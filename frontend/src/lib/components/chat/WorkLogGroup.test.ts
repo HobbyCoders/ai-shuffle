@@ -100,6 +100,28 @@ describe('WorkLogGroup', () => {
 		expect(screen.getAllByTestId('work-row').map(el => el.textContent)).toEqual(['Final answer']);
 	});
 
+	it('drops gallery duplicates only from rows that fed the gallery, not from a post-steer answer', () => {
+		const a = '/a.png';
+		const b = '/b.png';
+		const messages: ChatMessage[] = [
+			{ id: 'prompt', role: 'user', content: 'Make images', turnId: 'turn-1' },
+			{ id: 'answer', role: 'assistant', type: 'text', content: `Two options. ![A](${a}) ![B](${b})` },
+			{ id: 'steer', role: 'user', content: 'Show A again', turnId: 'turn-1' },
+			{ id: 'later', role: 'assistant', type: 'text', content: `Here it is: ![A](${a})` }
+		];
+		const group = buildTranscriptModel(messages, { isStreaming: false, groupingEnabled: true }).items[1];
+		if (group.kind !== 'work_log') throw new Error('expected work log');
+		expect(group.gallery?.map(item => item.src)).toEqual([a, b]);
+		const suppressionRow = createRawSnippet<[ChatMessage, number, ReadonlySet<string>?]>((getMessage, _getIndex, getSources) => ({
+			render: () => `<div data-testid="gallery-row" data-id="${getMessage().id}" data-suppressed="${[...(getSources?.() ?? [])].join(',')}"></div>`
+		}));
+		render(WorkLogGroup, { ...group, row: suppressionRow });
+		const suppressed = Object.fromEntries(
+			screen.getAllByTestId('gallery-row').map(el => [el.dataset.id, el.dataset.suppressed])
+		);
+		expect(suppressed).toEqual({ answer: `${a},${b}`, steer: '', later: '' });
+	});
+
 	it('keeps legacy embedded turn anchors when settled work is collapsed or expanded', async () => {
 		const messages = [
 			{ id: 'prompt', role: 'user', content: 'Start', turnId: 'turn-1' },

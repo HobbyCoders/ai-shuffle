@@ -61,10 +61,11 @@
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
+		latestTurnKey,
 		hasLinkedSubagent as hasLinkedSubagentIn,
 		type TranscriptModel
 	} from '$lib/utils/work-log';
-	import { createSettleHold } from '$lib/utils/settle-hold';
+	import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';
 	import {
 		TRANSCRIPT_WINDOW_SIZE,
 		TRANSCRIPT_WINDOW_CHUNK,
@@ -441,6 +442,24 @@
 			parked: $activeSession.turnParked === true
 		});
 	});
+	// That hold covers only the latest turn. A send during it opens a newer turn;
+	// the turn it interrupted keeps the rest of its hold rather than folding at once.
+	let handoffTick = $state(0);
+	const turnHandoff = createTurnHandoffHold(() => handoffTick++);
+	onDestroy(() => turnHandoff.dispose());
+	// The store emits on every stream delta; rescan only when the array changes.
+	let latestKeyFor: { messages: ChatMessage[] | null; key: string | null } = { messages: null, key: null };
+	const heldTurnKeys = $derived.by(() => {
+		void handoffTick;
+		const messages = $activeSession.messages;
+		if (messages !== latestKeyFor.messages) latestKeyFor = { messages, key: latestTurnKey(messages) };
+		return turnHandoff.update({
+			sessionId: $activeSession.sessionId,
+			latestTurnKey: latestKeyFor.key,
+			unsettled: latestTurnUnsettled,
+			parked: $activeSession.turnParked === true
+		});
+	});
 
 	// Memoize the grouped display list by message and lifecycle identity.
 	// The active-session store emits a fresh state object on every SSE stream
@@ -451,12 +470,13 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; groupingEnabled: boolean; model: TranscriptModel } =
+	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; heldTurnKeys: ReadonlySet<string> | null; groupingEnabled: boolean; model: TranscriptModel } =
 		{
 			messages: null,
 			isStreaming: false,
 			latestTurnUnsettled: false,
 			runningToolKey: '',
+			heldTurnKeys: null,
 			groupingEnabled: true,
 			model: {
 				items: [],
@@ -482,6 +502,8 @@
 		// every /live poll hands over a fresh task list.
 		const runningIds = runningToolIds;
 		const runningToolKey = [...runningIds].sort().join('\0');
+		// Same instance until a hand-off starts or ends (see settle-hold.ts).
+		const heldKeys = heldTurnKeys;
 		// When grouping is off, groupable tools fall through to the plain
 		// single-message path (system grouping is unaffected by this toggle).
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
@@ -492,6 +514,7 @@
 			&& isStreamingNow === _displayCache.isStreaming
 			&& latestIsUnsettled === _displayCache.latestTurnUnsettled
 			&& runningToolKey === _displayCache.runningToolKey
+			&& heldKeys === _displayCache.heldTurnKeys
 			&& groupingEnabled === _displayCache.groupingEnabled
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
@@ -509,6 +532,7 @@
 			isStreaming: isStreamingNow,
 			latestTurnUnsettled: latestIsUnsettled,
 			runningToolIds: runningIds,
+			heldTurnKeys: heldKeys,
 			sessionId,
 			swarms: Object.values(sessionSwarms ?? {}),
 			groupingEnabled
@@ -520,6 +544,7 @@
 		_displayCache.isStreaming = isStreamingNow;
 		_displayCache.latestTurnUnsettled = latestIsUnsettled;
 		_displayCache.runningToolKey = runningToolKey;
+		_displayCache.heldTurnKeys = heldKeys;
 		_displayCache.groupingEnabled = groupingEnabled;
 		_displayCache.model = model;
 		return model;

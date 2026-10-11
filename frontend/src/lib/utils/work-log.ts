@@ -34,6 +34,12 @@ export interface WorkLogEntry {
  */
 export interface WorkLogSequenceEntry extends WorkLogEntry {
 	hiddenWhenCollapsed: boolean;
+	/**
+	 * The row's media joined the fold's gallery, so a retained copy of it may
+	 * drop the duplicate. Rows after a steer never contribute, so they keep
+	 * every image even when it repeats one shown in the gallery.
+	 */
+	inGallery?: boolean;
 }
 
 export type DisplayItem =
@@ -519,6 +525,31 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
 	return turns;
 }
 
+/** Stable identity of a turn: the row that opens it (what its fold is keyed by). */
+function turnKeyOf(turn: Positioned[]): string {
+	const first = turn[0];
+	return first.message.id ?? String(first.index);
+}
+
+/**
+ * Identity of the latest turn by the same rule as `splitTurns` and `turnKeyOf`,
+ * without building the transcript. The settle hand-off (settle-hold.ts) tracks
+ * it to notice the moment a send or wake opens a newer turn.
+ */
+export function latestTurnKey(messages: readonly ChatMessage[]): string | null {
+	let key: string | null = null;
+	let currentTurnId: string | undefined;
+	messages.forEach((message, index) => {
+		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
+		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+		if (key === null || (opens && !(!idleAgentWake && !!message.turnId && message.turnId === currentTurnId))) {
+			key = message.id ?? String(index);
+			if (opens) currentTurnId = message.turnId;
+		}
+	});
+	return key;
+}
+
 /**
  * The turn id an optimistic send should carry so `splitTurns` keeps it inside
  * the turn it interrupts.
@@ -527,26 +558,39 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
  * running): the turn is still going, so the message is a steer and must not
  * open a turn of its own and fold everything above it. The id is the live turn
  * when known, otherwise the id of the message that opened the latest turn —
- * the same rule `splitTurns` uses. The server's `message.user` replaces it once
- * the backend has started the turn that carries the message (it follows that
- * turn's `turn.started`), which is the only moment the row moves.
+ * the same rule `splitTurns` uses — and only when that turn is the parked one:
+ * the reducer says so (`turnParked` is set by the park gate for the turn that
+ * just completed and cleared by the next `turn.started`), or a running task's
+ * launch row sits inside it. Running work launched by an EARLIER turn does not
+ * make the latest, completed turn parked. The server's `message.user` replaces
+ * the id once the backend has started the turn that carries the message (it
+ * follows that turn's `turn.started`), which is the only moment the row moves.
  */
 export function parkedSendTurnId(state: {
 	isStreaming: boolean;
 	liveTurnId?: string | null;
 	turnParked?: boolean;
-	activeTasks?: readonly { status: string }[];
+	activeTasks?: readonly { status: string; toolUseId?: string | null }[];
 	messages: readonly ChatMessage[];
 }): string | undefined {
 	if (state.isStreaming) return undefined;
-	const parked = state.turnParked === true || (state.activeTasks ?? []).some((task) => task.status === 'running');
-	if (!parked) return undefined;
+	const runningLaunches = new Set(
+		(state.activeTasks ?? [])
+			.filter((task) => task.status === 'running' && !!task.toolUseId)
+			.map((task) => task.toolUseId as string)
+	);
+	if (state.turnParked !== true && runningLaunches.size === 0) return undefined;
 	if (state.liveTurnId) return state.liveTurnId;
+	let ownsRunningWork = false;
 	for (let index = state.messages.length - 1; index >= 0; index--) {
 		const message = state.messages[index];
 		const opensTurn = (!!agentDelivery(message) && message.metadata?.agent_wake === true) ||
 			(message.role === 'user' && !agentDelivery(message));
-		if (opensTurn) return message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
+		if (opensTurn) {
+			if (state.turnParked !== true && !ownsRunningWork) return undefined;
+			return message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
+		}
+		if (message.toolId && runningLaunches.has(message.toolId)) ownsRunningWork = true;
 	}
 	return undefined;
 }
@@ -595,6 +639,12 @@ export interface BuildOptions {
 	 * later turn opened — a send or wake must not fold work still in flight.
 	 */
 	runningToolIds?: ReadonlySet<string>;
+	/**
+	 * Turns (by opening row id, see `latestTurnKey`) still inside their settle
+	 * hold after a newer turn opened. A send during the hold must not cut it
+	 * short: the turn stays flat until its own hold runs out.
+	 */
+	heldTurnKeys?: ReadonlySet<string>;
 	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
 	/** Session-scoped live/hydrated workflows, including updates before tool.result. */
@@ -708,6 +758,7 @@ export function createTranscriptModelBuilder() {
 			&& options.isStreaming === old.options.isStreaming
 			&& options.latestTurnUnsettled === old.options.latestTurnUnsettled
 			&& sameIds(options.runningToolIds, old.options.runningToolIds)
+			&& sameIds(options.heldTurnKeys, old.options.heldTurnKeys)
 			&& options.groupingEnabled === old.options.groupingEnabled
 			&& swarms.length === oldSwarms.length && swarms.every((s, i) => s === oldSwarms[i]);
 		let model: TranscriptModel;
@@ -806,6 +857,7 @@ export function buildTranscriptModel(
 		const runningToolIds = options.runningToolIds;
 		const unsettledTurn =
 			(latestTurnUnsettled && turnIndex === turns.length - 1) ||
+			!!options.heldTurnKeys?.has(turnKeyOf(turn)) ||
 			(!!runningToolIds?.size && turn.some((entry) => !!entry.message.toolId && runningToolIds.has(entry.message.toolId)));
 		if (unsettledTurn) {
 			emitLiveTurn(turn, items);
@@ -889,7 +941,8 @@ export function buildTranscriptModel(
 			sequence: response.map((entry) => ({
 				message: entry.message,
 				index: entry.index,
-				hiddenWhenCollapsed: shouldHide(entry)
+				hiddenWhenCollapsed: shouldHide(entry),
+				...(galleryEntries.has(entry) ? { inGallery: true } : {})
 			})),
 			durationLabel,
 			summary: summarizeWork(folded),

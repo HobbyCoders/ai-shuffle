@@ -1,7 +1,8 @@
 /**
  * Behavior tests for the transcript's turn grouping and settled disclosures.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { createSettleHold, createTurnHandoffHold, SETTLE_HOLD_MS } from './settle-hold';
 import type { ChatMessage } from '$lib/stores/types';
 import type { SwarmSnapshot } from './swarm';
 import producer from './__fixtures__/agent-delivery-producer.json';
@@ -19,6 +20,7 @@ import {
 	turnDurationMs,
 	turnWasInterrupted,
 	parkedSendTurnId,
+	latestTurnKey,
 	type DisplayItem,
 	type WorkLogEntry
 } from './work-log';
@@ -1437,13 +1439,56 @@ describe('turn unity', () => {
 		// The backend starts the next turn; only its message.user re-homes the row.
 		apply('turn.started', { turn_id: 'turn-2' });
 		expect(state.messages.find((m) => m.id === 'user-optimistic')?.turnId).toBe('turn-1');
-		apply('message.user', { content: 'Also ping me when done', turn_id: 'turn-2' });
+		// The send was queued behind the parked turn: the server names that turn in
+		// queued_turn_id, but grouping follows the owning turn_id alone.
+		apply('message.user', { content: 'Also ping me when done', turn_id: 'turn-2', queued_turn_id: 'turn-1' });
 		const rehomed = state.messages.find((m) => m.id === 'user-optimistic');
 		expect(rehomed?.turnId).toBe('turn-2');
+		expect(rehomed?.queuedTurnId).toBe('turn-1');
 		expect(deriveUserTurnNavigationItems(state.messages).length).toBe(turnsBefore);
 		// The parked turn's Monitor still runs: nothing above the steer folds.
 		const after = buildDisplayItems(state.messages, options);
 		expect(after.every((item) => item.kind === 'message')).toBe(true);
+	});
+
+	it('a send during the settle hold does not fold the turn it interrupted, with no background work', () => {
+		vi.useFakeTimers();
+		try {
+			const prompt = user('Summarize the logs', '2026-10-10T20:00:00.000Z', 'turn-1');
+			const read = tool({ toolName: 'Read', toolInput: { file_path: 'app.log' }, timestamp: '2026-10-10T20:00:05.000Z' });
+			const answer = text('Nothing unusual.', '2026-10-10T20:00:10.000Z');
+			const before = [prompt, read, answer];
+			const settle = createSettleHold(() => {});
+			const handoff = createTurnHandoffHold(() => {});
+			const view = (messages: ChatMessage[], rawUnsettled: boolean) => {
+				const latestTurnUnsettled = settle.update({ sessionId: 's', unsettled: rawUnsettled, parked: false });
+				const heldTurnKeys = handoff.update({ sessionId: 's', latestTurnKey: latestTurnKey(messages), unsettled: latestTurnUnsettled, parked: false });
+				return buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled, heldTurnKeys, runningToolIds: new Set() }).map((item) => item.kind);
+			};
+			expect(view(before, true)).toEqual(['message', 'message', 'message']);
+			// turn.completed: the hold keeps it flat.
+			expect(view(before, false)).toEqual(['message', 'message', 'message']);
+			// The user sends inside the hold: the optimistic row opens a new turn.
+			const after = [...before, user('And the errors?')];
+			expect(latestTurnKey(after)).toBe(after[3].id);
+			expect(view(after, false)).toEqual(['message', 'message', 'message', 'message']);
+			// Once the hold runs out, the earlier turn folds exactly once.
+			vi.advanceTimersByTime(SETTLE_HOLD_MS);
+			expect(view(after, true)).toEqual(['message', 'work_log', 'message']);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('names the latest turn the same way its fold is keyed', () => {
+		const t = longTurn();
+		const next = user('Thanks, now the docs', '2026-10-10T20:40:00.000Z', 'turn-2');
+		const messages = [...t.messages, next, text('Docs next.')];
+		expect(latestTurnKey(t.messages)).toBe(t.prompt.id);
+		expect(latestTurnKey(messages)).toBe(next.id);
+		const folds = buildDisplayItems(messages, { ...SETTLED, heldTurnKeys: new Set([t.prompt.id!]) });
+		expect(folds.filter((item) => item.kind === 'work_log')).toHaveLength(0);
+		expect(latestTurnKey([])).toBeNull();
 	});
 
 	it('names the parked turn for a send only while the turn is parked', () => {
@@ -1451,9 +1496,21 @@ describe('turn unity', () => {
 		const base = { isStreaming: false, liveTurnId: null, messages: [prompt, tool()] };
 		expect(parkedSendTurnId(base)).toBeUndefined();
 		expect(parkedSendTurnId({ ...base, turnParked: true })).toBe('turn-1');
-		expect(parkedSendTurnId({ ...base, activeTasks: [{ status: 'running' }] })).toBe('turn-1');
-		expect(parkedSendTurnId({ ...base, activeTasks: [{ status: 'running' }], liveTurnId: 'turn-9' })).toBe('turn-9');
+		const launch = tool({ toolName: 'Monitor', toolId: 'monitor-1' });
+		const withLaunch = { ...base, messages: [prompt, launch] };
+		expect(parkedSendTurnId({ ...withLaunch, activeTasks: [{ status: 'running', toolUseId: 'monitor-1' }] })).toBe('turn-1');
+		// A running task with no known launch row proves nothing about the latest turn.
+		expect(parkedSendTurnId({ ...withLaunch, activeTasks: [{ status: 'running' }] })).toBeUndefined();
+		expect(parkedSendTurnId({ ...base, activeTasks: [{ status: 'running', toolUseId: 'monitor-1' }], liveTurnId: 'turn-9' })).toBe('turn-9');
 		expect(parkedSendTurnId({ ...base, isStreaming: true, turnParked: true })).toBeUndefined();
+		// Background work launched by turn 1 still runs, but turn 2 completed and is
+		// not parked: a send there must not join turn 2.
+		const second = user('next', undefined, 'turn-2');
+		expect(parkedSendTurnId({
+			isStreaming: false, liveTurnId: null, turnParked: false,
+			activeTasks: [{ status: 'running', toolUseId: 'monitor-1' }],
+			messages: [prompt, launch, second, text('done')]
+		})).toBeUndefined();
 		expect(parkedSendTurnId({ ...base, turnParked: true, messages: [user('legacy'), tool()] })).toBeUndefined();
 	});
 });
