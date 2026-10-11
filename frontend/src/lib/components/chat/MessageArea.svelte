@@ -587,7 +587,7 @@
 		return hasLinkedSubagentIn(transcript, toolId);
 	}
 
-	// Transcript-local navigation: one stable anchor per user prompt. The left
+	// Transcript-local navigation: one stable anchor per turn (its opening prompt). The left
 	// timeline is only mounted when it can move somewhere (two or more turns).
 	//
 	// deriveUserTurnNavigationItems() normalises and previews every prompt
@@ -605,7 +605,9 @@
 		let signature = '';
 		for (const message of $activeSession.messages) {
 			if (!isNavigableUserTurn(message) || !message.id) continue;
-			signature += `${message.id}:${(message.content ?? '').length}\u0000`;
+			// The turn id decides whether a prompt opens a turn or was steered
+			// into one, and it changes when the server reconciles a send.
+			signature += `${message.id}:${message.turnId ?? ''}:${(message.content ?? '').length}\u0000`;
 		}
 		return signature;
 	});

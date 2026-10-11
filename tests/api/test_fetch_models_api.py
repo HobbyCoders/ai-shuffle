@@ -1,7 +1,7 @@
 """API tests for the provider catalog-fetch route (phase-2 Chunk D.1/D.2).
 
-``POST /api/v1/model-providers/{id}/fetch-models`` returns (never persists) a
-provider's live model roster for the curation UI:
+``POST /api/v1/model-providers/{id}/fetch-models`` returns a provider's live
+model roster and backfills missing curated context windows:
 
 * ChatGPT/Codex → ``GET https://chatgpt.com/backend-api/codex/models``
 * OpenAI / xAI / OpenRouter / custom → OpenAI-compatible ``GET .../models``
@@ -150,7 +150,7 @@ class TestLiveCatalogs:
         body = resp.json()
         assert body["source"] == "upstream"
         assert body["models"] == [
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
             {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
@@ -231,7 +231,7 @@ class TestLiveCatalogs:
                 "context_window": 272000,
             },
             {
-                "id": "gpt-5.6-sol", "label": "GPT-5.6-Sol",
+                "id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "context_window": 1_000_000,
                 "reasoning_capabilities": {
                     "version": 1, "effort_levels": ["medium", "xhigh"],
                     "default_effort": "xhigh",
@@ -286,7 +286,7 @@ class TestLiveCatalogs:
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         assert resp.json()["models"] == [
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert calls["n"] == 2
@@ -316,7 +316,7 @@ class TestLiveCatalogs:
         body = resp.json()
         assert body["source"] == "upstream"
         assert body["models"] == [
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
              "reasoning_capabilities": {"version": 1,
                  "effort_levels": ["none", "low", "medium", "high", "xhigh", "max"],
                  "default_effort": "medium"}},

@@ -373,14 +373,32 @@ def android_play(ctx: Context) -> None:
         ctx.notes.append("Play workflow shell checks not run: they need /bin/bash (a Linux worker).")
 
 
-def update_reach(ctx: Context) -> None:
-    labels = ""
+def update_reach(ctx: Context, *, head: str = "HEAD", branch: str | None = None) -> None:
+    labels, draft = "", True
+    reason = "gh is unavailable; treating this branch as having no PR"
     if shutil.which("gh"):
-        # The owner approves an unreachable change with a PR label; reading it costs nothing.
-        result = subprocess.run(["gh", "pr", "view", "--json", "labels", "--jq", '[.labels[].name] | join(",")'],
-                                cwd=ROOT, capture_output=True, text=True)
-        labels = result.stdout.strip() if result.returncode == 0 else ""
-    run([ctx.python, "scripts/ci/update_reach.py", "--base", ctx.base, "--head", "HEAD", "--labels", labels])
+        # Labels and draft state are live policy, not part of a cached tree pass.
+        try:
+            result = subprocess.run(["gh", "pr", "view", *([branch] if branch else []), "--json", "isDraft,labels"],
+                                    cwd=ROOT, capture_output=True, text=True, timeout=20)
+            if result.returncode:
+                reason = ("no PR exists for this branch" if "no pull requests found" in result.stderr.lower()
+                          else "gh could not read PR state (authentication or API failure); "
+                               "treating this branch as having no PR")
+            else:
+                pr = json.loads(result.stdout)
+                if not isinstance(pr["isDraft"], bool):
+                    raise ValueError("Invalid draft state")
+                labels = ",".join(label["name"] for label in pr["labels"])
+                draft = pr["isDraft"]
+                reason = "the PR is a draft"
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+            reason = "gh PR state is unavailable or invalid; treating this branch as having no PR"
+    if draft:
+        ctx.log(f"NOTE: update-reach is advisory because {reason}. "
+                "Owner acceptance labels are still required before readiness/merge.")
+    run([ctx.python, "scripts/ci/update_reach.py", "--base", ctx.base, "--head", head, "--labels", labels,
+         *(["--draft"] if draft else [])])
 
 
 def android_app(ctx: Context) -> None:
@@ -558,6 +576,15 @@ def scan_push(local_sha: str, remote_sha: str) -> None:
     run([choose_python(), "scripts/secret_scan.py", "--local", local_sha, "--remote", remote_sha], timeout=120)
 
 
+def attest_update_reach(revision: str) -> None:
+    from ci.edge_publication_gate import update_reach_readiness
+
+    ready, reason = update_reach_readiness(revision)
+    if not ready:
+        raise Failure(reason)
+    print(reason)
+
+
 def cmd_check(args) -> int:
     mode = "full" if args.command == "full" else "changed"
     python = choose_python()
@@ -568,11 +595,14 @@ def cmd_check(args) -> int:
         subprocess.run(["git", "fetch", "-q", "origin", "main"], cwd=ROOT, check=True)
         if not clean_checkout() or revision != git("rev-parse", BASE):
             raise Failure("--attest runs only on a clean checkout of the current origin/main")
+        attest_update_reach(revision)
         attest("pending", f"Full suite running on {machine()}", revision)
     clean = clean_checkout()
     try:
         security_check(python, getattr(args, "strict_audit", False), audit=not getattr(args, "_from_push", False))
         ran, skipped, _ = run_suites(mode, args.only, python)
+        if args.attest:
+            attest_update_reach(revision)
     except Failure as error:
         print(f"\nFAILED: {error}", file=sys.stderr)
         if args.attest:
@@ -592,6 +622,12 @@ def cmd_check(args) -> int:
     return 0
 
 
+def push_update_reach(revision: str, remote_ref: str) -> None:
+    base = git("merge-base", BASE, revision)
+    ctx = Context(mode="changed", base=base, files=None, python=choose_python())
+    update_reach(ctx, head=revision, branch=remote_ref.removeprefix("refs/heads/"))
+
+
 def cmd_pre_push(args) -> int:
     """Called by the pre-push hook with git's ref lines on stdin."""
     zero = "0" * 40
@@ -608,6 +644,8 @@ def cmd_pre_push(args) -> int:
         if not remote_ref.startswith("refs/heads/"):
             continue  # tags get the secret scan, but not the test suites
         if records.get(tree_of(local_sha), {}).get("security_gate") == SECURITY_GATE_VERSION:
+            # A draft pass must not bypass newly-ready state or removed labels.
+            push_update_reach(local_sha, remote_ref)
             continue
         if local_sha != head or not clean_checkout():
             print(f"pre-push: {local_sha[:9]} has no local check pass. Check out that commit with a clean "

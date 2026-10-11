@@ -831,17 +831,24 @@ function askingLeadIns(response: Positioned[]): Set<Positioned> {
  * each stays visible below it, and the current run shows every row.
  */
 /**
- * The last prose before each steer is the answer the steer replied to, and the
- * last prose of the turn is its answer: both stay on screen, live and settled.
+ * The last prose before each steer is the answer the steer replied to, the
+ * first prose after each steer is the reply to the steer, and the last prose
+ * of the turn is its answer: all stay on screen, live and settled. When a
+ * steer is followed only by tools and then the turn's last prose, that prose
+ * is both, so it is kept once.
  */
 function terminalProse(response: Positioned[]): Set<Positioned> {
 	const terminal = new Set<Positioned>();
 	let lastProse: Positioned | null = null;
+	let awaitingReply = false;
 	for (const entry of response) {
 		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
 			if (lastProse) terminal.add(lastProse);
 			lastProse = null;
+			awaitingReply = true;
 		} else if (isAssistantText(entry.message)) {
+			if (awaitingReply) terminal.add(entry);
+			awaitingReply = false;
 			lastProse = entry;
 		}
 	}

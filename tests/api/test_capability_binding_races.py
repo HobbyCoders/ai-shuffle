@@ -48,7 +48,7 @@ async def test_response_cannot_cross_binding_edit_and_new_binding_bypasses_coold
             return api.FetchModelsResponse(source="upstream", models=models("high"))
         return api.FetchModelsResponse(source="upstream", models=models("low"))
 
-    monkeypatch.setattr(api, "fetch_models", fetch)
+    monkeypatch.setattr(api, "_fetch_models", fetch)
     first = asyncio.create_task(api._refresh_provider_capabilities("catalog-race"))
     await entered.wait()
     db.update_model_provider("catalog-race", base_url="https://new.invalid", auth_token="new-dummy-key",
@@ -75,7 +75,7 @@ async def test_conditional_write_rejects_edit_after_final_read(mock_db, monkeypa
         original_update(provider_id, models_json=models("low"))
         return original_update(provider_id, **kwargs)
 
-    monkeypatch.setattr(api, "fetch_models", fetch)
+    monkeypatch.setattr(api, "_fetch_models", fetch)
     monkeypatch.setattr(db, "update_model_provider", race)
     assert await api._refresh_provider_capabilities("catalog-race") is False
     assert db.get_model_provider("catalog-race")["models_json"][0]["reasoning_capabilities"]["effort_levels"] == ["low"]
