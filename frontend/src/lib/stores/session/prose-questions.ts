@@ -21,9 +21,10 @@
  * whatever its mark — from every loaded sidebar row, every
  * `user_session_updated` frame and, for a session opened with no row carrying
  * the field (a deep link, Spotlight, a row outside the loaded or filtered
- * page), one read of its detail. When that read is still in flight at leave
- * time, revisions arriving afterwards are held until it resolves: its value
- * becomes the observation and a held revision later than it clears the entry.
+ * page), the `/live` snapshot the session opened with. When that snapshot is
+ * still in flight at leave time, revisions arriving afterwards are held until it
+ * resolves: its value becomes the observation and a held revision later than it
+ * clears the entry.
  * A revision that arrives after leaving never becomes the observation itself;
  * when nothing is known at all the entry waits for a reopen. Instants are
  * compared at the server's full (microsecond) precision with offsets applied.
@@ -68,12 +69,12 @@ const _observed = new Map<string, Revision | null | undefined>();
 /** The latest revision this tab has seen per session, marked or not. */
 const _latest = new Map<string, Revision | null>();
 
-/** Sessions whose own revision is being read (one read per session at a time). */
+/** Sessions whose own revision is awaited from their `/live` snapshot. */
 const _seeding = new Set<string>();
 
 /**
  * The latest revision seen after leaving, per remembered session whose
- * observation waits on an in-flight read; reconciled when the read resolves.
+ * observation waits on an in-flight snapshot; reconciled when it resolves.
  */
 const _afterLeave = new Map<string, Revision | null>();
 
@@ -155,8 +156,8 @@ export function rememberLeavingProseQuestion(
 
 /**
  * Start reading an opened session's own revision, when it is not known from
- * any source and no read for it is in flight. Returns whether the caller
- * should read it; it must then call `finishUserMessageRevisionSeed`.
+ * any source and none is awaited. Returns whether a claim was opened; the
+ * caller must then call `finishUserMessageRevisionSeed`.
  */
 export function beginUserMessageRevisionSeed(sessionId: string | null | undefined): boolean {
 	if (!sessionId || _latest.has(sessionId) || _seeding.has(sessionId)) return false;
@@ -165,9 +166,9 @@ export function beginUserMessageRevisionSeed(sessionId: string | null | undefine
 }
 
 /**
- * The read started by `beginUserMessageRevisionSeed` resolved. `value` is the
- * session's `last_user_message_at`, or undefined when the read failed or the
- * worker does not report it. A remembered entry left while the read was in
+ * The snapshot claimed by `beginUserMessageRevisionSeed` resolved. `value` is the
+ * session's `last_user_message_at`, or undefined when the request failed or the
+ * worker does not report it. A remembered entry left while it was in
  * flight takes it as its observation; a revision seen after leaving that is
  * later than it means the user answered, so the entry is dropped.
  */
@@ -197,7 +198,7 @@ export function observeLastUserMessage(sessionId: string | null | undefined, las
 	if (!_observed.has(sessionId)) return;
 	const baseline = _observed.get(sessionId);
 	if (baseline === undefined) {
-		// Never the observation itself: hold it for the in-flight read, if any.
+		// Never the observation itself: hold it for the awaited snapshot, if any.
 		if (_seeding.has(sessionId)) _afterLeave.set(sessionId, later(_afterLeave.get(sessionId), seen));
 		return;
 	}

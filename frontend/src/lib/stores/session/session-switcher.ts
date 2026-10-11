@@ -97,6 +97,8 @@ interface LiveSnapshot {
 		is_worker?: boolean;
 		is_remote?: boolean;
 		device_name?: string | null;
+		/** Latest persisted user message, or null when none is stamped (#2249). */
+		last_user_message_at?: string | null;
 	};
 	/** Durable background-task view (task registry `get_visible`), already in
 	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */
@@ -747,11 +749,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// One-shot metadata snapshot: the feed carries the transcript, streaming
 		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
 		// /live so worktree/cloud fields are correct on switch-in.
-		// The user-message revision is claimed now (so revisions arriving while
-		// it is read are held, not lost) and read only after `/live` settles.
-		const seedRevision = claimUserMessageRevision(sessionId);
-		const metadata = applyMetadataSnapshot(sessionId, generation);
-		if (seedRevision) void metadata.finally(() => readUserMessageRevision(sessionId));
+		// The session's user-message revision comes from that same snapshot. When
+		// no loaded row carries it, it is claimed now so revisions arriving before
+		// `/live` returns (after a quick leave) are held, not taken as the
+		// baseline; `applyMetadataSnapshot` resolves the claim.
+		applyMetadataSnapshot(sessionId, generation, claimUserMessageRevision(sessionId));
 	}
 
 	/**
@@ -759,10 +761,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * an unanswered prose question records a baseline and a later answer from
 	 * elsewhere clears the mark (#2249). A loaded row that carries the field is
 	 * recorded directly. Otherwise (a deep link, Spotlight, a row outside the
-	 * loaded or filtered page) the session's detail is read once — skipped when
-	 * the revision is already known from any source or a read is in flight.
-	 * `/live` does not report the field; the detail endpoint is the only
-	 * per-session source. Returns whether the caller must read it.
+	 * loaded or filtered page) the `/live` snapshot supplies it. Returns whether
+	 * a claim was opened that the snapshot must resolve.
 	 */
 	function claimUserMessageRevision(sessionId: string): boolean {
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
@@ -771,19 +771,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			return false;
 		}
 		return beginUserMessageRevisionSeed(sessionId);
-	}
-
-	async function readUserMessageRevision(sessionId: string) {
-		let value: unknown = undefined;
-		try {
-			const detail = await api.get<{ last_user_message_at?: string | null }>(
-				`/sessions/${encodeURIComponent(sessionId)}?message_limit=1`
-			);
-			if (detail && 'last_user_message_at' in detail) value = detail.last_user_message_at;
-		} catch {
-			// Unknown; a later switch-in tries again.
-		}
-		finishUserMessageRevisionSeed(sessionId, value);
 	}
 
 	/**
@@ -796,7 +783,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * switch generation + active sessionId so a stale response can't write into a
 	 * session the user already left.
 	 */
-	async function applyMetadataSnapshot(sessionId: string, generation: number) {
+	async function applyMetadataSnapshot(sessionId: string, generation: number, revisionClaimed = false) {
 		const initialProject = getState().project;
 		const initialProjectV2Id = getState().projectV2Id;
 		const initialFolders = getState().workspaceProjectIds;
@@ -815,8 +802,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			);
 		} catch (e) {
 			console.warn('[ActiveSession] metadata snapshot failed:', e);
+			if (revisionClaimed) finishUserMessageRevisionSeed(sessionId, undefined);
 			return;
 		}
+		// The revision is server truth whether or not the session is still open:
+		// it resolves the claim (or, unclaimed, is observed like a row update).
+		const lastUserMessage = snap?.session_meta && 'last_user_message_at' in snap.session_meta
+			? snap.session_meta.last_user_message_at : undefined;
+		if (revisionClaimed) finishUserMessageRevisionSeed(sessionId, lastUserMessage);
+		else if (lastUserMessage !== undefined) observeLastUserMessage(sessionId, lastUserMessage);
 		if (!snap) return;
 		if (generation !== _switchGeneration) return;
 		if (getState().sessionId !== sessionId) return;

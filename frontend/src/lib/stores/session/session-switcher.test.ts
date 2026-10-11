@@ -1383,9 +1383,11 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 
-	describe('the opened session\'s own revision (#2249)', () => {
-		const detailUrl = '/sessions/session-A?message_limit=1';
-		const detailCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => url === detailUrl).length;
+	describe('the opened session\'s own revision comes from its /live snapshot (#2249)', () => {
+		const T0 = '2026-10-11T10:00:00.000001Z';
+		const isLive = (url: string) => url.startsWith('/sessions/session-A/live');
+		const detailCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => /^\/sessions\/session-A(\?|$)/.test(url)).length;
+		const liveCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => isLive(url)).length;
 		const leaveA = async (switcher: ReturnType<typeof makeSwitcher>['switcher'], deps: ReturnType<typeof makeSwitcher>['deps']) => {
 			deps.update((st) => ({ ...st, messages: asked, isLoadingSession: false, isRestoringSession: false }));
 			await switcher.switchSession('session-B');
@@ -1393,56 +1395,52 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		beforeEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
 		afterEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
 
-		it('reads it from the detail, after /live, when no row is loaded; the first answer then clears', async () => {
+		it('takes the snapshot\'s value as the baseline when no row is loaded, without a detail request', async () => {
 			_mockSessions.current = [];
 			vi.mocked(api.get).mockImplementation(async (url: string) =>
-				url === detailUrl ? { id: 'session-A', last_user_message_at: '2026-10-11T10:00:00.000001+00:00' } : null);
+				isLive(url) ? { session_meta: { last_user_message_at: T0 } } : null);
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
 			await switcher.switchSession('session-A');
-			await vi.waitFor(() => expect(detailCalls()).toBe(1));
-			const urls = vi.mocked(api.get).mock.calls.map(([url]) => url);
-			expect(urls.findIndex((u) => u.startsWith('/sessions/session-A/live'))).toBeLessThan(urls.indexOf(detailUrl));
-			await Promise.resolve();
+			await vi.waitFor(() => expect(liveCalls()).toBe(1));
+			await new Promise((r) => setTimeout(r, 0));
 			await leaveA(switcher, deps);
 			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			observeLastUserMessage('session-A', '2026-10-11T10:00:00.000002+00:00');
+			// A refresh of the same instant is not an answer.
+			observeLastUserMessage('session-A', T0);
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			expect(detailCalls()).toBe(0);
+		});
+
+		it('a cross-device answer broadcast after /live returned clears the mark once the session is left', async () => {
+			_mockSessions.current = [];
+			vi.mocked(api.get).mockImplementation(async (url: string) =>
+				isLive(url) ? { session_meta: { last_user_message_at: T0 } } : null);
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(liveCalls()).toBe(1));
+			await new Promise((r) => setTimeout(r, 0));
+			await leaveA(switcher, deps);
+			// The very first broadcast after leaving IS the answer.
+			observeLastUserMessage('session-A', '2026-10-11T10:00:00.000002Z');
 			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 		});
 
-		it('holds an answer that lands before the detail, and clears once the detail resolves', async () => {
+		it('holds an answer that lands before /live returns, and clears once the snapshot resolves', async () => {
 			_mockSessions.current = [];
-			let resolveDetail!: (v: unknown) => void;
+			let resolveLive!: (v: unknown) => void;
 			vi.mocked(api.get).mockImplementation((url: string) =>
-				url === detailUrl ? new Promise((done) => { resolveDetail = done; }) : Promise.resolve(null));
+				isLive(url) && !resolveLive ? new Promise((done) => { resolveLive = done; }) : Promise.resolve(null));
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
 			await switcher.switchSession('session-A');
-			await vi.waitFor(() => expect(detailCalls()).toBe(1));
+			await vi.waitFor(() => expect(resolveLive).toBeDefined());
 			await leaveA(switcher, deps);
 			observeLastUserMessage('session-A', '2026-10-11T10:00:09Z');
 			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			resolveDetail({ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00Z' });
+			resolveLive({ session_meta: { last_user_message_at: '2026-10-11T10:00:00Z' } });
 			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
 		});
 
-		it('reads it once across repeated and overlapping rowless switch-ins', async () => {
-			_mockSessions.current = [];
-			let resolveDetail!: (v: unknown) => void;
-			vi.mocked(api.get).mockImplementation((url: string) =>
-				url === detailUrl ? new Promise((done) => { resolveDetail = done; }) : Promise.resolve(null));
-			const { switcher } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
-			await switcher.switchSession('session-A');
-			await switcher.switchSession('session-B');
-			await switcher.switchSession('session-A');
-			await vi.waitFor(() => expect(detailCalls()).toBe(1));
-			resolveDetail({ id: 'session-A', last_user_message_at: null });
-			await Promise.resolve();
-			await switcher.switchSession('session-B');
-			await switcher.switchSession('session-A');
-			await new Promise((r) => setTimeout(r, 0));
-			expect(detailCalls()).toBe(1);
-		});
-
-		it('records a loaded row\'s revision on switch-in without a read, so filtering the row out before leaving keeps the baseline', async () => {
+		it('records a loaded row\'s revision on switch-in, so filtering the row out before leaving keeps the baseline', async () => {
 			_mockSessions.current = [{ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00Z' }];
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
 			await switcher.switchSession('session-A');
