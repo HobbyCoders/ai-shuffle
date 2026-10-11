@@ -1748,16 +1748,28 @@ class TestGetSyncChanges:
 
 
 class TestGetSessionSyncStatus:
-    def test_returns_owner_freshness(self, client, mock_database, sample_session):
+    def test_returns_session_freshness(self, client, mock_database, sample_session):
         sample_session["owner_device_id"] = "peer-owner"
         mock_database.get_session.return_value = sample_session
-        with patch("app.network.transport.owner_sync_status", return_value={
-            "state": "syncing", "pending_updates": 12,
-        }) as freshness:
+        status = {"state": "syncing", "pending_updates": 12, "scope": "session",
+                  "seq": 3, "epoch": "log-id", "owner_seq": 15, "owner_epoch": "log-id"}
+        with patch("app.network.transport.session_sync_status", return_value=status) as freshness:
             response = client.get("/api/v1/sessions/test-session-id/sync-status")
         assert response.status_code == 200
-        assert response.json() == {"state": "syncing", "pending_updates": 12}
-        freshness.assert_called_once_with("peer-owner")
+        assert response.json() == status
+        freshness.assert_called_once_with("test-session-id", "peer-owner")
+
+    def test_initial_transcript_download_stays_syncing(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        with patch("app.network.transcripts.prioritise", return_value=True), patch(
+            "app.network.transport.session_sync_status"
+        ) as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 200
+        assert response.json() == {
+            "state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner",
+        }
+        freshness.assert_not_called()
 
     def test_missing_session(self, client, mock_database):
         mock_database.get_session.return_value = None

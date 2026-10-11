@@ -505,6 +505,24 @@ def get_tool_use_seqs(
     return seqs
 
 
+def get_watermark(session_id: str) -> Optional[Dict[str, Any]]:
+    """Read the materialized log ceiling and epoch in one statement.
+
+    Unlike the allocation counter, this reflects replicated clears/deletes too.
+    An absent session is unavailable; an existing empty log is (0, "0").
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE((SELECT MAX(seq) FROM session_events WHERE session_id = s.id), 0) AS seq, "
+            "COALESCE((SELECT id FROM session_events WHERE session_id = s.id "
+            "ORDER BY seq LIMIT 1), '0') AS epoch FROM sessions s WHERE s.id = %s",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return {"seq": int(row["seq"]), "epoch": str(row["epoch"])} if row else None
+
+
 def get_max_seq(session_id: str) -> int:
     """Return the highest allocated seq for a session (0 if none)."""
     with get_db() as conn:
