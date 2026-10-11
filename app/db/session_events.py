@@ -505,6 +505,31 @@ def get_tool_use_seqs(
     return seqs
 
 
+def get_watermark(session_id: str, *, at_seq: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Read the materialized log ceiling, epoch and tail identity in one statement.
+
+    Unlike the allocation counter, this reflects replicated clears/deletes too.
+    An absent session is unavailable; an existing empty log is (0, "0", "0").
+    ``at_seq`` reads the identity at an observed owner's ceiling instead of our
+    latest row, so newer local appends do not invalidate that owner's witness.
+    """
+    tail_filter = " AND seq = %s" if at_seq is not None else ""
+    params = (at_seq, session_id) if at_seq is not None else (session_id,)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE((SELECT MAX(seq) FROM session_events WHERE session_id = s.id), 0) AS seq, "
+            "COALESCE((SELECT id FROM session_events WHERE session_id = s.id "
+            "ORDER BY seq LIMIT 1), '0') AS epoch, "
+            "COALESCE((SELECT id FROM session_events WHERE session_id = s.id"
+            + tail_filter + " ORDER BY seq DESC LIMIT 1), '0') AS tail_id "
+            "FROM sessions s WHERE s.id = %s",
+            params,
+        )
+        row = cursor.fetchone()
+    return {"seq": int(row["seq"]), "epoch": str(row["epoch"]), "tail_id": str(row["tail_id"])} if row else None
+
+
 def get_max_seq(session_id: str) -> int:
     """Return the highest allocated seq for a session (0 if none)."""
     with get_db() as conn:

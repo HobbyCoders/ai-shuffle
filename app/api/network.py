@@ -124,6 +124,7 @@ class ExchangeRequest(BaseModel):
     flush: bool = False
     catalog_backlog: bool = False
     watermarks: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    session_ids: List[str] = Field(default_factory=list, max_length=128)
     limit: int = Field(default=500, ge=1, le=2000)
     lane: Optional[str] = None
     incarnation: Optional[int] = Field(default=None, ge=1)
@@ -589,6 +590,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                 "version": settings.version, "snapshot_required": snapshot,
                 "peer_state": 1, "flushed": body.flush,
+                "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),
                 "catalog_backlog": catalog.has_events_backlog(ctx=ctx)}
 
     return await run_sync(_work)

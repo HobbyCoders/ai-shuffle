@@ -2173,14 +2173,30 @@ async def get_session_sync_status(
     session_id: str,
     token: str = Depends(require_auth),
 ):
-    """Freshness of a mirrored owner's committed sync stream."""
+    """Freshness of this session's materialized transcript, relative to its owner.
+
+    ``scope=session`` compares the local ``seq``/``epoch`` with the owner's
+    last authenticated ``owner_seq``/``owner_epoch``. ``pending_updates`` is
+    the sequence gap in the same epoch, or the new owner's log length across
+    an epoch change (which is syncing even for an empty cleared log). A matching
+    first-row epoch alone cannot prove a multi-batch replacement finished: the
+    mirror must also hold the owner's tail event identity at ``owner_seq``.
+    While that identity differs, the pending count is at least one even if the
+    sequence gap is zero. Unrelated sessions, catalog work and snapshot backlog
+    do not affect this comparison.
+    These are observed watermarks, not a guarantee that the owner is online.
+
+    Initial transcript downloads remain syncing. Until a local copy and an
+    owner session watermark are available (including older peers), ``scope=owner``
+    retains the conservative owner-wide operation count and state fallback.
+    """
     session = await require_session(request, session_id)
     from app.network import transcripts
-    from app.network.transport import owner_sync_status
+    from app.network.transport import session_sync_status
     if await run_sync(transcripts.prioritise, session_id):
         # A worker that just joined has not copied this transcript yet; it is next.
-        return {"state": "syncing", "pending_updates": 0, "transcript": "downloading"}
-    return await run_sync(owner_sync_status, session.get("owner_device_id"))
+        return {"state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner"}
+    return await run_sync(session_sync_status, session_id, session.get("owner_device_id"))
 
 
 @router.get("/{session_id}/state")

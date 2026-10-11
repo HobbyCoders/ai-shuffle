@@ -73,6 +73,47 @@ its sequences restart at 1.
 a question still requires the replayed conversation, including tool questions,
 agent-delivery metadata, and streaming state.
 
+## Mirrored transcript freshness
+
+### GET /api/v1/sessions/{session_id}/sync-status
+
+Reports `state` (`checking`, `syncing`, `current`, or `offline`) and
+`pending_updates` without changing the transcript. Existing response fields are
+preserved. `scope` identifies the comparison:
+
+- `session`: for a materialized mirror with an observed owner transcript head,
+  compare local `seq`/`epoch` with `owner_seq`/`owner_epoch`. In the same epoch,
+  `pending_updates` is the non-negative sequence gap, not the owner's replication
+  operation count. Unrelated chats, session-row/catalog churn and snapshot work
+  do not make this chat `syncing`. Across epochs, the state is `syncing` and the
+  pending count is the new owner's sequence ceiling, even if that is zero after
+  a clear. Epoch identities are never numerically ordered. Sequence gaps are
+  positions, not message counts (compaction can leave gaps). During multi-batch
+  replacement, the new first-row epoch can coexist with an old tail. The mirror
+  must also hold the owner's tail event identity at `owner_seq` before reporting
+  `current`; until then the pending count is at least one even if the sequence
+  gap is zero. The peer-only `tail_id` witness is read atomically with the epoch
+  and ceiling and follows ordered replication; no in-memory replacement flag is
+  required, so disconnects and restarts do not falsely complete the replacement.
+- `owner`: the conservative owner-wide fallback until per-session data is
+  available, including older peers and a missing local copy. Initial transcript
+  downloads still return `state: syncing`, `transcript: downloading` and
+  `pending_updates: 0`. Unknown session IDs still return `404`.
+
+The authenticated peer exchange supplies requested owner-only transcript heads,
+including committed events not yet published to the replication outbox. Interest
+is bounded to 128 viewed sessions per receiving worker and expires 120 seconds
+without polling; the first poll wakes the exchange. Heads refresh with ordinary
+peer exchanges, not a new remote request per UI poll. Failed exchanges retain
+known backlog. `current` means caught up to the last observed head, not proof
+that the owner is online or has made no writes since that exchange. Locally owned
+sessions return `scope: session`, `state: current` without comparison fields.
+
+The head uses the same event sequence and lowest-event-ID epoch as SSE and
+transcript positions. `last_user_message_seq`/`last_user_message_epoch` identify
+only user messages and cannot substitute for this all-event watermark: assistant
+output and subagent progress must also count. No timestamp ordering is used.
+
 ## Read the Suggested Next Reply
 
 ### GET /api/v1/sessions/{session_id}/composer-suggestion

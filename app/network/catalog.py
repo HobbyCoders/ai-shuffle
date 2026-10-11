@@ -66,6 +66,19 @@ def has_events_backlog(*, ctx: Optional[engine.NetworkContext] = None) -> bool:
         return cursor.fetchone() is not None
 
 
+def transcript_watermarks(session_ids: List[str], *, ctx: engine.NetworkContext) -> dict:
+    """Authoritative heads for requested, locally owned logs (including unpublished events)."""
+    from app.db.session_events import get_watermark
+
+    if not session_ids:
+        return {}
+    with get_db() as conn:
+        owned = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False,
+                                   session_ids=session_ids)
+    return {session_id: head for session_id in owned
+            if (head := get_watermark(session_id)) is not None}
+
+
 def take_events_backlog() -> bool:
     """Whether a backlog remained after the last pass; clears the flag."""
     global _events_backlog
