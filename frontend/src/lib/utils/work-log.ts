@@ -200,14 +200,45 @@ function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
 }
 
 /**
- * A subagent card whose `agentStatus` has settled ('completed'/'error') is a
- * finished delegation: routine work that belongs inside the turn's fold. A
- * 'pending'/'running' card is live and keeps its own row, and so does a
- * 'stopped' one: somebody stopped it on purpose, and folding it away made the
- * card look like it went missing (#1806).
+ * A row that is not prose and never folds in a settled turn (spec §3): a worker
+ * card, a decision-bearing tool (questions, todos, Task/Agent, swarm), or a
+ * system notice that is not routine bookkeeping. Assistant mode keeps the same
+ * rows inline. A compaction card counts too: one trailing the answer keeps its
+ * row, and a mid-turn one is still folded by the settled turn's
+ * `hiddenWhenCollapsed`.
  */
-function isSettledSubagent(msg: ChatMessage): boolean {
-	return msg.type === 'subagent' && (msg.agentStatus === 'completed' || msg.agentStatus === 'error');
+export function isProtectedRow(msg: ChatMessage): boolean {
+	if (agentDelivery(msg)) return false;
+	if (msg.type === 'subagent') return true;
+	if (msg.type === 'tool_use') return isSpecialTool(msg);
+	if (msg.type !== 'system' && msg.role !== 'system') return false;
+	return !isGroupableSystem(msg) && !isFoldableRetryCard(msg);
+}
+
+/** A tool that puts a question to the reader. */
+function isAskingTool(msg: ChatMessage): boolean {
+	return msg.type === 'tool_use' && (msg.toolName === 'AskUserQuestion' || msg.toolName === 'AskUser');
+}
+
+/**
+ * Prose the reader must see even after the turn settles (transcript-organization
+ * spec §3): it asks something, or it carries a finding (two or more lines, or a
+ * heading, list, table or code fence). One short line without a question is
+ * narration ("Now checking the workflow.") and folds with the work.
+ */
+export function isProtectedProse(content: string): boolean {
+	const text = content.trim();
+	if (!text) return false;
+	if (text.split('\n').filter((line) => line.trim()).length >= 2) return true;
+	if (/^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|~~~)/m.test(text)) return true;
+	// A question mark inside a link target, a bare URL or inline code is not a
+	// question; punctuation that ends the sentence after a URL still counts.
+	const prose = text
+		.replace(/`[^`]*`/g, '')
+		.replace(/\]\([^)\s]*\)/g, ']')
+		.replace(/<https?:\/\/[^>\s]*>/g, '')
+		.replace(/\bhttps?:\/\/\S*[^\s.,;:!?)\]'"]/g, '');
+	return prose.includes('?');
 }
 
 /** A terminal retry failure folds only after recovery or supersession. */
@@ -231,7 +262,9 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 function isCompletedRoutineWork(msg: ChatMessage, gallery = false): boolean {
 	if (agentDelivery(msg)) return true;
 	if (msg.type === 'thinking') return !msg.streaming;
-	if (msg.type === 'subagent') return isSettledSubagent(msg);
+	// A worker card is the delegation itself: it keeps its row in every status
+	// and carries the head of the worker's report (spec §3, §4).
+	if (msg.type === 'subagent') return false;
 	// A finished retry note is routine work: it folds with the run instead of
 	// stacking a dozen standalone cards down a turn that recovered on its own.
 	if (isFoldableRetryCard(msg)) return true;
@@ -890,13 +923,21 @@ export function buildTranscriptModel(
 		// The last prose before each steer is the answer the steer replied to, and
 		// the last prose of the turn is its answer: both stay on screen.
 		const terminalAssistants = new Set<Positioned>();
+		// Prose followed by a question tool before the next prose or steer is
+		// the question's lead-in: it asks too, so it stays.
+		const askingProse = new Set<Positioned>();
 		let lastProse: Positioned | null = null;
+		let pendingLeadIn: Positioned | null = null;
 		for (const entry of response) {
 			if (isSteer(entry)) {
 				if (lastProse) terminalAssistants.add(lastProse);
 				lastProse = null;
+				pendingLeadIn = null;
 			} else if (isAssistantText(entry.message)) {
 				lastProse = entry;
+				pendingLeadIn = entry;
+			} else if (pendingLeadIn && isAskingTool(entry.message)) {
+				askingProse.add(pendingLeadIn);
 			}
 		}
 		if (lastProse) terminalAssistants.add(lastProse);
@@ -912,7 +953,11 @@ export function buildTranscriptModel(
 				isGroupableSystem(entry.message) ||
 				midTurnCompactions.has(entry) ||
 				entry.message.type === 'tool_result' ||
-				(isAssistantText(entry.message) && !entry.message.streaming && !terminalAssistants.has(entry))
+				(isAssistantText(entry.message) &&
+					!entry.message.streaming &&
+					!terminalAssistants.has(entry) &&
+					!askingProse.has(entry) &&
+					!isProtectedProse(entry.message.content))
 			);
 		const folded = response
 			.filter(shouldHide)

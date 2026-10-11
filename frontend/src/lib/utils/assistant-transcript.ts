@@ -1,14 +1,19 @@
 /**
  * Assistant-mode transcript: the assistant's own words first.
  *
- * In the assistant's home conversation the reader sees their prompts and the
- * assistant's prose. Everything else a turn produced (tool rows, thinking,
- * work-log groups, Task and swarm cards, system and permission notices, agent
- * deliveries) moves into one collapsed "Details" item at the end of that turn,
- * in its original order. Ordinary chats never pass through here.
+ * In the assistant's home conversation the reader sees their prompts, the
+ * assistant's prose and the rows that never fold (worker cards, questions,
+ * todos, Task and swarm rows, notices). Everything else a turn produced
+ * (routine tool rows, thinking, bookkeeping notices, agent deliveries) moves
+ * into one collapsed "Details" item at the end of that turn, in its original
+ * order. A settled turn applies the
+ * same protected set as the ordinary fold (transcript-organization spec §3):
+ * narration the fold hides goes to Details, findings and questions stay.
+ * Ordinary chats never pass through here.
  */
 import type { ChatMessage } from '$lib/stores/types';
 import type { DisplayItem, WorkLogEntry } from './work-log';
+import { isProtectedRow } from './work-log';
 import { agentDelivery } from './agent-delivery';
 import { isNavigableUserTurn } from './transcript-navigation';
 
@@ -29,7 +34,8 @@ export interface AssistantTranscript {
 	itemIndexByTurnId: Map<string, number>;
 }
 
-type Role = 'prompt' | 'spoken' | 'detail';
+/** `card` is a protected non-prose row (worker card, question, todo, notice): it stays in line. */
+type Role = 'prompt' | 'spoken' | 'card' | 'detail';
 
 /** Where a message goes in assistant mode. */
 export function assistantRowRole(message: ChatMessage): Role {
@@ -37,22 +43,41 @@ export function assistantRowRole(message: ChatMessage): Role {
 	if (message.type === 'command') return 'prompt';
 	if (message.role === 'user') return 'prompt';
 	if (message.type === 'text' || !message.type) return 'spoken';
+	if (isProtectedRow(message)) return 'card';
 	return 'detail';
 }
 
-function entriesOf(item: DisplayItem): { entry: WorkLogEntry; original?: DisplayItem }[] {
+interface Entry {
+	entry: WorkLogEntry;
+	original?: DisplayItem;
+	/** Set for a settled turn's rows: the ordinary fold hides this one. */
+	hidden?: boolean;
+}
+
+function entriesOf(item: DisplayItem): Entry[] {
 	switch (item.kind) {
 		case 'message':
 			return [{ entry: { message: item.message, index: item.index }, original: item }];
 		case 'system_group':
-			return item.messages.map((message, i) => ({ entry: { message, index: item.indices[i] ?? -1 } }));
+			// A run of bookkeeping notices: it is a group in the ordinary view too.
+			return item.messages.map((message, i) => ({ entry: { message, index: item.indices[i] ?? -1 }, hidden: true }));
 		case 'work_log':
 			// A settled turn carries its full order in `sequence`; a live one splits
 			// it into the folded rows and the visible tail.
-			return (item.sequence.length ? item.sequence : [...item.folded, ...item.tail]).map(({ message, index }) => ({
-				entry: { message, index }
-			}));
+			if (item.sequence.length) {
+				return item.sequence.map(({ message, index, hiddenWhenCollapsed }) => ({
+					entry: { message, index },
+					hidden: !!hiddenWhenCollapsed
+				}));
+			}
+			return [...item.folded, ...item.tail].map(({ message, index }) => ({ entry: { message, index } }));
 	}
+}
+
+/** A row the settled fold hides goes to Details, whatever its role. */
+function roleOf({ entry, hidden }: Entry): Role {
+	const role = assistantRowRole(entry.message);
+	return hidden && role !== 'prompt' ? 'detail' : role;
 }
 
 /**
@@ -76,8 +101,9 @@ export function foldAssistantTranscript(items: readonly DisplayItem[], live = fa
 	};
 
 	for (const item of items) {
-		for (const { entry, original } of entriesOf(item)) {
-			const role = assistantRowRole(entry.message);
+		for (const row of entriesOf(item)) {
+			const { entry, original } = row;
+			const role = roleOf(row);
 			if (role === 'detail') {
 				details.push(entry);
 				continue;

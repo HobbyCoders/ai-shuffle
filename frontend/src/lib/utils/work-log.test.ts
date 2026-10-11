@@ -21,6 +21,7 @@ import {
 	turnWasInterrupted,
 	parkedSendTurnId,
 	latestTurnKey,
+	isProtectedProse,
 	type DisplayItem,
 	type WorkLogEntry
 } from './work-log';
@@ -454,22 +455,23 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(entry?.hiddenWhenCollapsed).toBe(true);
 	});
 
-	it('folds settled subagent cards and counts them as delegated work', () => {
-		const first = subagent();
-		const second = subagent({ agentStatus: 'error' });
+	it('keeps worker cards visible in every status (spec §3)', () => {
+		const statuses = ['completed', 'error', 'stopped', 'running', 'pending'] as const;
+		const cards = statuses.map((agentStatus) => subagent({ agentStatus }));
 		const items = buildDisplayItems(
-			[user('go'), tool({ toolName: 'Grep' }), first, second, text('done')],
+			[user('go'), tool({ toolName: 'Grep' }), ...cards, text('done')],
 			SETTLED
 		);
 		const fold = items.find((item) => item.kind === 'work_log');
 		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
 
-		expect(fold.summary).toBe('Searched code 1 time and delegated 2 tasks');
-		for (const card of [first, second]) {
-			expect(fold.folded.map((entry) => entry.message.id)).toContain(card.id);
-			expect(fold.sequence.find((entry) => entry.message.id === card.id)?.hiddenWhenCollapsed).toBe(true);
+		// The fold now describes the routine work only; the cards speak for themselves.
+		expect(fold.summary).toBe('Searched code 1 time');
+		for (const card of cards) {
+			expect(fold.folded.map((entry) => entry.message.id)).not.toContain(card.id);
+			expect(fold.sequence.find((entry) => entry.message.id === card.id)?.hiddenWhenCollapsed).toBe(false);
 		}
-		expect(collapsedVisibleMessages(items).some((message) => message.type === 'subagent')).toBe(false);
+		expect(collapsedVisibleMessages(items).filter((message) => message.type === 'subagent')).toEqual(cards);
 	});
 
 	it('keeps a stopped subagent card visible instead of folding it away (#1806)', () => {
@@ -1350,6 +1352,7 @@ describe('turn unity', () => {
 	function longTurn() {
 		const prompt = user('Audit the deploy pipeline', '2026-10-10T20:00:00.000Z', 'turn-1');
 		const read = tool({ toolName: 'Read', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:00:10.000Z' });
+		const finding = text('Staging and prod share one token:\n- `CF_API_TOKEN` in both jobs', '2026-10-10T20:00:15.000Z');
 		const grep = tool({ toolName: 'Grep', toolInput: { pattern: 'wrangler' }, timestamp: '2026-10-10T20:00:20.000Z' });
 		const interim = text('Now checking the workflow.', '2026-10-10T20:01:00.000Z');
 		const monitor = tool({ toolName: 'Monitor', toolId: 'monitor-1', toolInput: { command: 'tail -f deploy.log' }, timestamp: '2026-10-10T20:01:30.000Z' });
@@ -1363,8 +1366,8 @@ describe('turn unity', () => {
 			timestamp: '2026-10-10T20:25:00.000Z'
 		});
 		const final = text('Prod deploy is wired through wrangler 3.', '2026-10-10T20:30:00.000Z');
-		const messages = [prompt, read, grep, interim, monitor, worker, question, steer, ack, report, final];
-		return { messages, prompt, read, grep, interim, monitor, worker, question, steer, ack, report, final };
+		const messages = [prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, report, final];
+		return { messages, prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, report, final };
 	}
 
 	it('renders the live long turn flat, steer in place', () => {
@@ -1388,7 +1391,9 @@ describe('turn unity', () => {
 		expect(fold.sequence.map((entry) => entry.message)).toEqual(messages.slice(1));
 		const visible = collapsedVisibleMessages(model.items).map((m) => m.id);
 		// The prose the steer interrupted stays, as it did before turns were unified.
-		expect(visible).toEqual([t.prompt.id, t.interim.id, t.question.id, t.steer.id, t.final.id]);
+		// The interim finding and the finished worker card stay too (spec §3); the
+		// one-line acknowledgement after the steer is narration and folds.
+		expect(visible).toEqual([t.prompt.id, t.finding.id, t.interim.id, t.worker.id, t.question.id, t.steer.id, t.final.id]);
 		expect(model.itemIndexByTurnId.get(t.steer.id!)).toBe(1);
 		expect(model.midTurnUserIds).toEqual(new Set([t.steer.id]));
 	});
@@ -1512,5 +1517,71 @@ describe('turn unity', () => {
 			messages: [prompt, launch, second, text('done')]
 		})).toBeUndefined();
 		expect(parkedSendTurnId({ ...base, turnParked: true, messages: [user('legacy'), tool()] })).toBeUndefined();
+	});
+});
+
+/**
+ * Protected prose (transcript-organization spec §3): a settled turn folds
+ * narration, never a question or a finding.
+ */
+describe('protected prose', () => {
+	function hiddenProse(...rows: ChatMessage[]) {
+		const items = buildDisplayItems([user('go'), ...rows, tool(), text('All done.')], SETTLED);
+		const visible = new Set(collapsedVisibleMessages(items).map((m) => m.id));
+		return rows.filter((m) => m.type === 'text' && !visible.has(m.id)).map((m) => m.content);
+	}
+
+	it('folds one short line without a question as narration', () => {
+		expect(hiddenProse(text('Now checking the workflow.'), tool())).toEqual(['Now checking the workflow.']);
+	});
+
+	it('keeps prose that asks', () => {
+		expect(hiddenProse(text('Should I also update staging?'), tool())).toEqual([]);
+	});
+
+	it('ignores a question mark inside a link or inline code', () => {
+		expect(isProtectedProse('Fetching https://example.com/a?b=1 now.')).toBe(false);
+		expect(isProtectedProse('Running `ls ?.txt` next.')).toBe(false);
+		expect(isProtectedProse('Is https://example.com/a?b=1 right?')).toBe(true);
+		// Sentence-ending punctuation after a URL is not part of it.
+		expect(isProtectedProse('Should I use https://example.com?')).toBe(true);
+		expect(isProtectedProse('Should I use https://example.com/a?b=1?')).toBe(true);
+		expect(isProtectedProse('See https://example.com/a?b=1.')).toBe(false);
+		// A query string in a markdown link target is not a question.
+		expect(isProtectedProse('Reading [guide](/docs?page=1).')).toBe(false);
+		expect(isProtectedProse('Reading <https://example.com/a?b=1> now.')).toBe(false);
+		expect(isProtectedProse('Is [the guide](/docs?page=1) current?')).toBe(true);
+	});
+
+	it('keeps the lead-in to a question tool in the same step', () => {
+		const lead = text('One choice before I continue.');
+		const ask = tool({ toolName: 'AskUserQuestion' });
+		expect(hiddenProse(lead, ask, tool())).toEqual([]);
+		// A question tool after later prose does not protect the earlier line.
+		expect(hiddenProse(text('Reading the config.'), tool(), text('Choosing a branch.'), ask, tool()))
+			.toEqual(['Reading the config.']);
+	});
+
+	it.each([
+		['two or more lines', 'The deploy uses wrangler 3.\nStaging shares the prod token.'],
+		['a heading', '## Findings'],
+		['a list', '- the token is shared'],
+		['a numbered list', '1. rotate the token'],
+		['a table', '| job | token |'],
+		['a code fence', '```yaml']
+	])('keeps a finding with %s', (_label, content) => {
+		expect(isProtectedProse(content)).toBe(true);
+		expect(hiddenProse(text(content), tool())).toEqual([]);
+	});
+
+	it('still keeps the last prose of the turn, however short', () => {
+		const items = buildDisplayItems([user('go'), tool(), text('Done.')], SETTLED);
+		expect(collapsedVisibleMessages(items).map((m) => m.content)).toContain('Done.');
+	});
+
+	it('leaves routine tools folded as before', () => {
+		const read = tool({ toolName: 'Read' });
+		const items = buildDisplayItems([user('go'), read, text('Line one.\nLine two.'), tool(), text('Done.')], SETTLED);
+		expect(collapsedVisibleMessages(items).some((m) => m.id === read.id)).toBe(false);
 	});
 });

@@ -1299,6 +1299,33 @@ describe('subagent cards', () => {
 		expect(card.agentChildren![0]).toMatchObject({ toolId: 'c1', toolResult: 'found', toolStatus: 'complete' });
 	});
 
+	it('subagent.completed prefers the full report and keeps the backend truncation flag', () => {
+		const started = ev('subagent.started', { task_id: 'task-1', agent_id: 'a1', description: 'do work' });
+		const full = fold([started, ev('subagent.completed', {
+			task_id: 'task-1', status: 'completed', result_preview: 'Head…', result: 'Head.\n\nThe whole report.', result_truncated: false,
+		})]).messages.find((m) => m.type === 'subagent')!;
+		expect(full.content).toBe('Head.\n\nThe whole report.');
+		expect(full.agentReportTruncated).toBe(false);
+		const cut = fold([started, ev('subagent.completed', {
+			task_id: 'task-1', status: 'completed', result_preview: 'Head…', result: 'Head. First 64 KiB', result_truncated: true,
+		})]).messages.find((m) => m.type === 'subagent')!;
+		expect(cut.content).toBe('Head. First 64 KiB');
+		expect(cut.agentReportTruncated).toBe(true);
+	});
+
+	it('subagent.completed with only a preview marks it cut only when the feed clipped it', () => {
+		const started = ev('subagent.started', { task_id: 'task-1', agent_id: 'a1', description: 'do work' });
+		const short = fold([started, ev('subagent.completed', { task_id: 'task-1', status: 'completed', result_preview: 'done' })])
+			.messages.find((m) => m.type === 'subagent')!;
+		expect(short.content).toBe('done');
+		expect(short.agentReportTruncated).toBe(false);
+		const clipped = 'x'.repeat(1999) + '…';
+		const long = fold([started, ev('subagent.completed', { task_id: 'task-1', status: 'completed', result_preview: clipped })])
+			.messages.find((m) => m.type === 'subagent')!;
+		expect(long.content).toBe(clipped);
+		expect(long.agentReportTruncated).toBe(true);
+	});
+
 	it('progress/completed for an unknown task_id are ignored', () => {
 		const s = fold([ev('subagent.progress', { task_id: 'nope', kind: 'chunk', note: 'x' })]);
 		expect(s.messages).toHaveLength(0);

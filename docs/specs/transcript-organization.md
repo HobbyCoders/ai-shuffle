@@ -40,7 +40,8 @@ So a 40-step turn reads as: `[+9 steps] finding · [+12 steps] worker card · [o
 | The last prose of the turn | always visible |
 | Steer bubble | always visible, in place |
 | `SubagentMessage` card, any status | always visible (today completed/error cards fold) |
-| Failed tool, stopped subagent, special tools (Task, swarm, TodoWrite, AskUser*) | unchanged: visible |
+| Stopped subagent, special tools (Task, swarm, TodoWrite, AskUser*) | unchanged: visible |
+| Failed routine tool | unchanged: folds with the run (counted as failed in the fold summary) |
 | Compaction card trailing the answer, usage-limit, errors | unchanged: visible |
 | Completed routine tools, thinking, hooks, task_* notices, retries, agent deliveries, tool_result | fold |
 
