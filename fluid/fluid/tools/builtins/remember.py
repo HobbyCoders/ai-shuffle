@@ -8,12 +8,12 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 def describe(tools: frozenset[str] | None = None) -> str:
     return (
-        "Save a fact immediately to this user's cross-session memory. user_requested=true "
-        "is only for a user request or correction: kept until the user says otherwise, "
-        "with Recall's ID/revision required to correct it. Your own saves are for "
-        "non-obvious established environment facts the next session would rediscover "
-        "(which interpreter has pytest; browser tools on another host). They retire "
-        "after months without recall, may be merged/removed by background curation "
+        "Save a fact immediately to this user's cross-session memory. Set user_requested to true only when the user asked "
+        "or corrected a fact: kept until the user says otherwise, "
+        "with Recall's ID/revision required to correct it. Your own saves are for a "
+        "non-obvious fact you established about the environment that the next session would rediscover "
+        "(which interpreter has pytest; browser tools on another host). They retire when nothing recalls them "
+        "for months, may be merged/removed by background curation "
         "or displaced when memory is full; saving again renews them. Recall first: "
         "correct existing/near-duplicate facts, replacing outdated hardware/paths "
         "rather than keeping both. Claim saved only after a saved receipt. Use stable "

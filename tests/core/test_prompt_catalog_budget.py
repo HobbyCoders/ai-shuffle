@@ -6,8 +6,8 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
 # origin/main da6b00497: full=141166, eager=107085 characters.
-MEASURED_FULL = 128_752
-MEASURED_EAGER = 94_671
+MEASURED_FULL = 128_818
+MEASURED_EAGER = 94_737
 
 
 def test_prompt_catalog_budget():

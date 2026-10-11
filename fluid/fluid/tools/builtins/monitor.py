@@ -109,15 +109,15 @@ def describe(
     )
     return (
         "Run a long-running shell command in the background; return task_id immediately. "
-        "On termination a later turn receives its exit code and bounded head/tail summary "
-        "of merged stdout/stderr (a few thousand characters), not the full buffer. "
+        "On termination a later turn receives its exit code and BOUNDED summary "
+        "(head/tail of merged stdout/stderr, a few thousand characters), not the full buffer. "
         "TaskOutput has the full buffer: retrieve it only if failure details were cut; "
-        "exit 0 needs no pull. No polling. " + DONT_PREDICT_PENDING + "\n\n"
+        "an exit code of 0 needs no TaskOutput pull. No polling. " + DONT_PREDICT_PENDING + "\n\n"
         "Use for work worth overlapping: CI, release/frontend builds, long test suites, "
         "training jobs. Prefer it for waits over a few seconds: project type-checks, "
         "webpack/vite/cargo builds, full suites and installs. Continue useful disjoint "
         "work and inspect completion before reporting. " + wait_here +
-        "Start every known independent job before ending the turn (one park covers several); "
+        "Start every known independent job before ending the turn (one park can cover several); "
         "do not start a Monitor then wait yourself: end the turn. " + END_TURN_ON_BACKGROUND + "\n\n"
         "The command must exit unless serves=true. Completion fires only on exit: "
         "unbounded tail -f, inotifywait -m or bare while true holds the session parked "
