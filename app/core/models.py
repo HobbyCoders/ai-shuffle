@@ -514,6 +514,8 @@ class Session(SessionBase):
     last_user_message_at: Optional[datetime] = None
     last_user_message_seq: Optional[int] = None
     last_user_message_epoch: Optional[str] = None
+    last_assistant_question_seq: Optional[int] = None
+    last_assistant_question_epoch: Optional[str] = None
 
     @field_validator("work_ms", mode="before")
     @classmethod

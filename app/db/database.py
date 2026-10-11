@@ -2266,6 +2266,12 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_user_message_epoch"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN last_user_message_epoch TEXT")
         migrations_applied.append("sessions.last_user_message_epoch")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_assistant_question_seq"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_assistant_question_seq BIGINT")
+        migrations_applied.append("sessions.last_assistant_question_seq")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_assistant_question_epoch"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_assistant_question_epoch TEXT")
+        migrations_applied.append("sessions.last_assistant_question_epoch")
 
     # Working time for the sidepanel. ``work_ms`` banks every finished turn's
     # live interval (app/db/turns.py), ``work_started_at`` is the live turn's

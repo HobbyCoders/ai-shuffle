@@ -84,6 +84,8 @@ class SessionRow(TypedDict):
     last_user_message_at: Optional[str]
     last_user_message_seq: Optional[int]
     last_user_message_epoch: Optional[str]
+    last_assistant_question_seq: Optional[int]
+    last_assistant_question_epoch: Optional[str]
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
@@ -2043,7 +2045,8 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
         cursor.execute(
             f"UPDATE sessions SET last_user_message_at = {ph()}, updated_at = {ph()} "
             f"WHERE id = {ph()} AND (last_user_message_at IS NULL OR last_user_message_at < {ph()}) "
-            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch",
+            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch, "
+            "last_assistant_question_seq, last_assistant_question_epoch",
             (now, now, session_id, now),
         )
     else:
@@ -2060,7 +2063,8 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
             f"last_user_message_epoch = {ph()}, updated_at = {ph()} WHERE id = {ph()} "
             f"AND (last_user_message_seq IS NULL OR last_user_message_seq < {ph()} "
             f"OR last_user_message_epoch IS NULL OR last_user_message_epoch != {ph()}) "
-            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch",
+            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch, "
+            "last_assistant_question_seq, last_assistant_question_epoch",
             (now, seq, epoch, now, session_id, seq, epoch),
         )
     row = cursor.fetchone()
@@ -2078,6 +2082,8 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
                 "last_user_message_at": now,
                 "last_user_message_seq": row["last_user_message_seq"],
                 "last_user_message_epoch": row["last_user_message_epoch"],
+                "last_assistant_question_seq": row["last_assistant_question_seq"],
+                "last_assistant_question_epoch": row["last_assistant_question_epoch"],
             },
         }, user_type="admin" if owner is None else "api_user")
 
@@ -2473,6 +2479,8 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
                    SET sdk_session_id = NULL,
                        last_user_message_seq = NULL,
                        last_user_message_epoch = NULL,
+                       last_assistant_question_seq = NULL,
+                       last_assistant_question_epoch = NULL,
                        total_cost_usd = 0,
                        total_tokens_in = 0,
                        total_tokens_out = 0,

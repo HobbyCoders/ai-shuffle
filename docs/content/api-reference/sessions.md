@@ -69,9 +69,38 @@ expose nullable positions too. Clearing resets `last_user_message_seq` and
 `last_user_message_epoch` to `null`; the next log has a different epoch even though
 its sequences restart at 1.
 
-`last_prose_is_question` is not provided: deciding whether the last prose asks
-a question still requires the replayed conversation, including tool questions,
-agent-delivery metadata, and streaming state.
+## Assistant-question revision
+
+The same row, list/detail, `/live` `session_meta`, `/state`, global
+`user_session_updated` updates and replicated catalog expose
+`last_assistant_question_seq` (integer or `null`) and
+`last_assistant_question_epoch` (opaque string or `null`). They identify the
+newest nonempty assistant prose if it asks a question. The exact shared
+`asksQuestion` predicate ignores inline code and URL/link targets; any remaining
+ASCII `?` counts, not just one at the end. Thinking, routine tools and system
+cards are not prose. AskUser/AskUserQuestion tools suppress a prose preface so
+that a question is not counted twice.
+
+The append transaction stamps closed `message.assistant` prose and settled
+streamed prose (using the last contributing text-delta sequence). An unfinished
+stream or later non-question prose clears the sequence to `null` in the current
+epoch. Empty prose does not replace the previous nonempty prose. User answers
+advance the user pair, not the assistant pair. The post-commit notification
+captures the persisted epoch, never the epoch at delivery time. Stable-ID
+retries and rollbacks do not publish new positions. No in-memory stream buffer
+is required: streamed text is derived from the persisted log, including after a
+restart. Older sessions/peers without this pair read as `null`.
+
+Mark Needs you when the question sequence and epoch are non-null, the epoch is
+the current session log epoch, and either the user sequence is null or the user
+epoch matches and the question sequence is greater than the user sequence.
+Epochs are opaque: never compare sequence numbers from different epochs.
+Clearing resets **both** revision pairs to `null`. Rewind removes user anchors
+in the discarded branch and recomputes the question from surviving prose in the
+same epoch. Discard cached anchors on reset/clear; delayed pre-clear snapshots
+must not reintroduce them. An explicit null question sequence in a current-epoch
+row/update clears the row-derived mark; a missing field from an older worker
+remains available for the transcript-derived fallback.
 
 ## Mirrored transcript freshness
 
@@ -315,14 +344,17 @@ persisted. It is included both with messages (the default) and with
 this metadata-only snapshot to seed the revision without fetching session detail.
 `session_meta.last_user_message_seq` and `session_meta.last_user_message_epoch`
 accompany it in both forms, with the same nullable values as list/detail and the
-session row.
+session row. `session_meta.last_assistant_question_seq` and
+`session_meta.last_assistant_question_epoch` accompany them with the same
+[assistant-question revision](#assistant-question-revision) semantics.
 
 ### GET /api/v1/sessions/{session_id}/state
 
 Get session state for client reconnection. The response includes the same
 nullable UTC ISO 8601 `last_user_message_at` and nullable integer
 `last_user_message_seq`, plus nullable string `last_user_message_epoch`, at the
-top level. This metadata-only route has no transcript.
+top level, together with nullable integer `last_assistant_question_seq` and
+nullable string `last_assistant_question_epoch`. This metadata-only route has no transcript.
 
 ### GET /api/v1/sessions/{session_id}/context-usage
 
