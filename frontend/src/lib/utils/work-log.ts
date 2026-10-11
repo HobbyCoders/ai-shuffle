@@ -974,11 +974,12 @@ function sameIds(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | un
 }
 
 export function createTranscriptModelBuilder() {
-	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel } | undefined;
+	// `itemAt` maps raw index → item index for exactly `model` (card-progress patch path).
+	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel; itemAt?: Int32Array } | undefined;
 	const turnCache = createTurnCache();
-	let locator: { model: TranscriptModel; itemAt: Int32Array } | undefined;
-	return (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
+	const build = (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
 		let changed: number | null = null;
+		let itemAt: Int32Array | undefined;
 		const old = previous;
 		const tail = messages.at(-1);
 		const oldTail = old?.messages.at(-1);
@@ -1018,15 +1019,20 @@ export function createTranscriptModelBuilder() {
 			items[items.length - 1] = { ...lastItem, sequence };
 			model = { ...old!.model, items };
 		} else if (sameOptions && (changed = onlyCardProgressChanged(old!.messages, messages)) !== null) {
-			if (!locator || locator.model !== old!.model) locator = { model: old!.model, itemAt: locateItems(old!.model.items, messages.length) };
-			model = patchRow(old!.model, locator.itemAt, changed, messages[changed]);
-			locator = { model, itemAt: locator.itemAt };
+			itemAt = old!.itemAt ?? locateItems(old!.model.items, messages.length);
+			model = patchRow(old!.model, itemAt, changed, messages[changed]);
 		} else {
 			model = buildTranscriptModel(messages, options, turnCache);
 		}
-		previous = { messages, options, model };
+		// The locator lives on `previous`, so it always describes the current
+		// model: any other path (a rebuild, a session switch, a streamed tail)
+		// drops it rather than keeping a switched-away model reachable.
+		previous = { messages, options, model, itemAt };
 		return model;
 	};
+	/** Test hook: models this builder still references (the current one only). */
+	build.retainedModels = (): TranscriptModel[] => (previous ? [previous.model] : []);
+	return build;
 }
 
 /**
@@ -1153,6 +1159,13 @@ function sameItem(a: DisplayItem, b: DisplayItem): boolean {
 	return false;
 }
 
+/** Raw index a plain row item starts at; null for work logs (never reused). */
+function plainItemIndex(item: DisplayItem): number | null {
+	if (item.kind === 'message') return item.index;
+	if (item.kind === 'system_group') return item.indices[0] ?? null;
+	return null;
+}
+
 function sameRows(a: Positioned[], b: Positioned[]): boolean {
 	if (a.length !== b.length) return false;
 	for (let i = 0; i < a.length; i++) {
@@ -1249,10 +1262,23 @@ export function buildTranscriptModel(
 		// A rebuilt turn keeps the identity of plain rows that did not change
 		// (its opening prompt, mostly), so only its work log re-renders.
 		if (hit) {
+			// Index the prior plain items once by their first raw index: an
+			// ungrouped long turn emits one item per row, and scanning the prior
+			// list per row made each append quadratic in the turn's length.
+			let prior: Map<number, DisplayItem> | undefined;
 			for (let i = start; i < items.length; i++) {
 				const fresh = items[i];
-				const same = hit.items.find((prior) => sameItem(prior, fresh));
-				if (same) items[i] = same;
+				const at = plainItemIndex(fresh);
+				if (at === null) continue;
+				if (!prior) {
+					prior = new Map();
+					for (const item of hit.items) {
+						const priorAt = plainItemIndex(item);
+						if (priorAt !== null && !prior.has(priorAt)) prior.set(priorAt, item);
+					}
+				}
+				const same = prior.get(at);
+				if (same && sameItem(same, fresh)) items[i] = same;
 			}
 		}
 		if (cache) nextTurns.set(key, { rows: turn, unsettled, items: items.slice(start) });

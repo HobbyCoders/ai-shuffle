@@ -58,12 +58,18 @@ describe('MessageArea reading position', () => {
 		// Every frame updates the non-reactive cache, never the global store.
 		expect(frame).toContain('scrollPositionCache.set(cacheKey, currentScrollTop)');
 		expect(frame).not.toContain('activeSession.setScrollTop(');
-		expect(frame).toContain('persistScrollTopSoon(cacheKey, currentScrollTop)');
-		const persist = block('function persistScrollTopSoon(', 'function handleScroll() {');
-		expect(persist).toContain("($activeSession.sessionId ?? 'new') === cacheKey");
-		// The switch and destroy paths cancel a pending write before writing.
-		expect(block('onDestroy(() => {', '// ── Session-switch scroll save/restore')).toContain('cancelScrollTopPersist()');
-		expect(block('if (currentId === prevId) return;', 'prevTrackedSessionId = currentId;')).toContain('cancelScrollTopPersist()');
+		expect(frame).toContain('scrollTopPersist.schedule(cacheKey, currentScrollTop)');
+		// Wiring of the deferred write; its behaviour is exercised in
+		// scroll-top-persist.test.ts.
+		const persist = block('const scrollTopPersist = createScrollTopPersist({', 'function handleScroll() {');
+		expect(persist).toContain("currentKey: () => $activeSession.sessionId ?? 'new'");
+		expect(persist).toContain('writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)');
+		expect(block('onDestroy(() => {', '// ── Session-switch scroll save/restore')).toContain('scrollTopPersist.destroy(cacheKey, containerRef.scrollTop)');
+		// A switch files the leaving position under the LEAVING id, never into the
+		// store, which already belongs to the session entered.
+		const sw = block('if (currentId === prevId) return;', 'prevTrackedSessionId = currentId;');
+		expect(sw).toContain('scrollTopPersist.leave(prevId, containerRef.scrollTop)');
+		expect(sw).not.toContain('activeSession.setScrollTop(');
 	});
 
 	it('restores a reader who had scrolled up, over the full transcript, instead of jumping to the bottom', () => {

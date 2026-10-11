@@ -344,6 +344,90 @@ function run(size: number, target: Target, warmup = 30, measured = 120): Result 
 // desktop and this must never flake. The pre-fix builder measured ≈10× this
 // at the 4k shape in the same harness (see the PR for the table).
 const P75_BUDGET_MS = 1.5;
+const LONG_TURN_BUDGET_MS = 15;
+
+/** One live turn of `rows` main-lane rows (tools, prose, system), grouping off. */
+function buildLongTurn(rows: number): { state: V2SessionState; options: BuildOptions } {
+	const turnId = 'long-turn';
+	const messages: ChatMessage[] = [
+		{ id: 'long-user', role: 'user', type: 'text', content: 'Run the whole migration.', turnId, timestamp: '2026-10-11T10:00:00.000Z' }
+	];
+	for (let i = 0; i < rows; i++) {
+		const id = `long-${i}`;
+		const timestamp = new Date(Date.parse('2026-10-11T10:00:00.000Z') + i * 1000).toISOString();
+		if (i % 10 === 9) {
+			messages.push({ id, role: 'assistant', type: 'text', content: PROSE[i % PROSE.length], turnId, timestamp });
+		} else if (i % 25 === 12) {
+			messages.push({ id, role: 'system', type: 'system', content: 'Task progress', systemSubtype: 'task_progress', turnId, timestamp });
+		} else {
+			messages.push({
+				id, role: 'assistant', type: 'tool_use', content: '', toolName: TOOLS[i % TOOLS.length], toolId: `tu-${id}`,
+				toolInput: { file_path: `/repo/${id}.ts` }, toolResult: 'ok', toolStatus: 'complete', turnId, timestamp
+			});
+		}
+	}
+	const state = initialState();
+	state.messages = messages;
+	for (const message of messages) state.messageOriginSeq.set(message.id, 1);
+	return {
+		state,
+		options: { isStreaming: true, latestTurnUnsettled: true, groupingEnabled: false, sessionId: 'perf-long-turn', swarms: [] }
+	};
+}
+
+function toolResult(toolUseId: string): WireEvent {
+	seq += 1;
+	return {
+		type: 'tool.result',
+		id: `result-${seq}`,
+		seq,
+		session_id: 'perf-session',
+		created_at: '2026-10-11T15:00:00.000Z',
+		tool_use_id: toolUseId,
+		output: 'ok'
+	} as WireEvent;
+}
+
+function runLongTurn(rows: number, warmup = 10, measured = 40): Result {
+	const fixture = buildLongTurn(rows);
+	const build = createTranscriptModelBuilder();
+	let state = fixture.state;
+	let model: TranscriptModel = build(releaseMessages(state), fixture.options);
+	const lexer = vi.spyOn(marked, 'lexer');
+	const samples: number[] = [];
+	let lexes = 0;
+	let maxChanged = 0;
+	let open: string | null = null;
+	for (let i = 0; i < 2 * (warmup + measured); i++) {
+		lexer.mockClear();
+		let event: WireEvent;
+		if (open) {
+			event = toolResult(open);
+			open = null;
+		} else {
+			event = toolUse(i);
+			open = (event as unknown as { tool_use_id: string }).tool_use_id;
+		}
+		const start = performance.now();
+		state = reduce(state, event);
+		const next = build(releaseMessages(state), fixture.options);
+		const elapsed = performance.now() - start;
+		if (i >= 2 * warmup) {
+			samples.push(elapsed);
+			lexes += lexer.mock.calls.length;
+			maxChanged = Math.max(maxChanged, changedItems(model.items, next.items));
+		}
+		model = next;
+	}
+	lexer.mockRestore();
+	return {
+		messages: state.messages.length,
+		items: model.items.length,
+		p75Ms: p75(samples),
+		lexesPerUpdate: lexes / (2 * measured),
+		maxChangedItems: maxChanged
+	};
+}
 
 describe('long-session subagent progress (#1282)', () => {
 	afterEach(() => vi.restoreAllMocks());
@@ -381,6 +465,22 @@ describe('long-session subagent progress (#1282)', () => {
 			expect(result.lexesPerUpdate).toBe(0);
 			expect(result.maxChangedItems).toBeLessThanOrEqual(1);
 		}
+	});
+
+	it('appending to one long ungrouped turn stays linear (tool call, then its result)', () => {
+		// Grouping off emits one item per row, and a rebuilt turn matches each
+		// fresh item against the previous build's. Matching by scan made every
+		// append O(rows²) in the turn: 21.5 ms at 4,000 rows, 89 ms at 8,000.
+		const results = [4000, 8000].map((rows) => runLongTurn(rows));
+		// eslint-disable-next-line no-console
+		console.info('[perf #1282] ungrouped long turn', JSON.stringify(results));
+		for (const result of results) {
+			expect(result.lexesPerUpdate).toBe(0);
+			expect(result.maxChangedItems).toBeLessThanOrEqual(2);
+		}
+		// A fresh build of the 8,000-row turn is ≈2.3 ms; the quadratic match was
+		// ≈40× that. Generous for a slow runner, far below the regression.
+		expect(results[1].p75Ms).toBeLessThan(LONG_TURN_BUDGET_MS);
 	});
 
 	it('keeps a progress update under budget at the 4k shape (warm p75)', () => {

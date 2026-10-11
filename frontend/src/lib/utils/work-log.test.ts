@@ -195,6 +195,53 @@ describe('incremental model reuse (#1282)', () => {
 		expect(after.items.filter((item) => !before.items.includes(item))).toHaveLength(1);
 		expect(after.items.at(-1)).not.toBe(before.items.at(-1));
 	});
+
+	it('keeps plain-row identity when an ungrouped long turn grows, and matches a fresh build', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		const options = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: false, sessionId: 's1' };
+		let before = build(releaseMessages(state), options);
+		for (let k = 0; k < 3; k++) {
+			state = reduce(state, event('tool.use', { tool_use_id: `long-${k}`, name: 'Read', input: {} }));
+			state = reduce(state, event('tool.result', { tool_use_id: `long-${k}`, output: 'ok' }));
+			const after = build(releaseMessages(state), options);
+			expect(after).toEqual(buildTranscriptModel(state.messages, options));
+			// Every row whose message did not change keeps its item object; only
+			// the appended row (and a row the append finalized) is new.
+			const reused = new Map(before.items.flatMap((item) => (item.kind === 'message' ? [[item.message, item] as const] : [])));
+			let kept = 0;
+			for (const item of after.items) {
+				if (item.kind !== 'message' || !reused.has(item.message)) continue;
+				expect(item).toBe(reused.get(item.message));
+				kept++;
+			}
+			expect(kept).toBeGreaterThan(20);
+			expect(after.items.filter((item) => !before.items.includes(item)).length).toBeLessThanOrEqual(2);
+			before = after;
+		}
+	});
+
+	it('drops a session\'s card-patch locator when the next build is another session', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		const options = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1' };
+		build(releaseMessages(state), options);
+		state = reduce(state, event('subagent.progress', { task_id: 'task-3', kind: 'chunk', note: 'working' }));
+		const patchedA = build(releaseMessages(state), options);
+		expect(build.retainedModels()).toEqual([patchedA]);
+		// Switch to an empty session B: nothing of A may stay referenced.
+		const empty = build([], { ...options, sessionId: 's2' });
+		expect(build.retainedModels()).toHaveLength(1);
+		expect(build.retainedModels()[0]).toBe(empty);
+		expect(build.retainedModels()[0]).not.toBe(patchedA);
+		// A card patch in B after the switch is still correct (no stale index map).
+		const prompt = user('go', undefined, 'tb');
+		const card = subagent({ toolId: 'wb', agentStatus: 'running', turnId: 'tb' });
+		const bOptions = { ...options, sessionId: 's2' };
+		build([prompt, card], bOptions);
+		const progressed = [prompt, { ...card, agentChildren: [{ id: 'c', type: 'text' as const, content: 'x' }] }];
+		expect(build(progressed, bOptions)).toEqual(buildTranscriptModel(progressed, bOptions));
+	});
 });
 
 let seq = 0;
