@@ -57,20 +57,22 @@ describe('assistant home transcript parity', () => {
 		expect(messageArea).not.toMatch(/foldAssistantTranscript|AssistantDetails/);
 	});
 
-	it('shows the live long turn as one group of runs, steers in place, current run open', () => {
+	it('shows the live long turn as one group of runs, steers in place, failures folded', () => {
 		const t = longTurn();
 		const view = render(TranscriptItems, { items: model(t.messages, true).items, folds: createFoldState(memoryStorage()) });
 		const groups = view.container.querySelectorAll('section.worklog');
 		expect(groups).toHaveLength(1);
 		expect((groups[0] as HTMLElement).dataset.workLogMode).toBe('live');
 		expect(visibleRows(view.container)).toEqual([
-			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack, t.failed,
-			t.worker2, t.steer2, t.grep2, t.report, t.final
+			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack,
+			t.worker2, t.steer2, t.final
 		].map((m) => m.id));
-		// Each earlier run behind its own live label.
+		// Each earlier run behind its own live label; the failed Edit folds with
+		// its run and is counted there, and the final prose ends the last run.
 		expect(screen.getAllByRole('button', { name: /^Show work details: / }).map((b) => b.getAttribute('aria-label'))).toEqual([
 			'Show work details: Read 1 file', 'Show work details: Searched code 1 time',
-			'Show work details: Ran 1 command', 'Show work details: Ran 1 command', 'Show work details: Changed 1 file'
+			'Show work details: Ran 1 command', 'Show work details: Ran 1 command and changed 2 files, 1 failed',
+			'Show work details: Searched code 1 time and got 1 agent message'
 		]);
 	});
 

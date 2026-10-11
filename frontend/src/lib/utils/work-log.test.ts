@@ -348,9 +348,20 @@ describe('agent deliveries in settled work', () => {
 	});
 
 	it.each([LIVE, { ...SETTLED, latestTurnUnsettled: true }, { ...SETTLED, groupingEnabled: false }])(
-		'keeps deliveries visible while live/parked or grouping is disabled (%j)', options => {
-			const messages = [user('Review'), receipt(), peer(), ...held(), text('Done')];
+		'keeps deliveries visible while live/parked until prose follows, or when grouping is disabled (%j)', options => {
+			const messages = [user('Review'), receipt(), peer(), ...held()];
 			expect(collapsedVisibleMessages(buildDisplayItems(messages, options))).toEqual(messages);
+		}
+	);
+
+	it.each([LIVE, { ...SETTLED, latestTurnUnsettled: true }])(
+		'folds live deliveries into the run the agent\'s next prose ends (%j)', options => {
+			const prompt = user('Review');
+			const deliveries = [receipt(), peer(), ...held()];
+			const done = text('Done');
+			const items = buildDisplayItems([prompt, ...deliveries, done], options);
+			expect(collapsedVisibleMessages(items)).toEqual([prompt, done]);
+			expect(liveLog(items)!.runs!.map((run) => run.summary)).toEqual(['Got 4 agent messages']);
 		}
 	);
 
@@ -369,7 +380,9 @@ describe('agent deliveries in settled work', () => {
 		expect(model.latestUserTurnId).toBeNull();
 		expect([...model.itemIndexByTurnId]).toEqual([]);
 		expect(model.rewindEligible.every(eligible => !eligible)).toBe(true);
-		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
+		// Live, the answer ends the run of deliveries and tools before it.
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual([answer]);
+		expect(collapsedVisibleMessages(buildDisplayItems(messages.slice(0, -1), LIVE))).toEqual(messages.slice(0, -1));
 	});
 
 	it('does not consume human checkpoint ordinals or turn navigation', () => {
@@ -943,7 +956,7 @@ describe('buildDisplayItems — live turn', () => {
 				.not.toContain(activeRetry.id);
 		}
 	});
-	it('keeps all rows across commentary boundaries, then folds once after the final response', () => {
+	it('folds live work behind each completed prose, then folds once after the final response', () => {
 		const messages = [
 			user('go'), tool(), tool(), text('progress'),
 			msg({ type: 'thinking', content: 'reasoning', streaming: false }),
@@ -956,7 +969,11 @@ describe('buildDisplayItems — live turn', () => {
 			const prefix = messages.slice(0, length);
 			const live = buildDisplayItems(prefix, LIVE);
 			expect(settledFolds(live)).toEqual([]);
-			expect(collapsedVisibleMessages(live)).toEqual(prefix);
+			// The prompt, the latest prose and everything after it stay on screen;
+			// the routine work before the latest prose folds into its run.
+			const latest = prefix.findLastIndex((m) => m.type === 'text');
+			const expected = latest < 0 ? prefix : [prefix[0], ...prefix.slice(latest)];
+			expect(collapsedVisibleMessages(live)).toEqual(expected);
 		}
 		const settled = buildDisplayItems(messages, SETTLED);
 		expect(settled.filter((item) => item.kind === 'work_log')).toHaveLength(1);
@@ -1047,9 +1064,10 @@ describe('work folds from wire events', () => {
 		expect(buildDisplayItems(structuredClone(state.messages), SETTLED)).toEqual(settled);
 		const parked = buildDisplayItems(state.messages, { ...SETTLED, latestTurnUnsettled: true });
 		expect(settledFolds(parked)).toEqual([]);
-		// Parked again, the turn is live. A steer never ends a run (spec §1.3) and
-		// no other protected row arrived, so the one run is current and open.
-		expect(collapsedVisibleMessages(parked)).toEqual(state.messages);
+		// Parked again, the turn is live. A steer never ends a run (spec §1.3);
+		// the prose around the steers does, so the live turn shows what the
+		// settled one does, with the reads folded into their runs.
+		expect(collapsedVisibleMessages(parked)).toEqual(collapsedVisibleMessages(settled));
 	});
 });
 
@@ -1575,25 +1593,29 @@ describe('turn unity', () => {
 		// Same key the settled fold will have, so settling flips mode in place.
 		expect(log.key).toBe(`wl-turn-${t.prompt.id}`);
 		expect(log.sequence.map((entry) => entry.message)).toEqual(t.messages.slice(1));
-		// Each earlier run folds; the protected row that ended it stays below it
-		// and keys the run: the finding, the question's lead-in, the first worker,
-		// the failed Edit, the second worker. The question ends a run with nothing
-		// to fold. Steers end no run: each stays in place inside the current one.
-		// The running Monitor finished its call, so it folds with its run.
+		// Each earlier run folds; the row that ended it stays below it and keys
+		// the run: the finding, the question's lead-in, the first worker, the
+		// second worker and the final prose. The question and the steer's reply
+		// end runs with nothing to fold. Steers end no run: each stays in place
+		// inside its run. The failed Edit is routine work: it folds with its run
+		// and the summary counts it. The running Monitor finished its call, so it
+		// folds with its run.
 		expect(log.runs!.map((run) => [run.index, run.key, run.folded.map((entry) => entry.message)])).toEqual([
 			[0, t.finding.id, [t.read]],
 			[1, t.interim.id, [t.grep]],
 			[2, t.worker.id, [t.monitor]],
-			[4, t.failed.id, [t.build]],
-			[5, t.worker2.id, [t.retry]]
+			[5, t.worker2.id, [t.build, t.failed, t.retry]],
+			[6, t.final.id, [t.grep2, t.report]]
 		]);
 		expect(log.runs!.map((run) => run.summary)).toEqual([
-			'Read 1 file', 'Searched code 1 time', 'Ran 1 command', 'Ran 1 command', 'Changed 1 file'
+			'Read 1 file', 'Searched code 1 time', 'Ran 1 command',
+			'Ran 1 command and changed 2 files, 1 failed', 'Searched code 1 time and got 1 agent message'
 		]);
-		// The run after the second steer is current and open.
+		// Live shows what the settled turn will: nothing after the final prose
+		// is still open, so the current run is empty.
 		expect(collapsedVisibleMessages(items)).toEqual([
-			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack, t.failed,
-			t.worker2, t.steer2, t.grep2, t.report, t.final
+			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack,
+			t.worker2, t.steer2, t.final
 		]);
 	});
 
@@ -1862,7 +1884,6 @@ describe('live runs', () => {
 		['a finding in prose', () => text('Found it:\n- the token is shared')],
 		['a question', () => tool({ toolName: 'AskUserQuestion', toolInput: { questions: [] } })],
 		['a worker card', () => subagent({ agentStatus: 'running' })],
-		['a failed tool', () => tool({ toolStatus: 'error', toolResult: 'boom' })],
 		['a special tool', () => tool({ toolName: 'TodoWrite', toolInput: { todos: [] } })]
 	])('ends a run at %s, which stays visible below its fold', (_label, boundary) => {
 		const prompt = user('go', undefined, 'turn-1');
@@ -1878,10 +1899,77 @@ describe('live runs', () => {
 	});
 
 	it('keeps every row of the current run open, with no fold before the first boundary', () => {
-		const messages = [user('go'), tool(), text('Now the workflow.'), tool(), tool({ toolStatus: 'running', streaming: true })];
+		const messages = [user('go'), tool(), tool({ toolStatus: 'error' }), tool(), tool({ toolStatus: 'running', streaming: true })];
 		const items = buildDisplayItems(messages, LIVE);
 		expect(liveLog(items)!.runs).toEqual([]);
 		expect(collapsedVisibleMessages(items)).toEqual(messages);
+	});
+
+	it('folds a failed tool with its run and counts it, keeping it in the expanded run', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const [a, failed, b] = [tool(), tool({ toolStatus: 'error', toolResult: 'boom' }), tool()];
+		const finding = text('Found it:\n- the token is shared');
+		const tail = tool({ toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([prompt, a, failed, b, finding, tail], LIVE);
+		const log = liveLog(items)!;
+		expect(runsOf(log)).toEqual([[0, [a, failed, b]]]);
+		expect(log.runs![0].summary).toBe('Ran 3 commands, 1 failed');
+		expect(log.runs![0].compactSummary).toBe('Ran 3 · 1 failed');
+		// Folded, only the boundary and the current run show; the failure is a
+		// row of the run, so opening the run shows it in place.
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, finding, tail]);
+		expect(log.sequence.find((entry) => entry.message === failed)).toMatchObject({ run: 0, foldsInRun: true });
+	});
+
+	it('ends a run at the latest completed one-line prose, folding the work behind it', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const [a, b] = [tool(), tool()];
+		const narration = text('Now the workflow.');
+		const running = tool({ toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([prompt, a, b, narration, running], LIVE);
+		expect(runsOf(liveLog(items)!)).toEqual([[0, [a, b]]]);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, narration, running]);
+		// Newer prose takes over: the earlier narration folds into the next run.
+		const ran = { ...running, toolStatus: 'complete' as const, streaming: false };
+		const [c, latest] = [tool(), text('Workflow checked.')];
+		const after = buildDisplayItems([prompt, a, b, narration, ran, c, latest], LIVE);
+		expect(runsOf(liveLog(after)!)).toEqual([[0, [a, b, narration, ran, c]]]);
+		expect(collapsedVisibleMessages(after)).toEqual([prompt, latest]);
+		// While the next prose streams, the last finished prose still ends the
+		// run, so nothing unfolds for the moment the new paragraph arrives.
+		const streaming = msg({ type: 'text', content: 'Writing', streaming: true });
+		const mid = buildDisplayItems([prompt, a, b, narration, streaming], LIVE);
+		expect(runsOf(liveLog(mid)!)).toEqual([[0, [a, b]]]);
+		expect(collapsedVisibleMessages(mid)).toEqual([prompt, narration, streaming]);
+	});
+
+	// The owner's coordinator turn (2026-10-11): a failed SendMessage and Bash
+	// mid-run, a task notification, a Monitor and one-line prose between them
+	// used to leave a lone row at every one of those points.
+	it('folds a coordinator turn into prose between runs', () => {
+		const prompt = user('Merge the batch', undefined, 'turn-1');
+		const send = tool({ toolName: 'mcp__fluid_bundled__mcp__builtins__SendMessage', toolStatus: 'error' });
+		const [bash1, bash2] = [tool(), tool({ toolStatus: 'error' })];
+		const getTask = tool({ toolName: 'mcp__fluid_bundled__mcp__builtins__TaskGet' });
+		const table = text('Batch landed:\n\n| PR | Merge |\n| --- | --- |\n| #2291 | 6860e83 |');
+		const notice = msg({ role: 'system', type: 'system', systemSubtype: 'task_notification', systemData: { status: 'completed' } });
+		const narration = text('Attest passed. Checking the publish run.');
+		const [bash3, bash4] = [tool(), tool()];
+		const monitor = tool({ toolName: 'mcp__fluid_bundled__mcp__builtins__Monitor', toolStatus: 'running', streaming: true });
+		const watching = text('A fresh attest is now running.');
+		const messages = [prompt, send, bash1, bash2, getTask, table, notice, narration, bash3, bash4, monitor, watching];
+		const items = buildDisplayItems(messages, LIVE);
+		const log = liveLog(items)!;
+		expect(log.runs!.map((run) => run.summary)).toEqual([
+			'Sent 1 message, ran 2 commands, and checked 1 task, 2 failed',
+			'Ran 2 commands and got 1 task result'
+		]);
+		expect(log.runs!.map((run) => run.compactSummary)).toEqual([
+			'Sent 1 · Ran 2 · Checked 1 · 2 failed',
+			'Ran 2 · Results 1'
+		]);
+		// The Monitor still runs, so it keeps its place between the folds.
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, table, monitor, watching]);
 	});
 
 	it('folds each earlier run on its own and leaves the current one open', () => {
@@ -1898,19 +1986,19 @@ describe('live runs', () => {
 
 	it('keys each run by the row that ended it, so a later boundary does not shift it', () => {
 		const prompt = user('go', undefined, 'turn-1');
-		const [a, b] = [tool(), tool({ toolStatus: 'running', streaming: true })];
+		const [a, b] = [tool(), msg({ type: 'text', content: 'Found:\n- partial', streaming: true })];
 		const finding = text('Found it:\n- one');
 		const [c, d] = [tool(), tool()];
 		const worker = subagent({ toolId: 'task-1', agentStatus: 'running' });
 		const tail = tool({ toolStatus: 'running', streaming: true });
 		const before = liveLog(buildDisplayItems([prompt, a, b, finding, c, d, worker, tail], LIVE))!;
 		expect(before.runs!.map((run) => [run.index, run.key])).toEqual([[0, finding.id], [1, worker.id]]);
-		// `b` fails after the fact: it becomes a boundary inside the first run,
+		// `b` finishes streaming: it becomes a boundary inside the first run,
 		// so ordinals shift, but the run [c, d] is still the one `worker` ended.
-		const failed = { ...b, toolStatus: 'error' as const, streaming: false };
-		const after = liveLog(buildDisplayItems([prompt, a, failed, finding, c, d, worker, tail], LIVE))!;
+		const done = { ...b, streaming: false };
+		const after = liveLog(buildDisplayItems([prompt, a, done, finding, c, d, worker, tail], LIVE))!;
 		expect(after.runs!.map((run) => [run.key, run.folded.map((entry) => entry.message)]))
-			.toEqual([[failed.id, [a]], [worker.id, [c, d]]]);
+			.toEqual([[done.id, [a]], [worker.id, [c, d]]]);
 		expect(after.runs!.find((run) => run.key === worker.id)!.index)
 			.not.toBe(before.runs!.find((run) => run.key === worker.id)!.index);
 	});
@@ -1926,14 +2014,14 @@ describe('live runs', () => {
 
 	it('does not end a run at a steer: it stays visible in place inside the current run', () => {
 		const prompt = user('go', undefined, 'turn-1');
-		const [a, answer] = [tool(), text('Looks fine.')];
+		const a = tool();
 		const steer = user('check prod too', undefined, 'turn-1');
 		const b = tool({ toolStatus: 'running', streaming: true });
-		const items = buildDisplayItems([prompt, a, answer, steer, b], LIVE);
+		const items = buildDisplayItems([prompt, a, steer, b], LIVE);
 		const log = liveLog(items)!;
 		expect(log.runs).toEqual([]);
-		expect(log.sequence.map((entry) => entry.run)).toEqual([0, 0, 0, 0]);
-		expect(collapsedVisibleMessages(items)).toEqual([prompt, a, answer, steer, b]);
+		expect(log.sequence.map((entry) => entry.run)).toEqual([0, 0, 0]);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, a, steer, b]);
 	});
 
 	// Spec §1.3: a turn never folds because the user sent something.

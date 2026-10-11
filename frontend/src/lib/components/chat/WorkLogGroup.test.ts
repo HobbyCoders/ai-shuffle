@@ -390,7 +390,10 @@ describe('WorkLogGroup', () => {
 			{ ...message, id: 'read-b', content: 'Read B' },
 			{ id: 'answer', role: 'assistant', type: 'text', content: 'Done.' }
 		];
-		const logOf = (isStreaming: boolean, messages = turn) => {
+		// Live, the answer is still streaming: finished prose would end the run
+		// and fold `read-b`, while these tests want it in the current, open run.
+		const liveTurn = turn.map((m) => (m.id === 'answer' ? { ...m, streaming: true } : m));
+		const logOf = (isStreaming: boolean, messages = isStreaming ? liveTurn : turn) => {
 			const item = buildTranscriptModel(messages, { isStreaming, groupingEnabled: true }).items
 				.find((entry) => entry.kind === 'work_log') as WorkLog;
 			return { ...item, row: expandableRow };
