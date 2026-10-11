@@ -22,16 +22,28 @@ describe('WorkerMenuList', () => {
 		expect(items.map(i => i.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
 	});
 
-	it('keeps blocked rows listed but inert, with their reason as the title', async () => {
+	it('keeps blocked rows focusable, announces their reason and never activates them', async () => {
 		const onSelect = vi.fn();
 		render(WorkerMenuList, { items: rows, onSelect });
 		const blocked = screen.getByRole('menuitem', { name: 'linux-worker offline' }) as HTMLButtonElement;
-		expect(blocked.disabled).toBe(true);
+		// Not natively disabled, so keyboard users can reach it and hear why.
+		expect(blocked.disabled).toBe(false);
+		blocked.focus();
+		expect(document.activeElement).toBe(blocked);
 		expect(blocked.getAttribute('aria-disabled')).toBe('true');
+		const reason = document.getElementById(blocked.getAttribute('aria-describedby')!);
+		expect(reason?.textContent).toBe('linux-worker is offline');
+		expect(reason?.hidden).toBe(true);
 		expect(blocked.title).toBe('linux-worker is offline');
 		expect(blocked.hasAttribute('aria-checked')).toBe(false);
 		await fireEvent.click(blocked);
-		await fireEvent.click(screen.getByRole('menuitem', { name: 'Unraid' }));
+		await fireEvent.keyDown(blocked, { key: 'Enter' });
+		await fireEvent.keyDown(blocked, { key: ' ' });
+		expect(onSelect).not.toHaveBeenCalled();
+		// Rows that are not blocked carry no reason.
+		const unraid = screen.getByRole('menuitem', { name: 'Unraid' });
+		expect(unraid.hasAttribute('aria-describedby')).toBe(false);
+		await fireEvent.click(unraid);
 		expect(onSelect).toHaveBeenCalledExactlyOnceWith(rows[1]);
 	});
 

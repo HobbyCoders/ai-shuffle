@@ -5,7 +5,10 @@
 		label: string;
 		/** Drives the presence dot. This worker is always online. */
 		online: boolean;
-		/** Blocked rows stay listed (greyed) so the reason is visible in the title. */
+		/**
+		 * Blocked rows stay listed, greyed and focusable (`aria-disabled`), and
+		 * announce `title` as their reason; activating them does nothing.
+		 */
 		disabled: boolean;
 		title: string;
 		/** Short trailing tag, e.g. "offline" or "no checkout". */
@@ -24,6 +27,11 @@
 	 * runner chip (ContextPillBar, `menuitem` rows that move the session), so
 	 * both menus read as the same list: a presence dot, the worker name and an
 	 * optional "offline" / "no checkout" tag, one row per worker, no sections.
+	 *
+	 * Blocked rows are not natively disabled, so keyboard and screen-reader
+	 * users can still reach them and hear why (the title is also wired up as
+	 * the row's description). Only `locked` (a move already running) disables
+	 * rows natively.
 	 *
 	 * Status rows (loading, a load error with Retry, the empty copy) follow
 	 * the worker rows. The parent owns the menu container and its role.
@@ -55,6 +63,8 @@
 		onSelect
 	}: Props = $props();
 
+	const uid = $props.id();
+
 	function select(row: WorkerMenuRow) {
 		if (row.disabled || locked) return;
 		onSelect(row);
@@ -70,7 +80,8 @@
 		{role}
 		aria-checked={role === 'menuitemradio' ? !!row.checked : undefined}
 		aria-disabled={row.disabled}
-		disabled={row.disabled || locked}
+		aria-describedby={row.disabled ? `${uid}-${row.id}-reason` : undefined}
+		disabled={locked}
 		title={row.title}
 		onclick={() => select(row)}
 	>
@@ -83,6 +94,10 @@
 			<Check size={13} strokeWidth={2} class="worker-row-check" aria-hidden="true" />
 		{/if}
 	</button>
+	{#if row.disabled}
+		<!-- Hidden description target: read as the row's reason, not its name. -->
+		<span id="{uid}-{row.id}-reason" hidden>{row.title}</span>
+	{/if}
 {/each}
 
 {#if loading}
@@ -116,11 +131,11 @@
 		transition: background-color 120ms ease;
 	}
 
-	.runner-item:hover:not(:disabled) {
+	.runner-item:hover:not(:disabled):not(.disabled) {
 		background: var(--hover-overlay);
 	}
 
-	.runner-item:active:not(:disabled) {
+	.runner-item:active:not(:disabled):not(.disabled) {
 		background: var(--selection-bg);
 	}
 

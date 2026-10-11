@@ -787,18 +787,6 @@
 
 	/* Mode dropdown — reuses .branch-dropdown visuals; anchored to the pill's left
 	   edge (it's the leftmost pill) and opens upward like the branch dropdown. */
-	/* Same surface as the active session's runner menu (ContextPillBar
-	   `.runner-dropdown`), so the two pickers read as one control. */
-	.mode-dropdown {
-		left: 0;
-		right: auto;
-		min-width: 220px;
-		max-width: min(320px, calc(100vw - 24px));
-		max-height: 320px;
-		background: var(--popover);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-	}
-
 	/* Branch selector */
 	.branch-selector {
 		position: relative;
@@ -836,6 +824,21 @@
 		padding: 4px;
 		z-index: 100;
 		animation: branchDropdown 120ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	/* Runner menu: the same surface as the active session's runner menu
+	   (ContextPillBar `.runner-dropdown`), so the two pickers read as one
+	   control. It must come AFTER `.branch-dropdown`: the menu carries both
+	   classes at equal specificity, so source order decides. The sheet-mode
+	   and phone rules further down still win (higher specificity / later). */
+	.mode-dropdown {
+		left: 0;
+		right: auto;
+		min-width: 220px;
+		max-width: min(320px, calc(100vw - 24px));
+		max-height: 320px;
+		background: var(--popover);
+		border-radius: calc(var(--radius, 0.75rem) * 0.83);
 	}
 
 	@keyframes branchDropdown {

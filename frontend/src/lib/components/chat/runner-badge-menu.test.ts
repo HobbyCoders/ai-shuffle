@@ -48,11 +48,28 @@ function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuIn
 }
 
 describe('runnerBadgeMenuItems', () => {
+	it('lists this worker first as the checked, non-moving row for a local session', () => {
+		const [current, ...rest] = runnerBadgeMenuItems(input({ ownerId: self.id, isRemote: false }));
+		expect(current).toMatchObject({ id: 'current-runner', label: 'Local', checked: true, action: null, disabled: false, online: true });
+		expect(rest.every((i) => !i.checked)).toBe(true);
+	});
+
+	it('lists the remote owner first as the checked row, then Continue here', () => {
+		const items = runnerBadgeMenuItems(input());
+		expect(items.slice(0, 2).map((i) => i.id)).toEqual(['current-runner', 'continue-here']);
+		expect(items[0]).toMatchObject({ label: owner.device_name, checked: true, action: null, disabled: false });
+		expect(items.filter((i) => i.checked)).toHaveLength(1);
+		// A remote owner the registry does not know yet falls back to the board row.
+		const unknown = runnerBadgeMenuItems(input({ installs: [self], ownerName: 'Garage PC', ownerOnline: false }))[0];
+		expect(unknown).toMatchObject({ label: 'Garage PC', online: false, note: 'offline', action: null });
+	});
+
+
 	it('offers only peer destinations for the local owner, never Continue here', () => {
 		const items = runnerBadgeMenuItems(input({ ownerId: self.id, isRemote: false }));
-		expect(items.map(i => i.id)).toEqual(['move-inst-owner', 'move-inst-online', 'move-inst-offline']);
+		expect(items.map(i => i.id)).toEqual(['current-runner', 'move-inst-owner', 'move-inst-online', 'move-inst-offline']);
 		expect(items.find(i => i.id === 'move-inst-offline')?.disabled).toBe(true);
-		expect(runnerBadgeMenuItems(input({ isRemote: false, installs: [self] }))).toEqual([]);
+		expect(runnerBadgeMenuItems(input({ isRemote: false, installs: [self] })).map(i => i.id)).toEqual(['current-runner']);
 	});
 
 	it('offers Continue here without an Unpin action', () => {
@@ -63,11 +80,11 @@ describe('runnerBadgeMenuItems', () => {
 	});
 
 	it('offers history-only Continue here for projectless sessions and explains Git publication', () => {
-		const noProject = runnerBadgeMenuItems(input({ hasProject: false }))[0];
+		const noProject = runnerBadgeMenuItems(input({ hasProject: false })).find((i) => i.id === 'continue-here')!;
 		expect(noProject.disabled).toBe(false);
 		expect(noProject.action).toEqual({ kind: 'adopt' });
 		expect(noProject.title).toContain('history');
-		expect(runnerBadgeMenuItems(input())[0].title).toContain('Commit and push');
+		expect(runnerBadgeMenuItems(input()).find((i) => i.id === 'continue-here')!.title).toContain('Commit and push');
 	});
 
 	it('lists other runners for /move and skips self and the current owner', () => {
@@ -102,6 +119,7 @@ describe('runnerBadgeMenuItems', () => {
 	it('carries each runner\'s presence for the status dot; Continue here is always online', () => {
 		const online = Object.fromEntries(runnerBadgeMenuItems(input()).map((i) => [i.id, i.online]));
 		expect(online).toEqual({
+			'current-runner': true,
 			'continue-here': true,
 			'move-inst-online': true,
 			'move-inst-offline': false
@@ -113,6 +131,7 @@ describe('runnerBadgeMenuItems', () => {
 			runnerBadgeMenuItems(input({ eligibility: { 'inst-online': false } })).map((i) => [i.id, i.note])
 		);
 		expect(notes).toEqual({
+			'current-runner': null,
 			'continue-here': null,
 			'move-inst-online': 'no checkout',
 			'move-inst-offline': 'offline'

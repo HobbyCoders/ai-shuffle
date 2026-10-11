@@ -239,7 +239,9 @@
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
 			hasProject: sessionHasProject,
-			isWorktree: isWorktreeSession
+			isWorktree: isWorktreeSession,
+			ownerName: sessionRow?.device_name ?? null,
+			ownerOnline: typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null
 		})
 	);
 
@@ -590,16 +592,23 @@
 						{#if runnerActionError}
 							<div class="runner-error" role="alert">{runnerActionError}</div>
 						{/if}
+						<!-- Same rows as the new-chat picker: the worker this session
+						     runs on first (checked; picking it just closes the menu),
+						     then Continue here for a remote session, then every peer. -->
 						<WorkerMenuList
 							items={runnerMenuLoading || runnerMenuError ? [] : runnerMenu}
+							role="menuitemradio"
 							locked={runnerActionPending || runnerChecking}
 							loading={runnerMenuLoading}
 							error={runnerMenuError || null}
 							onRetry={loadRunnerMenu}
-							emptyText={runnerMenu.length === 0 ? 'No other workers available.' : null}
+							emptyText={runnerMenu.every((i) => i.checked) ? 'No other workers available.' : null}
 							onSelect={(row) => {
 								const item = runnerMenu.find((i) => i.id === row.id);
-								if (item) void runMenuAction(item);
+								if (!item) return;
+								// The current worker never moves the session.
+								if (item.checked) closeDropdown('runner');
+								else void runMenuAction(item);
 							}}
 						/>
 						{/if}

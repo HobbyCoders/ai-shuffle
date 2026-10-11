@@ -490,6 +490,13 @@ describe('flat worker list (matches the active session runner menu)', () => {
 		const laptop = await screen.findByRole('menuitemradio', { name: 'Laptop no checkout' });
 		expect(laptop.getAttribute('aria-disabled')).toBe('true');
 		expect(laptop.getAttribute('title')).toBe("No checkout of this project on Laptop — a worktree can't be created there");
+		// Focusable, with the reason as its description, and inert.
+		expect((laptop as HTMLButtonElement).disabled).toBe(false);
+		laptop.focus();
+		expect(document.activeElement).toBe(laptop);
+		expect(document.getElementById(laptop.getAttribute('aria-describedby')!)?.textContent)
+			.toBe("No checkout of this project on Laptop — a worktree can't be created there");
+		await fireEvent.keyDown(laptop, { key: 'Enter' });
 		await fireEvent.click(laptop);
 		expect(activeSession.current.deviceIntent).toBeNull();
 	});
