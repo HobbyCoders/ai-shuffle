@@ -59,6 +59,11 @@ legacy `result_preview` unchanged (up to 2,000 characters, ending in `…` if cu
 are persisted in `session_events` and delivered on live SSE and history replay;
 there is no separate stored card message. Clients use `result` for card content,
 falling back to `result_preview` for older events, on both live and reload paths.
+Each SendMessage continuation emits its own completion report, deduplicated by
+parent, worker and continuation id rather than the original feed's done latch.
+Remote workers carry a separate bounded card report and truncation flag, keeping
+Task's independent head/tail report contract unchanged. Older remote reports
+without these fields retain their existing truncation flag on the card.
 This transport does not introduce any new sanitization.
 
 **Now:** `SubagentMessage` shows identity + status + "Open transcript ↗" only; the Task tool row that holds the result is suppressed when the card exists.

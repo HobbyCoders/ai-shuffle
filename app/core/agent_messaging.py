@@ -367,8 +367,6 @@ async def finish_message_resume(session_id, settled, outcome):
 
     async with turn_scheduler.message_resume_lock(session_id):
         record = supervisor.get_worker(owner, session_id)
-        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
-            return
         # Read only this turn's report: an interrupted continuation must never
         # report the previous successful turn as its new result.
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
@@ -388,13 +386,23 @@ async def finish_message_resume(session_id, settled, outcome):
                 outcome = "error"
                 text = str(payload.get("errors") or "Worker continuation failed")
         status = "completed" if outcome == "completed" else "error"
-        summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
+        report = text or "Worker continuation ended without a report"
+        summary, _ = provider_agent.bound_report(report)
         # A worker a usage limit paused: its parent was not woken at the pause,
         # so this report is where it hears, once, that it was paused (#1831).
         from app.core.limit_resume import report_note
         note = report_note(settled.get("payload"))
         if note:
             summary = f"{note}\n\n{summary}"
+            report = f"{note}\n\n{report}"
+        from app.core.provider_agent_feed import record_continuation_report
+
+        stopped = (record and record.torn_down) or task_registry.is_user_stopped(session_id)
+        await record_continuation_report(
+            owner, session_id, settled["id"], "killed" if stopped else status, report,
+        )
+        if stopped:
+            return  # Preserve Stop: a card update is not authority to wake anyone.
         # Read park BEFORE busy: unpark starts queued/running before clearing
         # the parked row. The single busy query covers queued->running too.
         # Admission holds this lock until both queue and ownership are written.

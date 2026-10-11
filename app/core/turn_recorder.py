@@ -459,17 +459,24 @@ def _translate_shared(
 
     if etype == "subagent_done":
         result, result_truncated = _bound_subagent_result(event.get("result"))
-        return [_build_event(
+        record = _build_event(
             contract.SubagentCompleted, session_id,
             task_id=event.get("tool_id") or event.get("agent_id") or "",
             status=("killed" if event.get("killed") is True
                     else "failed" if event.get("is_error") else "completed"),
             result_preview=_truncate(event.get("result_preview", event.get("result"))),
             result=result,
-            result_truncated=result_truncated,
+            result_truncated=result_truncated or event.get("result_truncated") is True,
             usage=event.get("usage") if isinstance(event.get("usage"), dict) else None,
             **kw,
-        )]
+        )
+        completion_id = event.get("completion_id")
+        if isinstance(completion_id, str) and completion_id:
+            record["id"] = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"subagent-completed:{session_id}:{record['payload']['task_id']}:{completion_id}",
+            ))
+        return [record]
 
     if etype in ("task_progress", "task_started", "task_notification"):
         state = event.get("status") or {

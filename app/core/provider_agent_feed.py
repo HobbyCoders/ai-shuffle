@@ -136,6 +136,25 @@ def _clip(text: Optional[str], limit: int) -> str:
     return body[: limit - 1] + "…"
 
 
+async def record_continuation_report(
+    parent_session_id: str, worker_session_id: str, completion_id: str,
+    status: str, result: str,
+) -> None:
+    """Persist a resumed turn independently of the original feed's done latch.
+
+    Stable event ids deduplicate retries, including after restart. This does
+    not settle the task: another continuation may already be running.
+    """
+    from app.core.turn_recorder import record_drained_event
+
+    await record_drained_event(parent_session_id, {
+        "type": "subagent_done", "tool_id": worker_session_id,
+        "completion_id": completion_id, "is_error": status != "completed",
+        "killed": status == "killed", "result": result,
+        "result_preview": _clip(result, MAX_RESULT_PREVIEW_CHARS),
+    })
+
+
 def _bound_tool_input(value: Any) -> Any:
     """Recursively clip long string leaves out of a tool input dict.
 
@@ -323,6 +342,8 @@ class WorkerFeed:
         result_preview: Optional[str] = None,
         summary: Optional[str] = None,
         usage: Optional[Dict[str, Any]] = None,
+        result: Optional[str] = None,
+        result_truncated: bool = False,
     ) -> None:
         """Emit the terminal frames for this worker.
 
@@ -360,7 +381,8 @@ class WorkerFeed:
             "killed": status == "killed",
             # The shared recorder bounds the full report for storage AND replay.
             # Keep the historical preview separate for existing consumers.
-            "result": result_preview,
+            "result": result if result is not None else result_preview,
+            "result_truncated": result_truncated,
             "result_preview": _clip(result_preview, MAX_RESULT_PREVIEW_CHARS),
             # The worker's authoritative token counts. Without them the card's
             # usage row renders nothing for workers.
