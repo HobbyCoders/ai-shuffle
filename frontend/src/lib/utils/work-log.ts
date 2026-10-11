@@ -50,17 +50,20 @@ export interface WorkLogSequenceEntry extends WorkLogEntry {
 
 /**
  * One earlier run of a live turn (spec §2): the routine rows between two
- * boundaries (protected rows and the prose that stays on screen). It renders as one live fold; the protected row that ended it
+ * boundaries (protected rows and the prose that stays on screen), keyed by
+ * the row it starts at. It renders as one live fold; the protected row that ended it
  * stays visible below. The current run (still receiving rows) has no entry.
  */
 export interface WorkLogRun {
 	/** Position among all runs of the turn, counting runs with nothing to fold. */
 	index: number;
 	/**
-	 * Stable fold-state key: the id of the protected row that ended the run.
-	 * The ordinal shifts when a new boundary appears earlier in the turn (prose
-	 * that finished streaming); the row that ended a run does not, so a
-	 * run the reader opened stays open on the same work.
+	 * Stable fold-state key: the id of the run's first row (the first row
+	 * after the boundary before it). The ordinal shifts when a new boundary
+	 * appears earlier in the turn, and the row that ENDS a run moves on when
+	 * newer prose finishes and replaces it as the latest word; the row a run
+	 * starts at does neither, so a run the reader opened stays open on the
+	 * same work while the turn goes on.
 	 */
 	key: string;
 	/** Rows hidden while the run is folded. */
@@ -884,7 +887,7 @@ function terminalProse(response: Positioned[]): Set<Positioned> {
 	return terminal;
 }
 
-/** Fold-state key of a run, from the protected row that ended it (see `WorkLogRun.key`). */
+/** Fold-state key of a run, from the row it starts at (see `WorkLogRun.key`). */
 function runKeyOf(entry: Positioned): string {
 	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
 }
@@ -960,7 +963,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 		for (const row of folded) hidden.add(row);
 		if (folded.length > 0) {
 			const rows = folded.map(({ message, index }) => ({ message, index }));
-			runs.push({ index: runIndex, key: runKeyOf(entry), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
 		}
 		runIndex++;
 		open = [];

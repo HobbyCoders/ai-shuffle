@@ -93,8 +93,10 @@
 	});
 
 	let localOpen = $state(false);
-	// Runs are keyed by the row that ended them (`WorkLogRun.key`), not by
-	// ordinal: a tool that fails later inserts a boundary and shifts ordinals.
+	// Runs are keyed by the row they start at (`WorkLogRun.key`), not by
+	// ordinal or by the row that ends them: prose that finishes later inserts
+	// a boundary and shifts ordinals, and newer prose replaces the boundary
+	// that ended a run, so neither may close a run the reader opened.
 	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
 	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);

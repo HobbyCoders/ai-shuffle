@@ -3,8 +3,9 @@
  *
  * A fold key is `<turn key>:run-<row id>` for a live run and `<turn key>:turn`
  * for the settled turn's group, where the turn key is the SERVER id of the
- * row that opened the turn and the row id is the protected row that ended the
- * run (stable when a later boundary splits an earlier run; see `WorkLogRun.key`).
+ * row that opened the turn and the row id is the run's first row (stable when
+ * a later boundary splits an earlier run or newer prose replaces the boundary
+ * that ended it; see `WorkLogRun.key`).
  * When the turn settles its runs become one fold: `promoteRuns` opens that
  * fold if the reader had opened any run, so settling never closes what they
  * were reading. An optimistic send has no server id until the

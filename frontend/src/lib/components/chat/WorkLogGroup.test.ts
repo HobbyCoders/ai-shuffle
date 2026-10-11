@@ -454,7 +454,7 @@ describe('WorkLogGroup', () => {
 			const first = render(WorkLogGroup, { ...logOf(true), folds });
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
 			expect(shown('read-a')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-finding': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-a': true });
 			first.unmount();
 
 			// A window remount, a session switch back or a reload (new store, same storage).
@@ -734,22 +734,22 @@ describe('WorkLogGroup', () => {
 			expect(screen.getByRole('button', { name: 'Hide work details' })).toBeTruthy();
 		});
 
-		it('keeps an open run open when a mid-run tool fails later and shifts the run ordinals', async () => {
-			const running = { ...message, id: 'read-0', content: 'Read 0', toolStatus: 'running' as const };
+		it('keeps an open run open when earlier prose finishes later and shifts the run ordinals', async () => {
+			const running: ChatMessage = { id: 'prose-0', role: 'assistant', type: 'text', content: 'Found:\n- partial', streaming: true };
 			const base = [turn[0], running, ...turn.slice(1, 3), { ...message, id: 'read-c', content: 'Read C' },
 				{ id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage,
 				{ ...message, id: 'tail', content: 'Tail', toolStatus: 'running' as const, streaming: true }];
 			const folds = createFoldState(memoryStorage());
 			const view = render(WorkLogGroup, { ...logOf(true, base), folds });
-			// Runs: [read-0, read-a] ended by the finding, [read-c] ended by the worker.
+			// Runs: [read-a] ended by the finding, [read-c] ended by the worker.
 			const labels = screen.getAllByRole('button', { name: /^Show work details/ });
 			expect(labels).toHaveLength(2);
 			await fireEvent.click(labels[1]);
 			expect(shown('read-c')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-worker': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-c': true });
 
-			// read-0 fails: a new boundary ahead of the open run renumbers the runs.
-			const failed = base.map((m) => (m === running ? { ...m, toolStatus: 'error' as const } : m));
+			// prose-0 finishes: a new boundary ahead of the open run renumbers the runs.
+			const failed = base.map((m) => (m === running ? { ...m, streaming: false } : m));
 			await view.rerender(logOf(true, failed));
 			expect(shown('read-c')).toBe(true);
 			expect(rowEl('read-a')).toBeNull();
@@ -785,16 +785,48 @@ describe('WorkLogGroup', () => {
 			expect(screen.queryByText('Show fewer log entries')).toBeNull();
 		});
 
+		// Review of #2297: the run behind finished prose A was keyed by A, so
+		// when newer prose B finished and took over as the run's boundary, the
+		// stored open state no longer matched and the open run folded shut.
+		it('keeps an open run open when newer prose finishes and ends it instead, through a reload', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const prompt = turn[0];
+			const read = { ...message, id: 'read-x', content: 'Read X' };
+			const proseA: ChatMessage = { id: 'prose-a', role: 'assistant', type: 'text', content: 'Checking the config.' };
+			const proseB: ChatMessage = { id: 'prose-b', role: 'assistant', type: 'text', content: 'Config checked.' };
+			const view = render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA]), folds });
+			expect(shown('read-x')).toBe(false);
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			expect(shown('read-x')).toBe(true);
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
+
+			// B streams: A still ends the run.
+			await view.rerender(logOf(true, [prompt, read, proseA, { ...proseB, streaming: true }]));
+			expect(shown('read-x')).toBe(true);
+			// B finishes: the run now runs through A to B, same key, still open.
+			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
+			expect(shown('read-x')).toBe(true);
+			expect(shown('prose-a')).toBe(true);
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
+			view.unmount();
+
+			// A remount or reload reads the same stored state.
+			render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA, proseB]), folds: createFoldState(storage) });
+			expect(shown('read-x')).toBe(true);
+			expect(screen.getByRole('button', { name: 'Hide work details: Read 1 file' })).toBeTruthy();
+		});
+
 		it('moves folds opened under an optimistic id onto the server id', async () => {
 			const folds = createFoldState(memoryStorage());
 			const view = render(WorkLogGroup, { ...logOf(true), folds });
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
-			expect(folds.isOpen('prompt:run-finding')).toBe(true);
+			expect(folds.isOpen('prompt:run-read-a')).toBe(true);
 
 			// The reducer reconciles the optimistic prompt in place and records its server id.
 			const reconciled = [{ ...turn[0], serverId: 'srv-1' }, ...turn.slice(1)];
 			await view.rerender(logOf(true, reconciled));
-			expect(folds.current).toEqual({ 'srv-1:run-finding': true });
+			expect(folds.current).toEqual({ 'srv-1:run-read-a': true });
 			expect(shown('read-a')).toBe(true);
 		});
 	});

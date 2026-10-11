@@ -1593,19 +1593,19 @@ describe('turn unity', () => {
 		// Same key the settled fold will have, so settling flips mode in place.
 		expect(log.key).toBe(`wl-turn-${t.prompt.id}`);
 		expect(log.sequence.map((entry) => entry.message)).toEqual(t.messages.slice(1));
-		// Each earlier run folds; the row that ended it stays below it and keys
-		// the run: the finding, the question's lead-in, the first worker, the
-		// second worker and the final prose. The question and the steer's reply
-		// end runs with nothing to fold. Steers end no run: each stays in place
+		// Each earlier run folds behind the row that ended it, which stays
+		// below it: the finding, the question's lead-in, the first worker, the
+		// second worker and the final prose. A run is keyed by its first row.
+		// The question and the steer's reply end runs with nothing to fold. Steers end no run: each stays in place
 		// inside its run. The failed Edit is routine work: it folds with its run
 		// and the summary counts it. The running Monitor finished its call, so it
 		// folds with its run.
 		expect(log.runs!.map((run) => [run.index, run.key, run.folded.map((entry) => entry.message)])).toEqual([
-			[0, t.finding.id, [t.read]],
-			[1, t.interim.id, [t.grep]],
-			[2, t.worker.id, [t.monitor]],
-			[5, t.worker2.id, [t.build, t.failed, t.retry]],
-			[6, t.final.id, [t.grep2, t.report]]
+			[0, t.read.id, [t.read]],
+			[1, t.grep.id, [t.grep]],
+			[2, t.monitor.id, [t.monitor]],
+			[5, t.build.id, [t.build, t.failed, t.retry]],
+			[6, t.steer2.id, [t.grep2, t.report]]
 		]);
 		expect(log.runs!.map((run) => run.summary)).toEqual([
 			'Read 1 file', 'Searched code 1 time', 'Ran 1 command',
@@ -1984,7 +1984,7 @@ describe('live runs', () => {
 		expect(collapsedVisibleMessages(items)).toEqual([prompt, first, second, d, e]);
 	});
 
-	it('keys each run by the row that ended it, so a later boundary does not shift it', () => {
+	it('keys each run by the row it starts at, so a later boundary does not shift it', () => {
 		const prompt = user('go', undefined, 'turn-1');
 		const [a, b] = [tool(), msg({ type: 'text', content: 'Found:\n- partial', streaming: true })];
 		const finding = text('Found it:\n- one');
@@ -1992,21 +1992,34 @@ describe('live runs', () => {
 		const worker = subagent({ toolId: 'task-1', agentStatus: 'running' });
 		const tail = tool({ toolStatus: 'running', streaming: true });
 		const before = liveLog(buildDisplayItems([prompt, a, b, finding, c, d, worker, tail], LIVE))!;
-		expect(before.runs!.map((run) => [run.index, run.key])).toEqual([[0, finding.id], [1, worker.id]]);
+		expect(before.runs!.map((run) => [run.index, run.key])).toEqual([[0, a.id], [1, c.id]]);
 		// `b` finishes streaming: it becomes a boundary inside the first run,
-		// so ordinals shift, but the run [c, d] is still the one `worker` ended.
+		// so ordinals shift, but the run [c, d] keeps the key it starts at.
 		const done = { ...b, streaming: false };
 		const after = liveLog(buildDisplayItems([prompt, a, done, finding, c, d, worker, tail], LIVE))!;
 		expect(after.runs!.map((run) => [run.key, run.folded.map((entry) => entry.message)]))
-			.toEqual([[done.id, [a]], [worker.id, [c, d]]]);
-		expect(after.runs!.find((run) => run.key === worker.id)!.index)
-			.not.toBe(before.runs!.find((run) => run.key === worker.id)!.index);
+			.toEqual([[a.id, [a]], [c.id, [c, d]]]);
+		expect(after.runs!.find((run) => run.key === c.id)!.index)
+			.not.toBe(before.runs!.find((run) => run.key === c.id)!.index);
 	});
 
-	it('keys a run ended by an optimistic row by its server id once reconciled', () => {
+	// Review of #2297: keyed by the prose that ended it, a run the reader had
+	// opened changed key, and folded shut, when newer prose finished.
+	it('keeps a run\'s key when newer prose finishes and replaces the boundary that ended it', () => {
 		const prompt = user('go', undefined, 'turn-1');
-		const a = tool();
-		const finding = { ...text('Found it:\n- one'), serverId: 'srv-9' };
+		const read = tool({ toolName: 'Read' });
+		const first = text('Checking the config.');
+		const keyOf = (rows: ChatMessage[]) => liveLog(buildDisplayItems([prompt, ...rows], LIVE))!.runs!.map((run) => run.key);
+		expect(keyOf([read, first])).toEqual([read.id]);
+		const next = msg({ type: 'text', content: 'Config checked.', streaming: true });
+		expect(keyOf([read, first, next])).toEqual([read.id]);
+		expect(keyOf([read, first, tool(), { ...next, streaming: false }])).toEqual([read.id]);
+	});
+
+	it('keys a run started by an optimistic row by its server id once reconciled', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const a = { ...tool(), serverId: 'srv-9' };
+		const finding = text('Found it:\n- one');
 		const tail = tool({ toolStatus: 'running', streaming: true });
 		const log = liveLog(buildDisplayItems([prompt, a, finding, tail], LIVE))!;
 		expect(log.runs!.map((run) => run.key)).toEqual(['srv-9']);
