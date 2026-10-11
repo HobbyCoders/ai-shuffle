@@ -96,9 +96,11 @@ def test_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     _create_schema(conn.cursor())
+    conn.execute("CREATE TABLE composer_suggestion_revisions (session_id TEXT PRIMARY KEY, "
+                 "activity_revision BIGINT NOT NULL DEFAULT 0, completed_revision BIGINT)")
     conn.execute(
         "CREATE TABLE composer_suggestions (session_id TEXT PRIMARY KEY, "
-        "turn_id TEXT NOT NULL, suggestion TEXT NOT NULL, "
+        "turn_id TEXT NOT NULL, suggestion TEXT NOT NULL, activity_revision BIGINT NOT NULL DEFAULT -1, "
         "FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE)"
     )
     conn.commit()

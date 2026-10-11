@@ -773,6 +773,8 @@ async def shutdown_services() -> None:
     await assistant_manager.shutdown()
     from app.core.global_events import global_events
     await global_events.shutdown()
+    from app.core import composer_suggestions
+    await composer_suggestions.stop()
     from app.core import lifecycle_events
     await lifecycle_events.stop()
 

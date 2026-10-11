@@ -32,9 +32,24 @@ def start() -> None:
     _loop = asyncio.get_running_loop()
 
 
+async def stop() -> None:
+    global _loop
+    _loop = None
+    tasks = list(_notifications)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def notify_superseded(session_id: str, turn_id: str) -> None:
+    loop = _loop
+    if loop is None or loop.is_closed():
+        return
+
     def schedule():
-        task = asyncio.create_task(_broadcast(session_id, turn_id, None))
+        if _loop is not loop:
+            return
+        task = loop.create_task(_broadcast(session_id, turn_id, None))
         _notifications.add(task)
         task.add_done_callback(finished)
 
@@ -44,11 +59,10 @@ def notify_superseded(session_id: str, turn_id: str) -> None:
             _diagnose(session_id, turn_id, "supersede", "publish_failure", task.exception())
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = _loop
-    if loop is not None and not loop.is_closed():
         loop.call_soon_threadsafe(schedule)
+    except RuntimeError:
+        # Shutdown can close the loop between the guard and the enqueue.
+        return
 
 
 def _json(value):
@@ -152,12 +166,13 @@ async def _eligible(session_id: str, turn_id: str) -> bool:
                 or task_registry.has_pending_composer_work(session_id))
 
 
-async def _publish(session_id: str, turn_id: str, text: str) -> None:
+async def _publish(session_id: str, turn_id: str, text: str, *, expected_revision: int | None = None) -> None:
     from app.db import composer_suggestions
 
     # Persist before notifying: watch_session only covers the open session.
     # Returning to a session (or reconnecting) reads this without another model call.
-    if not await asyncio.to_thread(composer_suggestions.save, session_id, turn_id, text):
+    if not await asyncio.to_thread(composer_suggestions.save, session_id, turn_id, text,
+                                   expected_revision=expected_revision):
         return
     await _broadcast(session_id, turn_id, text)
 
@@ -248,6 +263,9 @@ async def _run(session_id: str, turn_id: str) -> None:
     stage = "eligibility"
     try:
         async with asyncio.timeout(TIMEOUT_SECONDS):
+            from app.db.composer_suggestions import revision
+
+            expected_revision = await asyncio.to_thread(revision, session_id)
             if not await _eligible(session_id, turn_id):
                 return
             stage = "final_answer"
@@ -272,7 +290,7 @@ async def _run(session_id: str, turn_id: str) -> None:
             stage = "eligibility"
             if text and await _eligible(session_id, turn_id):
                 stage = "publish"
-                await _publish(session_id, turn_id, text)
+                await _publish(session_id, turn_id, text, expected_revision=expected_revision)
     except Exception as exc:
         # CancelledError is a BaseException and deliberately propagates.
         # Shared generation translates its own timeout into HTTP 504.

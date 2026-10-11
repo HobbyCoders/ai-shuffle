@@ -27,7 +27,28 @@ def _lock(cursor, session_id: str) -> None:
     cursor.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
 
 
-def save(session_id: str, turn_id: str, suggestion: str) -> bool:
+def revision(session_id: str) -> int | None:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT activity_revision FROM composer_suggestion_revisions WHERE session_id=%s",
+                       (session_id,))
+        row = cursor.fetchone()
+        return row["activity_revision"] if row else None
+
+
+def complete(conn, session_id: str) -> None:
+    """A durable completion acknowledges all preceding activity, including legacy writes."""
+    cursor = conn.cursor()
+    _lock(cursor, session_id)
+    cursor.execute(
+        "INSERT INTO composer_suggestion_revisions (session_id, completed_revision) "
+        "SELECT id, 0 FROM sessions WHERE id=%s "
+        "ON CONFLICT (session_id) DO UPDATE SET completed_revision=composer_suggestion_revisions.activity_revision",
+        (session_id,),
+    )
+
+
+def save(session_id: str, turn_id: str, suggestion: str, *, expected_revision: int | None = None) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         # Serialize with supersede(): its activity rows and deletion must commit
@@ -36,12 +57,16 @@ def save(session_id: str, turn_id: str, suggestion: str) -> bool:
         # A late generation must not overwrite a newer turn's saved hint or
         # revive a hint after a same-id continuation / user message.
         cursor.execute(
-            "INSERT INTO composer_suggestions (session_id, turn_id, suggestion) "
-            f"SELECT %s, %s, %s WHERE %s = ({_LATEST_TURN}) "
+            "INSERT INTO composer_suggestions (session_id, turn_id, suggestion, activity_revision) "
+            "SELECT %s, %s, %s, r.activity_revision FROM composer_suggestion_revisions r "
+            "WHERE r.session_id=%s AND r.completed_revision=r.activity_revision "
+            "AND (CAST(%s AS BIGINT) IS NULL OR r.activity_revision=%s) "
+            f"AND %s = ({_LATEST_TURN}) "
             f"AND EXISTS ({_CURRENT_COMPLETION.format(session='%s', turn='%s')}) "
             "ON CONFLICT (session_id) DO UPDATE SET "
-            "turn_id=excluded.turn_id, suggestion=excluded.suggestion",
-            (session_id, turn_id, suggestion, turn_id, session_id, session_id, turn_id),
+            "turn_id=excluded.turn_id, suggestion=excluded.suggestion, activity_revision=excluded.activity_revision",
+            (session_id, turn_id, suggestion, session_id, expected_revision, expected_revision,
+             turn_id, session_id, session_id, turn_id),
         )
         saved = cursor.rowcount > 0
         conn.commit()
@@ -54,6 +79,8 @@ def get(session_id: str) -> dict | None:
         # Rewind/clear removes completion events. Never revive their old hint.
         cursor.execute(
             "SELECT s.session_id, s.turn_id, s.suggestion FROM composer_suggestions s "
+            "JOIN composer_suggestion_revisions r ON r.session_id=s.session_id "
+            "AND r.activity_revision=s.activity_revision AND r.completed_revision=r.activity_revision "
             f"WHERE s.session_id=%s AND s.turn_id = ({_LATEST_TURN}) "
             f"AND EXISTS ({_CURRENT_COMPLETION.format(session='s.session_id', turn='s.turn_id')})",
             (session_id, session_id),
@@ -66,6 +93,12 @@ def supersede(conn, session_id: str) -> None:
     """Remove a hint in the activity transaction; notify only after its commit."""
     cursor = conn.cursor()
     _lock(cursor, session_id)
+    cursor.execute(
+        "INSERT INTO composer_suggestion_revisions (session_id, activity_revision) "
+        "SELECT id, 1 FROM sessions WHERE id=%s "
+        "ON CONFLICT (session_id) DO UPDATE SET activity_revision=composer_suggestion_revisions.activity_revision+1",
+        (session_id,),
+    )
     cursor.execute(
         "DELETE FROM composer_suggestions WHERE session_id=%s RETURNING turn_id",
         (session_id,),
