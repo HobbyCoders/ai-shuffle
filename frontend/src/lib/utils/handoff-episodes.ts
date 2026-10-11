@@ -347,7 +347,13 @@ export interface HandoffOwner {
 
 const settledByOwner = new WeakMap<HandoffEpisodes, HandoffEpisodes>();
 /** Owner seen when each sending move was first observed, by session and episode. */
-const ownerAtSend = new Map<string, string>();
+const ownerAtSend = new Map<string, Seen>();
+
+/** An observed owner: a stable device id and/or a display name. */
+interface Seen {
+	id: string;
+	name: string;
+}
 /** Moves whose owner was seen to change to their target. */
 const ownerMoved = new Set<string>();
 
@@ -357,8 +363,20 @@ function ownedByTarget(episode: HandoffEpisode, owner: HandoffOwner): boolean {
 	return !!name && !!episode.worker && name === episode.worker.toLowerCase();
 }
 
-function ownerKey(owner: HandoffOwner): string {
-	return `${owner.deviceId ?? ''}\0${text(owner.deviceName).toLowerCase()}`;
+function seenOf(owner: HandoffOwner): Seen {
+	return { id: text(owner.deviceId), name: text(owner.deviceName).toLowerCase() };
+}
+
+/**
+ * Whether `now` is a different owner than `before`. The device id is the
+ * identity: when both have one, only a different id is a transfer. A display
+ * name decides only when an id is missing on either side, and only when both
+ * names are known. Filling in a missing id or name, or renaming the same id,
+ * is the same owner described better, not a transfer.
+ */
+function ownerChanged(before: Seen, now: Seen): boolean {
+	if (before.id && now.id) return before.id !== now.id;
+	return !!before.name && !!now.name && before.name !== now.name;
 }
 
 /**
@@ -384,11 +402,17 @@ export function settleByOwner(
 	if (!ownerMoved.has(slot)) {
 		if (!owner || (!owner.deviceId && !text(owner.deviceName))) return handoffs;
 		const seen = ownerAtSend.get(slot);
+		const now = seenOf(owner);
 		if (seen === undefined) {
-			ownerAtSend.set(slot, ownerKey(owner));
+			ownerAtSend.set(slot, now);
 			return handoffs;
 		}
-		if (seen === ownerKey(owner) || !ownedByTarget(current, owner)) return handoffs;
+		if (!ownerChanged(seen, now)) {
+			// The same owner, maybe described better: keep what is now known.
+			ownerAtSend.set(slot, { id: seen.id || now.id, name: now.name || seen.name });
+			return handoffs;
+		}
+		if (!ownedByTarget(current, owner)) return handoffs;
 		ownerMoved.add(slot);
 		ownerAtSend.delete(slot);
 	}

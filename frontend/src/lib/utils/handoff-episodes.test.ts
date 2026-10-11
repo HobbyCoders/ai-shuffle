@@ -222,6 +222,29 @@ describe('review fixes (#2304)', () => {
 		expect(settleByOwner(handoffEpisodes(messages), here, 's4').open?.phase).toBe('sending');
 	});
 
+	it('P2: filling in an owner field is not an owner change', () => {
+		const messages = [call(queued), row('started', 's')];
+		const sending = () => handoffEpisodes(messages);
+		// Id first, then the same id with its name: enrichment.
+		resetOwnerTransitions();
+		expect(settleByOwner(sending(), { deviceId: 'dev_gaming' }, 'e1').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e1').open?.phase).toBe('sending');
+		expect(pendingHandoff(messages, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e1')).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		// Name first, then the id filled in: enrichment.
+		resetOwnerTransitions();
+		expect(settleByOwner(sending(), { deviceName: 'DesktopWorker' }, 'e2').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e2').open?.phase).toBe('sending');
+		// The same id renamed is the same owner.
+		resetOwnerTransitions();
+		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'Old name' }, 'e3').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e3').open?.phase).toBe('sending');
+		// A real change of id still settles, after an enriched baseline too.
+		resetOwnerTransitions();
+		expect(settleByOwner(sending(), { deviceName: 'Unraid' }, 'e4').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'e4').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e4').open).toBeNull();
+	});
+
 	it('P1: a `sent` record settles the move on the source worker', () => {
 		const r = only([call(queued), row('started', 's'), row('sent', 'Sent to DesktopWorker.')]);
 		expect(r.episode.phase).toBe('done');
