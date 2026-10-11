@@ -303,7 +303,7 @@ docker run -d \
 - Add `-e LICENSE_KEY=...` or `-e OWNER_PASSWORD=...` to set them on the first start.
 - Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
 - Set `PUID` and `PGID` to the owner of your workspace folder.
-- Keep `--restart unless-stopped`. If the application exits, its supervisor restarts it inside the container. After repeated crashes the container exits so Docker can start it again. A failed readiness probe only reports degradation: it does not kill a live process whose in-flight work cannot be confirmed safe to restart. Without a restart policy an exited container stays stopped until you start it.
+- Keep `--restart unless-stopped`. When AI Shuffle stops answering, the container restarts it on its own. If that keeps failing, the container exits so that Docker can start it again. Without a restart policy it stays stopped until you start it.
 
 ### Unraid, Portainer and other container managers
 

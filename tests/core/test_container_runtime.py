@@ -213,7 +213,7 @@ def test_readiness_monitor_counts_consecutive_failures_only():
     assert monitor.failures == 3
     assert monitor.check() is True
     assert monitor.failures == 4
-    assert runtime.READY_PROBE_FAILURES * runtime.READY_PROBE_INTERVAL == 120, "an unhealthy worker is reported degraded after two minutes"
+    assert runtime.READY_PROBE_FAILURES * runtime.READY_PROBE_INTERVAL == 120, "an unhealthy worker is restarted after two minutes"
     assert runtime.READY_PROBE_STARTUP_FAILURES >= runtime.READY_PROBE_FAILURES
 
 
@@ -243,27 +243,41 @@ def test_probe_ready_uses_status_and_never_raises():
     assert runtime.probe_ready(base + "/health/ready", timeout=0.5) is False, "connection refused counts as a failure"
 
 
-def test_watch_preserves_live_work_when_readiness_stops_answering(monkeypatch, capsys):
+def test_watch_exits_non_zero_when_live_app_stops_answering_readiness(monkeypatch, capsys):
     app = Mock()
     app.poll.return_value = None
     db = Mock(process=None)
+    monkeypatch.setattr(runtime, "READY_PROBE_INTERVAL", 0.05)
+    probes = []
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:1/health/ready", probe=lambda url: probes.append(url) or False, failures=3, startup_failures=3)
+    assert runtime.watch(app, db, None, monitor) == 1
+    assert len(probes) == 3 and probes[0] == "http://127.0.0.1:1/health/ready"
+    assert "readiness probe failed 3 times in a row" in capsys.readouterr().err
+
+
+def test_watch_logs_transient_readiness_degradation_and_recovery(monkeypatch, capsys):
+    app = Mock()
+    app.poll.return_value = None
     monkeypatch.setattr(runtime, "READY_PROBE_INTERVAL", 0)
+    answers = iter([True, False, False, True])
     probes = []
     def probe(url):
-        probes.append(url)
-        if len(probes) == 5:
+        answer = next(answers)
+        probes.append(answer)
+        if len(probes) == 4:
             runtime.STOP.set()
-        return False
-    monitor = runtime.ReadinessMonitor("http://127.0.0.1:1/health/ready", probe=probe, failures=3, startup_failures=3)
+        return answer
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:1/health/ready", probe=probe, failures=3)
     relaunch = Mock()
     try:
-        assert runtime.watch(app, db, None, monitor, relaunch=relaunch) == 0
+        assert runtime.watch(app, Mock(process=None), None, monitor, relaunch=relaunch) == 0
     finally:
         runtime.STOP.clear()
-    assert len(probes) == 5
     relaunch.assert_not_called()
-    app.terminate.assert_not_called()
-    assert "restart safety is unknown" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.count("application readiness degraded") == 1
+    assert err.count("application readiness recovered") == 1
+    assert err.index("degraded") < err.index("recovered")
 
 
 def test_watch_restarts_a_crashed_or_unready_app_in_place_within_a_budget(monkeypatch, capsys):
@@ -286,7 +300,7 @@ def test_watch_restarts_a_crashed_or_unready_app_in_place_within_a_budget(monkey
     assert err.count("restarting the application") == runtime.RELAUNCH_LIMIT
     assert "application exited unexpectedly; exiting so the container restarts" in err
 
-    # Transient readiness failure recovers without replacing a live process.
+    # A live app that stops answering readiness is replaced, then supervised.
     hung, healthy = Mock(), Mock()
     hung.poll.return_value = healthy.poll.return_value = None
     answers = iter([False, False, True])
@@ -308,8 +322,8 @@ def test_watch_restarts_a_crashed_or_unready_app_in_place_within_a_budget(monkey
         assert runtime.watch(hung, db, None, monitor("http://127.0.0.1:1/health/ready"), relaunch=relaunch_hung) == 0
     finally:
         runtime.STOP.clear()
-    assert replaced == []
-    assert "application readiness recovered" in capsys.readouterr().err
+    assert replaced == [hung]
+    assert "readiness probe failed 2 times in a row; restarting the application" in capsys.readouterr().err
 
 
 def test_watch_budget_forgets_old_restarts(monkeypatch):

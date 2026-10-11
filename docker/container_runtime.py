@@ -26,10 +26,9 @@ import time
 
 MAJOR = "16"
 # Readiness supervision: `restart: unless-stopped` only restarts an exited
-# container. Readiness failures degrade the worker and are logged, but are
-# not permission to terminate a live process: DB/executor contention is not
-# proof of a wedged loop, and an unresponsive app cannot confirm work is safe.
-# READY_PROBE_FAILURES consecutive failures trigger a degraded warning.
+# container, so an application that is alive but no longer answers
+# /health/ready is probed here and the supervisor exits non-zero after
+# READY_PROBE_FAILURES consecutive failures (2 minutes at these values).
 # Until the first successful probe a larger allowance covers first-boot
 # migrations; the probe itself is one cheap loopback GET per interval.
 READY_PROBE_INTERVAL = 30.0
@@ -62,8 +61,8 @@ _ISOLATION_FILE = Path(__file__).with_name("agent_isolation.py")
 ROLLBACK_PATTERN = r"^ai_shuffle_(rollback|failed)_[0-9a-f]{12}$"
 SNAPSHOT_MARGIN = 256 * 1024**2
 SNAPSHOT_TIMEOUT = 1800
-# An application that exits is restarted in place, without restarting the
-# container, at most this often. Past that the
+# An application that exits or stops answering readiness is restarted in place,
+# without restarting the container, at most this often. Past that the
 # supervisor exits and the container's restart policy takes over (#2112).
 RELAUNCH_LIMIT = 3
 RELAUNCH_WINDOW = 15 * 60.0
@@ -817,7 +816,7 @@ def probe_ready(url, timeout=None):
 
 
 class ReadinessMonitor:
-    """Counts readiness failures; `record` reports degraded, never proves dead."""
+    """Counts consecutive readiness failures; `record` says when the app is considered dead."""
 
     def __init__(self, url, *, probe=probe_ready, failures=None, startup_failures=None):
         self.url = url
@@ -842,8 +841,8 @@ class ReadinessMonitor:
 def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None):
     """Supervise until STOP (returns 0) or a failure the container must restart for (1).
 
-    An application that exits is handed to ``relaunch(app)``, which stops it,
-    rolls back an update's failed first
+    An application that exits or stops answering readiness is handed to
+    ``relaunch(app)``, which stops it, rolls back an update's failed first
     start, and returns the new process (None when the worker cannot run).
     At most RELAUNCH_LIMIT relaunches per RELAUNCH_WINDOW; then, or without
     ``relaunch``, the supervisor exits and the restart policy takes over."""
@@ -863,14 +862,14 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
         elif monitor is not None and time.monotonic() >= next_probe:
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
             previous_failures = monitor.failures
-            degraded = monitor.check()
-            if monitor.failures == 1 or (degraded and monitor.failures % monitor.limit == 0):
-                log(f"application readiness probe failed {monitor.failures} times in a row; "
-                    "degraded, preserving the live application because restart safety is unknown")
-            if monitor.failures == 0:
-                if previous_failures:
+            if monitor.check():
+                failure = f"application readiness probe failed {monitor.failures} times in a row"
+            else:
+                if monitor.failures == 1:
+                    log("application readiness degraded; waiting for subsequent probes")
+                elif previous_failures and monitor.failures == 0:
                     log("application readiness recovered")
-                if updates is not None:
+                if updates is not None and monitor.ever_ready and monitor.failures == 0:
                     updates.healthy()
                     confirm_handover(updates.root)
         if failure is None and updates is not None and time.monotonic() >= next_update:
