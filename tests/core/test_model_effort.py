@@ -388,7 +388,7 @@ async def test_refresh_preserves_curation_singleflight_and_failure(monkeypatch):
         return api.FetchModelsResponse(source="upstream", models=[{"id": "m", "label": "Upstream",
             "reasoning_capabilities": {"version": 1, "effort_levels": ["low", "max"], "default_effort": "max"}}, {"id": "not-curated"}])
     upstream = AsyncMock(side_effect=fetch)
-    monkeypatch.setattr(api, "fetch_models", upstream)
+    monkeypatch.setattr(api, "_fetch_models", upstream)
     first = asyncio.create_task(api._refresh_provider_capabilities("p"))
     await started.wait()
     second = asyncio.create_task(api._refresh_provider_capabilities("p"))
@@ -429,7 +429,7 @@ async def test_refresh_upgrades_legacy_ids_and_preserves_concurrent_curation(mon
                 "effort_levels": ["low", "max"], "default_effort": "max"}}
             for model in ("old-selection", "new-selection")
         ])
-    monkeypatch.setattr(api, "fetch_models", fetch)
+    monkeypatch.setattr(api, "_fetch_models", fetch)
     writes = []
     def update(_id, **kwargs):
         writes.append(kwargs)

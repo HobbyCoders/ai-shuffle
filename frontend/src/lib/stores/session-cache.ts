@@ -87,6 +87,18 @@ class SessionEphemeralCache {
 	}
 
 	/**
+	 * Update just the reading position of an already-cached session, in place.
+	 *
+	 * Same reason as patchDraft: the transcript writes the store's scrollTop on
+	 * a trailing timer (#1282), so the value the switcher saved for the session
+	 * being left can be stale. No-op if the session was never cached.
+	 */
+	patchScrollTop(sessionId: string, scrollTop: number): void {
+		const entry = this.cache.get(sessionId);
+		if (entry) entry.scrollTop = scrollTop;
+	}
+
+	/**
 	 * Check if a session has cached ephemeral state.
 	 */
 	has(sessionId: string): boolean {

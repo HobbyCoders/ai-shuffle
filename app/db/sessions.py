@@ -2050,6 +2050,12 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
             (now, now, session_id, now),
         )
     else:
+        # Authoritative append: project the assistant counterpart before
+        # capturing the combined row snapshot. This is part of the session-row
+        # write phase, before append takes any composer-suggestion advisory lock.
+        from app.db.session_questions import record_question
+
+        record_question(cursor, session_id)
         # Read the SSE log identity in the SAME transaction as the append and
         # stamp. Never derive it later for a delayed broadcast or snapshot.
         cursor.execute(
@@ -2137,6 +2143,9 @@ def add_session_message(
         notify = _record_user_message(cursor, session_id, role, now, metadata)
         if notify:
             from app.db.base import after_commit
+            from app.db.composer_suggestions import supersede
+
+            supersede(conn, session_id)
             after_commit(conn, notify)
 
     msg = {
@@ -2211,6 +2220,9 @@ def add_session_messages_batch(
             lastrowid = cursor.fetchone()["id"]
             notify = _record_user_message(cursor, msg["session_id"], msg["role"], now, metadata)
             if notify:
+                from app.db.composer_suggestions import supersede
+
+                supersede(conn, msg["session_id"])
                 notifications.append(notify)
             results.append({
                 "id": lastrowid,

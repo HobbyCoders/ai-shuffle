@@ -68,7 +68,7 @@ const railState = (page) =>
 
 const transcriptTop = (page) => page.evaluate(() => document.querySelector('.msg-scroll').scrollTop);
 const tick = (page, n, total) =>
-	page.getByRole('button', { name: new RegExp(`^User message ${n} of ${total}:`) });
+	page.getByRole('button', { name: new RegExp(`^Turn ${n} of ${total}:`) });
 
 async function run(viewport, touch, turns) {
 	const context = await browser.newContext({
@@ -161,7 +161,7 @@ async function run(viewport, touch, turns) {
 	assert.ok(state.visible.includes(turns - 1), `${label}: last tick not in view after End`);
 	assert.match(
 		await page.evaluate(() => document.activeElement?.getAttribute('aria-label')),
-		new RegExp(`^User message ${turns} of ${turns}:`)
+		new RegExp(`^Turn ${turns} of ${turns}:`)
 	);
 	await settle();
 	assert.equal((await railState(page)).current, turns - 1, `${label}: highlight drifted after End landed`);

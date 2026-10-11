@@ -32,6 +32,7 @@ import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+import { pendingQueue } from './pending-queue';
 import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
@@ -650,7 +651,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			liveRequestedModel: null,
 			liveProvider: null,
 			liveCompaction: null,
-			pendingRestorePrompt: null,
+			pendingRestorePrompt: pendingQueue.takeWithdrawnDraft(sessionId),
 			isCreatingWorktree: false,
 			worktreeError: null,
 			sessionLocked: false,

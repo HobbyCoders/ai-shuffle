@@ -172,10 +172,19 @@ def append_events(
                 and is_user_message("user", event.get("payload"))
             ) else other_params
             target.append(values)
+        # Only genuinely inserted events may project a question or invalidate
+        # a suggestion: a stable-id replay is not fresh activity/completion.
         inserted_other = False
+        activity_seq = completion_seq = 0
         for values in other_params:
             cursor.execute(insert_sql + " RETURNING seq", values)
-            inserted_other = cursor.fetchone() is not None or inserted_other
+            inserted = cursor.fetchone()
+            if inserted is not None:
+                inserted_other = True
+                if values[5] == "turn.started":
+                    activity_seq = max(activity_seq, int(inserted["seq"]))
+                elif values[5] == "turn.completed":
+                    completion_seq = max(completion_seq, int(inserted["seq"]))
         # The event log is authoritative on the EXECUTING worker. API, relay,
         # connector and automation turns need not have a legacy message row.
         # RETURNING distinguishes delivery from a retry of a stable event id;
@@ -209,14 +218,27 @@ def append_events(
                     )
                     if user_seq is not None and cut <= user_seq < rewind["seq"]:
                         user_seq = None
-            question_notify = record_question(cursor, session_id, force_notify=bool(rewinds))
+            if user_seq is None:
+                question_notify = record_question(cursor, session_id, force_notify=bool(rewinds))
+            # Otherwise _record_user_message projects it while writing the row,
+            # then captures both pairs in the single user-activity broadcast.
         if user_seq is not None:
             now = datetime.now(timezone.utc).isoformat()
             notify = _record_user_message(cursor, session_id, "user", now, seq=user_seq)
             if notify:
                 after_commit(conn, notify)
+            activity_seq = max(activity_seq, user_seq)
         elif question_notify:
             after_commit(conn, question_notify)
+        # Both user and question session-row updates precede the suggestion
+        # advisory lock. Nothing below may update the session row under it.
+        if activity_seq or completion_seq:
+            from app.db import composer_suggestions
+
+            if activity_seq:
+                composer_suggestions.supersede(conn, session_id)
+            if completion_seq > activity_seq:
+                composer_suggestions.complete(conn, session_id)
 
         # 4. Best-effort notify (guarded: pg_notify is absent on the SQLite
         # shim, and delivery must not depend on it — the gateway also polls).

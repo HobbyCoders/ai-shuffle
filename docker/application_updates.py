@@ -28,7 +28,12 @@ import httpx
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from app.core.application_updates import atomic_json
+def atomic_json(path, value):
+    # Manifest verification is also used by offline publication checks. Do not
+    # initialize app settings/database imports until the updater writes state.
+    from app.core.application_updates import atomic_json as write_json
+
+    return write_json(path, value)
 
 ORIGIN = "https://hobbycoders.com"
 REVISION = re.compile(r"[a-f0-9]{40}")

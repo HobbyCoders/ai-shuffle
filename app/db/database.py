@@ -2054,9 +2054,20 @@ def _run_column_migrations(cursor):
         CREATE TABLE IF NOT EXISTS composer_suggestions (
             session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
             turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-            suggestion TEXT NOT NULL
+            suggestion TEXT NOT NULL,
+            activity_revision BIGINT NOT NULL DEFAULT -1
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestion_revisions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            activity_revision BIGINT NOT NULL DEFAULT 0,
+            completed_revision BIGINT
+        )
+    """)
+    if not column_exists(cursor, "composer_suggestions", "activity_revision"):
+        cursor.execute("ALTER TABLE composer_suggestions ADD COLUMN activity_revision BIGINT NOT NULL DEFAULT -1")
+
 
     # One-time seed: carry every existing queued_messages row into turns as a
     # source='queue' queued turn, preserving order via position. queued_messages

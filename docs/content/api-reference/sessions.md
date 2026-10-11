@@ -82,9 +82,12 @@ cards are not prose. AskUser/AskUserQuestion tools suppress a prose preface so
 that a question is not counted twice.
 
 The append transaction stamps closed `message.assistant` prose and settled
-streamed prose (using the last contributing text-delta sequence). An unfinished
-stream or later non-question prose clears the sequence to `null` in the current
-epoch. Empty prose does not replace the previous nonempty prose. User answers
+streamed prose (using the last contributing text-delta sequence). Peer deliveries
+and mid-turn steers do not split an open prose bubble. A steer answers that
+earlier bubble even if subsequent deltas advance its position. Connection-drop
+retries hide only prose whose bubble originated after the last attempt boundary,
+matching the transcript's retry-card folding. An unfinished stream or later
+non-question prose clears the sequence to `null` in the current epoch. Empty prose does not replace the previous nonempty prose. User answers
 advance the user pair, not the assistant pair. The post-commit notification
 captures the persisted epoch, never the epoch at delivery time. Stable-ID
 retries and rollbacks do not publish new positions. No in-memory stream buffer
@@ -151,7 +154,7 @@ output and subagent progress must also count. No timestamp ordering is used.
 
 Returns `{ "session_id": "…", "turn_id": "…", "suggestion": "…" }`, or `null` when no current eligible suggestion is available. This read never calls a model.
 
-With **Suggest next reply** enabled (**Settings → General**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. A newer turn, a cleared/rewound answer, or disabling the feature prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
+With **Suggest next reply** enabled (**Settings → General**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. Starting or continuing a turn, or sending another user message, clears the hint on every watching device. Only the latest completed eligible turn can supply a new hint; reloading cannot restore a superseded hint. A cleared/rewound answer or disabling the feature also prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
 
 ## List Sessions
 

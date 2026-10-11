@@ -756,6 +756,9 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Row -> engine correlation id. Client commands survive queue acks,
+        # parked continuations and receipts; legacy producers still use row ids.
+        self._steer_ids: Dict[str, str] = {}
         # Queued turn ids the user took back (× / edit) during THIS turn. The
         # recall and the row's removal are two steps with a DB write between
         # them, and any concurrent ``steer_pending`` pass (another send, a peer
@@ -1784,7 +1787,11 @@ class SessionRuntime:
                         payload["peer_message_content"], sender=sender_id, id=row_id,
                     )
                 else:
-                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=row_id)
+                    command_id = row.get("command_id")
+                    steer_id = (command_id if isinstance(command_id, str)
+                                and command_id.startswith("client-") else row_id)
+                    self._steer_ids[row_id] = steer_id
+                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not
@@ -1971,7 +1978,7 @@ class SessionRuntime:
             # Barred BEFORE the engine is asked: ``adapter.cancel_steer`` may
             # suspend, and a pass running meanwhile must not re-submit it.
             self._steer_withdrawn.add(turn_id)
-        if await adapter.cancel_steer(turn_id):
+        if await adapter.cancel_steer(self._steer_ids.get(turn_id, turn_id)):
             # Never delivered and never will be, so the row is free again — and
             # it must leave the attempted set, or a later steer_pending() pass
             # would skip a row that is genuinely still queued (a recall that
@@ -2183,7 +2190,14 @@ class SessionRuntime:
                 self._task_steers.pop(row_id, None)
                 continue
             try:
-                row = await asyncio.to_thread(turns_db.get_turn, row_id)
+                if str(row_id).startswith("client-"):
+                    queued_id = next((key for key, value in self._steer_ids.items()
+                                      if value == row_id), None)
+                    row = (await asyncio.to_thread(turns_db.get_turn, queued_id)
+                           if queued_id else await asyncio.to_thread(
+                               turns_db.get_turn_by_command, self.session_id, row_id))
+                else:
+                    row = await asyncio.to_thread(turns_db.get_turn, row_id)
             except Exception:
                 logger.warning(
                     "SessionRuntime: could not load steered turn %s", row_id,
@@ -2196,6 +2210,12 @@ class SessionRuntime:
                     "%s — skipping", row_id, self.session_id,
                 )
                 continue
+            row_id = row["id"]
+            logger.info(
+                "steer delivery session=%s row=%s client_id=%s runtime_turn=%s boundary=%s at=%.6f",
+                self.session_id, row_id, row.get("command_id"), self.turn_id,
+                steer.get("tool_use_id"), time.time(),
+            )
             if row.get("state") != "queued":
                 # A receipt for a row that already left the queue. The two
                 # states are supposed to be mutually exclusive: cancelling a
@@ -2502,6 +2522,7 @@ class SessionRuntime:
         # below runs it as an ordinary turn.
         self._steering_closed = True
         self._steer_attempted.clear()
+        self._steer_ids.clear()
         # A task notification is the exception: it has no queue row behind it,
         # so an undelivered one has to be handed back to the scheduler or the
         # completion is lost. Before the park gate, so a wake enqueued here is

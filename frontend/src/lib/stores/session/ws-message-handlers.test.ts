@@ -187,6 +187,15 @@ describe('ws-message-handlers', () => {
 			expect(receive).toHaveBeenCalledWith(frame);
 			receive.mockRestore();
 		});
+		it.each(['turn.started', 'message.user'])('routes active-session %s through the suggestion reader', type => {
+			const receive = vi.spyOn(composerSuggestion, 'receive').mockImplementation(() => {});
+			const frame = { type, session_id: 'session-1', turn_id: 't', continued: true };
+			handlers.handleMessage({ ...frame, session_id: 'other' });
+			expect(receive).not.toHaveBeenCalled();
+			handlers.handleMessage({ event_type: 'stream_frame', data: frame });
+			expect(receive).toHaveBeenCalledExactlyOnceWith(frame);
+			receive.mockRestore();
+		});
 		it.each(['stopped', 'interrupted', 'error'])('invalidates current-session %s, not background events', type => {
 			const invalidate = vi.spyOn(composerSuggestion, 'invalidate');
 			handlers.handleMessage({ type, session_id: 'other', message: 'test' });
@@ -763,7 +772,7 @@ describe('ws-message-handlers', () => {
 			const [message, opts] = (notify.warning as ReturnType<typeof vi.fn>).mock.calls[0];
 			expect(message).toMatch(/already sent/i);
 			expect(opts).toMatchObject({ session_id: 'session-1' });
-			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.update).toHaveBeenCalledTimes(1);
 		});
 
 		it('stays quiet when the cancel took effect', () => {
@@ -2587,7 +2596,7 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 	}
 
 	beforeEach(() => {
-		pendingQueue.reset('session-1');
+		pendingQueue.reset('session-1', true);
 		state = mockState();
 		deps = createMockDeps({
 			update: vi.fn((fn) => { state = fn(state); }),
@@ -2615,6 +2624,41 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(state.pendingPeerMessages).toEqual([]);
 		handlers.handleMessage(peerFrame); // A stale pre-delivery snapshot must not resurrect it.
 		expect(state.pendingPeerMessages).toEqual([]);
+	});
+
+	it('retains cancellation across feed teardown and a delayed verdict for another session', () => {
+		const entry = { id: 'client-switch', clientMessageId: 'client-switch', content: 'restore only A', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		pendingQueue.reset(); // A's feed is torn down
+		state = { ...state, sessionId: 'session-2', draft: 'B draft', queuedMessages: [] };
+		pendingQueue.reset('session-2');
+		expect(pendingQueue.reconcile('session-1', [])).toEqual([{ ...entry, status: 'cancelling' }]);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			client_message_id: entry.id, message_id: 'turn-q', verdict: 'withdrawn' });
+		expect(state.sessionId).toBe('session-2');
+		expect(state.draft).toBe('B draft');
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-2')).toBeNull();
+		pendingQueue.reset();
+		pendingQueue.reset('session-1');
+		expect(pendingQueue.reconcile('session-1', [])).toHaveLength(0);
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBe(entry.content);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			client_message_id: entry.id, verdict: 'withdrawn' });
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+	});
+
+	it('retains a delivered chip and does not restore its text when delivery wins', () => {
+		const entry = { id: 'turn-q', clientMessageId: 'client-a', content: 'sent', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage(frame([]));
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'already_delivered' });
+		expect(state.queuedMessages).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(notify.warning).toHaveBeenCalledTimes(1);
+		handlers.handleMessage(frame([]));
+		expect(state.queuedMessages).toHaveLength(1);
 	});
 
 	it('renders the server snapshot', () => {
@@ -2654,19 +2698,20 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(pendingIds()).toEqual(['turn-q2']);
 	});
 
-	it('re-aims a deferred × at the server row once it appears', () => {
-		pendingQueue.noteOptimistic('session-1', 'queued-local-1');
-		pendingQueue.requestRemoval('session-1', {
-			id: 'queued-local-1', content: 'nope', queuedAt: 1,
+	it('keeps a cancelling chip until the server withdrawal verdict, then restores the draft', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'nope', queuedAt: 1 };
+		pendingQueue.noteOptimistic('session-1', entry.id);
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage(frame([])); // queue clearing must not hide a pending verdict
+		expect(pendingIds()).toEqual(['client-a']);
+		expect(state.queuedMessages[0].status).toBe('cancelling');
+		expect(state.pendingRestorePrompt).toBeNull();
+		handlers.handleMessage({
+			type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'withdrawn',
 		});
-
-		handlers.handleMessage(frame([{ id: 'turn-q', content: 'nope' }]));
-
-		expect(pendingIds()).toEqual([]);
-		expect(deps.wsSend).toHaveBeenCalledWith({
-			type: 'remove_queued_message',
-			message_id: 'turn-q',
-			session_id: 'session-1',
-		});
+		expect(pendingIds()).toHaveLength(0);
+		expect(state.pendingRestorePrompt).toBe('nope');
+		expect(deps.wsSend).not.toHaveBeenCalled();
 	});
 });

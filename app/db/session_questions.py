@@ -29,7 +29,7 @@ def asks_question(content: str) -> bool:
 # become prose, and must not hide an earlier question.
 _CLOSE_TEXT = {
     "turn.started", "turn.completed", "turn.aborted", "turn.parked",
-    "message.user", "message.assistant", "assistant.thinking_delta",
+    "message.assistant", "assistant.thinking_delta",
     "tool.use", "tool.input_delta", "subagent.started", "system.note",
     "system.compaction_boundary", "team.member_started",
 }
@@ -63,41 +63,74 @@ def _tail(cursor, session_id):
             yield seq, row["event_type"], payload
 
 
+def _attempt_start(cursor, session_id, retry_seq):
+    """The reducer's attemptStartSeq: user, turn start, result or retry note."""
+    for seq, kind, payload in _tail(cursor, session_id):
+        if seq >= retry_seq:
+            continue
+        if kind in ("turn.started", "message.user", "tool.result") or (
+            kind == "system.note" and payload.get("subtype") == "provider_retry"
+        ):
+            return seq
+    return 0
+
+
 def trailing_question_seq(cursor, session_id):
-    """Only the newest nonempty prose counts; unfinished text suppresses it."""
-    # User answers are compared via last_user_message_seq on the row, rather
-    # than erasing the last assistant position. Autonomous deliveries are not
-    # prose either.
+    """Newest nonempty rendered prose, respecting bubble/attempt origins.
+
+    Deliveries and steers do not close the reducer's openTextId. A steer can
+    answer a bubble even when subsequent deltas advance that earlier bubble's
+    event position. A dropped attempt hides only bubbles CREATED after the
+    attempt boundary, not a bubble spanning a mid-stream delivery/steer.
+    """
+    from app.db.sessions import is_user_message
+
     closed = False
     pieces = []
-    position = None
+    position = origin = None
+    user_seq = None
+    dropped_since = None
+
+    def finish():
+        text = _TRIM.sub("", "".join(reversed(pieces)))
+        if not text or (dropped_since is not None and origin > dropped_since):
+            return False, None
+        answered_mid_stream = user_seq is not None and origin < user_seq < position
+        return True, position if closed and not answered_mid_stream and asks_question(text) else None
+
     for seq, kind, payload in _tail(cursor, session_id):
         if kind == "system.note" and payload.get("subtype") in ("background_tasks_changed", "model_info"):
             continue
         if pieces and kind in _CLOSE_TEXT:
-            text = _TRIM.sub("", "".join(reversed(pieces)))
-            if text:
-                return position if closed and asks_question(text) else None
+            found, question = finish()
+            if found:
+                return question
             pieces = []
-            position = None
+            position = origin = None
+        if kind == "message.user" and is_user_message("user", payload):
+            user_seq = seq if user_seq is None else user_seq
+        if kind == "system.note" and payload.get("subtype") == "provider_retry":
+            if (payload.get("data") or {}).get("cause") == "connection_dropped":
+                dropped_since = _attempt_start(cursor, session_id, seq)
+        hidden = dropped_since is not None and seq > dropped_since
         if kind in ("tool.use", "tool.input_delta") and payload.get("name") in ("AskUser", "AskUserQuestion"):
-            return None
+            if not hidden:
+                return None
         if kind == "message.assistant" and payload.get("kind") in (None, "text"):
             text = _TRIM.sub("", payload.get("content") or "")
-            if text:
+            if text and not hidden:
                 return seq if asks_question(text) else None
         if kind == "assistant.text_delta":
-            # The live tail cannot ask yet. Avoid re-reading an ever-growing
-            # stream on every delta flush; collect it only once it closes.
+            # A live tail cannot ask yet. Read a stream only once it closes.
             if not closed and _TRIM.sub("", payload.get("text") or ""):
                 return None
             if position is None:
                 position = seq
+            origin = seq
             pieces.append(payload.get("text") or "")
         elif kind in _CLOSE_TEXT:
             closed = True
-    text = _TRIM.sub("", "".join(reversed(pieces)))
-    return position if closed and asks_question(text) else None
+    return finish()[1]
 
 
 def record_question(cursor, session_id, *, force_notify=False):

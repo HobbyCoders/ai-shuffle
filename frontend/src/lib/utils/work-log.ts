@@ -831,17 +831,24 @@ function askingLeadIns(response: Positioned[]): Set<Positioned> {
  * each stays visible below it, and the current run shows every row.
  */
 /**
- * The last prose before each steer is the answer the steer replied to, and the
- * last prose of the turn is its answer: both stay on screen, live and settled.
+ * The last prose before each steer is the answer the steer replied to, the
+ * first prose after each steer is the reply to the steer, and the last prose
+ * of the turn is its answer: all stay on screen, live and settled. When a
+ * steer is followed only by tools and then the turn's last prose, that prose
+ * is both, so it is kept once.
  */
 function terminalProse(response: Positioned[]): Set<Positioned> {
 	const terminal = new Set<Positioned>();
 	let lastProse: Positioned | null = null;
+	let awaitingReply = false;
 	for (const entry of response) {
 		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
 			if (lastProse) terminal.add(lastProse);
 			lastProse = null;
+			awaitingReply = true;
 		} else if (isAssistantText(entry.message)) {
+			if (awaitingReply) terminal.add(entry);
+			awaitingReply = false;
 			lastProse = entry;
 		}
 	}
@@ -974,8 +981,12 @@ function sameIds(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | un
 }
 
 export function createTranscriptModelBuilder() {
-	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel } | undefined;
-	return (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
+	// `itemAt` maps raw index → item index for exactly `model` (card-progress patch path).
+	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel; itemAt?: Int32Array } | undefined;
+	const turnCache = createTurnCache();
+	const build = (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
+		let changed: number | null = null;
+		let itemAt: Int32Array | undefined;
 		const old = previous;
 		const tail = messages.at(-1);
 		const oldTail = old?.messages.at(-1);
@@ -1014,17 +1025,166 @@ export function createTranscriptModelBuilder() {
 			const items = old!.model.items.slice();
 			items[items.length - 1] = { ...lastItem, sequence };
 			model = { ...old!.model, items };
+		} else if (sameOptions && (changed = onlyCardProgressChanged(old!.messages, messages)) !== null) {
+			itemAt = old!.itemAt ?? locateItems(old!.model.items, messages.length);
+			model = patchRow(old!.model, itemAt, changed, messages[changed]);
 		} else {
-			model = buildTranscriptModel(messages, options);
+			model = buildTranscriptModel(messages, options, turnCache);
 		}
-		previous = { messages, options, model };
+		// The locator lives on `previous`, so it always describes the current
+		// model: any other path (a rebuild, a session switch, a streamed tail)
+		// drops it rather than keeping a switched-away model reachable.
+		previous = { messages, options, model, itemAt };
 		return model;
 	};
+	/** Test hook: models this builder still references (the current one only). */
+	build.retainedModels = (): TranscriptModel[] => (previous ? [previous.model] : []);
+	return build;
+}
+
+/**
+ * Fields a worker's `subagent.progress` / completion changes on its card, none
+ * of which the grouping reads: the card is a protected row in every status,
+ * never folds, and its work summary counts it by type alone. A change confined
+ * to these fields cannot move a fold, a run, a summary or a turn boundary.
+ */
+const CARD_PROGRESS_FIELDS = new Set<string>(['agentChildren', 'agentStatus']);
+
+/**
+ * Index of the ONE subagent card that changed between two transcripts in
+ * nothing but `CARD_PROGRESS_FIELDS`, or null when anything else differs. One
+ * pointer comparison per row — no grouping work — so a burst of progress on a
+ * 4,000-row session no longer rebuilds the history model per update (#1282).
+ */
+function onlyCardProgressChanged(before: ChatMessage[], after: ChatMessage[]): number | null {
+	if (before === after || before.length !== after.length) return null;
+	let found = -1;
+	// Progress targets a recent card: scan from the end, stop at a second change.
+	for (let i = after.length - 1; i >= 0; i--) {
+		if (after[i] === before[i]) continue;
+		if (found !== -1) return null;
+		found = i;
+	}
+	if (found === -1) return null;
+	const next = after[found];
+	const prev = before[found];
+	if (next.type !== 'subagent' || prev.type !== 'subagent' || next.id !== prev.id) return null;
+	const nextKeys = Object.keys(next);
+	const prevKeys = Object.keys(prev);
+	for (const key of nextKeys) {
+		if (CARD_PROGRESS_FIELDS.has(key)) continue;
+		if (next[key as keyof ChatMessage] !== prev[key as keyof ChatMessage]) return null;
+	}
+	for (const key of prevKeys) {
+		if (!CARD_PROGRESS_FIELDS.has(key) && !(key in next)) return null;
+	}
+	return found;
+}
+
+/** Display-item index holding each raw message index (-1: not rendered). */
+function locateItems(items: DisplayItem[], length: number): Int32Array {
+	const itemAt = new Int32Array(length).fill(-1);
+	const mark = (index: number, itemIndex: number) => {
+		if (index >= 0 && index < length && itemAt[index] === -1) itemAt[index] = itemIndex;
+	};
+	items.forEach((item, itemIndex) => {
+		if (item.kind === 'message') mark(item.index, itemIndex);
+		else if (item.kind === 'system_group') for (const index of item.indices) mark(index, itemIndex);
+		else {
+			for (const entry of item.sequence) mark(entry.index, itemIndex);
+			for (const entry of item.folded) mark(entry.index, itemIndex);
+			for (const entry of item.tail) mark(entry.index, itemIndex);
+		}
+	});
+	return itemAt;
+}
+
+function swapEntries<T extends WorkLogEntry>(entries: T[], index: number, message: ChatMessage): T[] {
+	if (!entries.some((entry) => entry.index === index)) return entries;
+	return entries.map((entry) => (entry.index === index ? { ...entry, message } : entry));
+}
+
+/** The previous model with one row's message swapped; every other item keeps its identity. */
+function patchRow(model: TranscriptModel, itemAt: Int32Array, index: number, message: ChatMessage): TranscriptModel {
+	const itemIndex = itemAt[index] ?? -1;
+	// Not rendered (a Swarm owns it, or a duplicate id): nothing to redraw.
+	if (itemIndex < 0) return model;
+	const item = model.items[itemIndex];
+	let patched: DisplayItem;
+	if (item.kind === 'message') {
+		patched = { ...item, message };
+	} else if (item.kind === 'system_group') {
+		patched = { ...item, messages: item.messages.map((m, i) => (item.indices[i] === index ? message : m)) };
+	} else {
+		patched = {
+			...item,
+			sequence: swapEntries(item.sequence, index, message),
+			folded: swapEntries(item.folded, index, message),
+			tail: swapEntries(item.tail, index, message),
+			...(item.runs ? { runs: item.runs.map((run) => {
+				const folded = swapEntries(run.folded, index, message);
+				return folded === run.folded ? run : { ...run, folded };
+			}) } : {})
+		};
+	}
+	const items = model.items.slice();
+	items[itemIndex] = patched;
+	return { ...model, items };
+}
+
+/**
+ * Display items each turn produced on the previous build, by turn key.
+ *
+ * A turn's items depend only on its own rows (message identity AND raw index),
+ * whether it is live, and the build-wide options checked by `scope`. So when a
+ * worker's progress replaces one subagent card, every other turn reuses its
+ * items by identity: no re-grouping, no summaries, no gallery work, and the
+ * keyed `{#each}` sees unchanged props for every untouched group (#1282).
+ */
+interface TurnCacheEntry {
+	rows: Positioned[];
+	unsettled: boolean;
+	items: DisplayItem[];
+}
+
+export interface TurnCache {
+	scope: { groupingEnabled: boolean; sessionId: string | null | undefined } | null;
+	turns: Map<string, TurnCacheEntry>;
+}
+
+export function createTurnCache(): TurnCache {
+	return { scope: null, turns: new Map() };
+}
+
+/** Plain rows only: a work log's derived fields are not worth comparing. */
+function sameItem(a: DisplayItem, b: DisplayItem): boolean {
+	if (a.kind === 'message' && b.kind === 'message') return a.message === b.message && a.index === b.index;
+	if (a.kind === 'system_group' && b.kind === 'system_group') {
+		return a.indices.length === b.indices.length
+			&& a.indices.every((index, i) => index === b.indices[i] && a.messages[i] === b.messages[i]);
+	}
+	return false;
+}
+
+/** Raw index a plain row item starts at; null for work logs (never reused). */
+function plainItemIndex(item: DisplayItem): number | null {
+	if (item.kind === 'message') return item.index;
+	if (item.kind === 'system_group') return item.indices[0] ?? null;
+	return null;
+}
+
+function sameRows(a: Positioned[], b: Positioned[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].message !== b[i].message || a[i].index !== b[i].index) return false;
+	}
+	return true;
 }
 
 export function buildTranscriptModel(
 	messages: ChatMessage[],
-	options: BuildOptions
+	options: BuildOptions,
+	cache?: TurnCache
 ): TranscriptModel {
 	const { isStreaming, groupingEnabled } = options;
 	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
@@ -1086,17 +1246,61 @@ export function buildTranscriptModel(
 		}
 	}
 
+	const scope = cache?.scope;
+	const reusable = !!cache && !!scope
+		&& scope.groupingEnabled === groupingEnabled && scope.sessionId === options.sessionId;
+	const previousTurns = reusable ? cache.turns : null;
+	const nextTurns = new Map<string, TurnCacheEntry>();
 	turns.forEach((turn, turnIndex) => {
+		const key = turnKeyOf(turn);
+		const runningToolIds = options.runningToolIds;
+		const unsettled = groupingEnabled && (
+			(latestTurnUnsettled && turnIndex === turns.length - 1) ||
+			!!options.heldTurnKeys?.has(key) ||
+			(!!runningToolIds?.size && turn.some((entry) => !!entry.message.toolId && runningToolIds.has(entry.message.toolId))));
+		const hit = previousTurns?.get(key);
+		if (hit && hit.unsettled === unsettled && sameRows(hit.rows, turn)) {
+			for (const item of hit.items) items.push(item);
+			nextTurns.set(key, hit);
+			return;
+		}
+		const start = items.length;
+		emitTurn(turn, unsettled);
+		// A rebuilt turn keeps the identity of plain rows that did not change
+		// (its opening prompt, mostly), so only its work log re-renders.
+		if (hit) {
+			// Index the prior plain items once by their first raw index: an
+			// ungrouped long turn emits one item per row, and scanning the prior
+			// list per row made each append quadratic in the turn's length.
+			let prior: Map<number, DisplayItem> | undefined;
+			for (let i = start; i < items.length; i++) {
+				const fresh = items[i];
+				const at = plainItemIndex(fresh);
+				if (at === null) continue;
+				if (!prior) {
+					prior = new Map();
+					for (const item of hit.items) {
+						const priorAt = plainItemIndex(item);
+						if (priorAt !== null && !prior.has(priorAt)) prior.set(priorAt, item);
+					}
+				}
+				const same = prior.get(at);
+				if (same && sameItem(same, fresh)) items[i] = same;
+			}
+		}
+		if (cache) nextTurns.set(key, { rows: turn, unsettled, items: items.slice(start) });
+	});
+	if (cache) {
+		cache.scope = { groupingEnabled, sessionId: options.sessionId };
+		cache.turns = nextTurns;
+	}
+
+	function emitTurn(turn: Positioned[], unsettledTurn: boolean): void {
 		if (!groupingEnabled) {
 			emitWithSystemGroups(turn, items);
 			return;
 		}
 
-		const runningToolIds = options.runningToolIds;
-		const unsettledTurn =
-			(latestTurnUnsettled && turnIndex === turns.length - 1) ||
-			!!options.heldTurnKeys?.has(turnKeyOf(turn)) ||
-			(!!runningToolIds?.size && turn.some((entry) => !!entry.message.toolId && runningToolIds.has(entry.message.toolId)));
 		if (unsettledTurn) {
 			emitLiveTurn(turn, items);
 			return;
@@ -1187,7 +1391,7 @@ export function buildTranscriptModel(
 			summary: summarizeWork(folded),
 			compactSummary: summarizeWorkCompact(folded)
 		});
-	});
+	}
 
 	// Turn navigation jumps by message id; windowed mounting needs to know which
 	// display item that id lives in so it can mount far enough back to reach it.

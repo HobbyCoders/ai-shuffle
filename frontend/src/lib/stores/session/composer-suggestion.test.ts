@@ -25,6 +25,40 @@ describe('session-retained composer suggestions', () => {
 		s.observe({ ...idle }); await flush();
 		expect(load).toHaveBeenCalledOnce();
 	});
+	it.each(['turn.started', 'message.user'])('hides and refreshes on %s even with unchanged context', async type => {
+		const load = vi.fn().mockResolvedValue(frame);
+		const s = createComposerSuggestion(load);
+		s.observe({ ...idle, turnId: 't' }); await flush();
+		expect(get(s)).toBe(frame.suggestion);
+		load.mockResolvedValue(null);
+		const activity = { type, session_id: 's', turn_id: 't', continued: true };
+		s.receive({ ...activity, session_id: 'other' });
+		expect(get(s)).toBe(frame.suggestion);
+		expect(load).toHaveBeenCalledTimes(1);
+		s.receive(activity);
+		expect(get(s)).toBe('');
+		await flush(); expect(get(s)).toBe('');
+		expect(load).toHaveBeenCalledTimes(2);
+		load.mockResolvedValue({ ...frame, suggestion: 'Fresh reply' });
+		s.receive(frame); await flush();
+		expect(get(s)).toBe('Fresh reply');
+	});
+	it.each([null, '', '   '])('hides on a clear frame (%s), cancels stale reads, then allows a fresh hint', async suggestion => {
+		const load = vi.fn().mockResolvedValue(frame);
+		const s = createComposerSuggestion(load);
+		s.observe(idle); await flush();
+		expect(get(s)).toBe(frame.suggestion);
+		let resolve!: (hint: typeof frame) => void;
+		load.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+		s.receive(frame);
+		s.receive({ ...frame, suggestion, session_id: 'other' });
+		expect(get(s)).toBe(frame.suggestion);
+		s.receive({ ...frame, suggestion });
+		expect(get(s)).toBe('');
+		resolve(frame); await flush(); expect(get(s)).toBe('');
+		expect(load).toHaveBeenCalledTimes(2);
+		s.receive(frame); await flush(); expect(get(s)).toBe(frame.suggestion);
+	});
 	it('restores per-session hints across switches and composer remounts', async () => {
 		const s = createComposerSuggestion(async id => ({ ...frame, session_id: id, suggestion: id }));
 		s.observe(idle); await flush(); expect(get(s)).toBe('s');

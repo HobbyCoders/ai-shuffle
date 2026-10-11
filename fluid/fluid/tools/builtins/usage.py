@@ -17,8 +17,13 @@ SPEC = ToolSpec(
     name="GetUsage",
     description=(
         "Read the latest cached subscription and provider usage observed by "
-        "the host. Reports used and remaining percentages, reset timestamps, "
-        "source, freshness, and unavailable data explicitly. This is read-only "
+        "the host. Reports percent left (used_percent is 100 minus left), "
+        "reset timestamps, "
+        "source, freshness, and unavailable data explicitly. "
+        "Quote percentages as 'left': subscription rows in the Usage popover "
+        "show the same left number; some API-key provider windows and Settings "
+        "meters currently display used. "
+        "This is read-only "
         "and never refreshes a provider or reads credentials. Session token "
         "usage, when supplied by the host, is reported separately."
     ),
@@ -76,8 +81,9 @@ def _window(raw: Any, *, source: str, remaining_input: bool) -> dict[str, Any] |
         remaining = 100.0
     window = {
         "type": str(raw.get("type") or "unknown"),
-        "used_percent": round(100.0 - remaining, 2),
+        "left_percent": round(remaining, 2),
         "remaining_percent": round(remaining, 2),
+        "used_percent": round(100.0 - remaining, 2),
         "resets_at": raw.get("resets_at"),
         "source": source,
     }

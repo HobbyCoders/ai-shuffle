@@ -124,7 +124,10 @@ describe('Runs on in Chat controls', () => {
 });
 
 describe('Context and usage row', () => {
-	afterEach(() => { delete (globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit; });
+	afterEach(() => {
+		delete (globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit;
+		delete (globalThis as { __usageStubUnknownUsed?: string }).__usageStubUnknownUsed;
+	});
 
 	function renderPanel() {
 		session.store.set({ sessionId: 'chat-1', mode: 'chat', messages: [], activeTasks: [] });
@@ -143,5 +146,14 @@ describe('Context and usage row', () => {
 		(globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit = true;
 		renderPanel();
 		await waitFor(() => expect(shown()).toBe('Over limit'));
+	});
+
+	it('shows tokens used and no ring fill when the context window is unknown (#2274)', async () => {
+		(globalThis as { __usageStubUnknownUsed?: string }).__usageStubUnknownUsed = '12.3k';
+		renderPanel();
+		await waitFor(() => expect(shown()).toBe('12.3k used'));
+		const ring = document.querySelector('.mcp .usage-row .usage-ring');
+		expect(ring?.classList.contains('unknown')).toBe(true);
+		expect(ring?.querySelector('.ring-progress')).toBeNull();
 	});
 });

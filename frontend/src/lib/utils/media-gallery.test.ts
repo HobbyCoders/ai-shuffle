@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { marked } from 'marked';
 import type { ChatMessage } from '$lib/stores/types';
 import { galleryMediaForTurn, rewriteWithGallery } from './media-gallery';
 import { buildDisplayItems } from './work-log';
@@ -14,6 +15,22 @@ const answer = message('a', { type: 'text', content: `My choices.
 
 ![Second](${image2})` });
 const options = { isStreaming: false, groupingEnabled: true };
+
+describe('gallery extraction cache (#1282)', () => {
+	it('lexes each prose text once, and still resolves media per session', () => {
+		const content = `Cached once.\n\n![One](${image})\n\n![Two](${image2})`;
+		const prose = message('cache-a', { type: 'text', content });
+		const lexer = vi.spyOn(marked, 'lexer');
+		const first = galleryMediaForTurn([prose], 's1');
+		const second = galleryMediaForTurn([{ ...prose }], 's2');
+		const calls = lexer.mock.calls.filter(([text]) => text === content).length;
+		lexer.mockRestore();
+		expect(calls).toBe(1);
+		expect(first).toHaveLength(2);
+		expect(second.map(item => item.label)).toEqual(first.map(item => item.label));
+		expect(second[0].src).not.toBe(first[0].src);
+	});
+});
 
 describe('settled turn media gallery', () => {
 	it('keeps gallery, inline suppression and downloads on the owning session', () => {

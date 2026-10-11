@@ -107,6 +107,12 @@ Object.assign(window, {
 			await tick();
 			return `turn-${serial}`;
 		},
+		async activity(type: 'turn.started' | 'message.user', continued = false) {
+			const session = activeSession.current.sessionId!;
+			retained.delete(session);
+			transport.handleMessage({ type, session_id: session, turn_id: latestTurn.get(session), continued });
+			await tick();
+		},
 		async settle() {
 			this.state({ liveTurnId: null, isStreaming: false });
 			await tick();
