@@ -193,6 +193,79 @@ def test_pre_push_existing_assets_checks_only_outgoing_range(asset_repo):
     assert "has no local check pass" in result.stderr
 
 
+@pytest.mark.parametrize("divergent", [False, True])
+def test_pre_push_assets_refuses_restored_code(asset_repo, divergent):
+    _, git, commit, pre_push = asset_repo
+    ancestor = commit("code.py")
+    git("rm", "code.py")
+    remote = commit("remote.png")
+    local = ancestor
+    if divergent:
+        git("switch", "--detach", ancestor)
+        local = commit("local.png")
+    result = pre_push(local, remote)
+    assert result.returncode == 1
+    assert "has no local check pass" in result.stderr
+    assert "image-only range accepted" not in result.stdout
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("deleted", [False, True])
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_pre_push_assets_refuses_nonregular_entries(asset_repo, existing, deleted, mode):
+    _, git, commit, pre_push = asset_repo
+    base = commit("README.md")
+    # Build real index entries without requiring OS symlink privileges. Gitlinks
+    # point at an actual commit; symlinks contain an ordinary target blob.
+    oid = base if mode == "160000" else git("hash-object", "-w", "--stdin", input="README.md").stdout.strip()
+    git("update-index", "--add", "--cacheinfo", f"{mode},{oid},evil.png")
+    git("commit", "-qm", "Add nonregular asset")
+    if deleted:
+        git("update-index", "--force-remove", "evil.png")
+        git("commit", "-qm", "Remove nonregular asset")
+    tip = git("rev-parse", "HEAD").stdout.strip()
+    result = pre_push(tip, base if existing else "0" * 40)
+    assert result.returncode == 1
+    assert "image-only range accepted" not in result.stdout
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("name", ["evil.PNG", "README.md/evil.png"])
+def test_pre_push_assets_enforces_exact_filename_rules(asset_repo, existing, name):
+    _, _, commit, pre_push = asset_repo
+    base = commit("base.png")
+    tip = commit(name)
+    result = pre_push(tip, base if existing else "0" * 40)
+    assert result.returncode == 1
+    assert "has no local check pass" in result.stderr
+    assert "image-only range accepted" not in result.stdout
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_pre_push_nonregular_assets_refused_after_successful_scan(asset_repo, existing, mode):
+    _, git, commit, pre_push = asset_repo
+    base = commit("README.md")
+    oid = base if mode == "160000" else git("hash-object", "-w", "--stdin", input="README.md").stdout.strip()
+    git("update-index", "--add", "--cacheinfo", f"{mode},{oid},evil.png")
+    git("commit", "-qm", "Add nonregular asset")
+    with_link = git("rev-parse", "HEAD").stdout.strip()
+    if existing:
+        # Deletions are not scanned as blobs, but their old modes still count.
+        git("update-index", "--force-remove", "evil.png")
+        git("commit", "-qm", "Delete nonregular asset")
+    else:
+        # The scanner excludes known main history on new refs. Asset validation
+        # must still inspect it, including gitlinks the blob scanner cannot read.
+        git("update-ref", "refs/remotes/origin/main", with_link)
+    tip = git("rev-parse", "HEAD").stdout.strip()
+    result = pre_push(tip, with_link if existing else "0" * 40)
+    assert result.returncode == 1
+    assert "Secret scan (offline provider rules): 0 finding(s)" in result.stdout
+    assert "has no local check pass" in result.stderr
+    assert "image-only range accepted" not in result.stdout
+
+
 def test_pre_push_asset_scan_failure_still_refuses(asset_repo):
     _, _, commit, pre_push = asset_repo
     tip = commit("README.md", "LOCAL_CI_TEST_SECRET")
