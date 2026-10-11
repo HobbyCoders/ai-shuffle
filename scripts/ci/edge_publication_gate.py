@@ -36,13 +36,7 @@ class GitHub:
 
 def published_edge_revision() -> str:
     """Read the real signed edge pointer, never a successful-but-skipped Actions run."""
-    import base64
     import httpx
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from cryptography.hazmat.primitives.serialization import load_pem_public_key
-
-    root = Path(__file__).resolve().parents[2]
     # Match docker/application_updates.py::ContainerUpdates.fetch: no environment proxy,
     # no redirects, bounded streaming. Edge is public and needs no license lease.
     raw = bytearray()
@@ -53,16 +47,52 @@ def published_edge_revision() -> str:
                 raw.extend(chunk)
                 if len(raw) > 32768:
                     raise ValueError("Edge manifest exceeds limits")
-    envelope = json.loads(raw)
-    payload = base64.b64decode(envelope["payload"], validate=True)
-    key = load_pem_public_key((root / "desktop/build/application-update-key.pem").read_bytes())
-    if not isinstance(key, Ed25519PublicKey):
-        raise ValueError("Invalid edge signing key")
-    key.verify(base64.b64decode(envelope["signature"], validate=True), payload)
-    manifest = json.loads(payload)
-    if manifest.get("channel") != "edge" or not re.fullmatch(r"[a-f0-9]{40}", manifest.get("revision", "")):
-        raise ValueError("Invalid edge revision/channel")
+    revision = verify_edge_manifest(raw)
+    # Keep the envelope, not just its SHA: offline use must reverify the signature
+    # and the updater's complete manifest contract with the current public key.
+    try:
+        cache_edge_manifest(raw)
+    except OSError as error:
+        print(f"WARNING: could not cache verified edge manifest ({type(error).__name__}).")
+    return revision
+
+
+def verify_edge_manifest(raw) -> str:
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("publication_manifest_verifier", root / "docker/application_updates.py")
+    updater = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(updater)
+    manifest = updater.verify_manifest(raw, (root / "desktop/build/application-update-key.pem").read_bytes())
+    if manifest.get("channel") != "edge":
+        raise ValueError("Expected an edge manifest")
     return manifest["revision"]
+
+
+def edge_cache_path() -> Path:
+    return Path.home() / ".cache" / "ai-shuffle" / "verified-edge-manifest.json"
+
+
+def cache_edge_manifest(raw) -> None:
+    import tempfile
+
+    path = edge_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".verified-edge-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(raw)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def cached_edge_revision() -> str:
+    with edge_cache_path().open("rb") as stream:
+        return verify_edge_manifest(stream.read(32769))
 
 
 def load_update_reach():
@@ -90,14 +120,16 @@ def update_reach_readiness(revision, *, api=None, base=None):
             try:
                 base = published_edge_revision()
             except Exception as error:
-                # A feed outage need not block an in-reach attestation. A release
-                # tag is a conservative baseline, never a guess at the published SHA.
-                base = reach.latest_final_tag()
-                if not base:
-                    return False, "Update reach refused: edge pointer unavailable and no final release tag for fallback."
-                base = reach.git("rev-parse", f"{base}^{{commit}}")
-                warning = (f"WARNING: published edge pointer unavailable ({type(error).__name__}); "
-                           f"checking all main changes since the latest final release ({base[:9]}).\n")
+                warning = f"WARNING: published edge pointer unavailable ({type(error).__name__}); "
+                try:
+                    base = cached_edge_revision()
+                    warning += f"using the reverified cached signed publication ({base[:9]}).\n"
+                except Exception:
+                    # No publication evidence at all: never skip an unpublished
+                    # change by guessing a baseline from local tags or HEAD^.
+                    base = reach.git("rev-list", "--first-parent", revision).splitlines()[-1]
+                    warning += ("no verified cached publication; checking all first-parent changes "
+                                "since repository bootstrap. Local tags are not publication evidence.\n")
         # Refuse unknown/non-ancestor pointers instead of silently checking an empty range.
         if base not in reach.git("rev-list", "--first-parent", revision).splitlines():
             return False, "Update reach refused: published edge is not on this main history; fetch origin/main."

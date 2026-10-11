@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("edge_gate", ROOT / "scripts/ci/edge_publication_gate.py")
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
+REAL_PUBLISHED_EDGE_REVISION = gate.published_edge_revision
 
 REVISION = "a" * 40
 OTHER = "b" * 40
@@ -269,41 +270,21 @@ def test_each_unpublished_main_change_needs_its_own_acceptance(reach_history):
     assert "PR #43" not in reason
 
 
-def test_unverifiable_edge_pointer_refuses(reach_history, monkeypatch):
+def test_nonancestor_edge_pointer_refuses(reach_history):
     base, commit = reach_history
     head = commit("app/example.py", "version = 2")
-    def unavailable():
-        raise OSError("offline")
-    monkeypatch.setattr(gate, "published_edge_revision", unavailable)
-    assert not gate.update_reach_readiness(head)[0]
     assert not gate.update_reach_readiness(head, base="f" * 40)[0]
 
 
-@pytest.mark.parametrize("out_of_reach,accepted", [(False, True), (True, False), (True, True)])
-def test_edge_outage_uses_release_baseline_and_still_requires_labels(reach_history, monkeypatch,
-                                                                   out_of_reach, accepted):
-    base, commit = reach_history
-    gate.load_update_reach().git("tag", "v0.0.1", base)
-    path = "desktop/src/main/managed-entry.ts" if out_of_reach else "app/example.py"
-    head = commit(path, "version = 2")
-    def unavailable():
-        raise OSError("offline")
-    monkeypatch.setattr(gate, "published_edge_revision", unavailable)
-    calls = []
-    def api(endpoint):
-        calls.append(endpoint)
-        return [merged_pr(head, ["update-reach:windows-launcher"] if accepted else [])]
-    ready, reason = gate.update_reach_readiness(head, api=api)
-    assert ready is accepted
-    assert "WARNING: published edge pointer unavailable" in reason
-    assert "latest final release" in reason
-    assert len(calls) == (1 if out_of_reach else 0)
-    if not accepted:
-        assert "PR #42" in reason and "update-reach:windows-launcher" in reason
+@pytest.fixture(autouse=True)
+def isolated_edge_cache(tmp_path, monkeypatch):
+    path = tmp_path / "cache" / "edge.json"
+    monkeypatch.setattr(gate, "edge_cache_path", lambda: path)
+    return path
 
 
-@pytest.mark.parametrize("fault", [None, "signature", "channel", "revision", "oversize"])
-def test_published_pointer_is_signature_verified(monkeypatch, fault):
+@pytest.fixture
+def signed_feed(monkeypatch):
     import base64
     import httpx
 
@@ -311,30 +292,126 @@ def test_published_pointer_is_signature_verified(monkeypatch, fault):
     from cryptography.hazmat.primitives import serialization
 
     key = Ed25519PrivateKey.generate()
-    manifest = {"revision": "invalid" if fault == "revision" else REVISION,
-                "channel": "stable" if fault == "channel" else "edge"}
-    payload = json.dumps(manifest).encode()
-    signature = key.sign(payload)
-    if fault == "signature":
-        payload += b" "
-    raw = json.dumps({"payload": base64.b64encode(payload).decode(),
-                      "signature": base64.b64encode(signature).decode()}).encode()
-    if fault == "oversize":
-        raw = b"x" * 32769
-    calls = []
+    monkeypatch.setattr(serialization, "load_pem_public_key", lambda raw: key.public_key())
+    response = {"raw": b"", "offline": False}
     def fetch(request):
-        calls.append((request.method, str(request.url)))
-        return httpx.Response(200, content=raw)
+        assert (request.method, str(request.url)) == ("GET", "https://hobbycoders.com/v1/desktop/manifest/edge")
+        if response["offline"]:
+            raise httpx.ConnectError("offline")
+        return httpx.Response(200, content=response["raw"])
     client = httpx.Client
     def make_client(**kwargs):
         assert kwargs == {"trust_env": False, "follow_redirects": False, "timeout": 20}
         return client(transport=httpx.MockTransport(fetch), **kwargs)
     monkeypatch.setattr(httpx, "Client", make_client)
-    monkeypatch.setattr(serialization, "load_pem_public_key", lambda raw: key.public_key())
+    def publish(revision=REVISION, *, changes=None, omit=()):
+        manifest = {"format": 2, "revision": revision, "channel": "edge",
+                    "sha256": "c" * 64, "size": 1, "sequence": 1,
+                    "container": {"sequence": 1, "runtime": "d" * 64},
+                    "tree": "e" * 64, "version": "0.9.0"}
+        manifest.update(changes or {})
+        for field in omit:
+            manifest.pop(field)
+        payload = json.dumps(manifest).encode()
+        response["raw"] = json.dumps({"payload": base64.b64encode(payload).decode(),
+                                      "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
+        return response["raw"]
+    return publish, response
+
+
+@pytest.mark.parametrize("fault", [None, "signature", "channel", "revision", "oversize",
+                                   "missing-fields", "size", "container", "tree"])
+def test_published_pointer_uses_complete_updater_verification(signed_feed, isolated_edge_cache, fault):
+    publish, response = signed_feed
+    changes = {"channel": "stable"} if fault == "channel" else {}
+    if fault in ("size", "container", "tree"):
+        changes[fault] = {"size": 0, "container": {}, "tree": "invalid"}[fault]
+    publish("invalid" if fault == "revision" else REVISION, changes=changes,
+            omit=("format", "size", "sha256", "sequence", "container") if fault == "missing-fields" else ())
+    if fault == "signature":
+        import base64
+        envelope = json.loads(response["raw"])
+        envelope["payload"] = base64.b64encode(base64.b64decode(envelope["payload"]) + b" ").decode()
+        response["raw"] = json.dumps(envelope).encode()
+    if fault == "oversize":
+        response["raw"] = b"x" * 32769
     if fault:
-        from cryptography.exceptions import InvalidSignature
-        with pytest.raises((ValueError, InvalidSignature)):
+        with pytest.raises(Exception) as caught:
             gate.published_edge_revision()
+        assert type(caught.value).__name__ == ("ValueError" if fault in ("channel", "oversize") else "UpdateError")
+        assert not isolated_edge_cache.exists()
     else:
         assert gate.published_edge_revision() == REVISION
-    assert calls == [("GET", "https://hobbycoders.com/v1/desktop/manifest/edge")]
+        assert isolated_edge_cache.read_bytes() == response["raw"]
+        assert gate.cached_edge_revision() == REVISION
+
+
+def test_cached_manifest_is_reverified_not_a_bare_sha(signed_feed, isolated_edge_cache):
+    publish, response = signed_feed
+    publish()
+    gate.published_edge_revision()
+    isolated_edge_cache.write_text(json.dumps({"revision": OTHER}))
+    with pytest.raises(Exception) as caught:
+        gate.cached_edge_revision()
+    assert type(caught.value).__name__ == "UpdateError"
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_local_tag_cannot_skip_unpublished_launcher_change(reach_history, signed_feed, monkeypatch, cached):
+    base, commit = reach_history
+    publish, response = signed_feed
+    monkeypatch.setattr(gate, "published_edge_revision", REAL_PUBLISHED_EDGE_REVISION)
+    if cached:
+        publish(base)
+        assert gate.published_edge_revision() == base
+    launcher = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+    gate.load_update_reach().git("tag", "v999.0.0", launcher)
+    head = commit("app/example.py", "version = 2")
+    response["offline"] = True
+    calls = []
+    def api(endpoint):
+        calls.append(endpoint)
+        return [merged_pr(launcher)]
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert not ready and "PR #42" in reason and "update-reach:windows-launcher" in reason
+    assert calls == [f"commits/{launcher}/pulls?per_page=100"]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_network_outage_does_not_block_in_reach_history(reach_history, signed_feed, monkeypatch, cached):
+    base, commit = reach_history
+    publish, response = signed_feed
+    monkeypatch.setattr(gate, "published_edge_revision", REAL_PUBLISHED_EDGE_REVISION)
+    if cached:
+        # This unreachable change is already published: its labels are irrelevant
+        # during a later feed + GitHub outage, even if a local release tag predates it.
+        gate.load_update_reach().git("tag", "v0.0.1", base)
+        published = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+        publish(published)
+        assert gate.published_edge_revision() == published
+    head = commit("app/example.py", "version = 2")
+    response["offline"] = True
+    def unavailable(endpoint):
+        raise AssertionError("in-reach changes must not query GitHub")
+    ready, reason = gate.update_reach_readiness(head, api=unavailable)
+    assert ready, reason
+    assert "WARNING: published edge pointer unavailable" in reason
+    assert ("reverified cached signed publication" if cached else "no verified cached publication") in reason
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
+def test_outage_still_requires_labels(reach_history, signed_feed, monkeypatch, accepted, cached):
+    base, commit = reach_history
+    publish, response = signed_feed
+    monkeypatch.setattr(gate, "published_edge_revision", REAL_PUBLISHED_EDGE_REVISION)
+    if cached:
+        publish(base)
+        gate.published_edge_revision()
+    head = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+    response["offline"] = True
+    ready, reason = gate.update_reach_readiness(head, api=lambda endpoint:
+        [merged_pr(head, ["update-reach:windows-launcher"] if accepted else [])])
+    assert ready is accepted
+    if not accepted:
+        assert "PR #42" in reason and "update-reach:windows-launcher" in reason

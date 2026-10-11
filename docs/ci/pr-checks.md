@@ -154,11 +154,21 @@ merged main PR**, not a label on an unrelated PR. An unlabeled out-of-reach merg
 cannot obtain a new `local/full-suite` success through this path; the error names
 the PR and missing labels. In-reach commits need no PR API lookup. Missing,
 incomplete or unavailable evidence for an out-of-reach commit refuses the
-attestation. If the signed pointer cannot be read/verified, a warning explains
-that the latest final release tag is used as a conservative baseline instead:
-all main changes since that tag are checked, so an in-reach range can still pass
-without any PR API calls. This may recheck already-published changes. If neither
-a verified pointer nor an ancestor release tag is available, attestation refuses.
+attestation. Every successful read stores the signed envelope atomically at
+`~/.cache/ai-shuffle/verified-edge-manifest.json`. Both fresh and cached envelopes
+use the updater's complete `verify_manifest` contract and the existing public
+key; a bare cached revision is never trusted. If the feed is unavailable, the
+cached envelope is reverified and used with a warning, so already-published
+out-of-reach changes do not need GitHub again during an outage. Local release
+tags are never publication evidence and cannot advance this baseline.
+
+With neither live nor cached publication evidence, the check warns and examines
+all first-parent changes since repository bootstrap, rather than guessing an
+unpublished range. An entirely in-reach history passes without PR API calls;
+out-of-reach changes still need their own acceptance labels. This cold-cache
+case can conservatively recheck older history, but never skips an unpublished
+out-of-reach merge. A pointer outside the candidate's first-parent history
+refuses attestation.
 This does not revoke an already-posted status
 if labels are removed later; the existing publisher consumes the owner's status.
 
