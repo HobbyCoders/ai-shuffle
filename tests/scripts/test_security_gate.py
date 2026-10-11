@@ -106,7 +106,7 @@ def test_actual_hook_blocks_scratch_history_even_with_cached_clean_tree(remote_e
         assert secret_scan.scan(root) == 0
         records = root / ".git/local-ci/passes.json"
         records.parent.mkdir()
-        records.write_text(json.dumps({git(root, "rev-parse", "HEAD^{tree}"): {"security_gate": 1}}))
+        records.write_text(json.dumps({git(root, "rev-parse", "HEAD^{tree}"): {"security_gate": local_ci.SECURITY_GATE_VERSION}}))
         for ref in ("refs/heads/topic", "refs/tags/scratch"):
             refs = f"refs/heads/topic {tip} {ref} {base if remote_exists else '0' * 40}\n"
             result = subprocess.run(["sh", str(root / "hook")], cwd=root, input=refs,
@@ -151,11 +151,11 @@ def test_check_security_steps_run_even_with_only(monkeypatch):
     monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(local_ci, "git", lambda *args: "head")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: False)
-    monkeypatch.setattr(local_ci, "security_check", lambda python, strict: calls.append(("security", strict)))
+    monkeypatch.setattr(local_ci, "security_check", lambda python, strict, **kwargs: calls.append(("security", strict, kwargs["audit"])))
     monkeypatch.setattr(local_ci, "run_suites", lambda *args: (calls.append(("suites", args[1])) or ([], [], [])))
     args = argparse.Namespace(command="check", attest=False, only=["backend"], strict_audit=True)
     assert local_ci.cmd_check(args) == 0
-    assert calls == [("security", True), ("suites", ["backend"])]
+    assert calls == [("security", True, True), ("suites", ["backend"])]
 
 
 @pytest.mark.parametrize("strict,expected", [(False, 0), (True, 1)])
@@ -191,6 +191,138 @@ def test_npm_moderate_does_not_fail_high_threshold():
         "vulnerabilities": {"example": {"severity": "moderate"}},
     })
     assert not failed
+
+
+
+
+@pytest.mark.parametrize("setting,rule_id", [
+    ('CLOUDFLARE_API_TOKEN="' + 'a' * 40 + '"', "cloudflare-api-token"),
+    ('"cloudflare_api_token": "' + 'Z_9-' * 10 + '"', "cloudflare-api-token"),
+    ('123456789:' + 'a' * 35, "telegram-bot-token"),
+    ('123456789:' + 'a' * 34 + '-', "telegram-bot-token"),
+    ('M' + 'a' * 23 + '.' + 'b' * 6 + '.' + 'c' * 38, "discord-bot-token"),
+    ('xapp-1-A123456789-1234567890-' + 'd' * 32, "slack-app-token"),
+    ('whsec_' + 'e' * 32, "stripe-webhook-secret"),
+    ('postgresql://' + 'worker:synthetic-password@host/db', "postgres-password-url"),
+])
+def test_additional_provider_shapes(setting, rule_id):
+    assert rule_id in {rid for rid, _ in secret_scan.findings(secret_scan.load_rules(ROOT), "new.py", setting)}
+
+
+@pytest.mark.parametrize("text", [
+    'CHECKSUM="' + 'a' * 40 + '"',
+    'CLOUDFLARE_API_TOKEN="${TOKEN}"',
+    'CLOUDFLARE_API_TOKEN="short-placeholder"',
+    '123456789:short-placeholder',
+    'v1.uuid.123.hex',
+    'eyJ' + 'a' * 25 + '.' + 'b' * 40 + '.' + 'c' * 38,
+    'xapp-not-a-token', 'whsec_short',
+    'postgresql://' + 'user@host/db',
+    'postgresql://' + 'user:${PASSWORD}@host/db',
+    'postgresql://' + 'user:***@host/db',
+    'postgresql://' + '{user}:{password}@host/db',
+])
+def test_provider_context_and_placeholders_do_not_match(text):
+    assert not list(secret_scan.findings(secret_scan.load_rules(ROOT), "new.py", text))
+
+
+def test_postgres_fixture_allowlist_does_not_hide_new_password_or_path():
+    rules = secret_scan.load_rules(ROOT)
+    path = 'tests/api/test_health_ready.py'
+    value = 'postgresql://' + 'worker:private-test-password@localhost/db'
+    assert not list(secret_scan.findings(rules, path, value))
+    assert list(secret_scan.findings(rules, 'new.py', value))
+    assert list(secret_scan.findings(rules, path, value.replace('private-test-password', 'different-password')))
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_actual_hook_refuses_missing_or_pre_security_checkout(legacy):
+    with tempfile.TemporaryDirectory(prefix="secret-hook-old-checkout-") as directory:
+        root = Path(directory)
+        init(root)
+        (root / 'scripts').mkdir()
+        shutil.copyfile(ROOT / 'scripts/secret_scan.py', root / 'scripts/secret_scan.py')
+        (root / 'hook').write_bytes((ROOT / '.githooks/pre-push').read_bytes())
+        if legacy:
+            # A pre-security gate can accept a cached test pass without scanning.
+            # The installed hook must reject it without executing its code.
+            (root / 'scripts/local_ci.py').write_text('print("LEGACY_GATE_RAN")\nraise SystemExit(0)\n')
+        token = 'AKIA' + 'Q7W8E9R0T1Y2U3I4'
+        (root / 'fixture.txt').write_text(token)
+        tip = commit(root)
+        result = subprocess.run(['sh', str(root / 'hook')], cwd=root,
+                                input=f'refs/heads/a {tip} refs/heads/a {"0" * 40}\n',
+                                text=True, capture_output=True, timeout=10, check=False,
+                                env={**os.environ, 'LOCAL_CI_PYTHON': sys.executable})
+        assert result.returncode == 1
+        assert 'checkout lacks the required security gate' in result.stderr
+        assert 'LEGACY_GATE_RAN' not in result.stdout
+        assert token not in result.stdout + result.stderr
+
+
+def test_uncached_push_never_invokes_network_audits(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(local_ci, 'load_records', dict)
+    monkeypatch.setattr(local_ci, 'git', lambda *args: 'head')
+    monkeypatch.setattr(local_ci, 'tree_of', lambda *args: 'tree')
+    monkeypatch.setattr(local_ci, 'clean_checkout', lambda: True)
+    monkeypatch.setattr(local_ci, 'choose_python', lambda: sys.executable)
+    monkeypatch.setattr(local_ci, 'save_record', lambda *args: None)
+    monkeypatch.setattr(local_ci, 'run_suites', lambda *args: ([], [], []))
+    calls = []
+    def run(argv, **kwargs):
+        assert argv[1] == 'scripts/secret_scan.py', 'automatic push attempted network audit'
+        assert kwargs['timeout'] == 120
+        calls.append(argv)
+    monkeypatch.setattr(local_ci, 'run', run)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO('refs/heads/a head refs/heads/a remote\n'))
+    assert local_ci.cmd_pre_push(argparse.Namespace()) == 0
+    assert len(calls) == 2  # outgoing history and whole working tree, no pip/npm
+    assert 'Dependency audit: not run on automatic push' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('context', [False, True])
+def test_filename_and_control_characters_are_redacted(tmp_path, capsys, context):
+    init(tmp_path)
+    token = 'a' * 40 if context else 'ghp_' + 'a' * 36
+    text = f'CLOUDFLARE_API_TOKEN="{token}"' if context else token
+    # Windows disallows control chars in filenames: test escaped metadata itself
+    # on every platform and exercise a real secret-bearing filename separately.
+    (tmp_path / (token + '.txt')).write_text(text)
+    assert secret_scan.scan(tmp_path) == 1
+    assert token not in capsys.readouterr().out
+    rendered = secret_scan.safe_metadata(secret_scan.load_rules(ROOT), token + '\n\r\x1b\u202e.txt', text)
+    assert token not in rendered
+    assert json.loads(rendered) == '[REDACTED]\n\r\x1b\u202e.txt'
+    assert '\n' not in rendered and '\r' not in rendered and '\x1b' not in rendered
+    assert r'\u202e' in rendered
+
+
+def test_git_timeout_fails_closed(monkeypatch, capsys):
+    def hung(argv, **kwargs):
+        assert kwargs['timeout'] == 15
+        raise subprocess.TimeoutExpired(argv, 15)
+    monkeypatch.setattr(secret_scan.subprocess, 'run', hung)
+    monkeypatch.setattr(sys, 'argv', ['secret_scan.py'])
+    assert secret_scan.main() == 1
+    assert 'push blocked' in capsys.readouterr().out
+
+
+def test_actual_hook_kills_hung_scanner():
+    with tempfile.TemporaryDirectory(prefix='secret-hook-timeout-') as directory:
+        root = Path(directory)
+        init(root)
+        (root / 'scripts').mkdir()
+        gate = (ROOT / 'scripts/local_ci.py').read_text().replace('timeout=120', 'timeout=0.1')
+        (root / 'scripts/local_ci.py').write_text(gate)
+        (root / 'scripts/secret_scan.py').write_text('import time\ntime.sleep(60)\n')
+        (root / 'hook').write_bytes((ROOT / '.githooks/pre-push').read_bytes())
+        tip = commit(root)
+        result = subprocess.run(['sh', str(root / 'hook')], cwd=root,
+                                input=f'refs/heads/a {tip} refs/heads/a {"0" * 40}\n',
+                                text=True, capture_output=True, timeout=10, check=False,
+                                env={**os.environ, 'LOCAL_CI_PYTHON': sys.executable})
+        assert result.returncode == 1
+        assert 'timed out; push blocked' in result.stderr
 
 
 def test_python_skipped_dependency_is_not_clean():

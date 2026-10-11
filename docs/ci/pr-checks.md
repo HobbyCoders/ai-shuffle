@@ -74,14 +74,21 @@ new branches/tags exclude commits already on local `origin/main` (or scan all
 reachable history if it is unavailable). Tags are scanned; deletions need no scan.
 The hook uses local Git objects only: it never downloads a scanner or contacts a
 provider. Fetch `origin/main` before starting a branch so that baseline is current.
+The installed hook refuses a checkout missing the scanner/config or the required
+security-gate version, including branches that predate these checks: update that
+branch before pushing. Re-run `python scripts/local_ci.py install` to upgrade an
+older installed hook. Each scanner invocation has a 120-second deadline and its
+Git subprocesses have 15-second deadlines; timeouts block rather than pass.
 
 The vendored stdlib fallback, `scripts/secret_scan.py`, reads the deliberately
 small gitleaks-compatible `.gitleaks.toml` ruleset. Gitleaks is not bundled or
 available offline on all workers, so the gate needs no binary installation. It
-matches AWS, GitHub, OpenAI/Anthropic/OpenRouter, Google, Slack, Stripe live keys
-and PEM key material; it is **not** gitleaks' full default/entropy ruleset or a
-proof that no secret exists. Diagnostics show only rule, file, line and revision,
-never the matching value. Ignored local credential files are not whole-tree scan
+matches AWS, GitHub, OpenAI/Anthropic/OpenRouter, Google, Cloudflare scoped-token
+assignments, Telegram/Discord bot tokens, Slack bot/app tokens, Stripe live keys
+and webhook signing secrets, password-bearing PostgreSQL URLs and PEM key
+material. It is **not** gitleaks' full default/entropy ruleset or a proof that no
+secret exists. Diagnostics show only rule, file, line and revision, never the
+matching value: metadata is redacted too and control characters are escaped. Ignored local credential files are not whole-tree scan
 inputs, but force-adding one makes it tracked and scanned.
 
 For a false positive, add a `[[rules.allowlists]]` entry to the relevant rule in
@@ -110,9 +117,13 @@ because pip-audit does not provide it. No dependency is upgraded automatically.
 Findings and unavailable/timed-out audits **warn by default** until triaged.
 `python scripts/local_ci.py check --strict-audit` fails on any Python advisory,
 any npm high/critical finding, skipped Python packages or an unavailable audit.
-Every explicit check refreshes the audit; a recorded pass avoids repeating the
-network audit on the immediate push, but never skips the offline secret scan.
-Older pass records without the security gate are invalidated. This is local
+Every explicit `check`/`full` refreshes the audit. Automatic pre-push checks never
+run dependency audits, even without a cached test pass or when manifests changed:
+they print a reminder to run `python scripts/local_ci.py check` for a fresh audit.
+This prevents advisory-service/resolver stalls during an otherwise offline push;
+the existing test suites may still need their own tools/dependencies. Secret
+scanning is never skipped. Pass records record whether an audit was refreshed;
+records from older security-gate versions are invalidated. This is local
 protection, not GitHub push protection; the hook must be installed on each clone.
 
 ## Full suite on main, and edge publication

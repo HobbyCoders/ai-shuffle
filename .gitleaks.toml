@@ -121,5 +121,198 @@ id = "private-key"
 description = "Private key PEM material"
 regex = '''-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----(?:\s|\\[nr])+[A-Za-z0-9+/=]{64,}'''
 
+
+[[rules]]
+id = "cloudflare-api-token"
+description = "Cloudflare scoped token assigned to a Cloudflare token setting"
+regex = '''(?i:\b(?:cloudflare|cf)[_-]?(?:api[_-]?)?token)["']?\s*[:=]\s*["']?([A-Za-z0-9_-]{40})(?:$|[^A-Za-z0-9_-])'''
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot ID and authentication token"
+regex = '''\b([0-9]{6,12}:[A-Za-z0-9_-]{35})(?:$|[^A-Za-z0-9_-])'''
+
+[[rules]]
+id = "discord-bot-token"
+description = "Discord bot token (encoded ID, timestamp, signature; not a generic JWT)"
+regex = '''\b([MNO][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,40})(?:$|[^A-Za-z0-9_-])'''
+
+[[rules]]
+id = "slack-app-token"
+description = "Slack app-level socket-mode token"
+regex = '''\bxapp-[0-9]-[A-Z0-9]{6,}-[0-9]+-[A-Za-z0-9]{16,}\b'''
+
+[[rules]]
+id = "stripe-webhook-secret"
+description = "Stripe webhook signing secret"
+regex = '''\bwhsec_[A-Za-z0-9]{16,}\b'''
+
+[[rules]]
+id = "postgres-password-url"
+description = "PostgreSQL URL containing a literal password (not interpolation/redaction)"
+regex = '''\bpostgres(?:ql)?(?:\+asyncpg|\+psycopg2?)?://[A-Za-z0-9_.%+-]+:([^\s@/\\"'`<>${}\[\]*]+)@[^\s/\\"'`<>${}]+(?:/[^\s\\"'`<>${}]*)?'''
+
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^\.github/workflows/ci\-backend\.yml$''']
+regexes = ['''^[p]ostgresql://shuffle_mobile_test:mobile\-test\-only@127\.0\.0\.1:5432/shuffle_mobile_test$''', '''^[p]ostgresql://shuffle_network_test:network\-test\-only@127\.0\.0\.1:5432/shuffle_network_test$''', '''^[p]ostgresql://shuffle_safety_test:safety\-test\-only@127\.0\.0\.1:5432/shuffle_safety_test$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^app/core/scrub\.py$''']
+regexes = ['''^[p]ostgres://appuser:s3cr3t@db:5432/appdb$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^desktop/scripts/verify\-windows\-preview\.mjs$''']
+regexes = ['''^[p]ostgresql://never:never@127\.0\.0\.1:9/never$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^docs/content/api\-reference/hooks\.md$''']
+regexes = ['''^[p]ostgres://user:pass@db/app$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^fluid/tests/unit/test_child_env\.py$''']
+regexes = ['''^[p]ostgres://u:p@h/db$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^fluid/tests/unit/test_plugin_authoring\.py$''']
+regexes = ['''^[p]ostgres://u:p@db/x$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^frontend/src/lib/docs/content/api\-reference/hooks\.md$''']
+regexes = ['''^[p]ostgres://user:pass@db/app$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^scripts/unraid\-lab/test_host_op_guard\.py$''']
+regexes = ['''^[p]ostgresql://nouser:nopass@127\.0\.0\.1:1/nodb$''', '''^[p]ostgresql://u:p@127\.0\.0\.1:5432/db$''', '''^[p]ostgresql://user:p@ss@10\.0\.0\.9:5432/appdb$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^scripts/verify_container_postgres\.py$''']
+regexes = ['''^[p]ostgresql://unused:synthetic@external\.invalid/production$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_health_ready\.py$''']
+regexes = ['''^[p]ostgresql://worker:private\-test\-password@localhost/db$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_mcp_args_masking\.py$''']
+regexes = ['''^[p]ostgres://u:pw@h/db$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_claude_cli_install\.py$''']
+regexes = ['''^[p]ostgresql://user:secret@db/app$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_config\.py$''']
+regexes = ['''^[p]ostgresql://bad:bad@external\.invalid/prod$''', '''^[p]ostgresql://never:synthetic@external\.invalid/production$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_container_runtime\.py$''']
+regexes = ['''^[p]ostgres://u:never@external\.invalid/name$''', '''^[p]ostgresql://bad:synthetic@external\.invalid/prod$''', '''^[p]ostgresql://never:never@external\.invalid/prod$''', '''^[p]ostgresql://u:pw@127\.0\.0\.1:5432/db$''', '''^[p]ostgresql://u:synthetic@127\.0\.0\.1/test$''', '''^[p]ostgresql://u:synthetic@external\.invalid/prod$''', '''^[p]ostgresql://user:p%40ss%2Fword@127\.0\.0\.1:6543/synthetic$''', '''^[p]ostgresql://user:private\-test\-password@host/database$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_export_redaction\.py$''']
+regexes = ['''^[p]ostgres://user:fixture\-pw@db:5432/app$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_hook_env_hardening\.py$''']
+regexes = ['''^[p]ostgres://app:pw@db/app$''', '''^[p]ostgres://app:s3cret@db:5432/app$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_scrub_url_credentials\.py$''']
+regexes = ['''^[p]ostgres://a:one@h1/db$''', '''^[p]ostgres://appuser:s3cr3t@db\.internal:5432/appdb$''', '''^[p]ostgres://b:two@h2/db$''', '''^[p]ostgres://svc_acct:Tr0ub4dor@pg\-primary\.prod:5432/shuffle\?sslmode=require$''', '''^[p]ostgres://u:hunter2@db/app$''', '''^[p]ostgres://u:p@h$''', '''^[p]ostgres://u:pw@h:5432/d$''', '''^[p]ostgresql\+psycopg2://u:p@h/db$''', '''^[p]ostgresql://appuser:s3cr3t@db\.internal:5432/appdb$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_scrub_url_edges\.py$''']
+regexes = ['''^[p]ostgres://u:p%40ss@db/app$''', '''^[p]ostgres://u:p@ss@db:5432/app$''', '''^[p]ostgres://u:p@ss@h/d$''', '''^[p]ostgres://u:x@y@h1/d$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_support_report\.py$''']
+regexes = ['''^[p]ostgresql://shuffle:hunter2\-secret@127\.0\.0\.1:5432/shuffle$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/db/test_parse_database_url\.py$''']
+regexes = ['''^[p]ostgresql://a:b@h/db$''', '''^[p]ostgresql://alice:p%40ss@192\.0\.2\.10:5432/appdb$''', '''^[p]ostgresql://alice:p@ssXyz@192\.0\.2\.10:5432/appdb$''', '''^[p]ostgresql://alice:secret@db\.example\.com:5433/appdb$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/performance/test_pg_capacity_safety\.py$''']
+regexes = ['''^[p]ostgresql://capacity:secret@production:5432/capacity$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/test_packaging_audit\.py$''']
+regexes = ['''^[p]ostgresql://fixture:fixture@192\.0\.2\.1/fixture$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic PostgreSQL fixture or documentation example"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/test_run_local_supervisor\.py$''']
+regexes = ['''^[p]ostgresql://never:synthetic@external\.invalid/production$''']
+
 # Short sk-test / AKIA-* placeholders and v1.<uuid>.<ts>.<hex> preview
 # examples are not provider tokens: these rules deliberately do not match them.

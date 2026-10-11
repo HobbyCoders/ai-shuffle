@@ -6,6 +6,7 @@ The supported config subset fails closed; it is also valid gitleaks config.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def git(root: Path, *args: str) -> bytes:
-    result = subprocess.run(["git", *args], cwd=root, capture_output=True, check=False,
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, check=False, timeout=15,
                             env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"})
     if result.returncode:
         raise RuntimeError("secret scan: git operation failed (output withheld)")
@@ -72,7 +73,7 @@ def commit_files(root: Path, local: str, remote: str):
         revisions += ["^" + remote]
     else:
         exists = subprocess.run(["git", "rev-parse", "--verify", "origin/main"],
-                                cwd=root, capture_output=True, check=False)
+                                cwd=root, capture_output=True, check=False, timeout=15)
         if exists.returncode == 0:
             revisions += ["^origin/main"]
     commits = git(root, "rev-list", *revisions, "--").decode().splitlines()
@@ -98,6 +99,18 @@ def revision_files(root: Path, revision: str):
             yield name.decode("utf-8", "surrogateescape"), git(root, "cat-file", "blob", oid.decode()).decode("utf-8", "replace"), revision
 
 
+def safe_metadata(rules, value: str, text: str) -> str:
+    # Ignore fixture allowlists here: even an allowed fixture must not leak in
+    # diagnostics. Capture groups cover values in context-sensitive rules.
+    for _, pattern, _ in rules:
+        for match in pattern.finditer(text):
+            for token in (match.group(), *match.groups()):
+                if token:
+                    value = value.replace(token, "[REDACTED]")
+        value = pattern.sub("[REDACTED]", value)
+    return json.dumps(value, ensure_ascii=True)
+
+
 def scan(root: Path = ROOT, local: str | None = None, remote: str | None = None,
          revision: str | None = None) -> int:
     rules = load_rules(root)
@@ -107,7 +120,8 @@ def scan(root: Path = ROOT, local: str | None = None, remote: str | None = None,
     for path, text, source_revision in sources:
         for rule_id, line in findings(rules, path, text):
             # Never print matching lines, tokens, or hashes of their values.
-            print(f"secret scan: {rule_id}: {path}:{line} ({source_revision}; value redacted)")
+            metadata = [safe_metadata(rules, value, text) for value in (rule_id, path, source_revision)]
+            print(f"secret scan: {metadata[0]}: {metadata[1]}:{line} ({metadata[2]}; value redacted)")
             count += 1
     print(f"Secret scan (offline provider rules): {count} finding(s)")
     return 1 if count else 0
@@ -122,7 +136,7 @@ def main():
     args = parser.parse_args()
     try:
         return scan(local=args.local, remote=args.remote, revision=args.revision)
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError, re.error):
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, re.error, subprocess.TimeoutExpired):
         print("Secret scan failed: cannot read inputs/config; push blocked (details withheld).")
         return 1
 

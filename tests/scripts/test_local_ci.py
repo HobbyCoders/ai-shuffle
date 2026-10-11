@@ -76,7 +76,7 @@ def ref_line(sha, ref="refs/heads/topic"):
 
 
 def test_pre_push_trusts_a_recorded_tree(records, monkeypatch):
-    local_ci.save_record("t-" + "h" * 40, {"at": 1, "security_gate": 1})
+    local_ci.save_record("t-" + "h" * 40, {"at": 1, "security_gate": local_ci.SECURITY_GATE_VERSION})
     assert push(monkeypatch, [ref_line("h" * 40)]) == (0, [])
 
 
