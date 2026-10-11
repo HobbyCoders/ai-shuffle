@@ -57,6 +57,8 @@ def test_authoritative_user_revision_and_event_sequences_replicate(workers):
         mirrored = database.get_session("revision-sync")
         assert mirrored["last_user_message_seq"] == original["last_user_message_seq"] == 1
         assert mirrored["last_user_message_at"] == original["last_user_message_at"]
+        assert mirrored["last_user_message_epoch"] == original["last_user_message_epoch"]
+        assert mirrored["last_user_message_epoch"] == session_events.get_log_epoch("revision-sync")
         assert [e["seq"] for e in session_events.get_events("revision-sync", 0)] == [1, 2]
 
 

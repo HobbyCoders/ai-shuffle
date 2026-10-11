@@ -1237,6 +1237,7 @@ def finalize_transcript(
     """
     from app.core.cost_utils import attach_cost_metadata, attach_user_message_metadata
 
+    attach_event_positions(messages, session_id)
     attach_cost_metadata(messages, session_id)
     # Store/JSONL transcripts drop the DB row's user-message metadata
     # (e.g. automation_id/automation_run_id) — merge it back.
@@ -1246,7 +1247,60 @@ def finalize_transcript(
     compact_messages_for_display(page)
     for message in page:
         message.setdefault("seq", None)
+        message.setdefault("epoch", None)
     return page, pagination
+
+
+def attach_event_positions(messages: list[dict], session_id: str) -> None:
+    """Reconcile rich local transcripts with the authoritative event projection.
+
+    Fluid/store IDs are not event IDs and their parser has no event sequence.
+    Keep every local field/bubble; only attach positions, before pagination or
+    display truncation. Match exact rendered text (or a stable tool-use ID), in
+    occurrence order. Different occurrence counts are ambiguous: leave those
+    positions null rather than assigning an unrelated question's sequence.
+    """
+    from collections import defaultdict
+
+    if not messages or all(m.get("seq") is not None and m.get("epoch") for m in messages):
+        return
+    try:
+        projected, _ = load_event_messages(session_id)
+    except Exception:
+        # A temporarily unavailable log must not destroy the richer local
+        # transcript or claim a position that could clear an unanswered mark.
+        for message in messages:
+            message["seq"], message["epoch"] = None, None
+        return
+
+    def key(message):
+        kind = message.get("type") or "text"
+        if kind == "tool_use":
+            tool_id = message.get("toolId") or message.get("tool_use_id")
+            return (kind, tool_id) if tool_id else None
+        if kind in {"text", "thinking"} and message.get("content"):
+            return (message.get("role"), kind, message.get("thinkingSubtype"), message["content"])
+        return None
+
+    by_id = {m["id"]: m for m in projected}
+    local_groups, event_groups = defaultdict(list), defaultdict(list)
+    used = set()
+    for message in messages:
+        match = by_id.get(message.get("id"))
+        message["seq"] = match["seq"] if match else None
+        message["epoch"] = match["epoch"] if match else None
+        if match:
+            used.add(match["id"])
+        elif (signature := key(message)) is not None:
+            local_groups[signature].append(message)
+    for message in projected:
+        if message["id"] not in used and (signature := key(message)) is not None:
+            event_groups[signature].append(message)
+    for signature, local in local_groups.items():
+        events = event_groups.get(signature, [])
+        if len(events) == len(local):
+            for message, event in zip(local, events):
+                message["seq"], message["epoch"] = event["seq"], event["epoch"]
 
 
 def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
@@ -1275,10 +1329,12 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
     current_profile = None
     cursor = 0
     has_events = False
+    epoch = None
 
     def append(event: dict, **fields) -> dict:
         msg = {
-            "id": event["id"], "seq": event["seq"], "role": "assistant", "type": "text",
+            "id": event["id"], "seq": event["seq"], "epoch": epoch,
+            "role": "assistant", "type": "text",
             "content": "", "streaming": False, **fields,
         }
         timestamp = event.get("timestamp") or event.get("created_at")
@@ -1298,6 +1354,8 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
         rows = session_events.get_events(session_id, cursor, limit=500)
         if not rows:
             break
+        if not has_events:
+            epoch = str(rows[0]["id"])
         has_events = True
         for row in rows:
             # Exactly the envelope/reminder projection used by SSE replay.
@@ -1348,6 +1406,7 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
                 if tool is None:
                     tool = append(event, id=f"tooluse-{tool_id}", type="tool_use", toolId=tool_id, toolStatus="running")
                     tools[tool_id] = tool
+                tool["seq"] = event["seq"]
                 if kind == "tool.use":
                     tool["toolName"] = event.get("name") or ""
                     tool["toolInput"] = event.get("input") or {}
@@ -1365,6 +1424,7 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
             elif kind == "tool.result":
                 tool = tools.get(event.get("tool_use_id"))
                 if tool is not None:
+                    tool["seq"] = event["seq"]
                     tool["toolResult"] = event.get("content_preview") or ""
                     tool["toolStatus"] = "error" if event.get("is_error") else "complete"
                     hashes = event.get("artifact_hashes") or []
@@ -1435,6 +1495,7 @@ def build_detail_messages(session_id: str, jsonl_messages: List[dict]) -> List[d
         msg_data = {
             "id": m.get("id", i),
             "seq": m.get("seq"),
+            "epoch": m.get("epoch"),
             "role": m.get("role", "user"),
             "content": m.get("content", ""),
             "type": m.get("type"),  # Critical for tool_use/tool_result rendering
@@ -1491,6 +1552,7 @@ def build_live_messages(session_id: str, jsonl_messages: List[dict]) -> List[dic
         msg = {
             "id": m.get("id", ""),
             "seq": m.get("seq"),
+            "epoch": m.get("epoch"),
             "role": m.get("role", "user"),
             "type": m.get("type", "text"),
             "content": m.get("content", ""),

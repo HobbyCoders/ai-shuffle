@@ -64,12 +64,31 @@ def test_clear_resets_event_revision_for_new_log_epoch():
     sid = "clear-seq"
     database.create_session(sid, "default")
     event = {"type": "message.user", "payload": {}}
-    session_events.append_events(sid, [event, event])
-    assert database.get_session(sid)["last_user_message_seq"] == 2
-    sessions.clear_session_conversation(sid)
-    assert database.get_session(sid)["last_user_message_seq"] is None
-    session_events.append_events(sid, [event])
-    assert database.get_session(sid)["last_user_message_seq"] == 1
+    with patch.object(global_events, "lifecycle") as publish:
+        session_events.append_events(sid, [event] * 20)
+        old_row = database.get_session(sid)
+        old_update = publish.call_args.args[1]["updates"]
+        assert old_row["last_user_message_epoch"] == session_events.get_log_epoch(sid)
+        sessions.clear_session_conversation(sid)
+        cleared = database.get_session(sid)
+        assert cleared["last_user_message_seq"] is None
+        assert cleared["last_user_message_epoch"] is None
+        session_events.append_events(sid, [event, {
+            "type": "message.assistant", "payload": {"content": "New question?"},
+        }])
+        epoch = session_events.get_log_epoch(sid)
+        current = database.get_session(sid)
+        assert current["last_user_message_seq"] == 1
+        assert current["last_user_message_epoch"] == epoch
+        # A delayed snapshot AND a delayed WS update have larger numbers but
+        # belong to a different log, so neither can answer this question.
+        for stale in (old_row, old_update):
+            assert stale["last_user_message_seq"] == 20
+            assert stale["last_user_message_epoch"] != epoch
+        session_events.append_events(sid, [event])
+        answer = publish.call_args.args[1]["updates"]
+        assert answer["last_user_message_epoch"] == epoch
+        assert answer["last_user_message_seq"] == 3
 
 
 def test_event_sequence_wins_over_wall_clock():
@@ -173,6 +192,7 @@ def test_list_and_detail_payload_models():
     from app.network import policy
     assert "last_user_message_at" in policy.COLLECTIONS["sessions"].fields
     assert "last_user_message_seq" in policy.COLLECTIONS["sessions"].fields
+    assert "last_user_message_epoch" in policy.COLLECTIONS["sessions"].fields
 
 
 def test_schema_upgrade_preserves_old_sessions_as_null(tmp_path):
@@ -182,12 +202,13 @@ def test_schema_upgrade_preserves_old_sessions_as_null(tmp_path):
         raw.execute("INSERT INTO sessions (id, title) VALUES ('old', 'preserved')")
         raw.execute("ALTER TABLE sessions DROP COLUMN last_user_message_at")
         raw.execute("ALTER TABLE sessions DROP COLUMN last_user_message_seq")
+        raw.execute("ALTER TABLE sessions DROP COLUMN last_user_message_epoch")
         raw.execute("DELETE FROM system_settings WHERE key = ?", (database.MIGRATIONS_FINGERPRINT_KEY,))
         raw.commit()
         lifecycle.boot(raw)
         lifecycle.boot(raw)
-        row = raw.execute("SELECT title, last_user_message_at, last_user_message_seq FROM sessions WHERE id='old'").fetchone()
-        assert tuple(row) == ("preserved", None, None)
+        row = raw.execute("SELECT title, last_user_message_at, last_user_message_seq, last_user_message_epoch FROM sessions WHERE id='old'").fetchone()
+        assert tuple(row) == ("preserved", None, None, None)
     finally:
         raw.close()
 
@@ -271,6 +292,7 @@ def test_event_revision_is_atomic_and_stable_id_retry_is_silent(rollback):
         assert publish.call_count == (0 if rollback else 1)
         assert (stamp(sid) is None) == rollback
         assert database.get_session(sid)["last_user_message_seq"] == (None if rollback else 1)
+        assert database.get_session(sid)["last_user_message_epoch"] == (None if rollback else "delivered-event")
         if not rollback:
             timestamp = stamp(sid)
             publish.reset_mock()

@@ -321,6 +321,103 @@ class TestGetSessionPagination:
         assert transcript[0]["toolScreenshot"] == PNG_DATA_URI
 
 
+@pytest.mark.parametrize("delta", [False, True])
+@pytest.mark.parametrize("suffix", ["", "/live?include_messages=true"])
+def test_populated_fluid_transcript_reconciles_event_positions(suffix, delta):
+    from app.db import database, session_events
+    from tests.core.test_fluid_transcript import _insert, _user, _assistant
+
+    sid, sdk_id = "local-revision", "ses_local_revision"
+    database.create_session(sid, "default")
+    database.update_session(sid, sdk_session_id=sdk_id)
+    _insert(sdk_id, [
+        ("local-prompt", None, _user("Prompt")),
+        ("local-question", "local-prompt", _assistant("Which one?")),
+        ("local-answer", "local-question", _user("First")),
+    ])
+    question = ([
+        {"type": "assistant.text_delta", "payload": {"text": "Which "}},
+        {"type": "assistant.text_delta", "payload": {"text": "one?"}},
+    ] if delta else [{"type": "message.assistant", "payload": {"content": "Which one?"}}])
+    session_events.append_events(sid, [
+        {"type": "message.user", "payload": {"content": "Prompt"}},
+        *question,
+        {"type": "message.user", "payload": {"content": "First"}},
+    ])
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_auth] = lambda: "test-token"
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/sessions/{sid}{suffix}")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    messages = payload["messages"]
+    assert [m["content"] for m in messages] == ["Prompt", "Which one?", "First"]
+    # Local node identity/metadata survives: this is not the fallback projection.
+    assert "local-question" in messages[1]["id"]
+    assert messages[1]["metadata"]
+    assert [m["seq"] for m in messages] == ([1, 3, 4] if delta else [1, 2, 3])
+    meta = payload["session_meta"] if suffix else payload
+    assert messages[1]["seq"] < meta["last_user_message_seq"]
+    assert all(m["epoch"] == meta["last_user_message_epoch"] for m in messages)
+
+
+def test_delayed_pre_clear_snapshots_cannot_answer_a_new_epoch_question():
+    from app.db import database, session_events, sessions
+
+    sid = "snapshot-epoch-reset"
+    database.create_session(sid, "default")
+    user_event = {"type": "message.user", "payload": {"content": "Prompt"}}
+    session_events.append_events(sid, [user_event] * 20)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_auth] = lambda: "test-token"
+    with TestClient(app) as client:
+        def snapshots():
+            return [
+                next(row for row in client.get("/api/v1/sessions").json() if row["id"] == sid),
+                client.get(f"/api/v1/sessions/{sid}").json(),
+                client.get(f"/api/v1/sessions/{sid}/live?include_messages=false").json()["session_meta"],
+                client.get(f"/api/v1/sessions/{sid}/state").json(),
+            ]
+
+        delayed = snapshots()
+        sessions.clear_session_conversation(sid)
+        session_events.append_events(sid, [user_event, {
+            "type": "message.assistant", "payload": {"content": "New unanswered question?"},
+        }])
+        question = client.get(f"/api/v1/sessions/{sid}/live").json()["messages"][-1]
+        assert question["seq"] == 2
+        for old in delayed:
+            assert old["last_user_message_seq"] == 20
+            assert old["last_user_message_epoch"] != question["epoch"]
+        session_events.append_events(sid, [user_event])
+        for answer in snapshots():
+            assert answer["last_user_message_epoch"] == question["epoch"]
+            assert answer["last_user_message_seq"] == 3
+
+
+def test_reconciliation_is_occurrence_ordered_and_fails_closed_on_ambiguity():
+    from app.db import database, session_events
+
+    sid = "repeated-question"
+    database.create_session(sid, "default")
+    session_events.append_events(sid, [
+        {"type": "message.assistant", "payload": {"content": "Again?"}},
+        {"type": "message.user", "payload": {"content": "Yes"}},
+        {"type": "message.assistant", "payload": {"content": "Again?"}},
+    ])
+    messages = [{"id": f"local-{i}", "role": role, "content": content}
+                for i, (role, content) in enumerate([
+                    ("assistant", "Again?"), ("user", "Yes"), ("assistant", "Again?"),
+                ])]
+    sessions_helpers.attach_event_positions(messages, sid)
+    assert [m["seq"] for m in messages] == [1, 2, 3]
+    ambiguous = [{"id": "local", "role": "assistant", "content": "Again?"}]
+    sessions_helpers.attach_event_positions(ambiguous, sid)
+    assert ambiguous[0]["seq"] is None and ambiguous[0]["epoch"] is None
+
+
 def test_projected_delta_sequence_and_stream_frame_match():
     from app.api.events import _wire
     from app.db import database, session_events
@@ -405,11 +502,15 @@ class TestLiveEndpointPayload:
         body = response.json()
         snapshot = body["session_meta"] if endpoint.startswith("live") else body
         listed = next(row for row in listing.json() if row["id"] == session_id)
+        wire_epoch = detail.json()["last_user_message_epoch"]
+        assert snapshot["last_user_message_epoch"] == listed["last_user_message_epoch"] == wire_epoch
+        assert wire_epoch == (session_events.get_log_epoch(session_id) if stamped else None)
         wire_seq = detail.json()["last_user_message_seq"]
         assert snapshot["last_user_message_seq"] == listed["last_user_message_seq"] == wire_seq
         assert wire_seq == (1 if stamped else None)
         if stamped:
             assert [m["seq"] for m in detail.json()["messages"]] == [1, 2]
+            assert [m["epoch"] for m in detail.json()["messages"]] == [wire_epoch, wire_epoch]
             if endpoint == "live?include_messages=true":
                 assert [m["seq"] for m in body["messages"]] == [1, 2]
         wire_value = detail.json()["last_user_message_at"]

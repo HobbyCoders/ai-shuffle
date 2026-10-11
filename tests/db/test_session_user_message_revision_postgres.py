@@ -31,10 +31,12 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor.execute("INSERT INTO sessions (id, title) VALUES ('revision-old', 'kept')")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_at")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_seq")
+        cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_epoch")
     database.init_database()
     database.init_database()
     assert database.get_session("revision-old")["last_user_message_at"] is None
     assert database.get_session("revision-old")["last_user_message_seq"] is None
+    assert database.get_session("revision-old")["last_user_message_epoch"] is None
     with base.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
@@ -43,6 +45,9 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
                        "WHERE table_name='sessions' AND column_name='last_user_message_seq'")
         assert dict(cursor.fetchone()) == {"data_type": "bigint", "is_nullable": "YES"}
+        cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
+                       "WHERE table_name='sessions' AND column_name='last_user_message_epoch'")
+        assert dict(cursor.fetchone()) == {"data_type": "text", "is_nullable": "YES"}
     prompt = sessions.add_session_message("revision-old", "user", "initial")
     initial = database.get_session("revision-old")["last_user_message_at"]
     if isinstance(initial, str):
@@ -76,6 +81,8 @@ async def test_authoritative_recorder_delivery_dedup_and_provenance():
         assert first is not None
         first_seq = database.get_session("pg-events")["last_user_message_seq"]
         assert first_seq is not None
+        epoch = session_events.get_log_epoch("pg-events")
+        assert database.get_session("pg-events")["last_user_message_epoch"] == epoch
         assert database.get_session_messages("pg-events") == []
         assert await recorder.record_steered_user_message("Peer note", source="agent_message")
         assert database.get_session("pg-events")["last_user_message_at"] == first
@@ -91,11 +98,24 @@ async def test_authoritative_recorder_delivery_dedup_and_provenance():
                                                      "payload": event["payload"]}])
         assert database.get_session("pg-events")["last_user_message_at"] == latest
         assert database.get_session("pg-events")["last_user_message_seq"] == latest_seq
+        assert database.get_session("pg-events")["last_user_message_epoch"] == epoch
         with pytest.raises(ValueError):
             with base.transaction() as conn:
                 session_events.append_events("pg-events", [{"type": "message.user", "payload": {}}], _conn=conn)
                 raise ValueError("abort")
         assert database.get_session("pg-events")["last_user_message_at"] == latest
         assert database.get_session("pg-events")["last_user_message_seq"] == latest_seq
+        assert database.get_session("pg-events")["last_user_message_epoch"] == epoch
     finally:
         await recorder.close()
+    # A new log reuses low sequence numbers, but never the old revision epoch.
+    sessions.clear_session_conversation("pg-events")
+    assert database.get_session("pg-events")["last_user_message_epoch"] is None
+    session_events.append_events("pg-events", [
+        {"type": "message.user", "payload": {"content": "New prompt"}},
+        {"type": "message.assistant", "payload": {"content": "Unanswered?"}},
+    ])
+    reset = database.get_session("pg-events")
+    assert reset["last_user_message_seq"] == 1
+    assert reset["last_user_message_epoch"] == session_events.get_log_epoch("pg-events")
+    assert reset["last_user_message_epoch"] != epoch

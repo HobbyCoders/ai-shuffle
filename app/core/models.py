@@ -309,7 +309,8 @@ class SubagentChildMessage(BaseModel):
 class SessionMessage(BaseModel):
     """A message in a session"""
     id: Union[int, str]  # int from DB, string from JSONL
-    seq: Optional[int] = None  # Authoritative event position; absent for legacy transcripts
+    seq: Optional[int] = None  # Last contributing event; absent for legacy transcripts
+    epoch: Optional[str] = None  # Event-log identity; compare seq only within this epoch
     role: str  # user, assistant, system, tool
     content: str
     type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
@@ -512,6 +513,7 @@ class Session(SessionBase):
     work_started_at: Optional[datetime] = None
     last_user_message_at: Optional[datetime] = None
     last_user_message_seq: Optional[int] = None
+    last_user_message_epoch: Optional[str] = None
 
     @field_validator("work_ms", mode="before")
     @classmethod

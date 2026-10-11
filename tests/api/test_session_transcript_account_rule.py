@@ -166,7 +166,7 @@ def test_state_route_carries_no_transcript_and_stays_open(client):
     response = _get(client, "GET", "/api/v1/sessions/owner-chat/state", "member-phone")
     assert response.status_code == 200
     assert set(response.json()) == {
-        "session_id", "title", "status", "last_user_message_at", "last_user_message_seq",
+        "session_id", "title", "status", "last_user_message_at", "last_user_message_seq", "last_user_message_epoch",
         "is_streaming", "connected_devices",
     }
     assert response.json()["last_user_message_at"] is None

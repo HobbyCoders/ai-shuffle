@@ -83,6 +83,7 @@ class SessionRow(TypedDict):
     updated_at: str
     last_user_message_at: Optional[str]
     last_user_message_seq: Optional[int]
+    last_user_message_epoch: Optional[str]
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
@@ -2042,17 +2043,25 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
         cursor.execute(
             f"UPDATE sessions SET last_user_message_at = {ph()}, updated_at = {ph()} "
             f"WHERE id = {ph()} AND (last_user_message_at IS NULL OR last_user_message_at < {ph()}) "
-            "RETURNING api_user_id, last_user_message_seq",
+            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch",
             (now, now, session_id, now),
         )
     else:
+        # Read the SSE log identity in the SAME transaction as the append and
+        # stamp. Never derive it later for a delayed broadcast or snapshot.
+        cursor.execute(
+            f"SELECT id FROM session_events WHERE session_id = {ph()} ORDER BY seq ASC LIMIT 1",
+            (session_id,),
+        )
+        epoch = str(cursor.fetchone()["id"])
         # Event order is authoritative even if the wall clock moves backwards.
         cursor.execute(
             f"UPDATE sessions SET last_user_message_at = {ph()}, last_user_message_seq = {ph()}, "
-            f"updated_at = {ph()} WHERE id = {ph()} "
-            f"AND (last_user_message_seq IS NULL OR last_user_message_seq < {ph()}) "
-            "RETURNING api_user_id, last_user_message_seq",
-            (now, seq, now, session_id, seq),
+            f"last_user_message_epoch = {ph()}, updated_at = {ph()} WHERE id = {ph()} "
+            f"AND (last_user_message_seq IS NULL OR last_user_message_seq < {ph()} "
+            f"OR last_user_message_epoch IS NULL OR last_user_message_epoch != {ph()}) "
+            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch",
+            (now, seq, epoch, now, session_id, seq, epoch),
         )
     row = cursor.fetchone()
     if row is None:
@@ -2065,7 +2074,11 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
         global_events.lifecycle(owner, {
             "type": "user_session_updated",
             "session_id": session_id,
-            "updates": {"last_user_message_at": now, "last_user_message_seq": row["last_user_message_seq"]},
+            "updates": {
+                "last_user_message_at": now,
+                "last_user_message_seq": row["last_user_message_seq"],
+                "last_user_message_epoch": row["last_user_message_epoch"],
+            },
         }, user_type="admin" if owner is None else "api_user")
 
     return notify
@@ -2459,6 +2472,7 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
             f"""UPDATE sessions
                    SET sdk_session_id = NULL,
                        last_user_message_seq = NULL,
+                       last_user_message_epoch = NULL,
                        total_cost_usd = 0,
                        total_tokens_in = 0,
                        total_tokens_out = 0,

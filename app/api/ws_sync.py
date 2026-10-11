@@ -90,7 +90,7 @@ async def session_sync_websocket(
         state = await sync_engine.get_session_state(session_id)
         state["session"] = session
         state["messages"] = [
-            {"seq": None, **message}
+            {"seq": None, "epoch": None, **message}
             for message in await run_sync(database.get_session_messages, session_id)
         ]
 
@@ -128,7 +128,7 @@ async def session_sync_websocket(
                             state = await sync_engine.get_session_state(session_id)
                             state["session"] = await run_sync(database.get_session, session_id)
                             state["messages"] = [
-                                {"seq": None, **message}
+                                {"seq": None, "epoch": None, **message}
                                 for message in await run_sync(database.get_session_messages, session_id)
                             ]
                             await websocket.send_json({
