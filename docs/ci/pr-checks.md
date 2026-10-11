@@ -126,6 +126,58 @@ scanning is never skipped. Pass records record whether an audit was refreshed;
 records from older security-gate versions are invalidated. This is local
 protection, not GitHub push protection; the hook must be installed on each clone.
 
+## Out-of-reach changes: draft first, owner acceptance before readiness
+
+The pre-push update-reach check reads `gh pr view --json isDraft,labels`.
+When the branch has no PR yet or its PR is a draft, an unreachable change is a
+prominent **NOTE — OUT OF REACH**, not a push failure. The note names each group
+and its required `update-reach:<group>` label. If `gh` is missing, unauthenticated
+or cannot read the PR, the check says so and treats it as no PR for this local
+push only. Other check failures still fail the push.
+
+1. Push with the hook enabled and open a **draft** PR (`gh pr create --draft`).
+2. Move the change into updated source/add a migration path, or ask the owner
+   to accept each reported group by adding its `update-reach:<group>` label.
+   An agent must not add the acceptance label on the owner's behalf.
+3. Re-run `python scripts/local_ci.py check` and, only after acceptance and
+   review, have the owner/release agent mark it ready. A ready PR without the
+   required labels fails update-reach on subsequent checks/pushes. Cached test
+   passes do not cache PR state or labels: pre-push reads them again.
+
+**`gh pr ready` and `gh pr merge` themselves are not blocked; edge publication
+is.** There is no GitHub-required PR check (PR CI remains off). The strict
+backstop is `scripts/ci/edge_publication_gate.py::update_reach_readiness`, called
+by `local_ci.py full --attest` before starting and again before posting success.
+It verifies the signed published edge pointer, checks each first-parent main
+change since that revision, and requires the matching labels on **that change's
+merged main PR**, not a label on an unrelated PR. An unlabeled out-of-reach merge
+cannot obtain a new `local/full-suite` success through this path; the error names
+the PR and missing labels. In-reach commits need no PR API lookup. Missing,
+incomplete or unavailable evidence for an out-of-reach commit refuses the
+attestation. Every successful read stores the signed envelope atomically at
+`~/.cache/ai-shuffle/verified-edge-manifest.json`. Both fresh and cached envelopes
+use the updater's complete `verify_manifest` contract and the existing public
+key; a bare cached revision is never trusted. If the feed is unavailable, the
+cached envelope is reverified and used with a warning, so already-published
+out-of-reach changes do not need GitHub again during an outage. Local release
+tags are never publication evidence and cannot advance this baseline.
+
+With neither live nor cached publication evidence, the check warns and examines
+all first-parent changes since repository bootstrap, rather than guessing an
+unpublished range. This fallback requires complete Git history: a shallow clone
+refuses with `git fetch --unshallow origin` as the recovery instruction, because
+its oldest visible commit is not proof of repository bootstrap. Partial clones
+also need readable historical content: a failed lazy blob fetch refuses
+classification, rather than treating a file as absent. Restore access to the
+promisor remote or use a complete clone before retrying.
+An entirely in-reach history passes without PR API calls;
+out-of-reach changes still need their own acceptance labels. This cold-cache
+case can conservatively recheck older history, but never skips an unpublished
+out-of-reach merge. A pointer outside the candidate's first-parent history
+refuses attestation.
+This does not revoke an already-posted status
+if labels are removed later; the existing publisher consumes the owner's status.
+
 ## Full suite on main, and edge publication
 
 Edge publication waits for a full local pass on the exact `main` revision.
