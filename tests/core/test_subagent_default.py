@@ -491,9 +491,14 @@ def test_task_updated_frames_carry_the_registry_model(monkeypatch):
     task_registry.start_task("s-model", "w-model", "agent", "Fix it",
                              model="Claude · sonnet", agent="Plain")
     try:
-        assert turn_recorder._registry_worker("s-model", "w-model") == {"model": "Claude · sonnet"}
+        assert turn_recorder._registry_worker("s-model", "w-model") == {
+            "model": "Claude · sonnet",
+            "started_at": task_registry.get_task("s-model", "w-model")["startedAt"],
+        }
         task_registry.start_task("s-model", "sh-1", "shell", "npm test")
-        assert turn_recorder._registry_worker("s-model", "sh-1") == {}
+        assert turn_recorder._registry_worker("s-model", "sh-1") == {
+            "started_at": task_registry.get_task("s-model", "sh-1")["startedAt"],
+        }
     finally:
         task_registry.clear_session("s-model")
     assert "model" in TaskUpdated.model_fields
