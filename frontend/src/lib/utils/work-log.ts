@@ -199,6 +199,21 @@ function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
 	return gallery || !msg.toolScreenshot;
 }
 
+/**
+ * A row that is not prose and never folds in a settled turn (spec §3): a worker
+ * card, a decision-bearing tool (questions, todos, Task/Agent, swarm), or a
+ * system notice that is not routine bookkeeping. Assistant mode keeps the same
+ * rows inline. Compaction markers are excluded: they read as transcript
+ * plumbing, not something the turn said.
+ */
+export function isProtectedRow(msg: ChatMessage): boolean {
+	if (agentDelivery(msg)) return false;
+	if (msg.type === 'subagent') return true;
+	if (msg.type === 'tool_use') return isSpecialTool(msg);
+	if (msg.type !== 'system' && msg.role !== 'system') return false;
+	return !isGroupableSystem(msg) && !isCompactionCard(msg) && !isFoldableRetryCard(msg);
+}
+
 /** A tool that puts a question to the reader. */
 function isAskingTool(msg: ChatMessage): boolean {
 	return msg.type === 'tool_use' && (msg.toolName === 'AskUserQuestion' || msg.toolName === 'AskUser');
@@ -215,8 +230,13 @@ export function isProtectedProse(content: string): boolean {
 	if (!text) return false;
 	if (text.split('\n').filter((line) => line.trim()).length >= 2) return true;
 	if (/^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|~~~)/m.test(text)) return true;
-	// A question mark inside a link or inline code is not a question.
-	const prose = text.replace(/`[^`]*`/g, '').replace(/\bhttps?:\/\/\S+/g, '');
+	// A question mark inside a link target, a bare URL or inline code is not a
+	// question; punctuation that ends the sentence after a URL still counts.
+	const prose = text
+		.replace(/`[^`]*`/g, '')
+		.replace(/\]\([^)\s]*\)/g, ']')
+		.replace(/<https?:\/\/[^>\s]*>/g, '')
+		.replace(/\bhttps?:\/\/\S*[^\s.,;:!?)\]'"]/g, '');
 	return prose.includes('?');
 }
 

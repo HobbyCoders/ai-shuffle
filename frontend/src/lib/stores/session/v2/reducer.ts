@@ -1017,6 +1017,9 @@ function classifyToolRejection(raw: string): string | null {
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 
+/** `MAX_RESULT_PREVIEW_CHARS` in app/core/provider_agent_feed.py. */
+const SUBAGENT_PREVIEW_CHARS = 2_000;
+
 /**
  * Fold one wire event into the session state.
  *
@@ -1997,13 +2000,23 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// The worker's authoritative token counts, when the feed forwarded
 			// them — ProviderAgent worker cards rendered no usage row at all.
 			const usage = obj(event.usage);
+			// The full report (`result`, up to 64 KiB) when the backend sends it;
+			// otherwise the 2,000-character `result_preview`. The card says the
+			// report goes on in the transcript when the backend reports a cut, or
+			// when only a preview arrived and it carries the feed's clip mark.
+			const fullReport = str(event.result);
+			const preview = str(event.result_preview);
+			const agentReportTruncated =
+				event.result_truncated === true ||
+				(!fullReport && preview.length >= SUBAGENT_PREVIEW_CHARS && preview.endsWith('…'));
 			return {
 				...state,
 				speculativelySettledCardIds,
 				messages: replaceById(state.messages, card.id, {
 					agentStatus,
 					agentChildren: children,
-					content: str(event.result_preview),
+					content: fullReport || preview,
+					agentReportTruncated,
 					...(usage ? { agentUsage: usage as ChatMessage['agentUsage'] } : {}),
 				}),
 			};

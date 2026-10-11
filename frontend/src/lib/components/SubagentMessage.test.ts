@@ -116,6 +116,26 @@ describe('Subagent transcript card', () => {
   expect(screen.queryByTestId('worker-report-head')).toBeNull();
   expect(screen.queryByText('Private worker result')).toBeNull();
  });
+ it('points to the transcript for the rest of a cut report', async () => {
+  const content = 'Found the cause.\n\nThe first part of a long explanation';
+  const { container } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content, agentReportTruncated: true } });
+  await fireEvent.click(container.querySelector('summary')!);
+  const rest = screen.getByTestId('worker-report-rest');
+  const more = screen.getByRole('link', { name: 'Report continues in the transcript' });
+  expect(rest.contains(more)).toBe(true);
+  expect(more.getAttribute('href')).toBe('/?session=worker-session');
+  expect(more.classList.contains('transcript-link')).toBe(true);
+  await fireEvent.click(more);
+  expect(openSubagentLink).toHaveBeenCalledWith(expect.any(MouseEvent), 'worker-session');
+ });
+ it('offers the transcript even when a cut report is a single paragraph', () => {
+  render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content: 'One long paragraph', agentReportTruncated: true } });
+  expect(screen.getByTestId('worker-report-rest').textContent).toContain('Report continues in the transcript');
+ });
+ it('has no continuation link when the report is whole', () => {
+  render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content: 'A.\n\nB.', agentReportTruncated: false } });
+  expect(screen.queryByRole('link', { name: 'Report continues in the transcript' })).toBeNull();
+ });
  it('leaves the body as it was when there is no report and nothing running', async () => {
   const { container } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content: '  ' } });
   await fireEvent.click(container.querySelector('summary')!);

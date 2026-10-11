@@ -1543,6 +1543,14 @@ describe('protected prose', () => {
 		expect(isProtectedProse('Fetching https://example.com/a?b=1 now.')).toBe(false);
 		expect(isProtectedProse('Running `ls ?.txt` next.')).toBe(false);
 		expect(isProtectedProse('Is https://example.com/a?b=1 right?')).toBe(true);
+		// Sentence-ending punctuation after a URL is not part of it.
+		expect(isProtectedProse('Should I use https://example.com?')).toBe(true);
+		expect(isProtectedProse('Should I use https://example.com/a?b=1?')).toBe(true);
+		expect(isProtectedProse('See https://example.com/a?b=1.')).toBe(false);
+		// A query string in a markdown link target is not a question.
+		expect(isProtectedProse('Reading [guide](/docs?page=1).')).toBe(false);
+		expect(isProtectedProse('Reading <https://example.com/a?b=1> now.')).toBe(false);
+		expect(isProtectedProse('Is [the guide](/docs?page=1) current?')).toBe(true);
 	});
 
 	it('keeps the lead-in to a question tool in the same step', () => {

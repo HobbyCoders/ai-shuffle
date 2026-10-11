@@ -32,6 +32,8 @@
 			? reportParts(message.content)
 			: null
 	);
+	// The report on the card was cut; its end lives in the worker's transcript.
+	const reportCut = $derived(!!report && message.agentReportTruncated === true && !!message.agentSessionId);
 	const renderReport = (text: string) => sanitizeHtml(renderChatMarkdown(text, false));
 	// While it runs, the card names what the worker is doing now.
 	const latestTool = $derived(statusInfo.isRunning ? latestWorkerTool(message.agentChildren) : null);
@@ -143,12 +145,21 @@
 			<div class="prose prose-sm max-w-none wrap-break-word" data-testid="worker-report-head">
 				{@html renderReport(report.head)}
 			</div>
-			{#if report.rest}
+			{#if report.rest || reportCut}
 				<details data-testid="worker-report-rest">
 					<summary class="transcript-link">Full report</summary>
-					<div class="prose prose-sm max-w-none wrap-break-word">
-						{@html renderReport(report.rest)}
-					</div>
+					{#if report.rest}
+						<div class="prose prose-sm max-w-none wrap-break-word">
+							{@html renderReport(report.rest)}
+						</div>
+					{/if}
+					{#if reportCut}
+						<!-- The card holds a cut of the report; the worker's transcript has all of it. -->
+						<a class="transcript-link" href={sessionHref(message.agentSessionId!)}
+							onclick={(event) => openSubagentLink(event, message.agentSessionId!)} data-sveltekit-reload>
+							Report continues in the transcript <span aria-hidden="true">↗</span>
+						</a>
+					{/if}
 				</details>
 			{/if}
 		{/if}

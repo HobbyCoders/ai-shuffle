@@ -18,23 +18,25 @@ const shape = (items: ReturnType<typeof fold>['items']) =>
 	items.map((item) => item.kind === 'details' ? `details(${item.entries.map(e => e.message.id).join(',')})` : item.kind === 'message' ? item.message.id : item.kind);
 
 describe('assistantRowRole', () => {
-	it('keeps prompts, prose and worker cards, folds everything else', () => {
+	it('keeps prompts, prose and the rows that never fold, folds everything else', () => {
 		expect(assistantRowRole(user('u', 'hi'))).toBe('prompt');
 		expect(assistantRowRole(msg('c', { role: 'user', type: 'command', content: '/x' }))).toBe('prompt');
 		expect(assistantRowRole(text('a', 'Done.'))).toBe('spoken');
-		expect(assistantRowRole(msg('sa', { type: 'subagent' }))).toBe('card');
-		for (const m of [tool('t'), thinking('k'), msg('s', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed' }), msg('n', { type: 'tool_use', toolName: 'Task' })]) {
+		for (const m of [msg('sa', { type: 'subagent' }), msg('n', { type: 'tool_use', toolName: 'Task' }), tool('q', 'AskUserQuestion'), tool('td', 'TodoWrite'), msg('s', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed' })]) {
+			expect(assistantRowRole(m)).toBe('card');
+		}
+		for (const m of [tool('t'), thinking('k'), msg('h', { role: 'system', type: 'system', systemSubtype: 'hook_response' }), msg('cb', { role: 'system', type: 'system', systemSubtype: 'compact_boundary' })]) {
 			expect(assistantRowRole(m)).toBe('detail');
 		}
 	});
 
-	it('folds approval outcomes and reports from started chats under Details', () => {
+	it('keeps an approval outcome in line and folds reports from started chats under Details', () => {
 		const outcome = msg('o', { role: 'system', type: 'system', systemSubtype: 'assistant_confirm', content: 'Authorized: Do you authorize me to run `git push`?', systemData: { decision: 'approved' } });
 		const report = msg('r', { role: 'system', type: 'system', systemSubtype: 'task_notification', systemData: { kind: 'session', status: 'completed', result: 'raw output' } });
-		expect(assistantRowRole(outcome)).toBe('detail');
+		expect(assistantRowRole(outcome)).toBe('card');
 		expect(assistantRowRole(report)).toBe('detail');
 		const { items } = foldAssistantTranscript([user('u1', 'push it'), outcome, report, text('a1', 'Pushed. Checks are green.')].map((message, index) => ({ kind: 'message' as const, message, index })));
-		expect(shape(items)).toEqual(['u1', 'a1', 'details(o,r)']);
+		expect(shape(items)).toEqual(['u1', 'o', 'a1', 'details(r)']);
 	});
 
 	it('treats an agent delivery as detail even though it arrives in the user role', () => {
@@ -50,19 +52,34 @@ describe('foldAssistantTranscript', () => {
 		expect(shape(items)).toEqual(['u1', 'a1', 'details(k1,t1,a0,t2)']);
 	});
 
+	/** The ids the ordinary settled view keeps on screen. */
+	function ordinaryVisible(messages: ChatMessage[]) {
+		const model = buildTranscriptModel(messages, { isStreaming: false, latestTurnUnsettled: false, sessionId: 'home', swarms: [], groupingEnabled: true });
+		return model.items.flatMap((item) => item.kind === 'message' ? [item.message.id] : item.kind === 'work_log' ? item.sequence.filter((e) => !e.hiddenWhenCollapsed).map((e) => e.message.id) : []);
+	}
+	const inline = (items: ReturnType<typeof fold>['items']) => shape(items).filter((id) => !id.startsWith('details('));
+
 	it('keeps the same protected set as the ordinary fold (spec §3)', () => {
 		const card = msg('sa', { type: 'subagent', agentStatus: 'completed', content: 'Report.' });
+		const notice = msg('pm', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed', content: 'Mode: plan' });
 		const messages = [
 			user('u1', 'audit it'), tool('t1'), text('n1', 'Reading the config.'), tool('t2'),
 			text('f1', 'The token is shared:\n- staging\n- prod'), tool('t3'), text('q1', 'Rotate it now?'),
+			tool('ask', 'AskUserQuestion'), tool('todo', 'TodoWrite'), tool('task', 'Task'), notice,
 			tool('t4'), card, text('a1', 'Done.')
 		];
 		const { items } = fold(messages);
-		expect(shape(items)).toEqual(['u1', 'f1', 'q1', 'sa', 'a1', 'details(t1,n1,t2,t3,t4)']);
+		expect(shape(items)).toEqual(['u1', 'f1', 'q1', 'ask', 'todo', 'task', 'pm', 'sa', 'a1', 'details(t1,n1,t2,t3,t4)']);
 		// Parity: assistant mode shows exactly the rows the ordinary fold keeps.
-		const model = buildTranscriptModel(messages, { isStreaming: false, latestTurnUnsettled: false, sessionId: 'home', swarms: [], groupingEnabled: true });
-		const kept = model.items.flatMap((item) => item.kind === 'message' ? [item.message.id] : item.kind === 'work_log' ? item.sequence.filter((e) => !e.hiddenWhenCollapsed).map((e) => e.message.id) : []);
-		expect(kept).toEqual(['u1', 'f1', 'q1', 'sa', 'a1']);
+		expect(ordinaryVisible(messages)).toEqual(inline(items));
+	});
+
+	it('matches the ordinary view for a settled turn that has nothing to fold', () => {
+		// No folded rows: the model emits this turn flat, as message items.
+		const messages = [user('u', 'plan it'), tool('ask', 'AskUserQuestion'), tool('todo', 'TodoWrite'), tool('task', 'Task'), text('final', 'Waiting on your answer.')];
+		const { items } = fold(messages);
+		expect(inline(items)).toEqual(['u', 'ask', 'todo', 'task', 'final']);
+		expect(ordinaryVisible(messages)).toEqual(inline(items));
 	});
 
 	it('keeps a worker card in line while the turn runs', () => {
