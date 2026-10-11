@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from app.core.resource_sync import mutation, observe_transactions
 from app.db import database
 from app.db.base import rows_to_list
 from app.db.subagents import _subagent_config
@@ -266,10 +267,11 @@ def list_agent_templates() -> list[dict]:
     return [_describe(database.get_all_profiles())]
 
 
+@mutation("agents", scope="shared")
 def install_starter_team() -> dict:
     # Serialize concurrent installs across processes; both rows commit together.
     # Fresh UUIDs never inherit API-key scopes belonging to retired built-ins.
-    with database.get_db() as conn:
+    with observe_transactions(database.get_db)() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT pg_advisory_xact_lock(%s)", (718234921,))
         cursor.execute("SELECT * FROM agents")

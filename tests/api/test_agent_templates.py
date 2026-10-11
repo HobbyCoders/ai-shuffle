@@ -122,3 +122,128 @@ def test_templates_require_owner(client, method, path, api_key):
         response = getattr(client, method)(BASE + path, headers=headers)
     assert response.status_code == 403
     assert database.get_all_profiles() == before
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("retire", [False, True])
+async def test_stale_action_only_approval_is_cancelled(mock_db, monkeypatch, queued, retire):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.api.automations import approve_run_endpoint
+    from app.core import automation_manager as module
+
+    manager = module.AutomationManager()
+    monkeypatch.setattr(module, "automation_manager", manager)
+    tasks = []
+    create_task = manager._create_tracked_task
+
+    def track(coro, *, name):
+        task = create_task(coro, name=name)
+        tasks.append(task)
+        return task
+
+    monkeypatch.setattr(manager, "_create_tracked_task", track)
+    actions = AsyncMock()
+    output = AsyncMock()
+    prompt = AsyncMock()
+    monkeypatch.setattr(manager, "_execute_action_steps", actions)
+    monkeypatch.setattr(manager, "_deliver_output", output)
+    monkeypatch.setattr(manager, "_run_prompt_as_session", prompt)
+    database.create_profile("general-purpose", "Old builtin", None, {}, is_builtin=True)
+    database.create_automation(
+        "retirement-job", "Saved job", "interval", {"seconds": 300},
+        "general-purpose", prompt="", enabled=True, requires_approval=True,
+        action_steps=[{"type": "shell", "command": "must not run"}],
+    )
+    # Produce a real pending approval rather than seeding only the consumer's row.
+    await manager._execute("retirement-job", {"trigger": "manual"})
+    approval = next(a for a in database.get_pending_automation_approvals()
+                    if a["automation_id"] == "retirement-job")
+
+    def disable():
+        if retire:
+            seed_builtin_subagents()
+            assert database.get_automation("retirement-job")["profile_id"] is None
+        else:
+            database.update_automation("retirement-job", is_enabled=False)
+
+    if queued:
+        holder = asyncio.get_running_loop().create_future()
+        manager._running["retirement-job"] = holder
+    else:
+        disable()
+    await approve_run_endpoint(approval["id"], token="admin")
+    if queued:
+        # execute_approved_run already loaded the enabled/linked snapshot.
+        disable()
+        holder.set_result(None)
+    await asyncio.gather(*tasks)
+    run = database.get_automation_run(approval["run_id"])
+    assert run["status"] == "cancelled"
+    assert ("Choose an agent" if retire else "Enable this automation") in run["error"]
+    assert run["completed_at"]
+    actions.assert_not_called()
+    output.assert_not_called()
+    prompt.assert_not_called()
+    assert not database.get_automation("retirement-job")["is_enabled"]
+
+
+def test_install_publishes_shared_agents_only_after_commit(bare_db, monkeypatch):
+    from unittest.mock import Mock, call
+    from app.core.agent_templates import install_starter_team
+    from app.core.global_events import global_events
+
+    before = database.get_all_profiles()
+    # Query through another connection at notification time: both members must
+    # already be visible, not just inserted inside the install transaction.
+    def committed(*args, **kwargs):
+        assert len(database.get_all_profiles()) == len(before) + 2
+
+    changed = Mock(side_effect=committed)
+    monkeypatch.setattr(global_events, "resources_changed", changed)
+    installed = install_starter_team()
+    assert changed.call_args_list == [
+        call("agents", user_type="account"), call("agents", user_type="paired"),
+        call("agents"), call("agents", user_type="api_user"),
+    ]
+    changed.reset_mock()
+    assert install_starter_team() == installed
+    changed.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["insert", "commit"])
+def test_failed_install_does_not_publish_agents(bare_db, monkeypatch, failure):
+    from contextlib import contextmanager
+    from unittest.mock import Mock
+    from app.core import agent_templates
+    from app.core.global_events import global_events
+
+    before = database.get_all_profiles()
+    changed = Mock()
+    monkeypatch.setattr(global_events, "resources_changed", changed)
+    if failure == "insert":
+        original = agent_templates._subagent_config
+        calls = 0
+
+        def fail_second(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("install failed")
+            return original(*args)
+
+        monkeypatch.setattr(agent_templates, "_subagent_config", fail_second)
+    else:
+        original_db = database.get_db
+
+        @contextmanager
+        def fail_commit():
+            with original_db() as conn:
+                yield conn
+                raise RuntimeError("install failed")
+
+        monkeypatch.setattr(database, "get_db", fail_commit)
+    with pytest.raises(RuntimeError, match="install failed"):
+        agent_templates.install_starter_team()
+    changed.assert_not_called()
+    assert database.get_all_profiles() == before

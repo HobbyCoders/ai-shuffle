@@ -143,3 +143,33 @@ def test_recreated_agent_id_does_not_inherit_grants_on_postgres():
     )
 
     test_recreated_agent_id_does_not_inherit_the_deleted_agents_key_grants(None)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("retire", [False, True])
+async def test_stale_action_only_approval_on_postgres(monkeypatch, queued, retire):
+    from tests.api.test_agent_templates import test_stale_action_only_approval_is_cancelled
+
+    await test_stale_action_only_approval_is_cancelled(None, monkeypatch, queued, retire)
+
+
+def test_starter_install_invalidation_on_postgres(monkeypatch):
+    from app.db import database
+    from tests.api.test_agent_templates import test_install_publishes_shared_agents_only_after_commit
+
+    before = {agent["id"] for agent in database.get_all_profiles()}
+    try:
+        test_install_publishes_shared_agents_only_after_commit(None, monkeypatch)
+    finally:
+        # Don't let the notification-time assertion observe cleanup mutations.
+        monkeypatch.undo()
+        for agent in database.get_all_profiles():
+            if agent["id"] not in before:
+                database.delete_profile(agent["id"])
+
+
+@pytest.mark.parametrize("failure", ["insert", "commit"])
+def test_starter_install_rollback_invalidation_on_postgres(monkeypatch, failure):
+    from tests.api.test_agent_templates import test_failed_install_does_not_publish_agents
+
+    test_failed_install_does_not_publish_agents(None, monkeypatch, failure)
