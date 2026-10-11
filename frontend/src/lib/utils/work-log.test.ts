@@ -151,8 +151,13 @@ function collapsedVisibleMessages(items: DisplayItem[]): ChatMessage[] {
 }
 
 /** Settled folds only: a live turn is one work log in live mode, never settled. */
+/**
+ * Settled groups that draw a disclosure. A settled turn with nothing to fold
+ * keeps its group (so settling never remounts its rows) but shows no fold.
+ */
 function settledFolds(items: DisplayItem[]) {
-	return items.filter((item) => item.kind === 'work_log' && item.mode === 'settled');
+	return items.filter((item) => item.kind === 'work_log' && item.mode === 'settled'
+		&& (item.sequence.some((entry) => entry.hiddenWhenCollapsed) || (item.gallery?.length ?? 0) > 1));
 }
 
 /** The live turn's one work log, or undefined when the turn emitted none. */
@@ -606,7 +611,7 @@ describe('buildDisplayItems — settled turns', () => {
 			tool({ timestamp: '2026-08-19T10:01:02.000Z' }),
 			text('two', '2026-08-19T10:01:39.000Z')
 		];
-		const folds = buildDisplayItems(messages, SETTLED).filter((item) => item.kind === 'work_log');
+		const folds = settledFolds(buildDisplayItems(messages, SETTLED));
 
 		expect(folds).toHaveLength(1);
 		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
@@ -888,11 +893,9 @@ describe('work folds from wire events', () => {
 		expect(buildDisplayItems(structuredClone(state.messages), SETTLED)).toEqual(settled);
 		const parked = buildDisplayItems(state.messages, { ...SETTLED, latestTurnUnsettled: true });
 		expect(settledFolds(parked)).toEqual([]);
-		// Parked again, the turn is live: each steer ends a run and the answer it
-		// replied to stays on screen as it does settled. Only the first Read folds;
-		// the run after the last steer is the current one and stays open.
-		const firstRead = state.messages.find((m) => m.toolId === 'read-1');
-		expect(collapsedVisibleMessages(parked)).toEqual(state.messages.filter((m) => m !== firstRead));
+		// Parked again, the turn is live. A steer never ends a run (spec §1.3) and
+		// no other protected row arrived, so the one run is current and open.
+		expect(collapsedVisibleMessages(parked)).toEqual(state.messages);
 	});
 });
 
@@ -1384,9 +1387,17 @@ describe('turn unity', () => {
 			content: 'Worker report', systemData: { sender: 'worker', content: 'Pipeline uses wrangler 3.' },
 			timestamp: '2026-10-10T20:25:00.000Z'
 		});
+		const build = tool({ toolName: 'Bash', toolInput: { command: 'npm run build' }, timestamp: '2026-10-10T20:20:00.000Z' });
+		const failed = tool({ toolName: 'Edit', toolStatus: 'error', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:00.000Z' });
+		const retry = tool({ toolName: 'Edit', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:30.000Z' });
+		const worker2 = subagent({ toolId: 'task-2', agentName: 'Reviewer', agentStatus: 'running', timestamp: '2026-10-10T20:22:00.000Z' });
+		const steer2 = user('Also note the token rotation date', '2026-10-10T20:23:00.000Z', 'turn-1');
+		const grep2 = tool({ toolName: 'Grep', toolInput: { pattern: 'rotate' }, timestamp: '2026-10-10T20:23:30.000Z' });
 		const final = text('Prod deploy is wired through wrangler 3.', '2026-10-10T20:30:00.000Z');
-		const messages = [prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, report, final];
-		return { messages, prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, report, final };
+		// The spec §2 scenario: two steers, two workers, one question, one failed
+		// tool and a Monitor that keeps running while the turn is live.
+		const messages = [prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, build, failed, retry, worker2, steer2, grep2, report, final];
+		return { messages, prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, build, failed, retry, worker2, steer2, grep2, report, final };
 	}
 
 	it('renders the live long turn as runs, steer in place', () => {
@@ -1398,13 +1409,25 @@ describe('turn unity', () => {
 		// Same key the settled fold will have, so settling flips mode in place.
 		expect(log.key).toBe(`wl-turn-${t.prompt.id}`);
 		expect(log.sequence.map((entry) => entry.message)).toEqual(t.messages.slice(1));
-		// Each earlier run folds; the protected row that ended it stays below it:
-		// the finding, the question's lead-in, the worker card. The question and
-		// the steer end runs with nothing left to fold. The current run is open.
-		expect(log.runs!.map((run) => [run.index, run.folded.map((entry) => entry.message)]))
-			.toEqual([[0, [t.read]], [1, [t.grep]], [2, [t.monitor]]]);
+		// Each earlier run folds; the protected row that ended it stays below it
+		// and keys the run: the finding, the question's lead-in, the first worker,
+		// the failed Edit, the second worker. The question ends a run with nothing
+		// to fold. Steers end no run: each stays in place inside the current one.
+		// The running Monitor finished its call, so it folds with its run.
+		expect(log.runs!.map((run) => [run.index, run.key, run.folded.map((entry) => entry.message)])).toEqual([
+			[0, t.finding.id, [t.read]],
+			[1, t.interim.id, [t.grep]],
+			[2, t.worker.id, [t.monitor]],
+			[4, t.failed.id, [t.build]],
+			[5, t.worker2.id, [t.retry]]
+		]);
+		expect(log.runs!.map((run) => run.summary)).toEqual([
+			'Read 1 file', 'Searched code 1 time', 'Ran 1 command', 'Ran 1 command', 'Changed 1 file'
+		]);
+		// The run after the second steer is current and open.
 		expect(collapsedVisibleMessages(items)).toEqual([
-			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack, t.report, t.final
+			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack, t.failed,
+			t.worker2, t.steer2, t.grep2, t.report, t.final
 		]);
 	});
 
@@ -1413,8 +1436,10 @@ describe('turn unity', () => {
 		const live = buildDisplayItems(t.messages, { ...SETTLED, latestTurnUnsettled: true });
 		const settled = buildDisplayItems(t.messages, SETTLED);
 		expect(liveLog(live)!.key).toBe((settledFolds(settled)[0] as Extract<DisplayItem, { kind: 'work_log' }>).key);
+		// Settled, the turn is one fold: the failed Edit was retried and folds;
+		// the acknowledgement stays as the answer the second steer replied to.
 		expect(collapsedVisibleMessages(settled)).toEqual([
-			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.final
+			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack, t.worker2, t.steer2, t.final
 		]);
 	});
 
@@ -1433,10 +1458,14 @@ describe('turn unity', () => {
 		const visible = collapsedVisibleMessages(model.items).map((m) => m.id);
 		// The prose the steer interrupted stays, as it did before turns were unified.
 		// The interim finding and the finished worker card stay too (spec §3); the
-		// one-line acknowledgement after the steer is narration and folds.
-		expect(visible).toEqual([t.prompt.id, t.finding.id, t.interim.id, t.worker.id, t.question.id, t.steer.id, t.final.id]);
+		// acknowledgement stays as the answer the second steer replied to.
+		expect(visible).toEqual([
+			t.prompt.id, t.finding.id, t.interim.id, t.worker.id, t.question.id, t.steer.id, t.ack.id,
+			t.worker2.id, t.steer2.id, t.final.id
+		]);
 		expect(model.itemIndexByTurnId.get(t.steer.id!)).toBe(1);
-		expect(model.midTurnUserIds).toEqual(new Set([t.steer.id]));
+		expect(model.itemIndexByTurnId.get(t.steer2.id!)).toBe(1);
+		expect(model.midTurnUserIds).toEqual(new Set([t.steer.id, t.steer2.id]));
 	});
 
 	it('keeps a turn flat while its background work runs, even after a later turn opened', () => {
@@ -1446,7 +1475,7 @@ describe('turn unity', () => {
 		const running = buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled: false, runningToolIds: new Set(['monitor-1']) });
 		expect(settledFolds(running)).toEqual([]);
 		const done = buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled: false, runningToolIds: new Set() });
-		const folds = done.filter((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>[];
+		const folds = settledFolds(done) as Extract<DisplayItem, { kind: 'work_log' }>[];
 		expect(folds.map((fold) => fold.key)).toEqual([`wl-turn-${t.prompt.id}`]);
 	});
 
@@ -1640,7 +1669,6 @@ describe('live runs', () => {
 	it.each([
 		['a finding in prose', () => text('Found it:\n- the token is shared')],
 		['a question', () => tool({ toolName: 'AskUserQuestion', toolInput: { questions: [] } })],
-		['a steer', () => user('also check prod', undefined, 'turn-1')],
 		['a worker card', () => subagent({ agentStatus: 'running' })],
 		['a failed tool', () => tool({ toolStatus: 'error', toolResult: 'boom' })],
 		['a special tool', () => tool({ toolName: 'TodoWrite', toolInput: { todos: [] } })]
@@ -1676,16 +1704,61 @@ describe('live runs', () => {
 		expect(collapsedVisibleMessages(items)).toEqual([prompt, first, second, d, e]);
 	});
 
-	it('starts a new run at a steer mid-run and keeps the answer it replied to', () => {
+	it('keys each run by the row that ended it, so a later boundary does not shift it', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const [a, b] = [tool(), tool({ toolStatus: 'running', streaming: true })];
+		const finding = text('Found it:\n- one');
+		const [c, d] = [tool(), tool()];
+		const worker = subagent({ toolId: 'task-1', agentStatus: 'running' });
+		const tail = tool({ toolStatus: 'running', streaming: true });
+		const before = liveLog(buildDisplayItems([prompt, a, b, finding, c, d, worker, tail], LIVE))!;
+		expect(before.runs!.map((run) => [run.index, run.key])).toEqual([[0, finding.id], [1, worker.id]]);
+		// `b` fails after the fact: it becomes a boundary inside the first run,
+		// so ordinals shift, but the run [c, d] is still the one `worker` ended.
+		const failed = { ...b, toolStatus: 'error' as const, streaming: false };
+		const after = liveLog(buildDisplayItems([prompt, a, failed, finding, c, d, worker, tail], LIVE))!;
+		expect(after.runs!.map((run) => [run.key, run.folded.map((entry) => entry.message)]))
+			.toEqual([[failed.id, [a]], [worker.id, [c, d]]]);
+		expect(after.runs!.find((run) => run.key === worker.id)!.index)
+			.not.toBe(before.runs!.find((run) => run.key === worker.id)!.index);
+	});
+
+	it('keys a run ended by an optimistic row by its server id once reconciled', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const a = tool();
+		const finding = { ...text('Found it:\n- one'), serverId: 'srv-9' };
+		const tail = tool({ toolStatus: 'running', streaming: true });
+		const log = liveLog(buildDisplayItems([prompt, a, finding, tail], LIVE))!;
+		expect(log.runs!.map((run) => run.key)).toEqual(['srv-9']);
+	});
+
+	it('does not end a run at a steer: it stays visible in place inside the current run', () => {
 		const prompt = user('go', undefined, 'turn-1');
 		const [a, answer] = [tool(), text('Looks fine.')];
 		const steer = user('check prod too', undefined, 'turn-1');
 		const b = tool({ toolStatus: 'running', streaming: true });
 		const items = buildDisplayItems([prompt, a, answer, steer, b], LIVE);
 		const log = liveLog(items)!;
-		expect(runsOf(log)).toEqual([[0, [a]]]);
-		expect(log.sequence.find((entry) => entry.message === b)!.run).toBe(1);
-		expect(collapsedVisibleMessages(items)).toEqual([prompt, answer, steer, b]);
+		expect(log.runs).toEqual([]);
+		expect(log.sequence.map((entry) => entry.run)).toEqual([0, 0, 0, 0]);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, a, answer, steer, b]);
+	});
+
+	// Spec §1.3: a turn never folds because the user sent something.
+	it.each([
+		['after completed work', () => [tool(), tool()]],
+		['after narration', () => [tool(), text('Checking more.'), tool()]],
+		['after a finding and more work', () => [tool(), text('Found it:\n- one'), tool(), text('Hmm.')]],
+		['while a tool runs', () => [tool(), tool({ toolStatus: 'running', streaming: true })]],
+		['after a question', () => [tool(), text('Which one?'), tool({ toolName: 'AskUserQuestion', toolInput: { questions: [] } })]]
+	])('never hides a visible row when a same-turn steer arrives %s', (_label, work) => {
+		const prompt = user('go', undefined, 'turn-1');
+		const before = [prompt, ...work()];
+		const visibleBefore = collapsedVisibleMessages(buildDisplayItems(before, LIVE));
+		const steer = user('also check prod', undefined, 'turn-1');
+		const visibleAfter = collapsedVisibleMessages(buildDisplayItems([...before, steer], LIVE));
+		for (const row of visibleBefore) expect(visibleAfter).toContain(row);
+		expect(visibleAfter).toContain(steer);
 	});
 
 	it('does not end a run at prose that is still streaming', () => {

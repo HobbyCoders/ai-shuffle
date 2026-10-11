@@ -35,16 +35,30 @@ describe('fold state', () => {
 	it('moves an optimistic turn onto its server id, keeping every fold, and survives a reload', () => {
 		const storage = memoryStorage();
 		const folds = createFoldState(storage);
-		folds.setOpen('local-1:0', true);
+		folds.setOpen('local-1:run-r1', true);
 		folds.setOpen('local-1:turn', true);
 		folds.setOpen('other:0', true);
 		folds.remap('local-1', 'srv-1');
-		expect(folds.current).toEqual({ 'srv-1:0': true, 'srv-1:turn': true, 'other:0': true });
+		expect(folds.current).toEqual({ 'srv-1:run-r1': true, 'srv-1:turn': true, 'other:0': true });
 		// A prefix that only looks alike is not the same turn.
 		folds.setOpen('local-10:0', true);
 		folds.remap('local-1', 'srv-2');
 		expect(folds.isOpen('local-10:0')).toBe(true);
 		expect(createFoldState(storage).current).toEqual(folds.current);
+	});
+
+	it('merges an open run into the settled turn fold, stored for a reload', () => {
+		const storage = memoryStorage();
+		const folds = createFoldState(storage);
+		folds.setOpen('t1:run-r1', true);
+		folds.setOpen('t1:run-r2', true);
+		folds.setOpen('t10:run-r1', true);
+		folds.promoteRuns('t1');
+		expect(folds.current).toEqual({ 't10:run-r1': true, 't1:turn': true });
+		expect(createFoldState(storage).current).toEqual(folds.current);
+		// No open run: the settled fold keeps its own state (closed by default).
+		folds.promoteRuns('t2');
+		expect(folds.isOpen('t2:turn')).toBe(false);
 	});
 
 	it('drops the oldest folds past its cap', () => {

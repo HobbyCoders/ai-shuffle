@@ -88,20 +88,39 @@
 	});
 
 	let localOpen = $state(false);
-	let localRuns = $state<Record<number, boolean>>({});
+	// Runs are keyed by the row that ended them (`WorkLogRun.key`), not by
+	// ordinal: a tool that fails later inserts a boundary and shifts ordinals.
+	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
-	const open = $derived(turnFold ? stored[turnFold] === true : localOpen);
+	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
+	// Settling merges the runs into the turn's one fold: an open run opens it,
+	// so the reader's open fold does not close under them (spec §6). Until the
+	// store records the promotion, read any open run as the turn being open.
+	const anyRunOpen = $derived(runPrefix
+		? Object.keys(stored).some((key) => key.startsWith(runPrefix))
+		: Object.values(localRuns).some(Boolean));
+	const open = $derived(turnFold
+		? stored[turnFold] === true || (mode === 'settled' && anyRunOpen)
+		: localOpen);
+	$effect.pre(() => {
+		if (mode === 'settled' && foldKey && anyRunOpen) folds.promoteRuns(foldKey);
+	});
 	function setOpen(next: boolean) {
 		if (turnFold) folds.setOpen(turnFold, next);
 		else localOpen = next;
 	}
-	function runOpen(run: number): boolean {
-		return foldKey ? stored[`${foldKey}:${run}`] === true : localRuns[run] === true;
+	function runOpen(run: WorkLogRun): boolean {
+		return runPrefix ? stored[`${runPrefix}${run.key}`] === true : localRuns[run.key] === true;
 	}
-	function setRunOpen(run: number, next: boolean) {
-		if (foldKey) folds.setOpen(`${foldKey}:${run}`, next);
-		else localRuns = { ...localRuns, [run]: next };
+	function setRunOpen(run: WorkLogRun, next: boolean) {
+		if (runPrefix) folds.setOpen(`${runPrefix}${run.key}`, next);
+		else localRuns = { ...localRuns, [run.key]: next };
 	}
+	// A settled turn with nothing to hide keeps its group (so settling does not
+	// remount its rows) but draws no disclosure.
+	const foldable = $derived(
+		sequence.some((entry) => entry.hiddenWhenCollapsed) || gallery.length > 1
+	);
 
 	let previousMode = $state<'live' | 'settled' | null>(null);
 
@@ -157,12 +176,12 @@
 		}
 	});
 
-	// Without a fold key, an inspected live group returns to the compact
-	// finished presentation when the turn settles. With one, the reader's
-	// choice is stored state and survives the settle (spec §6).
+	// Without a fold key the group keeps its folds locally: at settle the turn
+	// fold opens exactly when the reader had a run open. With one, the store
+	// carries the same rule across a reload (`promoteRuns`, spec §6).
 	$effect(() => {
 		const currentMode = mode;
-		if (previousMode === 'live' && currentMode === 'settled' && !turnFold) localOpen = false;
+		if (previousMode === 'live' && currentMode === 'settled' && !turnFold) localOpen = anyRunOpen;
 		previousMode = currentMode;
 	});
 
@@ -199,7 +218,8 @@
 	}
 	function rowVisible(entry: WorkLogSequenceEntry): boolean {
 		if (mode === 'settled') return open || !entry.hiddenWhenCollapsed;
-		return !entry.foldsInRun || entry.run === undefined || !runByIndex.has(entry.run) || runOpen(entry.run);
+		const run = entry.run === undefined ? undefined : runByIndex.get(entry.run);
+		return !entry.foldsInRun || !run || runOpen(run);
 	}
 	// Rows the reader clicked into (expanded a tool, a thought, a worker card).
 	let touched = $state<Record<string, true>>({});
@@ -231,7 +251,7 @@
 	<div class="worklog-measure" bind:this={contentEl}>
 	{#if sequence.length > 0}
 		<!-- One keyed row list for live and settled: settling must not remount rows. -->
-		{#if mode === 'settled'}
+		{#if mode === 'settled' && foldable}
 			{#if open}
 				<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
 			{:else}
@@ -258,13 +278,13 @@
 				{@const run = mode === 'live' && entry.run !== undefined ? runByIndex.get(entry.run) : undefined}
 				{@const visible = rowVisible(entry)}
 				{#if run && runEdges.first.get(run.index) === position}
-					{#if runOpen(run.index)}
+					{#if runOpen(run)}
 						<div class="wlhead">Work log{#if run.summary}<span> · {run.summary}</span>{/if}</div>
 					{:else}
 						<button
 							type="button"
 							class="wlrow fold"
-							onclick={() => setRunOpen(run.index, true)}
+							onclick={() => setRunOpen(run, true)}
 							aria-expanded="false"
 							aria-label={`Show work details: ${runLabel(run)}`}
 						>
@@ -295,8 +315,8 @@
 						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined)}
 					</div>
 				{/if}
-				{#if run && runEdges.last.get(run.index) === position && runOpen(run.index)}
-					<button type="button" class="wlrow fold" onclick={() => setRunOpen(run.index, false)} aria-expanded="true" aria-label="Hide work details">
+				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
+					<button type="button" class="wlrow fold" onclick={() => setRunOpen(run, false)} aria-expanded="true" aria-label="Hide work details">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 							<path d="m18 15-6-6-6 6" />
 						</svg>
@@ -305,7 +325,7 @@
 				{/if}
 			{/each}
 		</div>
-		{#if mode === 'settled' && open}
+		{#if mode === 'settled' && foldable && open}
 			<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 					<path d="m18 15-6-6-6 6" />

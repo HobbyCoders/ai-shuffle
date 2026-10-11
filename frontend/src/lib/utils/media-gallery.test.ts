@@ -103,8 +103,14 @@ describe('settled turn media gallery', () => {
 			message('steer', { role: 'user', turnId: 'turn-1', content: 'Change it' }),
 			message('after', { type: 'text', content: '![After](/after.png)' })
 		];
-		expect(buildDisplayItems(messages, options).map(item => item.kind))
-			.toEqual(['message', 'message', 'message', 'message']);
+		const items = buildDisplayItems(messages, options);
+		// The turn keeps its group (nothing remounts at settle) but folds nothing
+		// and draws no gallery: every row stays on screen.
+		expect(items.map(item => item.kind)).toEqual(['message', 'work_log']);
+		const group = items[1];
+		if (group.kind !== 'work_log') throw new Error('Missing group');
+		expect(group.gallery ?? []).toEqual([]);
+		expect(group.sequence.every(entry => !entry.hiddenWhenCollapsed)).toBe(true);
 	});
 	it('does not override disabled work grouping', () => {
 		expect(buildDisplayItems([user, tool, answer], { ...options, groupingEnabled: false }).every(item => item.kind !== 'work_log')).toBe(true);

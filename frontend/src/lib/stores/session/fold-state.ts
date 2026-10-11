@@ -1,9 +1,13 @@
 /**
  * Which transcript folds the reader opened (transcript-organization spec §6).
  *
- * A fold key is `<turn key>:<run index>` for a live run and `<turn key>:turn`
+ * A fold key is `<turn key>:run-<row id>` for a live run and `<turn key>:turn`
  * for the settled turn's group, where the turn key is the SERVER id of the
- * row that opened the turn. An optimistic send has no server id until the
+ * row that opened the turn and the row id is the protected row that ended the
+ * run (stable when a later boundary splits an earlier run; see `WorkLogRun.key`).
+ * When the turn settles its runs become one fold: `promoteRuns` opens that
+ * fold if the reader had opened any run, so settling never closes what they
+ * were reading. An optimistic send has no server id until the
  * reducer reconciles it; until then its fold is keyed by the optimistic id and
  * `remap` moves it once the server id is known, so the open state follows the
  * turn through a reload.
@@ -69,12 +73,31 @@ export function createFoldState(storage?: Storage) {
 		store.set(next);
 	}
 
+	/**
+	 * Settle turn `turn`: its live runs merge into the one turn fold. If any run
+	 * was open, the turn fold opens (and is stored, so a reload keeps it); the
+	 * run entries are dropped either way, since a settled turn has no runs.
+	 */
+	function promoteRuns(turn: string) {
+		if (!turn) return;
+		const prefix = `${turn}:run-`;
+		const current = store.current;
+		const runKeys = Object.keys(current).filter((key) => key.startsWith(prefix));
+		if (runKeys.length === 0) return;
+		const next: FoldRecord = { ...current };
+		for (const key of runKeys) delete next[key];
+		delete next[`${turn}:turn`];
+		next[`${turn}:turn`] = true;
+		store.set(capped(next));
+	}
+
 	return {
 		subscribe: store.subscribe,
 		get current(): Readonly<FoldRecord> { return store.current; },
 		isOpen: (key: string) => store.current[key] === true,
 		setOpen,
-		remap
+		remap,
+		promoteRuns
 	};
 }
 

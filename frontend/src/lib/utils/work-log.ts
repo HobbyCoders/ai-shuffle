@@ -54,6 +54,13 @@ export interface WorkLogSequenceEntry extends WorkLogEntry {
 export interface WorkLogRun {
 	/** Position among all runs of the turn, counting runs with nothing to fold. */
 	index: number;
+	/**
+	 * Stable fold-state key: the id of the protected row that ended the run.
+	 * The ordinal shifts when a new boundary appears earlier in the turn (a
+	 * running tool that later fails); the row that ended a run does not, so a
+	 * run the reader opened stays open on the same work.
+	 */
+	key: string;
 	/** Rows hidden while the run is folded. */
 	folded: WorkLogEntry[];
 	summary: string | null;
@@ -85,7 +92,7 @@ export type DisplayItem =
 			runs?: WorkLogRun[];
 			/**
 			 * Fold-state key of the turn (spec §6): the server id of the row that
-			 * opened it. Run folds are `<foldKey>:<run>`, the settled group `<foldKey>:turn`.
+			 * opened it. Run folds are `<foldKey>:run-<run.key>`, the settled group `<foldKey>:turn`.
 			 */
 			foldKey?: string;
 			/** The optimistic id `foldKey` replaced, if any: its folds are remapped. */
@@ -814,6 +821,11 @@ function terminalProse(response: Positioned[]): Set<Positioned> {
 	return terminal;
 }
 
+/** Fold-state key of a run, from the protected row that ended it (see `WorkLogRun.key`). */
+function runKeyOf(entry: Positioned): string {
+	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+}
+
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	// Code-mode wrappers are not transcript rows: their dispatched tools are.
 	// Keep a streaming cell visible only until its first visible inner call arrives.
@@ -841,9 +853,10 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	// whatever they say, exactly as the settled turn keeps them.
 	const terminal = terminalProse(response);
 	// Rows that end a run and stay visible. Streaming prose is still arriving,
-	// so it only becomes a finding once it is complete.
+	// so it only becomes a finding once it is complete. A steer does NOT end a
+	// run: a turn never folds because the user sent something (spec §1.3). It
+	// stays a visible row in place inside whatever run is current.
 	const endsRun = (entry: Positioned) =>
-		isPromptRow(entry) ||
 		isProtectedRow(entry.message) ||
 		asking.has(entry) ||
 		(isAssistantText(entry.message) && !entry.message.streaming && isProtectedProse(entry.message.content)) ||
@@ -873,7 +886,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 		for (const row of folded) hidden.add(row);
 		if (folded.length > 0) {
 			const rows = folded.map(({ message, index }) => ({ message, index }));
-			runs.push({ index: runIndex, folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+			runs.push({ index: runIndex, key: runKeyOf(entry), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
 		}
 		runIndex++;
 		open = [];
@@ -1110,7 +1123,10 @@ export function buildTranscriptModel(
 			.filter(shouldHide)
 			.map((entry) => ({ message: entry.message, index: entry.index }));
 
-		if (folded.length === 0 && gallery.length === 0) {
+		// A turn with nothing to fold still keeps its group: the live turn
+		// rendered inside it, so settling must not unmount a worker card or a
+		// report the reader expanded. WorkLogGroup draws no disclosure for it.
+		if (response.length === 0) {
 			emitWithSystemGroups(turn, items);
 			return;
 		}
