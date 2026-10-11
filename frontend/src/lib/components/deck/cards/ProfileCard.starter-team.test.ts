@@ -165,4 +165,21 @@ describe('starter team', () => {
 		await waitFor(() => expect(installButtons()).toHaveLength(2));
 		for (const b of installButtons()) expect((b as HTMLButtonElement).disabled).toBe(false);
 	});
+
+	it('hides the built-in choices on a worker without built-ins', async () => {
+		render(ProfileCard);
+		await screen.findByRole('heading', { level: 2, name: 'Make your first agent' });
+		// No All / Yours / Built-in filter that would only lead to an empty list.
+		expect(screen.queryByRole('button', { name: 'Built-in' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Yours' })).toBeNull();
+		expect(list().getByText('Start blank or describe one.')).toBeTruthy();
+		await fireEvent.click(within(screen.getByRole('region', { name: 'Details' })).getByRole('button', { name: 'New agent' }));
+		const dialog = screen.getByRole('dialog', { name: 'New agent' });
+		expect(within(dialog).queryByRole('radio', { name: /From a built-in/ })).toBeNull();
+		expect(within(dialog).getAllByRole('radio')).toHaveLength(3);
+		// Arrow keys cycle the three left: Blank -> Describe it -> Import -> Blank.
+		const blank = within(dialog).getByRole('radio', { name: /Blank/ });
+		await fireEvent.keyDown(blank, { key: 'ArrowUp' });
+		expect(within(dialog).getByRole('radio', { name: /Import/ }).getAttribute('aria-checked')).toBe('true');
+	});
 });

@@ -5,7 +5,8 @@
 <script lang="ts">
 	/**
 	 * NewAgentDialog: the one way to start an agent. Blank, a copy of a
-	 * built-in's prompt and tools, an AI draft from a description (handed to
+	 * built-in's prompt and tools (offered only when the worker has
+	 * built-ins), an AI draft from a description (handed to
 	 * the AI generate dialog, which can ask follow-up questions), or an
 	 * exported .json. A bottom sheet on narrow screens.
 	 */
@@ -32,6 +33,9 @@
 		{ id: 'describe', title: 'Describe it', hint: 'AI drafts the agent.', icon: Sparkles },
 		{ id: 'import', title: 'Import', hint: 'From an exported .json.', icon: Upload }
 	];
+
+	/** "From a built-in" only when there is one to copy. */
+	const options = $derived(builtins.length ? OPTIONS : OPTIONS.filter((o) => o.id !== 'builtin'));
 
 	let mode = $state<NewAgentMode>('blank');
 	let builtin = $state('');
@@ -76,9 +80,9 @@
 		const keys = ['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'];
 		if (!keys.includes(event.key)) return;
 		event.preventDefault();
-		const i = OPTIONS.findIndex((o) => o.id === mode);
+		const i = options.findIndex((o) => o.id === mode);
 		const step = event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1;
-		void pick(OPTIONS[(i + step + OPTIONS.length) % OPTIONS.length].id);
+		void pick(options[(i + step + options.length) % options.length].id);
 	}
 
 	function onWindowKey(event: KeyboardEvent) {
@@ -100,7 +104,7 @@
 				<button type="button" class="st-btn ghost icon sm" aria-label="Close" onclick={onClose} disabled={busy}><X /></button>
 			</div>
 			<div class="dlg-b" role="radiogroup" aria-label="How to start" bind:this={list}>
-				{#each OPTIONS as opt (opt.id)}
+				{#each options as opt (opt.id)}
 					{@const on = mode === opt.id}
 					<button
 						type="button"
@@ -122,7 +126,6 @@
 							<select id="new-agent-builtin" class="sel" bind:value={builtin}>
 								{#each builtins as b (b.id)}<option value={b.id}>{b.name}</option>{/each}
 							</select>
-							{#if builtins.length === 0}<span class="lab">No built-ins found.</span>{/if}
 						</div>
 					{:else if on && opt.id === 'describe'}
 						<div class="optx">

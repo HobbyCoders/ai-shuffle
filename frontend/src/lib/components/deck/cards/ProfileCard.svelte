@@ -1103,6 +1103,12 @@
 	}
 
 	const builtinChoices = $derived(profiles.filter((p) => p.is_builtin).map((p) => ({ id: p.id, name: p.name })));
+	/** Workers ship no built-in agents now; the All / Yours / Built-in filter only shows when some exist. */
+	const hasBuiltins = $derived(builtinChoices.length > 0);
+	// A hidden filter must not keep narrowing the list.
+	$effect(() => {
+		if (!hasBuiltins && !loading && filter !== 'all') untrack(() => (filter = 'all'));
+	});
 	const noneOfYours = $derived(!profiles.some((p) => !p.is_builtin && p.id !== assistantId));
 	const emptyMessage = $derived(
 		offerStarterTeam && starterTeam && starterTeam.agents.length
@@ -1133,6 +1139,26 @@
 	</button>
 {/snippet}
 
+{#snippet listFilters()}
+	{#if hasBuiltins}
+		<Segmented
+			size="sm"
+			label="Show"
+			bind:value={filter}
+			options={[
+				{ value: 'all', label: 'All' },
+				{ value: 'yours', label: 'Yours' },
+				{ value: 'builtin', label: 'Built-in' }
+			]}
+		/>
+	{/if}
+	{#if folders.length > 0}
+		<span class="folder-filter">
+			<SelectField label="Folder" bind:value={folderFilter} width={170} options={folderOptions} />
+		</span>
+	{/if}
+{/snippet}
+
 {#snippet starterToolbar()}
 	{@render installTeamButton(true)}
 {/snippet}
@@ -1154,24 +1180,8 @@
 		onBack={null}
 		listLabel="Agent list"
 		toolbar={offerStarterTeam && !loading ? starterToolbar : undefined}
+		filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}
 	>
-		{#snippet filters()}
-			<Segmented
-				size="sm"
-				label="Show"
-				bind:value={filter}
-				options={[
-					{ value: 'all', label: 'All' },
-					{ value: 'yours', label: 'Yours' },
-					{ value: 'builtin', label: 'Built-in' }
-				]}
-			/>
-			{#if folders.length > 0}
-				<span class="folder-filter">
-					<SelectField label="Folder" bind:value={folderFilter} width={170} options={folderOptions} />
-				</span>
-			{/if}
-		{/snippet}
 		{#snippet list()}
 			<AgentList
 				{sections}
@@ -1181,6 +1191,7 @@
 				{selectedId}
 				loading={loading}
 				{noneOfYours}
+				{hasBuiltins}
 				{narrowed}
 				{query}
 				showYours={filter !== 'builtin'}
