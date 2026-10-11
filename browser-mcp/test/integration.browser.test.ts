@@ -223,7 +223,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
-        // As docker/start-chrome.sh: pages must keep seeing this screen (#1791).
+        // Linux/Ozone only, as in docker/start-chrome.sh (#1791). Other platforms
+        // ignore this flag; the fixed-screen regression is skipped there (#2292).
         "--ozone-override-screen-size=1920,1080",
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${userDataDir}`,
@@ -935,7 +936,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(restored).toBe(412);
   });
 
-  it("keeps the browser's screen size while the viewport is pinned (#1791)", async () => {
+  it("keeps the browser's screen size while the viewport is pinned (#1791)", async ({ skip }) => {
+    if (process.platform !== "linux") {
+      skip("#2292: --ozone-override-screen-size is only honoured on Linux/Ozone");
+    }
     const screenOf = async () => (await session.ensurePage()).evaluate(() => ({
       screen: [window.screen.width, window.screen.height], inner: [window.innerWidth, window.innerHeight],
     }));
