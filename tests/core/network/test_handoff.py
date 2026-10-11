@@ -236,7 +236,8 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
     from app.core import streaming_status
     from app.core.global_events import global_events
 
-    busy_changed, sessions_changed = Mock(), Mock()
+    busy_changed, sessions_changed, lifecycle = Mock(), Mock(), Mock()
+    monkeypatch.setattr(global_events, "lifecycle", lifecycle)
     monkeypatch.setattr(streaming_status, "notify", busy_changed)
     monkeypatch.setattr(global_events, "resources_changed", sessions_changed)
     a,b,source,target = pair
@@ -256,11 +257,17 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
             if body["phase"] == "commit":
                 busy_changed.reset_mock()
                 sessions_changed.reset_mock()
+                lifecycle.reset_mock()
             result = await control.handle(action, body, from_device=b.device_id)
             if body["phase"] == "commit":
                 # Ownership refresh cannot depend on the outer receive reply.
                 busy_changed.assert_called_once_with("handoff-test")
                 sessions_changed.assert_called_once_with("sessions")
+                lifecycle.assert_called_once_with(None, {
+                    "type": "user_session_updated", "session_id": "handoff-test",
+                    "updates": {"owner_device_id": b.device_id, "instance_id": b.device_id,
+                                "placement": {"where": "runner:" + b.device_id}},
+                }, user_type="admin")
                 commits.append(body)
             return result
     monkeypatch.setattr(control, "call", call)
@@ -285,7 +292,9 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
         assert checkout_transfer.fingerprint(source) != before
     assert phases == ["begin","commit"]
     with a.active():
+        lifecycle.reset_mock()
         assert handoff.finish("handoff-test", b.device_id, commits[0]) == {"committed": True}
+        assert lifecycle.call_args.args[1]["updates"]["owner_device_id"] == b.device_id
     converge([a,b])
     with b.active():
         assert database.get_session("handoff-test")["owner_device_id"] == b.device_id

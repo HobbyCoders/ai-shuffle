@@ -532,7 +532,7 @@ async def _queued_move(session: dict, op: str, target: Optional[str] = None, *, 
 async def queued_move_status(request: Request, session_id: str, token: str = Depends(require_auth)):
     """What keeps this chat from moving now, and any move already queued.
 
-    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"worker", "target_id", "by", "moving"} | null}``,
+    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"handoff_id", "worker", "target_id", "by", "moving"} | null}``,
     read on the owning worker. The worker selector and Resume here ask first:
     a running or parked chat is offered "Move when this turn ends".
     """

@@ -794,9 +794,9 @@ A session that is running a turn, has messages queued behind it, has a scheduled
 
 | Method | Path | Body | Result |
 |---|---|---|---|
-| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"worker", "target_id", "by", "moving"} or null}` |
-| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "worker": "DesktopWorker", "after": "turn" or "queued"}` |
-| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool}` |
+| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"handoff_id", "worker", "target_id", "by", "moving"} or null}` |
+| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "handoff_id": "uuid", "worker": "DesktopWorker", "after": "turn" or "queued"}` |
+| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool, "handoff_id": "uuid" or null}` |
 
 **Auth:** Required
 
@@ -811,6 +811,12 @@ Scheduled wake-ups, such as a resume after a usage limit, move with the session.
 Known limits: if the new worker stops between taking ownership and storing the moved wake-ups, those wake-ups are lost. Files attached to held messages stay on the old worker. A message sent to the new worker while the old one is still delivering held messages there can run before them. A Stop pressed on the old worker is not remembered if that worker restarts before the move's delivery finishes, so the resume turn can still start.
 
 The session records `handoff` rows for queued, cancelled, started and the outcome (`moved`, `failed`, `timeout`), so every device shows the pending move; the `moved` row is written on the new worker, which then owns the session. For an agent's hand-off its `resume` field is `send`, or `unsupported` / `unknown` when the new worker cannot take the resume turn; a resume turn the new worker refused adds a `resume_failed` row. A queued move is stored on the owning worker, so it survives a restart of that worker; a move that cannot resume is recorded as cancelled. Returns `409` when a move is already queued, the target is unknown or offline, the owning worker cannot be reached, or an approval, question or access card is open ("Answer or dismiss the open prompt first.").
+
+Each new request gets a UUID4 string, `handoff_id`, persisted with the pending move across restarts. Repeating the agent's request for the same pending destination returns the same id; cancelling and queuing another move (even to the same worker) gets a fresh id. `HandOffSession` returns `{"queued": true, "handoff_id": "uuid", "worker": "DesktopWorker", "message": "..."}`, or, with `cancel: true`, `{"cancelled": bool, "handoff_id": "uuid" or null}`. A cancellation with nothing pending has a null id. Replacement requests are refused while cancellation is being recorded; retry after the cancellation response.
+
+Transcript events have `type: "system"`, `subtype: "handoff"`, `content`, and `data: {"handoff_id": "uuid", "status": "...", "content": "...", ...}`. Group the tool result and these rows by id, not worker label. The same id travels in the transferred `started` row and in the destination note control payloads for `moved`, `held_failed` and `resume_failed`. Existing status-specific fields (`worker`, `by`, `note`, `after`, `still`, `reason`, `resume`, message counts and texts) are unchanged. Historical records and notes from older workers may lack the id; new notices about pre-id legacy moves or `nothing_queued` have a null id and must not settle a newer identified move.
+
+**Source-side completion:** no `sent` transcript row is added. The destination imports the transcript snapshot before asking the source to commit ownership. Before that commit, success is not known; after it, a new source row would not be in the transferred snapshot (and would consume a sequence number independently of destination events). Instead the source emits `user_session_updated` with `session_id` and `updates: {"owner_device_id": "target-device-id", "instance_id": "target-device-id", "placement": {"where": "runner:target-device-id"}}` when ownership commits, including on an idempotent commit retry. This does not depend on the outer receive call returning. The source UI should settle its current hand-off when the session's `owner_device_id` becomes its target device id; use `GET /handoff`'s `pending.target_id` rather than a worker label. Reconnecting clients read the authoritative session owner. Account/paired clients receive a sessions resource-change notification and refetch their authorized session instead of receiving the legacy lifecycle payload. The destination's `moved` row remains the transcript outcome.
 
 ## Session Sync
 

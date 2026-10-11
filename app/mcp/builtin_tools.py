@@ -2852,9 +2852,9 @@ def create_builtin_tools_server(
             return _err("Only the owner's sessions can be handed off between workers")
         from app.core import session_handoff
 
-        if args.get("cancel"):
-            return _ok({"cancelled": await session_handoff.cancel_async(session_id)})
         try:
+            if args.get("cancel"):
+                return _ok(await session_handoff.cancel_move(session_id))
             from app.db.async_database import run_sync
             return _ok(await run_sync(session_handoff.request, session_id,
                                       str(args.get("worker") or ""), str(args.get("note") or "")))
