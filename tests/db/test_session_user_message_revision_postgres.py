@@ -55,3 +55,36 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
             sessions.add_session_message("revision-old", "user", "rolled back", _conn=conn)
             raise ValueError("abort")
     assert [row["content"] for row in sessions.get_session_messages("revision-old")] == ["initial", "steer"]
+
+
+@pytest.mark.asyncio
+async def test_authoritative_recorder_delivery_dedup_and_provenance():
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import session_events
+
+    database.create_session("pg-events", None)
+    recorder = await TurnRecorder.maybe_create("pg-events")
+    assert recorder is not None
+    try:
+        await recorder.start("API/connector/relay prompt", source="user")
+        first = database.get_session("pg-events")["last_user_message_at"]
+        assert first is not None
+        assert database.get_session_messages("pg-events") == []
+        assert await recorder.record_steered_user_message("Peer note", source="agent_message")
+        assert database.get_session("pg-events")["last_user_message_at"] == first
+        assert await recorder.record_steered_user_message("Owner answer", source="user")
+        latest = database.get_session("pg-events")["last_user_message_at"]
+        assert latest > first
+        event = next(e for e in session_events.get_events("pg-events", 0)
+                     if e["event_type"] == "message.user")
+        # Retrying an already committed stable event cannot look like an answer.
+        session_events.append_events("pg-events", [{"id": event["id"], "type": "message.user",
+                                                     "payload": event["payload"]}])
+        assert database.get_session("pg-events")["last_user_message_at"] == latest
+        with pytest.raises(ValueError):
+            with base.transaction() as conn:
+                session_events.append_events("pg-events", [{"type": "message.user", "payload": {}}], _conn=conn)
+                raise ValueError("abort")
+        assert database.get_session("pg-events")["last_user_message_at"] == latest
+    finally:
+        await recorder.close()

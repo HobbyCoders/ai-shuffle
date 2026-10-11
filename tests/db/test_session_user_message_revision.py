@@ -177,3 +177,43 @@ def test_nested_transaction_callbacks_belong_to_their_connection(monkeypatch):
             base.after_commit(second, lambda: delivered.append("inner"))
         assert delivered == ["inner"]
     assert delivered == ["inner", "outer"]
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_event_revision_is_atomic_and_stable_id_retry_is_silent(rollback):
+    from app.db import session_events
+
+    sid = "event-revision"
+    database.create_session(sid, "default")
+    event = {"id": "delivered-event", "type": "message.user", "payload": {"content": "Answer"}}
+    with patch.object(global_events, "lifecycle") as publish:
+        try:
+            with base.transaction() as conn:
+                session_events.append_events(sid, [event], _conn=conn)
+                publish.assert_not_called()
+                if rollback:
+                    raise ValueError("abort")
+        except ValueError:
+            assert rollback
+        assert publish.call_count == (0 if rollback else 1)
+        assert (stamp(sid) is None) == rollback
+        if not rollback:
+            timestamp = stamp(sid)
+            publish.reset_mock()
+            session_events.append_events(sid, [event])
+            publish.assert_not_called()
+            assert stamp(sid) == timestamp
+            assert len(session_events.get_events(sid, 0)) == 1
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_autonomous_legacy_rows_preserve_revision(batch):
+    database.create_session("notes", "default")
+    for source in ("agent_message", "wakeup", "voice_system_note"):
+        message = {"session_id": "notes", "role": "user", "content": "not an answer",
+                   "metadata": {"source": source}}
+        if batch:
+            sessions.add_session_messages_batch([message])
+        else:
+            sessions.add_session_message(**message)
+    assert stamp("notes") is None

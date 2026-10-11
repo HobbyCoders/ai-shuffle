@@ -1387,7 +1387,7 @@ class SessionRuntime:
             and not already_recorded
             and (self.turn.get("payload") or {}).get("deferred_user_record")
         ):
-            await self._persist_user_message(prompt)
+            await self._persist_user_message(prompt, source=app_source)
         done_event = None
         try:
             await recorder.start(
@@ -2222,12 +2222,15 @@ class SessionRuntime:
                     content,
                     profile_id=profile_id,
                     command_id=row.get("command_id"),
-                    **({"queued_turn_id": row_id, "checkpoint_backed": False}
+                    **({"queued_turn_id": row_id, "checkpoint_backed": False,
+                        "source": "agent_message"}
                        if row.get("source") == "agent_message" else {}),
                 )
                 if not recorded:
                     return
-                await self._persist_user_message(content, profile_id=profile_id)
+                await self._persist_user_message(
+                    content, profile_id=profile_id, source=row.get("source") or "user",
+                )
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row
@@ -2427,7 +2430,8 @@ class SessionRuntime:
             )
 
     async def _persist_user_message(
-        self, content: str, *, profile_id: Optional[str] = None
+        self, content: str, *, profile_id: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> None:
         """Dual-write one user message to ``session_messages`` + fan it out.
 
@@ -2441,14 +2445,14 @@ class SessionRuntime:
             from app.db import database as database_mod
 
             role = "user"
-            metadata = None
+            metadata = {"source": source or self.source}
             if content.strip().startswith("/"):
                 parts = content.strip().split(None, 1)
                 role = "command"
-                metadata = {
+                metadata.update({
                     "command_name": parts[0],
                     "command_args": parts[1] if len(parts) > 1 else "",
-                }
+                })
             await asyncio.to_thread(
                 database_mod.add_session_message,
                 session_id=self.session_id,
@@ -2462,6 +2466,7 @@ class SessionRuntime:
                 message={
                     "role": "user",
                     "content": content,
+                    "metadata": metadata,
                     "profile_id": profile_id or self.turn.get("profile_id"),
                 },
                 source_device_id=None,

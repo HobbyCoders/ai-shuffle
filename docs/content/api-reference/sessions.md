@@ -15,8 +15,17 @@ An API key sees and acts only on the sessions it started (see [Own Sessions](/do
 Session list (including paginated/cursor lists) and detail responses include
 `last_user_message_at`: a nullable, timezone-aware UTC timestamp. It advances
 when a user message is persisted, including the initial prompt, a delivered
-mid-turn steer, a command, or a voice utterance. Queuing alone does not advance
-it. Existing sessions keep `null` until their next user message; it is not
+mid-turn steer, a command, or a voice utterance. REST conversations, connector
+messages, forwarded prompts on the executing worker, and delivered
+owner-configured automation prompts also count. Autonomous agent notes,
+wakes, and backend-authored voice notes do not count, even when their transport
+role is `user`; their source provenance is preserved in both message stores.
+
+Queuing alone does not advance it. The authoritative event-log insertion and
+the legacy message insertion both update the session revision in their own
+transaction. Retrying an already committed stable event ID does not advance
+it or rebroadcast an answer. Event-log backfill/copy paths do not advance it.
+Existing sessions keep `null` until their next user message; it is not
 backfilled from turn counts or working time.
 
 After commit, the global WebSocket feed emits `user_session_updated` with

@@ -156,13 +156,37 @@ def append_events(
             )
             for i, event in enumerate(events)
         ]
-        cursor.executemany(
+        from app.db.base import after_commit
+        from app.db.sessions import is_user_message, _record_user_message
+
+        insert_sql = (
             "INSERT INTO session_events "
             "(id, session_id, seq, run_id, turn_id, event_type, payload, command_id) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (id) DO NOTHING",
-            params,
+            "ON CONFLICT (id) DO NOTHING"
         )
+        user_params, other_params = [], []
+        for event, values in zip(events, params):
+            target = user_params if (
+                event["type"] == "message.user"
+                and is_user_message("user", event.get("payload"))
+            ) else other_params
+            target.append(values)
+        if other_params:
+            cursor.executemany(insert_sql, other_params)
+        # The event log is authoritative on the EXECUTING worker. API, relay,
+        # connector and automation turns need not have a legacy message row.
+        # RETURNING distinguishes delivery from a retry of a stable event id;
+        # backfills/copies use separate helpers and never advance the revision.
+        inserted_user = False
+        for values in user_params:
+            cursor.execute(insert_sql + " RETURNING id", values)
+            inserted_user = cursor.fetchone() is not None or inserted_user
+        if inserted_user:
+            now = datetime.now(timezone.utc).isoformat()
+            notify = _record_user_message(cursor, session_id, "user", now)
+            if notify:
+                after_commit(conn, notify)
 
         # 4. Best-effort notify (guarded: pg_notify is absent on the SQLite
         # shim, and delivery must not depend on it — the gateway also polls).

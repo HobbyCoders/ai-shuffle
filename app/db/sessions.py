@@ -2017,14 +2017,23 @@ def get_session_messages(session_id: str) -> List[SessionMessageRow]:
         return rows
 
 
-def _record_user_message(cursor, session_id: str, role: str, now: str):
-    """One row write for all prompt/steer/voice/batch insert paths.
+def is_user_message(role: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """User/owner-configured prompts count; autonomous deliveries do not."""
+    metadata = metadata or {}
+    return role in ("user", "command") and metadata.get("source") not in {
+        "agent_message", "wakeup", "unpark", "unpark_pump", "auto_continue",
+        "promotion", "voice_system_note", "task_notification",
+    } and not metadata.get("agent_wake")
+
+
+def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=None):
+    """Shared revision write for authoritative events and legacy messages.
 
     Guard against a slower transaction overwriting a newer message revision.
     The global feed reaches tabs that have never subscribed to this chat;
     paired/account clients and other workers receive scoped invalidations.
     """
-    if role not in ("user", "command"):
+    if not is_user_message(role, metadata):
         return None
     cursor.execute(
         f"UPDATE sessions SET last_user_message_at = {ph()}, updated_at = {ph()} "
@@ -2093,7 +2102,7 @@ def add_session_message(
         cursor = get_cursor(conn)
         cursor.execute(sql, params)
         lastrowid = cursor.fetchone()["id"]
-        notify = _record_user_message(cursor, session_id, role, now)
+        notify = _record_user_message(cursor, session_id, role, now, metadata)
         if notify:
             from app.db.base import after_commit
             after_commit(conn, notify)
@@ -2168,7 +2177,7 @@ def add_session_messages_batch(
             )
             cursor.execute(sql, params)
             lastrowid = cursor.fetchone()["id"]
-            notify = _record_user_message(cursor, msg["session_id"], msg["role"], now)
+            notify = _record_user_message(cursor, msg["session_id"], msg["role"], now, metadata)
             if notify:
                 notifications.append(notify)
             results.append({
