@@ -364,6 +364,24 @@ class TestReadModifyWriteIsAtomic:
         assert set(prof.threads) == set(read.threads)
         assert loop_thread not in read.threads
 
+    @pytest.mark.parametrize("profile_id", [None, ""])
+    async def test_toggle_retired_automation_requires_agent(self, loop_thread, hops, profile_id):
+        from unittest.mock import AsyncMock
+
+        read = _ThreadSpy(return_value=_automation(profile_id=profile_id, is_enabled=False))
+        with hops.install():
+            tools = _create_automation_tools(is_admin=True, project_id=None)
+        tool = get_tool(tools, "toggleAutomation")
+        with patch("app.db.database.get_automation", read), \
+             patch("app.db.database.update_automation") as write, \
+             patch("app.core.automation_manager.automation_manager.schedule_automation", new_callable=AsyncMock) as schedule:
+            body = tool_result_json(await tool.handler({"automation_id": "auto-1", "enabled": True}))
+        assert "Choose an agent" in body["error"]
+        write.assert_not_called()
+        schedule.assert_not_called()
+        assert hops.hops == 1
+        assert loop_thread not in read.threads
+
     async def test_toggle_automation_reads_and_writes_in_one_hop(
         self, loop_thread, hops
     ):
