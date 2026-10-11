@@ -67,8 +67,8 @@ class TestReencryptModelProviders:
         )
         db.update_model_provider(
             "prov-1", manual_balance_usd=37.25, manual_balance_set_at=1700000000123,
-            credential_status="ok",
         )
+        db.record_credential_check("prov-1", accepted=True)
         before = db.get_model_provider("prov-1", include_token=True)
         old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
         new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
@@ -87,7 +87,10 @@ class TestReencryptModelProviders:
         after = db.get_model_provider("prov-1", include_token=True)
         assert after["manual_balance_usd"] == before["manual_balance_usd"] == 37.25
         assert after["manual_balance_set_at"] == before["manual_balance_set_at"] == 1700000000123
-        assert after["credential_status"] == "ok"
+        status = mock_db.execute(
+            "SELECT credential_status FROM model_providers WHERE id = 'prov-1'",
+        ).fetchone()
+        assert status["credential_status"] == "ok"
         assert after["auth_token"] != before["auth_token"]
         monkeypatch.setattr(encryption, "_encryption_key", new_key)
         assert encryption.decrypt_value(after["auth_token"]) == "gw-secret"
