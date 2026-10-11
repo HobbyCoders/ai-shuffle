@@ -122,15 +122,17 @@ def seed_stale_resume(mock_db, *, explicit_start=True):
     })
 
 
-@pytest.mark.parametrize("ownership", ["mirror", "other-instance", "unknown", "handoff", "handoff-hold"])
-async def test_non_authoritative_hydration_never_repairs(mock_db, gw, registry, ownership):
+@pytest.mark.parametrize("ownership", ["mirror", "other-instance", "unknown", "both-unknown", "handoff", "handoff-hold"])
+async def test_non_authoritative_hydration_never_repairs(mock_db, gw, registry, monkeypatch, ownership):
     seed_stale_resume(mock_db)
     if ownership == "mirror":
         mock_db.execute("UPDATE sessions SET owner_device_id='other-worker'")
     elif ownership == "other-instance":
         mock_db.execute("UPDATE sessions SET instance_id='other-install'")
-    elif ownership == "unknown":
+    elif ownership in ("unknown", "both-unknown"):
         mock_db.execute("UPDATE sessions SET owner_device_id=NULL")
+        if ownership == "both-unknown":
+            monkeypatch.setattr("app.network.runners.self_device_id", lambda: None)
     else:
         from app.db.runs import claim_run
         claim_run("parent", ownership + ":reservation", 120)

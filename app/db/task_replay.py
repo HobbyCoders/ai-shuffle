@@ -23,10 +23,20 @@ def repair_task_projection(session_id, task_id, *, instance_id, device_id):
     this read/check/append with *all* event writers, across processes. A stable
     event id is an additional durable dedup fence for this particular start.
     """
+    if not device_id or not instance_id:
+        return False
     with get_db() as conn:
         cursor = conn.cursor()
-        # Match append_events' counter-before-session lock order (user messages
-        # update the session row after allocating their event sequence).
+        # Match fenced append_events (run -> counter -> session) and handoff's
+        # _lease -> session UPDATE. Taking the run lock after the session can
+        # deadlock with a handoff before we even see its reservation and decline.
+        cursor.execute(
+            "SELECT runner_id FROM runs WHERE session_id=%s AND state='active' FOR SHARE",
+            (session_id,),
+        )
+        if any(str(row["runner_id"]).startswith(("handoff:", "handoff-hold:"))
+               for row in cursor.fetchall()):
+            return False
         cursor.execute(
             "SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE",
             (session_id,),
@@ -38,15 +48,9 @@ def repair_task_projection(session_id, task_id, *, instance_id, device_id):
             (session_id,),
         )
         owner = cursor.fetchone()
-        if (not owner or owner["instance_id"] != instance_id
+        if (not owner or not owner["owner_device_id"]
+                or owner["instance_id"] != instance_id
                 or owner["owner_device_id"] != device_id):
-            return False
-        cursor.execute(
-            "SELECT runner_id FROM runs WHERE session_id=%s AND state='active' FOR SHARE",
-            (session_id,),
-        )
-        if any(str(row["runner_id"]).startswith(("handoff:", "handoff-hold:"))
-               for row in cursor.fetchall()):
             return False
         cursor.execute(
             "SELECT id, seq, payload, created_at FROM session_events "
