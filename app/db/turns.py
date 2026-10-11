@@ -667,6 +667,31 @@ def record_adhoc_turn(
 # Live-state transitions (all DB-raced via the partial unique index)
 # ---------------------------------------------------------------------------
 
+def _execution_defaults(cursor: Any, turn: Dict[str, Any]) -> Dict[str, Any]:
+    """Snapshot non-secret mutable binding defaults at claim, under its lock.
+
+    Compare defaults conservatively even if an override masks one: a changed
+    default may create a separate turn, but must never silently change a park's
+    execution identity. Do not snapshot credentials or arbitrary profile data.
+    """
+    cursor.execute("SELECT * FROM sessions WHERE id=%s", (turn["session_id"],))
+    session = cursor.fetchone()
+    cursor.execute("SELECT config FROM agents WHERE id=%s", (
+        turn.get("profile_id") or (session or {}).get("profile_id"),
+    ))
+    profile = cursor.fetchone()
+    config = _parse_json((profile or {}).get("config")) or {}
+    row = session or {}
+    return {
+        "provider": row.get("provider_id") if session is not None else config.get("provider"),
+        "model": row.get("model") or row.get("launched_model") or config.get("model"),
+        "effort": row.get("effort") or config.get("effort"),
+        "permission_mode": row.get("permission_mode") or config.get("permission_mode") or "default",
+        "workspace_project_ids": row.get("workspace_project_ids"),
+        "session_mode": row.get("session_mode"),
+    }
+
+
 def start_turn(
     turn_id: str,
     run_id: Optional[str] = None,
@@ -697,9 +722,12 @@ def start_turn(
                     or _cwd_blocked(cursor, candidate["session_id"])):
                 return None
             resumed = None
+            cursor.execute("SELECT * FROM turns WHERE id=%s AND state='queued' FOR UPDATE", (turn_id,))
+            queued = _row(cursor.fetchone())
+            if queued is None:
+                return None
+            queued["payload"]["execution_defaults"] = _execution_defaults(cursor, queued)
             if can_resume is not None:
-                cursor.execute("SELECT * FROM turns WHERE id=%s AND state='queued' FOR UPDATE", (turn_id,))
-                queued = _row(cursor.fetchone())
                 cursor.execute(
                     "SELECT * FROM turns WHERE session_id=%s AND state <> 'queued' "
                     "AND COALESCE(stop_reason, '') <> 'steered' "
@@ -741,10 +769,10 @@ def start_turn(
                         turn_id = previous["id"]
             cursor.execute(
                 "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "
-                "started_at=NOW() "
+                "started_at=NOW(), payload=%s "
                 "WHERE id=%s AND state='queued' "
                 "RETURNING *",
-                (run_id, instance_id, turn_id),
+                (run_id, instance_id, json.dumps(queued["payload"]), turn_id),
             )
             row = _row(cursor.fetchone()) or resumed
             if row is not None:
@@ -1079,18 +1107,23 @@ def settle_parked_turns(
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         cursor.execute(sql + "RETURNING id, payload", params)
         rows = cursor.fetchall()
-    # New-format parks have no premature completion event. Stop, boot repair,
-    # and an incompatible successor all close them through this one boundary.
-    from app.db import session_events
+        # Commit the lifecycle transition and its only terminal event together.
+        # An append failure leaves the row parked, so Stop/repair can retry.
+        from app.db import session_events
 
-    for row in rows or []:
-        payload = _parse_json(row.get("payload")) or {}
-        if "parked_usage" in payload:
-            session_events.append_events(session_id, [{
-                "id": f"parked-completed-{row['id']}",
-                "type": "turn.completed", "turn_id": row["id"],
-                "payload": {"stop_reason": "parked_settled", "usage": payload["parked_usage"]},
-            }])
+        events = []
+        for row in rows or []:
+            payload = _parse_json(row.get("payload")) or {}
+            if "parked_usage" in payload:
+                events.append({
+                    "id": f"parked-completed-{row['id']}",
+                    "type": "turn.completed", "turn_id": row["id"],
+                    "payload": {"stop_reason": "parked_settled", "usage": payload["parked_usage"]},
+                })
+        if events:
+            session_events.append_events(session_id, events, _conn=conn)
+    if events:
+        session_events.notify_session_write(session_id, "session_events")
     return len(rows or [])
 
 

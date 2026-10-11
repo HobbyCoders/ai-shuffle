@@ -18,8 +18,12 @@ settlement emits `turn.completed`. Background-completion wakes also resume it.
 A send after a genuinely completed turn starts a new id.
 
 Input still enters the durable queue before it is claimed. `/compact`, replay,
-attachments requiring setup, a different agent/model/permission/workspace
+attachments requiring setup, a different agent/model/provider/permission/workspace
 binding, and other incompatible inputs retain their separate queued turn.
+Mutable session/agent defaults are snapshotted at claim: changed defaults or
+legacy parks without a snapshot conservatively start a separate turn, even if
+an override masks the changed default. REST/connector replies from a parked
+attempt return that attempt's text, never a previous completed answer.
 Streaming peer-message receipts retain `queued_turn_id` with
 `checkpoint_backed: false` to identify their durable queue row, as before;
 ordinary user steers do not use that peer-message marker. Compatible parked

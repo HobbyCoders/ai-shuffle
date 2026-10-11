@@ -142,7 +142,7 @@ _STEERABLE_SOURCES = ("user", "queue", "agent_message")
 # under settings the user did not pick. ``fast`` and ``context_window`` are
 # deliberately NOT in this set: they shape throughput and
 # budget rather than which agent answers.
-_STEER_BINDING_KEYS = ("model", "effort", "permission_mode", "workspace_project_ids")
+_STEER_BINDING_KEYS = ("model", "provider", "effort", "permission_mode", "workspace_project_ids")
 
 # Binding keys whose ABSENCE on a queued row means "keep this chat's current
 # value", exactly as the run path reads it: ``query_options`` falls back to the
@@ -2033,6 +2033,12 @@ class SessionRuntime:
         if queued.get("project_id") != parked.get("project_id"):
             return False
         if queued.get("worktree_id") != parked.get("worktree_id"):
+            return False
+        before = (parked.get("payload") or {}).get("execution_defaults")
+        after = (queued.get("payload") or {}).get("execution_defaults")
+        # Raw overrides can both be empty while the session/profile defaults
+        # changed during the wait. Unknown legacy bindings also stay separate.
+        if before is None or after is None or before != after:
             return False
         return SessionRuntime(parked)._steer_eligible(queued)
 

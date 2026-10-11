@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -89,6 +90,8 @@ def append_events(
     events: List[Dict[str, Any]],
     run_id: Optional[str] = None,
     fence_token: Optional[int] = None,
+    *,
+    _conn: Any = None,
 ) -> Tuple[int, int]:
     """Append a batch of events, returning the ``(first_seq, last_seq)`` range.
 
@@ -107,7 +110,8 @@ def append_events(
         raise ValueError("fence_token is required when run_id is provided")
 
     n = len(events)
-    with get_db() as conn:
+    # With a caller-owned transaction, the caller also sends the post-commit wake.
+    with (get_db() if _conn is None else nullcontext(_conn)) as conn:
         cursor = conn.cursor()
 
         # 1. Fence check — reject a stale/superseded runner before writing.
@@ -173,7 +177,8 @@ def append_events(
         except Exception:
             logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
 
-    notify_session_write(session_id, "session_events")
+    if _conn is None:
+        notify_session_write(session_id, "session_events")
     return first_seq, last_seq
 
 

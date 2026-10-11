@@ -11,7 +11,7 @@ instead of on ``AutomationManager``.
 
 The log is the record: :func:`final_turn_outcome` reads the session's LAST
 terminal turn event and :func:`extract_final_assistant_text` concatenates the
-text deltas of the last completed turn. Neither raises — an unreadable log
+text deltas of that same latest attempt (including a park). Neither raises — an unreadable log
 yields an empty outcome, which callers treat as "nothing derivable".
 """
 
@@ -47,6 +47,20 @@ def load_session_events(session_id: str) -> List[Dict[str, Any]]:
     return events
 
 
+def _latest_attempt(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A logical turn can start again; never borrow text/outcomes across attempts."""
+    for index in range(len(events) - 1, -1, -1):
+        if events[index].get("event_type") == "turn.started":
+            turn_id = events[index].get("turn_id")
+            return [ev for ev in events[index:] if ev.get("turn_id") in (turn_id, None)]
+    return events  # Historical/backfilled logs may not contain turn.started.
+
+
+def _last_terminal(events: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    return next((ev for ev in reversed(events) if ev.get("event_type") in
+                 ("turn.completed", "turn.aborted", "turn.parked")), None)
+
+
 def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     """Derive a settled turn's outcome from the session's LAST terminal turn
     event (``turn.completed`` / ``turn.aborted`` / ``turn.parked``).
@@ -60,7 +74,8 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
       (a genuine stop that settled before the timeout);
     * any other ``turn.aborted`` (error / crash / escalation / lease) →
       ``error`` = the aborted ``message`` or a reason-derived string;
-    * ``turn.parked`` → clean run, retaining the preceding completion usage.
+    * ``turn.parked`` → clean run with its recorded usage (or the immediately
+      preceding completion's usage for legacy logs).
 
     ``terminal_found`` says whether a terminal event existed AT ALL (mirrors
     ``provider_agent.final_turn_outcome``). It is the difference between "the
@@ -72,12 +87,8 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     ignoring it; callers that just waited a submitted turn out must fail
     closed on it (``AutomationManager._run_prompt_as_session`` does).
     """
-    events = load_session_events(session_id)
-    terminal = None
-    for ev in reversed(events):
-        if ev.get("event_type") in ("turn.completed", "turn.aborted", "turn.parked"):
-            terminal = ev
-            break
+    events = _latest_attempt(load_session_events(session_id))
+    terminal = _last_terminal(events)
     result: Dict[str, Any] = {
         "usage": {},
         "error": None,
@@ -130,18 +141,13 @@ def extract_final_assistant_text(session_id: str) -> str:
     runs-list preview. Derived from the V2 session event log: the turn
     recorder streams assistant text as ``assistant.text_delta`` events and
     the v2 path no longer dual-writes ``session_messages``, so this
-    concatenates the LAST completed turn's text-delta payloads in seq order
-    exactly as replay would render them. Never raises (returns "")."""
-    events = load_session_events(session_id)
-
-    # Target the LAST completed turn; if none completed (an aborted or
-    # interrupted run), fall back to the turn of the last assistant text
-    # event so a partial turn still surfaces its text.
-    target_turn_id = None
-    for ev in reversed(events):
-        if ev.get("event_type") == "turn.completed":
-            target_turn_id = ev.get("turn_id")
-            break
+    concatenates the latest settled attempt's text-delta payloads in seq order.
+    Parks/aborts must not return an older completed answer; a resumed attempt
+    must not re-deliver text from earlier attempts of the same logical turn.
+    Never raises (returns "")."""
+    events = _latest_attempt(load_session_events(session_id))
+    terminal = _last_terminal(events)
+    target_turn_id = terminal.get("turn_id") if terminal else None
     if target_turn_id is None:
         for ev in reversed(events):
             if ev.get("event_type") in ("assistant.text_delta", "message.assistant"):

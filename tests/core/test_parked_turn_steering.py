@@ -185,3 +185,90 @@ async def test_each_resumed_attempt_books_once(mock_db):
             )
     assert database.get_session(sid)["total_tokens_in"] == 30
     assert database.get_session(sid)["total_cost_usd"] == pytest.approx(0.02)
+
+@pytest.mark.parametrize("after_insert", [False, True])
+def test_park_settlement_and_completion_roll_back_together(mock_db, after_insert):
+    sid = "park-atomic"
+    first = turns.enqueue_turn(sid, "user", prompt="work")
+    turns.start_turn(first["id"])
+    turns.park_turn(first["id"], ["task"], usage={"tokens_out": 5})
+    append = session_events.append_events
+
+    def fail(session_id, events, *, _conn):
+        cursor = _conn.cursor()
+        cursor.execute("SELECT state FROM turns WHERE id=%s", (first["id"],))
+        assert cursor.fetchone()["state"] == "completed"  # after the row update
+        if after_insert:
+            append(session_id, events, _conn=_conn)
+        raise RuntimeError("simulated completion failure")
+
+    with patch.object(session_events, "append_events", side_effect=fail), pytest.raises(RuntimeError):
+        turns.settle_parked_turns(sid)
+    assert turns.get_turn(first["id"])["state"] == "parked"
+    assert session_events.get_events(sid) == []
+    assert turns.settle_parked_turns(sid) == 1
+    assert turns.settle_parked_turns(sid) == 0
+    assert [e["event_type"] for e in session_events.get_events(sid)] == ["turn.completed"]
+
+
+@pytest.mark.parametrize("change", ["provider", "session_default", "profile_default", "legacy"])
+def test_changed_provider_or_inherited_defaults_do_not_join(mock_db, change):
+    sid = "binding-change"
+    database.create_session(session_id=sid, profile_id="default")
+    overrides = {"model": "same-model", "provider": "account-a"} if change == "provider" else {}
+    first = turns.enqueue_turn(sid, "user", prompt="first", profile_id="default", overrides=overrides)
+    turns.start_turn(first["id"])
+    turns.park_turn(first["id"], ["task"])
+    if change == "provider":
+        overrides = {**overrides, "provider": "account-b"}
+    elif change == "session_default":
+        mock_db.execute("UPDATE sessions SET provider_id=? WHERE id=?", ("another-account", sid))
+    elif change == "profile_default":
+        mock_db.execute("UPDATE agents SET config=? WHERE id=?", ('{"model":"new-default"}', "default"))
+    else:
+        mock_db.execute("UPDATE turns SET payload=? WHERE id=?", ('{}', first["id"]))
+    mock_db.commit()
+    second = turns.enqueue_turn(sid, "user", prompt="next", profile_id="default", overrides=overrides)
+    started = turns.start_turn(second["id"], can_resume=session_runtime.SessionRuntime._can_resume_parked)
+    assert started["id"] == second["id"]
+    assert turns.get_turn(first["id"])["state"] == "parked"
+
+
+@pytest.mark.asyncio
+async def test_rest_existing_completed_session_returns_new_parked_attempt(mock_db):
+    from unittest.mock import AsyncMock
+    from app.api.query import conversation
+    from app.core.models import ConversationRequest
+
+    sid = "rest-completed-parked"
+    database.create_api_user("rest-owner", "Test key", "test-hash")
+    database.create_session(session_id=sid, profile_id="default", api_user_id="rest-owner")
+    create_recorder = turn_recorder.TurnRecorder.create_for_run
+    first = turns.enqueue_turn(sid, "api", prompt="old")
+    def pump(text, tokens):
+        return make_pump([
+            {"type": "stream_delta", "delta_type": "text", "content": text},
+            {"type": "done", "metadata": {"tokens_out": tokens}},
+        ])
+    with _runtime_env(pump=pump("OLD ANSWER", 1)), patch.object(
+        turn_recorder.TurnRecorder, "create_for_run", new=create_recorder,
+    ):
+        assert await session_runtime.SessionRuntime(first).execute() == "completed"
+
+    async def submit(session_id, source, **kwargs):
+        second = turns.enqueue_turn(session_id, source, prompt=kwargs["prompt"])
+        with _runtime_env(pump=pump("NEW PARKED ANSWER", 7), bg_work=[{"id": "monitor"}]), patch.object(
+            turn_recorder.TurnRecorder, "create_for_run", new=create_recorder,
+        ), patch.object(session_runtime, "record_parked", new=turn_recorder.record_parked):
+            assert await session_runtime.SessionRuntime(second).execute() == "parked"
+        return second["id"]
+
+    with patch("app.api.query.require_claude_auth"), patch(
+        "app.core.turn_manager.submit_async", side_effect=submit,
+    ), patch("app.core.turn_manager.wait_session_idle", new=AsyncMock(return_value=True)):
+        result = await conversation(
+            ConversationRequest(session_id=sid, profile="default", prompt="new"),
+            {"id": "rest-owner", "profile_ids": ["default"]},
+        )
+    assert result["response"] == "NEW PARKED ANSWER"
+    assert result["metadata"].tokens_out == 7
