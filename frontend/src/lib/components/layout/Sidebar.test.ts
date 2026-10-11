@@ -1746,6 +1746,31 @@ describe('Sidebar assistant row', () => {
 		mocks.activeView.set(null);
 	});
 
+	it('offers no Rename, Fork or Delete for the built-in conversation', async () => {
+		mocks.sessions.set([
+			session('home', 'Assistant home chat', null, true),
+			session('active', 'Active chat', 'visible-project', true),
+		]);
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+		acceptAssistant(ready);
+		await tick();
+
+		const row = screen.getByRole('button', { name: 'Open your assistant' });
+		expect(row.hasAttribute('aria-haspopup')).toBe(false);
+		await fireEvent.contextMenu(row);
+		await fireEvent.keyDown(row, { key: 'F2' });
+		await fireEvent.keyDown(row, { key: 'Delete' });
+		await tick();
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(screen.queryByRole('menuitem')).toBeNull();
+		for (const label of [/rename/i, /fork/i, /delete/i]) {
+			expect(screen.queryByRole('button', { name: label })).toBeNull();
+			expect(screen.queryByTitle(label)).toBeNull();
+		}
+		// The home chat never appears as an ordinary row that could carry them.
+		expect(cardIds()).toEqual(['active']);
+	});
+
 	it('does not expose the assistant to non-admins', () => {
 		render(Sidebar, { props: { ...sidebarProps, isAdmin: false } });
 		expect(screen.queryByRole('button', { name: 'Open your assistant' })).toBeNull();

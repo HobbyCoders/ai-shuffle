@@ -44,6 +44,11 @@ describe('assistant mode flag', () => {
 		for (const source of [chatView, chatInput, messageArea]) expect(source).not.toContain('home_session_id');
 	});
 
+	it('loads the assistant state for an open chat even before any sidebar mounts', () => {
+		// The phone shell mounts its sidebar drawer on first open only.
+		expect(mainPanel).toContain('if ($isAdmin && activeTab?.sessionId && !$assistantState) void refreshAssistant().catch(() => {});');
+	});
+
 	it('hides the header download and Git in the home only', () => {
 		expect(mainPanel).toContain("{#if !assistantMode && $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}");
 		expect(mainPanel).toContain('{#if activeTab && !assistantMode && shouldShowHeaderGitActions({');

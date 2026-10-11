@@ -56,7 +56,7 @@
 	import AssistantHome from '$lib/components/assistant/AssistantHome.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
-	import { assistantState, isAssistantHome } from '$lib/stores/assistant';
+	import { assistantState, isAssistantHome, refreshAssistant } from '$lib/stores/assistant';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -233,6 +233,13 @@
 	// Assistant mode: the open chat is the assistant's home. Decided here, once,
 	// and passed down; the header, composer and transcript read only this flag.
 	const assistantMode = $derived(isAssistantHome(activeTab?.sessionId, $assistantState));
+	// The flag needs the assistant's state. The desktop sidebar loads it when it
+	// mounts, but the phone shell mounts its sidebar drawer only on first open,
+	// so a chat opened straight away would not know it is the built-in home
+	// (and would offer Rename / Fork / Delete). Load it here when it is missing.
+	$effect(() => {
+		if ($isAdmin && activeTab?.sessionId && !$assistantState) void refreshAssistant().catch(() => {});
+	});
 	const sessionBrowser = $derived(browserPanel.forSession(activeTab?.sessionId ?? null));
 
 

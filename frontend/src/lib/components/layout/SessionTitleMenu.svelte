@@ -12,6 +12,9 @@
 	 * The chevron opens a bottom sheet that shows the whole title (the bar can
 	 * only fit one ellipsized line) above the same actions; Rename edits the
 	 * title in place inside the sheet. Renders nothing for an unbound chat.
+	 *
+	 * The assistant's home chat counts as unbound in both variants: it is built
+	 * in, so it has no Rename / Fork / Delete.
 	 */
 	import { onDestroy } from 'svelte';
 	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
@@ -20,6 +23,7 @@
 	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { assistantState, isAssistantHome } from '$lib/stores/assistant';
 	import { notify } from '$lib/stores/notifications';
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
@@ -36,7 +40,9 @@
 
 	let { title, sessionId = null, variant = 'crumb', projectLabel = null }: Props = $props();
 
-	const bound = $derived(!!sessionId);
+	// The assistant's home chat is built in: it cannot be renamed, forked or
+	// deleted, so it takes the unbound path (plain title, no chevron) everywhere.
+	const bound = $derived(!!sessionId && !isAssistantHome(sessionId, $assistantState));
 	const open = $derived($openHeaderDropdown === 'session-title');
 	const sheet = $derived(variant === 'sheet');
 
@@ -70,6 +76,15 @@
 	// header panel) closes it.
 	$effect(() => {
 		if (sheet && !open && renaming) cancelRename();
+	});
+
+	// The chat can turn out to be the assistant's home after the menu opened
+	// (its state loads late): drop the menu and any half-done action.
+	$effect(() => {
+		if (bound) return;
+		if (open) closeMenu();
+		if (renaming) cancelRename();
+		if (pendingDelete) pendingDelete = false;
 	});
 
 	// Register outside-click / Escape on the next frame so the opening click
@@ -125,7 +140,7 @@
 	}
 
 	async function commitRename() {
-		if (!renaming || !sessionId) return;
+		if (!renaming || !sessionId || !bound) return;
 		const next = renameValue.trim();
 		const current = storedTitle().trim();
 		cancelRename();
@@ -157,7 +172,7 @@
 	}
 
 	async function handleFork() {
-		if (!sessionId) return;
+		if (!sessionId || !bound) return;
 		if (sheet) closeSheet();
 		else closeMenu();
 		try {
@@ -177,7 +192,7 @@
 	}
 
 	async function confirmDelete() {
-		if (!sessionId) return;
+		if (!sessionId || !bound) return;
 		const id = sessionId;
 		pendingDelete = false;
 		try {
