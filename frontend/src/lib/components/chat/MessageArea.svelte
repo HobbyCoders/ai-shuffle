@@ -451,11 +451,12 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; model: TranscriptModel } =
+	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; groupingEnabled: boolean; model: TranscriptModel } =
 		{
 			messages: null,
 			isStreaming: false,
 			latestTurnUnsettled: false,
+			runningToolKey: '',
 			groupingEnabled: true,
 			model: {
 				items: [],
@@ -464,7 +465,8 @@
 				subagentToolIds: new Set<string>(),
 				itemIndexByTurnId: new Map<string, number>(),
 				lastAssistantMetadata: null,
-				latestUserTurnId: null
+				latestUserTurnId: null,
+				midTurnUserIds: new Set<string>()
 			}
 		};
 
@@ -475,6 +477,11 @@
 		const sessionSwarms = $swarms.bySession[sessionId ?? ''];
 		const isStreamingNow = $activeSession.isStreaming;
 		const latestIsUnsettled = latestTurnUnsettled;
+		// A turn whose background work is still running stays unsettled even once
+		// a later turn opened (a send or a wake must not fold it). Keyed by value:
+		// every /live poll hands over a fresh task list.
+		const runningIds = runningToolIds;
+		const runningToolKey = [...runningIds].sort().join('\0');
 		// When grouping is off, groupable tools fall through to the plain
 		// single-message path (system grouping is unaffected by this toggle).
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
@@ -484,6 +491,7 @@
 			&& sessionSwarms === _displayCache.swarms
 			&& isStreamingNow === _displayCache.isStreaming
 			&& latestIsUnsettled === _displayCache.latestTurnUnsettled
+			&& runningToolKey === _displayCache.runningToolKey
 			&& groupingEnabled === _displayCache.groupingEnabled
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
@@ -500,6 +508,7 @@
 		const model = buildTranscript(messages, {
 			isStreaming: isStreamingNow,
 			latestTurnUnsettled: latestIsUnsettled,
+			runningToolIds: runningIds,
 			sessionId,
 			swarms: Object.values(sessionSwarms ?? {}),
 			groupingEnabled
@@ -510,6 +519,7 @@
 		_displayCache.swarms = sessionSwarms;
 		_displayCache.isStreaming = isStreamingNow;
 		_displayCache.latestTurnUnsettled = latestIsUnsettled;
+		_displayCache.runningToolKey = runningToolKey;
 		_displayCache.groupingEnabled = groupingEnabled;
 		_displayCache.model = model;
 		return model;
@@ -525,6 +535,7 @@
 	// historic user rows are not re-evaluated on every streaming fold.
 	const promptOccurrence = $derived(transcript.promptOccurrence);
 	const rewindEligible = $derived(transcript.rewindEligible);
+	const midTurnUserIds = $derived(transcript.midTurnUserIds);
 
 	// What this column should DRAW right now (PERFORMANCE_REVIEW §3.1 S3).
 	// ChatView already suppresses its own hero while history loads, but the
@@ -2030,6 +2041,7 @@
 			messageUuid={message.jsonlUuid}
 			userPromptOccurrence={userPromptOccurrence(messageIndex)}
 			rewindEligible={rewindEligible[messageIndex]}
+			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}
 		/>

@@ -80,12 +80,16 @@ describe('settled turn media gallery', () => {
 			}
 		}
 		const items = buildDisplayItems(messages, options);
-		expect(items.map(item => item.kind)).toEqual(['message', 'work_log', 'message', 'work_log']);
+		// One fold for the turn. Its gallery sits above the kept rows, so only
+		// media from before the steer joins it; later media stays in its row.
+		expect(items.map(item => item.kind)).toEqual(['message', 'work_log']);
 		const groups = items.filter(item => item.kind === 'work_log');
 		expect(groups.map(group => group.gallery?.map(media => media.src)))
-			.toEqual([[image, image2], ['/c.png', '/d.mp4']]);
+			.toEqual([[image, image2]]);
 		expect(groups.map(group => group.sequence.map(entry => entry.message.id)))
-			.toEqual([['t', 'a'], ['later']]);
+			.toEqual([['t', 'a', 'steer', 'later']]);
+		expect(groups[0].sequence.filter(entry => !entry.hiddenWhenCollapsed).map(entry => entry.message.id))
+			.toEqual(['a', 'steer', 'later']);
 		expect(buildDisplayItems(structuredClone(messages), options)).toEqual(items);
 	});
 	it('does not combine single images across a steer into a gallery', () => {

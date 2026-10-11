@@ -21,9 +21,10 @@
 		streaming?: boolean;
 		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
+		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false, midTurn = false }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -57,7 +58,7 @@
 			{/if}
 		</div>
 		<div class="useractions" class:is-visible={showActions}>
-			{#if timestamp}<span class="user-time">{formatMessageTime(timestamp)}</span>{/if}
+			{#if timestamp}<span class="user-time">{formatMessageTime(timestamp)}{#if midTurn}{' · mid-turn'}{/if}</span>{/if}
 			<MessageActions
 				{sessionId}
 				messageContent={content}
