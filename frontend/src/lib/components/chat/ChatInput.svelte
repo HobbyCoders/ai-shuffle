@@ -21,6 +21,7 @@
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { pendingHandoff, handoffPlaceholder } from './pending-handoff';
+	import { handoffPending } from '$lib/stores/handoff-pending';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
@@ -123,7 +124,7 @@
 	// A queued move (#1819) holds new messages until it runs: say so.
 	const moveWait = $derived.by(() => {
 		const row = $sessions.find((session) => session.id === $activeSession.sessionId);
-		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId));
+		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId, $activeSession.sessionId ? $handoffPending[$activeSession.sessionId] : null));
 	});
 	const composerPlaceholder = $derived(
 		moveWait ??

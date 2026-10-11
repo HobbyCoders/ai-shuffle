@@ -33,6 +33,7 @@
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import { pendingHandoff, handoffActivitySince, moveBlocked } from './pending-handoff';
+	import { handoffPending, recordHandoffPending } from '$lib/stores/handoff-pending';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -199,7 +200,7 @@
 		const sid = $activeSession.sessionId;
 		const messages = $activeSession.messages;
 		if (queueCancelled?.sessionId === sid && !handoffActivitySince(messages, queueCancelled.seen)) return null;
-		const fromChat = pendingHandoff(messages, sessionRow ? { deviceId: sessionRow.owner_device_id, deviceName: sessionRow.device_name } : null, sid);
+		const fromChat = pendingHandoff(messages, sessionRow ? { deviceId: sessionRow.owner_device_id, deviceName: sessionRow.device_name } : null, sid, sid ? $handoffPending[sid] : null);
 		if (fromChat) return fromChat;
 		if (ownerQueued?.sessionId === sid && !handoffActivitySince(messages, ownerQueued.seen)) {
 			return { worker: ownerQueued.worker, phase: 'queued' as const, afterQueued: ownerQueued.afterQueued };
@@ -318,7 +319,9 @@
 			runnerChecking = true;
 			let busy: QueuedMoveBusy | null = null;
 			try {
-				busy = (await getQueuedMove(sessionId)).busy;
+				const state = await getQueuedMove(sessionId);
+				busy = state.busy;
+				if (state && 'pending' in state) recordHandoffPending(sessionId, state.pending ?? null);
 			} catch {
 				// An older owner cannot say: the move itself still refuses a busy chat.
 			} finally {

@@ -352,7 +352,15 @@ export interface QueuedMoveBusy {
 export interface QueuedMoveState {
 	busy: QueuedMoveBusy;
 	/** A move already queued by the owner or the agent. */
-	pending: { worker: string; target_id: string; by: 'owner' | 'agent' | (string & {}) } | null;
+	pending: {
+		/** The move's id (#2308); older owners omit it. */
+		handoff_id?: string | null;
+		worker: string;
+		target_id: string;
+		by: 'owner' | 'agent' | (string & {});
+		/** Commit, push and move are running. */
+		moving?: boolean;
+	} | null;
 }
 
 export async function getQueuedMove(sessionId: string): Promise<QueuedMoveState> {
@@ -368,8 +376,8 @@ export async function queueMove(
 	sessionId: string,
 	targetInstanceId?: string,
 	stop = false
-): Promise<{ queued: boolean; worker: string; after?: 'turn' | 'queued' }> {
-	return api.post<{ queued: boolean; worker: string }>(`/sessions/${sessionId}/handoff`, {
+): Promise<{ queued: boolean; worker: string; after?: 'turn' | 'queued'; handoff_id?: string }> {
+	return api.post<{ queued: boolean; worker: string; after?: 'turn' | 'queued'; handoff_id?: string }>(`/sessions/${sessionId}/handoff`, {
 		...(targetInstanceId ? { target_instance_id: targetInstanceId } : {}),
 		stop
 	});

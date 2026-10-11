@@ -22,7 +22,7 @@
  * `handoff_id` are grouped strictly by it; without one, a late `cancelled`
  * settles the move a newer one replaced, never the newer move. On the source
  * worker the move settles when the chat's owner becomes the target
- * (`settleByOwner`), or on a `sent` record.
+ * (`settleByOwner`): no source-side transcript record exists for success.
  */
 import type { ChatMessage } from '$lib/stores/types';
 
@@ -283,12 +283,11 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 				return;
 			}
 			case 'moved':
-			case 'sent':
 			case 'failed':
 			case 'timeout':
 			case 'cancelled': {
 				const phase: HandoffPhase =
-					status === 'moved' || status === 'sent' ? 'done'
+					status === 'moved' ? 'done'
 					: status === 'cancelled' || (status === 'failed' && reason === 'open_prompt') ? 'cancelled'
 					: 'failed';
 				// `moved` may name the worker that really took the chat, which can
@@ -380,42 +379,56 @@ function ownerChanged(before: Seen, now: Seen): boolean {
 }
 
 /**
- * Settle a sending move on the source worker once its owner is SEEN to change
- * to the target. The source never receives `moved` (the new worker records it),
- * and a `sent` record settles the move by itself once the backend writes one.
+ * What the owning worker says is pending (`GET /sessions/{id}/handoff`).
+ * `known: false` until it has been read for this session.
+ */
+export interface HandoffPendingView {
+	known: boolean;
+	pending: { handoff_id?: string | null; target_id?: string | null; moving?: boolean } | null;
+}
+
+/** Target device of each identified move, learned from the pending move while it was pending. */
+const targetById = new Map<string, string>();
+
+/** Remember a pending move's target, so its end can be recognised after it stops being pending. */
+export function noteHandoffTarget(handoffId: string | null | undefined, targetId: string | null | undefined): void {
+	const id = text(handoffId);
+	const target = text(targetId);
+	if (id && target) targetById.set(id, target);
+}
+
+/**
+ * Settle a sending move on the source worker. No transcript record says it
+ * succeeded there: the new worker writes `moved`, and the source only updates
+ * the session (`owner_device_id` becomes the target device, #2308).
  *
- * Equality alone proves nothing: a stale session row, or the destination's own
- * view of a move it is still receiving, already names the target. So the owner
- * is captured when the move is first seen sending, and only a later, different
- * owner that is the target settles it. State is shared per session, so the row,
- * the chip and the composer agree. Returns `handoffs` itself when nothing
- * changes, and the same result for the same inputs, so rows keep identity.
+ * - An identified move (`handoff_id` X) whose target device is known is done
+ *   when the session's `owner_device_id` IS that target AND the owning worker
+ *   no longer reports X pending (`pending` null or another id), which also
+ *   holds on a reload after the move; or when the owner was SEEN to change to
+ *   the target while the page watched. Owner equality with X still pending
+ *   (or with pending not yet read) proves nothing.
+ * - If X's target device is not known (a reload after the move: the pending
+ *   move, the only source of `target_id`, is gone) the same authoritative pair
+ *   is checked against the target's name instead.
+ * - A move without an id (older workers) settles only on an observed change.
+ *
+ * Observed owners are kept per session, so the row, the chip and the composer
+ * agree. Returns `handoffs` itself when nothing changes, and the same result
+ * for the same inputs, so rows keep identity.
  */
 export function settleByOwner(
 	handoffs: HandoffEpisodes,
 	owner: HandoffOwner | null | undefined,
-	sessionId: string | null | undefined = ''
+	sessionId: string | null | undefined = '',
+	pendingView?: HandoffPendingView | null
 ): HandoffEpisodes {
 	const current = handoffs.open;
 	if (!current || current.phase !== 'sending') return handoffs;
 	const slot = `${sessionId ?? ''}\0${current.key}`;
-	if (!ownerMoved.has(slot)) {
-		if (!owner || (!owner.deviceId && !text(owner.deviceName))) return handoffs;
-		const seen = ownerAtSend.get(slot);
-		const now = seenOf(owner);
-		if (seen === undefined) {
-			ownerAtSend.set(slot, now);
-			return handoffs;
-		}
-		if (!ownerChanged(seen, now)) {
-			// The same owner, maybe described better: keep what is now known.
-			ownerAtSend.set(slot, { id: seen.id || now.id, name: now.name || seen.name });
-			return handoffs;
-		}
-		if (!ownedByTarget(current, owner)) return handoffs;
-		ownerMoved.add(slot);
-		ownerAtSend.delete(slot);
-	}
+	if (!ownerMoved.has(slot) && !decide(current, slot, owner, pendingView)) return handoffs;
+	ownerMoved.add(slot);
+	ownerAtSend.delete(slot);
 	const cached = settledByOwner.get(handoffs);
 	if (cached) return cached;
 	const done: HandoffEpisode = { ...current, phase: 'done', cancelling: undefined };
@@ -426,9 +439,40 @@ export function settleByOwner(
 	return value;
 }
 
+/** Whether the sending move `current` has now ended on this side (see settleByOwner). */
+function decide(
+	current: HandoffEpisode,
+	slot: string,
+	owner: HandoffOwner | null | undefined,
+	pendingView: HandoffPendingView | null | undefined
+): boolean {
+	const pending = pendingView?.pending ?? null;
+	if (current.id && pending && text(pending.handoff_id) === current.id) noteHandoffTarget(current.id, pending.target_id);
+	if (!owner || (!owner.deviceId && !text(owner.deviceName))) return false;
+	const target = current.targetId || (current.id ? targetById.get(current.id) : undefined);
+	const ownedNow = target ? !!owner.deviceId && owner.deviceId === target : ownedByTarget(current, owner);
+	// The authoritative pair: owned by the target, and X is no longer pending there.
+	const noLongerPending = !!current.id && !!pendingView?.known && text(pending?.handoff_id) !== current.id;
+	if (ownedNow && noLongerPending) return true;
+	// Otherwise only a change of owner the page saw happen.
+	const now = seenOf(owner);
+	const seen = ownerAtSend.get(slot);
+	if (seen === undefined) {
+		ownerAtSend.set(slot, now);
+		return false;
+	}
+	if (!ownerChanged(seen, now)) {
+		// The same owner, maybe described better: keep what is now known.
+		ownerAtSend.set(slot, { id: seen.id || now.id, name: now.name || seen.name });
+		return false;
+	}
+	return ownedNow;
+}
+
 /** Test hook: forget every observed owner. */
 export function resetOwnerTransitions(): void {
 	ownerAtSend.clear();
+	targetById.clear();
 	ownerMoved.clear();
 }
 

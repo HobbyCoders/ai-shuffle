@@ -65,6 +65,7 @@
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import HandoffCard from './HandoffCard.svelte';
 	import { EMPTY_HANDOFFS, settleByOwner } from '$lib/utils/handoff-episodes';
+	import { handoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
@@ -642,9 +643,24 @@
 	// target settles a move that is sending (settleByOwner keeps identity).
 	const handoffOwnerId = $derived(openRow?.owner_device_id ?? null);
 	const handoffOwnerName = $derived(openRow?.device_name ?? null);
+	const handoffPendingView = $derived(openSessionId ? $handoffPending[openSessionId] ?? null : null);
 	const handoffAnchors = $derived(
-		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }, openSessionId).byAnchor
+		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }, openSessionId, handoffPendingView).byAnchor
 	);
+	// The owning worker's pending move: read again whenever the open identified
+	// move, its phase or the session's owner changes (a finished move then
+	// reads null from its new owner, also after a reload).
+	const openHandoff = $derived(transcript.handoffs.open);
+	const handoffWatchKey = $derived(
+		openSessionId && openHandoff?.id && openHandoff.phase === 'sending'
+			? `${openHandoff.id}\0${handoffOwnerId ?? ''}`
+			: null
+	);
+	$effect(() => {
+		const sid = openSessionId;
+		const key = handoffWatchKey;
+		if (sid && key) untrack(() => void refreshHandoffPending(sid, key));
+	});
 	const openIsRemote = $derived(!!$activeSession.isRemote);
 	const openNeeds = $derived(openSessionNeeds(
 		$activeSession,
