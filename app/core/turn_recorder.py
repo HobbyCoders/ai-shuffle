@@ -342,6 +342,8 @@ def _registry_worker(session_id: str, task_id: Any) -> Dict[str, Any]:
         labels: Dict[str, Any] = {"worker_name": str(name)} if name else {}
         if record.get("model"):
             labels["model"] = str(record["model"])
+        if record.get("startedAt"):
+            labels["started_at"] = str(record["startedAt"])
         return labels
     except Exception:  # noqa: BLE001 — a label must never break recording
         return {}

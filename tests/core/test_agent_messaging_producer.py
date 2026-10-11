@@ -950,6 +950,16 @@ async def test_dispatched_worker_native_continuation_lifecycle(
             # The native engine resumed its own stored conversation, not a fresh loop.
             assert "original native report" in str(provider.requests[1].messages)
         assert provider_agent_supervisor.get_worker("root", "native-child") is None
+        # The panel replays task.updated, not the registry or completion card.
+        from app.db.session_events import get_events
+        updates = [e["payload"] for e in get_events("root", limit=1000)
+                   if e["event_type"] == "task.updated"
+                   and e["payload"]["task_id"] == "native-child"]
+        expected_status = ("killed" if ending in {"stop_task", "stop_all", "queued_stop"}
+                           else "error" if ending == "error" else "completed")
+        assert updates[-1]["state"] == expected_status
+        starts = [e for e in updates if e["state"] == "running"]
+        assert starts[-1]["started_at"] != starts[0]["started_at"]
         row = task_registry.get_task("root", "native-child")
         if ending in {"stop_task", "stop_all", "queued_stop"}:
             assert row["status"] == "killed"

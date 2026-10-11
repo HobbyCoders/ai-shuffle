@@ -2139,7 +2139,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				kind,
 				summary: typeof event.summary === 'string' ? event.summary : existing?.summary ?? null,
 				toolUseId: typeof event.tool_use_id === 'string' ? event.tool_use_id : existing?.toolUseId ?? null,
-				startedAt: existing?.startedAt || createdAt,
+				// New assignments reuse the task id, but not its original clock.
+				// Explicit registry time also fixes resumes whose prior terminal was lost.
+				startedAt: str(event.started_at) ||
+					(status === 'running' && existing?.status !== 'running'
+						? createdAt : existing?.startedAt) || createdAt,
 				updatedAt: createdAt || existing?.updatedAt || '',
 			};
 			// A remote Task child names its worker (additive; local tasks carry none).
