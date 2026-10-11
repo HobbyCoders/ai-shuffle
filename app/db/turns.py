@@ -731,6 +731,10 @@ def start_turn(
                 cursor.execute(
                     "SELECT * FROM turns WHERE session_id=%s AND state <> 'queued' "
                     "AND COALESCE(stop_reason, '') <> 'steered' "
+                    # A withdrawn queued message never replaced the parked
+                    # logical turn; skip its terminal bookkeeping on unpark.
+                    "AND NOT (state='aborted' AND started_at IS NULL "
+                    "AND COALESCE(stop_reason, '')='removed_from_queue') "
                     "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
                     (candidate["session_id"],),
                 )

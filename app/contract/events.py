@@ -25,6 +25,13 @@ class TurnQueued(EventBase):
     prompt_preview: str | None = None
 
 
+class QueuedMessageWithdrawn(EventBase):
+    """Content-free receipt for a held message withdrawn before it became a turn."""
+
+    type: Literal["queued_message.withdrawn"] = "queued_message.withdrawn"
+    message_id: str
+
+
 class TurnStarted(EventBase):
     type: Literal["turn.started"] = "turn.started"
     profile_id: str | None = None
@@ -379,6 +386,7 @@ SessionEvent = Annotated[
         TranscriptRewound,
         ArtifactCreated,
         TurnProviderAlive,
+        QueuedMessageWithdrawn,
     ],
     Field(discriminator="type"),
 ]
@@ -415,4 +423,5 @@ EVENT_TYPES: tuple[str, ...] = (
     "transcript.rewound",
     "artifact.created",
     "turn.provider_alive",
+    "queued_message.withdrawn",
 )

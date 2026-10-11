@@ -114,7 +114,22 @@ const prunedIds = new Set<string>();
 let deliveries: Delivery[] = [];
 // Keep an unresolved cancellation visible even if a queue-cleared frame wins
 // the race with its verdict. No text matching or expiring local-id map.
-const removals = new Map<string, PendingEntry>();
+interface CancellationState {
+	removals: Map<string, PendingEntry>;
+	withdrawn: Set<string>;
+	drafts: string[];
+}
+// Cancellation transactions belong to a session, not its currently mounted
+// feed. A socket verdict can arrive after that feed has been torn down.
+const cancellations = new Map<string | null, CancellationState>();
+function cancellationState(id: string | null): CancellationState {
+	let state = cancellations.get(id);
+	if (!state) {
+		state = { removals: new Map(), withdrawn: new Set(), drafts: [] };
+		cancellations.set(id, state);
+	}
+	return state;
+}
 const removalKey = (entry: PendingEntry) => entry.clientMessageId ?? entry.id;
 
 function normalize(content: string): string {
@@ -129,10 +144,9 @@ function resetState(next: string | null): void {
 	deliveredTurnIds.clear();
 	prunedIds.clear();
 	deliveries = [];
-	removals.clear();
 }
 
-/** Bind to a session, wiping everything learned about a different one. */
+/** Bind feed observations to a session; cancellation transactions are separate. */
 function useSession(id: string | null): void {
 	if (id !== sessionId) resetState(id);
 }
@@ -147,9 +161,17 @@ function stamp(id: string): number {
 }
 
 export const pendingQueue = {
-	/** Drop everything (session switch, feed start/stop). */
-	reset(id: string | null = null): void {
+	/** Reset feed observations, not outstanding cancellations. A full reset is
+	 * reserved for discarding the entire client store (e.g. test isolation). */
+	reset(id: string | null = null, clearCancellations = false): void {
 		resetState(id);
+		if (clearCancellations) cancellations.clear();
+	},
+
+	/** Consume confirmed withdrawals only when their own composer is mounted. */
+	takeWithdrawnDraft(id: string | null): string | null {
+		const state = cancellations.get(id);
+		return state?.drafts.length ? state.drafts.splice(0).join('\n\n') : null;
 	},
 
 	/**
@@ -210,23 +232,24 @@ export const pendingQueue = {
 
 	/** An × requests a verdict; it is not evidence of withdrawal. */
 	requestRemoval(id: string | null, entry: PendingEntry): string {
-		useSession(id);
 		const key = removalKey(entry);
-		removals.set(key, { ...entry, status: 'cancelling' });
+		cancellationState(id).removals.set(key, { ...entry, status: 'cancelling' });
 		return key;
 	},
 
 	removalFailed(id: string | null, key: string): void {
-		useSession(id);
-		removals.delete(key);
+		cancellations.get(id)?.removals.delete(key);
 	},
 
 	applyRemovalVerdict(id: string | null, key: string, verdict: string): void {
-		useSession(id);
+		const { removals, withdrawn, drafts } = cancellationState(id);
 		const entry = removals.get(key);
 		if (verdict === 'withdrawn') {
-			prunedIds.add(key);
-			if (entry) prunedIds.add(entry.id);
+			withdrawn.add(key);
+			if (entry) {
+				withdrawn.add(entry.id);
+				drafts.push(entry.content);
+			}
 			removals.delete(key);
 		} else if (verdict === 'already_delivered' && entry) {
 			removals.set(key, { ...entry, status: 'delivered' });
@@ -240,12 +263,13 @@ export const pendingQueue = {
 	 */
 	reconcile(id: string | null, entries: PendingEntry[]): PendingEntry[] {
 		useSession(id);
+		const { removals, withdrawn } = cancellationState(id);
 		const kept: PendingEntry[] = [];
 		const seen = new Set<string>();
 		for (const entry of entries) {
 			const key = removalKey(entry);
 			seen.add(key);
-			if (prunedIds.has(key)) continue;
+			if (prunedIds.has(key) || withdrawn.has(key) || withdrawn.has(entry.id)) continue;
 			const removal = removals.get(key);
 			if (removal) {
 				const retained = { ...entry, status: removal.status };
