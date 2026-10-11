@@ -33,6 +33,7 @@
 	import { isNavigableUserTurn, turnAnchorId } from '$lib/utils/transcript-navigation';
 	import type { ChatMessage } from '$lib/stores/types';
 	import MediaGallery from './MediaGallery.svelte';
+	import { trackRunHeader } from './run-header-placement';
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
 	import type { WorkLogEntry, WorkLogRun, WorkLogSequenceEntry } from '$lib/utils/work-log';
 	import { foldState, type FoldState } from '$lib/stores/session/fold-state';
@@ -284,49 +285,30 @@
 	 * is marked `data-run-header-off`.
 	 *
 	 * The placement depends on geometry as well as scroll position, so it is
-	 * recalculated (once per frame) on scroll, when the header or the work
-	 * log's content resizes (a breakpoint changes the header height, a row
-	 * expands or folds inside the run), after any click in the group, and on
-	 * window resize.
+	 * recalculated on scroll, when the header or the work log's content
+	 * resizes (a breakpoint changes the header height, a row expands or folds
+	 * inside the run), after any click in the group, and on window resize.
+	 * All open headers share one frame that measures every header before
+	 * writing any, and skips headers far off-screen (run-header-placement.ts).
 	 */
 	const stickWithinRun: Action<HTMLElement, number> = (node, runIndex) => {
 		let current = runIndex;
-		let scroller: HTMLElement | null = null;
-		let frame = 0;
-		const place = () => {
-			frame = 0;
-			const end = sectionEl?.querySelector<HTMLElement>(`[data-run-end="${current}"]`);
-			const line = scroller?.getBoundingClientRect().top;
-			if (!end || line === undefined) {
-				node.style.transform = '';
-				node.removeAttribute('data-run-header-off');
-				return;
-			}
-			const height = node.offsetHeight || node.getBoundingClientRect().height || 0;
-			const overlap = end.getBoundingClientRect().bottom - (line + height);
-			node.style.transform = overlap < 0 ? `translateY(${Math.max(overlap, -height)}px)` : '';
-			node.toggleAttribute('data-run-header-off', overlap <= -height);
-		};
-		const schedule = () => {
-			if (!frame) frame = requestAnimationFrame(place);
-		};
-		scroller = scrollParent(node);
+		const tracked = trackRunHeader({
+			node,
+			scroller: scrollParent(node),
+			end: () => sectionEl?.querySelector<HTMLElement>(`[data-run-end="${current}"]`)
+		});
 		const group = sectionEl;
-		scroller?.addEventListener('scroll', schedule, { passive: true });
-		group?.addEventListener('click', schedule);
-		window.addEventListener('resize', schedule);
-		const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
+		group?.addEventListener('click', tracked.place);
+		const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(tracked.place);
 		observer?.observe(node);
 		if (contentEl) observer?.observe(contentEl);
-		schedule();
 		return {
-			update(next: number) { current = next; schedule(); },
+			update(next: number) { current = next; tracked.place(); },
 			destroy() {
-				scroller?.removeEventListener('scroll', schedule);
-				group?.removeEventListener('click', schedule);
-				window.removeEventListener('resize', schedule);
+				group?.removeEventListener('click', tracked.place);
 				observer?.disconnect();
-				if (frame) cancelAnimationFrame(frame);
+				tracked.release();
 			}
 		};
 	};

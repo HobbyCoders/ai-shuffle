@@ -8,7 +8,7 @@ import type { SwarmSnapshot } from './swarm';
 import producer from './__fixtures__/agent-delivery-producer.json';
 import { deriveUserTurnNavigationItems } from './transcript-navigation';
 import { deriveStatus, needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
-import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
+import { initialState, reduce, releaseMessages, type WireEvent } from '$lib/stores/session/v2/reducer';
 import { longTurn } from '$lib/components/chat/test-fixtures/long-turn';
 import {
 	buildDisplayItems,
@@ -62,7 +62,11 @@ describe('streaming model reuse', () => {
 			const changed = {...options,...patch};
 			const actual = build([...messages.slice(0,-1), {...messages.at(-1)!,content:'updated'}], changed);
 			expect(actual).toEqual(buildTranscriptModel([...messages.slice(0,-1), {...messages.at(-1)!,content:'updated'}], changed));
-			expect(actual.items[0]).not.toBe(before.items[0]);
+			// The tail fast path never handles an options change. The per-turn
+			// cache may still reuse an unchanged prompt row, except when the
+			// session or grouping changes: those discard every cached turn.
+			if ('sessionId' in patch || 'groupingEnabled' in patch) expect(actual.items[0]).not.toBe(before.items[0]);
+			expect(actual.items.at(-1)).not.toBe(before.items.at(-1));
 		}
 		build(messages, options);
 		const metadata = [...messages.slice(0,-1), {...messages.at(-1)!,metadata:{input_tokens:123}}];
@@ -90,6 +94,153 @@ describe('streaming model reuse', () => {
 		}
 		options = {...options, isStreaming:false};
 		expect(build(messages, options)).toEqual(buildTranscriptModel(messages, options));
+	});
+});
+
+describe('incremental model reuse (#1282)', () => {
+	let n = 0;
+	const event = (type: string, fields: Record<string, unknown> = {}): WireEvent => {
+		n += 1;
+		return { type, id: `ev-${n}`, seq: n, session_id: 's1', created_at: new Date(Date.UTC(2026, 9, 11, 0, 0, n)).toISOString(), ...fields } as WireEvent;
+	};
+	/** Three settled turns with a worker each, then a parked fourth with a running worker. */
+	function history() {
+		const events: WireEvent[] = [];
+		for (let t = 0; t < 4; t++) {
+			events.push(event('turn.started', { turn_id: `turn-${t}` }));
+			events.push(event('message.user', { content: `Prompt ${t}`, turn_id: `turn-${t}` }));
+			for (let k = 0; k < 3; k++) {
+				events.push(event('tool.use', { tool_use_id: `tu-${t}-${k}`, name: 'Read', input: { file_path: `/f${k}` } }));
+				events.push(event('tool.result', { tool_use_id: `tu-${t}-${k}`, output: 'ok' }));
+			}
+			events.push(event('subagent.started', { task_id: `task-${t}`, description: `Worker ${t}` }));
+			events.push(event('assistant.text_delta', { text: t % 2 ? `Answer ${t}\n\n![a](/api/a${t}.png) ![b](/api/b${t}.png)` : `Answer ${t}` }));
+			if (t < 3) {
+				events.push(event('subagent.completed', { task_id: `task-${t}`, result: 'done' }));
+				events.push(event('turn.completed', {}));
+			}
+		}
+		let state = initialState();
+		for (const e of events) state = reduce(state, e);
+		return state;
+	}
+
+	it('matches a fresh build after every mixed update, including option flips', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		let options: Parameters<typeof buildTranscriptModel>[1] = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1', runningToolIds: new Set(['task-3']) };
+		const steps: Array<() => void> = [
+			() => { state = reduce(state, event('subagent.progress', { task_id: 'task-3', kind: 'chunk', note: 'working' })); },
+			() => { state = reduce(state, event('subagent.progress', { task_id: 'task-3', kind: 'tool_use', payload: { name: 'Read', tool_use_id: 'c1' } })); },
+			// A late update on a settled turn's worker re-opens it.
+			() => { state = reduce(state, event('subagent.progress', { task_id: 'task-1', kind: 'chunk', note: 'late' })); },
+			() => { options = { ...options, runningToolIds: new Set(['task-3', 'task-1']) }; },
+			() => { state = reduce(state, event('subagent.progress', { task_id: 'task-1', kind: 'tool_use', payload: { name: 'Bash', tool_use_id: 'c2' } })); },
+			() => { state = reduce(state, event('tool.use', { tool_use_id: 'main-1', name: 'Grep', input: {} })); },
+			() => { state = reduce(state, event('tool.result', { tool_use_id: 'main-1', output: 'hit' })); },
+			() => { state = reduce(state, event('subagent.completed', { task_id: 'task-1', result: 'done' })); },
+			() => { options = { ...options, runningToolIds: new Set(['task-3']) }; },
+			() => { options = { ...options, groupingEnabled: false }; },
+			() => { state = reduce(state, event('subagent.progress', { task_id: 'task-3', kind: 'chunk', note: 'more' })); },
+			() => { options = { ...options, groupingEnabled: true }; },
+			() => { state = reduce(state, event('subagent.completed', { task_id: 'task-3', result: 'all done' })); },
+			() => { options = { ...options, latestTurnUnsettled: false, runningToolIds: new Set() }; },
+			() => { state = reduce(state, event('message.user', { content: 'Next', turn_id: 'turn-4' })); },
+			() => { options = { ...options, sessionId: 's2' }; },
+		];
+		expect(build(releaseMessages(state), options)).toEqual(buildTranscriptModel(state.messages, options));
+		for (const step of steps) {
+			step();
+			expect(build(releaseMessages(state), options)).toEqual(buildTranscriptModel(state.messages, options));
+		}
+	});
+
+	it('a worker update replaces only the group that holds its card', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		const options = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1' };
+		const before = build(releaseMessages(state), options);
+		state = reduce(state, event('subagent.progress', { task_id: 'task-3', kind: 'chunk', note: 'working' }));
+		const after = build(releaseMessages(state), options);
+		expect(after).toEqual(buildTranscriptModel(state.messages, options));
+		const changed = after.items.filter((item, i) => item !== before.items[i]);
+		expect(changed).toHaveLength(1);
+		expect(changed[0].kind === 'work_log' && changed[0].sequence.some((e) => e.message.type === 'subagent' && e.message.agentChildren?.length)).toBe(true);
+		expect(after.promptOccurrence).toBe(before.promptOccurrence);
+		expect(after.subagentToolIds).toBe(before.subagentToolIds);
+	});
+
+	it('takes the full path when a card changes anything grouping reads', () => {
+		const build = createTranscriptModelBuilder();
+		const prompt = user('go', undefined, 't1');
+		const card = subagent({ toolId: 'w1', agentStatus: 'running', turnId: 't1' });
+		const answer = text('done');
+		const options = { isStreaming: false, latestTurnUnsettled: false, groupingEnabled: true };
+		build([prompt, card, answer], options);
+		for (const patch of [{ metadata: { duration_ms: 5000 } }, { timestamp: '2026-10-11T00:00:00Z' }, { toolId: 'w2' }, { toolStatus: 'error' as const }]) {
+			const next = [prompt, { ...card, ...patch, agentChildren: [{ id: 'c', type: 'text' as const, content: 'x' }] }, answer];
+			expect(build(next, options)).toEqual(buildTranscriptModel(next, options));
+		}
+	});
+
+	it('does not regroup or re-summarize unchanged settled turns when a row is appended', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		const options = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1' };
+		const before = build(releaseMessages(state), options);
+		state = reduce(state, event('tool.use', { tool_use_id: 'main-2', name: 'Read', input: {} }));
+		const after = build(releaseMessages(state), options);
+		expect(after).toEqual(buildTranscriptModel(state.messages, options));
+		// Every settled turn's items keep identity; only the live turn's group is new.
+		expect(after.items.filter((item) => !before.items.includes(item))).toHaveLength(1);
+		expect(after.items.at(-1)).not.toBe(before.items.at(-1));
+	});
+
+	it('keeps plain-row identity when an ungrouped long turn grows, and matches a fresh build', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		const options = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: false, sessionId: 's1' };
+		let before = build(releaseMessages(state), options);
+		for (let k = 0; k < 3; k++) {
+			state = reduce(state, event('tool.use', { tool_use_id: `long-${k}`, name: 'Read', input: {} }));
+			state = reduce(state, event('tool.result', { tool_use_id: `long-${k}`, output: 'ok' }));
+			const after = build(releaseMessages(state), options);
+			expect(after).toEqual(buildTranscriptModel(state.messages, options));
+			// Every row whose message did not change keeps its item object; only
+			// the appended row (and a row the append finalized) is new.
+			const reused = new Map(before.items.flatMap((item) => (item.kind === 'message' ? [[item.message, item] as const] : [])));
+			let kept = 0;
+			for (const item of after.items) {
+				if (item.kind !== 'message' || !reused.has(item.message)) continue;
+				expect(item).toBe(reused.get(item.message));
+				kept++;
+			}
+			expect(kept).toBeGreaterThan(20);
+			expect(after.items.filter((item) => !before.items.includes(item)).length).toBeLessThanOrEqual(2);
+			before = after;
+		}
+	});
+
+	it('drops a session\'s card-patch locator when the next build is another session', () => {
+		const build = createTranscriptModelBuilder();
+		let state = history();
+		const options = { isStreaming: false, latestTurnUnsettled: true, groupingEnabled: true, sessionId: 's1' };
+		build(releaseMessages(state), options);
+		state = reduce(state, event('subagent.progress', { task_id: 'task-3', kind: 'chunk', note: 'working' }));
+		const patchedA = build(releaseMessages(state), options);
+		expect(build.retainedModels()).toEqual([patchedA]);
+		// Switch to an empty session B: nothing of A may stay referenced.
+		const empty = build([], { ...options, sessionId: 's2' });
+		expect(build.retainedModels()).toHaveLength(1);
+		expect(build.retainedModels()[0]).toBe(empty);
+		expect(build.retainedModels()[0]).not.toBe(patchedA);
+		// A card patch in B after the switch is still correct (no stale index map).
+		const prompt = user('go', undefined, 'tb');
+		const card = subagent({ toolId: 'wb', agentStatus: 'running', turnId: 'tb' });
+		const bOptions = { ...options, sessionId: 's2' };
+		build([prompt, card], bOptions);
+		const progressed = [prompt, { ...card, agentChildren: [{ id: 'c', type: 'text' as const, content: 'x' }] }];
+		expect(build(progressed, bOptions)).toEqual(buildTranscriptModel(progressed, bOptions));
 	});
 });
 

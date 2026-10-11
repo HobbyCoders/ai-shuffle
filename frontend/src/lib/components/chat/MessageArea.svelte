@@ -31,6 +31,8 @@
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { derived as derivedStore } from 'svelte/store';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { sessionEphemeralCache } from '$lib/stores/session-cache';
+	import { createScrollTopPersist } from './scroll-top-persist';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
@@ -1177,6 +1179,16 @@
 		}
 	}
 
+	// Trailing write of the reading position into the session store once
+	// scrolling pauses (#1282). A switch writes the leaving session's position
+	// into its own saved snapshot, never into the store of the one entered.
+	const scrollTopPersist = createScrollTopPersist({
+		delayMs: 250,
+		currentKey: () => $activeSession.sessionId ?? 'new',
+		writeCurrent: (position) => activeSession.setScrollTop(position),
+		writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)
+	});
+
 	function handleScroll() {
 		if (!containerRef) return;
 		if (programmaticScrollDepth > 0) {
@@ -1215,8 +1227,10 @@
 
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
 			scrollPositionCache.set(cacheKey, currentScrollTop);
-			// Also save to session store for cross-session persistence
-			activeSession.setScrollTop(currentScrollTop);
+			// Also save to session store for cross-session persistence — but not
+			// per frame: every write publishes a new active-session object to all
+			// of its subscribers (#1282). Restores read the cache above first.
+			scrollTopPersist.schedule(cacheKey, currentScrollTop);
 
 			// Decide the next stick-to-bottom flag via the pure, unit-tested helper.
 			// It enables when the user is at/near the bottom, disables on a
@@ -1415,12 +1429,13 @@
 		clearJumpRevealTimer();
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
 		const cacheKey = $activeSession.sessionId ?? 'new';
+		scrollTopPersist.cancel();
 
 		if (containerRef) {
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
-			activeSession.setScrollTop(containerRef.scrollTop);
+			scrollTopPersist.destroy(cacheKey, containerRef.scrollTop);
 			// Persist auto-scroll state so remounting this component
 			// (e.g. returning from settings) resumes at the right position
 			autoScrollCache.set(cacheKey, shouldAutoScroll);
@@ -1457,14 +1472,23 @@
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 
-		// Save scroll state for the old session (if any)
-		if (prevId && containerRef) {
-			scrollPositionCache.set(prevId, containerRef.scrollTop);
+		// Save scroll state for the old session (if any). This effect runs after
+		// the DOM already shows the session entered, so the container's
+		// scrollTop is NOT the leaving session's: a short or still-loading
+		// transcript has clamped it, often to 0. Save the position captured from
+		// the reader's last scroll frame instead (the per-frame cache holds the
+		// same value when no deferred write is pending).
+		if (prevId) {
+			// The store already holds the session being entered: the position goes
+			// into the snapshot the switcher saved for the leaving session.
+			const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));
+			if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);
 			autoScrollCache.set(prevId, shouldAutoScroll);
-			activeSession.setScrollTop(containerRef.scrollTop);
 			// Prevent unbounded growth over long usage
 			evictOldest(scrollPositionCache, SCROLL_CACHE_MAX);
 			evictOldest(autoScrollCache, SCROLL_CACHE_MAX);
+		} else {
+			scrollTopPersist.cancel();
 		}
 
 		prevTrackedSessionId = currentId;
