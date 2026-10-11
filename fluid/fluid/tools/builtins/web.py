@@ -21,6 +21,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import socket
@@ -351,7 +352,7 @@ async def _get(url: str, *, transport: Any = None) -> Any:
                     target = urljoin(current, response.headers.get("location", ""))
                     if urlparse(target).hostname != urlparse(current).hostname:
                         return ("redirect", target)
-                    reason = check_url(target)
+                    reason = await asyncio.to_thread(check_url, target)
                     if reason is not None:
                         return ("blocked", reason)
                     current = target
@@ -452,7 +453,7 @@ def _fetch_scope(input: dict[str, Any]) -> frozenset[str] | None:
 
 async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     url = str(input.get("url", "")).strip()
-    reason = check_url(url)
+    reason = await asyncio.to_thread(check_url, url)
     if reason is not None:
         return ToolOutcome(text=f"WebFetch refused: {reason}", is_error=True)
     if url.startswith("http://"):

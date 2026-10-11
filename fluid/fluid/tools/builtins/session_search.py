@@ -22,6 +22,7 @@ after them, and drops other projects' unless ``scope="all"``.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from datetime import datetime
@@ -234,7 +235,7 @@ async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         limit if scope == "all"
         else min(limit * _SCOPED_FETCH_FACTOR, _SCOPED_FETCH_CAP)
     )
-    rows = recent(limit=fetch, exclude_session_id=ctx.session_id)
+    rows = await asyncio.to_thread(recent, limit=fetch, exclude_session_id=ctx.session_id)
     if inspect.isawaitable(rows):
         rows = await rows
     if not rows:
@@ -274,7 +275,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     limit = max(1, int(input.get("limit") or 5))
     scope = _scope_of(input)
 
-    hits = search(terms, limit=limit, exclude_session_id=ctx.session_id)
+    hits = await asyncio.to_thread(search, terms, limit=limit, exclude_session_id=ctx.session_id)
     if inspect.isawaitable(hits):
         hits = await hits
 

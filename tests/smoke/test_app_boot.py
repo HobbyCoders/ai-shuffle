@@ -258,6 +258,9 @@ def server(tmp_path_factory):
         inherited = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "LD_LIBRARY_PATH", "SYSTEMROOT")
         env = {k: v for k, v in os.environ.items() if k in inherited}
         env.update({
+            # Exercise this checkout's Fluid, not an older installed package.
+            # Do not inherit arbitrary PYTHONPATH entries from the host.
+            "PYTHONPATH": os.pathsep.join((str(REPO), str(REPO / "fluid"))),
             "HOME": str(home),
             "XDG_CONFIG_HOME": str(home / ".config"),
             "XDG_DATA_HOME": str(home / ".local" / "share"),

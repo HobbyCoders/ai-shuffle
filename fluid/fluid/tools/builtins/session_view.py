@@ -11,6 +11,7 @@ only formats the window.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import datetime
 from typing import Any
@@ -122,7 +123,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         {"viewer_session_id": ctx.session_id}
         if _accepts_viewer(slice_fn) else {}
     )
-    window = slice_fn(session_id, start=start, count=count, **scope)
+    window = await asyncio.to_thread(slice_fn, session_id, start=start, count=count, **scope)
     if inspect.isawaitable(window):
         window = await window
     if window is None:

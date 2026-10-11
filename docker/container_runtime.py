@@ -861,11 +861,17 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
             return 1
         elif monitor is not None and time.monotonic() >= next_probe:
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
+            previous_failures = monitor.failures
             if monitor.check():
                 failure = f"application readiness probe failed {monitor.failures} times in a row"
-            elif updates is not None and monitor.ever_ready and monitor.failures == 0:
-                updates.healthy()
-                confirm_handover(updates.root)
+            else:
+                if monitor.failures == 1:
+                    log("application readiness degraded; waiting for subsequent probes")
+                elif previous_failures and monitor.failures == 0:
+                    log("application readiness recovered")
+                if updates is not None and monitor.ever_ready and monitor.failures == 0:
+                    updates.healthy()
+                    confirm_handover(updates.root)
         if failure is None and updates is not None and time.monotonic() >= next_update:
             next_update = time.monotonic() + 1
             if updates.install_requested.is_set():
