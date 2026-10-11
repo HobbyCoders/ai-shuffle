@@ -1241,6 +1241,8 @@ async def get_live_session(
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.
         "is_worker": bool(session.get("is_worker")),
+        # Read the user-message revision without loading the transcript (#2259).
+        "last_user_message_at": session.get("last_user_message_at"),
         # Away mode (app/core/away_mode.py); null is a flag never set (off).
         "away_mode": session.get("away_mode"),
     }
@@ -2198,6 +2200,7 @@ async def get_session_state(
         "session_id": session_id,
         "title": session.get("title"),
         "status": session.get("status"),
+        "last_user_message_at": session.get("last_user_message_at"),
         "is_streaming": sync_state["is_streaming"],
         "connected_devices": sync_state["connected_devices"],
     }

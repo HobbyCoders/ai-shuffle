@@ -233,9 +233,17 @@ After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, n
 
 Get live session state for streaming. Returns current partial messages and streaming status.
 
+The response's `session_meta.last_user_message_at` is a nullable UTC ISO 8601
+string with the same value and [user-message revision](#user-message-revision)
+semantics as the session row. It is `null` until a qualifying user message is
+persisted. It is included both with messages (the default) and with
+`?include_messages=false`, which skips loading the transcript. Clients can use
+this metadata-only snapshot to seed the revision without fetching session detail.
+
 ### GET /api/v1/sessions/{session_id}/state
 
-Get session state for client reconnection.
+Get session state for client reconnection. The response includes the same
+nullable UTC ISO 8601 `last_user_message_at` at the top level.
 
 ### GET /api/v1/sessions/{session_id}/context-usage
 

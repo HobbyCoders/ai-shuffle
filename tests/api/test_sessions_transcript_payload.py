@@ -322,6 +322,36 @@ class TestGetSessionPagination:
 
 
 class TestLiveEndpointPayload:
+    @pytest.mark.parametrize("stamped", [False, True])
+    @pytest.mark.parametrize("endpoint", [
+        "live?include_messages=false", "live?include_messages=true", "state",
+    ])
+    def test_snapshot_round_trips_persisted_user_message_revision(self, endpoint, stamped):
+        from datetime import datetime
+        from app.db import database
+
+        session_id = "revision-snapshot"
+        database.create_session(session_id, "default")
+        expected = None
+        if stamped:
+            message = database.add_session_message(session_id, "user", "Hello")
+            expected = message["created_at"]
+            assert datetime.fromisoformat(expected).utcoffset().total_seconds() == 0
+        row_value = database.get_session(session_id)["last_user_message_at"]
+        if isinstance(row_value, datetime):
+            row_value = row_value.isoformat()
+        assert row_value == expected
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_auth] = lambda: "test-token"
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/sessions/{session_id}/{endpoint}")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        snapshot = body["session_meta"] if endpoint.startswith("live") else body
+        assert snapshot["last_user_message_at"] == expected
+
     def _live(self, api_client, query="", session_fields=None):
         client, mock_db = api_client
         mock_db.get_session.return_value = {**SESSION_ROW, **(session_fields or {})}
