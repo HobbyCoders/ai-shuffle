@@ -62,8 +62,9 @@ export interface WorkLogRun {
 	 * after the boundary before it). The ordinal shifts when a new boundary
 	 * appears earlier in the turn, and the row that ENDS a run moves on when
 	 * newer prose finishes and replaces it as the latest word; the row a run
-	 * starts at does neither, so a run the reader opened stays open on the
-	 * same work while the turn goes on.
+	 * starts at does neither. WorkLogGroup stores an open run as the range
+	 * from this row to its last one, so it stays open on the same work while
+	 * runs merge and split (run-fold-ranges.ts).
 	 */
 	key: string;
 	/** Rows hidden while the run is folded. */

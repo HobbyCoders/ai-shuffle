@@ -1,12 +1,14 @@
 /**
  * Which transcript folds the reader opened (transcript-organization spec §6).
  *
- * A fold key is `<turn key>:run-<row id>` for a live run and `<turn key>:turn`
- * for the settled turn's group, where the turn key is the SERVER id of the
- * row that opened the turn and the row id is the run's first row: one entry
- * per open run. When runs merge or split as prose finishes, WorkLogGroup
- * moves the entry onto the run now holding that work in one transfer and
- * drops the key no run has any more (see `WorkLogRun.key`).
+ * A fold key is `<turn key>:run-<first row>..<last row>` for a live run and
+ * `<turn key>:turn` for the settled turn's group, where the turn key is the
+ * SERVER id of the row that opened the turn and the range is the open run's
+ * extent when it was last rendered: one entry per open run. Runs merge and
+ * split as prose finishes; a run is open when its rows overlap a stored range,
+ * and WorkLogGroup rewrites the ranges to the runs' new extents in one write
+ * (see run-fold-ranges.ts). A key without `..` (stored before ranges) covers
+ * its one row.
  * When the turn settles its runs become one fold: `promoteRuns` opens that
  * fold if the reader had opened any run, so settling never closes what they
  * were reading. An optimistic send has no server id until the
@@ -59,6 +61,21 @@ export function createFoldState(storage?: Storage) {
 	}
 
 	/**
+	 * Close the folds in `close` and open the folds in `open`, in one write;
+	 * nothing is written when that changes nothing.
+	 */
+	function update(close: readonly string[], open: readonly string[]) {
+		const current = store.current;
+		const closing = close.filter((key) => current[key]);
+		const opening = open.filter((key) => !current[key]);
+		if (closing.length === 0 && opening.length === 0) return;
+		const next = { ...current };
+		for (const key of closing) delete next[key];
+		for (const key of opening) next[key] = true;
+		store.set(capped(next));
+	}
+
+	/**
 	 * Move every fold of turn `from` onto turn `to` (optimistic id → server id).
 	 * A fold already recorded under `to` wins; nothing changes when `from` has none.
 	 */
@@ -98,6 +115,7 @@ export function createFoldState(storage?: Storage) {
 		get current(): Readonly<FoldRecord> { return store.current; },
 		isOpen: (key: string) => store.current[key] === true,
 		setOpen,
+		update,
 		remap,
 		promoteRuns
 	};

@@ -47,6 +47,24 @@ describe('fold state', () => {
 		expect(createFoldState(storage).current).toEqual(folds.current);
 	});
 
+	it('closes and opens several folds in one write, and writes nothing for no change', () => {
+		const base = memoryStorage();
+		let writes = 0;
+		const storage = { ...base, get length() { return base.length; },
+			setItem: (key: string, value: string) => { writes++; base.setItem(key, value); } } as Storage;
+		const folds = createFoldState(storage);
+		folds.setOpen('t:run-a..w', true);
+		writes = 0;
+		folds.update(['t:run-a..w'], ['t:run-a..p', 't:run-b..w']);
+		expect(writes).toBe(1);
+		expect(folds.current).toEqual({ 't:run-a..p': true, 't:run-b..w': true });
+		folds.update(['t:run-gone'], ['t:run-a..p']);
+		expect(writes).toBe(1);
+		// Range keys follow the turn to its server id like any other fold.
+		folds.remap('t', 'srv');
+		expect(folds.current).toEqual({ 'srv:run-a..p': true, 'srv:run-b..w': true });
+	});
+
 	it('merges an open run into the settled turn fold, stored for a reload', () => {
 		const storage = memoryStorage();
 		const folds = createFoldState(storage);

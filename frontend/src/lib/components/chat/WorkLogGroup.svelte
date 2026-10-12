@@ -1,31 +1,3 @@
-<script lang="ts" module>
-	/**
-	 * Which run each row of a live turn sat in at its last render, for the rows
-	 * of open runs only, by fold prefix (`<turn>:run-`). Module memory, so a
-	 * split or merge that happens while the group is unmounted (a session
-	 * switch, a windowed remount) still moves the reader's open state when the
-	 * group mounts again. Dropped when the turn settles; at most
-	 * LIVE_MEMORY_TURNS turns are kept, the least recently rendered go first.
-	 * Not persisted: after a page reload a split made while away is not
-	 * recovered (its first part stays open).
-	 */
-	const LIVE_MEMORY_TURNS = 32;
-	const liveRunMemory = new Map<string, Map<string, string>>();
-	function rememberLiveRuns(prefix: string, rows: Map<string, string>) {
-		liveRunMemory.delete(prefix);
-		if (rows.size === 0) return;
-		liveRunMemory.set(prefix, rows);
-		if (liveRunMemory.size > LIVE_MEMORY_TURNS) {
-			const oldest = liveRunMemory.keys().next().value;
-			if (oldest !== undefined) liveRunMemory.delete(oldest);
-		}
-	}
-	/** Tests: forget every turn's remembered runs. */
-	export function resetLiveRunMemory() {
-		liveRunMemory.clear();
-	}
-</script>
-
 <script lang="ts">
 	/**
 	 * WorkLogGroup — the fold that hides a turn's routine steps.
@@ -65,6 +37,7 @@
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
 	import type { WorkLogEntry, WorkLogRun, WorkLogSequenceEntry } from '$lib/utils/work-log';
 	import { foldState, type FoldState } from '$lib/stores/session/fold-state';
+	import { openRunKeys, parseRange, rangeId, rangesOver, reconcileRanges, type RunSpan } from './run-fold-ranges';
 
 	interface Props {
 		mode: 'live' | 'settled';
@@ -119,19 +92,13 @@
 	// An optimistic send keeps its id as the row key (no remount); once the
 	// server id is known, folds recorded under the optimistic id move onto it.
 	$effect.pre(() => {
-		if (!foldKey || !foldAlias || foldAlias === foldKey) return;
-		folds.remap(foldAlias, foldKey);
-		const remembered = liveRunMemory.get(`${foldAlias}:run-`);
-		if (remembered) {
-			liveRunMemory.delete(`${foldAlias}:run-`);
-			if (!liveRunMemory.has(`${foldKey}:run-`)) rememberLiveRuns(`${foldKey}:run-`, remembered);
-		}
+		if (foldKey && foldAlias && foldAlias !== foldKey) folds.remap(foldAlias, foldKey);
 	});
 
 	let localOpen = $state(false);
 	// Runs are keyed by the row they start at (`WorkLogRun.key`), not by
 	// ordinal: prose that finishes later inserts a boundary and shifts
-	// ordinals. One stored entry per open run, under that key.
+	// ordinals. Without a fold key the open ranges are kept here.
 	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
 	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
@@ -151,85 +118,80 @@
 		if (turnFold) folds.setOpen(turnFold, next);
 		else localOpen = next;
 	}
-	function runOpen(run: WorkLogRun): boolean {
-		return runPrefix ? stored[`${runPrefix}${run.key}`] === true : localRuns[run.key] === true;
-	}
-	function setRunOpen(run: WorkLogRun, next: boolean) {
-		if (runPrefix) folds.setOpen(`${runPrefix}${run.key}`, next);
-		else localRuns = { ...localRuns, [run.key]: next };
-	}
-
 	/**
-	 * Runs merge and split as prose finishes. Two runs merge when newer prose
-	 * replaces the prose between them as the latest word, and the later run's
-	 * key is gone. A run splits when prose inside it finishes, and its later
-	 * part starts a run with a new key. The reader's open state moves with the
-	 * work in ONE transfer per change, never by storing a run under several
-	 * keys:
-	 *  - a run whose rows sat in an open run with another key at the last
-	 *    render (remembered across an unmount, see `liveRunMemory`), or that contains the row of a stored key no run has
-	 *    any more (a merge while this group was unmounted), opens under its
-	 *    own key;
-	 *  - a stored key that is no run's key any more is dropped, so closing a
-	 *    run clears everything that could reopen it at settle.
-	 * Idempotent: once transferred there is nothing left to move, so the
-	 * effect writes nothing on later renders.
+	 * Open runs are stored as row ranges, one per open run: the run's first
+	 * row through its last (run-fold-ranges.ts). Runs merge and split as prose
+	 * finishes; a run is open when its rows overlap a stored range, so the
+	 * reader's open work stays open through a merge, a split, a remount or a
+	 * reload, decided from the store and the current runs alone.
 	 */
-	const rowId = (entry: WorkLogSequenceEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
-	let localPrevious = new Map<string, string>();
-	$effect.pre(() => {
-		if (mode !== 'live') {
-			localPrevious = new Map();
-			if (runPrefix) liveRunMemory.delete(runPrefix);
+	const openIds = $derived(runPrefix
+		? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
+		: Object.keys(localRuns).filter((id) => localRuns[id]));
+	const rowId = (entry: WorkLogEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+	const rowPositions = $derived.by(() => {
+		const position = new Map<string, number>();
+		if (mode === 'live') sequence.forEach((entry, at) => position.set(rowId(entry), at));
+		return position;
+	});
+	const runSpans = $derived.by(() => {
+		const spans = new Map<number, RunSpan>();
+		if (mode !== 'live' || runs.length === 0) return spans;
+		const keyOfRun = new Map(runs.map((run) => [run.index, run.key]));
+		sequence.forEach((entry, at) => {
+			const key = entry.run === undefined ? undefined : keyOfRun.get(entry.run);
+			if (key === undefined) return;
+			const span = spans.get(entry.run!);
+			if (span) { span.end = at; span.through = rowId(entry); }
+			else spans.set(entry.run!, { key, start: rowPositions.get(key) ?? at, end: at, through: rowId(entry) });
+		});
+		return spans;
+	});
+	const openRuns = $derived(openRunKeys(openIds, [...runSpans.values()], rowPositions));
+	function runOpen(run: WorkLogRun): boolean {
+		return openRuns.has(run.key);
+	}
+	function writeRuns(close: string[], open: string[]) {
+		if (close.length === 0 && open.length === 0) return;
+		if (runPrefix) {
+			folds.update(close.map((id) => `${runPrefix}${id}`), open.map((id) => `${runPrefix}${id}`));
 			return;
 		}
-		const isOpen = (id: string) => (runPrefix ? stored[`${runPrefix}${id}`] === true : localRuns[id] === true);
-		const keys = new Set(runs.map((run) => run.key));
-		const keyOfRun = new Map(runs.map((run) => [run.index, run.key]));
-		const runOfRow = new Map<string, string>();
-		for (const entry of sequence) {
-			const key = entry.run === undefined ? undefined : keyOfRun.get(entry.run);
-			if (key) runOfRow.set(rowId(entry), key);
+		const next = { ...localRuns };
+		for (const id of close) delete next[id];
+		for (const id of open) next[id] = true;
+		localRuns = next;
+	}
+	/**
+	 * A run's range as drawn. Fold rows carry it, and a click acts on the
+	 * range it reads back from the clicked row: a click that lands while a
+	 * split or merge is queued opens or closes the rows the reader saw, and
+	 * the next reconcile fits the range to the new runs.
+	 */
+	function drawnRange(run: WorkLogRun): string | undefined {
+		const span = runSpans.get(run.index);
+		return span && rangeId(span);
+	}
+	function setRunOpen(run: WorkLogRun, next: boolean, drawn?: string) {
+		const span = runSpans.get(run.index);
+		const seen = drawn === undefined ? null : parseRange(drawn, rowPositions);
+		if (next) {
+			const id = seen ? drawn! : span && rangeId(span);
+			if (id) writeRuns([], [id]);
+			return;
 		}
-		const rows = new Set(sequence.map(rowId));
-		const opened = new Set<string>();
-		const retired = new Set<string>();
-		const previous = runPrefix ? liveRunMemory.get(runPrefix) ?? new Map<string, string>() : localPrevious;
-		for (const [row, was] of previous) {
-			const now = runOfRow.get(row);
-			if (now && now !== was && isOpen(was)) opened.add(now);
-		}
-		const storedIds = runPrefix
-			? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
-			: Object.keys(localRuns).filter((id) => localRuns[id]);
-		for (const id of storedIds) {
-			// Only ids that name a row of this turn: anything else is not ours to judge.
-			if (keys.has(id) || !rows.has(id)) continue;
-			retired.add(id);
-			const now = runOfRow.get(id);
-			if (now) opened.add(now);
-		}
-		const toOpen = [...opened].filter((id) => !isOpen(id));
-		// Remember only the rows of runs open after this pass: a closed run has
-		// nothing to carry, and opening one re-runs this effect to record it.
-		const openAfter = (id: string) => opened.has(id) || (isOpen(id) && !retired.has(id));
-		if (runPrefix) {
-			const remembered = new Map<string, string>();
-			for (const [row, key] of runOfRow) if (openAfter(key)) remembered.set(row, key);
-			rememberLiveRuns(runPrefix, remembered);
-		} else {
-			localPrevious = runOfRow;
-		}
-		if (toOpen.length === 0 && retired.size === 0) return;
-		if (runPrefix) {
-			for (const id of toOpen) folds.setOpen(`${runPrefix}${id}`, true);
-			for (const id of retired) folds.setOpen(`${runPrefix}${id}`, false);
-		} else {
-			const next = { ...localRuns };
-			for (const id of toOpen) next[id] = true;
-			for (const id of retired) delete next[id];
-			localRuns = next;
-		}
+		const close = new Set<string>();
+		for (const range of [seen, span]) if (range) for (const id of rangesOver(openIds, range, rowPositions)) close.add(id);
+		writeRuns([...close], []);
+	}
+	const drawnOf = (event: Event) => (event.currentTarget as HTMLElement | null)?.dataset.runRange;
+	// Keep one range per open run at its current extent. Idempotent: once the
+	// ranges match the runs there is nothing to write, so this writes only
+	// when a run's extent changes (prose finishing), never per row.
+	$effect.pre(() => {
+		if (mode !== 'live') return;
+		const { add, remove } = reconcileRanges(openIds, [...runSpans.values()], rowPositions);
+		writeRuns(remove, add);
 	});
 	// A settled turn with nothing to hide keeps its group (so settling does not
 	// remount its rows) but draws no disclosure.
@@ -342,10 +304,11 @@
 	 */
 	function collapseRunFromHeader(event: MouseEvent, run: WorkLogRun) {
 		const header = event.currentTarget as HTMLElement;
+		const drawn = header.dataset.runRange;
 		const stuckAt = header.getBoundingClientRect().top;
 		const line = scrollParent(header)?.getBoundingClientRect().top;
 		const stuck = line !== undefined && stuckAt - line < 1;
-		setRunOpen(run, false);
+		setRunOpen(run, false, drawn);
 		if (stuck) landAt(header, () => sectionEl?.querySelector<HTMLElement>(`[data-run-fold="${run.index}"]`), stuckAt);
 	}
 
@@ -513,6 +476,7 @@
 							type="button"
 							class="wlrow fold"
 							data-run-header={run.index}
+							data-run-range={drawnRange(run)}
 							use:stickWithinRun={run.index}
 							onclick={(event) => collapseRunFromHeader(event, run)}
 							aria-expanded="true"
@@ -535,7 +499,8 @@
 							type="button"
 							class="wlrow fold"
 							data-run-fold={run.index}
-							onclick={() => setRunOpen(run, true)}
+							data-run-range={drawnRange(run)}
+							onclick={(event) => setRunOpen(run, true, drawnOf(event))}
 							aria-expanded="false"
 							aria-label={`Show work details: ${runLabel(run)}`}
 						>
@@ -567,7 +532,7 @@
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
-					<button type="button" class="wlrow fold" data-run-end={run.index} onclick={() => setRunOpen(run, false)} aria-expanded="true" aria-label="Hide work details">
+					<button type="button" class="wlrow fold" data-run-end={run.index} data-run-range={drawnRange(run)} onclick={(event) => setRunOpen(run, false, drawnOf(event))} aria-expanded="true" aria-label="Hide work details">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 							<path d="m18 15-6-6-6 6" />
 						</svg>
