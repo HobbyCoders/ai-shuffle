@@ -3,12 +3,15 @@
 	/**
 	 * MessageActions - Hover-only action buttons for chat messages
 	 *
-	 * Provides Copy, Read (for assistant messages), and Rewind functionality.
+	 * Provides Copy, Read and Report AI content (for assistant messages), and
+	 * Rewind functionality. Report opens System > Help's report form as an AI
+	 * content report with this message and its session filled in.
 	 * The parent decides when the row is shown (hover/focus on desktop, always
 	 * on mobile) and reserves its space so revealing it never reflows the chat.
 	 */
 	import { onDestroy } from 'svelte';
 	import { executeRewind } from '$lib/api/client';
+	import { canSendSupportReport, reportAiContent } from '$lib/stores/support-report.svelte';
 
 	interface Props {
 		sessionId?: string | null;
@@ -240,6 +243,22 @@
 		</button>
 	{/if}
 
+	<!-- Report AI content (assistant only): Google Play generative-AI policy -->
+	{#if messageRole === 'assistant' && !isStreaming && canSendSupportReport()}
+		<button
+			type="button"
+			class="action-btn report-btn"
+			onclick={() => reportAiContent(messageContent, sessionId)}
+			title="Report AI content"
+			aria-label="Report AI content"
+			data-testid="report-ai-content"
+		>
+			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3v1.5M3 21v-6m0 0 2.77-.693a9 9 0 0 1 6.208.682l.108.054a9 9 0 0 0 6.086.71l3.114-.732a48.524 48.524 0 0 1-.005-10.499l-3.11.732a9 9 0 0 1-6.085-.711l-.108-.054a9 9 0 0 0-6.208-.682L3 4.5M3 15V4.5" />
+			</svg>
+		</button>
+	{/if}
+
 	<!-- Rewind button - only available for user messages -->
 	{#if sessionId && !isStreaming && messageRole === 'user'}
 		<button
@@ -367,6 +386,11 @@
 	.action-btn:active {
 		background-color: var(--muted);
 		transform: scale(0.94);
+	}
+
+	.report-btn:hover,
+	.report-btn:focus-visible {
+		color: var(--destructive);
 	}
 
 	.msg-action-btn:hover {

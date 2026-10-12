@@ -15,7 +15,7 @@ import SystemPage from './SystemPage.svelte';
 import { CHANNEL_LATE_POLL_MS, CHANNEL_POLL_MS, CHANNEL_READ_MS, CHANNEL_WAIT_MS, channelError, REINSTALL_TEXT } from './update-channel.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
-import { supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
+import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
 
 let policy: { allow_updates: boolean; update_all_workers: boolean };
 let workspace: string;
@@ -619,7 +619,7 @@ describe('help: report a problem', () => {
 
 	it('opens the support report dialog with the description as a frontend error', async () => {
 		render(SystemPage);
-		expect(screen.getByText('Report a problem')).toBeTruthy();
+		expect(screen.getByText('Report a problem or AI content')).toBeTruthy();
 		const field = await openForm();
 		await waitFor(() => expect(document.activeElement).toBe(field));
 		await fireEvent.input(field, { target: { value: '  The voice call dropped after a minute  ' } });
@@ -661,6 +661,33 @@ describe('help: report a problem', () => {
 		expect(supportReportDialog.request).toBeNull();
 	});
 
+	it('reports AI content with the excerpt and the reason as the note', async () => {
+		render(SystemPage);
+		await openForm();
+		await fireEvent.click(screen.getByLabelText(/Offensive or harmful AI content/));
+		const excerpt = (await screen.findByLabelText('The AI output')) as HTMLTextAreaElement;
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect((await screen.findAllByRole('alert'))[0].textContent).toContain('Paste the AI output');
+		expect(supportReportDialog.request).toBeNull();
+		await fireEvent.input(excerpt, { target: { value: 'A hateful reply' } });
+		await fireEvent.input(screen.getByLabelText('Why are you reporting it?'), { target: { value: 'Hate speech' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect(supportReportDialog.request?.source).toEqual({ kind: 'ai_content', excerpt: 'A hateful reply' });
+		expect(supportReportDialog.request?.note).toBe('Hate speech');
+	});
+
+	it('opens prefilled as an AI content report from a chat message', async () => {
+		aiContentPrefill.value = { excerpt: 'Reported reply', sessionId: 'sess-42' };
+		render(SystemPage);
+		const excerpt = (await screen.findByLabelText('The AI output')) as HTMLTextAreaElement;
+		expect(excerpt.value).toBe('Reported reply');
+		expect(aiContentPrefill.value).toBeNull();
+		expect(screen.getByText(/From session/)).toBeTruthy();
+		await fireEvent.input(screen.getByLabelText('Why are you reporting it?'), { target: { value: 'Violent' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect(supportReportDialog.request?.source).toEqual({ kind: 'ai_content', excerpt: 'Reported reply', session_id: 'sess-42' });
+	});
+
 	it('is hidden when this login cannot send support reports', async () => {
 		transport.get.mockImplementation(async (path: string) => {
 			if (path === '/support/capabilities') throw Object.assign(new Error('Owner access required'), { status: 403 });
@@ -668,7 +695,7 @@ describe('help: report a problem', () => {
 		});
 		render(SystemPage);
 		await waitFor(() => expect(supportCaps.status).toBe('forbidden'));
-		await waitFor(() => expect(screen.queryByText('Report a problem')).toBeNull());
+		await waitFor(() => expect(screen.queryByText('Report a problem or AI content')).toBeNull());
 		expect(screen.queryByRole('button', { name: /Describe it/ })).toBeNull();
 	});
 });

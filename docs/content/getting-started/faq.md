@@ -81,4 +81,4 @@ No. AI Shuffle is an independent product by HobbyCoders. It is not affiliated wi
 
 ## Where do I get help?
 
-Start with [Troubleshooting](/docs/getting-started/troubleshooting). Then email support@hobbycoders.com, or send a report from **Report a problem** in Settings. Don't send passwords, API keys or sign-in codes.
+Start with [Troubleshooting](/docs/getting-started/troubleshooting). Then email support@hobbycoders.com, or send a report from **Report a problem or AI content** in Settings. Don't send passwords, API keys or sign-in codes.

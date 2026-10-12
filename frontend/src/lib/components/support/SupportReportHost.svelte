@@ -21,7 +21,8 @@
 
 	function makeFlow(req: ReportRequest): SupportReportFlow {
 		const flow = new SupportReportFlow(req.source, {
-			defaultModel: () => supportCaps.current?.default_model ?? null
+			defaultModel: () => supportCaps.current?.default_model ?? null,
+			note: req.note
 		});
 		void flow.start();
 		return flow;

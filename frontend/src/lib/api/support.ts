@@ -12,6 +12,10 @@ export interface SupportCapabilities {
 	basic_report: boolean;
 	ai_diagnosis: boolean;
 	signed_in: boolean;
+	/** `problem` and `ai_content` (offensive or harmful AI output). */
+	report_kinds?: ReportKind[];
+	/** Where a local-only worker's saved report can be emailed. */
+	support_email?: string;
 	/** Picker value (`prov:<provider>:<model>` or a Claude id), or null. */
 	default_model: string | null;
 	/** Only a source checkout offers the older "Fix with AI" chat. */
@@ -24,6 +28,26 @@ export interface SupportCapabilities {
 		tools?: string[];
 		cost_cap?: number | null;
 	};
+}
+
+/** An app problem, or offensive or harmful AI output (Play generative-AI policy). */
+export type ReportKind = 'problem' | 'ai_content';
+
+/** Longest AI excerpt the report API takes. */
+export const EXCERPT_MAX = 8000;
+
+/** Offensive or harmful AI output: the excerpt and, optionally, the session it came from. */
+export interface AiContentInput {
+	kind: 'ai_content';
+	excerpt: string;
+	session_id?: string;
+}
+
+/** Where a local-only worker kept a report it could not send. */
+export interface LocalRecord {
+	/** Relative to the worker's data directory: `support-reports/<id>.json`. */
+	file: string;
+	saved_at: string;
 }
 
 /** The error as the UI saw it — the same fields a "Fix with AI" payload has. */
@@ -54,6 +78,12 @@ export interface SupportDelivery {
 export interface SupportReportPreview {
 	report_id: string;
 	kind: 'basic' | 'ai';
+	/** Absent on older workers: treat as `problem`. */
+	report_kind?: ReportKind;
+	/** The reported AI output (ai_content only). */
+	excerpt?: string | null;
+	session_ref?: string | null;
+	local_record?: LocalRecord | null;
 	status: 'draft' | 'sent';
 	fingerprint: string;
 	title: string;
@@ -114,6 +144,9 @@ export interface SendResult {
 	sent_at?: string;
 	delivered?: SupportDelivery;
 	known_issue?: KnownIssue | null;
+	/** `not_signed_in` on a local-only worker: the report was saved here instead. */
+	local_record?: LocalRecord;
+	support_email?: string;
 }
 
 const BASE = '/support';
@@ -123,7 +156,7 @@ export function getSupportCapabilities(): Promise<SupportCapabilities> {
 }
 
 export function buildSupportReport(
-	source: { error_id: string } | { error: SupportErrorInput },
+	source: { error_id: string } | { error: SupportErrorInput } | AiContentInput,
 	userNote?: string | null
 ): Promise<SupportReportPreview> {
 	const note = userNote?.trim() ? userNote : undefined;

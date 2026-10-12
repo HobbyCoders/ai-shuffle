@@ -31,8 +31,13 @@ class ErrorIn(BaseModel):
 
 
 class ReportIn(BaseModel):
+    # "problem": an app problem (error_id or error). "ai_content": offensive or
+    # harmful AI output (excerpt, the reason in user_note, optional session_id).
+    kind: Literal["problem", "ai_content"] = "problem"
     error_id: Optional[str] = Field(None, max_length=64)
     error: Optional[ErrorIn] = None
+    excerpt: Optional[str] = Field(None, max_length=reports.EXCERPT_MAX)
+    session_id: Optional[str] = Field(None, max_length=reports.SESSION_REF_MAX)
     user_note: Optional[str] = Field(None, max_length=reports.NOTE_MAX)
     model_config = {"extra": "forbid"}
 
@@ -79,6 +84,16 @@ async def get_capabilities(_=Depends(require_admin)) -> dict[str, Any]:
 @router.post("/reports")
 async def build_report(body: ReportIn, _=Depends(require_admin)) -> dict[str, Any]:
     """Build a basic report preview (no AI, nothing sent)."""
+    if body.kind == "ai_content":
+        if body.error_id or body.error:
+            raise HTTPException(400, "An AI content report takes an excerpt, not an error.")
+        try:
+            return await asyncio.to_thread(reports.build_ai_content, excerpt=body.excerpt,
+                                           user_note=body.user_note, session_id=body.session_id)
+        except reports.ReportError as exc:
+            _raise(exc)
+    if body.excerpt or body.session_id:
+        raise HTTPException(400, "An excerpt belongs to an AI content report (kind ai_content).")
     if bool(body.error_id) == bool(body.error):
         raise HTTPException(400, "Send exactly one of error_id or error.")
     try:

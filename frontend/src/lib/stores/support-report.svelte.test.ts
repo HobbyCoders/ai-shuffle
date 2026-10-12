@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api }));
+const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
+vi.mock('$lib/settings/navigation.svelte', () => nav);
 
 import {
 	SupportReportFlow,
@@ -15,7 +17,13 @@ import {
 	hubNotice,
 	knownIssueNotice,
 	openSupportReport,
+	aiContentPrefill,
+	clipCodePoints,
+	reportAiContent,
+	reportKindOf,
 	retryText,
+	supportMailSubject,
+	supportMailto,
 	supportCaps,
 	supportReportDialog,
 	wasDelivered
@@ -103,6 +111,36 @@ describe('capabilities', () => {
 	});
 });
 
+describe('AI content helpers', () => {
+	it('builds a mailto link with the report subject and a bounded body', () => {
+		const short = supportMailto('ai_content', 'Report kind: ai_content');
+		expect(short).toBe('mailto:support@hobbycoders.com?subject=AI%20content%20report&body=Report%20kind%3A%20ai_content');
+		const long = decodeURIComponent(supportMailto('problem', 'x'.repeat(5000)).split('body=')[1]);
+		expect(long.length).toBeLessThan(1700);
+		expect(long).toContain('Paste the full report');
+		expect(supportMailSubject('problem')).toBe('AI Shuffle problem report');
+	});
+
+	it('never splits an emoji when clipping the mailto body or an excerpt', () => {
+		const body = 'x'.repeat(1499) + '😀' + 'x'.repeat(20);
+		const link = supportMailto('ai_content', body);
+		const sent = decodeURIComponent(link.split('body=')[1]);
+		expect(sent.startsWith('x'.repeat(1499) + '😀')).toBe(true);
+		expect(clipCodePoints('ab😀cd', 3)).toBe('ab😀');
+		expect(clipCodePoints('short', 10)).toBe('short');
+		reportAiContent('x'.repeat(7999) + '😀😀', 's1');
+		const prefill = aiContentPrefill.take()!;
+		expect(Array.from(prefill.excerpt)).toHaveLength(8000);
+		expect(prefill.excerpt.endsWith('😀')).toBe(true);
+		expect(() => encodeURIComponent(prefill.excerpt)).not.toThrow();
+	});
+
+	it('tells the kind of a report source', () => {
+		expect(reportKindOf({ kind: 'ai_content', excerpt: 'x' })).toBe('ai_content');
+		expect(reportKindOf({ error_id: 'e1' })).toBe('problem');
+	});
+});
+
 describe('plain-language helpers', () => {
 	it('formats retry times', () => {
 		expect(retryText(undefined)).toBeNull();
@@ -165,7 +203,7 @@ describe('SupportReportFlow', () => {
 		expect(api.post).toHaveBeenCalledTimes(1);
 	});
 
-	it('blocks Send when the worker is not signed in, until a recheck succeeds', async () => {
+	it('lets a signed-out worker save the report instead of blocking Send', async () => {
 		routePosts({
 			'/support/reports': [() => preview()],
 			'/support/check': [() => ({ state: 'not_signed_in', message: 'Sign in.', known_issue: null }), () => OK_NEW]
@@ -173,9 +211,23 @@ describe('SupportReportFlow', () => {
 		const flow = new SupportReportFlow(ERROR);
 		await flow.start();
 		expect(flow.signedOut).toBe(true);
-		expect(flow.canSend).toBe(false);
-		await flow.recheck();
 		expect(flow.canSend).toBe(true);
+		await flow.recheck();
+		expect(flow.signedOut).toBe(false);
+		flow.dispose();
+	});
+
+	it('moves to saved_locally when a local-only worker keeps the report', async () => {
+		routePosts({
+			'/support/reports': [() => preview()],
+			'/support/check': [() => ({ state: 'not_signed_in', known_issue: null })],
+			'/send': [() => ({ state: 'not_signed_in', report_id: 'basic-1', local_record: { file: 'support-reports/basic-1.json', saved_at: '' } })]
+		});
+		const flow = new SupportReportFlow(ERROR);
+		await flow.start();
+		await flow.send();
+		expect(flow.phase).toBe('saved_locally');
+		expect(flow.savedLocally?.local_record?.file).toBe('support-reports/basic-1.json');
 		flow.dispose();
 	});
 

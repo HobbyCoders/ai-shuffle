@@ -262,6 +262,34 @@ describe('SettingsShell stacked mode', () => {
 		expect(shell.getAttribute('data-view')).toBe('index');
 	});
 
+	it('keeps a deep link on its page when a narrow window turns stacked after mounting', async () => {
+		// A browser at phone width: the width is 0 until the ResizeObserver
+		// reports it, after the target landed and the layout cleared it.
+		let report: ((entries: { contentRect: { width: number } }[]) => void) | null = null;
+		vi.stubGlobal(
+			'ResizeObserver',
+			class {
+				constructor(cb: typeof report) {
+					report = cb;
+				}
+				observe() {}
+				disconnect() {}
+			}
+		);
+		const view = render(SettingsShell, {
+			initialItemId: encodeTarget({ category: 'system', anchor: 'system.reportProblem' })
+		});
+		await tick();
+		await view.rerender({ initialItemId: undefined });
+		report!([{ contentRect: { width: 390 } }]);
+		await tick();
+		const shell = view.container.querySelector('.settings-shell')!;
+		expect(shell.hasAttribute('data-stacked')).toBe(true);
+		expect(shell.getAttribute('data-view')).toBe('page');
+		expect(settingsNav.category).toBe('system');
+		vi.unstubAllGlobals();
+	});
+
 	it('Ctrl+K returns to the index before focusing search', async () => {
 		platform.set('mobile');
 		const go = vi.spyOn(history, 'go').mockImplementation(() => {});

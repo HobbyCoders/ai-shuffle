@@ -84,6 +84,8 @@
 	});
 
 	let stackStarted = false;
+	/** A deep link already moved the stack: the width settling later must not reset it. */
+	let targetLanded = false;
 	$effect(() => {
 		const s = stacked;
 		untrack(() => {
@@ -91,7 +93,7 @@
 			if (s && !stackStarted) {
 				// Entering the stack: start at the index unless a target is landing.
 				stackStarted = true;
-				if (!initialItemId) settingsNav.resetStack('index');
+				if (!initialItemId && !targetLanded) settingsNav.resetStack('index');
 			} else if (!s) {
 				stackStarted = false;
 				settingsNav.depth = 0;
@@ -106,7 +108,10 @@
 		untrack(() => {
 			const target = decodeTarget(raw);
 			settingsNav.stacked = stacked;
-			if (target) settingsNav.go(target);
+			if (target) {
+				settingsNav.go(target);
+				targetLanded = true;
+			}
 			layout.clearFeatureItemId();
 		});
 	});

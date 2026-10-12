@@ -8,9 +8,16 @@
  * memory and vanish on restart: any draft read that answers 404 rebuilds the
  * draft and asks the user to look again, never sends a rebuilt draft unseen.
  *
+ * Two kinds of report: an app problem, and offensive or harmful AI output
+ * (`ai_content`, Google Play's generative-AI policy), which has no known-issue
+ * check and no AI diagnosis. On a local-only worker (no Shuffle account) Send
+ * saves the report on the worker and offers it as text and an email instead.
+ *
  * API: $lib/api/support (docs/content/api-reference/support-reports.md).
  */
+import { openSettings } from '$lib/settings/navigation.svelte';
 import {
+	EXCERPT_MAX,
 	buildSupportReport,
 	checkKnownIssue,
 	getDiagnosis,
@@ -25,6 +32,8 @@ import {
 	type SendResult,
 	type SupportCapabilities,
 	type SupportDelivery,
+	type AiContentInput,
+	type ReportKind,
 	type SupportErrorInput,
 	type SupportReportPreview
 } from '$lib/api/support';
@@ -85,21 +94,27 @@ export function canFixWithAi(): boolean {
 // Open request (one dialog, mounted once by SupportReportHost)
 // ---------------------------------------------------------------------------
 
-export type ReportSource = { error_id: string } | { error: SupportErrorInput };
+export type ReportSource = { error_id: string } | { error: SupportErrorInput } | AiContentInput;
+
+export function reportKindOf(source: ReportSource): ReportKind {
+	return 'kind' in source && source.kind === 'ai_content' ? 'ai_content' : 'problem';
+}
 
 export interface ReportRequest {
 	/** Increments per open so the host remounts a fresh flow. */
 	key: number;
 	source: ReportSource;
+	/** The note the draft starts with (an AI content report's reason). */
+	note?: string;
 }
 
 class SupportDialogStore {
 	request = $state<ReportRequest | null>(null);
 	#seq = 0;
 
-	open(source: ReportSource): void {
+	open(source: ReportSource, note?: string): void {
 		void supportCaps.load();
-		this.request = { key: ++this.#seq, source };
+		this.request = { key: ++this.#seq, source, ...(note?.trim() ? { note } : {}) };
 	}
 
 	close(): void {
@@ -109,9 +124,70 @@ class SupportDialogStore {
 
 export const supportReportDialog = new SupportDialogStore();
 
-/** Open the report dialog for an error the UI showed. */
-export function openSupportReport(source: ReportSource): void {
-	supportReportDialog.open(source);
+/** Open the report dialog for an error the UI showed, or for AI content. */
+export function openSupportReport(source: ReportSource, note?: string): void {
+	supportReportDialog.open(source, note);
+}
+
+// ---------------------------------------------------------------------------
+// "Report AI content" from a chat message
+// ---------------------------------------------------------------------------
+
+export interface AiContentPrefill {
+	excerpt: string;
+	sessionId?: string | null;
+}
+
+class AiContentPrefillStore {
+	/** Set by a message's Report button; System > Help takes it once. */
+	value = $state<AiContentPrefill | null>(null);
+
+	take(): AiContentPrefill | null {
+		const value = this.value;
+		this.value = null;
+		return value;
+	}
+}
+
+export const aiContentPrefill = new AiContentPrefillStore();
+
+/**
+ * Open the report form (System > Help) as an AI content report, with the
+ * message text and its session filled in. Nothing is built or sent until the
+ * user continues and then presses Send.
+ */
+export function reportAiContent(excerpt: string, sessionId?: string | null): void {
+	aiContentPrefill.value = { excerpt: clipCodePoints(excerpt.trim(), EXCERPT_MAX), sessionId: sessionId ?? null };
+	openSettings({ category: 'system', anchor: 'system.reportProblem' });
+}
+
+/**
+ * The first `max` code points of `text`. `slice` counts UTF-16 units and can
+ * split an emoji's surrogate pair, which `encodeURIComponent` then rejects;
+ * the server counts code points too.
+ */
+export function clipCodePoints(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const points = Array.from(text);
+	return points.length <= max ? text : points.slice(0, max).join('');
+}
+
+/** Subject of the email a local-only worker offers. */
+export function supportMailSubject(kind: ReportKind): string {
+	return kind === 'ai_content' ? 'AI content report' : 'AI Shuffle problem report';
+}
+
+/** Mail clients cut long mailto links; past this the user pastes the copied report. */
+export const MAILTO_BODY_MAX = 1500;
+
+/** `mailto:` link for a report a local-only worker could not send. */
+export function supportMailto(kind: ReportKind, body: string, email = 'support@hobbycoders.com'): string {
+	const clipped = clipCodePoints(body, MAILTO_BODY_MAX);
+	const text =
+		clipped === body
+			? body
+			: `${clipped}\n\n[Shortened. Paste the full report you copied from the app here.]`;
+	return `mailto:${email}?subject=${encodeURIComponent(supportMailSubject(kind))}&body=${encodeURIComponent(text)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +223,7 @@ const HUB_TITLES: Record<Exclude<HubState, 'ok'>, string> = {
 };
 
 const HUB_FALLBACK: Record<Exclude<HubState, 'ok'>, string> = {
-	not_signed_in: 'Sign this worker in to a Shuffle account to contact HobbyCoders support.',
+	not_signed_in: 'Sign this worker in to a Shuffle account to send reports directly.',
 	hub_unreachable: 'The HobbyCoders support service could not be reached. Check the connection and try again.',
 	rate_limited: 'Too many reports from this worker or account. Try again later.',
 	unavailable: 'The HobbyCoders support service is not available right now. Try again later.',
@@ -159,12 +235,15 @@ export function hubNotice(result: { state: HubState; message?: string; retry_aft
 	if (result.state === 'ok') return null;
 	const state = result.state in HUB_TITLES ? result.state : 'unavailable';
 	let text = result.message?.trim() || HUB_FALLBACK[state];
+	if (state === 'not_signed_in') {
+		text = `${text} You can still save the report here and email it.`;
+	}
 	const retry = retryText(result.retry_after);
 	if (retry && (state === 'rate_limited' || state === 'unavailable')) {
 		text = `${text.replace(/\s*Try again later\.?$/, '')} ${retry}`.trim();
 	}
 	return {
-		tone: state === 'rejected' ? 'error' : 'warning',
+		tone: state === 'rejected' ? 'error' : state === 'not_signed_in' ? 'info' : 'warning',
 		title: HUB_TITLES[state],
 		text,
 		action: state === 'not_signed_in' ? 'account' : state === 'rejected' ? undefined : 'retry'
@@ -209,7 +288,8 @@ function statusOf(err: unknown): number | undefined {
 // The flow
 // ---------------------------------------------------------------------------
 
-export type FlowPhase = 'building' | 'build_failed' | 'ready' | 'sending' | 'sent';
+/** `saved_locally`: a local-only worker kept the report and offers it as text and email. */
+export type FlowPhase = 'building' | 'build_failed' | 'ready' | 'sending' | 'sent' | 'saved_locally';
 export type AiStep = 'off' | 'confirm' | 'starting' | 'running' | 'done' | 'failed';
 
 export interface FlowOptions {
@@ -250,9 +330,12 @@ export class SupportReportFlow {
 	sendOutcome = $state<SendResult | null>(null);
 	sendError = $state<string | null>(null);
 	sent = $state<SendResult | null>(null);
+	/** The `not_signed_in` answer of a local-only worker that saved the report. */
+	savedLocally = $state<SendResult | null>(null);
 	alreadySent = $state(false);
 
 	readonly source: ReportSource;
+	readonly reportKind: ReportKind;
 	#opts: Required<Omit<FlowOptions, 'defaultModel'>> & Pick<FlowOptions, 'defaultModel'>;
 	#disposed = false;
 	#noteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -261,8 +344,10 @@ export class SupportReportFlow {
 	#savedNote = new Map<string, string>();
 	#rebuilds = 0;
 
-	constructor(source: ReportSource, opts: FlowOptions = {}) {
+	constructor(source: ReportSource, opts: FlowOptions & { note?: string } = {}) {
 		this.source = source;
+		this.reportKind = reportKindOf(source);
+		this.note = opts.note ?? '';
 		this.#opts = { pollMs: opts.pollMs ?? 1500, noteDelayMs: opts.noteDelayMs ?? 700, defaultModel: opts.defaultModel };
 	}
 
@@ -275,8 +360,22 @@ export class SupportReportFlow {
 		return this.checkResult?.state === 'ok' ? this.checkResult.known_issue : null;
 	}
 
+	get isAiContent(): boolean {
+		return this.reportKind === 'ai_content';
+	}
+
+	/** An AI content report needs its reason; the server refuses one without. */
+	get reasonMissing(): boolean {
+		return this.isAiContent && !this.note.trim();
+	}
+
+	/** No Shuffle account: Send saves the report on this worker instead. */
 	get signedOut(): boolean {
-		return this.checkResult?.state === 'not_signed_in' || this.sendOutcome?.state === 'not_signed_in';
+		return (
+			this.checkResult?.state === 'not_signed_in' ||
+			this.sendOutcome?.state === 'not_signed_in' ||
+			supportCaps.current?.signed_in === false
+		);
 	}
 
 	get aiBusy(): boolean {
@@ -284,7 +383,7 @@ export class SupportReportFlow {
 	}
 
 	get canSend(): boolean {
-		return this.phase === 'ready' && !!this.preview && !this.aiBusy && !this.signedOut;
+		return this.phase === 'ready' && !!this.preview && !this.aiBusy && !this.reasonMissing;
 	}
 
 	// -- building ----------------------------------------------------------
@@ -303,7 +402,8 @@ export class SupportReportFlow {
 			this.phase = 'build_failed';
 			return;
 		}
-		await this.runCheck();
+		// An AI content report is not a known issue: nothing to look up.
+		if (!this.isAiContent) await this.runCheck();
 	}
 
 	#setBasic(preview: SupportReportPreview) {
@@ -382,6 +482,8 @@ export class SupportReportFlow {
 		}
 		const target = this.preview;
 		if (!target || target.status === 'sent' || !this.noteDirty) return;
+		// The server refuses a blank reason; Send stays disabled until there is one.
+		if (this.reasonMissing) return;
 		const text = this.note.trim();
 		this.noteSaving = true;
 		try {
@@ -529,6 +631,11 @@ export class SupportReportFlow {
 			if (result.state === 'ok') {
 				this.sent = result;
 				this.phase = 'sent';
+				return;
+			}
+			if (result.state === 'not_signed_in' && result.local_record) {
+				this.savedLocally = result;
+				this.phase = 'saved_locally';
 				return;
 			}
 			this.sendOutcome = result;

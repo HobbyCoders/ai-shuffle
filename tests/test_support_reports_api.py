@@ -15,9 +15,10 @@ TRACE = 'Traceback (most recent call last):\n  File "/app/app/api/sessions.py", 
 
 
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
     from app.db import error_logs, mobile_hub
     reports.reset_for_tests()
+    monkeypatch.setattr(reports, "_local_dir", lambda: tmp_path / "support-reports")
     errors = {"e1": {"id": "e1", "source": "backend", "level": "ERROR", "message": "IndexError: list index out of range",
                      "detail": TRACE + "\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz012345", "occurrence_count": 3,
                      "updated_at": "2026-10-03T10:00:00+00:00", "session_id": "s1"}}
@@ -195,3 +196,152 @@ def test_input_validation(env):
     assert client.post("/api/v1/support/check", json={"fingerprint": "nope"}).status_code == 400
     assert client.get("/api/v1/support/reports/unknown").status_code == 404
     assert client.get("/api/v1/support/diagnoses/unknown").status_code == 404
+
+
+def test_input_validation_of_report_kinds(env):
+    client, _, _ = env
+    assert client.post("/api/v1/support/reports", json={"kind": "other", "error_id": "e1"}).status_code == 422
+    assert client.post("/api/v1/support/reports", json={"kind": "ai_content"}).status_code == 400
+    assert client.post("/api/v1/support/reports", json={"kind": "ai_content", "excerpt": "   "}).status_code == 400
+    assert client.post("/api/v1/support/reports", json={"kind": "ai_content", "excerpt": "x", "user_note": "y", "error_id": "e1"}).status_code == 400
+    assert client.post("/api/v1/support/reports", json={"error_id": "e1", "excerpt": "x"}).status_code == 400
+    too_long = "x" * (reports.EXCERPT_MAX + 1)
+    assert client.post("/api/v1/support/reports", json={"kind": "ai_content", "excerpt": too_long}).status_code == 422
+
+
+def test_problem_is_the_default_kind(env):
+    client, _, _ = env
+    draft = client.post("/api/v1/support/reports", json={"error_id": "e1"}).json()
+    assert draft["report_kind"] == "problem" and draft["excerpt"] is None
+    explicit = client.post("/api/v1/support/reports", json={"kind": "problem", "error_id": "e1"}).json()
+    assert explicit["report_kind"] == "problem" and explicit["fingerprint"] == draft["fingerprint"]
+
+
+def test_ai_content_report_previews_and_sends_the_excerpt_and_reason(env):
+    client, state, _ = env
+    r = client.post("/api/v1/support/reports", json={
+        "kind": "ai_content", "excerpt": "Some hateful reply. key sk-ant-api03-ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "user_note": "It insulted a group of people.", "session_id": "abc-123/../x"})
+    assert r.status_code == 200
+    draft = r.json()
+    assert draft["report_kind"] == "ai_content" and draft["kind"] == "basic"
+    assert draft["fingerprint"] == reports.AI_CONTENT_FINGERPRINT and draft["title"] == "AI content report"
+    assert draft["session_ref"] == "abc-123..x"
+    # The hub routes on the marker only as the exact first line (LF).
+    assert draft["body"].split("\n", 1)[0] == "Report kind: ai_content"
+    assert "\r" not in draft["body"]
+    assert "## Reported AI output\nSome hateful reply." in draft["body"]
+    assert "## Why the user reports it\nIt insulted a group of people." in draft["body"]
+    assert "sk-ant-api03-ZZZZ" not in draft["body"]
+    # No logs or errors travel with a content report.
+    assert draft["recent_errors"] == [] and draft["log_excerpt"] == [] and "## Log excerpt" not in draft["body"]
+    assert state["calls"] == []
+    # No AI diagnosis for a content report.
+    assert client.post("/api/v1/support/diagnoses", json={"report_id": draft["report_id"], "acknowledge_ai_usage": True}).status_code == 400
+
+    updated = client.post(f"/api/v1/support/reports/{draft['report_id']}/note", json={"user_note": "Harassment."}).json()
+    assert "## Why the user reports it\nHarassment." in updated["body"]
+
+    state["hub"] = lambda suffix, body: {"report_id": "hub-9", "status": "new", "reported": True,
+                                         "delivered": {"email": "sent", "github": "commented"}}
+    sent = client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True}).json()
+    assert sent["state"] == "ok" and sent["hub_report_id"] == "hub-9"
+    method, suffix, body, _ = state["calls"][-1]
+    assert suffix == "support/reports"
+    # The hub accepts kind basic|ai only; the report kind travels in the body and fingerprint.
+    assert set(body) == {"fingerprint", "kind", "title", "body", "app_version", "platform"}
+    assert body["kind"] == "basic" and body["fingerprint"] == reports.AI_CONTENT_FINGERPRINT
+    assert body["body"] == updated["body"]
+
+
+@pytest.mark.parametrize("kind_body", [
+    {"kind": "ai_content", "excerpt": "Offensive text", "user_note": "Slur."},
+    {"error": {"message": "boom", "source": "frontend"}},
+])
+def test_local_only_worker_saves_the_report_and_offers_email(env, tmp_path, kind_body):
+    import json
+    client, state, _ = env
+    state["binding"] = None
+    draft = client.post("/api/v1/support/reports", json=kind_body).json()
+    sent = client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True})
+    assert sent.status_code == 200
+    out = sent.json()
+    assert out["state"] == "not_signed_in" and out["support_email"] == "support@hobbycoders.com"
+    assert out["local_record"]["file"] == f"support-reports/{draft['report_id']}.json"
+    assert "saved on this worker" in out["message"]
+    assert state["calls"] == [], "nothing reaches the hub without a binding"
+    saved = json.loads((tmp_path / "support-reports" / f"{draft['report_id']}.json").read_text(encoding="utf-8"))
+    assert saved["body"] == draft["body"]
+    assert saved["report_kind"] == draft["report_kind"]
+    # The draft stays a draft: the user can still send it after signing in.
+    again = client.get(f"/api/v1/support/reports/{draft['report_id']}").json()
+    assert again["status"] == "draft" and again["local_record"]["file"] == out["local_record"]["file"]
+
+
+def test_local_reports_are_bounded(env, tmp_path, monkeypatch):
+    client, state, _ = env
+    state["binding"] = None
+    monkeypatch.setattr(reports, "MAX_LOCAL_REPORTS", 2)
+    for i in range(4):
+        draft = client.post("/api/v1/support/reports", json={"kind": "ai_content", "excerpt": f"text {i}", "user_note": "r"}).json()
+        client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True})
+    assert len(list((tmp_path / "support-reports").glob("*.json"))) == 2
+
+
+def test_capabilities_list_report_kinds(env):
+    client, _, _ = env
+    caps = client.get("/api/v1/support/capabilities").json()
+    assert caps["report_kinds"] == ["problem", "ai_content"] and caps["support_email"] == "support@hobbycoders.com"
+
+
+def test_ai_content_requires_a_reason_on_create_note_and_send(env):
+    client, state, _ = env
+    for note in (None, "", "   "):
+        body = {"kind": "ai_content", "excerpt": "Bad output"}
+        if note is not None:
+            body["user_note"] = note
+        r = client.post("/api/v1/support/reports", json=body)
+        assert r.status_code == 400 and "why" in r.json()["detail"].lower()
+    draft = client.post("/api/v1/support/reports", json={"kind": "ai_content", "excerpt": "Bad", "user_note": "Hate"}).json()
+    assert client.post(f"/api/v1/support/reports/{draft['report_id']}/note", json={"user_note": "  "}).status_code == 400
+    assert client.post(f"/api/v1/support/reports/{draft['report_id']}/note", json={"user_note": None}).status_code == 400
+    assert client.get(f"/api/v1/support/reports/{draft['report_id']}").json()["user_note"] == "Hate"
+    # A draft that somehow lost its reason is not sent.
+    reports.get_draft(draft["report_id"])["user_note"] = None
+    assert client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True}).status_code == 400
+    assert state["calls"] == []
+    # Problem reports keep an optional note.
+    problem = client.post("/api/v1/support/reports", json={"error_id": "e1"}).json()
+    assert client.post(f"/api/v1/support/reports/{problem['report_id']}/note", json={"user_note": ""}).status_code == 200
+
+
+def test_ai_content_body_starts_with_the_hub_marker():
+    report = {"report_kind": "ai_content", "app_version": "1.0", "platform": "docker linux x86_64",
+              "session_ref": "s1", "excerpt": "line one\r\nline two", "user_note": "why"}
+    body = reports.render_body(report)
+    assert body.startswith(reports.AI_CONTENT_MARKER + "\n")
+    assert body.splitlines()[0] == "Report kind: ai_content"
+
+
+def test_concurrent_local_saves_keep_the_cap_and_never_fail(env, tmp_path, monkeypatch):
+    import threading
+    client, state, _ = env
+    monkeypatch.setattr(reports, "MAX_LOCAL_REPORTS", 5)
+    drafts = [{"report_id": f"{i:032x}", "report_kind": "ai_content", "title": "AI content report",
+               "fingerprint": reports.AI_CONTENT_FINGERPRINT, "app_version": "1", "platform": "p",
+               "created": 0.0, "body": f"Report kind: ai_content\n{i}"} for i in range(80)]
+    errors = []
+
+    def save(chunk):
+        for d in chunk:
+            try:
+                reports.save_local(d, d["body"])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+    threads = [threading.Thread(target=save, args=(drafts[i::8],)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(list((tmp_path / "support-reports").glob("*.json"))) == 5

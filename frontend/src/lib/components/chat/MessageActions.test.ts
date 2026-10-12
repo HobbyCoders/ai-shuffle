@@ -3,6 +3,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 
 const rewind = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/client', async (importOriginal) => ({ ...(await importOriginal<object>()), executeRewind: rewind }));
+const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
+vi.mock('$lib/settings/navigation.svelte', () => nav);
+import { aiContentPrefill } from '$lib/stores/support-report.svelte';
 import MessageActions from './MessageActions.svelte';
 
 beforeEach(() => { rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
@@ -99,5 +102,22 @@ describe('MessageActions rewind', () => {
 		await waitFor(() => expect(dialog()!.textContent).toContain('network down'));
 		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 		expect(dialog()).toBeNull();
+	});
+});
+
+describe('MessageActions: Report AI content', () => {
+	it('offers Report on a settled assistant reply and opens the report form with it filled in', async () => {
+		const view = render(MessageActions, { ...base, messageRole: 'assistant', messageContent: 'A **hateful** reply' });
+		const button = screen.getByRole('button', { name: 'Report AI content' });
+		await fireEvent.click(button);
+		expect(aiContentPrefill.take()).toEqual({ excerpt: 'A **hateful** reply', sessionId: 's1' });
+		expect(nav.openSettings).toHaveBeenCalledWith({ category: 'system', anchor: 'system.reportProblem' });
+		await view.rerender({ isStreaming: true });
+		expect(screen.queryByRole('button', { name: 'Report AI content' })).toBeNull();
+	});
+
+	it('is not offered on the user\'s own messages', () => {
+		render(MessageActions, base);
+		expect(screen.queryByRole('button', { name: 'Report AI content' })).toBeNull();
 	});
 });

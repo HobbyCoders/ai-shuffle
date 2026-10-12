@@ -86,14 +86,17 @@ describe('SupportReportDialog', () => {
 		expect(nav.openSettings).toHaveBeenCalledWith({ category: 'system', anchor: 'system.checkUpdates' });
 	});
 
-	it('explains not being signed in and blocks Send', async () => {
+	it('explains not being signed in and offers to save the report instead', async () => {
 		await open({
 			'/support/reports': [() => preview()],
 			'/support/check': [() => ({ state: 'not_signed_in', message: 'Sign this worker in to a Shuffle account to contact HobbyCoders support.', known_issue: null })]
 		});
 		expect(screen.getByText('Not signed in')).toBeTruthy();
 		expect(screen.getByText(/Sign this worker in to a Shuffle account/)).toBeTruthy();
-		expect(sendButton().disabled).toBe(true);
+		expect(screen.getByText(/save the report here and email it/)).toBeTruthy();
+		expect(screen.getByText('What will be saved')).toBeTruthy();
+		const save = screen.getByRole('button', { name: 'Save report' }) as HTMLButtonElement;
+		expect(save.disabled).toBe(false);
 		await fireEvent.click(screen.getByRole('button', { name: 'Open Shuffle account' }));
 		expect(nav.openSettings).toHaveBeenCalledWith({ category: 'devices', item: 'account' });
 	});
@@ -202,5 +205,82 @@ describe('SupportReportDialog', () => {
 		expect(screen.getByText('Diagnosis failed')).toBeTruthy();
 		expect(screen.getByText(/took longer than 180 seconds\. You can still send the basic report\./)).toBeTruthy();
 		expect(sendButton().disabled).toBe(false);
+	});
+});
+
+describe('SupportReportDialog: AI content and local-only workers', () => {
+	const AI = { kind: 'ai_content' as const, excerpt: 'A hateful reply', session_id: 's1' };
+	const aiPreview = () =>
+		preview({
+			report_id: 'content-1',
+			report_kind: 'ai_content',
+			title: 'AI content report',
+			body: 'AI Shuffle AI content report\nReport kind: ai_content\n\n## Reported AI output\nA hateful reply',
+			redactions: 0,
+			excerpt: 'A hateful reply',
+			user_note: 'Hate speech.'
+		});
+
+	it('builds an AI content report with the reason, without a known-issue check or diagnosis', async () => {
+		routePosts({ '/support/reports': [() => aiPreview()] });
+		const flow = new SupportReportFlow(AI, { note: 'Hate speech.' });
+		render(SupportReportDialog, { flow, onClose: vi.fn() });
+		await flow.start();
+		await tick();
+		expect(api.post).toHaveBeenCalledTimes(1);
+		expect(api.post).toHaveBeenCalledWith('/support/reports', { ...AI, user_note: 'Hate speech.' });
+		expect(screen.getByText('Report AI content')).toBeTruthy();
+		expect(screen.getByText(/reviews reported AI content by hand/)).toBeTruthy();
+		expect(screen.getByText('Why are you reporting it?')).toBeTruthy();
+		expect(screen.queryByText('AI diagnosis')).toBeNull();
+		expect(sendButton().disabled).toBe(false);
+	});
+
+	it('disables Send with an inline message while the reason is blank', async () => {
+		routePosts({ '/support/reports': [() => aiPreview()] });
+		const flow = new SupportReportFlow(AI, { note: 'Hate speech.', noteDelayMs: 10_000 });
+		render(SupportReportDialog, { flow, onClose: vi.fn() });
+		await flow.start();
+		await tick();
+		const reason = screen.getByLabelText('Why are you reporting it?') as HTMLTextAreaElement;
+		await fireEvent.input(reason, { target: { value: '   ' } });
+		expect(sendButton().disabled).toBe(true);
+		expect(screen.getByRole('alert').textContent).toContain('Say why you are reporting it.');
+		expect(reason.getAttribute('aria-invalid')).toBe('true');
+		await fireEvent.blur(reason);
+		expect(api.post.mock.calls.some(([p]) => String(p).endsWith('/note'))).toBe(false);
+		await fireEvent.input(reason, { target: { value: 'Slur' } });
+		expect(sendButton().disabled).toBe(false);
+		expect(screen.queryByText('Say why you are reporting it.')).toBeNull();
+		flow.dispose();
+	});
+
+	it('on a local-only worker, saves the report and offers it as text and an email', async () => {
+		routePosts({
+			'/support/reports': [() => aiPreview()],
+			'/send': [
+				() => ({
+					state: 'not_signed_in',
+					report_id: 'content-1',
+					message: 'Saved on this worker.',
+					local_record: { file: 'support-reports/content-1.json', saved_at: '' },
+					support_email: 'support@hobbycoders.com'
+				})
+			]
+		});
+		const flow = new SupportReportFlow(AI, { note: 'Hate speech.' });
+		render(SupportReportDialog, { flow, onClose: vi.fn() });
+		await flow.start();
+		await tick();
+		await fireEvent.click(sendButton());
+		await tick();
+		expect(flow.phase).toBe('saved_locally');
+		expect(screen.getByText('Saved on this worker')).toBeTruthy();
+		expect(screen.getByText('support-reports/content-1.json')).toBeTruthy();
+		const mail = screen.getByTestId('mailto') as HTMLAnchorElement;
+		expect(mail.getAttribute('href')).toMatch(/^mailto:support@hobbycoders\.com\?subject=AI%20content%20report&body=/);
+		expect(decodeURIComponent(mail.getAttribute('href')!.split('body=')[1])).toContain('A hateful reply');
+		expect(screen.getByRole('button', { name: /Copy report/ })).toBeTruthy();
+		expect(screen.getByLabelText('Report text').textContent).toContain('Report kind: ai_content');
 	});
 });

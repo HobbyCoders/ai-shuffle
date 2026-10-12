@@ -9,11 +9,17 @@
 	 * and usage, names the model (the shared ModelPicker), and starts only after
 	 * an explicit acknowledgement.
 	 *
+	 * An AI content report (offensive or harmful AI output) shows the excerpt
+	 * and the reason instead, with no known-issue check and no diagnosis. On a
+	 * worker with no Shuffle account, Send saves the report on the worker and
+	 * this dialog then offers it as copyable text and an email to support.
+	 *
 	 * State and API calls live in SupportReportFlow
 	 * ($lib/stores/support-report.svelte); this file only renders it.
 	 */
 	import { onDestroy } from 'svelte';
-	import { Sparkles, Check, ShieldCheck, LoaderCircle, RotateCw } from 'lucide-svelte';
+	import { Sparkles, Check, ShieldCheck, LoaderCircle, RotateCw, Copy, Mail, HardDrive } from 'lucide-svelte';
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import UniversalModal from '$lib/components/UniversalModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
@@ -23,6 +29,8 @@
 		knownIssueNotice,
 		wasDelivered,
 		supportCaps,
+		supportMailSubject,
+		supportMailto,
 		type Notice,
 		type SupportReportFlow
 	} from '$lib/stores/support-report.svelte';
@@ -63,7 +71,41 @@
 		return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
 	});
 
-	onDestroy(() => flow.dispose());
+	onDestroy(() => {
+		flow.dispose();
+		if (copiedTimer) clearTimeout(copiedTimer);
+	});
+
+	// Local-only worker: the saved report as text and an email.
+	const supportEmail = $derived(flow.savedLocally?.support_email || supportCaps.current?.support_email || 'support@hobbycoders.com');
+	const mailto = $derived(preview ? supportMailto(flow.reportKind, preview.body, supportEmail) : '');
+	let copied = $state(false);
+	let copyError = $state<string | null>(null);
+	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+	async function copyReport() {
+		if (!preview) return;
+		copyError = null;
+		try {
+			await copyText(preview.body);
+			copied = true;
+			if (copiedTimer) clearTimeout(copiedTimer);
+			copiedTimer = setTimeout(() => (copied = false), 2000);
+		} catch {
+			copyError = COPY_ERROR_MESSAGE;
+		}
+	}
+
+	const title = $derived(
+		flow.phase === 'sent'
+			? 'Report sent'
+			: flow.phase === 'saved_locally'
+				? 'Report saved'
+				: flow.isAiContent
+					? 'Report AI content'
+					: 'Send report to HobbyCoders support'
+	);
+	const finished = $derived(flow.phase === 'sent' || flow.phase === 'saved_locally');
 
 	function close() {
 		if (flow.phase === 'sending') return;
@@ -94,23 +136,29 @@
 	}
 
 	const sendLabel = $derived(
-		flow.phase === 'sending' ? 'Sending…' : flow.kind === 'ai' && flow.aiReport ? 'Send with diagnosis' : 'Send report'
+		flow.phase === 'sending'
+			? 'Sending…'
+			: flow.signedOut
+				? 'Save report'
+				: flow.kind === 'ai' && flow.aiReport
+					? 'Send with diagnosis'
+					: 'Send report'
 	);
 </script>
 
 <UniversalModal
 	open
-	title={flow.phase === 'sent' ? 'Report sent' : 'Send report to HobbyCoders support'}
+	{title}
 	icon={FLAG_ICON}
 	size="lg"
 	onClose={close}
-	onSave={flow.phase === 'sent' || flow.phase === 'build_failed' ? undefined : () => void flow.send()}
+	onSave={finished || flow.phase === 'build_failed' ? undefined : () => void flow.send()}
 	saveLabel={sendLabel}
 	saveDisabled={!flow.canSend}
 	saving={flow.phase === 'sending'}
-	cancelLabel={flow.phase === 'sent' ? 'Done' : 'Cancel'}
+	cancelLabel={finished ? 'Done' : 'Cancel'}
 >
-	<div class="sr" data-phase={flow.phase}>
+	<div class="sr" data-phase={flow.phase} data-report-kind={flow.reportKind}>
 		{#if flow.phase === 'building'}
 			<div class="sr-loading" role="status" aria-live="polite">
 				<LoaderCircle size={16} class="sr-spin" aria-hidden="true" />
@@ -146,6 +194,36 @@
 			{#if sentIssue}
 				<Banner severity={sentIssue.tone} title={sentIssue.title} message={sentIssue.text} action={act(sentIssue)} />
 			{/if}
+		{:else if flow.phase === 'saved_locally' && preview}
+			<section class="sr-local" aria-labelledby="sr-local-title" data-testid="saved-locally">
+				<header class="sr-local-head">
+					<span class="sr-local-icon" aria-hidden="true"><HardDrive size={18} /></span>
+					<div>
+						<h3 id="sr-local-title">Saved on this worker</h3>
+						<p>
+							This worker isn't signed in to a Shuffle account, so nothing was sent. The report is in
+							<code>{flow.savedLocally?.local_record?.file}</code> in the app's data folder. To send it, email it to
+							<strong>{supportEmail}</strong>.
+						</p>
+					</div>
+				</header>
+				<div class="sr-local-actions">
+					<a class="sr-btn sr-btn-primary" href={mailto} data-testid="mailto">
+						<Mail size={14} aria-hidden="true" /> Email support
+					</a>
+					<button type="button" class="sr-btn" onclick={() => void copyReport()}>
+						{#if copied}<Check size={14} aria-hidden="true" /> Copied{:else}<Copy size={14} aria-hidden="true" /> Copy report{/if}
+					</button>
+					<span class="sr-muted sr-subject">Subject: {supportMailSubject(flow.reportKind)}</span>
+				</div>
+				<span class="sr-only" aria-live="polite">{copied ? 'Report copied' : ''}</span>
+				{#if copyError}<p class="sr-error" role="alert">{copyError}</p>{/if}
+				<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+				<pre class="sr-body" tabindex="0" aria-label="Report text">{preview.body}</pre>
+				<p class="sr-muted sr-foot">
+					Long reports may not fit in the email link: copy the report and paste it into the email.
+				</p>
+			</section>
 		{:else if preview}
 			<!-- Status notices -->
 			<div class="sr-notices" aria-live="polite">
@@ -191,21 +269,39 @@
 				{/if}
 			</div>
 
+			{#if flow.isAiContent}
+				<p class="sr-policy">
+					HobbyCoders support reviews reported AI content by hand against its content policy. The report holds only
+					the text below: the reported output, your reason, and a reference to the session.
+				</p>
+			{/if}
+
 			<!-- Note -->
 			<label class="sr-field">
-				<span class="sr-label">Your note <span class="sr-muted">(optional)</span></span>
+				{#if flow.isAiContent}
+					<span class="sr-label">Why are you reporting it?</span>
+				{:else}
+					<span class="sr-label">Your note <span class="sr-muted">(optional)</span></span>
+				{/if}
 				<textarea
 					rows="2"
 					maxlength="2000"
-					placeholder="What were you doing?"
+					placeholder={flow.isAiContent ? 'For example: it is hateful, sexual, violent or dangerous' : 'What were you doing?'}
+					aria-required={flow.isAiContent}
+					aria-invalid={flow.reasonMissing}
+					aria-describedby={flow.reasonMissing ? 'sr-reason-err' : undefined}
 					value={flow.note}
 					oninput={(e) => flow.setNote(e.currentTarget.value)}
 					onblur={() => void flow.saveNote()}
 					disabled={flow.phase === 'sending'}
 				></textarea>
+				{#if flow.reasonMissing}
+					<span class="sr-error" id="sr-reason-err" role="alert">Say why you are reporting it.</span>
+				{/if}
 			</label>
 
-			<!-- AI diagnosis -->
+			<!-- AI diagnosis (not for AI content reports) -->
+			{#if !flow.isAiContent}
 			<section class="sr-ai" data-step={flow.aiStep} aria-labelledby="sr-ai-title">
 				<header class="sr-ai-head">
 					<span class="sr-ai-glyph" aria-hidden="true"><Sparkles size={15} /></span>
@@ -311,11 +407,12 @@
 					</div>
 				{/if}
 			</section>
+			{/if}
 
 			<!-- Exactly what will be sent -->
 			<section class="sr-preview" aria-labelledby="sr-preview-title">
 				<header class="sr-preview-head">
-					<h3 id="sr-preview-title">What will be sent</h3>
+					<h3 id="sr-preview-title">{flow.signedOut ? 'What will be saved' : 'What will be sent'}</h3>
 					<span class="sr-redactions" class:has={preview.redactions > 0}>
 						<ShieldCheck size={13} aria-hidden="true" />
 						{#if preview.redactions > 0}
@@ -446,6 +543,9 @@
 		outline: none;
 		border-color: var(--ring);
 		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 22%, transparent);
+	}
+	textarea[aria-invalid='true'] {
+		border-color: var(--destructive);
 	}
 	textarea:disabled {
 		opacity: 0.6;
@@ -734,6 +834,75 @@
 		font-size: 0.75rem;
 	}
 
+	.sr-policy {
+		margin: 0;
+		padding: 10px 12px;
+		border-left: 3px solid var(--primary);
+		border-radius: 4px 10px 10px 4px;
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		line-height: 1.5;
+	}
+
+	/* ---- saved on this worker ---- */
+	.sr-local {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		min-width: 0;
+		animation: sr-rise 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+	}
+	@keyframes sr-rise {
+		from { transform: translateY(6px); opacity: 0; }
+		to { transform: none; opacity: 1; }
+	}
+	.sr-local-head {
+		display: flex;
+		gap: 12px;
+		align-items: flex-start;
+	}
+	.sr-local-head h3 {
+		margin: 0 0 4px;
+		font-size: 1rem;
+		font-weight: 600;
+	}
+	.sr-local-head p {
+		margin: 0;
+		color: var(--muted-foreground);
+		line-height: 1.5;
+		overflow-wrap: anywhere;
+	}
+	.sr-local-head code {
+		font-family: var(--font-mono, ui-monospace, monospace);
+		font-size: 0.8125rem;
+		color: var(--foreground);
+	}
+	.sr-local-head strong {
+		color: var(--foreground);
+	}
+	.sr-local-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		flex-shrink: 0;
+		border-radius: 10px;
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 14%, transparent);
+	}
+	.sr-local-actions {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px;
+	}
+	a.sr-btn {
+		text-decoration: none;
+	}
+	.sr-subject {
+		font-size: 0.75rem;
+	}
+
 	/* ---- sent ---- */
 	.sr-sent {
 		display: flex;
@@ -795,7 +964,8 @@
 			grid-template-columns: minmax(0, 1fr);
 			gap: 6px;
 		}
-		.sr-ai-actions .sr-btn {
+		.sr-ai-actions .sr-btn,
+		.sr-local-actions .sr-btn {
 			flex: 1 1 auto;
 		}
 		.sr-body {
@@ -807,6 +977,7 @@
 		.sr :global(.sr-spin),
 		.sr-skeleton span,
 		.sr-progress span,
+		.sr-local,
 		.sr-sent-icon {
 			animation: none;
 		}

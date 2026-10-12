@@ -108,7 +108,11 @@ The container has too little shared memory. Keep `shm_size: 1gb` in the compose 
 
 ## Sending logs to support
 
-**From the app:** open **Settings → System → Help → Report a problem**, describe what went wrong and press **Continue**. Error notifications also have **Send report to support**. The dialog shows exactly what will be sent, with secrets hidden, and nothing is sent until you press **Send**.
+**From the app:** open **Settings → System → Help → Report a problem or AI content**, choose **A problem with the app**, describe what went wrong and press **Continue**. Error notifications also have **Send report to support**. The dialog shows exactly what will be sent, with secrets hidden, and nothing is sent until you press **Send**. Without a Shuffle account, **Save report** keeps the report on this worker and offers it to copy or email.
+
+## Reporting offensive or harmful AI content
+
+Press the flag button under an assistant reply, or choose **Offensive or harmful AI content** in **Settings → System → Help → Report a problem or AI content**. Paste or check the AI output, say why you report it and press **Continue**, then **Send**. A person at HobbyCoders reviews it against the content policy. Without a Shuffle account the report is saved on this worker; use **Email support** or copy it to support@hobbycoders.com with the subject "AI content report".
 
 When the app does not start, save the container log and email it instead:
 

@@ -35,8 +35,14 @@
 	import { lockedReason, UpdateChannelState, type Channel } from './update-channel.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
 	import { fetchMemoryHealth, memoryRows, memorySummary, type MemoryHealth } from './memory-health';
-	import ReportProblemForm from './editors/ReportProblemForm.svelte';
-	import { canSendSupportReport, openSupportReport, supportCaps } from '$lib/stores/support-report.svelte';
+	import ReportProblemForm, { type ReportFormResult } from './editors/ReportProblemForm.svelte';
+	import type { ReportKind } from '$lib/api/support';
+	import {
+		aiContentPrefill,
+		canSendSupportReport,
+		openSupportReport,
+		supportCaps
+	} from '$lib/stores/support-report.svelte';
 	import './editors/editors.css';
 
 	let alive = true;
@@ -213,11 +219,34 @@
 	/* ---------- help: report a problem ---------- */
 
 	let reportOpen = $state(false);
+	let reportKind = $state<ReportKind>('problem');
 	let problem = $state('');
+	let excerpt = $state('');
+	let reason = $state('');
+	let reportSession = $state<string | null>(null);
 
-	/** The description becomes the report's error message; the dialog does the rest. */
-	function reportProblem(description: string) {
-		openSupportReport({ error: { message: description, source: 'frontend' } });
+	// A chat message's "Report AI content" lands here with the message filled in.
+	$effect(() => {
+		if (!aiContentPrefill.value) return;
+		const prefill = aiContentPrefill.take();
+		if (!prefill) return;
+		reportKind = 'ai_content';
+		excerpt = prefill.excerpt;
+		reason = '';
+		reportSession = prefill.sessionId ?? null;
+		reportOpen = true;
+	});
+
+	/** A problem's description becomes the report's error message; the dialog does the rest. */
+	function reportProblem(input: ReportFormResult) {
+		if (input.kind === 'ai_content') {
+			openSupportReport(
+				{ kind: 'ai_content', excerpt: input.excerpt, ...(input.sessionId ? { session_id: input.sessionId } : {}) },
+				input.reason
+			);
+			return;
+		}
+		openSupportReport({ error: { message: input.description, source: 'frontend' } });
 	}
 
 	function closeReport() {
@@ -415,7 +444,15 @@
 </PreferencePage>
 
 {#snippet reportForm()}
-	<ReportProblemForm bind:description={problem} onContinue={reportProblem} onCancel={closeReport} />
+	<ReportProblemForm
+		bind:kind={reportKind}
+		bind:description={problem}
+		bind:excerpt
+		bind:reason
+		sessionId={reportSession}
+		onContinue={reportProblem}
+		onCancel={closeReport}
+	/>
 {/snippet}
 
 {#snippet nightlyConfirm()}

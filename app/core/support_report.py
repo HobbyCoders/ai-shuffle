@@ -15,6 +15,11 @@ module sends on its own.
   traceback frames). The model gets no tools, so it cannot edit files, run
   commands or reach the network; it only writes text. The raw evidence is
   always attached, and the report names the provider/model that wrote it.
+- ``build_ai_content``: a report of offensive or harmful AI output (Google
+  Play's generative-AI policy): the excerpt, the user's reason, an optional
+  session reference, version and platform. No logs, no errors, no AI.
+- ``send`` without a hub binding (a local-only worker) keeps the report in
+  ``<data dir>/support-reports/`` instead, so the user can still email it.
 - Recognised secrets are filtered with the sharing-safe transcript filter
   (``app.core.export_redaction``) before the preview and again before sending.
   It recognises known credential shapes only, not arbitrary secrets.
@@ -66,6 +71,23 @@ DIAGNOSIS_PROMPT_MAX_CHARS = 60000
 DIAGNOSIS_TEXT_MAX_CHARS = 12000
 PREVIEW_TTL_SECONDS = 3600
 MAX_PREVIEWS = 20
+# Offensive-AI-content reports.
+EXCERPT_MAX = 8000
+SESSION_REF_MAX = 128
+AI_CONTENT_TITLE = "AI content report"
+# Every AI content report shares one fingerprint, so the hub files them under
+# one issue that support triages for content-policy review.
+AI_CONTENT_FINGERPRINT = hashlib.sha256(f"{FINGERPRINT_VERSION}\x1fai_content".encode()).hexdigest()[:32]
+# Reports kept on a worker with no hub binding: <data dir>/support-reports/.
+LOCAL_DIR_NAME = "support-reports"
+MAX_LOCAL_REPORTS = 200
+SUPPORT_EMAIL = "support@hobbycoders.com"
+REPORT_KINDS = ("problem", "ai_content")
+# First body line of an AI content report: the hub classifies a "basic"
+# report as ai_content by it (hobbycoders-cloud hub/src/support.ts).
+AI_CONTENT_MARKER = "Report kind: ai_content"
+REASON_REQUIRED = "Say why you are reporting this AI content."
+_local_lock = threading.Lock()
 
 # Hub outcome states the UI renders (docs: api-reference "Support reports").
 OK = "ok"
@@ -277,8 +299,36 @@ def _title(error: dict[str, Any], kind: str) -> str:
     return re.sub(r"[\x00-\x1f\x7f]", "", (prefix + message) or "Error report")[:TITLE_MAX]
 
 
+def _fit(text: str) -> str:
+    """Filtered and cut to the hub's size limits."""
+    body = redact_export_text(text)
+    marker = "\n[... report clipped to the support size limit]"
+    if len(body) > BODY_MAX_CHARS:
+        body = body[:BODY_MAX_CHARS - len(marker)] + marker
+    if len(body.encode("utf-8")) > BODY_MAX_BYTES:
+        body = body.encode("utf-8")[:BODY_MAX_BYTES - len(marker)].decode("utf-8", "ignore") + marker
+    return body
+
+
+def _render_ai_content(report: dict[str, Any]) -> str:
+    # The hub routes on this marker; it must be the body's first line.
+    lines = [
+        AI_CONTENT_MARKER,
+        "AI Shuffle AI content report",
+        f"App version: {report['app_version']}",
+        f"Platform: {report['platform']}",
+    ]
+    if report.get("session_ref"):
+        lines.append(f"Session reference: {report['session_ref']}")
+    lines += ["", "## Reported AI output", report["excerpt"],
+              "", "## Why the user reports it", report.get("user_note") or "(no reason given)"]
+    return _fit("\n".join(lines))
+
+
 def render_body(report: dict[str, Any]) -> str:
     """The exact text the hub receives (and the preview shows)."""
+    if report.get("report_kind") == "ai_content":
+        return _render_ai_content(report)
     e = report["error"]
     lines = [
         f"AI Shuffle support report ({'AI-diagnosed' if report['kind'] == 'ai' else 'basic'})",
@@ -308,13 +358,7 @@ def render_body(report: dict[str, Any]) -> str:
             lines += ["  " + line for line in r["detail"].splitlines()]
     lines += ["", f"## Log excerpt (last {len(report['log_excerpt'])} warning and error lines)"]
     lines += report["log_excerpt"] or ["(none)"]
-    body = redact_export_text("\n".join(lines))
-    marker = "\n[... report clipped to the support size limit]"
-    if len(body) > BODY_MAX_CHARS:
-        body = body[:BODY_MAX_CHARS - len(marker)] + marker
-    if len(body.encode("utf-8")) > BODY_MAX_BYTES:
-        body = body.encode("utf-8")[:BODY_MAX_BYTES - len(marker)].decode("utf-8", "ignore") + marker
-    return body
+    return _fit("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +415,10 @@ def get_draft(report_id: str) -> dict[str, Any]:
 
 def preview(report: dict[str, Any]) -> dict[str, Any]:
     keys = ("report_id", "kind", "fingerprint", "fingerprint_parts", "title", "app_version", "platform", "error",
-            "recent_errors", "log_excerpt", "user_note", "diagnosis", "body", "sent")
+            "recent_errors", "log_excerpt", "user_note", "diagnosis", "body", "sent", "excerpt", "session_ref",
+            "local_record")
     out = {k: report.get(k) for k in keys}
+    out["report_kind"] = report.get("report_kind") or "problem"
     out["status"] = "sent" if report.get("sent") else "draft"
     out["body_chars"] = len(report["body"])
     out["redactions"] = report["body"].count(REDACTED)
@@ -408,6 +454,7 @@ def build_basic(*, error_id: Optional[str] = None, error: Optional[dict[str, Any
     report = {
         "report_id": uuid.uuid4().hex,
         "kind": "basic",
+        "report_kind": "problem",
         "fingerprint": fingerprint(raw_message, raw_detail, source.get("status_code")),
         "fingerprint_parts": parts,
         "title": _title(record, parts["type"]),
@@ -427,10 +474,49 @@ def build_basic(*, error_id: Optional[str] = None, error: Optional[dict[str, Any
     return _store(report)
 
 
+def _session_ref(value: Optional[str]) -> Optional[str]:
+    ref = re.sub(r"[^A-Za-z0-9_.:-]", "", str(value or ""))[:SESSION_REF_MAX]
+    return ref or None
+
+
+def build_ai_content(*, excerpt: Optional[str], user_note: Optional[str] = None,
+                     session_id: Optional[str] = None) -> dict[str, Any]:
+    """Build and keep a report of offensive or harmful AI output. No AI and no network."""
+    if not str(excerpt or "").strip():
+        raise ReportError(400, "Paste the AI output you are reporting.")
+    if _note(user_note) is None:
+        raise ReportError(400, REASON_REQUIRED)
+    now = _now()
+    report = {
+        "report_id": uuid.uuid4().hex,
+        # The hub takes "basic" or "ai" only; report_kind routes it.
+        "kind": "basic",
+        "report_kind": "ai_content",
+        "fingerprint": AI_CONTENT_FINGERPRINT,
+        "fingerprint_parts": {"type": "ai_content", "message": "Offensive or harmful AI content", "frames": []},
+        "title": AI_CONTENT_TITLE,
+        "app_version": app_version(),
+        "platform": platform_label(),
+        "error": None,
+        "excerpt": _clean(str(excerpt).strip(), EXCERPT_MAX),
+        "session_ref": _session_ref(session_id),
+        "recent_errors": [],
+        "log_excerpt": [],
+        "user_note": _note(user_note),
+        "diagnosis": None,
+        "sent": None,
+        "created": now,
+        "expires": now + PREVIEW_TTL_SECONDS,
+    }
+    return _store(report)
+
+
 def set_note(report_id: str, user_note: Optional[str]) -> dict[str, Any]:
     report = get_draft(report_id)
     if report.get("sent"):
         raise ReportError(409, "This report was already sent.")
+    if report.get("report_kind") == "ai_content" and _note(user_note) is None:
+        raise ReportError(400, REASON_REQUIRED)
     report["user_note"] = _note(user_note)
     return _store(report)
 
@@ -520,6 +606,8 @@ def start_diagnosis(report_id: str, model: Optional[str], resolved: dict[str, An
     base = get_draft(report_id)
     if base["kind"] != "basic":
         raise ReportError(400, "Start a diagnosis from a basic report.")
+    if base.get("report_kind") == "ai_content":
+        raise ReportError(400, "An AI content report has no diagnosis.")
     with _lock:
         if any(r["status"] == "running" for r in _runs.values()):
             raise ReportError(409, "A diagnosis is already running.")
@@ -668,6 +756,8 @@ def check(fingerprint_value: str) -> dict[str, Any]:
 def send(report_id: str) -> dict[str, Any]:
     """Send an approved draft. Only the owner's explicit action calls this."""
     report = get_draft(report_id)
+    if report.get("report_kind") == "ai_content" and not report.get("user_note"):
+        raise ReportError(400, REASON_REQUIRED)
     with _lock:
         # A double click must not send twice.
         if report.get("sent") or report.get("_sending"):
@@ -689,6 +779,12 @@ def _send(report_id: str, report: dict[str, Any]) -> dict[str, Any]:
     if report["kind"] == "ai":
         payload["diagnosis_model"] = report["diagnosis"]["model"]
     outcome = _hub("support/reports", payload, timeout=30)
+    if outcome["state"] == NOT_SIGNED_IN:
+        # A local-only worker: keep the report here so the user can email it.
+        record = save_local(report, body)
+        return {**outcome, "report_id": report_id, "local_record": record, "support_email": SUPPORT_EMAIL,
+                "message": "This worker is not signed in to a Shuffle account, so the report was saved on this "
+                           f"worker instead. Email it to {SUPPORT_EMAIL} to send it."}
     if outcome["state"] != OK:
         return {**outcome, "report_id": report_id}
     result = outcome["result"]
@@ -697,6 +793,46 @@ def _send(report_id: str, report: dict[str, Any]) -> dict[str, Any]:
             "delivered": {"email": str(delivered.get("email") or "unknown"), "github": str(delivered.get("github") or "unknown")}}
     report["sent"] = sent
     return {"state": OK, "report_id": report_id, **sent, "known_issue": _issue(result)}
+
+
+def _local_dir() -> Path:
+    from app.core.config import settings
+    return Path(settings.effective_data_dir) / LOCAL_DIR_NAME
+
+
+def save_local(report: dict[str, Any], body: str) -> dict[str, Any]:
+    """Write the report to ``support-reports/<report_id>.json``; keep the newest MAX_LOCAL_REPORTS."""
+    import json
+    folder = _local_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"{report['report_id']}.json"
+    saved_at = _iso(_now())
+    record = {
+        "report_id": report["report_id"], "report_kind": report.get("report_kind") or "problem",
+        "title": report["title"], "fingerprint": report["fingerprint"], "app_version": report["app_version"],
+        "platform": report["platform"], "created_at": _iso(report["created"]), "saved_at": saved_at, "body": body,
+    }
+    # One writer at a time: a prune must not delete a file another save is
+    # enumerating, and the cap must hold with concurrent sends.
+    with _local_lock:
+        tmp = folder / f".{name}.tmp"
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, folder / name)
+        dated = []
+        for path in folder.glob("*.json"):
+            try:
+                dated.append((path.stat().st_mtime, path.name, path))
+            except OSError:  # removed meanwhile (another process)
+                continue
+        dated.sort()
+        for _, _, old in dated[:-MAX_LOCAL_REPORTS]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    info = {"file": f"{LOCAL_DIR_NAME}/{name}", "saved_at": saved_at}
+    report["local_record"] = info
+    return info
 
 
 def capabilities() -> dict[str, Any]:
@@ -711,6 +847,8 @@ def capabilities() -> dict[str, Any]:
         "basic_report": True,
         "ai_diagnosis": True,
         "signed_in": _binding() is not None,
+        "report_kinds": list(REPORT_KINDS),
+        "support_email": SUPPORT_EMAIL,
         "default_model": default_model,
         "fix_with_ai": checkout,
         "fix_with_ai_reason": "source_checkout" if checkout else None,

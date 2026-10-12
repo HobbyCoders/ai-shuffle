@@ -13,6 +13,8 @@ There are two kinds of report:
 - **Basic report** (free, no AI): the error, up to 10 other errors from the last 24 hours, the last 60 warning and error log lines, the app version and the platform.
 - **AI-diagnosed report**: a basic report plus a diagnosis written by a model the owner picks. It uses the owner's own AI usage. The diagnosis names the provider and model that wrote it, and the raw evidence stays attached, so a weak diagnosis still leaves a useful report.
 
+Each of those can be a report of a **problem** with the app (`kind: "problem"`, the default) or of **offensive or harmful AI content** (`kind: "ai_content"`). An AI content report carries the AI output being reported (`excerpt`), the user's reason (`user_note`) and optionally the session it came from; it has no error, logs, known-issue check or AI diagnosis. HobbyCoders support reviews AI content reports by hand for its content policy. In the app, **Settings → System → Help → Report a problem or AI content** and the flag button on an assistant reply open it.
+
 Every endpoint on this page is **Owner only**. Agent previews (a preview cookie) can read drafts and check fingerprints, but get `403` when they try to start a diagnosis or send.
 
 ## Flow
@@ -43,7 +45,7 @@ A fingerprint is a 32-character id for a kind of error. The same bug on two inst
 | `state` | Meaning |
 |---------|---------|
 | `ok` | Done. |
-| `not_signed_in` | This worker is not signed in to a Shuffle account, or the account no longer accepts it. Reports need a signed-in worker. |
+| `not_signed_in` | This worker is not signed in to a Shuffle account, or the account no longer accepts it. `/send` then saves the report on this worker instead (see [Local-only workers](#local-only-workers)). |
 | `hub_unreachable` | No connection to hobbycoders.com. |
 | `rate_limited` | Too many reports: the hub allows 5 an hour per worker and 20 a day per account, and 60 checks an hour per worker. |
 | `unavailable` | The support service is paused, down, or older than this app. |
@@ -63,6 +65,8 @@ What this worker can offer.
   "basic_report": true,
   "ai_diagnosis": true,
   "signed_in": true,
+  "report_kinds": ["problem", "ai_content"],
+  "support_email": "support@hobbycoders.com",
   "default_model": "prov:3f0c...:gpt-6.1",
   "fix_with_ai": false,
   "fix_with_ai_reason": null,
@@ -81,13 +85,16 @@ Build a basic report draft. No AI is used and nothing leaves the worker.
 
 **Auth:** Owner only
 
-Send exactly one of `error_id` or `error`.
+For a problem, send exactly one of `error_id` or `error`. For AI content, send `kind: "ai_content"` and `excerpt`, and neither `error_id` nor `error`.
 
 | Field | Type | Notes |
 |-------|------|-------|
+| `kind` | string | `problem` (default) or `ai_content`. |
+| `excerpt` | string | AI content only, required: the AI output being reported, up to 8,000 characters. Secrets are filtered like the rest of the report. |
+| `session_id` | string | AI content only, optional: the session the output came from. Sent as a reference. |
 | `error_id` | string | An `id` from `GET /api/v1/logs/errors`. |
 | `error` | object | The error as the UI saw it: `message` (required), `source` (`frontend`, `backend`, `ws` or `api`), `detail` (stack trace), `url`, `status_code`. The same fields as a **Fix with AI** action payload. |
-| `user_note` | string | Optional, up to 2,000 characters: what the user was doing. |
+| `user_note` | string | Up to 2,000 characters: what the user was doing (optional), or for AI content why they report it (required, not blank). |
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/support/reports \
@@ -125,7 +132,9 @@ curl -X POST http://localhost:8000/api/v1/support/reports \
 - `status` is `draft` or `sent`; `sent` holds the send result once sent.
 - An AI report also has `diagnosis`: `{"model": "OpenAI / gpt-6.1", "provider": "OpenAI", "model_id": "gpt-6.1", "text": "...", "workaround": "- Reload the page." | null, "started_at", "finished_at"}`. `workaround` is the model's "What you can try" section, written for the user.
 
-**Errors:** `400` when neither or both of `error_id` and `error` are sent, `404` when `error_id` is no longer in the error log.
+- `report_kind` is `problem` or `ai_content`. An AI content preview also has `excerpt` and `session_ref`, an empty `recent_errors` and `log_excerpt`, the title `AI content report`, and a body whose first line is exactly `Report kind: ai_content` (HobbyCoders routes the report by that line). Every AI content report has the same `fingerprint`, so HobbyCoders files them together for review. `kind` stays `basic`: the hub takes `basic` or `ai` there.
+
+**Errors:** `400` when neither or both of `error_id` and `error` are sent, when an AI content report has no excerpt, no reason or an error, or when a problem report has an excerpt; `404` when `error_id` is no longer in the error log. `POST /diagnoses` answers `400` for an AI content report.
 
 ### GET /api/v1/support/reports/{report_id}
 
@@ -135,7 +144,7 @@ The preview of a draft or sent report (basic or AI). `404` once it has expired.
 
 ### POST /api/v1/support/reports/{report_id}/note
 
-Replace the user's note on a draft and get the updated preview. `{"user_note": "..."}`; `null` or an empty string removes it. `409` after the report was sent.
+Replace the user's note on a draft and get the updated preview. `{"user_note": "..."}`; `null` or an empty string removes it, except on an AI content report, whose reason cannot be removed (`400`). `409` after the report was sent.
 
 **Auth:** Owner only
 
@@ -231,5 +240,21 @@ The worker filters secrets once more and sends the preview's `body`, its title, 
 `delivered` says where HobbyCoders received it: `email` is `sent`, `not_configured` or `failed`; `github` is `created`, `commented`, `not_configured`, `failed` or `deferred`. The report is stored by HobbyCoders whatever these say, so the user does not need to resend.
 
 On another `state` the response is `{"state", "message", "retry_after"?, "report_id"}` and the draft stays a draft.
+
+#### Local-only workers
+
+When the worker has no Shuffle account (`state: "not_signed_in"`), the report is written to `support-reports/<report_id>.json` in the app's data folder instead, and the response adds where it went and where to email it:
+
+```json
+{
+  "state": "not_signed_in",
+  "report_id": "9f1c2e...",
+  "message": "This worker is not signed in to a Shuffle account, so the report was saved on this worker instead. Email it to support@hobbycoders.com to send it.",
+  "local_record": {"file": "support-reports/9f1c2e....json", "saved_at": "2026-10-03T10:08:00+00:00"},
+  "support_email": "support@hobbycoders.com"
+}
+```
+
+The file holds the report's body, title, kind, fingerprint, version and platform. The worker keeps the newest 200 such files. The draft stays a draft, so it can still be sent after signing in. The app then shows the report text to copy and a `mailto:` link (subject `AI content report` or `AI Shuffle problem report`).
 
 **Errors:** `400` without `confirm: true`; `404` for an expired draft; `409` when the report was already sent (or is being sent); `403` from an agent preview.
