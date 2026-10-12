@@ -76,16 +76,36 @@ def test_explicit_destination_branch_is_protected(target, monkeypatch):
     monkeypatch.setattr(activity.git_service, 'get_current_branch', lambda _: 'unrelated')
     assert activity.busy_git_target_sessions('legacy', target[0], ['feature']) == ['busy']
 
-def test_remote_same_branch_is_protected_without_local_cwd(target, monkeypatch):
+@pytest.mark.parametrize('branch', [None, 'main', 'other-feature'])
+def test_remote_session_does_not_block_local_checkout(target, monkeypatch, branch):
+    target[2][0]['branch'] = branch
     monkeypatch.setattr(activity.control, 'owner_of', lambda _: 'other-worker')
-    assert activity.busy_git_target_sessions('legacy', target[0]) == ['busy']
+    monkeypatch.setattr(activity.git_service, 'get_current_branch', lambda _: 'main')
+    resolve = Mock(side_effect=AssertionError('remote cwd must not be resolved locally'))
+    monkeypatch.setattr(activity, 'resolve_existing_cwd', resolve)
+    assert activity.busy_git_target_sessions('legacy', target[0], {'main'}) == []
+    assert activity.git_target_mutations_blocked('legacy', target[0]) is False
+    activity.require_idle_git_target('legacy', target[0], {'main'})
+    resolve.assert_not_called()
+
+
+def test_remote_same_branch_is_protected_for_shared_github_operations(target, monkeypatch):
+    monkeypatch.setattr(activity.control, 'owner_of', lambda _: 'other-worker')
+    assert activity.busy_git_target_sessions('legacy', target[0], include_remote=True) == ['busy']
+
+
+def test_remote_unknown_branch_fails_closed_for_shared_github_operations(target, monkeypatch):
+    target[2][0]['branch'] = None
+    monkeypatch.setattr(activity.control, 'owner_of', lambda _: 'other-worker')
+    with pytest.raises(activity.GitActivityUnavailable, match=r'Unknown branch.*session busy'):
+        activity.busy_git_target_sessions('legacy', target[0], {'main'}, include_remote=True)
 
 def test_excluded_sessions_are_skipped_but_others_still_count(target, monkeypatch):
-    # A handoff accounts for its own reservations; an unknown-cwd remote session
+    # A handoff accounts for its own reservations; an unknown-cwd local session
     # it excluded must not make the check fail closed.
     here, _, sessions, _ = target
     sessions[0]['branch'] = None
-    monkeypatch.setattr(activity.control, 'owner_of', lambda _: 'other-worker')
+    monkeypatch.setattr(activity, 'resolve_existing_cwd', lambda _: None)
     assert activity.busy_git_target_sessions('legacy', here, exclude=('busy',)) == []
     sessions.append({'id': 'second', 'project_id': 'legacy', 'branch': 'feature'})
     monkeypatch.setattr(activity, '_live_session_ids', lambda: {'busy', 'second'})
@@ -101,9 +121,25 @@ def test_activity_errors_fail_closed(target, monkeypatch):
 def test_unknown_busy_cwd_fail_closed(target, monkeypatch):
     target[2][0]['branch'] = None
     monkeypatch.setattr(activity, 'resolve_existing_cwd', lambda _: None)
+    with pytest.raises(activity.GitActivityUnavailable, match=r'Unknown cwd of an active session \(session busy\)'):
+        activity.busy_git_target_sessions('legacy', target[0], {'main'})
     with pytest.raises(HTTPException) as error:
         activity.require_idle_git_target('legacy', target[0])
     assert error.value.status_code == 503
+
+def test_unknown_local_branch_names_session(target, monkeypatch):
+    target[2][0]['branch'] = None
+    monkeypatch.setattr(activity.git_service, 'get_current_branch', lambda _: None)
+    with pytest.raises(activity.GitActivityUnavailable, match=r'Unknown branch.*session busy'):
+        activity.busy_git_target_sessions('legacy', target[0], {'main'})
+
+
+def test_unexpected_local_resolution_error_names_session(target, monkeypatch):
+    target[2][0]['branch'] = None
+    monkeypatch.setattr(activity, 'resolve_existing_cwd', Mock(side_effect=RuntimeError('unavailable')))
+    with pytest.raises(activity.GitActivityUnavailable, match=r'Cannot verify checkout activity.*session busy'):
+        activity.busy_git_target_sessions('legacy', target[0], {'main'})
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('name', sorted(git_owner._MUTATING_ACTIONS))
@@ -141,7 +177,7 @@ async def test_merge_checks_base_branch_before_github_write(monkeypatch):
     monkeypatch.setattr(activity, 'require_idle_git_target', check)
     with pytest.raises(HTTPException):
         await github.require_idle_pull_branches('p', 'owner/repo', 1)
-    check.assert_called_once_with('p', None, ('feature', 'main'))
+    check.assert_called_once_with('p', None, ('feature', 'main'), include_remote=True)
 
 @pytest.mark.asyncio
 async def test_queued_merge_rechecks_activity_before_write(monkeypatch):

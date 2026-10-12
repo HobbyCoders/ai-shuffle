@@ -1732,6 +1732,28 @@ def _active_holds():
         return [row["session_id"] for row in cur.fetchall() if row["runner_id"].startswith(handoff.HOLD)]
 
 
+def test_hold_checkout_surfaces_and_logs_unknown_local_cwd(pair, monkeypatch, caplog):
+    import logging
+    from app.core import git_activity
+
+    a, _b, source, _target = pair
+    with a.active():
+        _bind_session("missing-cwd", None)
+        _start_work("missing-cwd", True)
+        monkeypatch.setattr(handoff.project_resolver, "resolve_existing_cwd", lambda _: None)
+        monkeypatch.setattr(git_activity, "resolve_existing_cwd", lambda _: None)
+        session = database.get_session("handoff-test")
+        project = projects_v2.get_project_v2(session["project_v2_id"])
+        reason = "Unknown cwd of an active session (session missing-cwd)"
+        with caplog.at_level(logging.WARNING, logger=handoff.__name__):
+            with pytest.raises(ValueError) as error:
+                handoff._hold_checkout(session, project, str(source), BRANCH, "holder", {})
+        assert str(error.value) == f"{handoff.UNVERIFIED_CHECKOUT} Reason: {reason}"
+        assert isinstance(error.value.__cause__, git_activity.GitActivityUnavailable)
+        assert any(record.levelno == logging.WARNING and "handoff-test" in record.message
+                   and reason in record.message for record in caplog.records)
+
+
 def _registered_receiving_worktree(a, b, source, target, tmp_path):
     """B has a real registered checkout of the branch, behind the source."""
     from pathlib import Path

@@ -497,7 +497,8 @@ def _hold_checkout(session, project, path, branch, holder, held):
         existing = path if path and Path(path).is_dir() else None
         busy = busy_git_target_sessions(project["id"], existing, (branch,), exclude=(session["id"], *held))
     except GitActivityUnavailable as exc:
-        raise ValueError(UNVERIFIED_CHECKOUT) from exc
+        logger.warning("Cannot verify checkout for handoff of session %s: %s", session["id"], exc)
+        raise ValueError(f"{UNVERIFIED_CHECKOUT} Reason: {exc}") from exc
     if busy:
         raise ValueError(BUSY_CHECKOUT)
 
