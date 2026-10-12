@@ -138,7 +138,7 @@ def test_release_requires_protected_main_and_a_merged_pr(monkeypatch, protected,
     replies = {
         "branches/main": {"protected": protected},
         "commits/release/pulls?per_page=100": [{
-            "merged_at": "date" if merged else None, "base": {"ref": base},
+            "merged_at": "date" if merged else None, "base": {"ref": base, "repo": {"full_name": checks.REPOSITORY}},
             "merge_commit_sha": merge_sha, "head": {"sha": "pr-head"},
         }],
     }

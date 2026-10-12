@@ -21,6 +21,54 @@ this repository's `account-hub-production` and `release-signing` signing setting
 they are not replaced by the cloud deployment environments. No secret-bearing
 source publication workflow runs on a pull request.
 
+## Fresh public history and publication identity
+
+The public root must have the complete tree of the merged private export. The
+bridge only verifies that transition for local update-reach attestation; it does
+not bypass archive exact-tree verification, signatures, protected-main status,
+merged-PR evidence or owner acceptance labels. It never fetches private objects
+into the public checkout. The local attester needs a separate complete private
+checkout (`AI_SHUFFLE_PRIVATE_CHECKOUT` or the helpers' `--private-checkout`).
+
+After freezing/draining publishers and inventorying the maximum container
+sequence across all distributed/withdrawn sources and images, open the final
+private export PR. On its clean branch run:
+
+```sh
+python scripts/release/prepare_cutover.py --export-pr "$EXPORT_PR" --last-shipped "$MAX_SHIPPED" --last-desktop-sequence "$MAX_DESKTOP_SEQUENCE"
+```
+
+Review/commit `release/public-cutover.json` and `release/container-sequence-offset`
+in that PR. The mapping pins the private numeric repository identity, export PR,
+signed old publication envelope hash/revision and inventory maxima. The desktop
+maximum covers all signed source sequences and installer-bundled commit-time
+baselines, including withdrawn/historical deliveries. Do not
+publish this export from old history. Copy its exact complete tree to the single
+public root; retain the signed envelope privately. The offset is committed data,
+read from the target revision, never a GitHub variable or environment override.
+It is immutable with the mapping for the entire public history epoch.
+
+On the first public release PR, run `python scripts/release/repin_catalog.py
+--public-root "$S"`; commit and merge it before a stable tag. The initial root
+itself is not eligible for stable. Use `bridge_attestation.py --private-export
+"$E" --public-root "$S" --private-checkout "$PRIVATE" --out "$RECEIPT"` for an
+audit receipt; `--verify "$RECEIPT"` repeats the live evidence checks, rather than
+trusting the receipt as an authorization. Run `cutover_check.py` with those E/S
+and checkout arguments plus `--old-repo HobbyCoders/ai-shuffle-private --new-repo
+HobbyCoders/ai-shuffle`. Failures are stop points, not bypass switches. The normal
+full-suite exact-main attestation remains required after this read-only check.
+
+Every publisher now requires `RELEASE_GITHUB_REPO_ID` (the current publication
+repository's numeric GitHub ID); `RELEASE_GITHUB_REPO` defaults to
+`HobbyCoders/ai-shuffle`. Configure both in the existing signing environments.
+The cloud provenance migration/allowlist must be deployed **first**. All writes
+and read-backs bind assets to this identity; retries preserve signed bytes and
+cannot move an existing row to a different repository. Withdrawn source rows
+remain part of the signing-clock floor. Full-release staging of source rows,
+installer pointers and Play artifacts is tracked separately in
+[#2335](https://github.com/HobbyCoders/ai-shuffle/issues/2335); Docker candidate
+staging is not a claim that these other surfaces are staged.
+
 ## The path of a release
 
 `release.yml`, on an owner manual dispatch **from an existing `vX.Y.Z` tag**
@@ -37,8 +85,18 @@ source publication workflow runs on a pull request.
    as `v6-phase2` and prereleases do not participate in that comparison.
 2. **docker** (`docker-publish.yml`) builds the image from the tag, runs the
    full container verification (`scripts/verify_container_postgres.py`), and
-   only then pushes `ghcr.io/hobbycoders/ai-shuffle-server:X.Y.Z`, plus `X.Y`,
-   `X` and `latest` when promoted.
+   only then pushes immutable version and full-SHA tags. Optional `candidate_tag`
+   must start with `candidate-`; the builder never moves `latest`, major, minor,
+   main or nightly aliases (including metadata-action's automatic latest).
+   An existing version tag must be reused, not overwritten: dispatch `release.yml`
+   with `image_digest=sha256:...` to verify the image's baked exact revision, full
+   Git tree, committed container sequence and capability contract without a
+   rebuild. The lifecycle and clean buyer-install checks still run. Only the
+   final **promote-image** job, after buyer-install, source signing, Linux release
+   attachment and Android APK publication, moves `X.Y`, `X` and `latest` by that
+   exact digest and reads them back. Windows must also succeed when requested;
+   it may be skipped only when `build_desktop` was not requested. Failed or
+   cancelled artifact jobs never permit alias promotion.
 3. **buyer-install** pulls that image on a fresh GitHub-hosted runner and
    installs it with `docs/install/compose` exactly as a buyer would
    (`scripts/ci/verify_buyer_compose.py`), then checks the first session
@@ -56,6 +114,11 @@ source publication workflow runs on a pull request.
 5. **android** builds and publishes to Play internal testing only when its
    existing signing/worker-readiness gates pass. This is not a public Play
    production release. The Windows installer is still opt-in on dispatch.
+6. **linux-build** calls the existing Linux workflow on the exact tag; **linux-release**
+   verifies its source revision/version, AppImage and deb hashes, and checksum
+   file, then attaches both packages, `SHA256SUMS-linux` and provenance to the
+   GitHub release with digest/size read-back. The one-day Actions artifact is
+   transport only, not the release download location.
 
 Complete release workflows are serialized without cancelling an active
 publish. A failed gate stops its dependent jobs; a partial release must not
@@ -69,6 +132,18 @@ dispatch. A retry/optional
 installer dispatch must select that existing tag as its workflow ref and
 supply the same version; a dispatch from `main` fails preflight, because a
 checkout does not change GitHub's tags-only environment authorization.
+
+Accepted nightly Docker candidates have a separate explicit promotion lane:
+`python3 scripts/release/promote_image.py --digest sha256:HEX --tags nightly`.
+Run it only after that digest's canary acceptance, from a clean checkout of the
+current public main. It verifies the pulled image's revision/tree/sequence and
+requires the existing owner-authored successful exact-main full-suite status on
+protected main. It rechecks main after the image pull and reads the nightly alias
+back. Missing/stale/failed evidence refuses promotion; this lane never moves
+`latest`, major or minor aliases, and mixed nightly/stable requests are rejected.
+The pre-canary cutover check requires Actions disabled and all runs drained in
+**all three** repositories: old private app, new public app and cloud. Enable the
+public candidate publisher only after that checkpoint as the runbook describes.
 
 The **nightly** source update is scheduled once a day at **06:00 UTC** from
 protected `main`, with an owner-only manual dispatch for retries. Pushes and

@@ -26,9 +26,9 @@ cp.execFileSync = (exe, args) => {
   if (!args.includes('d1') || !args.includes('--remote') || !args.includes('--command')) throw Error('Unexpected external command');
   const sql = args[args.indexOf('--command') + 1];
   if (sql.startsWith('INSERT')) {
-    const match = sql.match(/VALUES\('([a-z]+)','([^']+)','([a-f0-9]{40})','([^']+)','([^']+)',(\d+),(\d+),'([a-f0-9]{64})','([^']+)','([^']+)'\)/);
+    const match = sql.match(/VALUES\('([a-z]+)','([^']+)','([a-f0-9]{40})','([^']+)','([^']+)',(\d+),(\d+),'([a-f0-9]{64})','([^']+)','([^']+)','([^']+)',(\d+)\)/);
     if (!match) throw Error('Invalid publisher SQL');
-    saved = { platform: match[1], version: match[2], revision: match[3], arch: match[4], file_name: match[5], asset_id: Number(match[6]), size: Number(match[7]), sha256: match[8], payload: match[9], signature: match[10] };
+    saved = { platform: match[1], version: match[2], revision: match[3], arch: match[4], file_name: match[5], asset_id: Number(match[6]), size: Number(match[7]), sha256: match[8], payload: match[9], signature: match[10], release_repository: match[11], release_repository_id: Number(match[12]) };
     events.push('publish');
     fs.writeFileSync(path.join(root, 'record.json'), JSON.stringify(saved));
     return '[]';
@@ -40,6 +40,7 @@ cp.execFileSync = (exe, args) => {
 syncBuiltinESMExports();
 globalThis.fetch = async url => {
   events.push(String(url));
+  if (String(url) === 'https://api.github.com/repos/HobbyCoders/ai-shuffle') return Response.json({id:42,full_name:'HobbyCoders/ai-shuffle'});
   if (String(url) === 'https://api.github.com/repos/HobbyCoders/ai-shuffle/releases/tags/v1.2.3') return Response.json({ assets: [world.asset] });
   throw Error('Unexpected network request');
 };

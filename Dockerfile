@@ -225,6 +225,7 @@ ENV APP_VERSION=$APP_VERSION
 # Production publishing supplies a first-parent ordinal. Ad-hoc/lab images
 # without provenance remain pinned instead of silently following main.
 ARG APPLICATION_SEQUENCE=0
+ARG APPLICATION_SOURCE_TREE=
 RUN python docker/update_contract.py /app "$GIT_SHA" "$APPLICATION_SEQUENCE" > /app/docker/image.json
 ENV GIT_SHA=$GIT_SHA
 LABEL org.opencontainers.image.revision=$GIT_SHA

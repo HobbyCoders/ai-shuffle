@@ -27,9 +27,12 @@ COMMAND = "python scripts/local_ci.py full --attest"
 
 
 class GitHub:
+    def __init__(self, repository=REPOSITORY):
+        self.repository = repository
+
     def __call__(self, endpoint):
         raw = subprocess.check_output(
-            ["gh", "api", f"repos/{REPOSITORY}/{endpoint}"], text=True, encoding="utf-8", timeout=20
+            ["gh", "api", f"repos/{self.repository}/{endpoint}"], text=True, encoding="utf-8", timeout=20
         )
         return json.loads(raw)
 
@@ -105,7 +108,17 @@ def load_update_reach():
     return reach
 
 
-def update_reach_readiness(revision, *, api=None, base=None):
+def load_cutover():
+    import importlib.util
+
+    path = Path(__file__).with_name("public_cutover.py")
+    spec = importlib.util.spec_from_file_location("publication_cutover", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def update_reach_readiness(revision, *, api=None, base=None, root=None, repository=REPOSITORY, bridge=True):
     """Strict backstop before local/full-suite is posted, independent of PR draft state.
 
     Inspect each first-parent main change since the *published* edge pointer.
@@ -113,7 +126,9 @@ def update_reach_readiness(revision, *, api=None, base=None):
     In-reach changes do not need GitHub PR lookups at all.
     """
     reach = load_update_reach()
-    api = api or GitHub()
+    api = api or GitHub(repository)
+    git = reach.git if root is None else lambda *args: reach.git(*args, root=root)
+    reader = reach.reader if root is None else lambda ref: reach.reader(ref, root=root)
     try:
         warning = ""
         if base is None:
@@ -128,21 +143,30 @@ def update_reach_readiness(revision, *, api=None, base=None):
                     # No publication evidence at all: never skip an unpublished
                     # change by guessing a baseline from local tags or HEAD^.
                     # A shallow boundary is not repository bootstrap.
-                    if reach.git("rev-parse", "--is-shallow-repository") != "false":
+                    if git("rev-parse", "--is-shallow-repository") != "false":
                         return False, warning + ("no verified cached publication and incomplete Git history; "
                                                  "run `git fetch --unshallow origin` and retry attestation.")
-                    base = reach.git("rev-list", "--first-parent", revision).splitlines()[-1]
+                    base = git("rev-list", "--first-parent", revision).splitlines()[-1]
+                    if bridge and git("ls-tree", base, "--", "release/public-cutover.json"):
+                        raise ValueError("Configured cutover requires a verified signed envelope")
                     warning += ("no verified cached publication; checking all first-parent changes "
                                 "since repository bootstrap. Local tags are not publication evidence.\n")
         # Refuse unknown/non-ancestor pointers instead of silently checking an empty range.
-        if base not in reach.git("rev-list", "--first-parent", revision).splitlines():
-            return False, "Update reach refused: published edge is not on this main history; fetch origin/main."
-        commits = reach.git("rev-list", "--first-parent", "--reverse", f"{base}..{revision}").splitlines()
+        if base not in git("rev-list", "--first-parent", revision).splitlines():
+            if not bridge:
+                return False, "Update reach refused: published edge is not on this main history; fetch origin/main."
+            envelope = edge_cache_path().read_bytes()
+            if verify_edge_manifest(envelope) != base:
+                raise ValueError("Cutover requires the exact reverified signed publication")
+            base, _ = load_cutover().verify_bridge(
+                root or reach.ROOT, revision, base, envelope, walk=update_reach_readiness)
+
+        commits = git("rev-list", "--first-parent", "--reverse", f"{base}..{revision}").splitlines()
         refusals = []
         for commit in commits:
-            parent = reach.git("rev-parse", f"{commit}^1")
-            changed = reach.git("diff", "--name-only", parent, commit).splitlines()
-            groups = reach.classify(changed, reach.reader(parent), reach.reader(commit))
+            parent = git("rev-parse", f"{commit}^1")
+            changed = git("diff", "--name-only", parent, commit).splitlines()
+            groups = reach.classify(changed, reader(parent), reader(commit))
             failing = reach.verdict(groups)
             if not failing:
                 continue
@@ -151,7 +175,7 @@ def update_reach_readiness(revision, *, api=None, base=None):
             if not isinstance(prs, list) or len(prs) >= 100:
                 raise ValueError("Incomplete PR evidence")
             merged = [pr for pr in prs if pr.get("merged_at") and pr.get("base", {}).get("ref") == "main"
-                      and pr.get("base", {}).get("repo", {}).get("full_name") == REPOSITORY
+                      and pr.get("base", {}).get("repo", {}).get("full_name") == repository
                       and pr.get("merge_commit_sha") == commit]
             if not merged:
                 refusals.append(f"{commit[:9]}: no merged main PR; needs "

@@ -9,8 +9,16 @@ on:
         description: 'Rebuild an existing vX.Y.Z tag using the verification tools from this workflow ref'
         required: false
         type: string
+      image_digest:
+        description: 'Reuse this verified immutable digest instead of rebuilding'
+        required: false
+        type: string
+      candidate_tag:
+        description: 'Immutable canary tag; staging never moves aliases'
+        required: false
+        type: string
       promote_latest:
-        description: 'Also move latest, X.Y and X to this release (only for the newest final release)'
+        description: 'Must remain false; aliases require the final release promotion job'
         required: false
         type: boolean
         default: false
@@ -25,8 +33,16 @@ on:
         description: 'Immutable release tag to build and verify'
         required: true
         type: string
+      image_digest:
+        description: 'Reuse this verified immutable digest instead of rebuilding'
+        required: false
+        type: string
+      candidate_tag:
+        description: 'Immutable canary tag; staging never moves aliases'
+        required: false
+        type: string
       promote_latest:
-        description: 'Move latest, X.Y and X to this release after verification'
+        description: 'Must remain false; aliases require the final release promotion job'
         required: false
         type: boolean
         default: false
@@ -35,6 +51,9 @@ on:
         type: boolean
         default: false
     outputs:
+      digest:
+        description: 'Immutable published image digest'
+        value: ${{ jobs.build.outputs.digest }}
       image:
         description: 'Private image repository the release was pushed to'
         value: ${{ jobs.build.outputs.image }}
@@ -60,6 +79,7 @@ jobs:
       packages: write
     outputs:
       image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.published.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -87,14 +107,26 @@ jobs:
         working-directory: ${{ inputs.release_tag && 'release-source' || '.' }}
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
           echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-          echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sequence=$(python3 "$GITHUB_WORKSPACE/scripts/release/sequence_offset.py" show --revision HEAD)" >> "$GITHUB_OUTPUT"
           # The release tag is the version source: "0.8.18" on a tag,
           # "0.8.18-dev.N+g<sha>" on main. Empty (tags not fetched) falls back
           # to the checked-in app.__version__.
           echo "app_version=$(python3 "$GITHUB_WORKSPACE/android/ci/resolve-version-name.py" --release-tag "$RELEASE_TAG" 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+
+      - name: Validate staging inputs
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          PROMOTE: ${{ inputs.promote_latest }}
+        run: |
+          [ "$PROMOTE" != true ] || { echo 'Use the final release promotion job; builders never move aliases'; exit 1; }
+          if [ -n "$CANDIDATE_TAG" ]; then
+            [[ "$CANDIDATE_TAG" =~ ^candidate-[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$ ]] || exit 1
+            [ "$PROMOTE" != true ] || exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -118,6 +150,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          flavor: latest=false
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
           # A release always gets its exact version. latest, X.Y and X move
@@ -126,16 +159,26 @@ jobs:
           # never get X.Y or X (metadata-action skips them).
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
-            type=semver,pattern={{major}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
-            type=raw,value=latest,enable=${{ inputs.release_tag != '' && inputs.promote_latest && !contains(inputs.release_tag, '-') }}
-            # Manual main builds are the nightly channel.
-            type=raw,value=nightly,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
-            type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
+            # Moving aliases are only written by the final release promotion job.
+            type=raw,value=${{ inputs.candidate_tag }},enable=${{ inputs.candidate_tag != '' }}
             # Tag with git short SHA (simple prefix, works for all events)
-            type=raw,value=sha-${{ steps.source.outputs.short_sha }}
+            type=raw,value=sha-${{ steps.source.outputs.sha }}
+
+      - name: Verify and load an existing candidate digest
+        if: inputs.image_digest != ''
+        env:
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          SOURCE: ${{ inputs.release_tag && 'release-source' || '.' }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 scripts/release/verify_image.py --digest "$IMAGE_DIGEST" --checkout "$SOURCE"
+          if [ -n "$RELEASE_TAG" ]; then
+            actual=$(docker buildx imagetools inspect "$IMAGE:${RELEASE_TAG#v}" --format '{{.Manifest.Digest}}')
+            [ "$actual" = "$IMAGE_DIGEST" ] || { echo 'Version tag differs from reused digest'; exit 1; }
+          fi
 
       - name: Build candidate image
+        if: inputs.image_digest == ''
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.release_tag && 'release-source' || '.' }}
@@ -155,19 +198,18 @@ jobs:
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
             GIT_SHA=${{ steps.source.outputs.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
+            APPLICATION_SOURCE_TREE=${{ steps.source.outputs.tree }}
             APP_VERSION=${{ steps.source.outputs.app_version }}
 
-      # The container verification (boot the image, PostgreSQL bootstrap, UI
-      # through a browser) roughly triples the job. Release tags get it;
-      # manual `latest` rebuilds, which happen several times a day, do not —
-      # run `gh workflow run container-postgres.yml` for the same check on
-      # any branch.
+      # Verify release and candidate images, including reused digests, before
+      # publication. Plain branch SHA builds retain the existing cheaper path;
+      # container-postgres.yml can verify those independently.
       - name: Verify actual container lifecycle and UI
-        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' || inputs.candidate_tag != '' || inputs.image_digest != ''
         run: python scripts/verify_container_postgres.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
 
       - name: Upload container evidence
-        if: always() && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '')
+        if: always() && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' || inputs.candidate_tag != '' || inputs.image_digest != '')
         uses: actions/upload-artifact@v4
         with:
           retention-days: 7
@@ -176,15 +218,21 @@ jobs:
           if-no-files-found: ignore
 
       - name: Push the candidate without rebuilding
+        if: inputs.image_digest == ''
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            docker tag ai-shuffle:postgres-candidate "$tag"
-            docker push "$tag"
-          done <<< "$IMAGE_TAGS"
+        run: python3 scripts/release/push_candidate.py
 
-      - name: Inspect image
+      - name: Record immutable image digest
+        id: published
+        env:
+          REUSED_DIGEST: ${{ inputs.image_digest }}
+          VERSION_TAG: ${{ steps.meta.outputs.version }}
         run: |
-          docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+          if [ -n "$REUSED_DIGEST" ]; then
+            digest="$REUSED_DIGEST"
+          else
+            digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION_TAG" --format '{{.Manifest.Digest}}')
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"

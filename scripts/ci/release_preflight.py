@@ -44,6 +44,12 @@ def verify_catalog(root: Path, remote: bool = False) -> None:
     release = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
     if catalog["release"] != release:
         raise ValueError(f"Connector release identity is stale; expected {release}")
+    # No private ancestor fetches: the first release PR repins to the public
+    # root (the identical export cannot contain its own commit hash).
+    initial = git(root, "rev-list", "--max-parents=0", "HEAD").splitlines()
+    if len(initial) == 1 and git(root, "ls-tree", initial[0], "--", "release/public-cutover.json"):
+        if revision not in git(root, "rev-list", "HEAD").splitlines():
+            raise ValueError("Public releases require catalog repinning to public root S (or a later public commit) in a merged public PR")
     git(root, "cat-file", "-e", f"{revision}^{{commit}}")
     for spec in catalog["packages"].values():
         for filename, digest in spec["files"].items():
@@ -106,8 +112,12 @@ def verify_merged_pr(revision: str) -> None:
     if not github("branches/main")["protected"]:
         raise ValueError("main is not protected; configure the release ruleset first")
     prs = github(f"commits/{revision}/pulls?per_page=100")
-    if not any(pr["merged_at"] and pr["base"]["ref"] == "main" and pr["merge_commit_sha"] == revision for pr in prs):
-        raise ValueError("Release commit must be a merged pull request on main")
+    if not isinstance(prs, list) or len(prs) >= 100:
+        raise ValueError("Incomplete merged PR evidence")
+    if not any(pr["merged_at"] and pr["base"]["ref"] == "main"
+               and pr["base"].get("repo", {}).get("full_name") == REPOSITORY
+               and pr["merge_commit_sha"] == revision for pr in prs):
+        raise ValueError("Release commit must be a merged pull request on main; the initial public root is not a stable release candidate")
 
 
 def main() -> None:

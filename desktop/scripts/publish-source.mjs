@@ -18,7 +18,8 @@ import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { readLauncher } from './launcher-contract.mjs';
-const repo = 'HobbyCoders/ai-shuffle';
+import { releaseRepository } from './release-repository.mjs';
+const { repository: repo, id: repositoryId } = await releaseRepository(process.env.GH_TOKEN);
 const channel = process.env.SOURCE_CHANNEL || 'edge';
 if (!['stable', 'nightly', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or nightly (edge is a transition alias)');
 // Both public aliases share the existing D1 lane; never relabel signed bytes.
@@ -102,13 +103,14 @@ try {
  const wrangler = (...args) => execFileSync(process.execPath, ['scripts/source-publisher/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
  // Several CI completions can authorize the same revision. Preserve its original
  // signed sequence rather than turning each completion into another update.
- const existing = channel !== 'stable' ? JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json')) : [];
+ const existing = JSON.parse(wrangler('--command', `SELECT manifest,asset_id,release_repository,release_repository_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json'));
  const published = existing.flatMap(item => item.results ?? [])[0];
  if (published) {
   const signed = JSON.parse(published.manifest);
   const payload = Buffer.from(signed.payload, 'base64');
   const manifest = JSON.parse(payload);
-  if (manifest.revision !== revision || manifest.channel !== channel || published.asset_id !== asset?.id ||
+  if (published.release_repository !== repo || published.release_repository_id !== repositoryId ||
+      manifest.revision !== revision || manifest.channel !== channel || published.asset_id !== asset?.id ||
       asset?.state !== 'uploaded' || manifest.size !== asset.size || asset.digest !== `sha256:${manifest.sha256}` ||
       !verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), Buffer.from(signed.signature, 'base64'))) {
    throw new Error('Existing source publication is invalid; refusing to overwrite it');
@@ -121,8 +123,18 @@ try {
   const { sha256, size, tree } = built;
   if (!/^[a-f0-9]{64}$/.test(sha256) || !/^[a-f0-9]{64}$/.test(tree) || !Number.isSafeInteger(size) || size <= 0 || size > 512 * 1024 ** 2) throw new Error('Invalid runtime source archive');
   const sequence = Date.now();
-  const containerSequence = Number(git('rev-list', '--first-parent', '--count', revision));
-  if (!Number.isSafeInteger(containerSequence) || containerSequence <= 1 || git('rev-parse', '--is-shallow-repository') !== 'false') throw Error('Container publishing requires complete main history');
+  const history = JSON.parse(wrangler('--command', 'SELECT MAX(sequence) AS maximum FROM source_releases;', '--json')).flatMap(item => item.results ?? [])[0];
+  const inventory = JSON.parse(execFileSync('python', ['scripts/release/sequence_offset.py', 'signing-floor', '--revision', revision], { encoding: 'utf8' }));
+  let installerFloor = Math.max(Number(inventory.floor), Number(git('show', '-s', '--format=%ct', revision)) * 1000);
+  const installers = JSON.parse(wrangler('--command', 'SELECT revision,release_repository_id FROM desktop_installers UNION SELECT revision,release_repository_id FROM desktop_platform_installers;', '--json')).flatMap(item => item.results ?? []);
+  for (const installer of installers) {
+   if (installer.release_repository_id === inventory.old_repository_id && inventory.floor > 0) continue; // included in frozen historical inventory
+   if (installer.release_repository_id !== repositoryId || !/^[a-f0-9]{40}$/.test(installer.revision)) throw Error('Unknown installer sequence provenance');
+   installerFloor = Math.max(installerFloor, Number(git('show', '-s', '--format=%ct', installer.revision)) * 1000);
+  }
+  if (!history || !Number.isSafeInteger(sequence) || !Number.isSafeInteger(installerFloor) || sequence <= Number(history.maximum || 0) || sequence <= installerFloor) throw Error('Source signing clock did not exceed historical sequence/installer baseline');
+  const containerSequence = Number(execFileSync('python', ['scripts/release/sequence_offset.py', 'show', '--revision', revision], { encoding: 'utf8' }).trim());
+  if (!Number.isSafeInteger(containerSequence) || containerSequence <= 0) throw Error('Invalid committed container sequence');
   // What the revision needs from the Docker image (docker/update_contract.py,
   // #1821). runtime is all that images built before capabilities compare.
   const contract = JSON.parse(execFileSync('python', ['docker/update_contract.py', '--manifest'], { encoding: 'utf8' }));
@@ -149,13 +161,13 @@ try {
   if (!Number.isSafeInteger(asset.id) || asset.id <= 0 || asset.state !== 'uploaded' || asset.size !== size || asset.digest !== `sha256:${sha256}`) throw new Error('GitHub source asset checksum or size did not match');
   if (!(await current())) { console.log('Source stored, but main moved ahead; pointer unchanged.'); }
   else {
-   const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${quote(storageChannel)},${quote(version)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision,channel) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence,version=excluded.version WHERE asset_id=excluded.asset_id AND size=excluded.size;`;
+   const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence,release_repository,release_repository_id) SELECT ${quote(revision)},${quote(storageChannel)},${quote(version)},${asset.id},${size},${quote(signed)},${sequence},${quote(repo)},${repositoryId} WHERE ${sequence} > COALESCE((SELECT MAX(sequence) FROM source_releases),0) ON CONFLICT(revision,channel) DO NOTHING;`;
    // Small queries use the query API. --file invokes the bulk import path,
    // which emits upload progress even with --json and can pause DB queries.
    wrangler('--command', insert);
-   const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json'));
+   const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id,release_repository,release_repository_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json'));
    const row = result.flatMap(item => item.results ?? [])[0];
-   if (row?.manifest !== signed || row?.asset_id !== asset.id) throw new Error('Source pointer read-back did not match');
+   if (row?.manifest !== signed || row?.asset_id !== asset.id || row?.release_repository !== repo || row?.release_repository_id !== repositoryId) throw new Error('Source pointer read-back did not match');
    console.log(`Published ${channel} ${version} (${revision}): ${size} runtime source bytes in GitHub asset ${asset.id}; signed D1 manifest verified.`);
   }
  }

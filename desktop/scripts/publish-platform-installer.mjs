@@ -23,7 +23,7 @@ import { readdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
-const repo = 'HobbyCoders/ai-shuffle';
+import { releaseRepository } from './release-repository.mjs';
 // provenance and sums are the build's own record of what it made
 // (android/ci/prepare-apk-download.py writes the Android pair).
 const PLATFORMS = {
@@ -73,7 +73,8 @@ if (recorded?.bytes !== size || recorded?.sha256 !== sha256) throw Error('Instal
 const sums = await readFile(path.join(dir, target.sums), 'utf8');
 if (!sums.split('\n').includes(`${sha256}  ${file}`)) throw Error(`Installer does not match ${target.sums}`);
 
-const response = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'AI-Shuffle-Installer-Publisher' } });
+const { repository: repo, id: repositoryId } = await releaseRepository(token);
+const response = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`, { redirect: 'manual', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'AI-Shuffle-Installer-Publisher' } });
 if (!response.ok) throw Error(`Release lookup failed (${response.status})`);
 const asset = (await response.json()).assets.find(a => a.name === file);
 if (!asset || asset.state !== 'uploaded' || asset.size !== size || asset.digest !== `sha256:${sha256}`) throw Error('Uploaded installer did not match verified bytes');
@@ -89,14 +90,15 @@ try {
  const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
  const command = sql => JSON.parse(execFileSync(process.execPath, ['scripts/source-publisher/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', config, '--command', sql, '--json'], { env, encoding: 'utf8' }));
  const quote = value => `'${String(value).replaceAll("'", "''")}'`;
- const old = command(`SELECT version FROM desktop_platform_installers WHERE platform=${quote(platform)};`).flatMap(r => r.results ?? [])[0];
+ const old = command(`SELECT version,asset_id,release_repository,release_repository_id FROM desktop_platform_installers WHERE platform=${quote(platform)};`).flatMap(r => r.results ?? [])[0];
  if (old) {
+  if (old.version === version && (old.asset_id !== asset.id || old.release_repository !== repo || old.release_repository_id !== repositoryId)) throw Error('Existing installer publication identity changed');
   const a = version.split('.').map(Number), b = old.version.split('.').map(Number), first = a.findIndex((n, i) => n !== b[i]);
   if (first >= 0 && a[first] < b[first]) throw Error(`Refusing to replace the newer ${platform} installer ${old.version}`);
  }
  const signed = { payload: payload.toString('base64'), signature: signature.toString('base64') };
- command(`INSERT INTO desktop_platform_installers(platform,version,revision,arch,file_name,asset_id,size,sha256,payload,signature) VALUES(${[platform, version, revision, target.arch, file].map(quote).join(',')},${asset.id},${size},${quote(sha256)},${quote(signed.payload)},${quote(signed.signature)}) ON CONFLICT(platform) DO UPDATE SET version=excluded.version,revision=excluded.revision,arch=excluded.arch,file_name=excluded.file_name,asset_id=excluded.asset_id,size=excluded.size,sha256=excluded.sha256,payload=excluded.payload,signature=excluded.signature;`);
- const saved = command(`SELECT asset_id,sha256,payload FROM desktop_platform_installers WHERE platform=${quote(platform)};`).flatMap(r => r.results ?? [])[0];
- if (saved?.asset_id !== asset.id || saved?.sha256 !== sha256 || saved?.payload !== signed.payload) throw Error('Installer pointer verification failed');
+ command(`INSERT INTO desktop_platform_installers(platform,version,revision,arch,file_name,asset_id,size,sha256,payload,signature,release_repository,release_repository_id) VALUES(${[platform, version, revision, target.arch, file].map(quote).join(',')},${asset.id},${size},${quote(sha256)},${quote(signed.payload)},${quote(signed.signature)},${quote(repo)},${repositoryId}) ON CONFLICT(platform) DO UPDATE SET version=excluded.version,revision=excluded.revision,arch=excluded.arch,file_name=excluded.file_name,asset_id=excluded.asset_id,size=excluded.size,sha256=excluded.sha256,payload=excluded.payload,signature=excluded.signature,release_repository=excluded.release_repository,release_repository_id=excluded.release_repository_id;`);
+ const saved = command(`SELECT asset_id,sha256,payload,signature,release_repository,release_repository_id FROM desktop_platform_installers WHERE platform=${quote(platform)};`).flatMap(r => r.results ?? [])[0];
+ if (saved?.asset_id !== asset.id || saved?.sha256 !== sha256 || saved?.payload !== signed.payload || saved?.signature !== signed.signature || saved?.release_repository !== repo || saved?.release_repository_id !== repositoryId) throw Error('Installer pointer verification failed');
  console.log(`Published ${platform} ${version}: ${file}, ${size} verified bytes, revision ${revision}`);
 } finally { await unlink(config).catch(() => {}); }

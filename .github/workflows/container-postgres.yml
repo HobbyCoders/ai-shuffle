@@ -30,7 +30,9 @@ jobs:
           fetch-depth: 0
       - name: Image provenance for application updates
         id: source
-        run: echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sequence=$(python3 scripts/release/sequence_offset.py show)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build candidate image
@@ -48,6 +50,7 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
+            APPLICATION_SOURCE_TREE=${{ steps.source.outputs.tree }}
       - name: Validate embedded-only Compose configuration
         run: docker compose config --quiet
       - name: Verify actual container lifecycle and UI

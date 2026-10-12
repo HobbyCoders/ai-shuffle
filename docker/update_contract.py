@@ -67,7 +67,7 @@ RECOMMENDS = ()
 # The trust key is checked on its own (scripts/ci/update_reach.py).
 IMAGE_INPUTS = ("Dockerfile", "entrypoint.sh", "docker/install-claude-cli.sh")
 # sha256 of IMAGE_INPUTS with comment lines removed. Update with --pin.
-IMAGE_INPUTS_PIN = "0167fcfbb5cfde85b4990a8e3994afb1b31518e9149b0644254b7f879ec9c158"
+IMAGE_INPUTS_PIN = "323cc8eece70eaf18c54455f02384b43a482642d4c3fc81beeabe7c503b5d02f"
 
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,39}")
 
@@ -159,7 +159,14 @@ def main(argv):
     else:
         image_root, revision, sequence = argv
         del image_root  # the record is declared, not hashed from the image's files
-        print(json.dumps(image_record(revision, sequence)))
+        import os
+        record = image_record(revision, sequence)
+        tree = os.environ.get("APPLICATION_SOURCE_TREE", "")
+        if tree:
+            if not re.fullmatch(r"[0-9a-f]{40}", tree):
+                raise ValueError("Invalid complete source tree identity")
+            record["source_tree"] = tree
+        print(json.dumps(record))
     return 0
 
 

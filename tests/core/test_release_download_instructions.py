@@ -155,21 +155,22 @@ def meta_tags():
             if line.strip() and not line.strip().startswith("#")]
 
 
-def test_only_a_promoted_release_moves_latest_and_main_builds_are_nightly():
+def test_only_final_promotion_moves_aliases_after_all_release_gates():
     tags = meta_tags()
-    latest = next(tag for tag in tags if tag.startswith("type=raw,value=latest"))
-    assert "inputs.release_tag != ''" in latest and "inputs.promote_latest" in latest
-    assert "!contains(inputs.release_tag, '-')" in latest
     assert "is_default_branch" not in "".join(tags)
-    nightly = next(tag for tag in tags if tag.startswith("type=raw,value=nightly"))
-    assert "inputs.release_tag == ''" in nightly and "refs/heads/main" in nightly
-    assert not any(tag.startswith("type=raw,value=edge") for tag in tags)
-    for pattern in ("{{major}}.{{minor}}", "{{major}},"):
-        tag = next(tag for tag in tags if pattern in tag)
-        assert "inputs.promote_latest" in tag
+    for moving in ("value=latest", "value=nightly", "value=edge", "pattern={{major}}", "type=ref"):
+        assert not any(moving in tag for tag in tags)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker-publish.yml").read_text())
+    metadata = next(step for step in workflow["jobs"]["build"]["steps"] if step.get("id") == "meta")
+    assert metadata["with"]["flavor"] == "latest=false"
     release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
-    assert release["jobs"]["docker"]["with"]["promote_latest"] == (
-        "${{ needs.create-release.outputs.promote_latest == 'true' }}")
+    assert release["jobs"]["docker"]["with"]["promote_latest"] is False
+    promotion = release["jobs"]["promote-image"]
+    assert {"buyer-install", "source-stable", "docker"} <= set(promotion["needs"])
+    assert "always() && !failure() && !cancelled()" in promotion["if"]
+    assert "needs.create-release.outputs.promote_latest == 'true'" in promotion["if"]
+    assert {"android-apk", "linux-release", "desktop"} <= set(promotion["needs"])
+    assert "promote_image.py --digest" in promotion["steps"][-1]["run"]
 
 
 def test_images_go_to_the_private_package_only():
@@ -249,7 +250,8 @@ def test_signing_prerequisites_fail_before_publication(tmp_path):
     env = {**runtime_env, "DESKTOP_APPLICATION_SIGNING_KEY": key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode(),
         "CLOUDFLARE_API_TOKEN": "fixture", "CLOUDFLARE_ACCOUNT_ID": "fixture",
-        "ACCOUNT_HUB_DATABASE_ID": "11111111-1111-1111-1111-111111111111"}
+        "ACCOUNT_HUB_DATABASE_ID": "11111111-1111-1111-1111-111111111111",
+        "RELEASE_GITHUB_REPO": "HobbyCoders/ai-shuffle", "RELEASE_GITHUB_REPO_ID": "42"}
 
     def run(values):
         return subprocess.run(["node", "--input-type=module", "-e", script], cwd=tmp_path, env=values,
@@ -276,7 +278,7 @@ def test_installation_pages_direct_android_users_to_play():
 def test_docker_release_rebuild_keeps_container_verification_gate():
     workflow = yaml.safe_load((ROOT / ".github/workflows/docker-publish.yml").read_text())
     steps = {step["name"]: step for step in workflow["jobs"]["build"]["steps"] if "name" in step}
-    gate = "startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''"
+    gate = "startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' || inputs.candidate_tag != '' || inputs.image_digest != ''"
     assert steps["Verify actual container lifecycle and UI"]["if"] == gate
     assert steps["Upload container evidence"]["if"] == f"always() && ({gate})"
     assert steps["Checkout release source"]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"

@@ -5,6 +5,12 @@ name: Build Linux desktop artifact (manual opt-in)
 # this also runs on forks.
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Exact caller release tag version'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:

@@ -28,7 +28,7 @@ async function run(t, platform, prepare, world = {}) {
   const dir = path.join(root, 'artifact');
   const asset = await prepare(dir);
   const env = {
-    ...process.env, RUNNER_TEMP: root, GH_TOKEN: 'fixture', ACCOUNT_HUB_DATABASE_ID: '11111111-1111-1111-1111-111111111111',
+    ...process.env, RUNNER_TEMP: root, GH_TOKEN: 'fixture', RELEASE_GITHUB_REPO_ID: '42', ACCOUNT_HUB_DATABASE_ID: '11111111-1111-1111-1111-111111111111',
     PLATFORM_TEST: JSON.stringify({ revision, asset, ...world }),
   };
   const result = spawnSync(process.execPath, ['--import', preload, script, platform, dir, 'v1.2.3'], { encoding: 'utf8', env });
@@ -45,6 +45,7 @@ test('publishes the release APK as the signed android entry', async t => {
   assert.match(result.stdout, /Published android 1\.2\.3: AI-Shuffle-Android\.apk/);
   assert(events.includes('on-main'));
   assert.deepEqual({ ...record, payload: undefined, signature: undefined }, {
+    release_repository: 'HobbyCoders/ai-shuffle', release_repository_id: 42,
     platform: 'android', version: '1.2.3', revision, arch: 'universal', file_name: 'AI-Shuffle-Android.apk', asset_id: 77, size: apk.length, sha256: apkSha, payload: undefined, signature: undefined,
   });
   const payload = Buffer.from(record.payload, 'base64');

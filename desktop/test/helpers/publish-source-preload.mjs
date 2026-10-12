@@ -25,6 +25,7 @@ cp.execFileSync=(exe,args)=>{
   if(args[0]==='rev-parse'&&args[1]==='refs/tags/v1.2.3^{commit}')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='--is-shallow-repository')return 'false\n';
   if(args[0]==='rev-list')return '42\n';
+  if(args[0]==='show'&&args.includes('--format=%ct'))return '1\n';
   if(args[0]==='fetch'){events.push('fetch-main');return '';}
   if(args[0]==='merge-base'){events.push('on-main');if(scenario==='offmain')throw Error('not an ancestor');return '';}
   if(args[0]==='cat-file')return 'tag\n';
@@ -32,6 +33,7 @@ cp.execFileSync=(exe,args)=>{
   if(args[0]==='tag'&&args[2]==='--format=%(contents:body)')return 'Faster startup.\n-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n';
   throw Error('Unexpected git command '+args.join(' '));
  }
+ if(exe==='python'&&args[0]==='scripts/release/sequence_offset.py')return args[1]==='signing-floor'?JSON.stringify({floor:1,old_repository_id:null}):'42\n';
  if(exe==='python'&&args[0]==='docker/update_contract.py')return JSON.stringify({runtime:'b'.repeat(64),requires:['base-1'],recommends:[]})+'\n';
  if(exe==='python'&&args[0]==='android/ci/resolve-version-name.py')return '0.8.18-dev.4+gaaaaaaa\n';
  if(exe==='python'&&args[0]==='scripts/source_archive.py'){
@@ -43,10 +45,12 @@ cp.execFileSync=(exe,args)=>{
  if(args.includes('--file'))throw Error('Bulk file imports emit progress outside JSON and must not be used for small publisher queries');
  if(!args.includes('--command'))throw Error('Expected D1 query command');
  const sql=args[args.indexOf('--command')+1];
+ if(sql.startsWith('SELECT revision,release_repository_id'))return JSON.stringify([{results:[]}]);
+ if(sql.startsWith('SELECT MAX(sequence)'))return JSON.stringify([{results:[{maximum:scenario==='clock-regression'?Number.MAX_SAFE_INTEGER:1}]}]);
  if(sql.startsWith('INSERT')) {
-  events.push('publish');const match=sql.match(/INTO source_releases\(revision,channel,version,asset_id,size,manifest,sequence\) VALUES\('([a-f0-9]{40})','(stable|edge)','([^']+)',(\d+),(\d+),'(.*?)',(\d+)\)/);
+  events.push('publish');const match=sql.match(/INTO source_releases\(revision,channel,version,asset_id,size,manifest,sequence,release_repository,release_repository_id\) SELECT '([a-f0-9]{40})','(stable|edge)','([^']+)',(\d+),(\d+),'(.*?)',(\d+),'([^']+)',(\d+) WHERE/);
   if(!match)throw Error('Invalid publisher SQL');
-  saved={channel:match[2],version:match[3],manifest:match[6],asset_id:Number(match[4])};fs.writeFileSync(path.join(root,'record.json'),JSON.stringify(saved));return '';
+  saved={channel:match[2],version:match[3],manifest:match[6],asset_id:Number(match[4]),release_repository:match[8],release_repository_id:Number(match[9])};fs.writeFileSync(path.join(root,'record.json'),JSON.stringify(saved));return '';
  }
  if(sql.startsWith('SELECT')){events.push('read-publication');return JSON.stringify([{results:saved?[saved]:[]}]);}
  throw Error('Unexpected SQL');
@@ -54,6 +58,7 @@ cp.execFileSync=(exe,args)=>{
 syncBuiltinESMExports();
 globalThis.fetch=async(url,init={})=>{
  const target=String(url);events.push(target);
+ if(target==='https://api.github.com/repos/HobbyCoders/ai-shuffle')return Response.json({id:42,full_name:'HobbyCoders/ai-shuffle'});
  if(target.endsWith('/commits/main'))return Response.json({sha:scenario==='moved'&&++mainCalls>1?'b'.repeat(40):revision});
  if(target.endsWith('/releases/tags/desktop-sources'))return new Response(null,{status:404});
  if(target.endsWith('/releases')&&init.method==='POST'){
@@ -61,7 +66,7 @@ globalThis.fetch=async(url,init={})=>{
  }
  if(target.startsWith('https://api.github.com/')&&target.includes('/releases/9/assets?')){
   if(scenario==='reuse')events.push('reuse');
-  return Response.json(scenario==='reuse'?[asset]:[]);
+  return Response.json(scenario==='reuse'||saved?[asset]:[]);
  }
  if(target.startsWith('https://uploads.github.com/')){
   if(!target.includes(`name=${revision}-runtime.zip`))throw Error('Runtime archives use their own asset name');

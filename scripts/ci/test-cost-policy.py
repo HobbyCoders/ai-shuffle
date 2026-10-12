@@ -137,9 +137,17 @@ class CostPolicyTests(unittest.TestCase):
                               if "scripts/verify_container_postgres.py" in s.get("run", ""))
                 self.assertGreater(verify, steps.index(build))
                 if name != "container-postgres.yml":
-                    push = next(i for i, s in enumerate(steps)
-                                if 'docker push "$tag"' in s.get("run", ""))
+                    command = ("python3 scripts/release/push_candidate.py" if name == "docker-publish.yml"
+                               else 'docker push "$tag"')
+                    push = next(i for i, s in enumerate(steps) if command in s.get("run", ""))
                     self.assertGreater(push, verify)
+                    if name == "docker-publish.yml":
+                        # Reuse skips build/push but still exercises the actual
+                        # pulled container. Untagged candidates must verify too.
+                        for step in (build, steps[push]):
+                            self.assertEqual(step["if"], "inputs.image_digest == ''")
+                        self.assertEqual(steps[verify]["if"],
+                                         "startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' || inputs.candidate_tag != '' || inputs.image_digest != ''")
                 self.assertNotIn("fstrim", (WORKFLOWS / name).read_text(encoding="utf-8"))
 
     def test_browser_diagnostics_are_failure_only_and_short_lived(self):
