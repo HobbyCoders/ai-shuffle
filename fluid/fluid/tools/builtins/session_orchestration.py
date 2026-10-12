@@ -155,8 +155,8 @@ SPECS = (
         risk="write", requires_extra=("session_orchestration",)), _handler("message")),
     (start_session_spec(), _handler("start")),
     _management_tool("SettleSession", "settle",
-        "Move a chat from Active to Settled without stopping its work. "
-        "This also works when its execution worker is offline."),
+        "Move a chat from Active to Settled, dismissing pending owner prompts without stopping other work. "
+        "This also works offline; the execution worker dismisses its waits on reconnect."),
     _management_tool("UnsettleSession", "unsettle",
         "Move a settled chat back to Active without starting a turn or clearing a user stop. "
         "Archived chats must first be restored in the app."),

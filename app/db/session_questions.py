@@ -107,6 +107,11 @@ def trailing_question_seq(cursor, session_id):
                 return question
             pieces = []
             position = origin = None
+        # Settlement dismisses the prose before this durable boundary. Keeping
+        # the boundary in the log prevents later task/usage events resurrecting
+        # the old question (and lets a new question after reopen project normally).
+        if kind == "system.note" and payload.get("subtype") == "session_settled":
+            return finish()[1] if pieces else None
         if kind == "message.user" and is_user_message("user", payload):
             user_seq = seq if user_seq is None else user_seq
         if kind == "system.note" and payload.get("subtype") == "provider_retry":

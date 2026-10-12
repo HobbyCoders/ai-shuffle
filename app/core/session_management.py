@@ -190,6 +190,7 @@ async def apply(action, targets):
             log.warning("Batched %s failed; retrying each session", action, exc_info=True)
         else:
             for row in rows:
+                await session_active._apply_settle_change(row, active, archived)
                 await session_active._broadcast(row, row["id"])
                 await session_active._apply_archive_change(row["id"], archived)
             done = {row["id"] for row in rows}
@@ -238,6 +239,9 @@ def _execution_note(action):
     if action == "archive":
         return ("Archived chats are read-only until the owner restores them; any running or "
                 "parked work in them was stopped.")
+    if action == "settle":
+        return ("Pending owner prompts were dismissed on the owning worker (on reconnect if offline). "
+                "Other background work was not stopped.")
     return "Execution was not started or stopped."
 
 

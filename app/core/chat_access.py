@@ -782,6 +782,33 @@ class Broker:
         return {"updated": True, "revoked": revoked,
                 "host_key_cleared": bool(old.fingerprint) and not new.fingerprint}
 
+    def pending_sessions(self, session_id: str) -> set[str]:
+        """The actual waiters represented by this panel (including children)."""
+        return {r.session_id for r in self.requests.values()
+                if self._shown_in(r.session_id) == session_id and not r.result.done()} | {
+                    a.session_id for a in self.actions.values()
+                    if self._shown_in(a.session_id) == session_id and not a.decision.done()}
+
+    def dismiss_pending(self, session_id: str) -> set[str]:
+        """Deny this panel's waits, without revoking grants or killing operations.
+
+        Subagent waits shown in the parent panel are dismissed too; unrelated
+        background work and already approved access are untouched.
+        """
+        waiting = set()
+        for request in list(self.requests.values()):
+            if self._shown_in(request.session_id) == session_id and not request.result.done():
+                waiting.add(request.session_id)
+                self._finish_request(request)
+        for action in list(self.actions.values()):
+            if self._shown_in(action.session_id) == session_id and not action.decision.done():
+                waiting.add(action.session_id)
+                action.decision.set_result(False)
+                grant = self.grants.get(action.grant_id)
+                if grant is not None:
+                    self._notify(action.session_id, grant.owner)
+        return waiting
+
     async def decline(self, session_id: str, request_id: str):
         request = self.requests.get(request_id)
         if not request or request.session_id != session_id or request.result.done():

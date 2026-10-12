@@ -349,6 +349,12 @@ def _on_applied(touched) -> None:
         loop = getattr(global_events, "_loop", None)
         if loop and not loop.is_closed():
             asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(), loop)
+    settled_ids = [r for c, r, op in touched if c == "session_active" and op == "upsert"]
+    if settled_ids:
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            from app.network.session_active import dismiss_replicated
+            asyncio.run_coroutine_threadsafe(dismiss_replicated(settled_ids), loop)
     memory_ids = [r for c, r, _ in touched if c == "memory"]
     plugin_ids = [r for c, r, _ in touched if c == "plugins_desired"]
     if memory_ids:

@@ -96,8 +96,45 @@ async def set_shared(session_id: str, active: bool) -> dict:
     row = await run_sync(write_shared, session_id, active)
     if row is None:
         raise LookupError("Unknown session")
+    await _apply_settle_change(row, active)
     await _broadcast(row, session_id)
     return row
+
+
+async def _apply_settle_change(row: dict, active: bool, archived: Optional[bool] = None) -> None:
+    """Dismiss waits on the owner; shared membership remains offline-first."""
+    if active or archived is not None or row.get("status") == "archived":
+        return
+    owner = control.owner_of(row)
+    try:
+        if owner is None:
+            from app.core.session_settlement import dismiss_owner_waits
+            if await dismiss_owner_waits(row["id"]):
+                row.update(await run_sync(database.get_session, row["id"]))
+        else:
+            # A fast path only: replication also dismisses waits on the owner.
+            # No reachable address means no control call (idle/offline settle
+            # remains a local membership write, as before).
+            from app.network.endpoints import peer_endpoints
+            member = await run_sync(store.get_member, owner)
+            if member and peer_endpoints(member, engine.presence_of(owner)):
+                async with asyncio.timeout(3):
+                    await set_remote(owner, row["id"], False)
+    except Exception:
+        logger.warning("Could not dismiss owner waits for settled session %s", row["id"], exc_info=True)
+
+
+async def dismiss_replicated(session_ids: list[str]) -> None:
+    """After shared records commit, act only on locally owned, settled chats."""
+    from app.core.session_settlement import dismiss_owner_waits
+    for session_id in session_ids:
+        row = await run_sync(database.get_session, session_id)
+        if row and not row.get("is_active") and control.owner_of(row) is None:
+            try:
+                await dismiss_owner_waits(session_id)
+                await _broadcast(row, session_id)
+            except Exception:
+                logger.warning("Could not dismiss replicated owner wait for %s", session_id, exc_info=True)
 
 
 def _write(session_id: str, active: bool, *, archived: Optional[bool] = None,
@@ -157,6 +194,7 @@ async def handle(body: dict, from_device: str) -> dict:
         await run_sync(transport.release_hold_for_peer_view, from_device, view)
     restoring = archived is False and await _is_archived(session_id)
     row, envelope = await run_sync(lambda: _write(session_id, active, archived=archived))
+    await _apply_settle_change(row, active, archived)
     await _broadcast(row, session_id)
     await _apply_archive_change(session_id, archived, restoring)
     # Only the signed catalog representation crosses the worker boundary.
@@ -182,6 +220,7 @@ async def update_membership(existing: dict, active: bool, archived: Optional[boo
     row = await run_sync(database.set_session_active, session_id, active, archived)
     if row is None:
         raise MembershipUpdateFailed("Failed to update active status")
+    await _apply_settle_change(row, active, archived)
     await _broadcast(row, session_id)
     await _apply_archive_change(session_id, archived, existing.get("status") == "archived")
     return row
@@ -191,6 +230,7 @@ async def set_local(session_id: str, active: bool, archived: Optional[bool] = No
     """Settle, reopen, archive or restore a session this worker owns, for its own UI."""
     restoring = archived is False and await _is_archived(session_id)
     row, _envelope = await run_sync(lambda: _write(session_id, active, archived=archived, local=True))
+    await _apply_settle_change(row, active, archived)
     await _broadcast(row, session_id)
     await _apply_archive_change(session_id, archived, restoring)
     return row
