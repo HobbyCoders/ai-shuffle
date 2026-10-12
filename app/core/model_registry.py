@@ -257,12 +257,22 @@ def resolve_provider_context_window(
     return _positive_int(provider_row.get("context_window"))
 
 
+# The opt-in long-context window that makes a model's context adjustable.
+EXTENDED_CONTEXT_WINDOW = 1_000_000
+
+
 def context_window_choices(
     model_id: Optional[str],
     provider_row: Optional[ModelProviderRow] = None,
     model_entry: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
-    """Selectable session windows, shared by the picker and request validation.
+    """The picker's two presets: ``[standard, extended]``, or ``[]``.
+
+    ``standard`` is the model family's default window and the floor of the
+    user-adjustable Standard cap; ``extended`` is the model's full window and
+    the ceiling. Any whole token count between them is a valid session window
+    too (:func:`is_offered_context_window`), so a user can raise the point at
+    which a chat compacts without going all the way to Extended.
 
     OpenAI's GPT-6 variants and legacy Sol support an opt-in 1M window even
     when their catalog advertises the smaller default. Keep that separate from the
@@ -278,20 +288,56 @@ def context_window_choices(
     else:
         return []
 
-    if preset_kind_for(provider_row) in {"chatgpt", "openai"}:
-        # Preserve the numeric standard pick accepted by existing Astra/Sol
-        # sessions. New GPT-6 variants expose the 272K standard window.
-        if model_id in {"gpt-6-astra", "gpt-5.6-sol"}:
-            return [standard, 1_000_000]
-        if re.fullmatch(r"gpt-6(?:\.\d+)*(?:-(?:astra|sol|luna|terra))?", identity):
-            return [272_000, 1_000_000]
-
     window = (
         resolve_provider_context_window(provider_row, model_id, model_entry)
         if provider_row is not None
         else native.context_window if native is not None else None
     )
-    return [standard, 1_000_000] if window and window >= 1_000_000 else []
+    # Extended is the model's full window: at least the opt-in 1M, more when
+    # the registry advertises a larger one.
+    extended = max(EXTENDED_CONTEXT_WINDOW, window or 0)
+
+    if preset_kind_for(provider_row) in {"chatgpt", "openai"}:
+        # Preserve the numeric standard pick accepted by existing Astra/Sol
+        # sessions. New GPT-6 variants expose the 272K standard window.
+        if model_id in {"gpt-6-astra", "gpt-5.6-sol"}:
+            return [standard, extended]
+        if re.fullmatch(r"gpt-6(?:\.\d+)*(?:-(?:astra|sol|luna|terra))?", identity):
+            return [272_000, extended]
+
+    return [standard, extended] if window and window >= EXTENDED_CONTEXT_WINDOW else []
+
+
+def context_window_bounds(
+    model_id: Optional[str],
+    provider_row: Optional[ModelProviderRow] = None,
+    model_entry: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[int, int]]:
+    """``(standard, extended)`` for a model with a selectable window, else ``None``.
+
+    The inclusive range a session's window may be pinned to: the Standard
+    default is the floor, the model's full window (Extended) the ceiling.
+    """
+    choices = context_window_choices(model_id, provider_row, model_entry)
+    return (min(choices), max(choices)) if choices else None
+
+
+def is_offered_context_window(
+    value: Any,
+    model_id: Optional[str],
+    provider_row: Optional[ModelProviderRow] = None,
+    model_entry: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Whether ``value`` is a window this model can be pinned to.
+
+    True for either preset and for any whole token count between them (a
+    raised Standard cap). Booleans, non-integers and out-of-range values are
+    refused so a stale or hand-written value never becomes a session ceiling.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    bounds = context_window_bounds(model_id, provider_row, model_entry)
+    return bounds is not None and bounds[0] <= value <= bounds[1]
 
 
 def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Optional[int]:
@@ -329,7 +375,7 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
     if model.startswith("prov:"):
         _, provider_id, model = model.split(":", 2)
     provider = get_model_provider(provider_id) if provider_id else None
-    if value in context_window_choices(model, provider):
+    if is_offered_context_window(value, model, provider):
         return value
     logger.debug("Ignoring context window %s: model %r does not offer it", value, model)
     return None

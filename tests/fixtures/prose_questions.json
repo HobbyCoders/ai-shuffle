@@ -1,0 +1,98 @@
+[
+  {
+    "content": "",
+    "expected": false
+  },
+  {
+    "content": "Which one?",
+    "expected": true
+  },
+  {
+    "content": "Done.",
+    "expected": false
+  },
+  {
+    "content": "Why? Done.",
+    "expected": true
+  },
+  {
+    "content": "`x?`",
+    "expected": false
+  },
+  {
+    "content": "``?``",
+    "expected": true
+  },
+  {
+    "content": "[search](https://example.test/?q=x)",
+    "expected": false
+  },
+  {
+    "content": "[Which?](https://example.test/?q=x)",
+    "expected": true
+  },
+  {
+    "content": "<https://example.test/?q=x>",
+    "expected": false
+  },
+  {
+    "content": "https://example.test/?q=x",
+    "expected": false
+  },
+  {
+    "content": "Read https://example.test/x?",
+    "expected": true
+  },
+  {
+    "content": "Read https://example.test/?q=x?",
+    "expected": true
+  },
+  {
+    "content": "Read https://example.test/?q=x.",
+    "expected": false
+  },
+  {
+    "content": "Why？",
+    "expected": false
+  },
+  {
+    "content": "`unfinished?",
+    "expected": true
+  },
+  {
+    "content": "```\nwhat?\n```",
+    "expected": false
+  },
+  {
+    "content": "https://example.test/x) why?",
+    "expected": true
+  },
+  {
+    "content": " https://example.test/x?﻿",
+    "expected": true
+  },
+  {
+    "content": "éhttps://example.test/?q=x",
+    "expected": false
+  },
+  {
+    "content": "ahttps://example.test/?q=x",
+    "expected": true
+  },
+  {
+    "content": "[link](path?q=1)",
+    "expected": false
+  },
+  {
+    "content": "[link](path with?space)",
+    "expected": true
+  },
+  {
+    "content": "??",
+    "expected": true
+  },
+  {
+    "content": "`\n?\n` done",
+    "expected": false
+  }
+]

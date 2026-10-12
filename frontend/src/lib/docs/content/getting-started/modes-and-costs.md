@@ -101,4 +101,4 @@ Change the budgets and time limit, or turn the guard off, on the same **Policy**
 
 ## What AI Shuffle costs
 
-The license covers the app and its updates for one account with up to 3 workers, plus the Android app. Every license starts with a 14-day trial with every feature, and your first charge can be refunded within 7 days. Current prices are on [hobbycoders.com](https://hobbycoders.com/ai-shuffle). See [License](/docs/getting-started/license).
+The app and its updates are free. An optional free Cloud account serves 1 remote worker with no card. The paid Cloud plan serves 3 remote workers and adds cross-network sync, connector endpoints, OAuth relay and support. Founder pricing is $14/month or $140/year; regular pricing is $20/month or $200/year. Your first charge can be refunded within 7 days. See [AI Shuffle Cloud](/docs/getting-started/cloud).

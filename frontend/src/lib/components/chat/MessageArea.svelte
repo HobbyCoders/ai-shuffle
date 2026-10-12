@@ -30,7 +30,12 @@
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { derived as derivedStore } from 'svelte/store';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { sessionEphemeralCache } from '$lib/stores/session-cache';
+	import { createScrollTopPersist } from './scroll-top-persist';
+	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
+	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 	import { swarms } from '$lib/stores/swarms';
 	import type { SwarmSnapshot } from '$lib/utils/swarm';
 	import { forkOfferedSessionHere } from './fork-here';
@@ -58,13 +63,18 @@
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
+	import HandoffCard from './HandoffCard.svelte';
+	import { EMPTY_HANDOFFS, settleByOwner } from '$lib/utils/handoff-episodes';
+	import { handoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
+		latestTurnKey,
 		hasLinkedSubagent as hasLinkedSubagentIn,
+		type DisplayItem,
 		type TranscriptModel
 	} from '$lib/utils/work-log';
-	import { createSettleHold } from '$lib/utils/settle-hold';
+	import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';
 	import {
 		TRANSCRIPT_WINDOW_SIZE,
 		TRANSCRIPT_WINDOW_CHUNK,
@@ -89,7 +99,8 @@
 		isNavigableUserTurn,
 		resolveCurrentTurnIndex,
 		resolveLiveTurnStartedAt,
-		turnAnchorId
+		turnAnchorId,
+		needsYouTurnIds
 	} from '$lib/utils/transcript-navigation';
 	import { getModelLabel } from '$lib/constants/models.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
@@ -105,10 +116,9 @@
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
 	import MediaLightbox from './MediaLightbox.svelte';
 	import PendingMessages from './PendingMessages.svelte';
+	import PendingStatusAnnouncer from './PendingStatusAnnouncer.svelte';
 	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import RunningTasksList from './RunningTasksList.svelte';
-	import AssistantDetails from './AssistantDetails.svelte';
-	import { foldAssistantTranscript, isStreamingProse, type AssistantViewItem } from '$lib/utils/assistant-transcript';
 	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
 
 	// How many trailing messages are kept OUT of content-visibility virtualization.
@@ -120,17 +130,20 @@
 	const LIVE_TAIL = 8;
 
 	interface Props {
-		/** The assistant's home: prose first, everything else behind "Details". */
+		/**
+		 * The assistant's home. Its transcript is organized exactly like any chat
+		 * (same model, same WorkLogGroup folds, same `groupToolCalls` pref); only
+		 * the surroundings differ: running work sits beside the composer and
+		 * approvals are asked in words.
+		 */
 		assistantMode?: boolean;
 	}
 
 	let { assistantMode = false }: Props = $props();
 
 	/** Exhaustive keyed identity for every presentation-model variant. */
-	function displayItemKey(item: AssistantViewItem): string {
+	function displayItemKey(item: DisplayItem): string {
 		switch (item.kind) {
-			case 'details':
-				return item.key;
 			case 'message':
 				return `message-${item.message.id || item.index}`;
 			case 'system_group':
@@ -367,14 +380,10 @@
 	// The approval the assistant is asking in words, if any (assistant_confirm).
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 
+	// The assistant's question in words stands in for the dots while it waits.
 	const showGapIndicator = $derived(
-		assistantMode
-			// Its work rows are folded away, so the dots stand in for them until
-			// the assistant's own words are streaming.
-			? $activeSession.isStreaming
-				&& !assistantQuestion
-				&& !isStreamingProse($activeSession.messages[lastStreamingMessageIndex])
-			: shouldShowGapIndicator(
+		!(assistantMode && assistantQuestion)
+		&& shouldShowGapIndicator(
 			$activeSession.messages,
 			$activeSession.isStreaming,
 			chatPrefs?.showThinkingBlocks !== false
@@ -441,6 +450,24 @@
 			parked: $activeSession.turnParked === true
 		});
 	});
+	// That hold covers only the latest turn. A send during it opens a newer turn;
+	// the turn it interrupted keeps the rest of its hold rather than folding at once.
+	let handoffTick = $state(0);
+	const turnHandoff = createTurnHandoffHold(() => handoffTick++);
+	onDestroy(() => turnHandoff.dispose());
+	// The store emits on every stream delta; rescan only when the array changes.
+	let latestKeyFor: { messages: ChatMessage[] | null; key: string | null } = { messages: null, key: null };
+	const heldTurnKeys = $derived.by(() => {
+		void handoffTick;
+		const messages = $activeSession.messages;
+		if (messages !== latestKeyFor.messages) latestKeyFor = { messages, key: latestTurnKey(messages) };
+		return turnHandoff.update({
+			sessionId: $activeSession.sessionId,
+			latestTurnKey: latestKeyFor.key,
+			unsettled: latestTurnUnsettled,
+			parked: $activeSession.turnParked === true
+		});
+	});
 
 	// Memoize the grouped display list by message and lifecycle identity.
 	// The active-session store emits a fresh state object on every SSE stream
@@ -451,11 +478,13 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; model: TranscriptModel } =
+	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; heldTurnKeys: ReadonlySet<string> | null; groupingEnabled: boolean; model: TranscriptModel } =
 		{
 			messages: null,
 			isStreaming: false,
 			latestTurnUnsettled: false,
+			runningToolKey: '',
+			heldTurnKeys: null,
 			groupingEnabled: true,
 			model: {
 				items: [],
@@ -464,7 +493,9 @@
 				subagentToolIds: new Set<string>(),
 				itemIndexByTurnId: new Map<string, number>(),
 				lastAssistantMetadata: null,
-				latestUserTurnId: null
+				latestUserTurnId: null,
+				midTurnUserIds: new Set<string>(),
+				handoffs: EMPTY_HANDOFFS
 			}
 		};
 
@@ -475,6 +506,13 @@
 		const sessionSwarms = $swarms.bySession[sessionId ?? ''];
 		const isStreamingNow = $activeSession.isStreaming;
 		const latestIsUnsettled = latestTurnUnsettled;
+		// A turn whose background work is still running stays unsettled even once
+		// a later turn opened (a send or a wake must not fold it). Keyed by value:
+		// every /live poll hands over a fresh task list.
+		const runningIds = runningToolIds;
+		const runningToolKey = [...runningIds].sort().join('\0');
+		// Same instance until a hand-off starts or ends (see settle-hold.ts).
+		const heldKeys = heldTurnKeys;
 		// When grouping is off, groupable tools fall through to the plain
 		// single-message path (system grouping is unaffected by this toggle).
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
@@ -484,6 +522,8 @@
 			&& sessionSwarms === _displayCache.swarms
 			&& isStreamingNow === _displayCache.isStreaming
 			&& latestIsUnsettled === _displayCache.latestTurnUnsettled
+			&& runningToolKey === _displayCache.runningToolKey
+			&& heldKeys === _displayCache.heldTurnKeys
 			&& groupingEnabled === _displayCache.groupingEnabled
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
@@ -500,6 +540,8 @@
 		const model = buildTranscript(messages, {
 			isStreaming: isStreamingNow,
 			latestTurnUnsettled: latestIsUnsettled,
+			runningToolIds: runningIds,
+			heldTurnKeys: heldKeys,
 			sessionId,
 			swarms: Object.values(sessionSwarms ?? {}),
 			groupingEnabled
@@ -510,21 +552,24 @@
 		_displayCache.swarms = sessionSwarms;
 		_displayCache.isStreaming = isStreamingNow;
 		_displayCache.latestTurnUnsettled = latestIsUnsettled;
+		_displayCache.runningToolKey = runningToolKey;
+		_displayCache.heldTurnKeys = heldKeys;
 		_displayCache.groupingEnabled = groupingEnabled;
 		_displayCache.model = model;
 		return model;
 	});
 
-	// Assistant mode folds the same model; ordinary chats use it as built.
-	const assistantView = $derived(assistantMode ? foldAssistantTranscript(transcript.items, latestTurnUnsettled) : null);
-	const displayItems: AssistantViewItem[] = $derived(assistantView?.items ?? transcript.items);
-	const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(assistantView?.itemIndexByTurnId ?? transcript.itemIndexByTurnId);
+	// One presentation model for every chat, the assistant's home included
+	// (transcript-organization spec §10.5): no second fold path.
+	const displayItems: DisplayItem[] = $derived(transcript.items);
+	const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(transcript.itemIndexByTurnId);
 	// Per-row reads go through these rather than `transcript` (#1282). The
 	// streaming fast path in createTranscriptModelBuilder keeps both arrays by
 	// identity while only the tail text grows, so these deriveds do not notify and
 	// historic user rows are not re-evaluated on every streaming fold.
 	const promptOccurrence = $derived(transcript.promptOccurrence);
 	const rewindEligible = $derived(transcript.rewindEligible);
+	const midTurnUserIds = $derived(transcript.midTurnUserIds);
 
 	// What this column should DRAW right now (PERFORMANCE_REVIEW §3.1 S3).
 	// ChatView already suppresses its own hero while history loads, but the
@@ -549,7 +594,7 @@
 		return hasLinkedSubagentIn(transcript, toolId);
 	}
 
-	// Transcript-local navigation: one stable anchor per user prompt. The left
+	// Transcript-local navigation: one stable anchor per turn (its opening prompt). The left
 	// timeline is only mounted when it can move somewhere (two or more turns).
 	//
 	// deriveUserTurnNavigationItems() normalises and previews every prompt
@@ -567,7 +612,9 @@
 		let signature = '';
 		for (const message of $activeSession.messages) {
 			if (!isNavigableUserTurn(message) || !message.id) continue;
-			signature += `${message.id}:${(message.content ?? '').length}\u0000`;
+			// The turn id decides whether a prompt opens a turn or was steered
+			// into one, and it changes when the server reconciles a send.
+			signature += `${message.id}:${message.turnId ?? ''}:${(message.content ?? '').length}\u0000`;
 		}
 		return signature;
 	});
@@ -582,6 +629,64 @@
 
 	/** Stable id vector for the observer-driven rail index (no per-call allocation). */
 	const turnNavigationIds = $derived(turnNavigationItems.map((item) => item.id));
+
+	// The open session's "Needs you" count (spec §5), through the same
+	// derivation and signals as its sidebar row and the tab title: the real
+	// row (a mirror's owner state counts before its queues load), the
+	// background attention entry a reconnect can restore, private access and
+	// the session's own queues and prose question.
+	const openSessionId = $derived($activeSession.sessionId);
+	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
+	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
+	// later records patch the episode, so only the anchor rows re-read this.
+	// The source worker never sees `moved`: the session row CHANGING to the
+	// target settles a move that is sending (settleByOwner keeps identity).
+	const handoffOwnerId = $derived(openRow?.owner_device_id ?? null);
+	const handoffOwnerName = $derived(openRow?.device_name ?? null);
+	const handoffPendingView = $derived(openSessionId ? $handoffPending[openSessionId] ?? null : null);
+	const handoffAnchors = $derived(
+		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }, openSessionId, handoffPendingView).byAnchor
+	);
+	// The owning worker's pending move: read again whenever the open identified
+	// move, its phase or the session's owner changes (a finished move then
+	// reads null from its new owner, also after a reload).
+	const openHandoff = $derived(transcript.handoffs.open);
+	const handoffWatchKey = $derived(
+		openSessionId && openHandoff?.id && openHandoff.phase === 'sending'
+			? `${openHandoff.id}\0${handoffOwnerId ?? ''}`
+			: null
+	);
+	$effect(() => {
+		const sid = openSessionId;
+		const key = handoffWatchKey;
+		if (sid && key) untrack(() => void refreshHandoffPending(sid, key));
+	});
+	const openIsRemote = $derived(!!$activeSession.isRemote);
+	const openNeeds = $derived(openSessionNeeds(
+		$activeSession,
+		chatPrefs?.groupToolCalls !== false,
+		!!openSessionId && $proseQuestionSessions.has(openSessionId),
+		isTranscriptProseDismissed($proseQuestionDismissals, openSessionId, $activeSession.messages)
+	));
+	const openNeedsYou = $derived(
+		openSessionId
+			? needsYouCount(
+				openRow ?? { status: 'active', is_remote: openIsRemote, remote_runtime_state: null },
+				$backgroundPermissions.get(openSessionId),
+				$privateAccessPending.get(openSessionId) ?? 0,
+				openNeeds
+			)
+			: 0
+	);
+	// Reference-stable between folds that leave them alone, so the tick
+	// lookup below reruns only when the transcript or the questions change.
+	const openMessages = $derived($activeSession.messages);
+	const openPendingQuestions = $derived($activeSession.pendingQuestions);
+	const pendingQuestionToolIds = $derived((openPendingQuestions ?? []).map((q) => q.tool_use_id).filter(Boolean));
+	const newestTurnId = $derived(turnNavigationItems.at(-1)?.id ?? null);
+	// The ticks carrying the amber dot: a pending question on the turn that
+	// asked it, everything else on the newest turn.
+	const needsYouTurns = $derived(needsYouTurnIds(openNeedsYou, openMessages, pendingQuestionToolIds, newestTurnId));
 
 	// ── Windowed mounting (PERFORMANCE_REVIEW §3.2 R4) ─────────────────────
 	// Only a trailing window of display items is mounted. Everything below is
@@ -1103,6 +1208,16 @@
 		}
 	}
 
+	// Trailing write of the reading position into the session store once
+	// scrolling pauses (#1282). A switch writes the leaving session's position
+	// into its own saved snapshot, never into the store of the one entered.
+	const scrollTopPersist = createScrollTopPersist({
+		delayMs: 250,
+		currentKey: () => $activeSession.sessionId ?? 'new',
+		writeCurrent: (position) => activeSession.setScrollTop(position),
+		writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)
+	});
+
 	function handleScroll() {
 		if (!containerRef) return;
 		if (programmaticScrollDepth > 0) {
@@ -1141,8 +1256,10 @@
 
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
 			scrollPositionCache.set(cacheKey, currentScrollTop);
-			// Also save to session store for cross-session persistence
-			activeSession.setScrollTop(currentScrollTop);
+			// Also save to session store for cross-session persistence — but not
+			// per frame: every write publishes a new active-session object to all
+			// of its subscribers (#1282). Restores read the cache above first.
+			scrollTopPersist.schedule(cacheKey, currentScrollTop);
 
 			// Decide the next stick-to-bottom flag via the pure, unit-tested helper.
 			// It enables when the user is at/near the bottom, disables on a
@@ -1341,12 +1458,13 @@
 		clearJumpRevealTimer();
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
 		const cacheKey = $activeSession.sessionId ?? 'new';
+		scrollTopPersist.cancel();
 
 		if (containerRef) {
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
-			activeSession.setScrollTop(containerRef.scrollTop);
+			scrollTopPersist.destroy(cacheKey, containerRef.scrollTop);
 			// Persist auto-scroll state so remounting this component
 			// (e.g. returning from settings) resumes at the right position
 			autoScrollCache.set(cacheKey, shouldAutoScroll);
@@ -1383,14 +1501,23 @@
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 
-		// Save scroll state for the old session (if any)
-		if (prevId && containerRef) {
-			scrollPositionCache.set(prevId, containerRef.scrollTop);
+		// Save scroll state for the old session (if any). This effect runs after
+		// the DOM already shows the session entered, so the container's
+		// scrollTop is NOT the leaving session's: a short or still-loading
+		// transcript has clamped it, often to 0. Save the position captured from
+		// the reader's last scroll frame instead (the per-frame cache holds the
+		// same value when no deferred write is pending).
+		if (prevId) {
+			// The store already holds the session being entered: the position goes
+			// into the snapshot the switcher saved for the leaving session.
+			const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));
+			if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);
 			autoScrollCache.set(prevId, shouldAutoScroll);
-			activeSession.setScrollTop(containerRef.scrollTop);
 			// Prevent unbounded growth over long usage
 			evictOldest(scrollPositionCache, SCROLL_CACHE_MAX);
 			evictOldest(autoScrollCache, SCROLL_CACHE_MAX);
+		} else {
+			scrollTopPersist.cancel();
 		}
 
 		prevTrackedSessionId = currentId;
@@ -1784,6 +1911,8 @@
 </script>
 
 <div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2}>
+<!-- Unsend verdicts are announced here, outside the busy log region below. -->
+<PendingStatusAnnouncer messages={pendingMessages} sessionId={$activeSession.sessionId} />
 <!-- role="log" is a polite live region. aria-busy while a reply streams keeps
      screen readers from announcing every streamed token; the settled turn is
      read once the stream ends. -->
@@ -1882,12 +2011,16 @@
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}
 				>
 				{#if item.kind === 'work_log'}
-					<!-- Routine steps of one turn, folded (see $lib/utils/work-log) -->
+					<!-- Routine steps of one turn, folded (see $lib/utils/work-log).
+					     Live and settled share the item key: settling only flips `mode`. -->
 					<WorkLogGroup
 						mode={item.mode}
 						folded={item.folded}
 						tail={item.tail}
 						sequence={item.sequence}
+						runs={item.runs}
+						foldKey={item.foldKey}
+						foldAlias={item.foldAlias}
 						gallery={item.gallery}
 						durationLabel={item.durationLabel}
 						summary={item.summary}
@@ -1895,8 +2028,6 @@
 						row={messageBody}
 						{observeTurnAnchor}
 					/>
-				{:else if item.kind === 'details'}
-					<AssistantDetails entries={item.entries} live={item.live} row={messageBody} />
 				{:else if item.kind === 'system_group'}
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
 					<SystemMessageGroup messages={item.messages} />
@@ -1999,6 +2130,7 @@
 			items={turnNavigationItems}
 			currentIndex={currentTurnIndex}
 			onSelect={navigateToTurn}
+			needsYouIds={needsYouTurns}
 		/>
 	{/if}
 </div>
@@ -2007,7 +2139,11 @@
      folded row renders exactly as it would inline. -->
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
-	{#if delivery}
+	{@const handoff = handoffAnchors.get(message)}
+	{#if handoff}
+		<!-- One hand-off, one row: starting → sending → settled (the later records update it). -->
+		<HandoffCard episode={handoff} />
+	{:else if delivery}
 		{@const sender = agentSender(delivery, agentNames)}
 		<ToolUseMessage
 			name="Agent message"
@@ -2030,6 +2166,7 @@
 			messageUuid={message.jsonlUuid}
 			userPromptOccurrence={userPromptOccurrence(messageIndex)}
 			rewindEligible={rewindEligible[messageIndex]}
+			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}
 		/>

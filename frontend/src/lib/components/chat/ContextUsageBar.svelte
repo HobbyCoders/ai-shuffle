@@ -51,7 +51,9 @@
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
-	import { contextWindowForChoice, isContextWindowChoice } from '$lib/constants/model-context';
+	import { isContextWindowChoice } from '$lib/constants/model-context';
+	import { selectedContextWindow } from '$lib/stores/session/context-window';
+	import { contextCapRevision } from '$lib/stores/composer-preferences';
 	import {
 		getDefaultModel,
 		getModelLabel,
@@ -70,6 +72,7 @@
 		decideBreakdownRefresh,
 		resolveContextWindow,
 		fitBreakdownToWindow,
+		isWindowKnown,
 		formatTokenCount,
 		usageSeverity,
 		type ContextBreakdown,
@@ -115,11 +118,26 @@
 		percent?: number;
 		/** More is in context than the window holds; `percent` stops at 100. */
 		overLimit?: boolean;
+		/**
+		 * Tokens used, formatted ("12.3k"), when the model's context window is
+		 * unknown and so no percentage exists; null when the window is known.
+		 */
+		unknownWindowUsed?: string | null;
 	}
 
-	let { onOpenChange, showPercent = false, percent = $bindable(0), overLimit = $bindable(false) }: Props = $props();
+	let {
+		onOpenChange,
+		showPercent = false,
+		percent = $bindable(0),
+		overLimit = $bindable(false),
+		unknownWindowUsed = $bindable(null)
+	}: Props = $props();
 
-	// ── Effective model → context window (200k / 1M) ──────────────────────
+	/** Where a model's context length is set, for the unknown-window hint. */
+	const UNKNOWN_WINDOW_HINT =
+		'This model has no advertised context length, so there is no percentage. Set one in Settings → Providers → the model entry.';
+
+	// ── Effective model → context window (null when unknown) ──────────────
 	// The session's model pick may be a `prov:<providerId>:<modelId>` composite
 	// (PA13's cross-provider switch) — decode it once and let BOTH the model id
 	// and the provider id come from the pick, mirroring the backend's resolution.
@@ -147,13 +165,14 @@
 		return !$activeSession.modelOverride && defaultComposite ? defaultComposite.providerId : null;
 	});
 	const modelCapacity = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
-	// The chat's picked window (200k / 1M), resolved exactly as the next send
+	// The chat's picked window (its Standard cap or Extended), resolved exactly as the next send
 	// resolves it, so the meter shows what that turn will run with. Null when
 	// this model offers no choice: its own window applies.
 	const selectedWindow = $derived.by(() => {
 		const choice = $activeSession.contextWindowChoice;
 		if (!isContextWindowChoice(choice)) return null;
-		return contextWindowForChoice($activeSession.modelOverride || getDefaultModel(), choice);
+		void $contextCapRevision;
+		return selectedContextWindow($activeSession);
 	});
 
 	// Context usage from activeSession — set by onPollApplied after each poll.
@@ -256,15 +275,20 @@
 			outputTokens: $activeSession.totalTokensOut ?? 0,
 			cacheCreationTokens: $activeSession.totalCacheCreationTokens ?? 0,
 			cacheReadTokens: $activeSession.totalCacheReadTokens ?? 0,
-			contextMax: contextWindow.window,
+			contextMax: contextWindow.window ?? 0,
 		})
 	);
 	const displayBreakdown = $derived<ContextBreakdown>(
 		fitBreakdownToWindow(richBreakdown ?? breakdown, contextWindow.window)
 	);
+	// No window from the server, the curated model entry or the built-in table:
+	// show the tokens used, never a percentage of a guessed window (#2274).
+	const windowKnown = $derived(isWindowKnown(displayBreakdown));
+	const usedText = $derived(formatTokenCount(displayBreakdown.totalUsed));
 	const usedOfMax = $derived(
-		`${formatTokenCount(displayBreakdown.totalUsed)} / ${formatTokenCount(displayBreakdown.contextMax)}`
+		windowKnown ? `${usedText} / ${formatTokenCount(displayBreakdown.contextMax)}` : `${usedText} used`
 	);
+	$effect(() => { unknownWindowUsed = windowKnown ? null : usedText; });
 	const nextWindowText = $derived(
 		contextWindow.nextWindow != null ? `${formatTokenCount(contextWindow.nextWindow)} from the next turn` : null
 	);
@@ -610,9 +634,6 @@
 	function creditsLine(pb: ProviderUsageBucket): string | null {
 		const text = creditsSummary(pb.credits, pb.providerType);
 		if (text) return text;
-		// No source can read an OpenAI API prepaid balance: the Admin API reports
-		// spend only, and the billing endpoints refuse API and Admin keys.
-		if (pb.providerType === 'openai') return 'Credit balance not available for this key';
 		if (pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal') return 'Balance unavailable for this key';
 		return null;
 	}
@@ -1001,14 +1022,14 @@
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
 		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-			<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 		{:else if pbSummary}
 			<span class="row-pct {pbSummary.severity} sec-summary"
 				use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${suffix}` }}></span>
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
-			<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
-		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' || pb.providerType === 'openai'}
+			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal'}
 			<span class="sec-summary sec-credits">Balance unavailable</span>
 		{:else}
 			<span class="sec-summary sec-credits sec-empty">—</span>
@@ -1031,17 +1052,21 @@
 	<button
 		type="button"
 		class="usage-indicator"
-		title="{usedOfMax} tokens{displayBreakdown.overLimit ? ', over the limit' : ''}{nextWindowText ? ` · ${nextWindowText}` : ''} — click for details"
-		aria-label="Context and usage — {displayBreakdown.overLimit
-			? `over the limit, ${usedOfMax} tokens`
-			: `${Math.round(contextPercent)}% of context window used`}"
+		title={windowKnown
+			? `${usedOfMax} tokens${displayBreakdown.overLimit ? ', over the limit' : ''}${nextWindowText ? ` · ${nextWindowText}` : ''} — click for details`
+			: `${usedText} tokens used · context window unknown — click for details`}
+		aria-label="Context and usage — {!windowKnown
+			? `${usedText} tokens used, context window unknown`
+			: displayBreakdown.overLimit
+				? `over the limit, ${usedOfMax} tokens`
+				: `${Math.round(contextPercent)}% of context window used`}"
 		aria-haspopup="dialog"
 		aria-expanded={open}
 		onclick={toggle}
 	>
-		<svg class="usage-ring {ringSeverity}" viewBox="0 0 16 16" aria-hidden="true">
+		<svg class="usage-ring {ringSeverity}" class:unknown={!windowKnown} viewBox="0 0 16 16" aria-hidden="true">
 			<circle class="ring-track" cx="8" cy="8" r={RING_RADIUS} fill="none" stroke-width="2.4" />
-			<circle
+			{#if windowKnown}<circle
 				class="ring-progress"
 				cx="8"
 				cy="8"
@@ -1051,9 +1076,9 @@
 				stroke-linecap="round"
 				stroke-dasharray={RING_CIRCUMFERENCE}
 				stroke-dashoffset={ringDashoffset}
-			/>
+			/>{/if}
 		</svg>
-		{#if showPercent}<span class="usage-percent" aria-hidden="true">{displayBreakdown.overLimit ? 'Over' : `${Math.round(contextPercent)}%`}</span>{/if}
+		{#if showPercent}<span class="usage-percent" aria-hidden="true">{!windowKnown ? usedText : displayBreakdown.overLimit ? 'Over' : `${Math.round(contextPercent)}%`}</span>{/if}
 	</button>
 
 	{#if open}
@@ -1070,8 +1095,12 @@
 					<span class="row-label">Context window</span>
 					<span class="ctx-value">
 						{usedOfMax}
-						<span class="ctx-pct {displayBreakdown.severity}"
-							use:usageNumber={{ key: `context:${resolvedKey}:${sessionId ?? 'new'}:${effectiveProviderId}:${effectiveModel}`, text: displayBreakdown.overLimit ? '(over limit)' : `(${Math.round(displayBreakdown.totalPercent)}%)` }}></span>
+						{#if windowKnown}
+							<span class="ctx-pct {displayBreakdown.severity}"
+								use:usageNumber={{ key: `context:${resolvedKey}:${sessionId ?? 'new'}:${effectiveProviderId}:${effectiveModel}`, text: displayBreakdown.overLimit ? '(over limit)' : `(${Math.round(displayBreakdown.totalPercent)}%)` }}></span>
+						{:else}
+							<span class="ctx-pct unknown">· window unknown</span>
+						{/if}
 					</span>
 					<svg
 						class="ctx-chevron {breakdownOpen ? '' : 'collapsed'}"
@@ -1087,6 +1116,10 @@
 				<!-- Segmented bar (always shown). Expanded: one segment per category;
 				     the bare track tail is the free space. Collapsed: a single
 				     severity-coloured fill, same total width as the header %. -->
+				{#if !windowKnown}
+					<!-- No bar: a fill would claim a share of a window nobody declared. -->
+					<p class="ctx-unknown">{UNKNOWN_WINDOW_HINT}</p>
+				{:else}
 				<div class="ctx-segbar" aria-hidden="true">
 					{#if breakdownOpen}
 						{#each barSegments as seg (seg.key)}
@@ -1102,6 +1135,7 @@
 						></span>
 					{/if}
 				</div>
+				{/if}
 
 				{#if nextWindowText}
 					<!-- A pick applies from the next turn; the running one keeps its window. -->
@@ -1123,7 +1157,9 @@
 									—
 								{:else}
 									{formatTokenCount(row.tokens)}
-									{#if row.showPercent}
+									{#if !windowKnown}
+										<!-- No window, no share of it. -->
+									{:else if row.showPercent}
 										<span class="cat-pct">{row.barPercent.toFixed(1)}%</span>
 									{:else}
 										<span class="cat-pct">—</span>
@@ -1221,6 +1257,10 @@
 	.usage-ring.danger .ring-progress {
 		stroke: var(--destructive);
 	}
+	/* Unknown window: a dashed, empty track — no fill to misread as a share. */
+	.usage-ring.unknown .ring-track {
+		stroke-dasharray: 2.4 2.31;
+	}
 
 	/* Opens upward and inward from the rightmost control. Clamp both width
 	   limits to the visible chat column: min-width otherwise beats max-width. */
@@ -1311,6 +1351,16 @@
 	}
 	.ctx-pct.danger {
 		color: var(--destructive);
+	}
+	.ctx-pct.unknown {
+		font-weight: 400;
+		color: var(--muted-foreground);
+	}
+	.ctx-unknown {
+		margin: 0;
+		font-size: 10.5px;
+		line-height: 1.4;
+		color: var(--muted-foreground);
 	}
 
 	/* Single segmented progress bar — contiguous category segments; the

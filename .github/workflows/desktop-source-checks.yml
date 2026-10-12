@@ -1,13 +1,7 @@
 name: Desktop source update checks
-# Desktop-only PRs already run the desktop unit tests in desktop.yml, so this
-# workflow triggers on hub-side changes, where it re-checks both halves of the
-# source-update protocol.
+# Manual only. Re-checks both halves of the source-update protocol (desktop
+# and hub); scripts/local_ci.py runs the same tests before a push.
 on:
-  pull_request:
-    paths:
-      - 'android/hub/**'
-      - '.github/workflows/desktop-source*.yml'
-      - 'Start AI Shuffle.cmd'
   workflow_dispatch:
 permissions:
   contents: read

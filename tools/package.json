@@ -1,5 +1,6 @@
 {
   "name": "@ai-shuffle/tools",
+  "license": "AGPL-3.0-only",
   "version": "1.0.0",
   "type": "module",
   "description": "AI Shuffle tools for Claude code execution",

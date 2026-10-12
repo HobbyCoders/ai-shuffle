@@ -12,6 +12,7 @@
  */
 import type { ActiveSessionState } from '../active-session';
 import type { SessionAttention } from './ws-message-handlers';
+import { dismissProseQuestions, proseQuestionKeys } from './prose-questions';
 
 export interface SettlePromptDeps {
 	backgroundPermissions: {
@@ -31,6 +32,8 @@ export interface SettlePromptDeps {
 export interface SettlePromptSnapshot {
 	attention: SessionAttention | undefined;
 	requestIds: ReadonlySet<string>;
+	/** Prose questions (by position) that marked the session at send time. */
+	proseKeys: readonly string[];
 }
 
 export function snapshotSessionPrompts(
@@ -44,12 +47,13 @@ export function snapshotSessionPrompts(
 		for (const p of state.deferredPermissions) if (p.request_id) requestIds.add(p.request_id);
 		for (const q of state.pendingQuestions) if (q.request_id) requestIds.add(q.request_id);
 	}
-	return { attention: attention.get(sessionId), requestIds };
+	const open = state.sessionId === sessionId ? state.messages : null;
+	return { attention: attention.get(sessionId), requestIds, proseKeys: proseQuestionKeys(sessionId, open) };
 }
 
 /**
- * Drop the session's local waits. Without `only`, everything the session
- * holds goes (a settle frame is current by definition). With `only`, just
+ * Drop the session's local waits (prompts, attention entry and prose
+ * question). Without `only`, everything the session holds goes (a settle frame is current by definition). With `only`, just
  * what the snapshot saw: the attention entry if it is still the same object
  * (every change writes a new one), and prompts whose request id it recorded.
  */
@@ -59,6 +63,8 @@ export function dismissSettledSessionPrompts(
 	only?: SettlePromptSnapshot
 ): void {
 	if (!sessionId) return;
+	const openMessages = deps.getState().sessionId === sessionId ? deps.getState().messages : null;
+	dismissProseQuestions(sessionId, only ? only.proseKeys : proseQuestionKeys(sessionId, openMessages));
 	deps.backgroundPermissions.update((map) => {
 		if (!map.has(sessionId)) return map;
 		if (only && map.get(sessionId) !== only.attention) return map;

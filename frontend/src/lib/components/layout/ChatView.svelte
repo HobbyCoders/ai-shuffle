@@ -376,7 +376,9 @@
 				     via $effect watching sessionId. No {#key} needed — avoiding
 				     component destruction prevents a Svelte 5 reactivity edge case
 				     where the recreated component loses reactive updates during
-				     new session creation (sessionId: undefined → new ID). -->
+				     new session creation (sessionId: undefined → new ID).
+				     onCaughtUp fires once per opened mirrored chat (its first catch-up);
+				     later backlog drains arrive through the live feed (#2227). -->
 				<MirrorSyncGate
 					sessionId={$activeSession.sessionId}
 					remote={$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote}

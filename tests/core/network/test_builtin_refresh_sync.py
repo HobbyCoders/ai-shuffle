@@ -7,6 +7,9 @@ owner's edit made on another worker that has not arrived here yet.
 import json
 
 import pytest
+from tests.api.test_builtin_seeding import legacy_builtin_catalog  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("legacy_builtin_catalog")
 
 from app.db import database
 from app.db import network as store
@@ -54,7 +57,8 @@ def _paired_on_old_text(workers):
 
 @pytest.mark.parametrize("stale_clock_lead", [0, 50])
 def test_stale_worker_refresh_never_beats_an_unreplicated_peer_edit(workers, stale_clock_lead):
-    from app.core.builtin_subagents import GENERAL_PURPOSE_PROMPT, seed_builtin_subagents
+    from app.core.agent_templates import GENERAL_PURPOSE_PROMPT
+    from app.core.builtin_subagents import seed_builtin_subagents
 
     a, b = _paired_on_old_text(workers)
 
@@ -86,7 +90,8 @@ def test_stale_worker_refresh_never_beats_an_unreplicated_peer_edit(workers, sta
 
 
 def test_refresh_on_every_worker_publishes_nothing_and_converges(workers):
-    from app.core.builtin_subagents import GENERAL_PURPOSE_PROMPT, seed_builtin_subagents
+    from app.core.agent_templates import GENERAL_PURPOSE_PROMPT
+    from app.core.builtin_subagents import seed_builtin_subagents
 
     a, b = _paired_on_old_text(workers)
     counts = {}
@@ -104,7 +109,8 @@ def test_refresh_on_every_worker_publishes_nothing_and_converges(workers):
 
 
 def test_owner_edit_after_a_local_refresh_publishes_the_refreshed_row(workers):
-    from app.core.builtin_subagents import GENERAL_PURPOSE_PROMPT, seed_builtin_subagents
+    from app.core.agent_templates import GENERAL_PURPOSE_PROMPT
+    from app.core.builtin_subagents import seed_builtin_subagents
 
     a, b = _paired_on_old_text(workers)
     with a.active():

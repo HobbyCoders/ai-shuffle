@@ -10,6 +10,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from app.core import license as licensing
+from app.db import mobile_hub
+
+
+@pytest.fixture(autouse=True)
+def account_binding(mock_db):
+    """Use the real per-worker binding store, initially unlinked."""
+    pass
 
 DAY = 86400
 
@@ -93,7 +100,7 @@ def test_beta_mode_is_always_valid(monkeypatch, url, beta, keys_present):
     assert licensing.beta_mode()
     assert licensing.license_allows_agent_runs() == (True, None)
     s = licensing.status()
-    assert s["mode"] == "beta" and s["state"] == "beta" and s["allowed"] and s["banner"] is None
+    assert s["mode"] == "cloud" and s["state"] == "not_linked" and s["allowed"] and s["banner"] is None
 
 
 async def test_beta_mode_refuses_activation_without_calling_out(monkeypatch, server):
@@ -108,56 +115,79 @@ async def test_beta_mode_refuses_activation_without_calling_out(monkeypatch, ser
 # Gate states
 # ---------------------------------------------------------------------------
 
-def test_unlicensed_blocks_new_runs_only_with_a_setup_message(store):
+def test_unlinked_worker_allows_runs_without_a_banner(store):
     allowed, reason = licensing.license_allows_agent_runs()
-    assert allowed is False
-    assert "Settings > System > License" in reason and "data is not affected" in reason
-    assert licensing.status()["state"] == "unlicensed"
+    assert (allowed, reason) == (True, None)
+    s = licensing.status()
+    assert s["state"] == "not_linked" and not s["linked"]
+    assert s["banner"] is None and s["remote_worker_limit"] == 0
+
+
+def test_free_account_uses_the_actual_binding_store(store):
+    mobile_hub.bind("https://hub.example.com", "server-1", "encrypted-secret", "account-1")
+    s = licensing.status()
+    assert s["state"] == "free" and s["linked"]
+    assert s["remote_worker_limit"] == s["seats"] == 1
+    assert s["allowed"] and s["banner"] is None
 
 
 def test_active_lease_allows_runs(store, keys):
     save(store, install_id="inst-1", lease=keys.lease("inst-1"))
     assert licensing.license_allows_agent_runs() == (True, None)
     s = licensing.status()
-    assert s["state"] == "active" and s["plan"] == "monthly" and s["seats"] == 3 and s["seats_used"] == 1
+    assert s["state"] == "paid" and s["plan"] == "monthly" and s["seats"] == 3 and s["seats_used"] == 1
     assert s["account_id"] == "acct-1" and s["key_hint"] == "7QK2" and s["banner"] is None
     assert s["expires_at"].endswith("Z")
 
 
-def test_trial_lease_reports_trialing(store, keys):
+def test_legacy_trial_lease_still_reports_paid_capacity(store, keys):
     save(store, install_id="inst-1", lease=keys.lease("inst-1", status="trialing", plan="trial"))
-    assert licensing.status()["state"] == "trialing"
+    assert licensing.status()["state"] == "paid"
 
 
-def test_expired_lease_blocks_and_says_data_is_safe(store, keys):
+def test_expired_lease_does_not_block_local_use(store, keys):
     now = int(time.time())
     save(store, install_id="inst-1", lease=keys.lease("inst-1", issued_at=now - 15 * DAY, expires_at=now - DAY))
     allowed, reason = licensing.license_allows_agent_runs()
-    assert not allowed and "lease ended" in reason and "data is not affected" in reason
+    assert (allowed, reason) == (True, None)
     s = licensing.status()
-    assert s["state"] == "expired" and s["banner"]["severity"] == "error"
+    assert s["lease_state"] == "expired" and s["banner"] is None and s["state"] == "not_linked"
 
 
-def test_payment_grace_keeps_running_with_a_banner(store, keys):
+async def test_linked_paid_account_falls_back_to_free_on_expiry_and_release(store, keys, server):
+    mobile_hub.bind("https://hub.example.com", "server-1", "encrypted-secret", "account-1")
+    server.answers["activate"] = lambda body: (200, {"lease": keys.lease(body["install_id"]), "install_token": "a" * 64})
+    paid = await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
+    assert paid["state"] == "paid" and paid["remote_worker_limit"] == 3
+    expired = licensing.status(now=time.time() + 15 * DAY)
+    assert expired["state"] == "free" and expired["remote_worker_limit"] == 1
+    assert expired["allowed"] and expired["banner"] is None
+    server.answers["deactivate"] = (200, {"ok": True})
+    released = await licensing.deactivate()
+    assert released["state"] == "free" and released["remote_worker_limit"] == 1
+    assert released["allowed"] and licensing.lease_header() is None
+
+
+def test_payment_grace_is_settings_information_only(store, keys):
     now = int(time.time())
     save(store, install_id="inst-1", lease=keys.lease("inst-1", grace=True, status="grace", grace_until=now + 10 * DAY, expires_at=now + 10 * DAY))
     assert licensing.license_allows_agent_runs() == (True, None)
     s = licensing.status()
-    assert s["state"] == "grace" and s["grace"] is True and s["grace_until"]
-    assert "payment failed" in s["banner"]["message"]
+    assert s["lease_state"] == "grace" and s["grace"] is True and s["grace_until"]
+    assert "payment failed" in s["message"] and s["banner"] is None
 
 
-def test_offline_lease_warns_in_its_last_three_days_then_stops(store, keys):
+def test_offline_lease_expiry_only_changes_cloud_capacity(store, keys):
     now = int(time.time())
     save(store, install_id="inst-1", lease=keys.lease("inst-1", issued_at=now - 12 * DAY, expires_at=now + 2 * DAY))
     s = licensing.status()
-    assert s["state"] == "expiring" and s["allowed"] and s["banner"]["severity"] == "warning"
+    assert s["lease_state"] == "expiring" and s["allowed"] and s["banner"] is None
     # Fourteen days offline and the lease is over.
-    assert licensing.status(now=now + 2 * DAY + 1)["state"] == "expired"
+    assert licensing.status(now=now + 2 * DAY + 1)["lease_state"] == "expired"
 
 
 @pytest.mark.parametrize("tamper", ["other_install", "forged", "unknown_key", "garbage"])
-def test_leases_that_do_not_verify_block_runs(store, keys, tamper):
+def test_leases_that_do_not_verify_never_block_runs(store, keys, tamper):
     lease = keys.lease("inst-1")
     if tamper == "other_install":
         lease = keys.lease("inst-2")
@@ -171,8 +201,8 @@ def test_leases_that_do_not_verify_block_runs(store, keys, tamper):
         lease = {"format": "shuffle-lease-v1", "key_id": "test", "payload": "%%%", "signature": "x"}
     save(store, install_id="inst-1", lease=lease)
     allowed, reason = licensing.license_allows_agent_runs()
-    assert not allowed and "could not be verified" in reason
-    assert licensing.status()["state"] == "invalid"
+    assert (allowed, reason) == (True, None)
+    assert licensing.status()["lease_state"] == "invalid"
 
 
 def test_lease_header_carries_the_signed_envelope_for_the_hub(store, keys, monkeypatch):
@@ -200,7 +230,7 @@ def test_gate_fails_open_when_state_cannot_be_read(store, monkeypatch):
 async def test_activation_stores_a_verified_lease_and_reuses_the_install_id(store, keys, server):
     server.answers["activate"] = lambda body: (200, {"lease": keys.lease(body["install_id"]), "install_token": "a" * 64, "seats": 3, "seats_used": 1})
     s = await licensing.activate("  ASH-AAAAA-AAAAA-AAAAA-AAAAA ")
-    assert s["state"] == "active" and s["allowed"]
+    assert s["state"] == "paid" and s["allowed"]
     path, body = server.requests[0]
     assert path == "activate" and body["key"] == "ASH-AAAAA-AAAAA-AAAAA-AAAAA"
     assert len(body["fingerprint"]) == 64 and body["app_version"] and body["name"]
@@ -254,7 +284,7 @@ async def test_renewal_replaces_the_lease_and_schedules_a_jittered_daily_check(s
     server.answers["renew"] = lambda body: (200, {"lease": keys.lease("inst-1")})
     s = await licensing.refresh()
     saved = state(store)
-    assert s["state"] == "active" and saved["failures"] == 0 and saved["last_error"] is None
+    assert s["state"] == "paid" and saved["failures"] == 0 and saved["last_error"] is None
     assert json.loads(base64.b64decode(saved["lease"]["payload"]))["issued_at"] >= now
     assert DAY - 2 * 3600 - 5 <= saved["next_refresh_at"] - time.time() <= DAY + 2 * 3600 + 5
     assert server.requests[0][1]["install_id"] == "inst-1"
@@ -279,12 +309,12 @@ async def test_server_saying_no_keeps_the_current_lease_until_it_ends(store, key
     save(store, install_id="inst-1", install_token="a" * 64, lease=keys.lease("inst-1"))
     server.answers["renew"] = (402, {"error": "The subscription for this license has ended.", "status": "canceled"})
     s = await licensing.refresh()
-    assert s["state"] == "ending" and s["allowed"]
+    assert s["lease_state"] == "ending" and s["allowed"]
     assert s["server_status"]["code"] == "canceled"
-    assert "subscription for this license has ended" in s["banner"]["message"]
+    assert "not renewing" in s["message"] and s["banner"] is None
     # A later successful renewal clears it.
     server.answers["renew"] = lambda body: (200, {"lease": keys.lease("inst-1")})
-    assert (await licensing.refresh())["state"] == "active"
+    assert (await licensing.refresh())["state"] == "paid"
 
 
 async def test_deactivation_frees_the_seat_and_keeps_the_install_id(store, keys, server):
@@ -292,7 +322,7 @@ async def test_deactivation_frees_the_seat_and_keeps_the_install_id(store, keys,
     server.answers["deactivate"] = (200, {"ok": True, "seats_used": 0})
     s = await licensing.deactivate()
     assert server.requests == [("deactivate", {"install_id": "inst-1", "install_token": "a" * 64})]
-    assert s["seat_released"] is True and s["state"] == "unlicensed"
+    assert s["seat_released"] is True and s["state"] == "not_linked"
     assert state(store) == {"install_id": "inst-1"}
 
 
@@ -300,7 +330,7 @@ async def test_deactivation_offline_still_forgets_the_lease(store, keys, server)
     save(store, install_id="inst-1", install_token="a" * 64, lease=keys.lease("inst-1"))
     server.answers["deactivate"] = licensing.LicenseError(503, "offline")
     s = await licensing.deactivate()
-    assert s["seat_released"] is False and s["state"] == "unlicensed"
+    assert s["seat_released"] is False and s["state"] == "not_linked"
 
 
 async def test_release_seat_uses_the_key_to_free_another_worker(store, server):
@@ -339,25 +369,26 @@ async def test_renewal_keeps_the_new_install_token_it_is_given(store, keys, serv
     (410, {"error": "This worker was deactivated. Enter your license key to activate it again.", "code": "deactivated"}),
     (409, {"error": "This license is in use on 3 of 3 workers. Remove one at hobbycoders.com/account, or deactivate it in Settings > System > License on that worker, then try again.", "code": "seats_full", "seats": 3, "installs": []}),
 ])
-async def test_losing_the_seat_pauses_new_runs_at_once(store, keys, server, code, answer):
+async def test_losing_the_seat_drops_the_lease_without_pausing_runs(store, keys, server, code, answer):
     save(store, install_id="inst-1", install_token="a" * 64, lease=keys.lease("inst-1"), key_hint="7QK2")
     server.answers["renew"] = (code, answer)
     s = await licensing.refresh()
-    assert s["state"] == "unlicensed" and not s["allowed"]
-    assert s["reason"].startswith(answer["error"]) and "paused" in s["reason"] and "data is not affected" in s["reason"]
-    assert answer["error"] in s["banner"]["message"] and s["banner"]["severity"] == "error"
+    assert s["state"] == "not_linked" and s["allowed"]
+    assert s["lease_state"] == "seat_lost"
+    assert s["reason"] is None and s["banner"] is None
+    assert "Local use is unchanged" in s["message"]
     assert s["server_status"]["code"] == answer["code"]
     saved = state(store)
     assert "lease" not in saved and "install_token" not in saved
     assert saved["install_id"] == "inst-1" and saved["key_hint"] == "7QK2"
-    assert licensing.license_allows_agent_runs()[0] is False
+    assert licensing.license_allows_agent_runs() == (True, None)
     # Nothing left to renew until the key is entered again.
     assert licensing._seconds_until_refresh(time.time()) == licensing.REFRESH_INTERVAL
     # Entering the key again reuses the install id (no second seat) and clears the message.
     server.answers["activate"] = lambda body: (200, {"lease": keys.lease(body["install_id"]), "install_token": "c" * 64})
     s = await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
     assert server.requests[-1][1]["install_id"] == "inst-1"
-    assert s["state"] == "active" and s["server_status"] is None
+    assert s["state"] == "paid" and s["server_status"] is None
 
 
 async def test_an_unexplained_refusal_does_not_drop_the_lease(store, keys, server):
@@ -387,9 +418,9 @@ def test_host_machine_id_reads_the_linux_machine_id(monkeypatch):
     import sys
     monkeypatch.setattr(sys, "platform", "linux")
     seen = []
-    real = licensing.Path
+    from pathlib import PurePosixPath
 
-    class FakePath(type(real())):
+    class FakePath(PurePosixPath):
         def read_text(self, *a, **k):
             seen.append(str(self))
             if str(self) == "/etc/machine-id":
@@ -509,7 +540,7 @@ async def test_desktop_key_is_activated_once_and_its_file_left_to_the_desktop(fi
     assert await licensing.activate_first_install_key() == "activated"
     path, body = server.requests[0]
     assert path == "activate" and body["key"] == KEY
-    assert licensing.status()["state"] == "active"
+    assert licensing.status()["state"] == "paid"
     # The desktop deletes license-key.json itself once a lease opened its update feed.
     assert (first_key / licensing.DESKTOP_KEY_FILE).exists()
     assert await licensing.activate_first_install_key() == "licensed"
@@ -529,7 +560,7 @@ async def test_a_refused_key_is_not_sent_again_and_says_why(first_key, server):
     server.answers["activate"] = (404, {"error": "That license key does not exist."})
     assert await licensing.activate_first_install_key() == "refused"
     current = licensing.status()
-    assert current["state"] == "unlicensed"
+    assert current["state"] == "not_linked"
     assert current["last_error"] == "LICENSE_KEY was not accepted: That license key does not exist."
     # The next start finds the same key in the container settings: not sent again.
     licensing.capture_env_key({licensing.LICENSE_KEY_ENV: KEY.lower()})
@@ -548,7 +579,7 @@ async def test_an_unreachable_server_is_tried_again(first_key, store, keys, serv
     assert "license_first_key:test" not in store, "an unanswered key is not marked as tried"
     activating(server, keys)
     await licensing._first_install_activation()
-    assert licensing.status()["state"] == "active" and no_sleep == []
+    assert licensing.status()["state"] == "paid" and no_sleep == []
 
 
 async def test_startup_retries_a_few_times_then_gives_up_quietly(first_key, server, monkeypatch, no_sleep):

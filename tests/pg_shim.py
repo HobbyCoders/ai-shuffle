@@ -286,7 +286,7 @@ def translate_sql(sql: str) -> str:
     # Row-lock clauses (`FOR SHARE` / `FOR UPDATE`) — no-ops on SQLite's single
     # writer; strip them so the SELECT parses.
     s = re.sub(r"\bFOR\s+SHARE\b", "", s, flags=re.I)
-    s = re.sub(r"\bFOR\s+UPDATE\b", "", s, flags=re.I)
+    s = re.sub(r"\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b", "", s, flags=re.I)
     # JSONB key extraction as text: `col ->> 'key'` -> json_extract(col,'$.key').
     # JSONB columns become TEXT here, and SQLite's json_extract reads that text
     # with the same "missing key yields NULL" semantics ->> has. Only the

@@ -93,8 +93,7 @@ def _refuse_assistant_agent(*agent_ids: str) -> None:
 def _check_profile_modified(profile: dict) -> None:
     """Set is_modified on a built-in agent by comparing to its defaults.
 
-    Built-in subagents (general-purpose, Plan, frontend-designer)
-    compare against their code definitions in BUILTIN_SUBAGENTS.
+    Legacy built-ins compare against the compatibility catalog, now empty.
     """
     if not profile.get("is_builtin"):
         return
@@ -161,6 +160,22 @@ async def list_profiles(request: Request, token: str = Depends(require_auth)):
         return profiles
 
     return await run_sync(_load)
+
+
+@router.get("/team-templates")
+async def list_team_templates(token: str = Depends(require_admin)):
+    """List opt-in agent teams and their already-installed members (owner only)."""
+    from app.core.agent_templates import list_agent_templates
+
+    return await run_sync(list_agent_templates)
+
+
+@router.post("/templates/starter-team/install")
+async def install_starter_team_template(token: str = Depends(require_admin)):
+    """Create only missing starter agents, as ordinary editable owner agents."""
+    from app.core.agent_templates import install_starter_team
+
+    return await run_sync(install_starter_team)
 
 
 @router.get("/{profile_id}", response_model=ProfilePresentation)

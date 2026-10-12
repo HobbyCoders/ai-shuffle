@@ -339,7 +339,7 @@ def test_claude_rejected_event_reads_exhausted(used):
     assert window["resets_at"] == _FUTURE_RESET
     assert isinstance(window["observed_at"], int)
 
-async def test_official_openai_model_account_is_explicitly_unavailable_before_any_poll(mock_db):
+async def test_official_openai_model_account_hidden_without_admin_or_entered_balance(mock_db):
     from app.db import database as db
     from app.api.usage import _load_provider_usage
 
@@ -348,8 +348,4 @@ async def test_official_openai_model_account_is_explicitly_unavailable_before_an
     db.create_model_provider("disabled-api", "Disabled API", "openai", "https://api.openai.com/v1")
     db.set_model_provider_enabled("disabled-api", False)
     entries = await _load_provider_usage()
-    assert len(entries) == 1
-    assert entries[0].provider_id == "new-api"
-    assert entries[0].status == "unavailable"
-    assert entries[0].last_error_kind == "unsupported"
-    assert entries[0].credits is None and entries[0].windows == []
+    assert entries == []

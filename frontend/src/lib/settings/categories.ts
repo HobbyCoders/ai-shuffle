@@ -12,6 +12,7 @@ import {
 	Cable,
 	Webhook,
 	MonitorSmartphone,
+	Cloud,
 	Shield,
 	Server,
 	ScrollText
@@ -47,6 +48,7 @@ const ROWS: CategoryRow[] = [
 	{ id: 'mcp', label: 'MCP servers', icon: Cable, group: 'ai' },
 	{ id: 'hooks', label: 'Hooks', icon: Webhook, group: 'ai' },
 	{ id: 'devices', label: 'Devices', icon: MonitorSmartphone, group: 'worker' },
+	{ id: 'cloud', label: 'Cloud', icon: Cloud, group: 'worker' },
 	{ id: 'security', label: 'Security', icon: Shield, group: 'worker' },
 	{ id: 'system', label: 'System', icon: Server, group: 'worker' },
 	{ id: 'logs', label: 'Logs', icon: ScrollText, group: 'worker' }

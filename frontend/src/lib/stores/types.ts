@@ -82,6 +82,8 @@ export interface QueuedMessage {
 	id: string;
 	content: string;
 	queuedAt: number;
+	clientMessageId?: string;
+	status?: 'cancelling' | 'delivered';
 }
 
 /** Attributed peer traffic; has no user unsend/interrupt controls. */
@@ -110,6 +112,8 @@ export interface ChatMessage {
 	server_side?: boolean; // Snake-case alias emitted by backend on some paths
 	metadata?: Record<string, unknown>;
 	timestamp?: string; // ISO-8601 creation time — from server metadata.timestamp on load, stamped client-side on send; without it the UI falls back to "now"
+	seq?: number | null; // Event-log position: seq of the LAST event that contributed (folded deltas advance it); null/absent when unknown (#2249)
+	epoch?: string | null; // Opaque event-log identity `seq` belongs to; compare seqs only within an equal epoch
 	turnId?: string; // Turn this message belongs to (user messages, from the wire event). Two user messages sharing one turn id means the later one was steered into a turn already running — see work-log's splitTurns.
 	queuedTurnId?: string; // Queued row absorbed into an already-running turn.
 	streaming?: boolean;
@@ -121,7 +125,7 @@ export interface ChatMessage {
 	// Subagent-specific fields
 	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
 	agentSessionId?: string; // App worker transcript session; not a native SDK agent ID
-	agentType?: string; // The subagent type (e.g., 'general-purpose', 'Plan'); for app-dispatched workers this is the MODEL slug
+	agentType?: string; // The subagent type (e.g., 'general-purpose', 'frontend-designer'); for app-dispatched workers this is the MODEL slug
 	agentName?: string; // The dispatched agent's display name (e.g., 'Frontend Designer') — the card's identity
 	agentDescription?: string; // Task description from the Task tool
 	agentPrompt?: string; // The initial prompt sent to the subagent
@@ -129,6 +133,7 @@ export interface ChatMessage {
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
 	agentModel?: string; // The "<provider> · <model>" label the worker runs on, from task.updated (#1827)
 	agentStopNote?: string; // Who stopped a 'stopped' card, as the task registry recorded it ("Stopped by user")
+	agentReportTruncated?: boolean; // The card's `content` is a cut of the worker's report; the rest is in its transcript
 	agentLaunchToolUseId?: string; // The model's Task launch tool_use_id absorbed into this card (fluid-leg worker cards)
 	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number; input_tokens?: number; output_tokens?: number }; // Task progress stats
 	// Team member fields (Claude Code agent-teams feature)
@@ -139,6 +144,7 @@ export interface ChatMessage {
 	teammateStatus?: TeammateStatus;
 	// Command-specific fields (for slash commands like /commit, /ralph-loop)
 	commandId?: string; // Internal command identifier (e.g., 'commit-commands:commit')
+	serverId?: string; // Server id of an optimistic row reconciled in place (its `id` stays the optimistic one so Svelte does not remount it; a reload uses this id)
 	commandName?: string; // Display name with slash (e.g., '/commit')
 	commandArgs?: string; // Arguments passed to the command
 }

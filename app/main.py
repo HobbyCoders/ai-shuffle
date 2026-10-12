@@ -593,6 +593,8 @@ app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(preferences.router)
 app.include_router(settings_api.router)
+from app.api.settings_updates import channel_router
+app.include_router(channel_router)
 app.include_router(settings_import.router)
 app.include_router(generated_images.router)
 app.include_router(generated_videos.router)

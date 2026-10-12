@@ -60,10 +60,10 @@ def _hub_failure(exc):
 def _tunnel_limit_message(refused):
     if refused.licensed:
         return (f'Remote access is off: this account already uses all {refused.limit} remote connections '
-                'its license covers. Turn off remote access on another worker to free one.')
+                'its paid Cloud plan covers. Turn off remote access on another worker to free one.')
     one = 'its one remote connection' if refused.limit == 1 else f'its {refused.limit} remote connections'
     return (f'Remote access is off: this account already uses {one}. Remote access for more workers '
-            'needs an AI Shuffle license (Settings > System > License), or turn off remote access on another worker. '
+            'needs a paid Cloud plan (Settings > Cloud), or turn off remote access on another worker. '
             'Local use is not affected.')
 
 

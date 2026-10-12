@@ -2,13 +2,13 @@
 import asyncio
 from fluid.tools.registry import ToolOutcome, ToolSpec
 
-from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
-from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE, EFFORT_PROPERTY
+from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE
+from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
     has = lambda name: tools is None or name in tools
-    routing = f"{SWARM_ROUTING} Use only agents available to Task. " if has("Task") else ""
+    routing = "Follow the delegation rules in the system prompt (or Task on standalone hosts). Use only agents available to Task. " if has("Task") else ""
     messaging = (
         "ListAgents and SendMessage address peers and main; messaging is also "
         "available outside a swarm. "
@@ -20,7 +20,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "Declare the complete planned tasks and their depends_on IDs in one "
         "start call. The schema accepts at most 64 tasks; that is a ceiling, "
         "not a target. Omit max_parallel to run every dependency-ready task "
-        "at once, or set it lower to throttle. " + SUBAGENT_WORKTREE_GUIDANCE + " " +
+        "at once, or set it lower to throttle. "
+        + ("Follow the same checkout rules as Task. " if has("Task")
+           else SUBAGENT_WORKTREE_GUIDANCE + " ") +
         "The scheduler launches ready tasks up to max_parallel, hands bounded "
         "dependency results to successors, blocks successors of failed tasks, "
         "and sends one workflow completion wake instead of waking the parent "
@@ -50,7 +52,7 @@ def input_schema(worker: dict | None = None) -> dict:
         "model": {"type": "string", "description": (
             "Optional model for this task only, under the same rule as Task's model; "
             "omit it to use the agent's own model "
-            "or the subagent default. " + MODEL_OVERRIDE_RULE)},
+            "or the subagent default. See Task.model for host validation and provider rules.")},
         "depends_on": {"type": "array", "items": {"type": "string"}}}
     if worker is not None:
         item["worker"] = dict(worker)

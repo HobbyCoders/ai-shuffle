@@ -52,6 +52,8 @@ PG_ONLY_COLUMN_CHANGES = {
     ("sessions", "v2_stream"): "ALTER TABLE sessions ALTER COLUMN v2_stream SET DEFAULT TRUE",
     ("sessions", "total_tokens_in"): "ALTER COLUMN total_tokens_in TYPE BIGINT",
     ("sessions", "total_tokens_out"): "ALTER COLUMN total_tokens_out TYPE BIGINT",
+    # Actual nullability upgrade is exercised on real PG in test_explore_retirement_postgres.
+    ("automations", "profile_id"): "ALTER TABLE automations ALTER COLUMN profile_id DROP NOT NULL",
 }
 
 #: Tables older releases created that today's schema no longer defines. Since
@@ -117,10 +119,13 @@ def _comparable(snapshot):
         kind, name = key
         if kind == "table":
             columns = dict(value["columns"])
-            for (table, column) in PG_ONLY_COLUMN_CHANGES:
+            for (table, column), statement in PG_ONLY_COLUMN_CHANGES.items():
                 if table == name and column in columns:
-                    _type, notnull, _default, pk = columns[column]
-                    columns[column] = (None, notnull, None, pk)
+                    col_type, notnull, default, pk = columns[column]
+                    if statement.endswith("DROP NOT NULL"):
+                        columns[column] = (col_type, None, default, pk)
+                    else:
+                        columns[column] = (None, notnull, None, pk)
             value = {"columns": columns, "fks": value["fks"]}
         out[key] = value
     return out

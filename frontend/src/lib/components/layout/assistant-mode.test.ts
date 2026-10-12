@@ -4,13 +4,14 @@
  *
  * MainPanel, ChatView, ChatInput and MessageArea pull in the whole session
  * graph when mounted (see chatview-mode-lanes.test.ts), so the gates are pinned
- * at the source level; ControlsDock, the strip and Details are mounted in their
- * own tests, and the integrated view is checked in a browser.
+ * at the source level; ControlsDock and the strip are mounted in their own
+ * tests, the shared transcript in assistant-transcript-parity.test.ts, and the
+ * integrated view is checked in a browser.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { isAssistantHome } from '$lib/stores/assistant';
+import { chatIdentity, isAssistantHome } from '$lib/stores/assistant';
 import type { AssistantState } from '$lib/api/assistant';
 
 // HTML comments only: a block-comment pattern would also eat `accept="image/*"`.
@@ -33,6 +34,22 @@ describe('isAssistantHome', () => {
 	});
 });
 
+describe('chatIdentity (fails closed for Rename / Fork / Delete)', () => {
+	const state = { home_session_id: 'home' } as AssistantState;
+	it('is unknown until the auth status and, for an admin, the assistant state are loaded', () => {
+		expect(chatIdentity('home', null, state)).toBe('unknown');
+		expect(chatIdentity('other', true, null)).toBe('unknown');
+	});
+	it('names the home and ordinary chats once known', () => {
+		expect(chatIdentity('home', true, state)).toBe('assistant');
+		expect(chatIdentity('other', true, state)).toBe('ordinary');
+		expect(chatIdentity('other', true, { home_session_id: null } as AssistantState)).toBe('ordinary');
+	});
+	it('treats a non-admin chat as ordinary without the assistant state', () => {
+		expect(chatIdentity('other', false, null)).toBe('ordinary');
+	});
+});
+
 describe('assistant mode flag', () => {
 	it('is decided once in MainPanel and passed down as a prop', () => {
 		expect(mainPanel).toContain('const assistantMode = $derived(isAssistantHome(activeTab?.sessionId, $assistantState));');
@@ -41,6 +58,11 @@ describe('assistant mode flag', () => {
 		expect(chatView).toMatch(/<ChatInput[^>]*\{assistantMode\}/);
 		expect(chatInput).toMatch(/<ControlsDock[\s\S]*?\{assistantMode\}/);
 		for (const source of [chatView, chatInput, messageArea]) expect(source).not.toContain('home_session_id');
+	});
+
+	it('loads the assistant state for an open chat even before any sidebar mounts', () => {
+		// The phone shell mounts its sidebar drawer on first open only.
+		expect(mainPanel).toContain('if ($isAdmin && activeTab?.sessionId && !$assistantState) void refreshAssistant().catch(() => {});');
 	});
 
 	it('hides the header download and Git in the home only', () => {
@@ -60,10 +82,18 @@ describe('assistant mode flag', () => {
 		expect(chatView).toMatch(/\{#if assistantMode\}\s*<BackgroundWorkStrip /);
 	});
 
-	it('folds the transcript only in the home', () => {
-		expect(messageArea).toContain('const assistantView = $derived(assistantMode ? foldAssistantTranscript(transcript.items, latestTurnUnsettled) : null);');
-		expect(messageArea).toContain('const displayItems: AssistantViewItem[] = $derived(assistantView?.items ?? transcript.items);');
-		expect(messageArea).toContain("{:else if item.kind === 'details'}");
+	it('organizes the home transcript exactly like any chat (spec §10.5)', () => {
+		// One presentation model and one fold component: no second fold path.
+		expect(messageArea).toContain('const displayItems: DisplayItem[] = $derived(transcript.items);');
+		expect(messageArea).toContain('const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(transcript.itemIndexByTurnId);');
+		expect(messageArea).not.toMatch(/foldAssistantTranscript|AssistantDetails|item\.kind === 'details'/);
+		// The model is built from the same pref and lifecycle in both modes.
+		const build = messageArea.slice(messageArea.indexOf('const transcript: TranscriptModel'), messageArea.indexOf('const displayItems'));
+		expect(build).toContain('const groupingEnabled = chatPrefs?.groupToolCalls !== false;');
+		expect(build).not.toContain('assistantMode');
+		const loop = messageArea.slice(messageArea.indexOf('{#each visibleItems as item'), messageArea.indexOf('{/each}', messageArea.indexOf('{#each visibleItems as item')));
+		expect(loop).toContain('<WorkLogGroup');
+		expect(loop).not.toContain('assistantMode');
 	});
 
 	it('asks marked approvals in words and keeps the dialog for every other request', () => {

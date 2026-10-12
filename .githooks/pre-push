@@ -1,0 +1,46 @@
+#!/bin/sh
+# LOCAL-CI-PRE-PUSH v3
+# Every outgoing ref gets an offline secret scan, even with a cached test pass.
+# Local checks before anything leaves this machine (scripts/local_ci.py).
+# CI does not test pull requests; this hook is where tests run.
+# `python scripts/local_ci.py install` copies it into the clone's hooks
+# directory and keeps any earlier pre-push hook as pre-push.user.
+refs=$(cat)
+root=$(git rev-parse --show-toplevel) || exit 1
+# This installed hook survives branch switches. Never delegate to an older
+# checkout whose local_ci.py can accept a pre-security cached pass.
+if [ ! -f "$root/scripts/secret_scan.py" ] || [ ! -f "$root/.gitleaks.toml" ] ||
+   ! grep -q '^SECURITY_GATE_VERSION = 2[[:space:]]*$' "$root/scripts/local_ci.py" 2>/dev/null; then
+  echo "pre-push: checkout lacks the required security gate; update this branch before pushing." >&2
+  exit 1
+fi
+if [ -f "$root/scripts/local_ci.py" ]; then
+  python=""
+  # The interpreter install recorded (git config local-ci.python), else the
+  # first one that can run the backend tests.
+  saved=$(git config --get local-ci.python)
+  for candidate in "$LOCAL_CI_PYTHON" "$saved"; do
+    if [ -n "$candidate" ] && "$candidate" -c "import pytest, yaml" >/dev/null 2>&1; then
+      python=$candidate
+      break
+    fi
+  done
+  [ -n "$python" ] || for candidate in python3.12 python3 python "py -3.12" /usr/local/bin/python3; do
+    if $candidate -c "import pytest, yaml" >/dev/null 2>&1; then
+      python=$($candidate -c "import sys; print(sys.executable)")
+      break
+    fi
+  done
+  if [ -z "$python" ]; then
+    echo "pre-push: no Python with pytest and PyYAML found. Install requirements-dev.txt, then run" >&2
+    echo "  python scripts/local_ci.py install --python /path/to/python" >&2
+    exit 1
+  fi
+  printf '%s\n' "$refs" | "$python" "$root/scripts/local_ci.py" pre-push || exit 1
+fi
+user_hook="$(dirname "$0")/pre-push.user"
+if [ -x "$user_hook" ]; then
+  printf '%s\n' "$refs" | "$user_hook" "$@"
+  exit $?
+fi
+exit 0

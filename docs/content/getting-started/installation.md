@@ -12,9 +12,9 @@ AI Shuffle runs on Windows, macOS, Linux and Docker, and you can use it from And
 | --- | --- | --- |
 | Linux server, NAS or home server | Docker | Available. See [Install with Docker](/docs/getting-started/install-docker-compose). |
 | Any PC with Docker (Windows, macOS or Linux) | Docker | Available. See [Install with Docker](/docs/getting-started/install-docker-compose). |
-| Windows 10 or 11 | Desktop app | Beta. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
+| Windows 10 or 11 | Desktop app | Available. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
 | macOS | Desktop app | Coming soon. Use Docker for now. |
-| Linux desktop (64-bit) | Desktop app | Beta. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
+| Linux desktop (64-bit) | Desktop app | Available. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
 | Android | App on Google Play | Connects to your workers. See [Remote access](/docs/getting-started/remote-access). |
 | iPhone and iPad | App | Coming soon. Use a browser for now. |
 
@@ -25,7 +25,7 @@ The Docker image runs on 64-bit Intel or AMD machines only. Check the [requireme
 - **Docker** suits a machine that is always on, like a server or NAS. Agents run inside the container, away from the rest of the machine.
 - **The desktop app** suits a single PC. Agents run as your own user, with your files and programs. It is the only install that can use **computer use** (agents controlling the screen), because a container has no desktop.
 
-You can use both: one license covers up to 3 workers, and you can connect them so they share settings and chats.
+You can use both for free on your LAN or VPN. Same-LAN sync is free. An optional [Cloud account](/docs/getting-started/cloud) adds managed remote access: 1 worker for free or 3 on the paid plan.
 
 ## What every install has in common
 
@@ -36,8 +36,8 @@ You can use both: one license covers up to 3 workers, and you can connect them s
 
 ## After installing
 
-Open AI Shuffle and follow [First run](/docs/getting-started/first-run): set your owner password, enter your license key, connect an AI provider, pick a workspace and run your first agent.
+Open AI Shuffle and follow [First run](/docs/getting-started/first-run): set your owner password, connect an AI provider, pick a workspace and run your first agent.
 
 ## More than one worker
 
-Install each worker the same way, activate your license on each one, and link them under **Settings → Devices**. Each worker keeps its own data. Never point two workers at the same data folder.
+Install each worker the same way and link them under **Settings → Devices**. No license is required for local use. Each worker keeps its own data. Never point two workers at the same data folder.

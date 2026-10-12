@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
 import { configurePersistenceFixture, verifyOfflineSetup, workerJson } from '../../tests/integration/container_ui_smoke.mjs';
 assert(process.platform==='win32'&&process.env.CI==='true','Fresh Windows CI only');
@@ -53,7 +53,8 @@ async function connect(){await until(async()=>{
  if(candidate)await candidate.close().catch(()=>{});
  return false;
 },'Installed desktop debugger and worker did not become ready',180000);}
-async function launch(){const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});child.on('error',e=>console.error(e));await connect();}
+const launched=[];
+async function launch(){const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});launched.push(child);child.on('error',e=>console.error(e));await connect();}
 async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
  await until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
  if(browser)await browser.close().catch(()=>{});browser=null;page=null;}
@@ -103,6 +104,10 @@ try{
  // earlier release. The installer asset, trust key, updater, IPC and public
  // signed stable archive are untouched. This forces a real first source update.
  await fs.writeFile(buildPath,JSON.stringify({revision:'0'.repeat(40),sequence:1}));
+ // The earlier release is also the last code that opened this database. The
+ // launcher's migration fence otherwise sees the installer revision as newer
+ // than the faked baseline and correctly refuses to boot the older bundle.
+ await fs.writeFile(path.join(sourceRoot,'database-floor.json'),JSON.stringify({schemaVersion:1,revision:'0'.repeat(40),sequence:1}));
  await launch();await page.evaluate(()=>window.shuffleDesktop.updates.check());
  await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return state.phase==='available';},'Stable update was not offered',45000);
  await requestUpdate('download');
@@ -134,3 +139,7 @@ try{
  try{const buildLog=await fs.readFile(path.join(sourceRoot,'build.log'),'utf8');report.buildErrors=buildLog.split(/\r?\n/).filter(line=>/error|failed|traceback|cannot|no such|not found|not recognized/i.test(line)).slice(-25).map(line=>redact(line).slice(0,1000));console.error(report.buildErrors.join('\n'));}catch{}
  if(page&&!page.isClosed())await screenshot('failure').catch(()=>{});}
 finally{if(page)await close().catch(()=>{});await log.close();await collectLogs().catch(error=>{report.logsError=String(error);});await fs.writeFile(path.join(output,'acceptance.json'),JSON.stringify(report,null,2));}
+// A failed launch can leave the app (and its worker and PostgreSQL) running,
+// which keeps Node alive until the job timeout. Stop them and exit now.
+if(process.exitCode)for(const child of launched)if(child.exitCode===null&&child.pid)spawnSync('taskkill',['/pid',String(child.pid),'/T','/F'],{stdio:'ignore'});
+process.exit(process.exitCode??0);

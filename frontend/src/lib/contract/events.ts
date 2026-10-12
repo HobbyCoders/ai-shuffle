@@ -31,7 +31,8 @@ export type SessionEvent =
   | InteractionExpired
   | TranscriptRewound
   | ArtifactCreated
-  | TurnProviderAlive;
+  | TurnProviderAlive
+  | QueuedMessageWithdrawn;
 export type CommandId = string | null;
 export type CreatedAt = string;
 export type Id = string;
@@ -219,7 +220,9 @@ export type Type15 = 'subagent.progress';
 export type CommandId16 = string | null;
 export type CreatedAt16 = string;
 export type Id16 = string;
+export type Result = string | null;
 export type ResultPreview = string | null;
+export type ResultTruncated = boolean;
 export type RunId16 = string | null;
 export type Seq16 = number;
 export type SessionId16 = string;
@@ -279,6 +282,7 @@ export type Model1 = string | null;
 export type RunId20 = string | null;
 export type Seq20 = number;
 export type SessionId20 = string;
+export type StartedAt = string | null;
 export type State = string;
 export type Summary = string | null;
 export type TaskId3 = string;
@@ -301,8 +305,8 @@ export type DependsOn = string[];
 export type Error = string | null;
 export type FinishedAt = string | null;
 export type Id23 = string;
-export type Result = string | null;
-export type StartedAt = string | null;
+export type Result1 = string | null;
+export type StartedAt1 = string | null;
 export type Status3 = 'queued' | 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'interrupted';
 export type TaskId4 = string | null;
 export type Title = string;
@@ -404,6 +408,15 @@ export type SessionId31 = string;
 export type Signal = string | null;
 export type TurnId30 = string | null;
 export type Type30 = 'turn.provider_alive';
+export type CommandId31 = string | null;
+export type CreatedAt32 = string;
+export type Id33 = string;
+export type MessageId = string;
+export type RunId31 = string | null;
+export type Seq31 = number;
+export type SessionId32 = string;
+export type TurnId31 = string | null;
+export type Type31 = 'queued_message.withdrawn';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -661,7 +674,9 @@ export interface SubagentCompleted {
   command_id?: CommandId16;
   created_at: CreatedAt16;
   id: Id16;
+  result?: Result;
   result_preview?: ResultPreview;
+  result_truncated?: ResultTruncated;
   run_id?: RunId16;
   seq: Seq16;
   session_id: SessionId16;
@@ -733,6 +748,7 @@ export interface TaskUpdated {
   run_id?: RunId20;
   seq: Seq20;
   session_id: SessionId20;
+  started_at?: StartedAt;
   state: State;
   summary?: Summary;
   task_id: TaskId3;
@@ -770,8 +786,8 @@ export interface SwarmTask {
   error?: Error;
   finished_at?: FinishedAt;
   id: Id23;
-  result?: Result;
-  started_at?: StartedAt;
+  result?: Result1;
+  started_at?: StartedAt1;
   status: Status3;
   task_id?: TaskId4;
   title: Title;
@@ -924,5 +940,20 @@ export interface TurnProviderAlive {
   signal?: Signal;
   turn_id?: TurnId30;
   type?: Type30;
+  [k: string]: unknown;
+}
+/**
+ * Content-free receipt for a held message withdrawn before it became a turn.
+ */
+export interface QueuedMessageWithdrawn {
+  command_id?: CommandId31;
+  created_at: CreatedAt32;
+  id: Id33;
+  message_id: MessageId;
+  run_id?: RunId31;
+  seq: Seq31;
+  session_id: SessionId32;
+  turn_id?: TurnId31;
+  type?: Type31;
   [k: string]: unknown;
 }

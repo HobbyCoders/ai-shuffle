@@ -17,3 +17,10 @@ android/site/public/ai-shuffle/install/* text eol=lf
 android/site/scripts/render-docs.mjs text eol=lf
 android/site/public/_headers text eol=lf
 android/site/wrangler.toml text eol=lf
+# render-docs --check compares docs.json byte for byte, and local_ci compares the
+# two docs copies; keep both LF on Windows checkouts too.
+android/site/src/content/docs.json text eol=lf
+frontend/src/lib/docs/content/** text eol=lf
+# Tests import these scripts; Vitest on Windows fails on a CRLF after the #! line.
+frontend/scripts/*.mjs text eol=lf
+.githooks/* text eol=lf

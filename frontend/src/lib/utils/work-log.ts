@@ -6,7 +6,9 @@
  * adopting its data model:
  *
  * - assistant prose is never withheld while a turn is live;
- * - every live work row stays visible until the turn settles;
+ * - a live turn folds its completed routine work run by run, between the prose
+ *   and protected rows that stay on screen; the work after the latest prose
+ *   stays flat until the turn settles;
  * - once a turn settles, non-final commentary, reasoning, and routine tools fold
  *   behind one compact work row while the final answer remains visible;
  * - failed tool calls fold with the rest of the run and are counted in the work
@@ -21,6 +23,7 @@ import { isNavigableUserTurn } from './transcript-navigation';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
 import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
+import { handoffEpisodes, isHandoffTool, sameHandoffs, type HandoffEpisodes } from './handoff-episodes';
 
 export interface WorkLogEntry {
 	message: ChatMessage;
@@ -34,6 +37,41 @@ export interface WorkLogEntry {
  */
 export interface WorkLogSequenceEntry extends WorkLogEntry {
 	hiddenWhenCollapsed: boolean;
+	/**
+	 * The row's media joined the fold's gallery, so a retained copy of it may
+	 * drop the duplicate. Rows after a steer never contribute, so they keep
+	 * every image even when it repeats one shown in the gallery.
+	 */
+	inGallery?: boolean;
+	/** Live turn only: the run this row belongs to (see `WorkLogRun`). */
+	run?: number;
+	/** Live turn only: the row hides while its run is folded. */
+	foldsInRun?: boolean;
+}
+
+/**
+ * One earlier run of a live turn (spec §2): the routine rows between two
+ * boundaries (protected rows and the prose that stays on screen), keyed by
+ * the row it starts at. It renders as one live fold; the protected row that ended it
+ * stays visible below. The current run (still receiving rows) has no entry.
+ */
+export interface WorkLogRun {
+	/** Position among all runs of the turn, counting runs with nothing to fold. */
+	index: number;
+	/**
+	 * Stable fold-state key: the id of the run's first row (the first row
+	 * after the boundary before it). The ordinal shifts when a new boundary
+	 * appears earlier in the turn, and the row that ENDS a run moves on when
+	 * newer prose finishes and replaces it as the latest word; the row a run
+	 * starts at does neither. WorkLogGroup stores an open run as the range
+	 * from this row to its last one, so it stays open on the same work while
+	 * runs merge and split (run-fold-ranges.ts).
+	 */
+	key: string;
+	/** Rows hidden while the run is folded. */
+	folded: WorkLogEntry[];
+	summary: string | null;
+	compactSummary: string | null;
 }
 
 export type DisplayItem =
@@ -57,6 +95,15 @@ export type DisplayItem =
 			summary: string | null;
 			/** Token-condensed variant ("Read 3 · Ran 2") for narrow screens. */
 			compactSummary: string | null;
+			/** Live turn: its earlier runs, each folded on its own (spec §2). */
+			runs?: WorkLogRun[];
+			/**
+			 * Fold-state key of the turn (spec §6): the server id of the row that
+			 * opened it. Run folds are `<foldKey>:run-<run.key>`, the settled group `<foldKey>:turn`.
+			 */
+			foldKey?: string;
+			/** The optimistic id `foldKey` replaced, if any: its folds are remapped. */
+			foldAlias?: string;
 	  };
 
 /**
@@ -100,6 +147,17 @@ export interface TranscriptModel {
 	lastAssistantMetadata: Record<string, unknown> | null;
 	/** Id of the last navigable user turn — the transcript's live anchor. */
 	latestUserTurnId: string | null;
+	/**
+	 * Ids of user messages steered into a turn already under way: same turn id
+	 * as the turn's opening prompt, but not that prompt. Their time line reads
+	 * "· mid-turn".
+	 */
+	midTurnUserIds: ReadonlySet<string>;
+	/**
+	 * Hand-offs, one row each (see handoff-episodes.ts): the anchor row renders
+	 * the episode's current phase; the later records it absorbed are not rows.
+	 */
+	handoffs: HandoffEpisodes;
 }
 
 /**
@@ -172,6 +230,9 @@ function isTurnWork(msg: ChatMessage): boolean {
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
 		isSwarmTool(msg.toolName ?? '') ||
+		// A hand-off is one row that moves through its phases after the turn
+		// ends: folding it would hide the row the later records update.
+		isHandoffTool(msg) ||
 		msg.toolName === 'TodoWrite' ||
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
@@ -188,14 +249,73 @@ function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
 }
 
 /**
- * A subagent card whose `agentStatus` has settled ('completed'/'error') is a
- * finished delegation: routine work that belongs inside the turn's fold. A
- * 'pending'/'running' card is live and keeps its own row, and so does a
- * 'stopped' one: somebody stopped it on purpose, and folding it away made the
- * card look like it went missing (#1806).
+ * A row that is not prose and never folds in a settled turn (spec §3): a worker
+ * card, a decision-bearing tool (questions, todos, Task/Agent, swarm), or a
+ * system notice that is not routine bookkeeping. Assistant mode keeps the same
+ * rows inline. A compaction card counts too: one trailing the answer keeps its
+ * row, and a mid-turn one is still folded by the settled turn's
+ * `hiddenWhenCollapsed`.
  */
-function isSettledSubagent(msg: ChatMessage): boolean {
-	return msg.type === 'subagent' && (msg.agentStatus === 'completed' || msg.agentStatus === 'error');
+export function isProtectedRow(msg: ChatMessage): boolean {
+	if (agentDelivery(msg)) return false;
+	if (msg.type === 'subagent') return true;
+	if (msg.type === 'tool_use') return isSpecialTool(msg);
+	if (msg.type !== 'system' && msg.role !== 'system') return false;
+	return !isGroupableSystem(msg) && !isFoldableRetryCard(msg);
+}
+
+/** A tool that puts a question to the reader. */
+function isAskingTool(msg: ChatMessage): boolean {
+	return msg.type === 'tool_use' && (msg.toolName === 'AskUserQuestion' || msg.toolName === 'AskUser');
+}
+
+/**
+ * Prose the reader must see even after the turn settles (transcript-organization
+ * spec §3): it asks something, or it carries a finding (two or more lines, or a
+ * heading, list, table or code fence). One short line without a question is
+ * narration ("Now checking the workflow.") and folds with the work.
+ */
+export function isProtectedProse(content: string): boolean {
+	const text = content.trim();
+	if (!text) return false;
+	if (text.split('\n').filter((line) => line.trim()).length >= 2) return true;
+	if (/^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|~~~)/m.test(text)) return true;
+	return asksQuestion(text);
+}
+
+/**
+ * Prose that asks the reader something (spec §3's question rule, shared by
+ * `isProtectedProse` and the "Needs you" count, spec §5). A question mark
+ * inside a link target, a bare URL or inline code is not a question;
+ * punctuation that ends the sentence after a URL still counts.
+ */
+export function asksQuestion(content: string): boolean {
+	const prose = content
+		.replace(/`[^`]*`/g, '')
+		.replace(/\]\([^)\s]*\)/g, ']')
+		.replace(/<https?:\/\/[^>\s]*>/g, '')
+		.replace(/\bhttps?:\/\/\S*[^\s.,;:!?)\]'"]/g, '');
+	return prose.includes('?');
+}
+
+/**
+ * Whether the conversation is waiting on the reader's answer to a prose
+ * question (spec §5): the newest assistant prose since the last user message
+ * asks something. A user message (prompt, steer or command) answers it; an
+ * agent's delivered report does not. Prose still streaming has not finished
+ * asking, so it neither counts nor lets an earlier question count. Prose that
+ * leads into a question tool is that tool's question, which the question
+ * surface already counts once.
+ */
+export function lastProseAsksQuestion(messages: readonly ChatMessage[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role === 'user' && !agentDelivery(message)) return false;
+		if (isAskingTool(message)) return false;
+		if (!isAssistantText(message)) continue;
+		return !message.streaming && asksQuestion(message.content.trim());
+	}
+	return false;
 }
 
 /** A terminal retry failure folds only after recovery or supersession. */
@@ -219,7 +339,9 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 function isCompletedRoutineWork(msg: ChatMessage, gallery = false): boolean {
 	if (agentDelivery(msg)) return true;
 	if (msg.type === 'thinking') return !msg.streaming;
-	if (msg.type === 'subagent') return isSettledSubagent(msg);
+	// A worker card is the delegation itself: it keeps its row in every status
+	// and carries the head of the worker's report (spec §3, §4).
+	if (msg.type === 'subagent') return false;
 	// A finished retry note is routine work: it folds with the run instead of
 	// stacking a dozen standalone cards down a turn that recovered on its own.
 	if (isFoldableRetryCard(msg)) return true;
@@ -295,6 +417,8 @@ type ToolAction =
 	| 'code-search'
 	| 'web-search'
 	| 'delegate'
+	| 'message'
+	| 'task-check'
 	| 'image-gen'
 	| 'image-edit'
 	| 'video-gen'
@@ -319,7 +443,11 @@ function toolAction(message: ChatMessage): ToolAction {
 	if (AUDIO_GEN_TOOLS.includes(name)) return 'audio-gen';
 	if (THREED_GEN_TOOLS.includes(name)) return 'threed-gen';
 	if (name === 'Note') return 'note';
-	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(name)) return 'read';
+	// Agent-task plumbing a coordinator turn is full of: messages to peers and
+	// subagents, and checks on background tasks. Neither reads a file.
+	if (['SendMessage', 'MessageSession'].includes(name)) return 'message';
+	if (['TaskGet', 'TaskOutput'].includes(name)) return 'task-check';
+	if (['Read', 'BashOutput'].includes(name)) return 'read';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
 	if (['Bash', 'KillShell', 'SlashCommand', 'Monitor', 'TaskStop'].includes(name)) return 'command';
 	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(name)) return 'code-search';
@@ -343,6 +471,10 @@ function actionLabel(action: ToolAction, count: number): string {
 			return `Searched the web ${count} ${count === 1 ? 'time' : 'times'}`;
 		case 'delegate':
 			return `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`;
+		case 'message':
+			return `Sent ${count} ${count === 1 ? 'message' : 'messages'}`;
+		case 'task-check':
+			return `Checked ${count} ${count === 1 ? 'task' : 'tasks'}`;
 		case 'image-gen':
 			return `Generated ${count} ${count === 1 ? 'image' : 'images'}`;
 		case 'image-edit':
@@ -376,6 +508,8 @@ const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	'code-search': (n) => `Search ${n}`,
 	'web-search': (n) => `Web ${n}`,
 	delegate: (n) => `Delegated ${n}`,
+	message: (n) => `Sent ${n}`,
+	'task-check': (n) => `Checked ${n}`,
 	'image-gen': (n) => `Images ${n}`,
 	'image-edit': (n) => `ImgEdits ${n}`,
 	'video-gen': (n) => `Videos ${n}`,
@@ -399,7 +533,8 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	).length;
 	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
 	const deliveries = entries.filter((entry) => agentDelivery(entry.message)).length;
-	if (tools.length === 0 && thoughtCount === 0 && compactions === 0 && deliveries === 0) return null;
+	const taskResults = entries.filter((entry) => isTaskResult(entry.message)).length;
+	if (tools.length === 0 && thoughtCount === 0 && compactions === 0 && deliveries === 0 && taskResults === 0) return null;
 
 	const counts = new Map<ToolAction, number>();
 	let failed = 0;
@@ -414,6 +549,7 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	if (thoughtCount > 0) tokens.push(`Thought ${thoughtCount}`);
 	if (compactions > 0) tokens.push(`Compacted ${compactions}`);
 	if (deliveries > 0) tokens.push(`Msgs ${deliveries}`);
+	if (taskResults > 0) tokens.push(`Results ${taskResults}`);
 	if (failed > 0) tokens.push(`${failed} failed`);
 	return tokens.length > 0 ? tokens.join(' · ') : null;
 }
@@ -429,6 +565,15 @@ function isHiddenCodeModeCell(message: ChatMessage): boolean {
 	return message.toolStatus !== 'error';
 }
 
+/**
+ * A background task's completion notice ("Task COMPLETED"). It is the result
+ * of work launched earlier, so a fold counts it; the started/progress/updated
+ * notices around it are bookkeeping and only fold.
+ */
+function isTaskResult(message: ChatMessage): boolean {
+	return message.type === 'system' && message.systemSubtype === 'task_notification';
+}
+
 /** Provider-neutral, action-specific summary for a folded tool run. */
 export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
@@ -438,7 +583,8 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
 	const compactionLabel = compactions === 1 ? 'compacted the context' : `compacted the context ${compactions} times`;
 	const deliveries = entries.filter((entry) => agentDelivery(entry.message)).length;
-	if (tools.length === 0 && deliveries === 0) {
+	const taskResults = entries.filter((entry) => isTaskResult(entry.message)).length;
+	if (tools.length === 0 && deliveries === 0 && taskResults === 0) {
 		const base = entries.some((entry) => entry.message.type === 'thinking')
 			? 'Reasoning and interim work'
 			: entries.length > compactions ? 'Interim work' : null;
@@ -467,6 +613,7 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	}
 	if (compactions > 0) labels.push(compactionLabel);
 	if (deliveries > 0) labels.push(`Got ${deliveries} agent ${deliveries === 1 ? 'message' : 'messages'}`);
+	if (taskResults > 0) labels.push(`Got ${taskResults} task ${taskResults === 1 ? 'result' : 'results'}`);
 	const sentence = sentenceJoin(labels);
 	if (!sentence) return null;
 	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
@@ -513,6 +660,87 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
 	return turns;
 }
 
+/** Stable identity of a turn: the row that opens it (what its fold is keyed by). */
+function turnKeyOf(turn: Positioned[]): string {
+	const first = turn[0];
+	return first.message.id ?? String(first.index);
+}
+
+/**
+ * Display key and fold-state keys of a turn's work log. The display key uses
+ * the row's own id, which an optimistic send keeps after reconcile, so the
+ * group never remounts; the fold key prefers the server id a reload will see.
+ */
+function workLogKeys(anchor: Positioned): Pick<Extract<DisplayItem, { kind: 'work_log' }>, 'key' | 'foldKey' | 'foldAlias'> {
+	const own = anchor.message.id ?? String(anchor.index);
+	const foldKey = anchor.message.serverId ?? own;
+	return { key: `wl-turn-${own}`, foldKey, ...(foldKey !== own ? { foldAlias: own } : {}) };
+}
+
+/**
+ * Identity of the latest turn by the same rule as `splitTurns` and `turnKeyOf`,
+ * without building the transcript. The settle hand-off (settle-hold.ts) tracks
+ * it to notice the moment a send or wake opens a newer turn.
+ */
+export function latestTurnKey(messages: readonly ChatMessage[]): string | null {
+	let key: string | null = null;
+	let currentTurnId: string | undefined;
+	messages.forEach((message, index) => {
+		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
+		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+		if (key === null || (opens && !(!idleAgentWake && !!message.turnId && message.turnId === currentTurnId))) {
+			key = message.id ?? String(index);
+			if (opens) currentTurnId = message.turnId;
+		}
+	});
+	return key;
+}
+
+/**
+ * The turn id an optimistic send should carry so `splitTurns` keeps it inside
+ * the turn it interrupts.
+ *
+ * Only for a send into a PARKED turn (not streaming, but background work still
+ * running): the turn is still going, so the message is a steer and must not
+ * open a turn of its own and fold everything above it. The id is the live turn
+ * when known, otherwise the id of the message that opened the latest turn —
+ * the same rule `splitTurns` uses — and only when that turn is the parked one:
+ * the reducer says so (`turnParked` is set by the park gate for the turn that
+ * just completed and cleared by the next `turn.started`), or a running task's
+ * launch row sits inside it. Running work launched by an EARLIER turn does not
+ * make the latest, completed turn parked. The server's `message.user` replaces
+ * the id once the backend has started the turn that carries the message (it
+ * follows that turn's `turn.started`), which is the only moment the row moves.
+ */
+export function parkedSendTurnId(state: {
+	isStreaming: boolean;
+	liveTurnId?: string | null;
+	turnParked?: boolean;
+	activeTasks?: readonly { status: string; toolUseId?: string | null }[];
+	messages: readonly ChatMessage[];
+}): string | undefined {
+	if (state.isStreaming) return undefined;
+	const runningLaunches = new Set(
+		(state.activeTasks ?? [])
+			.filter((task) => task.status === 'running' && !!task.toolUseId)
+			.map((task) => task.toolUseId as string)
+	);
+	if (state.turnParked !== true && runningLaunches.size === 0) return undefined;
+	if (state.liveTurnId) return state.liveTurnId;
+	let ownsRunningWork = false;
+	for (let index = state.messages.length - 1; index >= 0; index--) {
+		const message = state.messages[index];
+		const opensTurn = (!!agentDelivery(message) && message.metadata?.agent_wake === true) ||
+			(message.role === 'user' && !agentDelivery(message));
+		if (opensTurn) {
+			if (state.turnParked !== true && !ownsRunningWork) return undefined;
+			return message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
+		}
+		if (message.toolId && runningLaunches.has(message.toolId)) ownsRunningWork = true;
+	}
+	return undefined;
+}
+
 /** Fold consecutive low-signal system messages without disturbing order. */
 function emitWithSystemGroups(entries: Positioned[], out: DisplayItem[]) {
 	let index = 0;
@@ -551,6 +779,18 @@ export interface BuildOptions {
 	 * omitted, legacy callers fall back to `isStreaming`.
 	 */
 	latestTurnUnsettled?: boolean;
+	/**
+	 * Launch tool ids of background work still running. A turn that launched
+	 * one has something pending, so it stays unsettled (flat) even after a
+	 * later turn opened — a send or wake must not fold work still in flight.
+	 */
+	runningToolIds?: ReadonlySet<string>;
+	/**
+	 * Turns (by opening row id, see `latestTurnKey`) still inside their settle
+	 * hold after a newer turn opened. A send during the hold must not cut it
+	 * short: the turn stays flat until its own hold runs out.
+	 */
+	heldTurnKeys?: ReadonlySet<string>;
 	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
 	/** Session-scoped live/hydrated workflows, including updates before tool.result. */
@@ -604,6 +844,64 @@ function swarmOwnedMessages(messages: ChatMessage[], options: BuildOptions): Set
 	return hidden;
 }
 
+const isPromptRow = (entry: Positioned) => entry.message.role === 'user' && !agentDelivery(entry.message);
+
+/**
+ * Prose the reader must see while it is the latest word, or because it asks:
+ * a lead-in followed by a question tool (before the next prose or steer) asks
+ * too. Shared by the live runs and the settled turn so both keep the same rows.
+ */
+function askingLeadIns(response: Positioned[]): Set<Positioned> {
+	const asking = new Set<Positioned>();
+	let pendingLeadIn: Positioned | null = null;
+	for (const entry of response) {
+		if (isPromptRow(entry)) pendingLeadIn = null;
+		else if (isAssistantText(entry.message)) pendingLeadIn = entry;
+		else if (pendingLeadIn && isAskingTool(entry.message)) asking.add(pendingLeadIn);
+	}
+	return asking;
+}
+
+/**
+ * The live turn (spec §2). Grouping on, it becomes the opening prompt plus ONE
+ * work log in live mode, keyed exactly as the settled group of the same turn
+ * will be, so settling flips `mode` on the same component instead of mounting
+ * a new one (spec §6). Inside it the turn is cut into runs at every protected
+ * row and at the completed prose that stays on screen: earlier runs fold
+ * behind the live label, the row that ended each stays visible below it, and
+ * the current run shows every row.
+ */
+/**
+ * The last prose before each steer is the answer the steer replied to, the
+ * first prose after each steer is the reply to the steer, and the last prose
+ * of the turn is its answer: all stay on screen, live and settled. When a
+ * steer is followed only by tools and then the turn's last prose, that prose
+ * is both, so it is kept once.
+ */
+function terminalProse(response: Positioned[]): Set<Positioned> {
+	const terminal = new Set<Positioned>();
+	let lastProse: Positioned | null = null;
+	let awaitingReply = false;
+	for (const entry of response) {
+		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
+			if (lastProse) terminal.add(lastProse);
+			lastProse = null;
+			awaitingReply = true;
+		} else if (isAssistantText(entry.message)) {
+			if (awaitingReply) terminal.add(entry);
+			awaitingReply = false;
+			lastProse = entry;
+		}
+	}
+	if (lastProse) terminal.add(lastProse);
+	return terminal;
+}
+
+/** Fold-state key of a run, from the row it starts at (see `WorkLogRun.key`). */
+function runKeyOf(entry: Positioned): string {
+	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+}
+
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	// Code-mode wrappers are not transcript rows: their dispatched tools are.
 	// Keep a streaming cell visible only until its first visible inner call arrives.
@@ -611,14 +909,97 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	const streamingCell = turn.findLast(
 		(entry) => isHiddenCodeModeCell(entry.message) && entry.message.streaming === true
 	);
-	for (const [index, entry] of turn.entries()) {
-		if (
-			isHiddenCodeModeCell(entry.message) &&
-			!(entry === streamingCell && index > lastVisibleIndex)
-		) continue;
-		// Nothing in the current turn folds, even between tool runs or while parked.
-		items.push({ kind: 'message', message: entry.message, index: entry.index });
+	const shown = turn.filter((entry, index) =>
+		!isHiddenCodeModeCell(entry.message) || (entry === streamingCell && index > lastVisibleIndex)
+	);
+
+	// Same opening-row rule as the settled turn, so both pick the same anchor.
+	const userIndex = turn.findIndex(isPromptRow);
+	if (userIndex < 0 && !turn.some((entry) => agentDelivery(entry.message))) {
+		for (const entry of shown) items.push({ kind: 'message', message: entry.message, index: entry.index });
+		return;
 	}
+	const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
+	const response = shown.filter((entry) => entry !== prefix[0]);
+	emitWithSystemGroups(prefix, items);
+	if (response.length === 0) return;
+
+	const asking = askingLeadIns(response);
+	// The latest prose and the prose each steer replied to stay on screen
+	// whatever they say, exactly as the settled turn keeps them.
+	const terminal = terminalProse(response);
+	// The newest prose the agent has FINISHED writing. Prose still streaming
+	// has not replaced it yet, so the run it ends stays folded while the next
+	// paragraph arrives instead of opening up for a moment and folding again.
+	const latestDone = response.findLast((entry) => isAssistantText(entry.message) && !entry.message.streaming);
+	// Rows that end a run and stay visible. Streaming prose is still arriving,
+	// so it only ends a run once it is complete. A steer does NOT end a run: a
+	// turn never folds because the user sent something (spec §1.3); it stays a
+	// visible row in place inside whatever run is current. The agent's own
+	// completed prose does when the reader must keep seeing it: a finding, a
+	// question's lead-in, the latest word, or the prose a steer answered or
+	// that answers a steer. The routine work behind it folds, so a long live
+	// turn reads as prose between folds; only the work after the latest prose
+	// stays flat. A failed tool is routine work: it folds with its run and the
+	// run's summary counts it ("…, 1 failed").
+	const endsRun = (entry: Positioned) =>
+		isProtectedRow(entry.message) ||
+		asking.has(entry) ||
+		(isAssistantText(entry.message) && !entry.message.streaming && (
+			isProtectedProse(entry.message.content) || entry === latestDone || terminal.has(entry)
+		));
+	// Rows a folded run hides; anything else (a tool still running, a
+	// screenshot, streaming thinking) keeps its place between the folds.
+	const foldsWithRun = (entry: Positioned) =>
+		!terminal.has(entry) && (
+			isCompletedRoutineWork(entry.message) ||
+			isGroupableSystem(entry.message) ||
+			entry.message.type === 'tool_result' ||
+			(isAssistantText(entry.message) && !entry.message.streaming)
+		);
+
+	const runs: WorkLogRun[] = [];
+	const runOf = new Map<Positioned, number>();
+	const hidden = new Set<Positioned>();
+	let runIndex = 0;
+	let open: Positioned[] = [];
+	for (const entry of response) {
+		runOf.set(entry, runIndex);
+		if (!endsRun(entry)) {
+			open.push(entry);
+			continue;
+		}
+		const folded = open.filter(foldsWithRun);
+		for (const row of folded) hidden.add(row);
+		if (folded.length > 0) {
+			const rows = folded.map(({ message, index }) => ({ message, index }));
+			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+		}
+		runIndex++;
+		open = [];
+	}
+
+	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
+	items.push({
+		kind: 'work_log',
+		...workLogKeys(prefix[0] ?? response[0]),
+		mode: 'live',
+		folded,
+		tail: [],
+		// `hiddenWhenCollapsed` describes the settled fold; a live turn hides
+		// nothing there (assistant mode reads it), only inside its folded runs.
+		sequence: response.map((entry) => ({
+			message: entry.message,
+			index: entry.index,
+			hiddenWhenCollapsed: false,
+			run: runOf.get(entry),
+			...(hidden.has(entry) ? { foldsInRun: true } : {})
+		})),
+		runs,
+		durationLabel: null,
+		summary: summarizeWork(folded),
+		compactSummary: summarizeWorkCompact(folded)
+	});
 }
 
 /**
@@ -644,9 +1025,20 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
  * Never cache by message id: completed tools and late Swarm association can
  * change earlier rows, even while the final assistant paragraph streams.
  */
+function sameIds(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined): boolean {
+	if (a === b) return true;
+	if ((a?.size ?? 0) !== (b?.size ?? 0)) return false;
+	for (const id of a ?? []) if (!b?.has(id)) return false;
+	return true;
+}
+
 export function createTranscriptModelBuilder() {
-	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel } | undefined;
-	return (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
+	// `itemAt` maps raw index → item index for exactly `model` (card-progress patch path).
+	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel; itemAt?: Int32Array } | undefined;
+	const turnCache = createTurnCache();
+	const build = (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
+		let changed: number | null = null;
+		let itemAt: Int32Array | undefined;
 		const old = previous;
 		const tail = messages.at(-1);
 		const oldTail = old?.messages.at(-1);
@@ -656,38 +1048,203 @@ export function createTranscriptModelBuilder() {
 		const sameOptions = old && options.sessionId === old.options.sessionId
 			&& options.isStreaming === old.options.isStreaming
 			&& options.latestTurnUnsettled === old.options.latestTurnUnsettled
+			&& sameIds(options.runningToolIds, old.options.runningToolIds)
+			&& sameIds(options.heldTurnKeys, old.options.heldTurnKeys)
 			&& options.groupingEnabled === old.options.groupingEnabled
 			&& swarms.length === oldSwarms.length && swarms.every((s, i) => s === oldSwarms[i]);
 		let model: TranscriptModel;
-		if (sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
-			&& tail && oldTail && tail.streaming && oldTail.streaming
+		const onlyTailTextGrew = !!sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
+			&& !!tail && !!oldTail && !!tail.streaming && !!oldTail.streaming
 			&& tail.role === 'assistant' && ['text', 'thinking'].includes(tail.type ?? '')
-			&& tail.content && oldTail.content && !isAssistantPhantom(tail)
-			&& lastItem?.kind === 'message' && lastItem.message === oldTail
-			&& lastItem.index === messages.length - 1
+			&& !!tail.content && !!oldTail.content && !isAssistantPhantom(tail)
 			&& messages.length === old.messages.length
 			&& messages.every((message, i) => i === messages.length - 1 || message === old.messages[i])
 			&& Object.keys(tail).length === Object.keys(oldTail).length
 			&& Object.keys(tail).every(key => key === 'content'
-				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage])) {
-			const items = old.model.items.slice();
-			items[items.length - 1] = { ...lastItem, message: tail };
-			model = { ...old.model, items };
+				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage]);
+		// A streaming row never ends a live run and never folds, so its growing
+		// text cannot change the runs: only the row itself is swapped.
+		const lastRow = lastItem?.kind === 'work_log' && lastItem.mode === 'live' ? lastItem.sequence.at(-1) : undefined;
+		if (onlyTailTextGrew && lastItem?.kind === 'message' && lastItem.message === oldTail
+			&& lastItem.index === messages.length - 1) {
+			const items = old!.model.items.slice();
+			items[items.length - 1] = { ...lastItem, message: tail! };
+			model = { ...old!.model, items };
+		} else if (onlyTailTextGrew && lastItem?.kind === 'work_log' && lastRow
+			&& lastRow.message === oldTail && lastRow.index === messages.length - 1 && !lastRow.foldsInRun) {
+			const sequence = lastItem.sequence.slice();
+			sequence[sequence.length - 1] = { ...lastRow, message: tail! };
+			const items = old!.model.items.slice();
+			items[items.length - 1] = { ...lastItem, sequence };
+			model = { ...old!.model, items };
+		} else if (sameOptions && (changed = onlyCardProgressChanged(old!.messages, messages)) !== null) {
+			itemAt = old!.itemAt ?? locateItems(old!.model.items, messages.length);
+			model = patchRow(old!.model, itemAt, changed, messages[changed]);
 		} else {
-			model = buildTranscriptModel(messages, options);
+			model = buildTranscriptModel(messages, options, turnCache);
+			// Unchanged hand-offs keep their identity, so rows that read them do
+			// not re-evaluate on a rebuild that changed something else.
+			if (old && sameHandoffs(old.model.handoffs, model.handoffs)) model = { ...model, handoffs: old.model.handoffs };
 		}
-		previous = { messages, options, model };
+		// The locator lives on `previous`, so it always describes the current
+		// model: any other path (a rebuild, a session switch, a streamed tail)
+		// drops it rather than keeping a switched-away model reachable.
+		previous = { messages, options, model, itemAt };
 		return model;
 	};
+	/** Test hook: models this builder still references (the current one only). */
+	build.retainedModels = (): TranscriptModel[] => (previous ? [previous.model] : []);
+	return build;
+}
+
+/**
+ * Fields a worker's `subagent.progress` / completion changes on its card, none
+ * of which the grouping reads: the card is a protected row in every status,
+ * never folds, and its work summary counts it by type alone. A change confined
+ * to these fields cannot move a fold, a run, a summary or a turn boundary.
+ */
+const CARD_PROGRESS_FIELDS = new Set<string>(['agentChildren', 'agentStatus']);
+
+/**
+ * Index of the ONE subagent card that changed between two transcripts in
+ * nothing but `CARD_PROGRESS_FIELDS`, or null when anything else differs. One
+ * pointer comparison per row — no grouping work — so a burst of progress on a
+ * 4,000-row session no longer rebuilds the history model per update (#1282).
+ */
+function onlyCardProgressChanged(before: ChatMessage[], after: ChatMessage[]): number | null {
+	if (before === after || before.length !== after.length) return null;
+	let found = -1;
+	// Progress targets a recent card: scan from the end, stop at a second change.
+	for (let i = after.length - 1; i >= 0; i--) {
+		if (after[i] === before[i]) continue;
+		if (found !== -1) return null;
+		found = i;
+	}
+	if (found === -1) return null;
+	const next = after[found];
+	const prev = before[found];
+	if (next.type !== 'subagent' || prev.type !== 'subagent' || next.id !== prev.id) return null;
+	const nextKeys = Object.keys(next);
+	const prevKeys = Object.keys(prev);
+	for (const key of nextKeys) {
+		if (CARD_PROGRESS_FIELDS.has(key)) continue;
+		if (next[key as keyof ChatMessage] !== prev[key as keyof ChatMessage]) return null;
+	}
+	for (const key of prevKeys) {
+		if (!CARD_PROGRESS_FIELDS.has(key) && !(key in next)) return null;
+	}
+	return found;
+}
+
+/** Display-item index holding each raw message index (-1: not rendered). */
+function locateItems(items: DisplayItem[], length: number): Int32Array {
+	const itemAt = new Int32Array(length).fill(-1);
+	const mark = (index: number, itemIndex: number) => {
+		if (index >= 0 && index < length && itemAt[index] === -1) itemAt[index] = itemIndex;
+	};
+	items.forEach((item, itemIndex) => {
+		if (item.kind === 'message') mark(item.index, itemIndex);
+		else if (item.kind === 'system_group') for (const index of item.indices) mark(index, itemIndex);
+		else {
+			for (const entry of item.sequence) mark(entry.index, itemIndex);
+			for (const entry of item.folded) mark(entry.index, itemIndex);
+			for (const entry of item.tail) mark(entry.index, itemIndex);
+		}
+	});
+	return itemAt;
+}
+
+function swapEntries<T extends WorkLogEntry>(entries: T[], index: number, message: ChatMessage): T[] {
+	if (!entries.some((entry) => entry.index === index)) return entries;
+	return entries.map((entry) => (entry.index === index ? { ...entry, message } : entry));
+}
+
+/** The previous model with one row's message swapped; every other item keeps its identity. */
+function patchRow(model: TranscriptModel, itemAt: Int32Array, index: number, message: ChatMessage): TranscriptModel {
+	const itemIndex = itemAt[index] ?? -1;
+	// Not rendered (a Swarm owns it, or a duplicate id): nothing to redraw.
+	if (itemIndex < 0) return model;
+	const item = model.items[itemIndex];
+	let patched: DisplayItem;
+	if (item.kind === 'message') {
+		patched = { ...item, message };
+	} else if (item.kind === 'system_group') {
+		patched = { ...item, messages: item.messages.map((m, i) => (item.indices[i] === index ? message : m)) };
+	} else {
+		patched = {
+			...item,
+			sequence: swapEntries(item.sequence, index, message),
+			folded: swapEntries(item.folded, index, message),
+			tail: swapEntries(item.tail, index, message),
+			...(item.runs ? { runs: item.runs.map((run) => {
+				const folded = swapEntries(run.folded, index, message);
+				return folded === run.folded ? run : { ...run, folded };
+			}) } : {})
+		};
+	}
+	const items = model.items.slice();
+	items[itemIndex] = patched;
+	return { ...model, items };
+}
+
+/**
+ * Display items each turn produced on the previous build, by turn key.
+ *
+ * A turn's items depend only on its own rows (message identity AND raw index),
+ * whether it is live, and the build-wide options checked by `scope`. So when a
+ * worker's progress replaces one subagent card, every other turn reuses its
+ * items by identity: no re-grouping, no summaries, no gallery work, and the
+ * keyed `{#each}` sees unchanged props for every untouched group (#1282).
+ */
+interface TurnCacheEntry {
+	rows: Positioned[];
+	unsettled: boolean;
+	items: DisplayItem[];
+}
+
+export interface TurnCache {
+	scope: { groupingEnabled: boolean; sessionId: string | null | undefined } | null;
+	turns: Map<string, TurnCacheEntry>;
+}
+
+export function createTurnCache(): TurnCache {
+	return { scope: null, turns: new Map() };
+}
+
+/** Plain rows only: a work log's derived fields are not worth comparing. */
+function sameItem(a: DisplayItem, b: DisplayItem): boolean {
+	if (a.kind === 'message' && b.kind === 'message') return a.message === b.message && a.index === b.index;
+	if (a.kind === 'system_group' && b.kind === 'system_group') {
+		return a.indices.length === b.indices.length
+			&& a.indices.every((index, i) => index === b.indices[i] && a.messages[i] === b.messages[i]);
+	}
+	return false;
+}
+
+/** Raw index a plain row item starts at; null for work logs (never reused). */
+function plainItemIndex(item: DisplayItem): number | null {
+	if (item.kind === 'message') return item.index;
+	if (item.kind === 'system_group') return item.indices[0] ?? null;
+	return null;
+}
+
+function sameRows(a: Positioned[], b: Positioned[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].message !== b[i].message || a[i].index !== b[i].index) return false;
+	}
+	return true;
 }
 
 export function buildTranscriptModel(
 	messages: ChatMessage[],
-	options: BuildOptions
+	options: BuildOptions,
+	cache?: TurnCache
 ): TranscriptModel {
 	const { isStreaming, groupingEnabled } = options;
 	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
 	const swarmOwned = swarmOwnedMessages(messages, options);
+	const handoffs = handoffEpisodes(messages);
 
 	// Duplicate ids crash Svelte's keyed each; drop repeats defensively.
 	const seen = new Set<string>();
@@ -725,6 +1282,7 @@ export function buildTranscriptModel(
 		if (
 			isAssistantPhantom(message) ||
 			swarmOwned.has(message) ||
+			handoffs.absorbed.has(message) ||
 			isTransientProviderRetry(message)
 		) return;
 		if (message.id) {
@@ -736,14 +1294,70 @@ export function buildTranscriptModel(
 
 	const items: DisplayItem[] = [];
 	const turns = splitTurns(positioned);
+	const midTurnUserIds = new Set<string>();
+	for (const turn of turns) {
+		const openingTurnId = turn[0]?.message.turnId;
+		if (!openingTurnId) continue;
+		for (const { message } of turn.slice(1)) {
+			if (message.id && message.turnId === openingTurnId && isNavigableUserTurn(message)) midTurnUserIds.add(message.id);
+		}
+	}
 
+	const scope = cache?.scope;
+	const reusable = !!cache && !!scope
+		&& scope.groupingEnabled === groupingEnabled && scope.sessionId === options.sessionId;
+	const previousTurns = reusable ? cache.turns : null;
+	const nextTurns = new Map<string, TurnCacheEntry>();
 	turns.forEach((turn, turnIndex) => {
+		const key = turnKeyOf(turn);
+		const runningToolIds = options.runningToolIds;
+		const unsettled = groupingEnabled && (
+			(latestTurnUnsettled && turnIndex === turns.length - 1) ||
+			!!options.heldTurnKeys?.has(key) ||
+			(!!runningToolIds?.size && turn.some((entry) => !!entry.message.toolId && runningToolIds.has(entry.message.toolId))));
+		const hit = previousTurns?.get(key);
+		if (hit && hit.unsettled === unsettled && sameRows(hit.rows, turn)) {
+			for (const item of hit.items) items.push(item);
+			nextTurns.set(key, hit);
+			return;
+		}
+		const start = items.length;
+		emitTurn(turn, unsettled);
+		// A rebuilt turn keeps the identity of plain rows that did not change
+		// (its opening prompt, mostly), so only its work log re-renders.
+		if (hit) {
+			// Index the prior plain items once by their first raw index: an
+			// ungrouped long turn emits one item per row, and scanning the prior
+			// list per row made each append quadratic in the turn's length.
+			let prior: Map<number, DisplayItem> | undefined;
+			for (let i = start; i < items.length; i++) {
+				const fresh = items[i];
+				const at = plainItemIndex(fresh);
+				if (at === null) continue;
+				if (!prior) {
+					prior = new Map();
+					for (const item of hit.items) {
+						const priorAt = plainItemIndex(item);
+						if (priorAt !== null && !prior.has(priorAt)) prior.set(priorAt, item);
+					}
+				}
+				const same = prior.get(at);
+				if (same && sameItem(same, fresh)) items[i] = same;
+			}
+		}
+		if (cache) nextTurns.set(key, { rows: turn, unsettled, items: items.slice(start) });
+	});
+	if (cache) {
+		cache.scope = { groupingEnabled, sessionId: options.sessionId };
+		cache.turns = nextTurns;
+	}
+
+	function emitTurn(turn: Positioned[], unsettledTurn: boolean): void {
 		if (!groupingEnabled) {
 			emitWithSystemGroups(turn, items);
 			return;
 		}
 
-		const unsettledTurn = latestTurnUnsettled && turnIndex === turns.length - 1;
 		if (unsettledTurn) {
 			emitLiveTurn(turn, items);
 			return;
@@ -757,67 +1371,84 @@ export function buildTranscriptModel(
 			return;
 		}
 
-		// A steer does not end the running turn, but it is a presentation boundary
-		// once that turn settles. Keep its work and media on the side they arrived.
+		// One turn, one fold. A steer does not end the turn, so it does not cut the
+		// settled presentation either: it stays a visible row in time order inside
+		// the turn's sequence, and the fold label and summary describe the whole turn.
 		const turnMessages = turn.map((entry) => entry.message);
 		const durationLabel = turnFoldLabel(turnMessages, turnWasInterrupted(turnMessages));
-		const segments: Positioned[][] = [[]];
-		for (const entry of turn) {
-			if (entry.message.role === 'user' && !agentDelivery(entry.message) && segments.at(-1)!.length > 0) segments.push([]);
-			segments.at(-1)!.push(entry);
-		}
-		for (const segment of segments) {
-			const prefix = userIndex < 0 ? [] : segment.slice(0, 1);
-			const response = segment.slice(prefix.length);
-			const gallery = galleryMediaForTurn(response.map((entry) => entry.message), options.sessionId);
-			const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
-			// A compaction card the turn worked past is mid-turn; one trailing the
-			// answer (an idle or manual /compact) keeps its own row.
-			const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
-			const midTurnCompactions = new Set(
-				response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
-			);
-			const shouldHide = (entry: Positioned) =>
-				isCompletedRoutineWork(entry.message, gallery.length > 1) ||
+		const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
+		const response = turn.slice(prefix.length);
+		const isSteer = (entry: Positioned) => entry.message.role === 'user' && !agentDelivery(entry.message);
+		// The fold renders its gallery above the rows it keeps, so only media from
+		// before the first steer may join it; later media stays in its own rows,
+		// in time order below the steer.
+		const firstSteer = response.findIndex(isSteer);
+		const galleryRows = firstSteer < 0 ? response : response.slice(0, firstSteer);
+		const gallery = galleryMediaForTurn(galleryRows.map((entry) => entry.message), options.sessionId);
+		const galleryEntries = new Set(gallery.length > 1 ? galleryRows : []);
+		const terminalAssistants = terminalProse(response);
+		// Prose followed by a question tool before the next prose or steer is
+		// the question's lead-in: it asks too, so it stays.
+		const askingProse = askingLeadIns(response);
+		// A compaction card the turn worked past is mid-turn; one trailing the
+		// answer (an idle or manual /compact) keeps its own row.
+		const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
+		const midTurnCompactions = new Set(
+			response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
+		);
+		const shouldHide = (entry: Positioned) =>
+			!isSteer(entry) && (
+				isCompletedRoutineWork(entry.message, galleryEntries.has(entry)) ||
 				isGroupableSystem(entry.message) ||
 				midTurnCompactions.has(entry) ||
 				entry.message.type === 'tool_result' ||
-				(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
-			const folded = response
-				.filter(shouldHide)
-				.map((entry) => ({ message: entry.message, index: entry.index }));
+				(isAssistantText(entry.message) &&
+					!entry.message.streaming &&
+					!terminalAssistants.has(entry) &&
+					!askingProse.has(entry) &&
+					!isProtectedProse(entry.message.content))
+			);
+		const folded = response
+			.filter(shouldHide)
+			.map((entry) => ({ message: entry.message, index: entry.index }));
 
-			if (folded.length === 0 && gallery.length === 0) {
-				emitWithSystemGroups(segment, items);
-				continue;
-			}
-
-			// User prompts stay outside disclosures, including steers. The duration
-			// still describes the logical turn; summaries count only this segment.
-			emitWithSystemGroups(prefix, items);
-			// Keyed by the prompt that opens the segment, which never changes. Keying
-			// by the first folded row remounted the group (collapsing an open log and
-			// replaying its settle animation) whenever a late tool result or a
-			// finished delegation folded an earlier row.
-			const anchor = prefix[0] ?? folded[0] ?? response[0];
-			items.push({
-				kind: 'work_log',
-				key: `wl-turn-${anchor.message.id ?? anchor.index}`,
-				gallery,
-				mode: 'settled',
-				folded,
-				tail: [],
-				sequence: response.map((entry) => ({
-					message: entry.message,
-					index: entry.index,
-					hiddenWhenCollapsed: shouldHide(entry)
-				})),
-				durationLabel,
-				summary: summarizeWork(folded),
-				compactSummary: summarizeWorkCompact(folded)
-			});
+		// A turn with nothing to fold still keeps its group: the live turn
+		// rendered inside it, so settling must not unmount a worker card or a
+		// report the reader expanded. WorkLogGroup draws no disclosure for it.
+		if (response.length === 0) {
+			emitWithSystemGroups(turn, items);
+			return;
 		}
-	});
+
+		// The opening prompt stays outside the disclosure; steers ride inside the
+		// sequence as protected rows (WorkLogGroup re-emits their turn anchors).
+		emitWithSystemGroups(prefix, items);
+		// Keyed by the prompt that opens the turn, which never changes. Keying by
+		// the first folded row remounted the group (collapsing an open log and
+		// replaying its settle animation) whenever a late tool result or a
+		// finished delegation folded an earlier row. The live turn uses the same
+		// key, so settling flips this group's mode instead of mounting a new one.
+		items.push({
+			kind: 'work_log',
+			...workLogKeys(prefix[0] ?? response[0]),
+			gallery,
+			mode: 'settled',
+			folded,
+			tail: [],
+			// A hidden code-mode cell draws nothing, as in the live turn. Kept in
+			// the sequence it would make a turn that folds nothing look foldable,
+			// so settling drew a "Show work details" button that revealed nothing.
+			sequence: response.filter((entry) => !isHiddenCodeModeCell(entry.message)).map((entry) => ({
+				message: entry.message,
+				index: entry.index,
+				hiddenWhenCollapsed: shouldHide(entry),
+				...(galleryEntries.has(entry) ? { inGallery: true } : {})
+			})),
+			durationLabel,
+			summary: summarizeWork(folded),
+			compactSummary: summarizeWorkCompact(folded)
+		});
+	}
 
 	// Turn navigation jumps by message id; windowed mounting needs to know which
 	// display item that id lives in so it can mount far enough back to reach it.
@@ -839,6 +1470,8 @@ export function buildTranscriptModel(
 		subagentToolIds,
 		itemIndexByTurnId,
 		lastAssistantMetadata,
-		latestUserTurnId
+		latestUserTurnId,
+		midTurnUserIds,
+		handoffs
 	};
 }

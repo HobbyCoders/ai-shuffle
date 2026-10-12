@@ -90,13 +90,14 @@ def test_move_wake_barrier_schema_upgrade_is_idempotent(mock_db):
     session_moves.save("legacy", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="owner",
                        requested_at=1, expires_at=2)
     session_moves.append_held("legacy", {"id": "held-legacy", "prompt": "keep me"})
+    mock_db.execute("ALTER TABLE session_moves DROP COLUMN handoff_id")
     mock_db.execute("ALTER TABLE session_moves DROP COLUMN wake_token")
     mock_db.execute("ALTER TABLE session_moves DROP COLUMN wakes_superseded")
     mock_db.execute("DROP TABLE handoff_wakes")
     mock_db.commit()
     for _ in range(2):
         database._run_column_migrations(ShimCursor(mock_db.cursor()))
-    assert {"wake_token", "wakes_superseded"} <= column_names(mock_db, "session_moves")
+    assert {"handoff_id", "wake_token", "wakes_superseded"} <= column_names(mock_db, "session_moves")
     assert {"token", "session_id", "source_id", "branch", "wakes", "superseded", "keep_peer", "finalized"} <= column_names(mock_db, "handoff_wakes")
     row = session_moves.get("legacy")
     assert row["held"] == [{"id": "held-legacy", "prompt": "keep me"}]
@@ -155,6 +156,99 @@ def test_resolves_by_name_or_device_id_and_refuses_offline_or_self():
         sh.resolve_worker("  ")
 
 
+@pytest.mark.parametrize("replacement", ["agent", "owner"])
+async def test_cancel_records_before_same_worker_replacement_can_be_accepted(replacement):
+    import asyncio
+    from uuid import UUID
+    from app.db import session_moves
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    rows = []
+
+    async def record(sid, text, data):
+        if data["status"] == "cancelled":
+            entered.set()
+            await release.wait()
+        rows.append(data)
+
+    with patch.object(sh, "schedule"), patch.object(sh, "busy_state", _Busy()), \
+            patch.object(sh, "_record", record):
+        first = await sh.queue_move("s1", "DesktopWorker")
+        assert UUID(first["handoff_id"]).version == 4
+        assert sh.request("s1", "DesktopWorker")["handoff_id"] == first["handoff_id"]
+        cancel = asyncio.create_task(sh.cancel_move("s1"))
+        await asyncio.wait_for(entered.wait(), 2)
+        try:
+            assert session_moves.get("s1") is None  # the old race window
+            with pytest.raises(ValueError, match="being cancelled"):
+                if replacement == "agent":
+                    await asyncio.to_thread(sh.request, "s1", "DesktopWorker")
+                else:
+                    await sh.queue_move("s1", "DesktopWorker")
+        finally:
+            release.set()
+            cancelled = await cancel
+        assert cancelled == {"cancelled": True, "handoff_id": first["handoff_id"]}
+        second = await sh.queue_move("s1", "DesktopWorker")
+        assert UUID(second["handoff_id"]).version == 4
+        assert second["handoff_id"] != first["handoff_id"]
+        assert [(r["status"], r["handoff_id"]) for r in rows] == [
+            ("queued", first["handoff_id"]), ("cancelled", first["handoff_id"]),
+            ("queued", second["handoff_id"]),
+        ]
+        assert session_moves.get("s1")["handoff_id"] == second["handoff_id"]
+
+
+@pytest.mark.parametrize("failure", ["move", "timeout", "open_prompt"])
+async def test_failure_records_keep_request_identity(failure):
+    result = sh.request("s1", "DesktopWorker")
+    if failure == "timeout":
+        sh.pending_for("s1").expires_at = 1
+    with patch.object(sh, "_busy", return_value=False), \
+            patch.object(sh, "_open_prompt", return_value=failure == "open_prompt"), \
+            patch.object(sh, "_record", AsyncMock()) as record, \
+            patch("app.api.sessions.move_session_to", AsyncMock(side_effect=HTTPException(409, "refused"))), \
+            patch.object(sh, "_owner_now", return_value=None):
+        await sh.run_pending("s1")
+    assert record.await_args_list
+    assert {call.args[2]["handoff_id"] for call in record.await_args_list} == {result["handoff_id"]}
+    assert record.await_args.args[2]["status"] == ("timeout" if failure == "timeout" else "failed")
+
+
+@pytest.mark.parametrize("failure", [None, "held", "resume"])
+async def test_produced_destination_notes_keep_request_identity(failure):
+    from types import SimpleNamespace
+    from app.network import control, engine
+
+    _chat()
+    result = sh.request("s1", "DesktopWorker", "continue here")
+    if failure == "held":
+        sh.hold("s1", "user", {"prompt": "held message"})
+    events = []
+    context = SimpleNamespace(member=lambda device: SimpleNamespace(kind="worker", status="active"))
+
+    async def receive_note(device, action, body, **kwargs):
+        assert device == "dev-gaming" and action == "session-move"
+        # Exercise the receiver's filtering and recording, not just a fixture
+        # with a pre-seeded handoff_id.
+        with patch.object(engine, "require_context", return_value=context), \
+                patch.object(control, "_require_owned", return_value={"id": "s1"}):
+            return await sh.handle_control(body, "dev-unraid")
+
+    async def record(sid, event):
+        events.append(event)
+
+    submit = AsyncMock(side_effect=control.ControlRefused("refused") if failure else None)
+    with _moving(GAMING_RESUME, receive_note), \
+            patch.object(control, "submit_turn", submit), \
+            patch("app.core.turn_recorder.record_drained_event", record):
+        await sh.run_pending("s1")
+    expected = ["started", "moved"] + ([failure + "_failed"] if failure else [])
+    assert [event["data"]["status"] for event in events] == expected
+    assert {event["data"]["handoff_id"] for event in events} == {result["handoff_id"]}
+    assert all(event["subtype"] == "handoff" for event in events)
+
+
 def test_request_queues_and_cancel_drops_it():
     result = sh.request("s1", "DesktopWorker", "  tests pass;\n next: wire the UI ")
     assert result["queued"] and result["worker"] == "DesktopWorker"
@@ -163,7 +257,7 @@ def test_request_queues_and_cancel_drops_it():
 
 
 async def test_runs_the_move_when_idle_and_records_the_outcome():
-    sh.request("s1", "DesktopWorker", "halfway")
+    result = sh.request("s1", "DesktopWorker", "halfway")
     move = AsyncMock()
     with patch.object(sh, "_busy", return_value=False), \
             patch.object(sh, "_record", AsyncMock()) as record, \
@@ -174,6 +268,7 @@ async def test_runs_the_move_when_idle_and_records_the_outcome():
     assert outcome.startswith("Handed off to DesktopWorker")
     texts = [call.args[1] for call in record.await_args_list]
     assert texts[0] == "Handing off to DesktopWorker. Note: halfway"
+    assert {call.args[2]["handoff_id"] for call in record.await_args_list} == {result["handoff_id"]}
     assert sh.pending_for("s1") is None
 
 
@@ -231,15 +326,16 @@ async def test_owner_move_is_queued_while_running_and_runs_when_the_turn_ends():
             patch("app.api.sessions.move_session_to", move), \
             patch("app.db.database.get_session", return_value={"id": "s1"}):
         result = await sh.queue_move("s1", "dev-gaming")
-        assert result == {"queued": True, "worker": "DesktopWorker", "after": "turn"}
+        assert result == {"queued": True, "worker": "DesktopWorker", "after": "turn",
+                          "handoff_id": sh.pending_for("s1").handoff_id}
         assert record.await_args_list[0].args[1] == "Move to DesktopWorker queued for when this turn ends."
         assert record.await_args_list[0].args[2] == {"status": "queued", "worker": "DesktopWorker", "by": "owner",
-                                                     "after": "turn"}
+                                                     "after": "turn", "handoff_id": result["handoff_id"]}
         assert not await _settle(lambda: move.await_count, rounds=10)
         assert sh.pending_for("s1").by == "owner"
         state = await sh.owner_op("s1", "status")
         assert state["pending"] == {"worker": "DesktopWorker", "target_id": "dev-gaming", "by": "owner",
-                                    "moving": False}
+                                    "moving": False, "handoff_id": result["handoff_id"]}
         assert state["busy"]["running"] is True
         busy.idle = True
         assert await _settle(lambda: move.await_count and sh.pending_for("s1") is None)
@@ -267,8 +363,10 @@ async def test_cancel_stops_a_waiting_move_and_says_so():
             patch("app.api.sessions.move_session_to", move):
         await sh.queue_move("s1", "DesktopWorker")
         assert await _settle(lambda: "s1" in sh._waiting)
-        assert await sh.owner_op("s1", "cancel") == {"cancelled": True}
-        assert record.await_args_list[-1].args[2] == {"status": "cancelled", "worker": "DesktopWorker", "by": "owner"}
+        handoff_id = sh.pending_for("s1").handoff_id
+        assert await sh.owner_op("s1", "cancel") == {"cancelled": True, "handoff_id": handoff_id}
+        assert record.await_args_list[-1].args[2] == {"status": "cancelled", "worker": "DesktopWorker", "by": "owner",
+                                                                  "handoff_id": handoff_id}
         assert await _settle(lambda: "s1" not in sh._running)
         busy.idle = True
         assert (await sh.owner_op("s1", "status"))["pending"] is None
@@ -277,7 +375,7 @@ async def test_cancel_stops_a_waiting_move_and_says_so():
 
 async def test_cancel_with_nothing_queued_still_clears_the_chat():
     with patch.object(sh, "_record", AsyncMock()) as record:
-        assert await sh.cancel_move("s1") == {"cancelled": False}
+        assert await sh.cancel_move("s1") == {"cancelled": False, "handoff_id": None}
     assert record.await_args.args[2]["status"] == "cancelled"
 
 
@@ -330,6 +428,23 @@ def test_a_queued_turn_keeps_the_session_busy():
             patch.object(task_registry, "get_active", return_value=[]):
         assert sh.busy_state("s1") == {"running": True, "tasks": [], "queued": 1, "wake": False}
         assert sh._busy("s1") is True
+
+
+@pytest.mark.parametrize("status", ["pending", "running"])
+def test_background_idle_gate_matches_transfer_gate_after_registry_loss(status):
+    from app.core.task_registry import task_registry
+    from app.db import background_tasks, database
+
+    database.create_session("remote-task-chat", "default")
+    snapshot = {"task_id": "remote-child", "session_id": "remote-task-chat", "kind": "agent",
+                "status": status, "remote_device_id": "dev-gaming"}
+    background_tasks.upsert_background_task(snapshot)
+    with patch.object(task_registry, "get_active", return_value=[]), \
+            patch("app.core.streaming_status.has_active_run", return_value=False):
+        assert sh.busy_state("remote-task-chat")["tasks"] == ["Background work"]
+        assert sh._busy("remote-task-chat") is True
+        background_tasks.upsert_background_task({**snapshot, "status": "completed"})
+        assert sh._busy("remote-task-chat") is False
 
 
 def test_an_unreadable_turn_queue_does_not_hold_the_hand_off_forever():
@@ -540,7 +655,8 @@ async def test_rule2_held_messages_are_sent_here_when_the_move_is_cancelled():
         turn_manager._submit_blocking("s1", "user", prompt="one", profile_id="default")
         turn_manager._submit_blocking("s1", "user", prompt="two", profile_id="default")
         assert _queued_prompts() == []
-        assert await sh.cancel_move("s1") == {"cancelled": True}
+        handoff_id = sh.pending_for("s1").handoff_id
+        assert await sh.cancel_move("s1") == {"cancelled": True, "handoff_id": handoff_id}
         assert record.await_args.args[1] == "Queued move to DesktopWorker cancelled. Your 2 messages were sent here."
         kick.assert_called_with("s1")
         # Sent here in order; new messages are no longer held.
@@ -635,13 +751,14 @@ async def test_rule5_a_queued_move_survives_a_restart_with_its_held_messages():
             patch("app.network.control.submit_turn", submit):
         assert await sh.resume_queued() == 1
         assert sh.pending_for("s1").by == "owner" and sh.holds("s1")
+        assert sh.pending_for("s1").handoff_id == stored["handoff_id"]
         assert (await sh.owner_op("s1", "status"))["pending"]["worker"] == "DesktopWorker"
         busy.idle = True
         assert await _settle(lambda: submit.await_count == 1)
     move.assert_awaited_once()
     assert submit.await_args.kwargs["prompt"] == "one"
     record.assert_any_await("s1", "Handed off to DesktopWorker. Open this chat there to continue on the same branch.",
-                            {"status": "moved", "worker": "DesktopWorker"})
+                            {"status": "moved", "worker": "DesktopWorker", "handoff_id": stored["handoff_id"]})
 
 
 async def test_rule5_a_restart_clears_moves_that_no_longer_exist():
@@ -889,7 +1006,7 @@ async def test_rule2_after_an_ambiguous_move_failure_held_messages_follow_the_ne
 async def test_the_outcome_is_recorded_on_the_worker_that_now_runs_the_chat():
     """F7: the old worker's rows do not reach the chat on the new one."""
     call = AsyncMock(return_value={"recorded": True})
-    sh.request("s1", "DesktopWorker")
+    result = sh.request("s1", "DesktopWorker")
     with patch.object(sh, "_busy", return_value=False), patch.object(sh, "_open_prompt", return_value=False), \
             patch.object(sh, "_record", AsyncMock()) as record, \
             patch("app.api.sessions.move_session_to", AsyncMock()), \
@@ -901,7 +1018,8 @@ async def test_the_outcome_is_recorded_on_the_worker_that_now_runs_the_chat():
         "session_id": "s1", "op": "note",
         "content": ("Handed off to DesktopWorker. Open this chat there to continue on the same branch. DesktopWorker has "
                     "not reported that it can resume it by itself: send a message there."),
-        "data": {"status": "moved", "worker": "DesktopWorker", "resume": "unknown"}})
+        "data": {"status": "moved", "worker": "DesktopWorker", "resume": "unknown",
+                 "handoff_id": result["handoff_id"]}})
     assert [c.args[2]["status"] for c in record.await_args_list] == ["started"]
 
 
@@ -1066,7 +1184,8 @@ async def test_held_messages_of_a_chat_archived_meanwhile_are_named_not_dropped(
         conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", ("s1",))
     with patch.object(sh, "_record", AsyncMock()) as record, \
             patch("app.services.notification_service.emit_notification", AsyncMock()) as notify:
-        assert await sh.cancel_move("s1") == {"cancelled": True}
+        handoff_id = sh.pending_for("s1").handoff_id
+        assert await sh.cancel_move("s1") == {"cancelled": True, "handoff_id": handoff_id}
     assert record.await_args.args[1] == ("Could not send 1 of your messages here because this chat is archived: "
                                          "“one”. Send them again.")
     assert record.await_args.args[2]["reason"] == "archived"
@@ -1164,18 +1283,20 @@ async def test_2012_an_agent_hand_off_resumes_the_chat_there_with_its_note():
     from app.db import session_moves
     _chat()
     call, turns_sent, notes = _gaming()
-    sh.request("s1", "DesktopWorker", "tests pass; next: wire the UI")
+    result = sh.request("s1", "DesktopWorker", "tests pass; next: wire the UI")
     with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()) as record:
         outcome = await sh.run_pending("s1")
     assert outcome == "Handed off to DesktopWorker. This chat continues there on the same branch."
-    assert [body["data"] for body in notes] == [{"status": "moved", "worker": "DesktopWorker", "resume": "send"}]
+    assert [body["data"] for body in notes] == [{"status": "moved", "worker": "DesktopWorker", "resume": "send",
+                                                  "handoff_id": result["handoff_id"]}]
     assert [c.args[2]["status"] for c in record.await_args_list] == ["started"]
     assert len(turns_sent) == 1
     body = turns_sent[0]
     assert body["source"] == "wakeup" and body["prompt"] == RESUME_PROMPT
     assert body["profile_id"] == "default" and "owner_send" not in body
     assert body["command_id"].startswith(sh.RESUME_COMMAND_PREFIX)
-    assert body["payload"] == {sh.RESUME_PAYLOAD: {"from": "Unraid", "note": "tests pass; next: wire the UI"}}
+    assert body["payload"] == {sh.RESUME_PAYLOAD: {"from": "Unraid", "note": "tests pass; next: wire the UI",
+                                                "handoff_id": result["handoff_id"]}}
     assert _queued() == [("wakeup", RESUME_PROMPT)]
     assert session_moves.get("s1") is None
 
@@ -1184,7 +1305,7 @@ async def test_2012_held_messages_go_first_then_the_resume():
     """(b) The owner's held messages run before the resume, in order."""
     _chat()
     call, turns_sent, _notes = _gaming()
-    sh.request("s1", "DesktopWorker", "tests pass; next: wire the UI")
+    result = sh.request("s1", "DesktopWorker", "tests pass; next: wire the UI")
     sh.hold("s1", "user", {"prompt": "one", "profile_id": "default"})
     sh.hold("s1", "queue", {"prompt": "two", "profile_id": "default"})
     with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
@@ -1202,12 +1323,12 @@ async def test_2012_the_owners_own_move_of_an_idle_chat_gets_no_resume():
     idle.idle = True
     with _moving(GAMING_RESUME, call, move), patch.object(sh, "busy_state", idle), \
             patch.object(sh, "_record", AsyncMock()):
-        await sh.queue_move("s1", "DesktopWorker")
+        result = await sh.queue_move("s1", "DesktopWorker")
         assert await _settle(lambda: move.await_count and notes)
         assert await _settle(lambda: "s1" not in sh._running)
     assert turns_sent == [] and _queued() == []
     assert notes[0]["content"] == "Handed off to DesktopWorker. Open this chat there to continue on the same branch."
-    assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker"}
+    assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker", "handoff_id": result["handoff_id"]}
 
 
 async def test_2012_a_cancelled_or_failed_hand_off_gets_no_resume():
@@ -1215,17 +1336,17 @@ async def test_2012_a_cancelled_or_failed_hand_off_gets_no_resume():
     _chat()
     call, turns_sent, _notes = _gaming()
     submit = AsyncMock()
-    sh.request("s1", "DesktopWorker", "halfway")
+    result = sh.request("s1", "DesktopWorker", "halfway")
     assert sh.cancel("s1")
     with _moving(GAMING_RESUME, call), patch("app.network.control.submit_turn", submit), \
             patch.object(sh, "_record", AsyncMock()):
         assert await sh.run_pending("s1") is None
-    sh.request("s1", "DesktopWorker", "halfway")
+    result = sh.request("s1", "DesktopWorker", "halfway")
     with _moving(GAMING_RESUME, call, AsyncMock(side_effect=HTTPException(409, "DesktopWorker went offline"))), \
             patch("app.network.control.submit_turn", submit), patch.object(sh, "_record", AsyncMock()) as record:
         outcome = await sh.run_pending("s1")
     assert outcome == "Hand-off to DesktopWorker failed: DesktopWorker went offline"
-    assert record.await_args.args[2] == {"status": "failed", "worker": "DesktopWorker"}
+    assert record.await_args.args[2] == {"status": "failed", "worker": "DesktopWorker", "handoff_id": result["handoff_id"]}
     submit.assert_not_awaited()
     assert turns_sent == [] and _queued() == []
     # A pending hand-off cancelled after it was read never resumes either.
@@ -1240,13 +1361,13 @@ async def test_2012_a_chat_the_owner_stopped_is_not_resumed():
     from app.core.task_registry import task_registry
     _chat()
     call, turns_sent, notes = _gaming()
-    sh.request("s1", "DesktopWorker", "halfway")
+    result = sh.request("s1", "DesktopWorker", "halfway")
     task_registry.mark_user_stopped("s1")
     try:
         with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
             await sh.run_pending("s1")
         assert turns_sent == []
-        assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker"}
+        assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker", "handoff_id": result["handoff_id"]}
         # The new worker drops a resume that reaches a chat stopped there.
         from app.network import control
         resume = {"session_id": "s1", "source": "wakeup", "prompt": "resume", "profile_id": "default",
@@ -1274,11 +1395,12 @@ async def test_2012_an_older_or_silent_new_worker_degrades_and_the_outcome_says_
         sh._pending.clear()
         _chat(f"s-{plan}")
         call, turns_sent, notes = _gaming()
-        sh.request(f"s-{plan}", "DesktopWorker", "halfway")
+        result = sh.request(f"s-{plan}", "DesktopWorker", "halfway")
         with _moving(gaming, call), patch.object(sh, "_record", AsyncMock()):
             outcome = await sh.run_pending(f"s-{plan}")
         assert outcome == text
-        assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker", "resume": plan}
+        assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker", "resume": plan,
+                                    "handoff_id": result["handoff_id"]}
         assert turns_sent == [] and _queued(f"s-{plan}") == []
 
 
@@ -1298,7 +1420,7 @@ async def test_2012_a_resume_whose_reply_was_lost_or_resent_after_a_restart_runs
         if len(sends) == 1:
             raise control.MaybeApplied("DesktopWorker did not answer in time. It may still have been applied.")
         return reply
-    sh.request("s1", "DesktopWorker", "halfway")
+    result = sh.request("s1", "DesktopWorker", "halfway")
     with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
         await sh.run_pending("s1")
     assert len(sends) == 2 and sends[0]["command_id"] == sends[1]["command_id"]
@@ -1328,9 +1450,10 @@ async def test_2012_a_resume_the_new_worker_refuses_is_reported_there():
             notes.append(body)
             return {"recorded": True}
         raise control.ControlRefused("This chat is archived")
-    sh.request("s1", "DesktopWorker", "halfway")
+    result = sh.request("s1", "DesktopWorker", "halfway")
     with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
         await sh.run_pending("s1")
     assert notes[-1]["content"] == ("Could not continue this chat on DesktopWorker (This chat is archived). "
                                     "Send a message there to continue.")
-    assert notes[-1]["data"] == {"status": "resume_failed", "worker": "DesktopWorker", "reason": "This chat is archived"}
+    assert notes[-1]["data"] == {"status": "resume_failed", "worker": "DesktopWorker", "reason": "This chat is archived",
+                                 "handoff_id": result["handoff_id"]}

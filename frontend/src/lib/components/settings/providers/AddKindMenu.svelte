@@ -8,7 +8,6 @@
 	import { Plus } from 'lucide-svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import type { AddableKind } from './providers-model';
-	import UnofficialBadge from './UnofficialBadge.svelte';
 
 	interface Props {
 		providerName: string;
@@ -129,7 +128,7 @@
 		<div class="head" aria-hidden="true">Add to {providerName}</div>
 		{#each kinds as kind (kind.menuLabel)}
 			<button type="button" role="menuitem" class="opt" tabindex="-1" onclick={() => pick(kind)}>
-				<span>{kind.menuLabel}{#if kind.unofficial} <UnofficialBadge />{/if}</span>
+				<span>{kind.menuLabel}</span>
 				<span class="hint">{kind.hint}</span>
 			</button>
 		{/each}

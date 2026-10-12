@@ -19,6 +19,8 @@ surfacing on the response body is asserted alongside the transcript checks.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.api.sessions import get_live_session
 
 LEGACY_MSGS = [
@@ -193,6 +195,30 @@ async def test_include_messages_false_keeps_the_metadata_fields():
     assert result["activeTasks"][0]["id"] == "task-9"
     assert result["unpark_pending"] is True
     assert result["is_streaming"] is False
+
+
+@pytest.mark.parametrize("include_messages", [True, False])
+async def test_live_row_revision_matches_list_after_question_changes(include_messages):
+    from app.core.models import Session
+    from app.db import database, session_events
+
+    sid = "live-row-revision"
+    database.create_session(sid, "default")
+    previous = None
+    for content in ("Which?", "Or this?", "Done."):
+        session_events.append_events(sid, [{
+            "type": "message.assistant", "payload": {"content": content},
+        }])
+        row = database.get_session(sid)
+        result, _ = await _poll_live(
+            row, store_result=([], {}), legacy_result=([], False),
+            include_messages=include_messages,
+        )
+        updated_at = result["session_meta"]["updated_at"]
+        assert updated_at == Session(**row).model_dump(mode="json")["updated_at"]
+        if previous is not None:
+            assert updated_at > previous
+        previous = updated_at
 
 
 async def test_metadata_only_snapshot_includes_hidden_worker_run_binding():

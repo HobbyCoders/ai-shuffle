@@ -32,8 +32,8 @@
 		if (await flow.saveUsername()) flashSaved();
 	}
 
-	function openLicense() {
-		settingsNav.go({ category: 'system', anchor: 'system.license' });
+	function openCloud() {
+		settingsNav.go({ category: 'cloud' });
 	}
 </script>
 
@@ -108,7 +108,7 @@
 					still works here and on your network.
 				</span>
 				{#snippet actions()}
-					<button type="button" class="st-btn sm" onclick={openLicense}>Open License</button>
+					<button type="button" class="st-btn sm" onclick={openCloud}>Open Cloud</button>
 				{/snippet}
 			</InlineBanner>
 		{/if}

@@ -108,22 +108,11 @@ async def _stream_query_with_failover(
 
 
 async def require_claude_auth():
-    """Dependency: the license lets this worker start agent runs.
+    """Compatibility dependency; per-provider credentials are checked per turn.
 
-    Only the license half of ``app.core.credential_gate``. Whether a run also
-    needs the Claude Code credential depends on the leg it runs on: a turn on
-    an OpenAI, xAI, OpenRouter or custom provider row needs none. Each route
-    checks that with :func:`_refuse_unready_leg` once it knows the profile,
-    the overrides and the session.
+    Cloud account state never refuses a local query.
     """
-    from app.core.license import license_allows_agent_runs
-
-    allowed, reason = await asyncio.to_thread(license_allows_agent_runs)
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=reason or "This worker is not set up to start agents.",
-        )
+    return None
 
 
 def _request_overrides(request) -> dict | None:

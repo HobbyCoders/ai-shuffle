@@ -32,7 +32,7 @@ AI Shuffle is an independent product. It is not affiliated with, built, endorsed
 | Page | Read it when |
 | --- | --- |
 | [Updates](/docs/getting-started/updates) | A new version is out. |
-| [License](/docs/getting-started/license) | You activate a license, move it to another machine, cancel or ask for a refund. |
+| [AI Shuffle Cloud](/docs/getting-started/cloud) | Free local use, remote workers, paid plans, cancellation and refunds. |
 | [Troubleshooting](/docs/getting-started/troubleshooting) | Something does not work. |
 | [FAQ](/docs/getting-started/faq) | You have a question about accounts, privacy, pricing or support. |
 
@@ -45,4 +45,4 @@ AI Shuffle is an independent product. It is not affiliated with, built, endorsed
 
 ## Get help
 
-Email support@hobbycoders.com. Never send passwords, API keys, pull tokens, license keys or sign-in codes. The same documentation is on [hobbycoders.com](https://hobbycoders.com/ai-shuffle), together with the [FAQ](https://hobbycoders.com/ai-shuffle/faq), [privacy policy](https://hobbycoders.com/privacy) and [license terms](https://hobbycoders.com/license).
+Email support@hobbycoders.com. Never send passwords, API keys, license keys or sign-in codes. The same documentation is on [hobbycoders.com](https://hobbycoders.com/ai-shuffle), together with the [FAQ](https://hobbycoders.com/ai-shuffle/faq), [privacy policy](https://hobbycoders.com/privacy) and [license terms](https://hobbycoders.com/license).

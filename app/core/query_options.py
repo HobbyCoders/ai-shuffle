@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
-from app.core.model_registry import context_window_choices
+from app.core.model_registry import is_offered_context_window
 
 # --- Re-exports for backward compatibility ---
 # All symbols that were previously defined here are re-exported so that
@@ -1376,7 +1376,7 @@ def build_options_from_profile(
     # Validate new/sessionless overrides against the picker, but a saved pin
     # is a ceiling, not permission to silently use a wider model default when
     # the model changes or its catalog entry is missing/stale.
-    if context_window not in context_window_choices(model_to_use, main_provider_row):
+    if not is_offered_context_window(context_window, model_to_use, main_provider_row):
         from app.core.model_registry import get_model, resolve_provider_context_window
 
         native = get_model(model_to_use) if main_provider_row is None else None
@@ -1713,6 +1713,7 @@ def build_options_from_profile(
             # file/plugin agent definitions a native leg gets from fluid — the
             # delegated (CLI) leg has no engine to publish them (ruling CE6).
             cwd=working_dir,
+            workflow_guidance=True,  # aih_automatic_workflows below supplies it
         )
         if builtins_srv:
             mcp_servers_dict["builtins"] = builtins_srv

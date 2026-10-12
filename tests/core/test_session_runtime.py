@@ -62,6 +62,7 @@ def _recorder_mock():
     rec.start = AsyncMock()
     rec.on_event = AsyncMock()
     rec.close = AsyncMock()
+    rec.settle = AsyncMock()
     rec.record_task_terminal = AsyncMock(return_value=0)
     return rec
 
@@ -461,7 +462,7 @@ async def test_parking_drains_user_messages_before_background_completion(mock_db
             second_started.set()
         yield {"type": "done", "metadata": {}}
 
-    async def on_park(*args):
+    async def on_park(*args, **kwargs):
         if enqueue_at_park and not queued:
             enqueue()
 
@@ -478,7 +479,8 @@ async def test_parking_drains_user_messages_before_background_completion(mock_db
         finally:
             turn_manager.register_kick(None)
     assert delivered == ["launch background work", "answer me now"]
-    assert turns_db.get_turn(queued[0]["id"])["state"] == "parked"
+    assert turns_db.get_turn(queued[0]["id"])["stop_reason"] == "steered"
+    assert turns_db.get_turn(first["id"])["state"] == "parked"
     assert turns_db.get_queued_turns(sid) == []
     assert turns_db.get_turn(first["id"])["payload"]["task_ids"] == ["still-running"]
 
@@ -534,7 +536,7 @@ async def test_provider_worker_parks_on_native_monitor(mock_db, spawner_harness,
             assert turns_db.get_turn(turn["id"])["state"] == expected
             assert provider_agent._worker_still_working(sid) is (not serves)
             if not serves:
-                env["record_parked"].assert_awaited_once_with(sid, [task.task_id])
+                env["record_parked"].assert_awaited_once_with(sid, [task.task_id], turn_id=turn["id"], usage={})
     finally:
         task.exit_code = 0
         task._running = False
@@ -865,12 +867,12 @@ async def test_stopping_only_monitor_cannot_leave_an_unwakeable_park(
 
     original_park = turns_db.park_turn
 
-    def racing_park(tid, ids):
+    def racing_park(tid, ids, **kwargs):
         # park_turn runs off-thread. Schedule Stop on the owning event loop
         # while the park write is paused, so the interleaving is deterministic.
         if stop_at == "before_park_write":
             asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
-        row = original_park(tid, ids)
+        row = original_park(tid, ids, **kwargs)
         if stop_at == "after_park_write":
             asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
         return row
@@ -994,10 +996,10 @@ async def test_monitor_exit_racing_park_queues_exactly_one_wake(
     original_park = turns_db.park_turn
     loop = asyncio.get_running_loop()
 
-    def racing_park(tid, ids):
+    def racing_park(tid, ids, **kwargs):
         if exit_at == "before_park_write":
             asyncio.run_coroutine_threadsafe(exit(), loop).result(timeout=2)
-        row = original_park(tid, ids)
+        row = original_park(tid, ids, **kwargs)
         if exit_at == "after_park_write":
             asyncio.run_coroutine_threadsafe(exit(), loop).result(timeout=2)
         return row
@@ -1053,8 +1055,8 @@ async def test_stop_settling_an_interrupted_park_requeues_its_swallowed_steer(
 
     original_park = turns_db.park_turn
 
-    def racing_park(tid, ids):
-        row = original_park(tid, ids)
+    def racing_park(tid, ids, **kwargs):
+        row = original_park(tid, ids, **kwargs)
         asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
         return row
 
@@ -1114,8 +1116,8 @@ async def test_stop_settling_a_completed_park_does_not_requeue_its_steer(
 
     original_park = turns_db.park_turn
 
-    def racing_park(tid, ids):
-        row = original_park(tid, ids)
+    def racing_park(tid, ids, **kwargs):
+        row = original_park(tid, ids, **kwargs)
         asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
         return row
 

@@ -100,7 +100,7 @@ def feed(tmp_path, monkeypatch):
         payload = json.dumps({key: value for key, value in release.items() if value is not None}).encode()
         envelope = json.dumps({"payload": base64.b64encode(payload).decode(),
                                "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
-        responses["/v1/desktop/manifest" + ("" if channel == "stable" else "/edge")] = envelope
+        responses["/v1/desktop/manifest" + ("" if channel == "stable" else "/nightly")] = envelope
         responses["/v1/desktop/sources/" + revision] = archive
         return envelope
     def handler(request):
@@ -799,17 +799,19 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
             assert "went back to the version it was running" in status.call_args.kwargs["error"]
 
 
-def test_only_a_signed_release_for_the_configured_channel_is_offered(feed):
+@pytest.mark.parametrize("configured", ["edge", "nightly"])
+@pytest.mark.parametrize("signed_channel", ["edge", "nightly"])
+def test_only_a_signed_release_for_the_configured_channel_is_offered(feed, configured, signed_channel):
     updater, publish, _, requests, responses = feed
     # A hub serving an edge build at the stable address cannot relabel it.
-    responses["/v1/desktop/manifest"] = publish(channel="edge", version="0.8.18-dev.43+g3667297")
+    responses["/v1/desktop/manifest"] = publish(channel=signed_channel, version="0.8.18-dev.43+g3667297")
     with pytest.raises(UpdateError, match="signed stable release"):
         updater.check(download=True)
     assert updater.state == {} and [r.url.path for r in requests] == ["/v1/desktop/manifest"]
-    edge = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, channel="edge")
+    edge = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, channel=configured)
     edge.build = updater.build
     edge.check(download=True)
-    assert requests[-2].url.path == "/v1/desktop/manifest/edge" and edge.state == {"pending": B}
+    assert requests[-2].url.path == "/v1/desktop/manifest/nightly" and edge.state == {"pending": B}
     # Switching the worker back to stable never activates the staged edge build.
     stable = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {})
     assert stable.state == {}
@@ -817,7 +819,7 @@ def test_only_a_signed_release_for_the_configured_channel_is_offered(feed):
         ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, channel="beta")
 
 
-@pytest.mark.parametrize("field, value", [("channel", "nightly"), ("tree", "short"),
+@pytest.mark.parametrize("field, value", [("channel", "beta"), ("tree", "short"),
                                           ("version", "latest; rm"), ("notes", "x" * 4001)])
 def test_signed_manifest_with_malformed_release_fields_is_refused(feed, field, value):
     updater, publish, _, _, _ = feed

@@ -22,7 +22,7 @@ class AutomationRow(TypedDict):
     trigger_config: Dict[str, Any]
     triggers: Optional[List[Dict[str, Any]]]
     prompt: str
-    profile_id: str
+    profile_id: Optional[str]
     project_id: Optional[str]
     output_config: Dict[str, Any]
     max_turns: Optional[int]

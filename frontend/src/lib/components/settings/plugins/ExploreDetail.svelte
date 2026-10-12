@@ -87,6 +87,9 @@
 {/snippet}
 
 {#snippet banner()}
+	{#each model.marketplaces.filter((source) => source.error) as source (source.id)}
+		<InlineBanner tone="warn"><span role="alert">{source.error}</span></InlineBanner>
+	{/each}
 	{#if model.actionError}
 		<InlineBanner tone="warn"><span role="alert">{model.actionError}</span></InlineBanner>
 	{/if}

@@ -133,8 +133,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
             type=semver,pattern={{major}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' && inputs.promote_latest }}
             type=raw,value=latest,enable=${{ inputs.release_tag != '' && inputs.promote_latest && !contains(inputs.release_tag, '-') }}
-            # Manual main builds are the edge channel.
-            type=raw,value=edge,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
+            # Manual main builds are the nightly channel.
+            type=raw,value=nightly,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
             type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
             # Tag with git short SHA (simple prefix, works for all events)
             type=raw,value=sha-${{ steps.source.outputs.short_sha }}

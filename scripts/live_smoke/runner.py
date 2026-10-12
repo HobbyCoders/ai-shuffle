@@ -98,12 +98,21 @@ def _pending_user(messages: list) -> bool:
     return bool(users) and (not replies or users[-1] > replies[-1])
 
 
+# fluid/fluid/engine/native.py ``_run_manual_compaction``: the reason a native
+# /compact gives when the chat is already as small as compaction makes it.
+NOTHING_TO_COMPACT = "nothing could be compacted"
+
+
 def _tool_names(messages: list) -> set:
     names = set()
     for m in messages:
         for key in ("toolName", "tool_name"):
             if m.get(key):
                 names.add(m[key])
+        if m.get("type") == "subagent":
+            # A Task launched from a native chat's code mode (run_python) is
+            # stored as its own subagent card, not as a Task tool_use.
+            names.add("Task")
         for child in m.get("agentChildren") or []:
             if child.get("toolName"):
                 names.add(child["toolName"])
@@ -365,8 +374,7 @@ class Runner:
             else:
                 sid = sessions[step.get("session", "a")]
                 if op == "compact":
-                    self._compact(sid, within)
-                    evidence["compact"] = "boundary recorded"
+                    evidence["compact"] = self._compact(sid, within)
                     continue
                 if op == "message":
                     if step.get("when") == "reply_seen":
@@ -382,7 +390,14 @@ class Runner:
             self._check(step, s, sessions, evidence)
         return evidence
 
-    def _compact(self, sid: str, within: float) -> None:
+    def _compact(self, sid: str, within: float) -> str:
+        """POST /compact and wait for its outcome; returns the evidence line.
+
+        Claude Code records a ``compact_boundary`` in the history. A native
+        chat records its outcome as a ``system.note`` in the event log only:
+        on a chat this short the engine correctly answers "nothing could be
+        compacted", which proves /compact ran and kept the session.
+        """
         try:
             self.client.compact(sid)
         except ClientError as exc:
@@ -391,10 +406,19 @@ class Runner:
         while True:
             s = self._snapshot(sid)
             subtypes = [m.get("systemSubtype") or m.get("subtype") for m in s.get("messages") or []]
+            busy = self._busy(sid, s)
             if "compact_failed" in subtypes:
                 raise StepFailed("compact_failed recorded")
-            if "compact_boundary" in subtypes and not self._busy(sid, s):
-                return
+            if "compact_boundary" in subtypes and not busy:
+                return "boundary recorded"
+            if not busy:
+                for note in self.client.system_notes(sid):
+                    if note.get("subtype") != "compact_failed":
+                        continue
+                    reason = str((note.get("data") or {}).get("reason") or "")
+                    if reason.startswith(NOTHING_TO_COMPACT):
+                        return f"native engine: {reason}"
+                    raise StepFailed(f"compact_failed recorded: {reason or 'no reason'}")
             if self.clock() >= deadline:
                 raise StepFailed(f"no compact boundary within {int(within)}s")
             self.sleep(self.poll_s)

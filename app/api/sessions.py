@@ -13,6 +13,7 @@ import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Response, status, Request
+from pydantic import TypeAdapter
 
 from app.core.cli_sessions import (
     rename_session as sdk_rename_session,
@@ -35,10 +36,20 @@ from app.api.common import api_error_handler
 from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.git_owner import refuse_subagent_git
 from app.core.project_utils import get_project_working_dir
-from app.core.session_payload import client_view
+from app.core.session_payload import client_view, serialize_session_updated_at
 
 import logging
 logger = logging.getLogger(__name__)
+
+# Untyped snapshots must use the same datetime parsing/JSON format as Session.
+_USER_MESSAGE_TIMESTAMP = TypeAdapter(Session.model_fields["last_user_message_at"].annotation)
+
+
+def _serialize_last_user_message_at(value: object) -> Optional[str]:
+    return _USER_MESSAGE_TIMESTAMP.dump_python(
+        _USER_MESSAGE_TIMESTAMP.validate_python(value), mode="json",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Sub-module imports (check_session_access / enrich_sessions_with_tags are also
@@ -50,6 +61,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     check_transcript_access,
     filter_readable_sessions,
     require_session,
+    refuse_assistant_home_mutation,
     require_transcript_session,
     enrich_sessions_with_tags,
     fetch_and_enrich_sessions,
@@ -520,7 +532,7 @@ async def _queued_move(session: dict, op: str, target: Optional[str] = None, *, 
 async def queued_move_status(request: Request, session_id: str, token: str = Depends(require_auth)):
     """What keeps this chat from moving now, and any move already queued.
 
-    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"worker", "target_id", "by", "moving"} | null}``,
+    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"handoff_id", "worker", "target_id", "by", "moving"} | null}``,
     read on the owning worker. The worker selector and Resume here ask first:
     a running or parked chat is offered "Move when this turn ends".
     """
@@ -1227,6 +1239,7 @@ async def get_live_session(
     # paths so the frontend can correct any stale state on switch.
     from app.core.workspace_folders import normalize_workspace_project_ids
     session_meta = {
+        "updated_at": serialize_session_updated_at(session.get("updated_at")),
         "mode": session.get("mode"),
         "project_id": session.get("project_id"),
         "project_v2_id": session.get("project_v2_id"),
@@ -1241,6 +1254,12 @@ async def get_live_session(
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.
         "is_worker": bool(session.get("is_worker")),
+        # Read the user-message revision without loading the transcript (#2259).
+        "last_user_message_at": _serialize_last_user_message_at(session.get("last_user_message_at")),
+        "last_user_message_seq": session.get("last_user_message_seq"),
+        "last_user_message_epoch": session.get("last_user_message_epoch"),
+        "last_assistant_question_seq": session.get("last_assistant_question_seq"),
+        "last_assistant_question_epoch": session.get("last_assistant_question_epoch"),
         # Away mode (app/core/away_mode.py); null is a flag never set (off).
         "away_mode": session.get("away_mode"),
     }
@@ -1477,6 +1496,8 @@ async def update_session(
 ):
     """Update session title or status. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
+    if title is not None:
+        await refuse_assistant_home_mutation(session_id, "renamed")
 
     # Sync title rename to Claude SDK session if available. Only a Claude CLI
     # conversation id (a UUID) names a transcript the CLI owns; a fluid
@@ -1704,6 +1725,7 @@ async def delete_session(
     the HTTP response on slow worktree/subprocess lock release.
     """
     existing = await require_session(request, session_id)
+    await refuse_assistant_home_mutation(session_id, "deleted")
 
     # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
@@ -2046,6 +2068,7 @@ async def batch_delete_sessions(
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
+            await refuse_assistant_home_mutation(session_id, "deleted")
             await run_sync(database.delete_session, session_id)
             from app.core import browser_runtime
             await browser_runtime.close_session(session_id)
@@ -2158,14 +2181,30 @@ async def get_session_sync_status(
     session_id: str,
     token: str = Depends(require_auth),
 ):
-    """Freshness of a mirrored owner's committed sync stream."""
+    """Freshness of this session's materialized transcript, relative to its owner.
+
+    ``scope=session`` compares the local ``seq``/``epoch`` with the owner's
+    last authenticated ``owner_seq``/``owner_epoch``. ``pending_updates`` is
+    the sequence gap in the same epoch, or the new owner's log length across
+    an epoch change (which is syncing even for an empty cleared log). A matching
+    first-row epoch alone cannot prove a multi-batch replacement finished: the
+    mirror must also hold the owner's tail event identity at ``owner_seq``.
+    While that identity differs, the pending count is at least one even if the
+    sequence gap is zero. Unrelated sessions, catalog work and snapshot backlog
+    do not affect this comparison.
+    These are observed watermarks, not a guarantee that the owner is online.
+
+    Initial transcript downloads remain syncing. Until a local copy and an
+    owner session watermark are available (including older peers), ``scope=owner``
+    retains the conservative owner-wide operation count and state fallback.
+    """
     session = await require_session(request, session_id)
     from app.network import transcripts
-    from app.network.transport import owner_sync_status
+    from app.network.transport import session_sync_status
     if await run_sync(transcripts.prioritise, session_id):
         # A worker that just joined has not copied this transcript yet; it is next.
-        return {"state": "syncing", "pending_updates": 0, "transcript": "downloading"}
-    return await run_sync(owner_sync_status, session.get("owner_device_id"))
+        return {"state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner"}
+    return await run_sync(session_sync_status, session_id, session.get("owner_device_id"))
 
 
 @router.get("/{session_id}/state")
@@ -2198,6 +2237,11 @@ async def get_session_state(
         "session_id": session_id,
         "title": session.get("title"),
         "status": session.get("status"),
+        "last_user_message_at": _serialize_last_user_message_at(session.get("last_user_message_at")),
+        "last_user_message_seq": session.get("last_user_message_seq"),
+        "last_user_message_epoch": session.get("last_user_message_epoch"),
+        "last_assistant_question_seq": session.get("last_assistant_question_seq"),
+        "last_assistant_question_epoch": session.get("last_assistant_question_epoch"),
         "is_streaming": sync_state["is_streaming"],
         "connected_devices": sync_state["connected_devices"],
     }

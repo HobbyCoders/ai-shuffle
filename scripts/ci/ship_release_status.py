@@ -1,8 +1,10 @@
 """One-shot, read-only release readiness summary for the ship-release skill.
 
 Gathers every gate the owner otherwise has to be walked through one question at
-a time: what changed since the last final tag, whether ``main`` CI is green on
-the release candidate, whether edge publication caught up, the Play gates, and
+a time: what changed since the last final tag, whether the local full suites
+passed on the release candidate on Linux and on Windows (the ``local/full-suite``
+and ``local/windows-suite`` statuses ``scripts/local_ci.py full --attest``
+posts), whether edge publication caught up, the Play gates, and
 which platforms actually need a new build, and the live smoke gate: a passing
 smoke result file for the candidate revision on every covered worker (see
 ``docs/internal/live-smoke.md``). Nothing is tagged, dispatched or published.
@@ -15,6 +17,7 @@ Usage::
     python scripts/ci/ship_release_status.py --json     # machine-readable
     python scripts/ci/ship_release_status.py --smoke-worker Unraid --smoke-worker DesktopWorker
     python scripts/ci/ship_release_status.py --skip-smoke "DesktopWorker away this week"
+    python scripts/ci/ship_release_status.py --skip-windows "DesktopWorker away; no Windows changes"
 """
 from __future__ import annotations
 
@@ -36,8 +39,11 @@ from scripts.live_smoke import scenarios as smoke_scenarios
 
 REPOSITORY = "HobbyCoders/ai-shuffle"
 FINAL_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-# Workflows whose latest run on the candidate must be green before tagging.
-REQUIRED_CI = ("CI Backend", "CI JavaScript", "CI fluid")
+OWNER_ID = "76577322"
+# Local full-suite passes the owner must have posted on the candidate before
+# tagging. CI does not test code; scripts/local_ci.py full --attest posts these.
+REQUIRED_LOCAL = ("local/full-suite", "local/windows-suite")
+WINDOWS_CONTEXT = "local/windows-suite"
 EDGE_WORKFLOW = "Publish desktop source update"
 
 # Path prefixes -> platform that needs a fresh artifact when they change.
@@ -67,6 +73,16 @@ def latest_final_tag(tags: Iterable[str]) -> Optional[str]:
     return max(finals, key=lambda t: tuple(int(p) for p in t[1:].split(".")))
 
 
+def release_tags() -> list:
+    """Tags on origin. A checkout can carry local-only tags (an old v5.0.0 on
+    DesktopWorker once made the preflight suggest v5.0.1), so local tags are read
+    only when origin cannot be reached."""
+    remote = _try("git", "ls-remote", "--tags", "--refs", "origin")
+    if remote is None:
+        return (_try("git", "tag", "--list") or "").splitlines()
+    return [line.split("refs/tags/", 1)[1] for line in remote.splitlines() if "refs/tags/" in line]
+
+
 def next_patch(tag: Optional[str]) -> str:
     if not tag:
         return "v0.1.0"
@@ -83,20 +99,26 @@ def platforms_needing_builds(changed: Iterable[str]) -> dict:
     return {name: {"needed": bool(paths), "example_paths": paths} for name, paths in result.items()}
 
 
-def ci_state(runs: list, sha: str) -> dict:
-    """Latest run per required workflow on ``sha`` -> success/pending/failed/missing."""
+def local_state(statuses: list) -> dict:
+    """Newest owner-posted status per required local suite -> success/pending/failure/missing."""
     state = {}
-    for name in REQUIRED_CI + (EDGE_WORKFLOW,):
-        mine = [r for r in runs if r.get("workflowName") == name and r.get("headSha") == sha]
-        if not mine:
-            state[name] = "missing"
-            continue
-        run = mine[0]  # gh returns newest first
-        if run.get("status") != "completed":
-            state[name] = "pending"
-        else:
-            state[name] = "success" if run.get("conclusion") == "success" else (run.get("conclusion") or "failed")
+    for context in REQUIRED_LOCAL:
+        mine = [s for s in statuses if s.get("context") == context
+                and str((s.get("creator") or {}).get("id")) == OWNER_ID]
+        # GitHub lists statuses newest first.
+        state[context] = mine[0].get("state") or "missing" if mine else "missing"
     return state
+
+
+def edge_state(runs: list, sha: str) -> str:
+    """Latest edge publication run on ``sha`` -> success/pending/failed/missing."""
+    mine = [r for r in runs if r.get("workflowName") == EDGE_WORKFLOW and r.get("headSha") == sha]
+    if not mine:
+        return "missing"
+    run = mine[0]  # gh returns newest first
+    if run.get("status") != "completed":
+        return "pending"
+    return "success" if run.get("conclusion") == "success" else (run.get("conclusion") or "failed")
 
 
 def _gh_json(*args: str):
@@ -128,10 +150,10 @@ def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optio
 
 
 def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = None,
-            smoke_dir: Optional[str] = None) -> dict:
+            smoke_dir: Optional[str] = None, skip_windows: Optional[str] = None) -> dict:
     _try("git", "fetch", "--quiet", "--tags", "origin", "main")
     head = _try("git", "rev-parse", "origin/main") or ""
-    tag = latest_final_tag((_try("git", "tag", "--list") or "").splitlines())
+    tag = latest_final_tag(release_tags())
     tag_sha = _try("git", "rev-list", "-n", "1", tag) if tag else None
     commits = []
     changed: list = []
@@ -141,7 +163,9 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         changed = (_try("git", "diff", "--name-only", f"{tag}..origin/main") or "").splitlines()
     runs = _gh_json("run", "list", "--repo", REPOSITORY, "--branch", "main", "--limit", "60",
                     "--json", "workflowName,status,conclusion,headSha") or []
-    ci = ci_state(runs, head)
+    statuses = (_gh_json("api", f"repos/{REPOSITORY}/commits/{head}/statuses?per_page=100") or []) if head else []
+    local = local_state(statuses)
+    edge = edge_state(runs, head)
     gates = {
         "ANDROID_WORKERS_READY": _variable("ANDROID_WORKERS_READY"),
         "PLAY_SIGNING_READY": _variable("PLAY_SIGNING_READY", env="google-play-internal"),
@@ -149,9 +173,16 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
     blockers = []
     if not commits:
         blockers.append("Nothing new on main since the last release tag.")
-    for name in REQUIRED_CI:
-        if ci.get(name) != "success":
-            blockers.append(f"{name} on {head[:9]} is {ci.get(name)}.")
+    notes = []
+    for context in REQUIRED_LOCAL:
+        if local[context] == "success":
+            continue
+        if context == WINDOWS_CONTEXT and skip_windows:
+            notes.append(f"Windows full suite not run on this release (--skip-windows): {skip_windows}")
+            continue
+        where = "on DesktopWorker (Windows)" if context == WINDOWS_CONTEXT else "on a Linux worker"
+        blockers.append(f"{context} on {head[:9]} is {local[context]}: run "
+                        f"`python scripts/local_ci.py full --attest` {where} on a clean checkout of main.")
     smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir)
     blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
     return {
@@ -160,12 +191,12 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         "suggested_tag": next_patch(tag),
         "commits_since_release": len(commits),
         "commit_subjects": commits[:30],
-        "ci_on_main_head": ci,
-        "edge_published": ci.get(EDGE_WORKFLOW) == "success",
+        "local_suites_on_main_head": local,
+        "edge_published": edge == "success",
         "platform_builds": platforms_needing_builds(changed),
         "play_gates": gates,
         "smoke": smoke,
-        "release_notes_lines": smoke["release_notes_lines"],
+        "release_notes_lines": smoke["release_notes_lines"] + notes,
         "blockers": blockers,
         "ready": not blockers,
     }
@@ -176,7 +207,8 @@ def render(report: dict) -> str:
         f"Candidate: origin/main {report['main_head'][:9]}  "
         f"(last release {report['last_release']['tag']}, {report['commits_since_release']} commits since)",
         f"Suggested tag: {report['suggested_tag']}",
-        "CI on candidate: " + ", ".join(f"{k}={v}" for k, v in report["ci_on_main_head"].items()),
+        "Local suites on candidate: " + ", ".join(f"{k}={v}" for k, v in report["local_suites_on_main_head"].items())
+        + f"; edge published: {'yes' if report['edge_published'] else 'no'}",
         "Play gates: " + ", ".join(f"{k}={v}" for k, v in report["play_gates"].items()),
     ]
     smoke = report.get("smoke")
@@ -185,7 +217,7 @@ def render(report: dict) -> str:
                      + (f" ({smoke['skip_reason']})" if smoke.get("skip_reason") else ""))
         lines += [f"  owner to-do: {t}" for t in smoke.get("owner_todo", [])]
         lines += [f"  skipped blocker: {b}" for b in smoke.get("would_block", [])]
-        lines += [f"  release notes must say: {line}" for line in smoke.get("release_notes_lines", [])]
+    lines += [f"  release notes must say: {line}" for line in report.get("release_notes_lines", [])]
     for name, info in report["platform_builds"].items():
         lines.append(f"{name}: {'changed' if info['needed'] else 'no changes'}"
                      + (f" (e.g. {', '.join(info['example_paths'][:3])})" if info["needed"] else ""))
@@ -201,10 +233,12 @@ def main(argv: Optional[list] = None) -> int:
                              "every worker with a file for the candidate)")
     parser.add_argument("--skip-smoke", metavar="REASON", default=None,
                         help="tag without a passing live smoke; the reason goes into the release notes")
+    parser.add_argument("--skip-windows", metavar="REASON", default=None,
+                        help="tag without a Windows full-suite pass; the reason goes into the release notes")
     parser.add_argument("--smoke-dir", default=None,
                         help="smoke results folder (default $AI_SHUFFLE_SMOKE_DIR or <data dir>/smoke)")
     args = parser.parse_args(argv)
-    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir)
+    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_windows)
     print(json.dumps(report, indent=2) if args.json else render(report))
     return 0
 

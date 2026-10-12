@@ -240,6 +240,12 @@ async def test_continuations_keep_order_and_dedupe_each_completion(mock_db):
         ]
         for report in ("original report", "first continuation", "second continuation"):
             assert queued[0]["prompt"].count(report) == 1
+        from app.api.events import _wire
+        completed = [e for e in se_db.get_events("owner") if e["event_type"] == "subagent.completed"]
+        assert [_wire(e)["result"] for e in completed] == [
+            "first continuation", "second continuation",
+        ]
+        assert all(e["payload"]["result_truncated"] is False for e in completed)
         assert turns_db.start_turn(queued[0]["id"], None, "runner")
         for frame in frames:
             await turn_scheduler.on_task_terminal("owner", frame)
@@ -265,6 +271,62 @@ async def test_resumed_worker_error_is_not_reported_as_success(mock_db):
     frame = notify.await_args.args[1]
     assert frame["status"] == "error"
     assert "transport failure" in frame["summary"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "error", "stopped"])
+@pytest.mark.parametrize("oversized", [False, True], ids=["above-task-cap", "above-byte-cap"])
+async def test_continuation_report_is_durable_bounded_and_deduped(mock_db, ending, oversized):
+    import json
+    from app.api.events import _frame
+    from app.core.agent_messaging import finish_message_resume
+
+    task_registry.start_task("owner", "child", "agent", "Continue", tool_use_id="child")
+    kept = "é" * 30_000 if oversized else "x" * 61000
+    report = kept + "\n\n" + "tail" * 3000 if oversized else kept
+    if ending == "error":
+        event = {"type": "turn.completed", "payload": {"is_error": True, "errors": report}}
+    else:
+        event = {"type": "assistant.text_delta", "payload": {"text": report}}
+    se_db.append_events("child", [{**event, "turn_id": "continuation"}])
+    settled = {"id": "continuation", "payload": {"agent_message_reply_to": "owner"}}
+    if ending == "stopped":
+        task_registry.mark_user_stopped("child")
+    with patch.object(turn_scheduler, "on_task_terminal", AsyncMock()) as notify:
+        await asyncio.gather(*(finish_message_resume("child", settled, "completed") for _ in range(2)))
+        if ending == "stopped":
+            notify.assert_not_awaited()
+    rows = [e for e in se_db.get_events("owner") if e["event_type"] == "subagent.completed"]
+    assert len(rows) == 1  # Durable id, even though notify is mocked and never latches.
+    live = json.loads(_frame(rows[0]).split("data: ", 1)[1])
+    replay = se_db.get_events("owner", from_seq=rows[0]["seq"] - 1)[0]
+    assert json.loads(_frame(replay).split("data: ", 1)[1]) == live
+    assert live["result"] == kept
+    assert live["result_truncated"] is oversized
+    assert live["result_preview"] == report[:1999] + "…"
+    assert live["status"] == {"completed": "completed", "error": "failed", "stopped": "killed"}[ending]
+
+
+@pytest.mark.asyncio
+async def test_continuation_supervisor_stop_persists_one_killed_report(mock_db):
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.agent_messaging import finish_message_resume
+
+    record = supervisor.WorkerRecord(
+        parent_session_id="owner", worker_session_id="child", task_id="child",
+        tool_use_id="child", continuation_turn_id="resume", torn_down=True,
+    )
+    supervisor.register_worker(record)
+    await supervisor._settle_card(record, "Stopped by user", "Stopped")
+    await supervisor._settle_card(record, "Stopped by user", "Stopped")
+    with patch.object(turn_scheduler, "on_task_terminal", AsyncMock()) as notify:
+        await finish_message_resume("child", {"id": "resume", "payload": {
+            "agent_message_reply_to": "owner"}}, "aborted")
+        notify.assert_not_awaited()
+    [done] = [e for e in se_db.get_events("owner") if e["event_type"] == "subagent.completed"]
+    assert done["payload"]["status"] == "killed"
+    assert done["payload"]["result"] == "Stopped by user"
+    assert done["payload"]["result_truncated"] is False
 
 
 @pytest.mark.asyncio
@@ -2544,7 +2606,9 @@ async def test_missing_cwd_runtime_cycle_records_one_failure_and_finishes_resume
             })
             await turn_scheduler.on_task_terminal(sibling, {
                 "task_id": broken, "status": "error", "summary": "missing checkout",
-                "agent_message_turn_id": wake["id"],
+                # The resumed attempt belongs to the parked logical turn;
+                # finish_message_resume publishes that id, not the queue row.
+                "agent_message_turn_id": parked["id"],
             })
             await turn_scheduler._kick_impl(broken)
         assert se_db.get_events(broken, 0, 100) == before
@@ -2557,7 +2621,7 @@ async def test_missing_cwd_runtime_cycle_records_one_failure_and_finishes_resume
         if report_to_parent:
             (report,) = turns_db.get_queued_turns(recipient)
             assert str(missing) in report["prompt"]
-            assert report["payload"]["pending_frames"][0]["agent_message_turn_id"] == wake["id"]
+            assert report["payload"]["pending_frames"][0]["agent_message_turn_id"] == parked["id"]
             await turn_scheduler.on_task_terminal(recipient, report["payload"]["pending_frames"][0])
             assert len(turns_db.get_queued_turns(recipient)) == 1
 

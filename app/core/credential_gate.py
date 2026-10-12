@@ -1,14 +1,11 @@
 """One answer to "may a new agent run start on this worker?".
 
-Two things decide it:
+The provider the run uses must have its credential. Every provider counts the
+same: Claude, OpenAI, xAI Grok, OpenRouter and custom gateways. Cloud plans do
+not restrict local runs.
 
-1. The license allows new agent runs (``license.license_allows_agent_runs``;
-   unlicensed blocks only new runs, never data).
-2. The provider the run uses has its credential. Every provider counts the
-   same: Claude, OpenAI, xAI Grok, OpenRouter and custom gateways.
-
-Worker readiness (startup, ``GET /auth/status``) is "the license allows runs
-and at least one agent provider is usable" (:func:`ready_providers`). A worker
+Worker readiness (startup, ``GET /auth/status``) means at least one agent
+provider is usable (:func:`ready_providers`). A worker
 with no Claude credential but a connected OpenAI or Grok account is ready.
 
 Turn start is decided per provider (:func:`turn_refusal`). A turn on the
@@ -154,17 +151,12 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
 def agent_credentials_ready(cli=None) -> Tuple[bool, Optional[str]]:
     """``(ready, reason)`` for a new run on the Claude leg of this worker.
 
-    License first, then the Claude credential. Worker readiness across every
+    The Claude credential only. Worker readiness across every
     provider is :func:`status_payload` / :func:`record_startup`.
 
     Blocking (may run the CLI probe on a cache miss); async callers use
     :func:`agent_credentials_ready_async`.
     """
-    from app.core.license import license_allows_agent_runs
-
-    allowed, reason = license_allows_agent_runs()
-    if not allowed:
-        return False, reason
     try:
         return claude_credential_ready(cli)
     except Exception:  # noqa: BLE001 — a broken check must not look like "ready"
@@ -185,10 +177,7 @@ def turn_refusal(leg: Optional[str]) -> Optional[str]:
     if leg in (None, "delegated"):
         ready, reason = agent_credentials_ready()
         return None if ready else reason
-    from app.core.license import license_allows_agent_runs
-
-    allowed, reason = license_allows_agent_runs()
-    return None if allowed else reason
+    return None
 
 
 async def turn_refusal_async(leg: Optional[str]) -> Optional[str]:
@@ -694,24 +683,19 @@ def default_run_selection(
 def record_startup(cli=None) -> Tuple[bool, Optional[str]]:
     """Startup's check: log whether agents can run on this worker.
 
-    Ready means the license allows runs and at least one provider is usable.
+    Ready means at least one provider is usable.
     Claude missing or off while another provider is ready is logged as
     information, not as a setup problem.
     """
     global startup_state, startup_reason
-    from app.core.license import license_allows_agent_runs
-
-    license_ok, license_reason = license_allows_agent_runs()
     claude_ok, claude_reason = _claude_ok(cli)
     providers = ready_providers(claude_ok=claude_ok)
-    ready = bool(license_ok and providers)
-    reason = license_reason if not license_ok else (None if providers else NO_PROVIDER_MESSAGE)
+    ready = bool(providers)
+    reason = None if providers else NO_PROVIDER_MESSAGE
     startup_state = "ready" if ready else "setup_required"
     startup_reason = reason
     if ready:
         logger.info("Agent runs: ready (providers: %s)", ", ".join(providers))
-    elif not license_ok:
-        logger.warning("Agent runs are blocked: %s", reason)
     else:
         logger.warning("Agent runs are blocked until a provider is set up: %s", reason)
     if not claude_ok:
@@ -725,27 +709,20 @@ def record_startup(cli=None) -> Tuple[bool, Optional[str]]:
 def status_payload(cli=None) -> dict:
     """The gate as ``/auth/status`` and Settings report it.
 
-    ``ready`` is "the license allows runs and any agent provider is usable";
-    ``claude_credential_ready`` is the Claude-only answer. ``reason`` explains a
-    false ``ready`` (license first, then the missing provider).
+    ``ready`` means any agent provider is usable; ``claude_credential_ready``
+    is the Claude-only answer. ``reason`` explains a missing provider.
     """
     from app.core import claude_auth_mode
-    from app.core.license import license_allows_agent_runs
-
-    license_ok, license_reason = license_allows_agent_runs()
     claude_ok, _ = _claude_ok(cli)
     providers = ready_providers(claude_ok=claude_ok)
     any_ok = bool(providers)
-    if not license_ok:
-        reason = license_reason
-    else:
-        reason = None if any_ok else NO_PROVIDER_MESSAGE
+    reason = None if any_ok else NO_PROVIDER_MESSAGE
     return {
-        "ready": bool(license_ok and any_ok),
+        "ready": any_ok,
         "reason": reason,
         "mode": claude_auth_mode.current_mode(),
         "claude_credential_ready": claude_ok,
-        "license_allows_runs": license_ok,
+        "license_allows_runs": True,
         "startup_state": startup_state,
         "any_provider_ready": any_ok,
         "ready_providers": providers,

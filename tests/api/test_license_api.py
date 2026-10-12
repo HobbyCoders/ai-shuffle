@@ -22,7 +22,7 @@ def client(monkeypatch):
             raise api.licensing.LicenseError(409, "All 3 workers on this license are in use.", code="seats_full", seats=3, installs=[{"install_id": "x"}])
         if key == "unknown":
             raise api.licensing.LicenseError(404, "License key not recognised")
-        return {"state": "active", "allowed": True}
+        return {"state": "paid", "allowed": True}
 
     async def release_seat(key, install_id):
         calls.append(("release", key, install_id))
@@ -30,17 +30,17 @@ def client(monkeypatch):
 
     async def deactivate():
         calls.append(("deactivate",))
-        return {"state": "unlicensed", "seat_released": True}
+        return {"state": "not_linked", "seat_released": True}
 
     async def refresh():
         calls.append(("refresh",))
-        return {"state": "active"}
+        return {"state": "paid"}
 
     monkeypatch.setattr(api.licensing, "activate", activate)
     monkeypatch.setattr(api.licensing, "deactivate", deactivate)
     monkeypatch.setattr(api.licensing, "release_seat", release_seat)
     monkeypatch.setattr(api.licensing, "refresh", refresh)
-    monkeypatch.setattr(api.licensing, "status", lambda: {"mode": "beta", "state": "beta", "allowed": True})
+    monkeypatch.setattr(api.licensing, "status", lambda: {"mode": "cloud", "state": "not_linked", "allowed": True})
     with TestClient(app) as test_client:
         yield test_client, app, calls
 
@@ -48,13 +48,13 @@ def client(monkeypatch):
 def test_status_is_readable_by_any_signed_in_user(client):
     c, app, _ = client
     app.dependency_overrides.pop(require_admin)
-    assert c.get("/api/v1/license").json() == {"mode": "beta", "state": "beta", "allowed": True}
+    assert c.get("/api/v1/license").json() == {"mode": "cloud", "state": "not_linked", "allowed": True}
 
 
 def test_owner_activates_and_errors_keep_their_status_and_details(client):
     c, _, calls = client
     ok = c.post("/api/v1/license/activate", json={"key": "ASH-AAAAA-AAAAA-AAAAA-AAAAA"})
-    assert ok.status_code == 200 and ok.json() == {"activated": True, "state": "active", "allowed": True}
+    assert ok.status_code == 200 and ok.json() == {"activated": True, "state": "paid", "allowed": True}
     # Seats full is an answer the card acts on, so it comes back as data.
     full = c.post("/api/v1/license/activate", json={"key": "full"})
     assert full.status_code == 200
@@ -67,7 +67,7 @@ def test_owner_activates_and_errors_keep_their_status_and_details(client):
     assert c.post("/api/v1/license/activate", json={"key": ""}).status_code == 422
     assert c.post("/api/v1/license/activate", json={"key": "k", "extra": 1}).status_code == 422
     assert c.post("/api/v1/license/deactivate").json()["seat_released"] is True
-    assert c.post("/api/v1/license/refresh").json() == {"state": "active"}
+    assert c.post("/api/v1/license/refresh").json() == {"state": "paid"}
     assert calls[0] == ("activate", "ASH-AAAAA-AAAAA-AAAAA-AAAAA")
 
 

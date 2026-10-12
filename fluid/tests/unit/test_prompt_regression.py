@@ -175,7 +175,9 @@ def test_delegation_limits_read_as_ceilings_not_targets() -> None:
     for surface in (frozenset({"Task"}), frozenset({"Task", "Swarm"})):
         assert DELEGATION_SIZING in task.describe(surface)
     swarm_text = swarm.describe(frozenset({"Task", "Swarm"}))
-    assert DELEGATION_SIZING in swarm_text
+    assert DELEGATION_SIZING not in swarm_text
+    assert "delegation rules in the system prompt (or Task" in swarm_text
+    assert (swarm_text + task.describe(frozenset({"Task", "Swarm"}))).count(DELEGATION_SIZING) == 1
     assert "at most 64 tasks; that is a ceiling, not a target" in swarm_text
 
     # Ranges are spelled out and stay far below every maximum: no digits
@@ -237,9 +239,9 @@ def test_shared_fragments_appear_verbatim() -> None:
             fr.END_TURN_ON_BACKGROUND,
             ("Task", "Monitor"),
         ),
-        "SWARM_ROUTING": (fr.SWARM_ROUTING, ("Task", "Swarm")),
-        "DELEGATION_SIZING": (fr.DELEGATION_SIZING, ("Task", "Swarm")),
-        "SUBAGENT_WORKTREE_GUIDANCE": (fr.SUBAGENT_WORKTREE_GUIDANCE, ("Task", "Swarm")),
+        "SWARM_ROUTING": (fr.SWARM_ROUTING, ("Task",)),
+        "DELEGATION_SIZING": (fr.DELEGATION_SIZING, ("Task",)),
+        "SUBAGENT_WORKTREE_GUIDANCE": (fr.SUBAGENT_WORKTREE_GUIDANCE, ("Task",)),
         "WEB_UNTRUSTED": (fr.WEB_UNTRUSTED, ("WebFetch", "WebSearch")),
     }
     for label, (fragment, names) in carriers.items():

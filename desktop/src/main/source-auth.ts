@@ -23,7 +23,7 @@ export function isLicenseKeyValue(value: unknown): value is string {
  */
 export async function publicSourceFetch(url:string, lease?:string, licenseKey?:string):Promise<Response> {
  const target=new URL(url);
- if(target.origin!==SOURCE_ORIGIN||target.username||target.password||!/^\/v1\/desktop\/(manifest|manifest\/edge|sources\/[a-f0-9]{40})$/.test(target.pathname)||target.search||target.hash)throw new Error('Invalid source download endpoint');
+ if(target.origin!==SOURCE_ORIGIN||target.username||target.password||!/^\/v1\/desktop\/(manifest|manifest\/(?:nightly|edge)|sources\/[a-f0-9]{40})$/.test(target.pathname)||target.search||target.hash)throw new Error('Invalid source download endpoint');
  const init:RequestInit={method:'GET',redirect:'error',credentials:'omit',signal:AbortSignal.timeout(120000)};
  if(lease!==undefined){if(!isLeaseValue(lease))throw new Error('Invalid license lease');init.headers={[LEASE_HEADER]:lease};}
  else if(licenseKey!==undefined){if(!isLicenseKeyValue(licenseKey))throw new Error('Invalid license key');init.headers={[LICENSE_KEY_HEADER]:licenseKey};}

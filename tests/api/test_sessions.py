@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from app.api.sessions import check_session_access, enrich_sessions_with_tags
 from tests.api.helpers import app  # noqa: F401  (fixture)
+from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
 
 # =============================================================================
@@ -308,11 +309,12 @@ class TestControllableAnnotation:
 
     def _annotate(self, sessions, installs_map, me="me-install"):
         from app.api import sessions_helpers
+        from app.core.config import settings
 
-        mock_settings = MagicMock()
-        mock_settings.effective_instance_id = me
+        # Keep the settings singleton: placement is imported lazily here and
+        # would retain a replacement mock after this fixture exits.
         with patch("app.api.sessions_helpers.database") as mock_db, \
-                patch("app.core.config.settings", mock_settings), \
+                patch.object(type(settings), "effective_instance_id", property(lambda _: me)), \
                 patch("app.db.projects_v2.list_projects_v2", return_value=[]):
             mock_db.get_installs_map.return_value = installs_map
             mock_db.get_project.return_value = None
@@ -1178,6 +1180,119 @@ class TestSessionStoreReadIsolation:
 # Test Update Session Endpoint
 # =============================================================================
 
+@pytest.fixture
+def stored_sessions_client():
+    """Exercise the router against persisted sessions and assistant bindings."""
+    from fastapi import FastAPI
+    from app.api.auth import require_auth
+    from app.api.sessions import router
+
+    application = FastAPI()
+    application.include_router(router)
+    application.dependency_overrides[require_auth] = lambda: "test-token"
+    with TestClient(application) as value:
+        yield value
+
+
+class TestAssistantHomeMutations:
+    @pytest.mark.parametrize("params", [
+        {"title": "Renamed"},
+        {"title": ""},
+        {"title": "Renamed", "status": "completed"},
+    ])
+    def test_rename_refused_before_any_write(
+        self, stored_sessions_client, assistant_fixture, params, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        rename = MagicMock()
+        monkeypatch.setattr("app.api.sessions.sdk_rename_session", rename)
+        response = stored_sessions_client.patch(f"/api/v1/sessions/{sid}", params=params)
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "Your personal assistant is a persistent conversation and cannot be renamed"
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        rename.assert_not_called()
+
+    def test_delete_refused_preserves_home(self, stored_sessions_client, assistant_fixture, monkeypatch):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        cleanup = AsyncMock()
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
+        response = stored_sessions_client.delete(f"/api/v1/sessions/{sid}")
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "Your personal assistant is a persistent conversation and cannot be deleted"
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        cleanup.assert_not_called()
+
+    def test_batch_delete_skips_home_and_deletes_ordinary_sessions(
+        self, stored_sessions_client, assistant_fixture, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        ordinary_ids = ["ordinary-before-home", "ordinary-after-home"]
+        for ordinary_id in ordinary_ids:
+            database.create_session(ordinary_id, "default", title="Ordinary")
+        cleanup = AsyncMock()
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
+        response = stored_sessions_client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": [ordinary_ids[0], sid, ordinary_ids[1]]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "deleted_count": 2,
+            "total_requested": 3,
+            "errors": [f"Access denied for session {sid}: Your personal assistant is a persistent conversation and cannot be deleted"],
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        assert all(database.get_session(ordinary_id) is None for ordinary_id in ordinary_ids)
+        assert [call.args[0] for call in cleanup.await_args_list] == ordinary_ids
+
+    def test_status_only_patch_still_allowed(self, stored_sessions_client, assistant_fixture):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        response = stored_sessions_client.patch(f"/api/v1/sessions/{sid}", params={"status": "completed"})
+        assert response.status_code == 200
+        row = database.get_session(sid)
+        assert row["status"] == "completed"
+        assert row["title"] == assistant_fixture["title"]
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+
+    def test_ordinary_rename_and_delete_still_allowed(
+        self, stored_sessions_client, assistant_fixture, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        database.create_session("ordinary-mutation", "default", title="Ordinary")
+        url = "/api/v1/sessions/ordinary-mutation"
+        response = stored_sessions_client.patch(url, params={"title": "Renamed"})
+        assert response.status_code == 200
+        assert database.get_session("ordinary-mutation")["title"] == "Renamed"
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", AsyncMock())
+        assert stored_sessions_client.delete(url).status_code == 204
+        assert database.get_session("ordinary-mutation") is None
+        assert store.get_state(service.assistant_id())["home_session_id"] == assistant_fixture["id"]
+
+
 class TestUpdateSession:
     """Test PATCH /api/v1/sessions/{session_id} endpoint."""
 
@@ -1747,16 +1862,28 @@ class TestGetSyncChanges:
 
 
 class TestGetSessionSyncStatus:
-    def test_returns_owner_freshness(self, client, mock_database, sample_session):
+    def test_returns_session_freshness(self, client, mock_database, sample_session):
         sample_session["owner_device_id"] = "peer-owner"
         mock_database.get_session.return_value = sample_session
-        with patch("app.network.transport.owner_sync_status", return_value={
-            "state": "syncing", "pending_updates": 12,
-        }) as freshness:
+        status = {"state": "syncing", "pending_updates": 12, "scope": "session",
+                  "seq": 3, "epoch": "log-id", "owner_seq": 15, "owner_epoch": "log-id"}
+        with patch("app.network.transport.session_sync_status", return_value=status) as freshness:
             response = client.get("/api/v1/sessions/test-session-id/sync-status")
         assert response.status_code == 200
-        assert response.json() == {"state": "syncing", "pending_updates": 12}
-        freshness.assert_called_once_with("peer-owner")
+        assert response.json() == status
+        freshness.assert_called_once_with("test-session-id", "peer-owner")
+
+    def test_initial_transcript_download_stays_syncing(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        with patch("app.network.transcripts.prioritise", return_value=True), patch(
+            "app.network.transport.session_sync_status"
+        ) as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 200
+        assert response.json() == {
+            "state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner",
+        }
+        freshness.assert_not_called()
 
     def test_missing_session(self, client, mock_database):
         mock_database.get_session.return_value = None

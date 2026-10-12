@@ -3,6 +3,7 @@ import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 from fluid.tools.registry import ToolCtx
 from fluid.swarm import SwarmCoordinator, Launch
 from app.core import agent_messaging, session_runtime, swarm
@@ -21,17 +22,18 @@ def clean_runtime():
     swarm._locks.clear()
 
 @pytest.mark.asyncio
-async def test_swarm_naming_retired_explore_fails_normally(agents, monkeypatch):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
+async def test_swarm_naming_retired_agent_fails_normally(agents, monkeypatch, retired_id):
     from app.core import task_dispatch
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    agents.create_profile("Explore", "Explore", None, {"model": "haiku"}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     seed_builtin_subagents()
     _mk_session(agents, "retired-swarm-parent", "root-agent")
     monkeypatch.setattr(swarm, "persist", AsyncMock())
     ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher("retired-swarm-parent")})
     result = await swarm.make_handler(lambda: "retired-swarm-parent")({"action": "start", "tasks": [
-        {"id": "search", "agent": "Explore", "prompt": "Find it"},
+        {"id": "search", "agent": retired_id, "prompt": "Find it"},
     ]}, ctx)
     assert not result.is_error
     key = result.background_task.task_id
@@ -43,7 +45,29 @@ async def test_swarm_naming_retired_explore_fails_normally(agents, monkeypatch):
     from app.core.agent_provider_models import available_subagents, resolve_subagent
     error = json.loads(snapshot["tasks"][0]["error"])
     assert error["ok"] is False
-    assert error["error"] == resolve_subagent("Explore", available_subagents("root-agent", None))[1]
+    assert error["error"] == resolve_subagent(retired_id, available_subagents("root-agent", None))[1]
+
+
+@pytest.mark.asyncio
+async def test_empty_roster_refuses_swarm_without_dispatch(bare_db, monkeypatch):
+    from app.db import database
+    from app.core import task_dispatch
+    from app.core.builtin_subagents import seed_builtin_subagents
+
+    seed_builtin_subagents()
+    database.create_profile("only-caller", "Caller", None, {"model": "opus"})
+    database.create_session("empty-swarm-parent", profile_id="only-caller")
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher("empty-swarm-parent")})
+    result = await swarm.make_handler(lambda: "empty-swarm-parent")({"action": "start", "tasks": [
+        {"id": "work", "agent": "general-purpose", "prompt": "Work"},
+    ]}, ctx)
+    key = result.background_task.task_id
+    coordinator = swarm.coordinators["empty-swarm-parent"]
+    await coordinator.jobs[key]
+    snapshot = coordinator.snapshot(key)
+    assert snapshot["status"] == "failed"
+    assert "Available subagent IDs: none" in snapshot["tasks"][0]["error"]
 
 
 @pytest.mark.asyncio

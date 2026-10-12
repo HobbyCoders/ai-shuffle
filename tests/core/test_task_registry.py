@@ -142,12 +142,13 @@ class TestLifecycle:
         assert [t["id"] for t in visible] == ["t1"]
         assert visible[0]["status"] == "running"
 
-    def test_resume_revival_preserves_started_at(self, reg):
+    def test_resume_revival_replaces_started_at(self, reg, monkeypatch):
+        monkeypatch.setattr("app.core.task_registry._now_iso", lambda: "2026-10-09T00:00:00Z")
         reg.start_task("s1", "t1", "agent", "work")
-        started_at = reg.get_active("s1")[0]["startedAt"]
         reg.complete_task("s1", "t1", "completed")
+        monkeypatch.setattr("app.core.task_registry._now_iso", lambda: "2026-10-10T00:00:00Z")
         reg.start_task("s1", "t1", "agent", "work")
-        assert reg.get_active("s1")[0]["startedAt"] == started_at
+        assert reg.get_active("s1")[0]["startedAt"] == "2026-10-10T00:00:00Z"
 
     def test_resume_does_not_revive_failed_task(self, reg):
         # A re-emitted start for a FAILED/killed task is the force-cleanup /

@@ -23,6 +23,15 @@ from app.network import usage_budget
 PROVIDER = "cooldown-router"
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_fal_credentials(monkeypatch):
+    # These request counts cover only the seeded OpenRouter rows. An inherited
+    # fal key also schedules the global billing poll, doubling the mock's calls
+    # (and budget claims) without duplicating any OpenRouter request.
+    for name in provider_usage.FAL_KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
 class Clock:
     def __init__(self):
         # Real epoch base: failure rows are stamped with the real wall clock.
@@ -109,6 +118,38 @@ async def test_forced_refresh_respects_cooldown(provider, clock, counts, upstrea
     passes = await popover_opens(provider_usage.ProviderUsageMonitor(), clock,
                                  every=3, until=600, cooldown=cooldown)
     assert {"passes": passes, "claims": counts["claims"], "upstream": upstream.await_count} == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_name", provider_usage.FAL_KEY_ENV_VARS)
+async def test_explicit_fal_key_polls_a_separate_endpoint(
+    provider, clock, upstream, monkeypatch, env_name,
+):
+    """Two configured sources mean two requests, not a duplicate model-key poll."""
+    monkeypatch.setenv(env_name, "dummy-fal-key")
+    router_url = "https://router.example.test/api/v1/key"
+    bodies = {
+        router_url: {"data": {"usage": 1.0, "limit": 10.0}},
+        provider_usage.FAL_BALANCE_URL: {"balance": 5.0},
+    }
+
+    def response(url, **_):
+        return httpx.Response(200, json=bodies[url], request=httpx.Request("GET", url))
+
+    upstream.side_effect = response
+    monitor = provider_usage.ProviderUsageMonitor()
+    await monitor.request_refresh(force=True, cooldown=30)
+    assert sorted(call.args[0] for call in upstream.await_args_list) == sorted(bodies)
+    snapshots = {s["provider_id"]: s for s in db.get_all_provider_usage_snapshots()}
+    assert snapshots[PROVIDER]["credits"]["usage"] == 1.0
+    assert snapshots[provider_usage.FAL_USAGE_PROVIDER_ID]["credits"]["balance_remaining"] == 5.0
+
+    clock.now += 30
+    await monitor.request_refresh(force=True, cooldown=30)
+    assert upstream.await_count == 2  # Both sources are still budget-limited.
+    clock.now += 270
+    await monitor.request_refresh(force=True, cooldown=30)
+    assert sorted(call.args[0] for call in upstream.await_args_list) == sorted(list(bodies) * 2)
 
 
 @pytest.mark.asyncio

@@ -870,6 +870,29 @@ class AutomationManager:
             )
             return
 
+        def _cancel_ineligible_run() -> bool:
+            # Approvals may outlive agent retirement, or wait behind another
+            # run. Re-read at the common boundary, before ANY side effects.
+            current = database.get_automation(automation_id)
+            error = None
+            if not current:
+                error = "Automation no longer exists"
+            elif not current.get("profile_id"):
+                error = "Choose an agent before running this automation"
+            elif not current.get("is_enabled"):
+                error = "Enable this automation before running it"
+            if error is None:
+                return False
+            database.update_automation_run(
+                run_id, status="cancelled", error=error,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                expected_status=claim_from,
+            )
+            return True
+
+        if await run_sync(_cancel_ineligible_run):
+            return
+
         # If there's no prompt AND no action_steps, skip execution
         has_prompt = bool(rendered_prompt and rendered_prompt.strip())
         has_action_steps = bool(action_steps)
@@ -1143,6 +1166,8 @@ class AutomationManager:
 
         automation_id = automation["id"]
         profile_id = automation["profile_id"]
+        if not profile_id:
+            raise ValueError("Choose an agent before running this automation")
         timeout_seconds = automation.get("timeout_seconds", 300)
         # The fire passed the shutdown gates before the run moved to
         # ``running``; project resolution (possibly a clone) ran since.

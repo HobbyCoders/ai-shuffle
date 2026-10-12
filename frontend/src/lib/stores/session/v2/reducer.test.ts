@@ -13,6 +13,7 @@ import {
 	initialState,
 	releaseMessages,
 	sealState,
+	withLogEpoch,
 	type WireEvent,
 } from './reducer';
 import type { ChatMessage } from '../../types';
@@ -426,6 +427,7 @@ describe('message.user reconcile', () => {
 		const s = fold([ev('message.user', { id: 'srv-1', content: 'hello', command_id: null })]);
 		expect(s.messages).toHaveLength(1);
 		expect(s.messages[0]).toMatchObject({ id: 'srv-1', role: 'user', type: 'text', content: 'hello' });
+		expect(s.messages[0].serverId).toBeUndefined();
 	});
 
 	it('reconciles onto an optimistic message by command_id, keeping the optimistic id', () => {
@@ -442,6 +444,8 @@ describe('message.user reconcile', () => {
 		expect(s.messages).toHaveLength(1);
 		expect(s.messages[0].id).toBe('local-abc'); // kept for stable keying
 		expect(s.messages[0].commandId).toBe('req-xyz');
+		// The server id rides along so the row's fold state can follow it.
+		expect(s.messages[0].serverId).toBe('srv-9');
 	});
 
 	it('reconciles by content + recency when no command_id matches', () => {
@@ -1299,6 +1303,33 @@ describe('subagent cards', () => {
 		expect(card.agentChildren![0]).toMatchObject({ toolId: 'c1', toolResult: 'found', toolStatus: 'complete' });
 	});
 
+	it('subagent.completed prefers the full report and keeps the backend truncation flag', () => {
+		const started = ev('subagent.started', { task_id: 'task-1', agent_id: 'a1', description: 'do work' });
+		const full = fold([started, ev('subagent.completed', {
+			task_id: 'task-1', status: 'completed', result_preview: 'Head…', result: 'Head.\n\nThe whole report.', result_truncated: false,
+		})]).messages.find((m) => m.type === 'subagent')!;
+		expect(full.content).toBe('Head.\n\nThe whole report.');
+		expect(full.agentReportTruncated).toBe(false);
+		const cut = fold([started, ev('subagent.completed', {
+			task_id: 'task-1', status: 'completed', result_preview: 'Head…', result: 'Head. First 64 KiB', result_truncated: true,
+		})]).messages.find((m) => m.type === 'subagent')!;
+		expect(cut.content).toBe('Head. First 64 KiB');
+		expect(cut.agentReportTruncated).toBe(true);
+	});
+
+	it('subagent.completed with only a preview marks it cut only when the feed clipped it', () => {
+		const started = ev('subagent.started', { task_id: 'task-1', agent_id: 'a1', description: 'do work' });
+		const short = fold([started, ev('subagent.completed', { task_id: 'task-1', status: 'completed', result_preview: 'done' })])
+			.messages.find((m) => m.type === 'subagent')!;
+		expect(short.content).toBe('done');
+		expect(short.agentReportTruncated).toBe(false);
+		const clipped = 'x'.repeat(1999) + '…';
+		const long = fold([started, ev('subagent.completed', { task_id: 'task-1', status: 'completed', result_preview: clipped })])
+			.messages.find((m) => m.type === 'subagent')!;
+		expect(long.content).toBe(clipped);
+		expect(long.agentReportTruncated).toBe(true);
+	});
+
 	it('progress/completed for an unknown task_id are ignored', () => {
 		const s = fold([ev('subagent.progress', { task_id: 'nope', kind: 'chunk', note: 'x' })]);
 		expect(s.messages).toHaveLength(0);
@@ -1558,6 +1589,39 @@ describe('subagent cards', () => {
 // ─── Task summaries ─────────────────────────────────────────────────────────
 
 describe('task.updated summaries', () => {
+	it.each(['completed', 'error', 'killed'])('settles a resumed id on %s without reviving it on park', (terminal) => {
+		const s = fold([
+			ev('task.updated', { task_id: 'resumed', state: 'running' }),
+			ev('task.updated', { task_id: 'resumed', state: 'completed' }),
+			ev('task.updated', { task_id: 'resumed', state: 'running' }),
+			ev('turn.completed', {}),
+			ev('task.updated', { task_id: 'resumed', state: terminal }),
+			ev('turn.parked', {}),
+		]);
+		expect(s.activeTaskSummaries.find((t) => t.id === 'resumed')?.status).toBe(terminal);
+		expect(s.activeTaskSummaries.filter((t) => t.status === 'running')).toEqual([]);
+	});
+
+	it.each([true, false])('uses the resume clock with an earlier terminal present=%s', (hasTerminal) => {
+		const original = '2026-10-09T19:00:00Z';
+		const resumed = '2026-10-11T00:26:42Z';
+		const events = [ev('task.updated', { task_id: 'resumed', state: 'running', created_at: original })];
+		if (hasTerminal) events.push(ev('task.updated', { task_id: 'resumed', state: 'completed' }));
+		events.push(ev('task.updated', { task_id: 'resumed', state: 'running', started_at: resumed }));
+		events.push(ev('task.updated', { task_id: 'resumed', state: 'running', summary: 'progress' }));
+		expect(fold(events).activeTaskSummaries[0].startedAt).toBe(resumed);
+	});
+
+	it('uses the resume event time for older logs without started_at', () => {
+		const resumed = '2026-10-11T00:26:42Z';
+		const s = fold([
+			ev('task.updated', { task_id: 'resumed', state: 'running' }),
+			ev('task.updated', { task_id: 'resumed', state: 'completed' }),
+			ev('task.updated', { task_id: 'resumed', state: 'running', created_at: resumed }),
+		]);
+		expect(s.activeTaskSummaries[0].startedAt).toBe(resumed);
+	});
+
 	it('adds then updates a running task summary (default kind agent)', () => {
 		const s = fold([
 			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),
@@ -2881,5 +2945,75 @@ describe('replay allocation (copy-on-publish ownership)', () => {
 		const elapsed = Date.now() - t0;
 		expect(state.messages).toHaveLength(20_000);
 		expect(elapsed).toBeLessThan(3_000);
+	});
+});
+
+
+describe('event-log position on rendered assistant text (#2249)', () => {
+	const text = (state: ReturnType<typeof reduceAll>) => state.messages.filter((m) => m.role === 'assistant' && m.type === 'text');
+
+	it('folded deltas carry the LAST contributing seq, not the first', () => {
+		const state = reduceAll([
+			ev('turn.started', { seq: 1, turn_id: 't1' }),
+			ev('assistant.text_delta', { seq: 2, turn_id: 't1', text: 'Staging ' }),
+			ev('assistant.text_delta', { seq: 3, turn_id: 't1', text: 'or prod?' }),
+			ev('assistant.text_delta', { seq: 7, turn_id: 't1', text: '' }),
+		], withLogEpoch(initialState(), 'evt-1'));
+		const [msg] = text(state);
+		expect(msg.content).toBe('Staging or prod?');
+		expect(msg.seq).toBe(7);
+		expect(msg.epoch).toBe('evt-1');
+		// The rewind origin stays the first delta.
+		expect(state.messageOriginSeq.get(msg.id)).toBe(2);
+	});
+
+	it('a closed assistant text and a voice reply carry their own seq', () => {
+		const state = reduceAll([
+			ev('message.user', { seq: 1, turn_id: 'voice-1', content: 'Deploy it' }),
+			ev('message.assistant', { seq: 2, turn_id: 'voice-1', content: 'Staging or prod?' }),
+			ev('turn.started', { seq: 3, turn_id: 't2' }),
+			ev('message.assistant', { seq: 4, turn_id: 't2', content: 'Which region?' }),
+		], withLogEpoch(initialState(), 'evt-1'));
+		expect(text(state).map((m) => [m.content, m.seq, m.epoch])).toEqual([
+			['Staging or prod?', 2, 'evt-1'],
+			['Which region?', 4, 'evt-1'],
+		]);
+	});
+
+	it('messages reduced before the epoch is known take it when the feed reports it', () => {
+		const before = reduceAll([
+			ev('turn.started', { seq: 1, turn_id: 't1' }),
+			ev('assistant.text_delta', { seq: 2, turn_id: 't1', text: 'Staging or prod?' }),
+		]);
+		expect(text(before)[0].seq).toBe(2);
+		expect(text(before)[0].epoch).toBeUndefined();
+		const after = withLogEpoch(before, 'evt-9');
+		expect(text(after)[0].epoch).toBe('evt-9');
+		expect(after.logEpoch).toBe('evt-9');
+		// Later deltas stamp it directly.
+		const more = reduce(after, ev('assistant.text_delta', { seq: 3, turn_id: 't1', text: ' Now.' }));
+		expect(text(more)[0]).toMatchObject({ seq: 3, epoch: 'evt-9' });
+		// Adopting the same (or no) epoch again is a no-op.
+		expect(withLogEpoch(after, 'evt-9')).toBe(after);
+		expect(withLogEpoch(after, null)).toBe(after);
+	});
+
+	it('withLogEpoch does not mutate a released transcript', () => {
+		const state = reduceAll([
+			ev('turn.started', { seq: 1, turn_id: 't1' }),
+			ev('assistant.text_delta', { seq: 2, turn_id: 't1', text: 'Hi?' }),
+		]);
+		const held = releaseMessages(state);
+		const snapshot = held.map((m) => ({ ...m }));
+		withLogEpoch(state, 'evt-2');
+		expect(held).toEqual(snapshot);
+	});
+
+	it('an event without a seq leaves the position absent', () => {
+		const state = reduce(withLogEpoch(initialState(), 'evt-1'), {
+			type: 'message.assistant', id: 'x', session_id: 's1', content: 'Hello?'
+		} as unknown as WireEvent);
+		expect(text(state)[0].seq).toBeUndefined();
+		expect(text(state)[0].epoch).toBeUndefined();
 	});
 });

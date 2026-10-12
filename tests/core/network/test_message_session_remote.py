@@ -215,6 +215,36 @@ async def test_owning_worker_applies_its_own_peer_checks(workers, monkeypatch, k
     assert kicks == []
 
 
+async def test_chats_started_from_the_owners_account_are_peers(workers, monkeypatch, kicks):
+    # The owner starts a chat from a signed-in phone or browser: the worker
+    # that runs it labels it with the owner's account and keeps no record of
+    # its own. Other workers see only the label (#2218).
+    from app.core import preference_identity
+    a, b, served = network(workers, monkeypatch)
+    _chat(a, "target")
+    _chat(a, "stranger", title="Someone else's")
+    _update(a, "target", provenance_owner="account:owner-1")
+    _update(a, "stranger", provenance_owner="account:other-1")
+    converge([a, b])
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "owner-1")
+    with b.active():
+        result = json.loads((await _tool("ListSessions", {"scope": "all"})).text)
+        assert {e["id"] for e in result["sessions"] if e.get("worker")} == {"target"}
+        outcome = await _tool("MessageSession", MESSAGE)
+        assert not outcome.is_error, outcome.text
+        refused = await _tool("MessageSession", {**MESSAGE, "session_id": "stranger", "request_id": "x"})
+        assert refused.is_error and "not an eligible peer" in refused.text
+    with a.active():
+        [turn] = agent_turns("target")
+        assert turn["payload"]["peer_message_content"] == MESSAGE["message"]
+
+    # No owner account readable: the label proves nothing, as before.
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: None)
+    with b.active():
+        outcome = await _tool("MessageSession", {**MESSAGE, "request_id": "ask-2"})
+    assert outcome.is_error and "not an eligible peer" in outcome.text
+
+
 async def test_only_owner_chats_message_another_worker(workers, monkeypatch, kicks):
     a, b, _ = _two_workers(workers, monkeypatch)
     _api_user(a, b, user_id="user-1")

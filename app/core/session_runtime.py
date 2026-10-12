@@ -142,7 +142,7 @@ _STEERABLE_SOURCES = ("user", "queue", "agent_message")
 # under settings the user did not pick. ``fast`` and ``context_window`` are
 # deliberately NOT in this set: they shape throughput and
 # budget rather than which agent answers.
-_STEER_BINDING_KEYS = ("model", "effort", "permission_mode", "workspace_project_ids")
+_STEER_BINDING_KEYS = ("model", "provider", "effort", "permission_mode", "workspace_project_ids")
 
 # Binding keys whose ABSENCE on a queued row means "keep this chat's current
 # value", exactly as the run path reads it: ``query_options`` falls back to the
@@ -756,6 +756,9 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Row -> engine correlation id. Client commands survive queue acks,
+        # parked continuations and receipts; legacy producers still use row ids.
+        self._steer_ids: Dict[str, str] = {}
         # Queued turn ids the user took back (× / edit) during THIS turn. The
         # recall and the row's removal are two steps with a DB write between
         # them, and any concurrent ``steer_pending`` pass (another send, a peer
@@ -1010,7 +1013,8 @@ class SessionRuntime:
                 return None
             # 2. Take the session's single live slot.
             started = await asyncio.to_thread(
-                turns_db.start_turn, tid, run_id, runner_id
+                turns_db.start_turn, tid, run_id, runner_id,
+                can_resume=self._can_resume_parked,
             )
             if started is None:
                 logger.info(
@@ -1018,6 +1022,12 @@ class SessionRuntime:
                     sid, tid,
                 )
                 return None
+
+            # start_turn can atomically absorb this queued input into a parked
+            # turn. Every subsequent lease, event and settlement uses that id.
+            self.turn = started
+            self.turn_id = tid = started["id"]
+            self.source = started.get("source") or "user"
 
             if task_registry.stop_invalidated(sid, self._stop_generation):
                 # Stop may have cleared the queue while start_turn was in flight.
@@ -1031,7 +1041,8 @@ class SessionRuntime:
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
             from app.core.lifecycle_events import enqueue
-            enqueue("started", sid, tid)
+            if not (self.turn.get("payload") or {}).get("continued_turn"):
+                enqueue("started", sid, tid)
 
             # A fresh turn re-arms computer-use for the session (clears the
             # halt its previous Stop set) so the new agent can act again.
@@ -1168,7 +1179,8 @@ class SessionRuntime:
                 run_id=run_id,
                 fence_token=fence_token,
                 turn_id=tid,
-                command_id=self.turn.get("command_id"),
+                command_id=(self.turn.get("payload") or {}).get(
+                    "continuation_command_id", self.turn.get("command_id")),
                 runner_id=runner_id,
             )
             # A fence violation means another runner now owns this run: the
@@ -1254,7 +1266,7 @@ class SessionRuntime:
                 if final is not None and final["state"] in turns_db.TERMINAL_STATES:
                     outcome = final["state"]
                 return outcome
-            outcome, settled_here = await self._finalize(sid, tid)
+            outcome, settled_here = await self._finalize(sid, tid, recorder=recorder)
             if settled_here:
                 # The finished interval is banked now. Fire-and-forget: the
                 # done frame below must not wait on a row read.
@@ -1378,7 +1390,7 @@ class SessionRuntime:
             and not already_recorded
             and (self.turn.get("payload") or {}).get("deferred_user_record")
         ):
-            await self._persist_user_message(prompt)
+            await self._persist_user_message(prompt, source=app_source)
         done_event = None
         try:
             await recorder.start(
@@ -1386,6 +1398,7 @@ class SessionRuntime:
                 profile_id=self.turn.get("profile_id"),
                 record_user=not resume and not already_recorded,
                 source=fluid_turn_source(app_source),
+                **({"continued": True} if (self.turn.get("payload") or {}).get("continued_turn") else {}),
             )
             if self._abort_reason == "recording_failed":
                 return
@@ -1774,7 +1787,11 @@ class SessionRuntime:
                         payload["peer_message_content"], sender=sender_id, id=row_id,
                     )
                 else:
-                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=row_id)
+                    command_id = row.get("command_id")
+                    steer_id = (command_id if isinstance(command_id, str)
+                                and command_id.startswith("client-") else row_id)
+                    self._steer_ids[row_id] = steer_id
+                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not
@@ -1961,7 +1978,7 @@ class SessionRuntime:
             # Barred BEFORE the engine is asked: ``adapter.cancel_steer`` may
             # suspend, and a pass running meanwhile must not re-submit it.
             self._steer_withdrawn.add(turn_id)
-        if await adapter.cancel_steer(turn_id):
+        if await adapter.cancel_steer(self._steer_ids.get(turn_id, turn_id)):
             # Never delivered and never will be, so the row is free again — and
             # it must leave the attempted set, or a later steer_pending() pass
             # would skip a row that is genuinely still queued (a recall that
@@ -2010,6 +2027,27 @@ class SessionRuntime:
         except Exception:  # noqa: BLE001
             return None
         return getattr(state, "adapter", None) if state is not None else None
+
+    @staticmethod
+    def _can_resume_parked(parked: Dict[str, Any], queued: Dict[str, Any]) -> bool:
+        """Use the streaming steer's execution-binding gates at a parked claim.
+
+        A wake completes the same logical turn, too. Other automatic producers,
+        explicit replay/resume and /compact keep their own turn boundaries.
+        """
+        if queued.get("source") not in ("user", "queue", "api", "unpark"):
+            return False
+        if queued.get("project_id") != parked.get("project_id"):
+            return False
+        if queued.get("worktree_id") != parked.get("worktree_id"):
+            return False
+        before = (parked.get("payload") or {}).get("execution_defaults")
+        after = (queued.get("payload") or {}).get("execution_defaults")
+        # Raw overrides can both be empty while the session/profile defaults
+        # changed during the wait. Unknown legacy bindings also stay separate.
+        if before is None or after is None or before != after:
+            return False
+        return SessionRuntime(parked)._steer_eligible(queued)
 
     def _steer_eligible(self, row: Dict[str, Any]) -> bool:
         """Whether ``row``'s prompt can join the LIVE turn as it stands."""
@@ -2152,7 +2190,14 @@ class SessionRuntime:
                 self._task_steers.pop(row_id, None)
                 continue
             try:
-                row = await asyncio.to_thread(turns_db.get_turn, row_id)
+                if str(row_id).startswith("client-"):
+                    queued_id = next((key for key, value in self._steer_ids.items()
+                                      if value == row_id), None)
+                    row = (await asyncio.to_thread(turns_db.get_turn, queued_id)
+                           if queued_id else await asyncio.to_thread(
+                               turns_db.get_turn_by_command, self.session_id, row_id))
+                else:
+                    row = await asyncio.to_thread(turns_db.get_turn, row_id)
             except Exception:
                 logger.warning(
                     "SessionRuntime: could not load steered turn %s", row_id,
@@ -2165,6 +2210,12 @@ class SessionRuntime:
                     "%s — skipping", row_id, self.session_id,
                 )
                 continue
+            row_id = row["id"]
+            logger.info(
+                "steer delivery session=%s row=%s client_id=%s runtime_turn=%s boundary=%s at=%.6f",
+                self.session_id, row_id, row.get("command_id"), self.turn_id,
+                steer.get("tool_use_id"), time.time(),
+            )
             if row.get("state") != "queued":
                 # A receipt for a row that already left the queue. The two
                 # states are supposed to be mutually exclusive: cancelling a
@@ -2191,12 +2242,15 @@ class SessionRuntime:
                     content,
                     profile_id=profile_id,
                     command_id=row.get("command_id"),
-                    **({"queued_turn_id": row_id, "checkpoint_backed": False}
+                    **({"queued_turn_id": row_id, "checkpoint_backed": False,
+                        "source": "agent_message"}
                        if row.get("source") == "agent_message" else {}),
                 )
                 if not recorded:
                     return
-                await self._persist_user_message(content, profile_id=profile_id)
+                await self._persist_user_message(
+                    content, profile_id=profile_id, source=row.get("source") or "user",
+                )
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row
@@ -2396,7 +2450,8 @@ class SessionRuntime:
             )
 
     async def _persist_user_message(
-        self, content: str, *, profile_id: Optional[str] = None
+        self, content: str, *, profile_id: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> None:
         """Dual-write one user message to ``session_messages`` + fan it out.
 
@@ -2410,14 +2465,14 @@ class SessionRuntime:
             from app.db import database as database_mod
 
             role = "user"
-            metadata = None
+            metadata = {"source": source or self.source}
             if content.strip().startswith("/"):
                 parts = content.strip().split(None, 1)
                 role = "command"
-                metadata = {
+                metadata.update({
                     "command_name": parts[0],
                     "command_args": parts[1] if len(parts) > 1 else "",
-                }
+                })
             await asyncio.to_thread(
                 database_mod.add_session_message,
                 session_id=self.session_id,
@@ -2431,6 +2486,7 @@ class SessionRuntime:
                 message={
                     "role": "user",
                     "content": content,
+                    "metadata": metadata,
                     "profile_id": profile_id or self.turn.get("profile_id"),
                 },
                 source_device_id=None,
@@ -2445,7 +2501,9 @@ class SessionRuntime:
     # finalize — always runs; decides completed | aborted | parked
     # ------------------------------------------------------------------
 
-    async def _finalize(self, sid: str, tid: str) -> "tuple[str, bool]":
+    async def _finalize(
+        self, sid: str, tid: str, *, recorder: Optional[TurnRecorder] = None,
+    ) -> "tuple[str, bool]":
         """Settle or park the turn. ALWAYS runs (called from the pump ``finally``).
 
         Returns ``(outcome, settled_here)``. ``settled_here`` is True only when
@@ -2453,11 +2511,10 @@ class SessionRuntime:
         escalation, ``reap_expired``) that settled the turn first already fired
         ``on_turn_settled``, so the caller must not fire again.
 
-        Event mirroring: the recorder already emits ``turn.completed`` (on the
-        pump ``done``) and ``turn.aborted`` (on ``interrupted``/``error`` or its
-        crash-path ``close()``), so the runtime does NOT re-emit those. Only
-        ``turn.parked`` — which the recorder never emits during the pump — is
-        appended here (``record_parked``).
+        The recorder defers ``turn.completed`` until this park gate is known.
+        A parked attempt emits only ``turn.parked``; completion is published
+        under the current lease after all background work has come to rest.
+        Aborts remain recorded by the pump/error/crash paths.
         """
         # The turn is over, so nothing is steerable into it any more. Anything
         # this runtime submitted but never saw receipted was dropped by the
@@ -2465,6 +2522,7 @@ class SessionRuntime:
         # below runs it as an ordinary turn.
         self._steering_closed = True
         self._steer_attempted.clear()
+        self._steer_ids.clear()
         # A task notification is the exception: it has no queue row behind it,
         # so an undelivered one has to be handed back to the scheduler or the
         # completion is lost. Before the park gate, so a wake enqueued here is
@@ -2611,7 +2669,13 @@ class SessionRuntime:
         ):
             parked = None
             try:
-                parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids)
+                from app.core.turn_recorder import merge_turn_usage
+
+                usage = merge_turn_usage(
+                    (self.turn.get("payload") or {}).get("parked_usage", {}),
+                    (self._pending_done or {}).get("metadata") or {},
+                )
+                parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids, usage=usage)
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
             if parked is not None:
@@ -2640,7 +2704,7 @@ class SessionRuntime:
                         return "completed", True
                 # turn.parked event — only when the park actually happened.
                 try:
-                    await record_parked(sid, task_ids)
+                    await record_parked(sid, task_ids, turn_id=tid, usage=usage)
                 except Exception:
                     logger.debug("SessionRuntime: record_parked failed for %s", sid, exc_info=True)
             if self._terminal != "done":
@@ -2655,6 +2719,14 @@ class SessionRuntime:
         # A runner that lost its lease settles the row only while it is still
         # bound to that run. Once another install's sweep requeued it (or a
         # new owner started it), the row is theirs and this settle is a no-op.
+        if recorder is not None and self._terminal == "done" and not self._unowned:
+            # Resolve older, incompatible parked turns before this completion,
+            # so terminal readers still see the current turn last.
+            try:
+                await asyncio.to_thread(turns_db.settle_parked_turns, sid, tid)
+            except Exception:
+                logger.warning("SessionRuntime: resolved park cleanup failed for %s", sid, exc_info=True)
+            await recorder.settle("completed", (self.turn.get("payload") or {}).get("parked_usage", {}))
         owned_run = self._run_id if self._unowned else None
         if (self._abort_reason == "recording_failed"
                 or self._terminal in ("interrupted", "error") or self._terminal is None):

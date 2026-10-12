@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -89,6 +90,35 @@ def _truncate(value: Any, limit: int = RESULT_TRUNCATE_CHARS) -> Optional[str]:
     if len(text) > limit:
         return text[:limit]
     return text
+
+
+SUBAGENT_RESULT_MAX_BYTES = 64 * 1024
+
+
+def _bound_subagent_result(value: Any) -> tuple[Optional[str], bool]:
+    """Keep complete paragraphs within 64 KiB of UTF-8, or a bounded first paragraph.
+
+    A single oversized paragraph has no safe paragraph boundary: fall back to
+    the longest UTF-8 prefix rather than losing the entire report.
+    """
+    if value is None:
+        return None, False
+    text = value if isinstance(value, str) else str(value)
+    encoded = text.encode("utf-8", errors="surrogatepass")
+    if len(encoded) <= SUBAGENT_RESULT_MAX_BYTES:
+        return text, False
+    prefix = encoded[:SUBAGENT_RESULT_MAX_BYTES].decode("utf-8", errors="ignore")
+    # Accept blank lines with spaces and Windows line endings too, including
+    # a separator just beyond the cap after a paragraph that fits exactly.
+    boundary = None
+    for match in re.finditer(r"\r?\n[ \t]*\r?\n", text):
+        if match.start() > len(prefix):
+            break
+        if match.start() > 0:
+            boundary = match.start()
+    if boundary is not None:
+        prefix = prefix[:boundary]
+    return prefix, True
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -312,6 +342,8 @@ def _registry_worker(session_id: str, task_id: Any) -> Dict[str, Any]:
         labels: Dict[str, Any] = {"worker_name": str(name)} if name else {}
         if record.get("model"):
             labels["model"] = str(record["model"])
+        if record.get("startedAt"):
+            labels["started_at"] = str(record["startedAt"])
         return labels
     except Exception:  # noqa: BLE001 — a label must never break recording
         return {}
@@ -428,15 +460,25 @@ def _translate_shared(
         )]
 
     if etype == "subagent_done":
-        return [_build_event(
+        result, result_truncated = _bound_subagent_result(event.get("result"))
+        record = _build_event(
             contract.SubagentCompleted, session_id,
             task_id=event.get("tool_id") or event.get("agent_id") or "",
             status=("killed" if event.get("killed") is True
                     else "failed" if event.get("is_error") else "completed"),
-            result_preview=_truncate(event.get("result")),
+            result_preview=_truncate(event.get("result_preview", event.get("result"))),
+            result=result,
+            result_truncated=result_truncated or event.get("result_truncated") is True,
             usage=event.get("usage") if isinstance(event.get("usage"), dict) else None,
             **kw,
-        )]
+        )
+        completion_id = event.get("completion_id")
+        if isinstance(completion_id, str) and completion_id:
+            record["id"] = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"subagent-completed:{session_id}:{record['payload']['task_id']}:{completion_id}",
+            ))
+        return [record]
 
     if etype in ("task_progress", "task_started", "task_notification"):
         state = event.get("status") or {
@@ -620,6 +662,8 @@ class TurnRecorder:
         self._last_append_at: float = float("-inf")
 
         self._terminal_recorded = False
+        self._defer_completion = False
+        self._deferred_completion: Optional[Dict[str, Any]] = None
         self._closed = False
         # Fence state. The first FenceViolation from append_events means the
         # run lease moved to another runner: every later append from this
@@ -735,6 +779,7 @@ class TurnRecorder:
         )
         recorder.turn_id = turn_id
         recorder._owns_lease = False
+        recorder._defer_completion = True
         return recorder
 
     async def start(
@@ -743,8 +788,12 @@ class TurnRecorder:
         profile_id: str | None = None,
         record_user: bool = True,
         source: str | None = None,
+        continued: bool = False,
     ) -> None:
         """Append ``turn.started`` then ``message.user``.
+
+        A parked continuation re-arms streaming with the SAME turn id and a
+        ``continued`` marker. It does not open a new logical transcript turn.
 
         ``record_user=False`` appends only ``turn.started`` — a resumed turn
         re-runs from the head node and adds no new user message. ``source``
@@ -754,12 +803,16 @@ class TurnRecorder:
             started: Dict[str, Any] = {"profile_id": profile_id}
             if source is not None:
                 started["source"] = source
-            events = [self._event(contract.TurnStarted, **started)]
+            events = [self._event(
+                contract.TurnStarted, **started,
+                extra_payload={"continued": True} if continued else None,
+            )]
             if record_user:
                 events.append(self._event(
                     contract.MessageUser,
                     content=user_message or "",
                     profile_id=profile_id,
+                    extra_payload={"source": source} if source is not None else None,
                 ))
             await self._append(events)
         except Exception:
@@ -776,6 +829,7 @@ class TurnRecorder:
         command_id: str | None = None,
         queued_turn_id: str | None = None,
         checkpoint_backed: bool | None = None,
+        source: str | None = None,
     ) -> bool:
         """Append a ``message.user`` for a message steered into the LIVE turn.
 
@@ -808,6 +862,7 @@ class TurnRecorder:
                     profile_id=profile_id,
                     queued_turn_id=queued_turn_id,
                     checkpoint_backed=False,
+                    extra_payload={"source": source} if source is not None else None,
                 ))
                 await self._append(events)
             return not (self._recording_failed or self._superseded)
@@ -897,6 +952,18 @@ class TurnRecorder:
                 self.session_id, event.get("type") if isinstance(event, dict) else None,
                 exc_info=True,
             )
+
+    async def settle(self, outcome: Optional[str], prior_usage: Dict[str, Any]) -> None:
+        """Publish completion only after the runtime's park decision, under its lease.
+
+        close() has already flushed the pump's data, but an injected recorder
+        does not release the runtime-owned lease. A parked pump is not terminal.
+        """
+        completed, self._deferred_completion = self._deferred_completion, None
+        if completed is not None and outcome == "completed":
+            completed["payload"]["usage"] = merge_turn_usage(
+                prior_usage, completed["payload"].get("usage") or {})
+            await self._append([completed])
 
     async def close(self, outcome: Optional[str] = None) -> None:
         """Flush, append crash-path terminal if needed, release lease.
@@ -1060,13 +1127,17 @@ class TurnRecorder:
             for key in ("is_error", "errors"):
                 if metadata.get(key):
                     api_error = {**(api_error or {}), key: metadata[key]}
-            events.append(self._event(
+            completed = self._event(
                 contract.TurnCompleted,
                 stop_reason=metadata.get("stop_reason"),
                 terminal_reason=metadata.get("terminal_reason"),
                 usage=usage_summary,
                 extra_payload=api_error,
-            ))
+            )
+            if self._defer_completion:
+                self._deferred_completion = completed
+            else:
+                events.append(completed)
             self._terminal_recorded = True
         elif etype == "interrupted":
             events.extend(self._flush_pending_usage())
@@ -1790,12 +1861,38 @@ async def record_task_settle_frame(
     })
 
 
-async def record_parked(session_id: str, task_ids: List[str]) -> None:
+def merge_turn_usage(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    """Add foreground-attempt totals; context snapshots remain per model call."""
+    merged = {}
+    for key in ("tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens",
+                "total_cost_usd", "duration_ms", "num_turns"):
+        if key in previous or key in current:
+            merged[key] = (previous.get(key) or 0) + (current.get(key) or 0)
+    if previous.get("usage_estimated") or current.get("usage_estimated"):
+        merged["usage_estimated"] = True
+    models = {}
+    for usage in (previous.get("model_usage") or {}, current.get("model_usage") or {}):
+        for model, values in usage.items():
+            combined = models.setdefault(model, {})
+            for key, value in values.items():
+                combined[key] = (combined.get(key, 0) + value
+                                 if isinstance(value, (int, float)) and not isinstance(value, bool)
+                                 else value)
+    if models:
+        merged["model_usage"] = models
+    return merged
+
+
+async def record_parked(
+    session_id: str, task_ids: List[str], *, turn_id: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> None:
     """Append ``turn.parked`` when a turn parks over active bg work."""
     try:
         await _append_unfenced(session_id, [_build_event(
-            contract.TurnParked, session_id,
+            contract.TurnParked, session_id, turn_id=turn_id,
             task_ids=[t for t in (task_ids or []) if t],
+            extra_payload={"usage": usage} if usage is not None else None,
         )])
     except Exception:
         logger.warning(

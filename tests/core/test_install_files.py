@@ -1,7 +1,10 @@
 """The buyer install files in docs/install stay pinned, complete and safe."""
 from pathlib import Path
 import re
+import shutil
+import subprocess
 
+import pytest
 import yaml
 
 from app import __version__
@@ -29,8 +32,8 @@ def test_compose_runs_a_pinned_release_image_never_a_build_or_moving_tag():
     ai_shuffle = service()
     assert "build" not in ai_shuffle
     image = ai_shuffle["image"]
-    assert image.endswith(f"/ai-shuffle:${{AI_SHUFFLE_VERSION:-{__version__}}}")
-    assert "${AI_SHUFFLE_PULL_TOKEN:?" in image, "a missing pull token must fail with a message"
+    assert image == f"ghcr.io/hobbycoders/ai-shuffle-server:${{AI_SHUFFLE_VERSION:-{__version__}}}"
+    assert "TOKEN" not in image
     assert "latest" not in image and "edge" not in image
     assert env_example()["AI_SHUFFLE_VERSION"] == __version__
 
@@ -47,9 +50,8 @@ def test_compose_carries_the_runtime_settings_the_image_needs():
 
 
 def test_env_example_lists_only_what_a_buyer_sets():
-    assert set(env_example()) == {"AI_SHUFFLE_PULL_TOKEN", "AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
+    assert set(env_example()) == {"AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
                                   "COOKIE_SECURE", "OWNER_PASSWORD", "LICENSE_KEY", "WORKSPACE_DIR", "PUID", "PGID"}
-    assert env_example()["AI_SHUFFLE_PULL_TOKEN"] == ""
     # The owner password is optional and seeds the first start only.
     assert env_example()["OWNER_PASSWORD"] == ""
     assert service()["environment"]["OWNER_PASSWORD"] == "${OWNER_PASSWORD:-}"
@@ -68,18 +70,66 @@ def test_env_example_lists_only_what_a_buyer_sets():
 
 def test_buyer_compose_is_verified_in_ci():
     workflow = yaml.safe_load((ROOT / ".github/workflows/container-postgres.yml").read_text())
-    # Paid image build: manual, or a PR that changes packaging or the setup
-    # wizard (#1941); every release runs buyer-install below.
-    assert set(workflow[True]) == {"pull_request", "workflow_dispatch"}
-    # Drafts skip it; marking the PR ready starts it (types).
-    assert set(workflow[True]["pull_request"]) == {"types", "paths"}
-    assert "ready_for_review" in workflow[True]["pull_request"]["types"]
+    # Paid image build: manual only; every release runs buyer-install below.
+    assert set(workflow[True]) == {"workflow_dispatch"}
     steps = workflow["jobs"]["container-postgres"]["steps"]
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in steps)
     release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     job = release["jobs"]["buyer-install"]
     assert job["runs-on"] == "ubuntu-latest" and job["needs"] == ["create-release", "docker"]
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in job["steps"])
+
+
+def test_private_registry_is_retired():
+    for workflow in ("ci-registry.yml", "deploy-registry.yml"):
+        assert not (ROOT / ".github/workflows" / workflow).exists()
+    assert not (ROOT / "docs/install/registry.md").exists()
+    for name in ("compose.yaml", "env.example", "README.md"):
+        text = (COMPOSE / name).read_text()
+        assert not re.search(r"pull[ _-]tokens?", text, re.I)
+        assert "registry.hobbycoders.com" not in text
+    readme = (COMPOSE / "README.md").read_text()
+    assert "ghcr.io/hobbycoders/ai-shuffle-server" in readme
+    assert "Local use and updates are free" in readme
+    # Old checkouts can retain ignored node_modules after the registry is removed.
+    # Source archives have no Git metadata; still run the other checks above.
+    if not (ROOT / ".git").exists() or shutil.which("git") is None:
+        pytest.skip("tracked-file check requires a Git checkout and git")
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "android/registry"], cwd=ROOT,
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    assert not tracked.stdout, tracked.stdout
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_private_registry_retirement_ignores_only_untracked_files(tmp_path, monkeypatch, tracked):
+    if shutil.which("git") is None:
+        pytest.skip("regression requires git")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, timeout=10)
+    (tmp_path / ".gitignore").write_text("node_modules/\n")
+    leftover = tmp_path / "android/registry/node_modules/x"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("leftover dependency")
+    subprocess.run(
+        ["git", "check-ignore", "--quiet", "android/registry/node_modules/x"],
+        cwd=tmp_path, check=True, timeout=10,
+    )
+    compose = tmp_path / "docs/install/compose"
+    shutil.copytree(COMPOSE, compose)
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "COMPOSE", compose)
+    if tracked:
+        # Even an ignored path must fail if someone adds it back to the index.
+        subprocess.run(
+            ["git", "add", "--force", "android/registry/node_modules/x"],
+            cwd=tmp_path, check=True, timeout=10,
+        )
+        with pytest.raises(AssertionError, match="android/registry/node_modules/x"):
+            test_private_registry_is_retired()
+    else:
+        test_private_registry_is_retired()
+    assert leftover.is_file()
 
 
 def test_retired_install_templates_are_gone():

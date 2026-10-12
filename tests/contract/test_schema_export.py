@@ -32,6 +32,21 @@ def test_committed_schemas_match_models():
     )
 
 
+def test_subagent_completed_report_fields_and_legacy_defaults():
+    adapter = TypeAdapter(SessionEvent)
+    legacy = dict(
+        type="subagent.completed", id="e1", session_id="s1", seq=1,
+        created_at="2026-07-11T00:00:00Z", task_id="t1", status="completed",
+        result_preview="preview",
+    )
+    event = adapter.validate_python(legacy)
+    assert event.result is None
+    assert event.result_truncated is False
+    full = {**legacy, "result": "full report", "result_truncated": True}
+    assert adapter.validate_json(adapter.dump_json(adapter.validate_python(full))).result == "full report"
+    assert adapter.validate_python(full).result_truncated is True
+
+
 def test_round_trip_discriminated_dispatch():
     event_adapter = TypeAdapter(SessionEvent)
     command_adapter = TypeAdapter(Command)

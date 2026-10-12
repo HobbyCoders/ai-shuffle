@@ -205,7 +205,8 @@ _register(Collection(
     fields=("id", "name", "provider_type", "base_url", "api_dialect", "auth_token", "models_json",
             "default_model", "small_fast_model", "extra_env_json", "context_window", "max_output_tokens",
             "enabled", "auth_mode", "codex_access_token", "codex_refresh_token", "codex_account_id",
-            "codex_id_token_expires_at", "codex_last_refresh", "needs_reauth", "created_at", "updated_at"),
+            "codex_id_token_expires_at", "codex_last_refresh", "needs_reauth", "created_at", "updated_at",
+            "manual_balance_usd", "manual_balance_set_at"),
     encrypted=("auth_token", "codex_access_token", "codex_refresh_token"),
     local_fields=("codex_refresh_lease_owner", "codex_refresh_lease_expires_at",
                   "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id"),
@@ -326,6 +327,11 @@ _register(Collection(
     notes="Active/Settled membership editable on any worker, including while the execution owner is offline. "
           "Last writer wins; projected onto the session catalog without changing execution ownership."))
 
+def _materialize_session_questions(record: Dict[str, Any]) -> Dict[str, Any]:
+    # An older owner's full catalog row cannot retain a newer peer's stale mark.
+    return {"last_assistant_question_seq": None, "last_assistant_question_epoch": None, **record}
+
+
 _register(Collection(
     name="sessions", table="sessions", keys=("id",),
     fields=("id", "project_id", "profile_id", "api_user_id", "title", "status", "is_active",
@@ -335,9 +341,11 @@ _register(Collection(
             "first_model", "project_v2_id", "branch", "placement", "provider_id", "model", "effort",
             "permission_mode", "permission_ceiling", "context_window", "workspace_project_ids", "fast",
             "mode", "hidden", "is_worker", "pr_number", "pr_url", "pr_state", "pull_requests", "work_ms",
-            "work_started_at", "away_mode", "provenance_owner", "fast_pinned"),
+            "work_started_at", "last_user_message_at", "last_user_message_seq", "last_user_message_epoch",
+            "last_assistant_question_seq", "last_assistant_question_epoch", "away_mode", "provenance_owner", "fast_pinned"),
     json_fields=("placement", "workspace_project_ids", "pull_requests"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=90,
+    materialize_hook=_materialize_session_questions,
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
                   "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
                   "workspace_facts"),

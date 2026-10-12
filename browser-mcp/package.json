@@ -1,5 +1,6 @@
 {
   "name": "@ai-shuffle/browser-mcp",
+  "license": "AGPL-3.0-only",
   "version": "0.1.0",
   "type": "module",
   "description": "Provider-agnostic, token-conservative browser-control MCP server (Playwright over CDP)",

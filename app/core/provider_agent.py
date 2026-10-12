@@ -817,24 +817,31 @@ def worker_fast(
         return None
 
 
+# Each model family's untouched Standard window (Claude; GPT; GPT-6).
+_FAMILY_STANDARD_WINDOWS = frozenset({200_000, 256_000, 272_000})
+
+
 def worker_context_window(
     window: Optional[int], provider_id: Optional[str], model_id: Optional[str],
 ) -> Optional[int]:
     """Fit the caller's window choice onto the worker's own model.
 
-    The picker's choice is "standard" or "1M"; the stored value is that
-    choice's token count for the caller's model (200K for Claude, 256K/272K
-    for GPT). A worker on another model keeps the same choice: an exact match
-    passes through, otherwise a sub-1M window becomes the worker model's
-    standard window and a 1M window its 1M one. When the worker's choices
-    cannot be resolved here (an inherited model, an unknown row) the value
-    passes through unchanged and ``query_options`` drops it if the model
+    The picker's choice is Standard (a cap from the model family's default up
+    to its full window) or Extended (the full window); the stored value is that
+    choice's token count for the caller's model. A worker on another model
+    keeps the same choice: an exact preset passes through; a family default
+    (200K Claude, 256K/272K GPT) becomes the worker model's own default, so an
+    untouched Standard stays Standard; a raised cap the worker's range holds
+    passes through; a 1M-or-larger window becomes the worker's Extended one;
+    anything else is clamped into the worker's range. When the worker's
+    choices cannot be resolved here (an inherited model, an unknown row) the
+    value passes through unchanged and ``query_options`` drops it if the model
     cannot run it — the same fallback a session turn gets.
     """
     window = _positive_window(window)
     if window is None:
         return None
-    from app.core.model_registry import context_window_choices
+    from app.core.model_registry import EXTENDED_CONTEXT_WINDOW, context_window_choices
 
     row = None
     if provider_id:
@@ -854,9 +861,12 @@ def worker_context_window(
         return window
     if not choices or window in choices:
         return window
-    if window >= 1_000_000:
-        return max(choices) if max(choices) >= 1_000_000 else None
-    return min(choices)
+    standard, extended = min(choices), max(choices)
+    if window >= EXTENDED_CONTEXT_WINDOW:
+        return extended if extended >= EXTENDED_CONTEXT_WINDOW else None
+    if window in _FAMILY_STANDARD_WINDOWS:
+        return standard
+    return min(max(window, standard), extended)
 
 
 def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -2946,7 +2956,9 @@ async def dispatch_worker(
             )
 
         status = "completed"
-        preview = report
+        # The card has its own 64-KiB paragraph-aware bound. Do not feed it the
+        # Task report's independent 60,000-character head/tail truncation.
+        preview = final_text.strip()
         completion_summary = _completion_summary(report)
         if background:
             # A SYNC dispatch still returns its report inline to a live caller

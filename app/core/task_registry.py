@@ -1000,7 +1000,8 @@ class TaskRegistry:
         another worker (``app.core.remote_task``); the durable row keeps the
         device so the record survives this worker's restart.
 
-        Re-registering preserves the original ``started_at``. A fresh
+        Re-registering running work preserves ``started_at``; a resume resets it.
+        A fresh
         ``TaskStartedMessage`` for a CLEANLY-COMPLETED task is a genuine RESUME
         (the SDK re-emits TaskStartedMessage when a background sub-agent is
         continued via the SendMessage tool under the SAME task_id), so its status
@@ -1047,6 +1048,7 @@ class TaskRegistry:
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
                 existing["status"] = "running"
+                existing["started_at"] = now
                 existing.pop("notification_delivered", None)
                 retained = self._recent_terminal.get(session_id)
                 if retained is not None:

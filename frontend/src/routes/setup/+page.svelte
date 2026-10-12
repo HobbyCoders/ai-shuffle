@@ -8,7 +8,7 @@
 	 * 2. Owner password. Before a password exists a browser cannot reach this
 	 *    page, so the owner gate (OwnerAccessGate) shows steps 1 and 2 itself;
 	 *    here the step only appears as done. The desktop app has no such step.
-	 * 3. License: a key, or the beta, which needs none.
+	 * 3. Cloud: optional; local use is free, a paid plan key can be added.
 	 * 4. AI provider: connect at least one of the agent providers (Claude,
 	 *    OpenAI, xAI Grok, OpenRouter, a custom gateway), all equal choices.
 	 *    Blocking: there is no way to finish setup without one ready.
@@ -62,7 +62,7 @@
 	const SUBTITLES: Record<SetupStepId, string> = {
 		welcome: 'A few steps to set up this worker. It takes about five minutes.',
 		owner: 'The password every browser on your network signs in with.',
-		license: 'Your AI Shuffle license.',
+		license: 'Optional: AI Shuffle Cloud for remote workers.',
 		provider: 'Connect at least one AI provider. You can add more later in Settings > Providers.',
 		workspace: 'Where your projects live.',
 		'first-run': 'Watch an agent answer.',

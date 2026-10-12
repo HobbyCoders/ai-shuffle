@@ -141,6 +141,59 @@ def test_the_report_settles_the_record_card_and_supervisor_then_wakes_once(worke
         assert background_tasks.get_running_task_presence(["caller"])["caller"]["has_running_tasks"] is False
 
 
+@pytest.mark.parametrize("report,expected,truncated", [
+    ("x" * 61000, "x" * 61000, False),
+    ("x" * 65536, "x" * 65536, False),
+    ("x" * 66000, "x" * 65536, True),
+    ("é" * 33000, "é" * 32768, True),
+    ("a" * 61000 + "\n\n" + "b" * 10000, "a" * 61000, True),
+], ids=["above-task-cap", "exact-byte-cap", "above-byte-cap", "multibyte", "paragraph"])
+@pytest.mark.parametrize("outcome", ["completed", "aborted"])
+def test_remote_card_report_keeps_its_own_bound_and_flag(
+    workers, monkeypatch, kicks, report, expected, truncated, outcome,
+):
+    import json
+    from app.api.events import _frame
+    from app.core.provider_agent import bound_report
+
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        finish_child(child, text=report, outcome=outcome)
+        body = remote_task.build_child_report(child)
+        assert body["card_result"] == expected
+        assert body["card_result_truncated"] is truncated
+        assert (body["report"], body["truncated"]) == bound_report(report)
+        asyncio.run(remote_task.on_child_settled(child))
+        asyncio.run(remote_task.deliver_due())
+    with b.active():
+        [done] = caller_events("subagent.completed")
+        live = json.loads(_frame(done).split("data: ", 1)[1])
+        [replay] = caller_events("subagent.completed")
+        assert json.loads(_frame(replay).split("data: ", 1)[1]) == live
+        assert live["result"] == expected
+        assert live["result_truncated"] is truncated
+        assert live["status"] == ("completed" if outcome == "completed" else "failed")
+        assert live["result_preview"] == body["report"][:1999] + "…"
+        assert asyncio.run(remote_task.handle_task_report(body, a.device_id))["duplicate"]
+        assert len(caller_events("subagent.completed")) == 1
+
+
+def test_legacy_remote_card_report_keeps_its_truncation_flag(workers, monkeypatch, kicks):
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        finish_child(child, text="x" * 61000)
+        body = remote_task.build_child_report(child)
+    body.pop("card_result")
+    body.pop("card_result_truncated")
+    with b.active():
+        asyncio.run(remote_task.handle_task_report(body, a.device_id))
+        [done] = caller_events("subagent.completed")
+        assert done["payload"]["result"] == body["report"]
+        assert done["payload"]["result_truncated"] is True
+
+
 def test_a_failed_child_settles_as_an_error(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)

@@ -72,7 +72,7 @@ FORWARD_RETRY_S = 2.0
 FORWARD_RETRY_MAX_S = 30.0
 # What the new worker's "note" operation accepts in a hand-off row's data.
 NOTE_STATUSES = ("moved", "held_failed", "resume_failed")
-NOTE_KEYS = ("status", "worker", "count", "unconfirmed", "messages", "reason", "resume")
+NOTE_KEYS = ("handoff_id", "status", "worker", "count", "unconfirmed", "messages", "reason", "resume")
 # An agent's hand-off resumes the chat on the new worker (#2012): one turn
 # after the held messages, marked with this payload key and sent with a
 # command id built from the move's request time, so a resend is dropped there.
@@ -98,6 +98,7 @@ class PendingHandoff:
     expires_at: float = 0.0
     # While True, the owner's new messages wait for the move (``hold``).
     holding: bool = field(default=True)
+    handoff_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def __post_init__(self) -> None:
         if not self.expires_at:
@@ -106,6 +107,8 @@ class PendingHandoff:
 
 _pending: Dict[str, PendingHandoff] = {}
 _running: set[str] = set()
+# Blocks replacement requests until cancellation has recorded its outcome.
+_cancelling: set[str] = set()
 # Hand-offs taken from _pending that are waiting for the session to go idle.
 _waiting: Dict[str, PendingHandoff] = {}
 # Hand-offs whose move is under way.
@@ -146,7 +149,7 @@ def _save(session_id: str, pending: PendingHandoff) -> None:
 
     session_moves.save(session_id, target_id=pending.target_id, label=pending.label, note=pending.note,
                        requested_by=pending.by, requested_at=pending.requested_at,
-                       expires_at=pending.expires_at)
+                       expires_at=pending.expires_at, handoff_id=pending.handoff_id)
 
 
 def _workers() -> Dict[str, Any]:
@@ -179,22 +182,39 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
 
     check_unfinished_wakes(session_id)
     row = resolve_worker(worker)
-    current = _active(session_id)
-    if current is not None and current.target_id != row["device_id"]:
-        raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
-    message = ("Finish this turn now with a short summary of where the work stands; once the turn "
-               "and any background work end, the app commits and pushes the branch and moves this "
-               "session there.")
-    if current is not None:
-        # The same move again: the queued one stands (with its time limit).
-        return {"queued": True, "worker": current.label,
-                "message": f"Hand-off to {current.label} is already queued. {message}"}
-    pending = PendingHandoff(row["device_id"], str(row.get("device_name") or row["device_id"]),
-                             " ".join((note or "").split())[:2000], time.time())
-    _save(session_id, pending)
-    _pending[session_id] = pending
-    return {"queued": True, "worker": pending.label,
-            "message": f"Hand-off to {pending.label} is queued. {message}"}
+    with _state_lock:
+        _check_cancelling(session_id)
+        current = _active(session_id)
+        if current is not None and current.target_id != row["device_id"]:
+            raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
+        message = ("Finish this turn now with a short summary of where the work stands; once the turn "
+                   "and any background work end, the app commits and pushes the branch and moves this "
+                   "session there.")
+        if current is not None:
+            # The same move again: the queued one stands (with its time limit).
+            return {"queued": True, "worker": current.label, "handoff_id": current.handoff_id,
+                    "message": f"Hand-off to {current.label} is already queued. {message}"}
+        pending = PendingHandoff(row["device_id"], str(row.get("device_name") or row["device_id"]),
+                                 " ".join((note or "").split())[:2000], time.time())
+        _save(session_id, pending)
+        _pending[session_id] = pending
+        return {"queued": True, "worker": pending.label, "handoff_id": pending.handoff_id,
+                "message": f"Hand-off to {pending.label} is queued. {message}"}
+
+
+def _check_cancelling(session_id: str) -> None:
+    if session_id in _cancelling:
+        raise ValueError("A move is being cancelled. Wait for its outcome before queuing another.")
+
+
+def _queue_owner(session_id: str, pending: PendingHandoff) -> None:
+    with _state_lock:
+        _check_cancelling(session_id)
+        current = _active(session_id)
+        if current is not None:
+            raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
+        _save(session_id, pending)
+        _pending[session_id] = pending
 
 
 def pending_for(session_id: str) -> Optional[PendingHandoff]:
@@ -335,7 +355,8 @@ async def _notify(session_id: str, entries: List[Dict[str, Any]], message: str) 
         logger.warning("Could not notify about unsent messages of %s", session_id, exc_info=True)
 
 
-async def _report_unsent_here(session_id: str, unsent: List[Dict[str, Any]]) -> None:
+async def _report_unsent_here(session_id: str, unsent: List[Dict[str, Any]],
+                              handoff_id: Optional[str] = None) -> None:
     """Name the held messages this worker refused too (an archived chat)."""
     if not unsent:
         return
@@ -344,7 +365,7 @@ async def _report_unsent_here(session_id: str, unsent: List[Dict[str, Any]]) -> 
     archived = await asyncio.to_thread(archive_guard.is_archived, session_id)
     reason = " because this chat is archived" if archived else ""
     content = f"Could not send {_messages(len(unsent))} here{reason}: {_quoted(unsent)}. Send them again."
-    await _record(session_id, content, {"status": "held_failed", "count": len(unsent),
+    await _record(session_id, content, {"handoff_id": handoff_id, "status": "held_failed", "count": len(unsent),
                                         "messages": [str(entry.get("prompt") or "") for entry in unsent],
                                         "reason": "archived" if reason else "refused"})
     await _notify(session_id, unsent, content)
@@ -491,7 +512,7 @@ def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[s
                "stop after a brief acknowledgement; do not invent new work.")
     return {"prompt": prompt, "source": "wakeup", "profile_id": session.get("profile_id"),
             "project_id": session.get("project_id"),
-            "payload": {RESUME_PAYLOAD: {"from": source, "note": pending.note}},
+            "payload": {RESUME_PAYLOAD: {"from": source, "note": pending.note, "handoff_id": pending.handoff_id}},
             "command_id": f"{RESUME_COMMAND_PREFIX}{pending.requested_at:.6f}"}
 
 
@@ -590,7 +611,8 @@ async def _report_revoked_source(session_id, label):
     content = (f"Delivery to {label} stopped because this worker was revoked. "
                f"Your held messages remain saved on this worker: {_quoted(entries)}. "
                "Check the destination before sending them again.")
-    await _record(session_id, content, {"status": "held_failed", "reason": "source_revoked",
+    await _record(session_id, content, {"handoff_id": (row or {}).get("handoff_id"),
+                                       "status": "held_failed", "reason": "source_revoked",
                                        "worker": label, "messages": [entry.get("prompt") or "" for entry in entries]})
     await _notify(session_id, entries, content)
 
@@ -633,7 +655,10 @@ async def _deliver(session_id: str, target_id: str, label: str,
 async def _deliver_active(session_id: str, target_id: str, label: str,
                           resume: Optional[Dict[str, Any]] = None) -> None:
     from app.network import control
+    from app.db import session_moves
 
+    row = await asyncio.to_thread(session_moves.get, session_id)
+    handoff_id = (row or {}).get("handoff_id")
     # Also repairs the receiver's ownership if its commit reply was lost.
     await _finalize_moved_wakes(session_id, target_id, release=False)
     resend_safe = await asyncio.to_thread(_resend_safe, target_id)
@@ -687,7 +712,7 @@ async def _deliver_active(session_id: str, target_id: str, label: str,
     if resume_reason:
         await _tell(session_id, target_id,
                     f"Could not continue this chat on {label}{resume_reason}. Send a message there to continue.",
-                    {"status": "resume_failed", "worker": label, "reason": resume_reason.strip(" ()")})
+                    {"handoff_id": handoff_id, "status": "resume_failed", "worker": label, "reason": resume_reason.strip(" ()")})
     parts = []
     if unsent:
         parts.append(f"Could not send {_messages(len(unsent))} to {label}{reason}: {_quoted(unsent)}. "
@@ -701,7 +726,7 @@ async def _deliver_active(session_id: str, target_id: str, label: str,
         parts.append("This chat was not resumed there.")
     content = " ".join(parts)
     told = await _tell(session_id, target_id, content, {
-        "status": "held_failed", "worker": label, "count": len(unsent), "unconfirmed": len(unconfirmed),
+        "handoff_id": handoff_id, "status": "held_failed", "worker": label, "count": len(unsent), "unconfirmed": len(unconfirmed),
         "messages": [str(entry.get("prompt") or "") for entry in unsent + unconfirmed]})
     if not told:
         await _notify(session_id, unsent + unconfirmed, content)
@@ -727,13 +752,14 @@ def cancel(session_id: str) -> bool:
 
 
 async def cancel_async(session_id: str) -> bool:
+    pending = pending_for(session_id)
     released = await asyncio.to_thread(_cancel_counting, session_id)
     if released is not None:
         from app.core import turn_manager
 
         turn_manager._kick(session_id)
         await _queue_changed(session_id)
-        await _report_unsent_here(session_id, released[1])
+        await _report_unsent_here(session_id, released[1], pending.handoff_id if pending else None)
     return released is not None
 
 
@@ -765,6 +791,16 @@ def busy_state(session_id: str) -> Dict[str, Any]:
 
     tasks = [str(task.get("subject") or task.get("agent") or "Background task")
              for task in task_registry.get_active(session_id)]
+    if not tasks:
+        # Match the transfer's idle gate: pending local launches and durable
+        # remote tasks are work too, even when get_active's running-only view
+        # is empty (notably after a restart). Wait rather than start and fail.
+        from app.db.base import get_db
+        from app.network.handoff import _has_live_tasks
+
+        with get_db() as conn:
+            if _has_live_tasks(conn.cursor(), session_id):
+                tasks = ["Background work"]
     try:
         # One SELECT over queued/running/interrupting/draining, so a turn
         # flipping from queued to running is never missed between two reads.
@@ -844,9 +880,9 @@ async def _expire(session_id: str, pending: PendingHandoff) -> str:
     minutes = max(1, round(IDLE_TIMEOUT_S / 60))
     outcome = (f"{_noun(pending)} to {pending.label} cancelled: this chat was still busy after "
                f"{minutes} minutes.{still_text}{_sent_here(sent)}")
-    await _record(session_id, outcome, {"status": "timeout", "worker": pending.label, "by": pending.by,
+    await _record(session_id, outcome, {"handoff_id": pending.handoff_id, "status": "timeout", "worker": pending.label, "by": pending.by,
                                         "still": still})
-    await _report_unsent_here(session_id, unsent)
+    await _report_unsent_here(session_id, unsent, pending.handoff_id)
     return outcome
 
 
@@ -885,7 +921,7 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
         outcome += f" {label} runs an older version that cannot resume it by itself: send a message there."
     elif plan == "unknown":
         outcome += f" {label} has not reported that it can resume it by itself: send a message there."
-    data: Dict[str, Any] = {"status": "moved", "worker": label}
+    data: Dict[str, Any] = {"handoff_id": pending.handoff_id, "status": "moved", "worker": label}
     if plan:
         data["resume"] = plan
     await _tell(session_id, owner, outcome, data)
@@ -919,8 +955,8 @@ async def _failed(session_id: str, pending: PendingHandoff, error: Any) -> str:
         except Exception:  # noqa: BLE001
             logger.warning("Could not send held messages of %s here", session_id, exc_info=True)
     outcome = f"{_noun(pending)} to {pending.label} failed: {error}{_sent_here(sent)}"
-    await _record(session_id, outcome, {"status": "failed", "worker": pending.label})
-    await _report_unsent_here(session_id, unsent)
+    await _record(session_id, outcome, {"handoff_id": pending.handoff_id, "status": "failed", "worker": pending.label})
+    await _report_unsent_here(session_id, unsent, pending.handoff_id)
     return outcome
 
 
@@ -945,13 +981,13 @@ async def run_pending(session_id: str) -> Optional[str]:
             from app.network.handoff import OPEN_PROMPT
 
             outcome = f"{_noun(pending)} to {pending.label} cancelled. {OPEN_PROMPT}{_sent_here(sent)}"
-            await _record(session_id, outcome, {"status": "failed", "worker": pending.label,
+            await _record(session_id, outcome, {"handoff_id": pending.handoff_id, "status": "failed", "worker": pending.label,
                                                 "by": pending.by, "reason": "open_prompt"})
-            await _report_unsent_here(session_id, unsent)
+            await _report_unsent_here(session_id, unsent, pending.handoff_id)
             return outcome
         note = f" Note: {pending.note}" if pending.note else ""
         await _record(session_id, f"Handing off to {pending.label}.{note}",
-                      {"status": "started", "worker": pending.label, "note": pending.note})
+                      {"handoff_id": pending.handoff_id, "status": "started", "worker": pending.label, "note": pending.note})
         from fastapi import HTTPException
 
         from app.api.sessions import move_session_to
@@ -978,7 +1014,7 @@ async def run_pending(session_id: str) -> Optional[str]:
 def _owner_state(session_id: str) -> Dict[str, Any]:
     pending = _active(session_id)
     return {"busy": busy_state(session_id),
-            "pending": ({"worker": pending.label, "target_id": pending.target_id, "by": pending.by,
+            "pending": ({"handoff_id": pending.handoff_id, "worker": pending.label, "target_id": pending.target_id, "by": pending.by,
                          "moving": session_id in _moving}
                         if pending else None)}
 
@@ -1004,20 +1040,19 @@ async def queue_move(session_id: str, target: str, *, stop: bool = False) -> Dic
     row = await asyncio.to_thread(resolve_worker, runners.resolve_runner_id(target) or target)
     label = str(row.get("device_name") or row["device_id"])
     pending = PendingHandoff(row["device_id"], label, "", time.time(), by="owner")
-    await asyncio.to_thread(_save, session_id, pending)
-    _pending[session_id] = pending
+    await asyncio.to_thread(_queue_owner, session_id, pending)
     state = await asyncio.to_thread(busy_state, session_id)
     after = "queued" if state.get("queued") and not stop else "turn"
     text = (f"Move to {label} queued for after the queued messages." if after == "queued"
             else f"Move to {label} queued for when this turn ends.")
-    await _record(session_id, text, {"status": "queued", "worker": label, "by": "owner", "after": after})
+    await _record(session_id, text, {"handoff_id": pending.handoff_id, "status": "queued", "worker": label, "by": "owner", "after": after})
     if stop:
         from app.core.desktop_lifecycle import stop_session_work
 
         await stop_session_work(session_id, source="session_handoff")
     # Start waiting now: a parked chat has no turn end left to start it.
     schedule(session_id)
-    return {"queued": True, "worker": label, "after": after}
+    return {"queued": True, "handoff_id": pending.handoff_id, "worker": label, "after": after}
 
 
 async def cancel_move(session_id: str) -> Dict[str, Any]:
@@ -1025,7 +1060,21 @@ async def cancel_move(session_id: str) -> Dict[str, Any]:
 
     Held messages are sent here. A move already under way is not cancelled.
     """
-    pending = pending_for(session_id)
+    # Reservation is acquired synchronously with request admission. Keep it
+    # through recording, including when there was no pending move at all.
+    with _state_lock:
+        _check_cancelling(session_id)
+        _cancelling.add(session_id)
+        pending = pending_for(session_id)
+    try:
+        return await _cancel_move_reserved(session_id, pending)
+    finally:
+        with _state_lock:
+            _cancelling.discard(session_id)
+
+
+async def _cancel_move_reserved(session_id: str, pending: Optional[PendingHandoff]) -> Dict[str, Any]:
+    handoff_id = pending.handoff_id if pending else None
     released = await asyncio.to_thread(_cancel_counting, session_id)
     if released is None:
         moving = _moving.get(session_id)
@@ -1033,23 +1082,23 @@ async def cancel_move(session_id: str) -> Dict[str, Any]:
             raise ValueError(f"The move to {moving.label} has already started.")
         if pending is not None or session_id in _running:
             # A move ending right now records its own outcome.
-            return {"cancelled": False}
+            return {"cancelled": False, "handoff_id": handoff_id}
         # Nothing is queued: a row left "queued" (an earlier version, a lost
         # restart note) would keep showing a move. This row ends it.
         await _record(session_id, "No move is queued for this chat.",
-                      {"status": "cancelled", "worker": "", "by": "owner", "reason": "nothing_queued"})
-        return {"cancelled": False}
+                      {"handoff_id": handoff_id, "status": "cancelled", "worker": "", "by": "owner", "reason": "nothing_queued"})
+        return {"cancelled": False, "handoff_id": handoff_id}
     sent, unsent = released
     from app.core import turn_manager
 
-    turn_manager._kick(session_id)
-    await _queue_changed(session_id)
     label = pending.label if pending else ""
     target = f" to {label}" if label else ""
     await _record(session_id, f"Queued move{target} cancelled.{_sent_here(sent)}",
-                  {"status": "cancelled", "worker": label, "by": "owner"})
-    await _report_unsent_here(session_id, unsent)
-    return {"cancelled": True}
+                  {"handoff_id": handoff_id, "status": "cancelled", "worker": label, "by": "owner"})
+    turn_manager._kick(session_id)
+    await _queue_changed(session_id)
+    await _report_unsent_here(session_id, unsent, handoff_id)
+    return {"cancelled": True, "handoff_id": handoff_id}
 
 
 def _cancel_counting(session_id: str) -> Optional[Released]:
@@ -1171,7 +1220,10 @@ async def resume_queued() -> int:
             owner = control.owner_of(session)
             pending = PendingHandoff(str(row["target_id"]), str(row["label"]), str(row.get("note") or ""),
                                      float(row["requested_at"]), by=str(row.get("requested_by") or "agent"),
-                                     expires_at=float(row["expires_at"]))
+                                     expires_at=float(row["expires_at"]),
+                                     handoff_id=row.get("handoff_id") or str(uuid.uuid4()))
+            if not row.get("handoff_id"):
+                await asyncio.to_thread(_save, session_id, pending)
             if owner is not None:
                 # The move finished before the restart: its held messages go
                 # there, then an agent hand-off's resume (dropped there if it
@@ -1231,7 +1283,8 @@ async def announce_dropped() -> int:
         await _record(session_id,
                       f"Queued move{target} cancelled: the app restarted before the move ran. "
                       "Queue it again if you still want to move this chat.",
-                      {"status": "cancelled", "worker": label, "by": entry["by"], "reason": "restart"})
+                      {"handoff_id": None, "status": "cancelled", "worker": label,
+                       "by": entry["by"], "reason": "restart"})
         told += 1
     return told
 

@@ -262,6 +262,62 @@ class TestParentTriple:
         assert done["payload"]["status"] == "completed"
         assert len(done["payload"]["result_preview"]) == feed_mod.MAX_RESULT_PREVIEW_CHARS
 
+    @pytest.mark.parametrize("status", ["completed", "error", "killed"])
+    @pytest.mark.parametrize(
+        "report", [None, "", "A short report.", "Findings.\n\n" + "x" * 5000],
+        ids=["absent", "empty", "short", "beyond-preview"],
+    )
+    def test_completed_persists_full_report_for_live_and_reload(self, db, status, report):
+        import json
+        from app.api.events import _frame
+
+        f = _feed()
+        asyncio.run(f.completed(status, result_preview=report))
+        row = next(r for r in _parent_rows() if r["event_type"] == "subagent.completed")
+        live = json.loads(_frame(row).split("data: ", 1)[1])
+        # A fresh DB read and the real SSE serializer are also the reload path.
+        replay_row = se.get_events(PARENT, from_seq=row["seq"] - 1)[0]
+        replay = json.loads(_frame(replay_row).split("data: ", 1)[1])
+        assert live == replay
+        assert replay["result"] == report
+        assert replay["result_truncated"] is False
+        expected_preview = report or ""
+        if len(expected_preview) > 2000:
+            expected_preview = expected_preview[:1999] + "…"
+        assert replay["result_preview"] == expected_preview
+
+    @pytest.mark.parametrize("status", ["completed", "error"])
+    @pytest.mark.parametrize("separator", ["\n\n", "\r\n\r\n", "\n \t\n"])
+    def test_full_report_truncates_at_paragraph_boundary(self, db, status, separator):
+        first = "é" * 30_000
+        report = first + separator + "z" * 10_000
+        asyncio.run(_feed().completed(status, result_preview=report))
+        done = next(r for r in _parent_rows() if r["event_type"] == "subagent.completed")
+        assert done["payload"]["result"] == first
+        assert len(done["payload"]["result"].encode("utf-8")) <= 64 * 1024
+        assert done["payload"]["result_truncated"] is True
+        assert done["payload"]["result_preview"] == report[:1999] + "…"
+
+    def test_full_report_keeps_a_paragraph_ending_exactly_at_limit(self, db):
+        kept = "intro\n\n" + "x" * (65536 - len("intro\n\n"))
+        asyncio.run(_feed().completed("completed", result_preview=kept + "\n\ntrailing"))
+        done = next(r for r in _parent_rows() if r["event_type"] == "subagent.completed")
+        assert done["payload"]["result"] == kept
+        assert done["payload"]["result_truncated"] is True
+
+    @pytest.mark.parametrize("report,expected,truncated", [
+        ("x" * 65536, "x" * 65536, False),
+        ("x" * 65537, "x" * 65536, True),
+        ("🙂" * 16385, "🙂" * 16384, True),
+        ("x" + "🙂" * 16384, "x" + "🙂" * 16383, True),
+    ], ids=["exact-limit", "over-limit", "unicode", "partial-codepoint"])
+    def test_full_report_byte_limit_without_paragraphs(self, db, report, expected, truncated):
+        asyncio.run(_feed().completed("completed", result_preview=report))
+        done = next(r for r in _parent_rows() if r["event_type"] == "subagent.completed")
+        assert done["payload"]["result"] == expected
+        assert done["payload"]["result_truncated"] is truncated
+        assert done["payload"]["result_preview"] == report[:1999] + "…"
+
     @pytest.mark.parametrize(
         "status,expected",
         # A stopped worker reads "Stopped", not as a failure (#1806).

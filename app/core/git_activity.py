@@ -46,14 +46,17 @@ def project_has_active_git_sessions(project_id, working_dir=None):
     except Exception as exc:
         raise HTTPException(503, 'Cannot verify repository activity. Git changes are blocked.') from exc
 
-def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=()):
+def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=(), *, include_remote=False):
     """Busy users of this cwd OR branch. Hidden/v2 alias sessions are included.
 
     Return an empty list only when idle has been positively established. Unknown
     liveness/cwd is not proof of safety; callers either block or return HTTP 503.
     ``exclude`` names sessions the caller has already accounted for (a session
     handoff's own reservations), which are skipped rather than evaluated.
+    Remote-owned sessions use another worker's checkout and are skipped unless
+    ``include_remote`` protects a shared GitHub operation rather than local Git.
     """
+    session_id = None
     try:
         skip = set(exclude)
         candidates = [s for s in _project_candidates(project_id, working_dir) if s['id'] not in skip]
@@ -67,14 +70,18 @@ def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=()):
                 wanted.add(current)
         busy = []
         for session in candidates:
+            session_id = session['id']
+            remote = control.owner_of(session) is not None
+            if remote and not include_remote:
+                continue  # Another worker's checkout cannot use this worker's Git state.
             branch = session.get('branch') or session.get('worktree_branch')
             if branch and branch in wanted:
                 busy.append(session['id'])
                 continue
-            if control.owner_of(session) is not None:
+            if remote:
                 if branch and wanted:
                     continue  # Known unrelated branch on another worker.
-                raise GitActivityUnavailable('Unknown branch of an active remote session')
+                raise GitActivityUnavailable(f"Unknown branch of an active remote session (session {session['id']})")
             if session.get('worktree_id'):
                 from app.core.project_utils import get_worktree_working_dir
                 row = database.get_worktree(session['worktree_id'])
@@ -82,7 +89,7 @@ def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=()):
             else:
                 cwd = resolve_existing_cwd(session)
             if not cwd:
-                raise GitActivityUnavailable('Unknown cwd of an active session')
+                raise GitActivityUnavailable(f"Unknown cwd of an active session (session {session['id']})")
             if target and Path(cwd).resolve() == target:
                 busy.append(session['id'])
             else:
@@ -90,16 +97,17 @@ def busy_git_target_sessions(project_id, working_dir, branches=(), exclude=()):
                 if branch in wanted or actual_branch in wanted:
                     busy.append(session['id'])
                 elif wanted and not branch and not actual_branch:
-                    raise GitActivityUnavailable('Unknown branch of an active session')
+                    raise GitActivityUnavailable(f"Unknown branch of an active session (session {session['id']})")
         return busy
     except GitActivityUnavailable:
         raise
     except Exception as exc:
-        raise GitActivityUnavailable('Cannot verify checkout activity') from exc
+        context = f' (session {session_id})' if session_id else ''
+        raise GitActivityUnavailable(f'Cannot verify checkout activity{context}') from exc
 
-def require_idle_git_target(project_id, working_dir, branches=()):
+def require_idle_git_target(project_id, working_dir, branches=(), *, include_remote=False):
     try:
-        busy = busy_git_target_sessions(project_id, working_dir, branches)
+        busy = busy_git_target_sessions(project_id, working_dir, branches, include_remote=include_remote)
     except GitActivityUnavailable as exc:
         raise HTTPException(503, 'Cannot verify worktree/branch activity. Git changes are blocked until activity can be verified.') from exc
     if busy:

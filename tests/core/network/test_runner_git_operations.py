@@ -26,6 +26,22 @@ LEGACY_B = "legacy-b"
 PROJECT_ID = "project-1"
 
 
+def test_git_catalog_membership_lookup_runs_off_loop(monkeypatch):
+    import threading
+    from app.network import git
+    loop_thread = threading.get_ident()
+    calls = []
+    def resolve(runner_id):
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return runner_id
+    monkeypatch.setattr(git, "device_id", resolve)
+    monkeypatch.setattr(engine, "context", lambda: None)
+    monkeypatch.setattr(checkouts_db, "eligible_base_project_ids", lambda _: [])
+    assert asyncio.run(git.catalog("local")) == []
+    assert len(calls) == 1
+
+
 def _effective_id_for(*workers):
     by_device = {
         worker.device_id: legacy

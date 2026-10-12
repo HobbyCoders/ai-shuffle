@@ -23,3 +23,14 @@ describe('UserMessage disclosure', () => {
 		expect(container.querySelector('.bubble-text')?.classList.contains('is-collapsed')).toBe(false);
 	});
 });
+
+describe('UserMessage steer marker', () => {
+	it('marks a mid-turn message on its time line only', () => {
+		const timestamp = '2026-10-10T20:19:00.000Z';
+		const { container } = render(UserMessage, { props: { content: 'Prod only', timestamp, midTurn: true } });
+		expect(container.querySelector('.user-time')?.textContent).toMatch(/ · mid-turn$/);
+		cleanup();
+		const plain = render(UserMessage, { props: { content: 'Prod only', timestamp } });
+		expect(plain.container.querySelector('.user-time')?.textContent).not.toContain('mid-turn');
+	});
+});

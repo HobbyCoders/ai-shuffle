@@ -561,7 +561,7 @@ describe('message-sender send during a live turn', () => {
 	});
 
 	it('echoes the prompt onto queuedMessages, not the transcript', async () => {
-		const { deps, getState } = makeDeps(streamingState());
+		const { deps, wsConn, getState } = makeDeps(streamingState());
 		const sender = createMessageSender(deps);
 
 		await sender.sendMessage('answer this too');
@@ -569,7 +569,8 @@ describe('message-sender send during a live turn', () => {
 		const queued = getState().queuedMessages;
 		expect(queued).toHaveLength(1);
 		expect(queued[0].content).toBe('answer this too');
-		expect(queued[0].id).toMatch(/^queued-local-/);
+		expect(queued[0].id).toMatch(/^client-[0-9a-f]{32}$/);
+		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ client_message_id: queued[0].id }));
 		// The transcript is untouched — the model hasn't seen the prompt yet.
 		expect(getState().messages).toHaveLength(1);
 	});
@@ -605,6 +606,54 @@ describe('message-sender send during a live turn', () => {
 		expect(getState().messages).toHaveLength(2);
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
+		// Nothing parked: the send opens its own turn.
+		expect(getState().messages[1].turnId).toBeUndefined();
+	});
+
+	it('carries the parked turn id on a send while background work runs', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			sessionId: 'ses-1',
+			isStreaming: false,
+			liveTurnId: null,
+			turnParked: true,
+			activeTasks: [{ id: 'task-1', status: 'running', toolUseId: 'monitor-1' }],
+			title: 'Existing chat',
+			messages: [
+				{ id: 'u0', role: 'user', content: 'watch the deploy', turnId: 'turn-1' } as any,
+				{ id: 'a0', role: 'assistant', type: 'tool_use', toolName: 'Monitor', toolId: 'monitor-1', content: '' } as any,
+			],
+		} as Partial<ActiveSessionState>));
+		const sender = createMessageSender(deps);
+
+		expect(await sender.sendMessage('ping me when done')).toBe(true);
+
+		const appended = getState().messages.at(-1)!;
+		expect(appended.content).toBe('ping me when done');
+		expect(appended.turnId).toBe('turn-1');
+	});
+
+	it('does not attach a send to a completed turn because an earlier turn still has work running', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			sessionId: 'ses-1',
+			isStreaming: false,
+			liveTurnId: null,
+			turnParked: false,
+			activeTasks: [{ id: 'task-1', status: 'running', toolUseId: 'monitor-1' }],
+			title: 'Existing chat',
+			messages: [
+				{ id: 'u0', role: 'user', content: 'watch the deploy', turnId: 'turn-1' } as any,
+				{ id: 'a0', role: 'assistant', type: 'tool_use', toolName: 'Monitor', toolId: 'monitor-1', content: '' } as any,
+				{ id: 'u1', role: 'user', content: 'now the docs', turnId: 'turn-2' } as any,
+				{ id: 'a1', role: 'assistant', type: 'text', content: 'Docs done.' } as any,
+			],
+		} as Partial<ActiveSessionState>));
+		const sender = createMessageSender(deps);
+
+		expect(await sender.sendMessage('next thing')).toBe(true);
+
+		expect(getState().messages.at(-1)!.turnId).toBeUndefined();
 	});
 });
 
@@ -981,7 +1030,7 @@ describe('message-sender pending-bubble edges', () => {
 	}
 
 	beforeEach(() => {
-		pendingQueue.reset('ses-1');
+		pendingQueue.reset('ses-1', true);
 	});
 
 	it('skips the optimistic echo when the server already described the queue', async () => {
@@ -1040,34 +1089,51 @@ describe('message-sender pending-bubble edges', () => {
 		}));
 		const sender = createMessageSender(deps);
 
-		expect(sender.removeQueuedMessage('turn-q')).toBe('nope');
+		expect(sender.removeQueuedMessage('turn-q')).toBeNull();
 
-		expect(getState().queuedMessages).toHaveLength(0);
+		expect(getState().queuedMessages).toHaveLength(1);
+		expect(getState().queuedMessages[0].status).toBe('cancelling');
 		expect(wsConn.send).toHaveBeenCalledWith({
 			type: 'remove_queued_message',
 			message_id: 'turn-q',
+			client_message_id: undefined,
 			session_id: 'ses-1',
 		});
 	});
 
-	it('drops a local echo on × instead of naming an id the server cannot know', async () => {
+	it('cancels the stable send identity after 15 seconds without awaiting a queue acknowledgement', async () => {
 		const { deps, wsConn, getState } = makeDeps(streamingState());
 		const sender = createMessageSender(deps);
 		await sender.sendMessage('take it back');
 		const localId = getState().queuedMessages[0].id;
 		wsConn.send.mockClear();
 
-		sender.removeQueuedMessage(localId);
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16000);
+		try { sender.removeQueuedMessage(localId); } finally { clock.mockRestore(); }
 
-		// Gone from view, and no frame naming the local id (which would only make
-		// the server rebroadcast the row straight back).
-		expect(getState().queuedMessages).toHaveLength(0);
-		expect(wsConn.send).not.toHaveBeenCalled();
-		// The removal is re-aimed at the real row when the snapshot arrives.
-		const rows = [{ id: 'turn-q', content: 'take it back', queuedAt: 2 }];
+		expect(getState().queuedMessages).toHaveLength(1);
+		expect(getState().queuedMessages[0].status).toBe('cancelling');
+		expect(wsConn.send).toHaveBeenCalledExactlyOnceWith({
+			type: 'remove_queued_message', message_id: localId,
+			client_message_id: localId, session_id: 'ses-1',
+		});
+		const rows = [{ id: 'turn-q', clientMessageId: localId, content: 'take it back', queuedAt: 2 }];
 		pendingQueue.noteAuthoritative('ses-1', rows);
-		expect(pendingQueue.reconcile('ses-1', rows)).toEqual([]);
-		expect(pendingQueue.drainRemovalRequests()).toEqual(['turn-q']);
+		expect(pendingQueue.reconcile('ses-1', rows)).toEqual([{ ...rows[0], status: 'cancelling' }]);
+		pendingQueue.applyRemovalVerdict('ses-1', localId, 'withdrawn');
+		expect(pendingQueue.reconcile('ses-1', rows)).toHaveLength(0);
+	});
+
+	it('keeps the chip and draft intact when the cancellation frame cannot be sent', async () => {
+		const { deps, wsConn, getState } = makeDeps(streamingState());
+		const sender = createMessageSender(deps);
+		await sender.sendMessage('do not lose me');
+		const entry = getState().queuedMessages[0];
+		wsConn.send.mockReturnValue(false);
+		expect(sender.removeQueuedMessage(entry.id)).toBeNull();
+		expect(getState().queuedMessages).toEqual([entry]);
+		expect(getState().error).toMatch(/cancellation was sent/);
+		expect(pendingQueue.reconcile('ses-1', [entry])).toEqual([entry]);
 	});
 
 	it('ignores an × for a message that is no longer pending', () => {

@@ -136,14 +136,15 @@ def meta_tags():
             if line.strip() and not line.strip().startswith("#")]
 
 
-def test_only_a_promoted_release_moves_latest_and_main_builds_are_edge():
+def test_only_a_promoted_release_moves_latest_and_main_builds_are_nightly():
     tags = meta_tags()
     latest = next(tag for tag in tags if tag.startswith("type=raw,value=latest"))
     assert "inputs.release_tag != ''" in latest and "inputs.promote_latest" in latest
     assert "!contains(inputs.release_tag, '-')" in latest
     assert "is_default_branch" not in "".join(tags)
-    edge = next(tag for tag in tags if tag.startswith("type=raw,value=edge"))
-    assert "inputs.release_tag == ''" in edge and "refs/heads/main" in edge
+    nightly = next(tag for tag in tags if tag.startswith("type=raw,value=nightly"))
+    assert "inputs.release_tag == ''" in nightly and "refs/heads/main" in nightly
+    assert not any(tag.startswith("type=raw,value=edge") for tag in tags)
     for pattern in ("{{major}}.{{minor}}", "{{major}},"):
         tag = next(tag for tag in tags if pattern in tag)
         assert "inputs.promote_latest" in tag
@@ -279,4 +280,4 @@ def test_stable_update_is_signed_only_after_verification_in_a_protected_environm
     assert job["concurrency"]["group"] == "desktop-source-publish"
     # Automatic main publication cannot overwrite the stable release feed.
     edge = yaml.safe_load((ROOT / ".github/workflows/desktop-source.yml").read_text())
-    assert edge["jobs"]["publish"]["steps"][-1]["env"]["SOURCE_CHANNEL"] == "edge"
+    assert edge["env"]["SOURCE_CHANNEL"] == "edge"

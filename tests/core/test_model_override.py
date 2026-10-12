@@ -1252,8 +1252,10 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     from app.core.agent_provider_models import build_task_contract
     from fluid.tools.builtins.swarm import input_schema
     descriptions = [prop["description"],
-                    build_task_contract("caller", None).input_schema["properties"]["model"]["description"],
-                    input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]]
+                    build_task_contract("caller", None).input_schema["properties"]["model"]["description"]]
+    swarm_description = input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]
+    assert "See Task.model for host validation and provider rules" in swarm_description
+    assert "under the same rule as Task's model" in swarm_description
     for description in descriptions:
         assert "Pass the model exactly as the user named it" in description
         assert "model IDs and display names" in description

@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { ActiveSessionState } from '../active-session';
 import type { SessionAttention } from './ws-message-handlers';
 import { dismissSettledSessionPrompts, snapshotSessionPrompts } from './settle-prompts';
+import {
+	_resetProseQuestions,
+	isTranscriptProseDismissed,
+	observeLastUserMessage,
+	proseQuestionDismissals,
+	proseQuestionSessions,
+	rememberLeavingProseQuestion,
+} from './prose-questions';
 
 // #2324: settle dismisses the session's waits locally. The settle PATCH can
 // resolve after the settle frame AND after another device unsettled the
@@ -13,6 +21,7 @@ function harness(sessionId = 's1') {
 		pendingPermissions: [],
 		deferredPermissions: [],
 		pendingQuestions: [],
+		messages: [],
 	} as unknown as ActiveSessionState;
 	const deps = {
 		backgroundPermissions: { update: (fn: (m: Map<string, SessionAttention>) => Map<string, SessionAttention>) => { attention = fn(attention); } },
@@ -30,6 +39,9 @@ function harness(sessionId = 's1') {
 		},
 		addPermission(requestId: string) {
 			state = { ...state, pendingPermissions: [...state.pendingPermissions, { request_id: requestId, tool_name: 'Bash' } as never] };
+		},
+		setMessages(messages: unknown[]) {
+			state = { ...state, messages } as ActiveSessionState;
 		},
 		addQuestion(requestId: string) {
 			state = { ...state, pendingQuestions: [...state.pendingQuestions, { request_id: requestId } as never] };
@@ -96,5 +108,54 @@ describe('settle prompt dismissal', () => {
 		expect(snap.requestIds.size).toBe(0);
 		dismissSettledSessionPrompts('other', h.deps, snap);
 		expect(h.state.pendingPermissions).toHaveLength(1);
+	});
+});
+
+describe('settle dismisses prose questions (#2324)', () => {
+	afterEach(_resetProseQuestions);
+	const asked = (seq: number) => [
+		{ id: `u${seq}`, role: 'user' as const, content: 'Deploy it', seq: seq - 1, epoch: 'evt-1' },
+		{ id: `a${seq}`, role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?', seq, epoch: 'evt-1' },
+	];
+
+	it('a settle frame clears a background session\'s remembered prose question; a later question marks again', () => {
+		const h = harness('open');
+		rememberLeavingProseQuestion('bg', asked(5));
+		expect(proseQuestionSessions.current.has('bg')).toBe(true);
+
+		dismissSettledSessionPrompts('bg', h.deps);
+		expect(proseQuestionSessions.current.has('bg')).toBe(false);
+
+		// A row revision repeating the same question does not bring it back.
+		observeLastUserMessage('bg', { last_assistant_question_seq: 5, last_assistant_question_epoch: 'evt-1', last_user_message_seq: 4, last_user_message_epoch: 'evt-1' });
+		expect(proseQuestionSessions.current.has('bg')).toBe(false);
+
+		// A new question (after unsettle and a new turn) has a new position.
+		observeLastUserMessage('bg', { last_assistant_question_seq: 9, last_assistant_question_epoch: 'evt-1', last_user_message_seq: 8, last_user_message_epoch: 'evt-1' });
+		expect(proseQuestionSessions.current.has('bg')).toBe(true);
+	});
+
+	it('dismisses the open session\'s transcript question', () => {
+		const h = harness('s1');
+		h.setMessages(asked(5));
+		expect(isTranscriptProseDismissed(proseQuestionDismissals.current, 's1', h.state.messages)).toBe(false);
+
+		dismissSettledSessionPrompts('s1', h.deps);
+		expect(isTranscriptProseDismissed(proseQuestionDismissals.current, 's1', h.state.messages)).toBe(true);
+		// A later question in the transcript is not dismissed.
+		expect(isTranscriptProseDismissed(proseQuestionDismissals.current, 's1', asked(9))).toBe(false);
+	});
+
+	it('the late PATCH leaves a prose question asked after the settle was sent', () => {
+		const h = harness('open');
+		rememberLeavingProseQuestion('bg', asked(5));
+		const snap = snapshotSessionPrompts('bg', h.attention, h.state);
+
+		dismissSettledSessionPrompts('bg', h.deps);
+		observeLastUserMessage('bg', { last_assistant_question_seq: 9, last_assistant_question_epoch: 'evt-1', last_user_message_seq: 8, last_user_message_epoch: 'evt-1' });
+		expect(proseQuestionSessions.current.has('bg')).toBe(true);
+
+		dismissSettledSessionPrompts('bg', h.deps, snap);
+		expect(proseQuestionSessions.current.has('bg')).toBe(true);
 	});
 });

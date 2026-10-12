@@ -367,8 +367,6 @@ async def finish_message_resume(session_id, settled, outcome):
 
     async with turn_scheduler.message_resume_lock(session_id):
         record = supervisor.get_worker(owner, session_id)
-        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
-            return
         # Read only this turn's report: an interrupted continuation must never
         # report the previous successful turn as its new result.
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
@@ -388,13 +386,23 @@ async def finish_message_resume(session_id, settled, outcome):
                 outcome = "error"
                 text = str(payload.get("errors") or "Worker continuation failed")
         status = "completed" if outcome == "completed" else "error"
-        summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
+        report = text or "Worker continuation ended without a report"
+        summary, _ = provider_agent.bound_report(report)
         # A worker a usage limit paused: its parent was not woken at the pause,
         # so this report is where it hears, once, that it was paused (#1831).
         from app.core.limit_resume import report_note
         note = report_note(settled.get("payload"))
         if note:
             summary = f"{note}\n\n{summary}"
+            report = f"{note}\n\n{report}"
+        from app.core.provider_agent_feed import record_continuation_report
+
+        stopped = (record and record.torn_down) or task_registry.is_user_stopped(session_id)
+        await record_continuation_report(
+            owner, session_id, settled["id"], "killed" if stopped else status, report,
+        )
+        if stopped:
+            return  # Preserve Stop: a card update is not authority to wake anyone.
         # Read park BEFORE busy: unpark starts queued/running before clearing
         # the parked row. The single busy query covers queued->running too.
         # Admission holds this lock until both queue and ownership are written.
@@ -412,6 +420,13 @@ async def finish_message_resume(session_id, settled, outcome):
                 and not task_registry.is_woken(owner, session_id, completion_id=settled["id"])):
             settled_now = True
             task_registry.complete_task(owner, session_id, status, summary=summary)
+            # Only the last continuation may settle the shared task row. Emit
+            # under the admission lock so a new resume cannot race this frame.
+            from app.core.turn_recorder import record_task_settle_frame
+
+            await record_task_settle_frame(
+                owner, session_id, status, summary, tool_use_id=session_id,
+            )
             if (record and record.continuation_turn_id
                     and supervisor.get_worker(owner, session_id) is record):
                 supervisor.unregister_worker(owner, session_id)

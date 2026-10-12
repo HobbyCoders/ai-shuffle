@@ -2,8 +2,8 @@
  * The one place notifications are drawn (#1823).
  *
  * Every notice that pops over the page (page banners, the connection banner,
- * computer use, a call in another chat, the restart notice, license and
- * sign-in notices, the install prompt) renders through a NotificationSlot,
+ * computer use, a call in another chat, the restart notice, sign-in
+ * notices, the install prompt) renders through a NotificationSlot,
  * which hands its content to the mounted NotificationDock. MainPanel mounts the
  * anchored dock under its header, sized to the chat column; RootLayout mounts a
  * fallback that shows only on pages without MainPanel (setup, pairing).

@@ -890,6 +890,83 @@
       "title": "MessageUser",
       "type": "object"
     },
+    "QueuedMessageWithdrawn": {
+      "description": "Content-free receipt for a held message withdrawn before it became a turn.",
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "message_id": {
+          "title": "Message Id",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "queued_message.withdrawn",
+          "default": "queued_message.withdrawn",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "message_id"
+      ],
+      "title": "QueuedMessageWithdrawn",
+      "type": "object"
+    },
     "SubagentCompleted": {
       "properties": {
         "command_id": {
@@ -913,6 +990,18 @@
           "title": "Id",
           "type": "string"
         },
+        "result": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result"
+        },
         "result_preview": {
           "anyOf": [
             {
@@ -924,6 +1013,11 @@
           ],
           "default": null,
           "title": "Result Preview"
+        },
+        "result_truncated": {
+          "default": false,
+          "title": "Result Truncated",
+          "type": "boolean"
         },
         "run_id": {
           "anyOf": [
@@ -1893,6 +1987,18 @@
         "session_id": {
           "title": "Session Id",
           "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
         },
         "state": {
           "title": "State",
@@ -3426,6 +3532,7 @@
       "interaction.requested": "#/$defs/InteractionRequested",
       "message.assistant": "#/$defs/MessageAssistant",
       "message.user": "#/$defs/MessageUser",
+      "queued_message.withdrawn": "#/$defs/QueuedMessageWithdrawn",
       "subagent.completed": "#/$defs/SubagentCompleted",
       "subagent.progress": "#/$defs/SubagentProgress",
       "subagent.started": "#/$defs/SubagentStarted",
@@ -3545,6 +3652,9 @@
     },
     {
       "$ref": "#/$defs/TurnProviderAlive"
+    },
+    {
+      "$ref": "#/$defs/QueuedMessageWithdrawn"
     }
   ],
   "title": "SessionEvent"

@@ -20,6 +20,7 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(abort, "_GENERATIONS", {})
     cs._seen.clear()
     cs._tasks.clear()
+    monkeypatch.setattr(cs, "_loop", None)
     yield
     cs._seen.clear()
 
@@ -92,7 +93,7 @@ async def test_generation_contract_and_dedup():
         assert answer in prompt
         assert "untrusted data" in prompt
         assert generate.call_args.kwargs == {"timeout_seconds": cs.TIMEOUT_SECONDS}
-        publish.assert_awaited_once_with("s", "t", "What should I test next?")
+        publish.assert_awaited_once_with("s", "t", "What should I test next?", expected_revision=None)
 
 
 @pytest.mark.asyncio
@@ -446,15 +447,15 @@ async def test_final_unpark_generates_after_nested_owner_receipt(mock_db, owner_
             })
             assert await session_runtime.SessionRuntime(wake).execute() == "completed"
             await asyncio.gather(*cs._tasks.values())
-            assert turns.get_latest_turn("s")["id"] == wake["id"], turns.get_latest_turn("s")
-            assert cs._final_answer("s", wake["id"]) == "All requested work is finished."
-            assert await cs._eligible("s", wake["id"])
+            assert turns.get_latest_turn("s")["id"] == parked["id"], turns.get_latest_turn("s")
+            assert cs._final_answer("s", parked["id"]) == "All requested work is finished."
+            assert await cs._eligible("s", parked["id"])
             generate.assert_awaited_once()
             assert "All requested work is finished." in generate.call_args.args[0]
             suggestions = [call.args[0].data for call in broadcast.await_args_list
                            if call.args[0].data.get("type") == "composer_suggestion"]
             assert suggestions == [{
-                "type": "composer_suggestion", "session_id": "s", "turn_id": wake["id"],
+                "type": "composer_suggestion", "session_id": "s", "turn_id": parked["id"],
                 "suggestion": "Which edge case should we test next?",
             }]
             assert turns.get_turn(wake["id"])["state"] == "completed"
@@ -800,4 +801,202 @@ async def test_late_generation_cannot_overwrite_newer_saved_hint(mock_db):
     await cs._publish("s", old["id"], "Stale reply")
     assert composer_suggestions.get("s")["suggestion"] == "New reply"
     mock_db.execute("DELETE FROM sessions WHERE id=?", ("s",))
+    assert composer_suggestions.get("s") is None
+
+
+@pytest.mark.asyncio
+async def test_api_only_returns_latest_completed_hint(mock_db):
+    from app.api.sessions import get_composer_suggestion
+    from app.db import composer_suggestions, sessions, settings
+    from starlette.requests import Request
+
+    sessions.create_session("s", "default", api_user_id="owner")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    old = _settled_turn("s")
+    await cs._publish("s", old["id"], "Old reply")
+    request = Request({"type": "http", "state": {"api_user": {"id": "owner"}}})
+    assert (await get_composer_suggestion(request, "s"))["suggestion"] == "Old reply"
+    mock_db.execute("UPDATE turns SET created_at='2000-01-01' WHERE id=?", (old["id"],))
+    latest = _settled_turn("s")
+    # Leave the old row in place to exercise reload protection independently
+    # of the writer's invalidation path.
+    assert mock_db.execute("SELECT turn_id FROM composer_suggestions").fetchone()["turn_id"] == old["id"]
+    assert composer_suggestions.get("s") is None
+    assert await get_composer_suggestion(request, "s") is None
+    await cs._publish("s", latest["id"], "Fresh reply")
+    assert (await get_composer_suggestion(request, "s"))["suggestion"] == "Fresh reply"
+    # Steered queue rows resolve to their parent, just as save() does.
+    mock_db.execute("UPDATE turns SET stop_reason='steered', parent_turn_id=? WHERE id=?",
+                    (old["id"], latest["id"]))
+    await cs._publish("s", old["id"], "Parent reply")
+    assert composer_suggestions.get("s")["suggestion"] == "Parent reply"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activity", ["new", "continued", "steered", "user", "legacy", "batch"])
+async def test_activity_removes_hint_and_broadcasts_clear(mock_db, monkeypatch, activity):
+    from app.core.sync_engine import sync_engine
+    from app.db import composer_suggestions, sessions, turns
+
+    sessions.create_session("s", "default")
+    turn = _settled_turn("s")
+    await cs._publish("s", turn["id"], "Old reply")
+    monkeypatch.setattr(cs, "_loop", asyncio.get_running_loop())
+    received = asyncio.Event()
+
+    async def broadcast(event):
+        received.set()
+
+    with patch.object(sync_engine, "broadcast_event", AsyncMock(side_effect=broadcast)) as send:
+        if activity in ("legacy", "batch"):
+            if activity == "legacy":
+                await asyncio.to_thread(sessions.add_session_message, "s", "user", "Next")
+            else:
+                await asyncio.to_thread(sessions.add_session_messages_batch,
+                                        [{"session_id": "s", "role": "user", "content": "Next"}])
+        else:
+            if activity == "new":
+                turn = turns.enqueue_turn("s", "user", prompt="Next")
+            kind = "message.user" if activity in ("user", "steered") else "turn.started"
+            payload = {"content": "Next"} if kind == "message.user" else {"continued": activity == "continued"}
+            await asyncio.to_thread(append, turn, kind, payload)
+        await asyncio.wait_for(received.wait(), timeout=1)
+        send.assert_awaited_once()
+        frame = send.call_args.args[0]
+        assert frame.event_type == "stream_frame"
+        assert frame.session_id == "s"
+        assert frame.data["type"] == "composer_suggestion"
+        assert frame.data["session_id"] == "s"
+        assert frame.data["suggestion"] is None
+        assert mock_db.execute("SELECT COUNT(*) FROM composer_suggestions").fetchone()[0] == 0
+        assert composer_suggestions.get("s") is None
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_late_save_and_event_replay_preserves_fresh_hint(mock_db):
+    from app.db import composer_suggestions, sessions
+
+    sessions.create_session("s", "default")
+    turn = _settled_turn("s")
+    activity = {"id": "stable-start", "type": "turn.started", "turn_id": turn["id"],
+                "payload": {"continued": True}}
+    events.append_events("s", [activity])
+    assert not composer_suggestions.save("s", turn["id"], "Late reply")
+    append(turn, "turn.completed", {"stop_reason": "end_turn"})
+    assert composer_suggestions.save("s", turn["id"], "Fresh reply")
+    events.append_events("s", [activity])
+    assert composer_suggestions.get("s")["suggestion"] == "Fresh reply"
+
+
+@pytest.mark.parametrize("kind", ["turn.started", "message.user"])
+def test_get_rejects_same_turn_hint_before_latest_activity(mock_db, kind):
+    from app.db import composer_suggestions, sessions
+
+    sessions.create_session("s", "default")
+    turn = _settled_turn("s")
+    append(turn, kind, {"continued": True, "content": "Next"})
+    # Simulate an old worker's retained row, bypassing the new writer guard.
+    mock_db.execute("INSERT INTO composer_suggestions (session_id, turn_id, suggestion) VALUES (?, ?, ?)",
+                    ("s", turn["id"], "Stale reply"))
+    assert composer_suggestions.get("s") is None
+
+
+def test_rollback_preserves_hint_and_sends_no_clear(mock_db):
+    from app.db import base, composer_suggestions, sessions
+
+    sessions.create_session("s", "default")
+    turn = _settled_turn("s")
+    assert composer_suggestions.save("s", turn["id"], "Keep this")
+    with patch.object(cs, "notify_superseded") as notify:
+        with pytest.raises(RuntimeError, match="rollback"):
+            with base.transaction() as conn:
+                events.append_events("s", [{"type": "turn.started", "turn_id": turn["id"],
+                                            "payload": {"continued": True}}], _conn=conn)
+                notify.assert_not_called()
+                raise RuntimeError("rollback")
+        notify.assert_not_called()
+    assert composer_suggestions.get("s")["suggestion"] == "Keep this"
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_legacy_activity_revision_rejects_delayed_generation_and_stale_reads(mock_db, batch):
+    from app.db import composer_suggestions, sessions
+
+    sessions.create_session("s", "default")
+    turn = _settled_turn("s")
+    before = composer_suggestions.revision("s")
+    assert composer_suggestions.save("s", turn["id"], "Old hint")
+    if batch:
+        sessions.add_session_messages_batch([{"session_id": "s", "role": "user", "content": "Next"}])
+    else:
+        sessions.add_session_message("s", "user", "Next")
+    assert composer_suggestions.revision("s") == before + 1
+    assert composer_suggestions.get("s") is None
+    assert not composer_suggestions.save("s", turn["id"], "Late generation")
+    assert not composer_suggestions.save("s", turn["id"], "Late generation", expected_revision=before)
+    # Even a same-id continuation completing cannot admit an older generation.
+    append(turn, "turn.completed", {"stop_reason": "end_turn"})
+    assert not composer_suggestions.save("s", turn["id"], "Late generation", expected_revision=before)
+    mock_db.execute("INSERT INTO composer_suggestions (session_id, turn_id, suggestion, activity_revision) "
+                    "VALUES (?, ?, ?, ?)", ("s", turn["id"], "Stale row", before))
+    assert composer_suggestions.get("s") is None
+    assert composer_suggestions.save("s", turn["id"], "Fresh generation", expected_revision=before + 1)
+    assert composer_suggestions.get("s")["suggestion"] == "Fresh generation"
+
+
+@pytest.mark.asyncio
+async def test_foreign_loop_notifications_use_only_bound_worker_loop():
+    worker_loop = asyncio.get_running_loop()
+    delivered = asyncio.Event()
+    loops = []
+
+    async def broadcast(*args):
+        loops.append(asyncio.get_running_loop())
+        delivered.set()
+
+    async def invoke():
+        assert asyncio.get_running_loop() is not worker_loop
+        cs.notify_superseded("s", "t")
+
+    cs.start()
+    try:
+        with patch.object(cs, "_broadcast", broadcast):
+            await asyncio.to_thread(lambda: asyncio.run(invoke()))
+            await asyncio.wait_for(delivered.wait(), timeout=2)
+            assert loops == [worker_loop]
+    finally:
+        await cs.stop()
+
+
+@pytest.mark.asyncio
+async def test_notifications_drop_when_unbound_or_shutdown():
+    with patch.object(cs, "_broadcast", AsyncMock()) as broadcast:
+        cs.notify_superseded("s", "t")
+        cs.start()
+        cs.notify_superseded("s", "t")
+        # Shutdown also invalidates a callback queued before it starts running.
+        await cs.stop()
+        cs.notify_superseded("s", "t")
+        await asyncio.sleep(0)
+        broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generation_revision_captured_before_legacy_activity(mock_db):
+    from app.db import composer_suggestions, sessions, settings
+
+    sessions.create_session("s", "default", api_user_id="owner")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    turn = _settled_turn("s", terminal_event=False)
+    append(turn, "assistant.text_delta", {"text": "Original final answer"})
+    append(turn, "turn.completed", {"stop_reason": "end_turn"})
+
+    async def generate(*args, **kwargs):
+        sessions.add_session_message("s", "user", "New activity during generation")
+        append(turn, "turn.completed", {"stop_reason": "end_turn"})
+        return "Stale generated reply"
+
+    with patch("app.api.generation.generate_with_claude", AsyncMock(side_effect=generate)) as provider:
+        await cs._run("s", turn["id"])
+        provider.assert_awaited_once()
     assert composer_suggestions.get("s") is None

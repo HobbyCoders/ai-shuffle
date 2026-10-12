@@ -31,9 +31,8 @@ DONE = [{"type": "done", "metadata": {}}]
 
 
 async def test_park_then_unpark_settles_the_parked_row_and_logs_it(mock_db, caplog):
-    """The ordinary unpark: turn 1 parks on running background work; once the
-    work is over a wake turn starts, and its turn-start self-heal settles the
-    parked row (``parked_settled``) — logged as a RESOLVED park, not a stale one."""
+    """The ordinary unpark resumes and completes the original parked turn,
+    rather than completing an old row and starting a separate logical turn."""
     sid = "park-unpark"
     first = turns_db.enqueue_turn(sid, "user", prompt="launch a worker")
     with _runtime_env(pump=make_pump(DONE), bg_work=[{"id": "worker-1"}]) as env:
@@ -42,7 +41,7 @@ async def test_park_then_unpark_settles_the_parked_row_and_logs_it(mock_db, capl
     assert parked["state"] == "parked"
     assert parked["payload"]["task_ids"] == ["worker-1"]
     env["scheduler"].assert_called_once_with(sid, first["id"], "parked")
-    env["record_parked"].assert_awaited_once_with(sid, ["worker-1"])
+    env["record_parked"].assert_awaited_once_with(sid, ["worker-1"], turn_id=first["id"], usage={})
     # The lease was released even though the turn parked.
     assert runs_db.get_active_run(sid) is None
 
@@ -53,22 +52,18 @@ async def test_park_then_unpark_settles_the_parked_row_and_logs_it(mock_db, capl
     caplog.set_level(logging.INFO, logger="app.core.session_runtime")
     with _runtime_env(pump=make_pump(DONE)) as env:
         assert await session_runtime.SessionRuntime(wake).execute() == "completed"
-    env["scheduler"].assert_called_once_with(sid, wake["id"], "completed")
+    env["scheduler"].assert_called_once_with(sid, first["id"], "completed")
 
     settled = turns_db.get_turn(first["id"])
     assert settled["state"] == "completed"
-    assert settled["stop_reason"] == "parked_settled"
-    assert turns_db.get_turn(wake["id"])["state"] == "completed"
-    assert (
-        f"SessionRuntime: settled 1 resolved parked turn(s) for {sid} at turn "
-        f"{wake['id']} start"
-    ) in caplog.text
+    assert settled["stop_reason"] is None
+    assert turns_db.get_turn(wake["id"])["stop_reason"] == "steered"
+    assert "resolved parked turn(s)" not in caplog.text
 
 
 async def test_unpark_while_other_work_still_runs_leaves_the_park(mock_db, caplog):
-    """A wake for ONE finished task while another still runs must not settle the
-    park (the self-heal is gated on no active background work), and the wake
-    itself parks again on what is left."""
+    """A wake for ONE finished task resumes the same turn, then parks it
+    again on the remaining work instead of creating a second parked row."""
     sid = "park-partial"
     first = turns_db.enqueue_turn(sid, "user", prompt="launch two")
     with _runtime_env(pump=make_pump(DONE), bg_work=[{"id": "a"}, {"id": "b"}]):
@@ -80,7 +75,8 @@ async def test_unpark_while_other_work_still_runs_leaves_the_park(mock_db, caplo
         assert await session_runtime.SessionRuntime(wake).execute() == "parked"
 
     assert turns_db.get_turn(first["id"])["state"] == "parked"
-    assert turns_db.get_turn(wake["id"])["payload"]["task_ids"] == ["b"]
+    assert turns_db.get_turn(first["id"])["payload"]["task_ids"] == ["b"]
+    assert turns_db.get_turn(wake["id"])["stop_reason"] == "steered"
     assert "resolved parked turn(s)" not in caplog.text
 
 
@@ -89,7 +85,8 @@ async def test_a_failing_parked_settle_never_blocks_the_next_turn(mock_db, caplo
     stale = turns_db.enqueue_turn(sid, "user", prompt="old")
     turns_db.start_turn(stale["id"], run_id="run-old")
     turns_db.park_turn(stale["id"], ["gone"])
-    fresh = turns_db.enqueue_turn(sid, "user", prompt="new")
+    # An incompatible send still exercises the separate-turn cleanup path.
+    fresh = turns_db.enqueue_turn(sid, "user", prompt="new", profile_id="different")
     with _runtime_env(pump=make_pump(DONE)), patch.object(
         turns_db, "settle_parked_turns", side_effect=RuntimeError("db blip"),
     ):

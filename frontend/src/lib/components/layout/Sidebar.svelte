@@ -54,6 +54,8 @@
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
@@ -81,6 +83,8 @@
 		isVisibleSidebarSession,
 		isArchived,
 		sidebarGroup,
+		openSessionNeeds,
+		sessionNeedsInput,
 		liveProjectKeys,
 		UNGROUPED_PROJECT,
 		type SessionCardStatus
@@ -170,6 +174,24 @@
 	// A cached turn/task can be out of date when a session is selected. Only a
 	// local send bridges the wait for the server's run-start broadcast.
 	const activeStreamingId = $derived($activeSession.optimisticStreaming ? $activeSession.sessionId : null);
+	// The open session's own prompts and prose question (spec §5). The answer
+	// object is reference-stable, so a streaming fold that changes none of it
+	// leaves the rows be.
+	const groupToolCalls = $derived(chatPreferences.current?.groupToolCalls !== false);
+	const openNeedsNow = $derived(openSessionNeeds(
+		$activeSession,
+		groupToolCalls,
+		!!activeId && $proseQuestionSessions.has(activeId),
+		isTranscriptProseDismissed($proseQuestionDismissals, activeId, $activeSession.messages)
+	));
+	// Null while the open session waits on nothing, so switching sessions does
+	// not re-derive every row.
+	const openNeedsId = $derived(
+		openNeedsNow.permissions > 0 || openNeedsNow.questions > 0 || openNeedsNow.proseQuestion ? activeId : null
+	);
+	// Prose questions remembered for sessions that are not open; the open one
+	// reads its own transcript instead.
+	const rememberedProse = $derived(withoutSession($proseQuestionSessions, activeId));
 	const streamingMap = $derived($streamingSessions);
 
 	function isStreaming(id: string): boolean {
@@ -358,7 +380,12 @@
 						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
 						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
-						isActive: !!s.is_active
+						isActive: !!s.is_active,
+						open: sessionNeedsInput(
+							s.id === openNeedsId,
+							openNeedsNow,
+							groupToolCalls && rememberedProse.has(s.id)
+						)
 					}),
 					ts: sessionTimestamp(s)
 				};

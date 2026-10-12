@@ -1,7 +1,7 @@
 # AI Shuffle with Docker Compose.
 #
 # 1. Put this file and env.example in an empty folder.
-# 2. Copy env.example to .env and set AI_SHUFFLE_PULL_TOKEN from your license email.
+# 2. Copy env.example to .env and adjust the settings if needed.
 # 3. Run: docker compose up -d
 # 4. Open http://localhost:8000 on this computer.
 #
@@ -17,9 +17,8 @@ name: ai-shuffle
 
 services:
   ai-shuffle:
-    # A pinned release, pulled through your licensed registry path. The pull
-    # token is read-only and is not your license key.
-    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.9.1}
+    # A pinned public release. No account or Docker login is needed.
+    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-0.9.3}
     container_name: ai-shuffle
     restart: unless-stopped
 
@@ -53,7 +52,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Seeds the owner password on the first start only (see env.example).
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
-      # Activates your license on the first start (see env.example).
+      # Optional: links a paid Cloud plan on the first start (see env.example).
       LICENSE_KEY: ${LICENSE_KEY:-}
       # Optional: each applies only once uncommented here (a line in .env alone
       # does not reach the container). The install guide explains each one.

@@ -1,31 +1,18 @@
 name: Android CI
-run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
 
-# Android app (android/) and the Cloudflare account hub (android/hub). Paths-
-# filtered like the other CI workflows: a PR that touches nothing under
-# android/ never starts it. Chat loads the phone UI from the paired worker's
+# Android app (android/) and the Cloudflare account hub (android/hub). Manual
+# or called by a release; pull requests run no CI (scripts/local_ci.py). Chat loads the phone UI from the paired worker's
 # /mobile/ (app/mobile_ui.py), so mobile/ and frontend/ changes ship with a
 # worker update and are covered by frontend CI, not an emulator run. The APK
 # bundles mobile/ only as the offline demo. Signed sideload builds require
 # publish_download; normal CI only stages APKs for emulator verification.
 # A merge must not ship a client before its workers serve /mobile/
-# (docs/mobile-desktop-ui-split.md). Merges to main do not re-run it — the PR
-# already did, and the publish job below only fires from a dispatch or a
-# release workflow_call that sets publish_download.
+# (docs/mobile-desktop-ui-split.md).
+# The publish job only fires from a dispatch or a release workflow_call that
+# sets publish_download.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
-  pull_request:
-    # Platform jobs are deferred on PRs. Add ci:full to run them on every push
-    # (for PRs that really change this platform); removing it cancels them.
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    paths:
-      - 'android/**'
-      - '.github/workflows/android.yml'
-      - '.github/workflows/deploy-site.yml'
-      - '.github/workflows/deploy-hub.yml'
-      - 'scripts/ci/require-full-ci.py'
-      - 'scripts/ci/android-inputs.py'
   workflow_dispatch:
     inputs:
       publish_download:
@@ -47,42 +34,12 @@ permissions:
   contents: read
 
 concurrency:
-  # Unrelated label events must not replace a running OR pending validation.
-  group: android-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && github.run_id || 'validation' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  changes:
-    name: Classify Android APK inputs${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      apk: ${{ steps.inputs.outputs.apk }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Classify changed paths (manual and release runs always build)
-        id: inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ "$EVENT_NAME" != pull_request ]; then
-            echo 'apk=true' >> "$GITHUB_OUTPUT"
-          else
-            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" > "$RUNNER_TEMP/android-changes.json"
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/android-pr.json"
-            python3 scripts/ci/android-inputs.py "$RUNNER_TEMP/android-changes.json" "$RUNNER_TEMP/android-pr.json" "$PR_HEAD" >> "$GITHUB_OUTPUT"
-          fi
-
   account-hub:
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
-    name: Account hub Worker and D1 tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Account hub Worker and D1 tests
     timeout-minutes: 8
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
@@ -120,9 +77,7 @@ jobs:
         run: node --test app/src/test/js/chat-downloads.test.cjs
 
   build:
-    needs: changes
-    if: needs.changes.outputs.apk == 'true'
-    name: Build and test Android app${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Build and test Android app
     timeout-minutes: 20
     runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
@@ -176,11 +131,9 @@ jobs:
           ./gradlew assembleDebug --max-workers=2 --stacktrace
           python3 ci/verify-mobile-apk.py app/build/outputs/apk/debug/app-debug.apk
       - name: Build Android test APK
-        if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
         run: ./gradlew assembleDebugAndroidTest --max-workers=2 --stacktrace
 
       - name: Upload instrumentation APKs
-        if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
         uses: actions/upload-artifact@v4
         with:
           retention-days: 1
@@ -191,7 +144,7 @@ jobs:
           if-no-files-found: error
 
       - name: Decode release keystore
-        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
@@ -202,7 +155,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
 
       - name: Build release APK
-        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -224,18 +177,18 @@ jobs:
           python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
 
       - name: Verify APK is signed with the release key
-        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)"
           "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Prepare public APK download
-        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         run: python3 ci/prepare-apk-download.py
 
       - name: Upload public download files
-        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         uses: actions/upload-artifact@v4
         with:
           retention-days: 1
@@ -244,8 +197,7 @@ jobs:
           if-no-files-found: error
 
   android-ui:
-    name: Android emulator verification (API ${{ matrix.api }})${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    name: Android emulator verification (API ${{ matrix.api }})
     strategy:
       fail-fast: false
       matrix:
@@ -328,9 +280,9 @@ jobs:
           if-no-files-found: warn
 
   publish:
-    name: Publish verified Android download${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Publish verified Android download
     needs: [account-hub, build, android-ui]
-    if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+    if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
@@ -351,18 +303,3 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: bash android/ci/publish-apk.sh android-download
 
-  readiness:
-    name: Android merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    needs: ['changes', 'account-hub', 'build', 'android-ui']
-    if: ${{ !cancelled() && (github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@v4
-      - name: Require successful checks for this revision
-        env:
-          CI_FULL_REQUESTED: ${{ github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
-          CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
-          CI_DEFERRABLE_JOBS: '["android-ui"]'
-          CI_ANDROID_APK_REQUIRED: ${{ needs.changes.outputs.apk }}
-        run: python3 scripts/ci/require-full-ci.py

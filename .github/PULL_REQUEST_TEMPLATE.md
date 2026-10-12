@@ -1,58 +1,20 @@
-## Summary
+## What changed and why?
 
-<!-- Brief description of the changes in this PR -->
+<!-- Describe the problem, your change and the related issue. Open this PR as a draft against main. -->
 
-## Type of Change
+## Local checks
 
-<!-- Check all that apply -->
+<!-- List the exact commands and results. Run targeted tests while working, then commit and run python scripts/local_ci.py before pushing. CI runs no tests on PRs or branch pushes. -->
 
-- [ ] Bug fix (non-breaking change that fixes an issue)
-- [ ] New feature (non-breaking change that adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] Documentation update
-- [ ] Refactoring (no functional changes)
-- [ ] CI/CD changes
-- [ ] Dependencies update
+## Running-app checks
 
-## Related Issues
+<!-- Say what you exercised in the app, or explicitly say it was tested only with fixtures. Add screenshots for visible changes. Never include secrets or private data. -->
 
-<!-- Link any related issues here -->
-<!-- Fixes #123 -->
-<!-- Closes #456 -->
+## Not covered here
 
-## Changes Made
+<!-- Copy local_ci.py's "Not covered here" lines and describe any other checks you could not run. -->
 
-<!-- List the key changes made in this PR -->
+## Contributor sign-off
 
--
--
--
-
-## Testing
-
-<!-- Describe how you tested these changes -->
-
-- [ ] I ran the Python test suite (`pytest tests/ -v`)
-- [ ] I ran the frontend tests (`cd frontend && npm run test`)
-- [ ] I tested manually in the browser
-- [ ] I tested on Docker deployment
-- [ ] I added new tests for this functionality
-- [ ] If this PR says it was "not tried on real workers", it adds a row to `.fluid/skills/live-test/scenarios.json` that would catch the bug live (see `docs/internal/live-smoke.md`)
-
-## Screenshots
-
-<!-- If applicable, add screenshots to demonstrate the changes -->
-
-## Checklist
-
-- [ ] My code follows the project's code style (Ruff for Python, TypeScript for frontend)
-- [ ] I have run `ruff check` and fixed any issues
-- [ ] I have updated documentation if needed
-- [ ] My changes don't introduce new warnings
-- [ ] I have added tests that prove my fix/feature works
-- [ ] All existing tests pass locally
-- [ ] I have checked that my changes work with `LOCAL_MODE=true`
-
-## Additional Notes
-
-<!-- Any additional context or notes for reviewers -->
+- [ ] Every commit has a DCO `Signed-off-by: Your Name <your-email>` line added with `git commit -s`.
+- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md) and kept this PR in draft for review.

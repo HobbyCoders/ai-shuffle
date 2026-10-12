@@ -156,7 +156,7 @@ describe('starter agent', () => {
 	});
 
 	it('creates an Assistant when only the built-in agents exist', async () => {
-		mocks.get.mockResolvedValue(['general-purpose', 'Plan', 'frontend-designer']
+		mocks.get.mockResolvedValue(['general-purpose', 'frontend-designer']
 			.map((id) => ({ id, name: id, is_builtin: true })));
 		mocks.post.mockResolvedValue({ id: 'assistant', name: 'Assistant' });
 		expect(await ensureStarterAgent()).toMatchObject({ id: 'assistant' });

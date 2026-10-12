@@ -255,6 +255,31 @@ def test_watch_exits_non_zero_when_live_app_stops_answering_readiness(monkeypatc
     assert "readiness probe failed 3 times in a row" in capsys.readouterr().err
 
 
+def test_watch_logs_transient_readiness_degradation_and_recovery(monkeypatch, capsys):
+    app = Mock()
+    app.poll.return_value = None
+    monkeypatch.setattr(runtime, "READY_PROBE_INTERVAL", 0)
+    answers = iter([True, False, False, True])
+    probes = []
+    def probe(url):
+        answer = next(answers)
+        probes.append(answer)
+        if len(probes) == 4:
+            runtime.STOP.set()
+        return answer
+    monitor = runtime.ReadinessMonitor("http://127.0.0.1:1/health/ready", probe=probe, failures=3)
+    relaunch = Mock()
+    try:
+        assert runtime.watch(app, Mock(process=None), None, monitor, relaunch=relaunch) == 0
+    finally:
+        runtime.STOP.clear()
+    relaunch.assert_not_called()
+    err = capsys.readouterr().err
+    assert err.count("application readiness degraded") == 1
+    assert err.count("application readiness recovered") == 1
+    assert err.index("degraded") < err.index("recovered")
+
+
 def test_watch_restarts_a_crashed_or_unready_app_in_place_within_a_budget(monkeypatch, capsys):
     # #2112: a container whose restart policy is "no" stayed down after the
     # readiness watchdog exited it. The app is restarted inside the container
@@ -275,19 +300,22 @@ def test_watch_restarts_a_crashed_or_unready_app_in_place_within_a_budget(monkey
     assert err.count("restarting the application") == runtime.RELAUNCH_LIMIT
     assert "application exited unexpectedly; exiting so the container restarts" in err
 
-    # A live app that stops answering readiness is replaced, then supervised
-    # until the external stop when the replacement is healthy.
+    # A live app that stops answering readiness is replaced, then supervised.
     hung, healthy = Mock(), Mock()
     hung.poll.return_value = healthy.poll.return_value = None
-    answers = iter([False, False] + [True] * 10000)
+    answers = iter([False, False, True])
+    def probe(_):
+        answer = next(answers)
+        if answer:
+            runtime.STOP.set()
+        return answer
     monitor_type = runtime.ReadinessMonitor
     def monitor(url):
-        return monitor_type(url, probe=lambda _: next(answers), failures=2, startup_failures=2)
+        return monitor_type(url, probe=probe, failures=2, startup_failures=2)
     monkeypatch.setattr(runtime, "ReadinessMonitor", monitor)
     replaced = []
     def relaunch_hung(current):
         replaced.append(current)
-        threading.Timer(0.3, runtime.STOP.set).start()
         return healthy
     runtime.STOP.clear()
     try:

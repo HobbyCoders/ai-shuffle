@@ -18,6 +18,7 @@ export const CATEGORY_IDS = [
 	'mcp',
 	'hooks',
 	'devices',
+	'cloud',
 	'security',
 	'system',
 	'logs'
@@ -39,6 +40,7 @@ export const PAGE_TYPES: Record<CategoryId, PageType> = {
 	mcp: 'collection',
 	hooks: 'collection',
 	devices: 'collection',
+	cloud: 'preference',
 	security: 'preference',
 	system: 'preference',
 	logs: 'collection'

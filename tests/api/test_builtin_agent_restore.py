@@ -1,17 +1,28 @@
-"""Built-in subagents: is_modified detection and POST /agents/{id}/restore.
+"""Legacy built-in compatibility: is_modified and POST /agents/{id}/restore.
 
-Built-in subagents (general-purpose, Plan, frontend-designer) live in
+Production ships no built-ins. The fixture simulates the old catalog so the
+retained generic restore helpers stay covered. Legacy built-ins lived in
 the unified agents table and compare against their code definitions in
 BUILTIN_SUBAGENTS. The list endpoint and the restore endpoint both use that
 subagent comparison — otherwise the revert button never appears.
 """
 
+import pytest
+
+from app.core.agent_templates import GENERAL_PURPOSE_PROMPT, STARTER_TEAM_AGENTS
 from app.core.builtin_subagents import (
-    GENERAL_PURPOSE_PROMPT,
     get_builtin_subagent_definition,
     seed_builtin_subagents,
 )
 from app.db import database
+
+
+@pytest.fixture(autouse=True)
+def legacy_catalog(monkeypatch):
+    from app.core import builtin_subagents
+
+    monkeypatch.setattr(builtin_subagents, "BUILTIN_SUBAGENTS", STARTER_TEAM_AGENTS)
+    monkeypatch.setattr(builtin_subagents, "RETIRED_BUILTIN_IDS", ("Explore", "Plan"))
 
 
 def _general_purpose(client) -> dict:

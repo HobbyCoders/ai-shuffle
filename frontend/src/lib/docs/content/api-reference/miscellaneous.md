@@ -1083,9 +1083,9 @@ Take the screen back from the agent now. It does not turn computer use off. Retu
 
 **Auth:** Required
 
-## License
+## AI Shuffle Cloud
 
-License status and seats for this worker. See [License](/docs/getting-started/license) for how licenses work.
+Cloud account, paid lease and remote-worker capacity for Settings. The historical `/license` routes remain compatible. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
 ### GET /api/v1/license
 
@@ -1093,8 +1093,12 @@ License status and seats for this worker. See [License](/docs/getting-started/li
 
 ```json
 {
-  "mode": "licensed",
-  "state": "active",
+  "mode": "cloud",
+  "state": "paid",
+  "linked": true,
+  "remote_worker_limit": 3,
+  "lease_state": "active",
+  "message": "Paid Cloud plan. Local use does not depend on this plan.",
   "allowed": true,
   "reason": null,
   "banner": null,
@@ -1109,11 +1113,11 @@ License status and seats for this worker. See [License](/docs/getting-started/li
 }
 ```
 
-The response also has `plan`, `key_hint`, `issued_at` and `grace_until`. `state` is `beta`, `unlicensed`, `invalid`, `active`, `trialing`, `expiring`, `grace`, `ending` or `expired`. `allowed` says whether new agent runs can start; when `false`, `reason` says why. `banner` (`severity`, `message`) is the notice the app shows, or `null`. During the beta, `mode` and `state` are `beta`.
+The response also has `plan`, `account_id`, `license_id`, `key_hint`, `issued_at`, `grace_until`, `server_status` and `server_configured`. `state` is `not_linked`, `free` or `paid`; `linked` reports the local account binding independently of paid-key activation. `remote_worker_limit` is 0 without an account, 1 for a free account, or the valid signed lease's seat count. The hub enforces actual capacity. `lease_state` is `none`, `active`, `grace`, `expiring`, `ending`, `expired`, `invalid` or `seat_lost`. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, and `reason` and `banner` are always `null`. No Cloud state blocks local runs or updates. An expired lease falls back to `free` if linked, otherwise `not_linked`; renewal timestamps and errors remain available.
 
 ### POST /api/v1/license/activate
 
-Activate this worker with a license key.
+Link a paid Cloud plan to this worker with a license key. Local use never needs one.
 
 **Auth:** Owner only. Refused (`403`) for requests from an agent preview.
 

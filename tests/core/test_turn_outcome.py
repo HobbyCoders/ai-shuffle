@@ -15,6 +15,25 @@ def _events(*events):
     return patch("app.db.session_events.get_events", return_value=list(events))
 
 
+def test_resumed_attempt_delivers_only_its_own_text_and_outcome():
+    log = [
+        {"seq": 1, "turn_id": "same", "event_type": "turn.started"},
+        {"seq": 2, "turn_id": "same", "event_type": "assistant.text_delta", "payload": {"text": "old"}},
+        {"seq": 3, "turn_id": "same", "event_type": "turn.parked", "payload": {"usage": {"tokens_out": 1}}},
+        {"seq": 4, "turn_id": "same", "event_type": "turn.started", "payload": {"continued": True}},
+    ]
+    with _events(*log):
+        assert turn_outcome.final_turn_outcome("s1")["terminal_found"] is False
+        assert turn_outcome.extract_final_assistant_text("s1") == ""
+    log.extend([
+        {"seq": 5, "turn_id": "same", "event_type": "assistant.text_delta", "payload": {"text": "new"}},
+        {"seq": 6, "turn_id": "same", "event_type": "turn.parked", "payload": {"usage": {"tokens_out": 2}}},
+    ])
+    with _events(*log):
+        assert turn_outcome.final_turn_outcome("s1")["usage"] == {"tokens_out": 2}
+        assert turn_outcome.extract_final_assistant_text("s1") == "new"
+
+
 def test_no_terminal_event_is_flagged_not_shaped_as_success():
     log = [
         {"seq": 1, "turn_id": "t1", "event_type": "turn.started", "payload": {}},
