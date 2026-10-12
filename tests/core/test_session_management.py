@@ -629,3 +629,101 @@ async def test_settle_redirected_wait_interrupts_only_waiting_child(chats, monke
     finally:
         broker.dismiss_pending("target")
         await asyncio.gather(*broker._notifications)
+
+async def test_settle_snapshot_preserves_successor_and_all_new_prompts(chats, monkeypatch):
+    import asyncio
+    from app.core import chat_access, session_settlement, turn_manager
+    from app.db import interactions, runs, session_events
+
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    old = turns.enqueue_turn("target", "user", prompt="Old", profile_id="agent")
+    lease = runs.claim_run("target", "runner", 60)
+    turns.start_turn(old["id"], lease["id"], "runner")
+    old_permission = interactions.create_interaction("target", "permission", {"request_id": "same-id"}, 300)
+    old_question = interactions.create_interaction("target", "question", {"request_id": "same-question"}, 300)
+    await broker.request("target", "service", "Old access")
+    session_events.append_events("target", [{"type": "message.assistant", "payload": {"content": "Old question?"}}])
+    real_run = session_settlement.run_sync
+    successor = {}
+    signals = Mock()
+    monkeypatch.setattr(turn_manager, "_fire_interrupt_executor", signals)
+
+    async def interleave(fn, *args, **kwargs):
+        value = await real_run(fn, *args, **kwargs)
+        if fn is session_settlement._capture_and_dismiss:
+            assert value is not None
+            assert turns.get_turn(old["id"])["state"] == "interrupting"
+            # Old runtime exits, owner reopens, then fresh work arrives before
+            # any post-commit notifications/private releases/runtime signal.
+            turns.settle_turn(old["id"], "completed")
+            sessions.set_session_active("target", True)
+            new_turn = turns.enqueue_turn("target", "user", prompt="Fresh", profile_id="agent")
+            turns.start_turn(new_turn["id"], lease["id"], "runner")
+            successor["turn"] = new_turn
+            successor["permission"] = interactions.create_interaction("target", "permission", {"request_id": "same-id"}, 300)
+            successor["question"] = interactions.create_interaction("target", "question", {"request_id": "same-question"}, 300)
+            broker.dismiss_pending("target", snapshot=value["private"])
+            successor["private"] = await broker.request("target", "service", "Fresh access")
+            session_events.append_events("target", [{"type": "message.assistant", "payload": {"content": "Fresh question?"}}])
+        return value
+
+    monkeypatch.setattr(session_settlement, "run_sync", interleave)
+    try:
+        assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+        assert turns.get_turn(successor["turn"]["id"])["state"] == "running"
+        signals.assert_called_once_with("target", "stop", old["id"])
+        assert interactions.get_interaction(old_permission["id"])["answer"]["decision"] == "deny"
+        assert interactions.get_interaction(old_question["id"])["state"] == "cancelled"
+        assert interactions.get_interaction(successor["permission"]["id"])["state"] == "pending"
+        assert interactions.get_interaction(successor["question"]["id"])["state"] == "pending"
+        assert successor["private"]["request_id"] in broker.requests
+        assert broker.pending_count("target") == 1
+        assert sessions.get_session("target")["is_active"]
+        assert sessions.get_session("target")["last_assistant_question_seq"] is not None
+    finally:
+        broker.dismiss_pending("target")
+        await asyncio.gather(*broker._notifications)
+
+
+async def test_settlement_runtime_interrupt_does_not_sweep_new_permissions(chats, monkeypatch):
+    from app.core import session_runtime, query_session_lifecycle
+    from app.db import interactions
+
+    turn = turns.enqueue_turn("target", "user", prompt="Old", profile_id="agent")
+    turns.start_turn(turn["id"])
+    turns.interrupt_turn("target", "stop", turn_id=turn["id"], source="session_settled")
+    fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+
+    async def signal(_sid):
+        turns.settle_turn(turn["id"], "aborted")
+    monkeypatch.setattr(query_session_lifecycle, "interrupt_session", signal)
+    monkeypatch.setattr(session_runtime, "record_interrupting", AsyncMock())
+    await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
+    assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+
+
+async def test_local_delayed_settlement_revision_cannot_dismiss_a_new_settle(chats):
+    from app.db import interactions
+    from app.network import session_active
+
+    stale = session_active.write_shared("target", False)
+    session_active.write_shared("target", True)
+    session_active.write_shared("target", False)
+    fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+    await session_active._apply_settle_change(stale, False)
+    assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+
+async def test_repeated_settle_revision_preserves_post_snapshot_wait(chats):
+    from app.core.session_settlement import dismiss_owner_waits
+    from app.db import interactions
+    from app.network import session_active
+
+    interactions.create_interaction("target", "permission", {"request_id": "old"}, 300)
+    row = session_active.write_shared("target", False)
+    revision = row["_settled_revision"]
+    assert await dismiss_owner_waits("target", expected_revision=revision)
+    fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+    assert not await dismiss_owner_waits("target", expected_revision=revision)
+    assert interactions.get_interaction(fresh["id"])["state"] == "pending"

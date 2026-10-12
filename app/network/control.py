@@ -471,6 +471,11 @@ def _session_active_handler():
     return handle
 
 
+def _session_settle_dismiss_handler():
+    from app.network.session_active import handle_dismiss
+    return handle_dismiss
+
+
 def _permission_mode_handler():
     from app.api.sessions_permissions import handle
     return handle
@@ -509,6 +514,7 @@ _LAZY_HANDLERS = {
     "permission-mode": _permission_mode_handler,
     "away-mode": _away_mode_handler,
     "session-active": _session_active_handler,
+    "session-settle-dismiss": _session_settle_dismiss_handler,
     "handoff": _handoff_handler,
     "session-move": _session_move_handler,
     "application-update": _application_update_handler,

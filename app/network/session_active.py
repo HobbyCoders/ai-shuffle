@@ -59,9 +59,12 @@ def write_shared(session_id: str, active: bool) -> Optional[dict]:
         if not active:
             from app.db.assistant import assert_can_settle
             assert_can_settle(conn, session_id)
-        _record_active(cur, session_id, active)
+        membership_envelope = _record_active(cur, session_id, active)
         cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
         row = dict(cur.fetchone())
+        row["_settled_membership"] = membership_envelope
+        cur.execute("SELECT updated_at FROM network_session_active WHERE session_id=%s", (session_id,))
+        row["_settled_revision"] = {"membership_updated_at": cur.fetchone()["updated_at"]}
     engine.kick()
     return row
 
@@ -85,9 +88,12 @@ def write_shared_many(session_ids: list[str], active: bool) -> list[dict]:
             if not active:
                 from app.db.assistant import assert_can_settle
                 assert_can_settle(conn, session_id)
-            _record_active(cur, session_id, active)
+            membership_envelope = _record_active(cur, session_id, active)
             cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
-            rows.append(dict(cur.fetchone()))
+            row = {**dict(cur.fetchone()), "_settled_membership": membership_envelope}
+            cur.execute("SELECT updated_at FROM network_session_active WHERE session_id=%s", (session_id,))
+            row["_settled_revision"] = {"membership_updated_at": cur.fetchone()["updated_at"]}
+            rows.append(row)
     engine.kick()
     return rows
 
@@ -103,13 +109,15 @@ async def set_shared(session_id: str, active: bool) -> dict:
 
 async def _apply_settle_change(row: dict, active: bool, archived: Optional[bool] = None) -> None:
     """Dismiss waits on the owner; shared membership remains offline-first."""
+    envelope = row.pop("_settled_membership", None)
+    revision = row.pop("_settled_revision", {"session_updated_at": row.get("updated_at")})
     if active or archived is not None or row.get("status") == "archived":
         return
     owner = control.owner_of(row)
     try:
         if owner is None:
             from app.core.session_settlement import dismiss_owner_waits
-            if await dismiss_owner_waits(row["id"]):
+            if await dismiss_owner_waits(row["id"], expected_revision=revision):
                 row.update(await run_sync(database.get_session, row["id"]))
         else:
             # A fast path only: replication also dismisses waits on the owner.
@@ -117,9 +125,14 @@ async def _apply_settle_change(row: dict, active: bool, archived: Optional[bool]
             # remains a local membership write, as before).
             from app.network.endpoints import peer_endpoints
             member = await run_sync(store.get_member, owner)
-            if member and peer_endpoints(member, engine.presence_of(owner)):
+            if envelope and member and peer_endpoints(member, engine.presence_of(owner)):
                 async with asyncio.timeout(3):
-                    await set_remote(owner, row["id"], False)
+                    # A delivery of the original signed revision, NOT another
+                    # membership write. Late delivery cannot undo an unsettle.
+                    await control.call(owner, "session-settle-dismiss", {
+                        "session_id": row["id"], "is_active": False,
+                        "settled_membership": envelope,
+                    })
     except Exception:
         logger.warning("Could not dismiss owner waits for settled session %s", row["id"], exc_info=True)
 
@@ -163,20 +176,46 @@ def _write(session_id: str, active: bool, *, archived: Optional[bool] = None,
         # Older peers still ask the execution owner. Write the shared record
         # too so their edits participate in the same conflict order.
         active = False if archived else active
-        _record_active(cur, session_id, active)
+        membership_envelope = _record_active(cur, session_id, active)
         status_sql, status_params = database.archive_status_sql(archived, "%s")
         cur.execute(f"UPDATE sessions SET is_active=%s, updated_at=%s{status_sql} WHERE id=%s RETURNING *",
                     (active, datetime.now(timezone.utc).isoformat(), *status_params, session_id))
         row = dict(cur.fetchone())
         envelope = engine.record(cur, "sessions", session_id, row, force=True)
+        cur.execute("SELECT updated_at FROM network_session_active WHERE session_id=%s", (session_id,))
+        row["_settled_revision"] = {"membership_updated_at": cur.fetchone()["updated_at"]}
         if envelope is None and not local:
             # Do not commit a remote edit that cannot be published yet.
             raise PermissionError(
                 "The worker that runs this session is not ready yet: it is still syncing "
                 "with the other workers. Try again in a minute."
             )
+    row["_settled_membership"] = membership_envelope
     engine.kick()
     return row, envelope
+
+
+async def handle_dismiss(body: dict, from_device: str) -> dict:
+    """Deliver a signed settle revision without creating a membership write.
+
+    A distinct action is intentional: old workers must refuse the fast path,
+    not interpret it as their legacy session-active mutation.
+    """
+    session_id = body.get("session_id")
+    envelope = body.get("settled_membership")
+    if (not isinstance(session_id, str) or not session_id or body.get("is_active") is not False
+            or body.get("archived") is not None or not isinstance(envelope, dict)
+            or envelope.get("collection") != "session_active" or envelope.get("record_id") != session_id
+            or envelope.get("origin_device_id") != from_device or envelope.get("op") != "upsert"):
+        raise ValueError("Invalid settled membership delivery")
+    # Normal signed ordering decides whether this is current, obsolete or
+    # waiting for a missing predecessor. Never mint a new owner revision.
+    result = await run_sync(engine.apply_batch, [envelope])
+    if result.rejected:
+        raise PermissionError("Invalid signed settled membership")
+    from app.core.session_settlement import dismiss_owner_waits
+    dismissed = await dismiss_owner_waits(session_id, expected_revision=envelope)
+    return {"dismissed": dismissed}
 
 
 async def handle(body: dict, from_device: str) -> dict:

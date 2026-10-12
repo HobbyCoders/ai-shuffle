@@ -122,10 +122,10 @@ def answer_question_and_enqueue(
     return True
 
 
-def cancel_interaction(interaction_id: str) -> bool:
+def cancel_interaction(interaction_id: str, *, _conn: Any = None) -> bool:
     """Cancel a pending interaction. False if it is no longer pending."""
     session_id = None
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE pending_interactions SET state='cancelled' "
@@ -133,7 +133,7 @@ def cancel_interaction(interaction_id: str) -> bool:
             (interaction_id,),
         )
         cancelled = cursor.rowcount > 0
-        if cancelled:
+        if cancelled and _conn is None:
             session_id = _session_of(cursor, interaction_id)
     notify_session_write(session_id, "pending_interactions")
     return cancelled
