@@ -1,7 +1,10 @@
 """The buyer install files in docs/install stay pinned, complete and safe."""
 from pathlib import Path
 import re
+import shutil
+import subprocess
 
+import pytest
 import yaml
 
 from app import __version__
@@ -78,7 +81,6 @@ def test_buyer_compose_is_verified_in_ci():
 
 
 def test_private_registry_is_retired():
-    assert not (ROOT / "android/registry").exists()
     for workflow in ("ci-registry.yml", "deploy-registry.yml"):
         assert not (ROOT / ".github/workflows" / workflow).exists()
     assert not (ROOT / "docs/install/registry.md").exists()
@@ -89,6 +91,45 @@ def test_private_registry_is_retired():
     readme = (COMPOSE / "README.md").read_text()
     assert "ghcr.io/hobbycoders/ai-shuffle-server" in readme
     assert "Local use and updates are free" in readme
+    # Old checkouts can retain ignored node_modules after the registry is removed.
+    # Source archives have no Git metadata; still run the other checks above.
+    if not (ROOT / ".git").exists() or shutil.which("git") is None:
+        pytest.skip("tracked-file check requires a Git checkout and git")
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "android/registry"], cwd=ROOT,
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    assert not tracked.stdout, tracked.stdout
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_private_registry_retirement_ignores_only_untracked_files(tmp_path, monkeypatch, tracked):
+    if shutil.which("git") is None:
+        pytest.skip("regression requires git")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, timeout=10)
+    (tmp_path / ".gitignore").write_text("node_modules/\n")
+    leftover = tmp_path / "android/registry/node_modules/x"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("leftover dependency")
+    subprocess.run(
+        ["git", "check-ignore", "--quiet", "android/registry/node_modules/x"],
+        cwd=tmp_path, check=True, timeout=10,
+    )
+    compose = tmp_path / "docs/install/compose"
+    shutil.copytree(COMPOSE, compose)
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "COMPOSE", compose)
+    if tracked:
+        # Even an ignored path must fail if someone adds it back to the index.
+        subprocess.run(
+            ["git", "add", "--force", "android/registry/node_modules/x"],
+            cwd=tmp_path, check=True, timeout=10,
+        )
+        with pytest.raises(AssertionError, match="android/registry/node_modules/x"):
+            test_private_registry_is_retired()
+    else:
+        test_private_registry_is_retired()
+    assert leftover.is_file()
 
 
 def test_retired_install_templates_are_gone():
