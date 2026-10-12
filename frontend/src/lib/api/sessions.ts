@@ -118,6 +118,8 @@ export interface Session {
 	project_v2_id?: string | null;  // Origin-keyed project (install-independent)
 	origin?: string | null;  // Grouping token (git:… / manual:… / local:<id>)
 	is_pinned?: boolean;  // Explicit runner:<id> placement pin (computed at read)
+	// Where the session runs, e.g. `{ where: 'runner:<device id>' }` after a hand-off.
+	placement?: { where?: string | null } | null;
 	automation_id?: string | null;  // Set when an automation run created this session
 	provider_id?: string | null;  // Bound model provider (null = native Claude)
 	// The run binding chosen when this session was created (agents no longer

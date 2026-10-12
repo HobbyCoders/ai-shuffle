@@ -2014,6 +2014,36 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_session_updated handler (hand-off owner, #2308)', () => {
+		// The frame the source worker publishes on the global feed when a move
+		// commits (app/network/handoff.py _announce_owner).
+		const moved = {
+			owner_device_id: 'dev_gaming',
+			instance_id: 'dev_gaming',
+			placement: { where: 'runner:dev_gaming' },
+		};
+
+		it('patches owner_device_id, instance_id and placement into the row at once', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: moved });
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledTimes(1);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', moved);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				// The new owner's name and remote flag are not in the frame: a
+				// debounced reload brings them.
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	describe('user_session_updated handler (user-message revision, #2249)', () => {
 		// The question was rendered from event seq 5 of log `evt-1`.
 		const asked = [
