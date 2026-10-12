@@ -1049,6 +1049,47 @@ describe('WorkLogGroup', () => {
 				expect(shown('read-s')).toBe(false);
 			});
 
+			// Review of #2297: the steer is acked while the group is unmounted and
+			// the page reloads from server history, where the row has only its
+			// server id. The range opened under the optimistic id must still open
+			// the run, close with it, and never reopen the log at settle.
+			it('keeps a steer-started run open after an ack while away and a reload from history, and settles closed after closing it', async () => {
+				const storage = memoryStorage();
+				const steer: ChatMessage = { id: 'steer-opt', role: 'user', content: 'Check the tests too', turnId: 'turn-1' };
+				const readS = { ...message, id: 'read-s', content: 'Read S' };
+				const proseS: ChatMessage = { id: 'prose-s', role: 'assistant', type: 'text', content: 'Tests checked.' };
+				const tail = { ...message, id: 'tail', content: 'Tail', toolStatus: 'running' as const, streaming: true };
+				const live = (first: ChatMessage) => [prompt, readA, { ...finding, streaming: false }, first, readS, proseS, tail];
+				const first = render(WorkLogGroup, { ...logOf(true, live(steer)), folds: createFoldState(storage) });
+				await fireEvent.click(screen.getAllByRole('button', { name: /^Show work details/ })[1]);
+				expect(shown('read-s')).toBe(true);
+				first.unmount();
+
+				// Reloaded from server history: the steer row is only its server id.
+				const history = live({ ...steer, id: 'srv-steer' });
+				const folds = createFoldState(storage);
+				expect(folds.current).toEqual({ 'prompt:run-steer-opt..prose-s': true });
+				const view = render(WorkLogGroup, { ...logOf(true, history), folds });
+				expect(shown('read-s')).toBe(true);
+				expect(folds.current).toEqual({ 'prompt:run-srv-steer..prose-s': true });
+
+				await fireEvent.click(screen.getByRole('button', { name: /^Hide work details:/ }));
+				expect(shown('read-s')).toBe(false);
+				expect(folds.current).toEqual({});
+
+				await view.rerender(logOf(false, history.filter((m) => m.id !== 'tail')));
+				expect(folds.isOpen('prompt:turn')).toBe(false);
+				expect(shown('read-s')).toBe(false);
+			});
+
+			it('drops a run range that names no row of the settled turn instead of opening the log', () => {
+				const folds = createFoldState(memoryStorage());
+				folds.setOpen('prompt:run-gone..also-gone', true);
+				render(WorkLogGroup, { ...logOf(false, split()), folds });
+				expect(folds.current).toEqual({});
+				expect(shown('read-a')).toBe(false);
+			});
+
 			it('does not open a run of another session whose turn has the same key', async () => {
 				const folds = createFoldState(memoryStorage());
 				const first = render(WorkLogGroup, { ...logOf(true, whole()), folds });

@@ -102,17 +102,43 @@
 	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
 	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
+	const openIds = $derived(runPrefix
+		? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
+		: Object.keys(localRuns).filter((id) => localRuns[id]));
+	const rowId = (entry: WorkLogEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+	// A row is found by its `id` as well as its `serverId`: the reducer acks an
+	// optimistic row (a steer) by adding a `serverId` and keeping its `id`, so
+	// a range stored before the ack still names it, and the reconcile below
+	// moves the range onto the server id in one write.
+	const rowPositions = $derived.by(() => {
+		const position = new Map<string, number>();
+		sequence.forEach((entry, at) => {
+			const { id } = entry.message;
+			if (id && !position.has(id)) position.set(id, at);
+		});
+		sequence.forEach((entry, at) => position.set(rowId(entry), at));
+		return position;
+	});
 	// Settling merges the runs into the turn's one fold: an open run opens it,
 	// so the reader's open fold does not close under them (spec §6). Until the
 	// store records the promotion, read any open run as the turn being open.
 	const anyRunOpen = $derived(runPrefix
 		? Object.keys(stored).some((key) => key.startsWith(runPrefix))
 		: Object.values(localRuns).some(Boolean));
+	const runOpenHere = $derived(anyRunOpen && openIds.some((id) => parseRange(id, rowPositions) !== null));
 	const open = $derived(turnFold
-		? stored[turnFold] === true || (mode === 'settled' && anyRunOpen)
+		? stored[turnFold] === true || (mode === 'settled' && runOpenHere)
 		: localOpen);
+	// Only a run range that names a row of this turn opens the settled fold. A
+	// range none of whose rows exist any more (an optimistic id gone after a
+	// reload) is dropped instead, so it cannot reopen work the reader closed.
+	// Residual: a different session whose turn has the SAME turn key would
+	// lose its stored live runs here; turn keys are server ids, so this needs
+	// a server id collision.
 	$effect.pre(() => {
-		if (mode === 'settled' && foldKey && anyRunOpen) folds.promoteRuns(foldKey);
+		if (mode !== 'settled' || !foldKey || !runPrefix || !anyRunOpen) return;
+		if (runOpenHere) folds.promoteRuns(foldKey);
+		else folds.update(openIds.map((id) => `${runPrefix}${id}`), []);
 	});
 	function setOpen(next: boolean) {
 		if (turnFold) folds.setOpen(turnFold, next);
@@ -125,24 +151,6 @@
 	 * reader's open work stays open through a merge, a split, a remount or a
 	 * reload, decided from the store and the current runs alone.
 	 */
-	const openIds = $derived(runPrefix
-		? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
-		: Object.keys(localRuns).filter((id) => localRuns[id]));
-	const rowId = (entry: WorkLogEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
-	// A row is found by its `id` as well as its `serverId`: the reducer acks an
-	// optimistic row (a steer) by adding a `serverId` and keeping its `id`, so
-	// a range stored before the ack still names it, and the reconcile below
-	// moves the range onto the server id in one write.
-	const rowPositions = $derived.by(() => {
-		const position = new Map<string, number>();
-		if (mode !== 'live') return position;
-		sequence.forEach((entry, at) => {
-			const { id } = entry.message;
-			if (id && !position.has(id)) position.set(id, at);
-		});
-		sequence.forEach((entry, at) => position.set(rowId(entry), at));
-		return position;
-	});
 	const runSpans = $derived.by(() => {
 		const spans = new Map<number, RunSpan>();
 		if (mode !== 'live' || runs.length === 0) return spans;

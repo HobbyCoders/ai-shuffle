@@ -36,19 +36,24 @@ export function rangeId(span: RunSpan): string {
 /**
  * Positions a stored id covers in this turn, or null when it names no row
  * of this turn (another session's turn under the same key, a row that left
- * the window): such ids are never touched. An end that is no row of this
- * turn any more covers the first row only.
+ * the window): such ids are never touched while the turn is live. A range
+ * resolves by any endpoint that still names a row: an optimistic row acked
+ * and then reloaded from server history keeps only its server id, so a
+ * range stored under the optimistic id covers its surviving end's row, and
+ * the next reconcile rewrites it to the run's real extent.
  */
 export function parseRange(id: string, position: ReadonlyMap<string, number>): Range | null {
 	const single = position.get(id);
 	if (single !== undefined) return { start: single, end: single };
+	let partial: Range | null = null;
 	for (let at = id.indexOf(RANGE_SEP); at > 0; at = id.indexOf(RANGE_SEP, at + 1)) {
 		const start = position.get(id.slice(0, at));
-		if (start === undefined) continue;
-		const end = position.get(id.slice(at + RANGE_SEP.length)) ?? start;
-		return end < start ? { start: end, end: start } : { start, end };
+		const end = position.get(id.slice(at + RANGE_SEP.length));
+		if (start !== undefined && end !== undefined) return end < start ? { start: end, end: start } : { start, end };
+		const one = start ?? end;
+		if (one !== undefined && !partial) partial = { start: one, end: one };
 	}
-	return null;
+	return partial;
 }
 
 const overlaps = (a: Range, b: Range) => a.start <= b.end && b.start <= a.end;

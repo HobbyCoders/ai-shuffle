@@ -12,7 +12,10 @@ describe('run fold ranges', () => {
 		expect(parseRange('a..w', position)).toEqual({ start: 0, end: 3 });
 		expect(parseRange('b', position)).toEqual({ start: 2, end: 2 });
 		expect(parseRange('a..gone', position)).toEqual({ start: 0, end: 0 });
-		expect(parseRange('x..a', position)).toBeNull();
+		// Either surviving endpoint resolves the range to its row.
+		expect(parseRange('x..a', position)).toEqual({ start: 0, end: 0 });
+		expect(parseRange('gone..w', position)).toEqual({ start: 3, end: 3 });
+		expect(parseRange('x..y', position)).toBeNull();
 		expect(parseRange('other', position)).toBeNull();
 		const dotted = new Map([['m..1', 0], ['m..2', 1]]);
 		expect(parseRange('m..1..m..2', dotted)).toEqual({ start: 0, end: 1 });
