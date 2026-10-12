@@ -141,12 +141,13 @@ jobs:
             | Build | Platform | Download / install |
             |-------|----------|--------------------|
             | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://hobbycoders.com/desktop) |
-            | **Mobile** | Android 8.0+ | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) |
+            | **Mobile** | Android 8.0+ | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle), or signed APK in this release's assets |
             | **Docker** | Linux amd64 | [Container image](https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server) — `ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}` (private); buyers install from `docs/install` |
 
             Docker becomes available after its build and verification finish. Pull it
             from the container registry, not the release assets. Android installs and
-            updates are delivered through Google Play, subject to track access and review.
+            updates are available through Google Play, subject to track access and review,
+            or the signed APK attached after the Android APK job succeeds.
             In-app updates are offered to installs only after this release's image
             passed verification and its signed source was published as the stable
             release.
@@ -168,11 +169,22 @@ jobs:
             ### Mobile install
 
             Install or update AI Shuffle through [Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle).
-            Do not uninstall your existing app when updating. Play updates require
-            verified signing continuity and compatible workers; no APK is attached
-            by this release workflow. Releases go to **internal testing**, not public
-            production. Join through the Play Console tester opt-in invitation using
+            This workflow publishes to **internal testing**, not public production;
+            production promotion is a separate owner-approved Play Console step.
+            For internal testing, join through the tester opt-in invitation using
             the same Google account you use in Play before opening the store link.
+
+            For sideloading, download the signed `AI-Shuffle-Android.apk`,
+            `AI-Shuffle-Android.apk.sha256` and `android-build.json` from this
+            release's assets after the Android APK job succeeds. In that download
+            directory, run `sha256sum --check AI-Shuffle-Android.apk.sha256`.
+            The checksum checks file integrity; verify the signing certificate with
+            `apksigner verify --print-certs AI-Shuffle-Android.apk` and compare it
+            with your existing install's certificate before updating. APK and Play
+            builds must retain the original signing identity and use compatible
+            workers. Do not uninstall your existing app when updating. APK and Play
+            builds can have different version codes: an older Play version cannot
+            replace a newer sideloaded APK; wait for a higher compatible version.
 
             ### Docker install
 
@@ -317,6 +329,18 @@ jobs:
       release_tag: ${{ needs.create-release.outputs.release_tag }}
       publish_to_play: true
       workers_ready: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
+    secrets: inherit
+
+  android-apk:
+    name: Signed Android APK for the GitHub release
+    # Internal publication checks signing enrollment and compatible workers first.
+    needs: [create-release, android]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/android.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+      publish_download: true
     secrets: inherit
 
   desktop:

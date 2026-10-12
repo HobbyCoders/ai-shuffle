@@ -65,6 +65,7 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
                  create_release=NS(outputs=NS(promote_latest="true"))),
         startsWith=lambda value, prefix: value.startswith(prefix), always=lambda: True,
         contains=lambda items, value: value in items,
+        format=lambda template, *values: template.format(*values),
         _path=lambda item, path: functools.reduce(getattr, path.split("."), item),
     )
     # Globals, so that object-filter comprehensions can resolve the context.
@@ -100,6 +101,15 @@ def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
         assert not permits(condition, ref=TAG, event="push")
     else:
         assert permits(condition, ref=TAG, event="push")
+
+
+@pytest.mark.parametrize("job", ["bundle", "publish"])
+def test_play_accepts_manual_release_caller_only_for_its_exact_tag(job):
+    condition = workflow("android-play.yml")["jobs"][job]["if"]
+    assert permits(condition, ref=TAG, event="workflow_dispatch")
+    assert not permits(condition, ref=TAG, release_tag="")
+    assert not permits(condition, ref=TAG, release_tag="v0.8.18")
+    assert not permits(condition, ref=TAG, actor_id="7")
 
 
 @pytest.mark.parametrize("name,job,commands", [

@@ -31,7 +31,16 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "Start AI Shuffle.cmd" not in body
     assert "https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle" in body
     assert "releases/download/" not in body
-    assert "Signed Android APK" not in body
+    assert "no APK is attached" not in body
+    for asset in ("AI-Shuffle-Android.apk", "AI-Shuffle-Android.apk.sha256", "android-build.json"):
+        assert asset in body
+    assert "sha256sum --check AI-Shuffle-Android.apk.sha256" in body
+    assert "apksigner verify --print-certs AI-Shuffle-Android.apk" in body
+    assert "original signing identity" in body
+    assert "Do not uninstall your existing app" in body
+    assert "older Play version cannot" in body
+    assert "**internal testing**, not public production" in body
+    assert "separate owner-approved Play Console step" in body
     assert "Desktop installers are opt-in" in body
     assert "https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server" in body
     assert "docs/install" in body
@@ -105,7 +114,7 @@ def test_release_version_outputs_feed_play_and_docker(tmp_path):
         assert output.read_text() == ""
 
 
-def test_release_orchestration_defaults_to_docker_and_play_only():
+def test_release_orchestration_defaults_to_docker_play_and_signed_apk():
     workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     desktop = workflow["jobs"]["desktop"]
     assert workflow["on"]["workflow_dispatch"]["inputs"]["build_desktop"] == {
@@ -116,9 +125,19 @@ def test_release_orchestration_defaults_to_docker_and_play_only():
     assert desktop["uses"] == "./.github/workflows/desktop-installer.yml"
     assert workflow["jobs"]["docker"]["uses"] == "./.github/workflows/docker-publish.yml"
     assert workflow["permissions"]["packages"] == "write"
-    for name in ("desktop", "docker", "android"):
+    for name in ("desktop", "docker", "android", "android-apk"):
         assert workflow["jobs"][name]["with"]["release_tag"] == "${{ needs.create-release.outputs.release_tag }}"
-    assert "./.github/workflows/android.yml" not in str(workflow)
+    apk = workflow["jobs"]["android-apk"]
+    assert apk["uses"] == "./.github/workflows/android.yml"
+    assert apk["needs"] == ["create-release", "android"]
+    assert apk["with"]["publish_download"] == "true"
+    assert apk["secrets"] == "inherit"
+    assert apk["permissions"]["contents"] == "write"
+    child = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
+    assert child["jobs"]["publish"]["needs"] == ["build", "android-ui"]
+    publish = child["jobs"]["publish"]["steps"][-1]
+    assert publish["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
+    assert publish["run"] == "bash android/ci/publish-apk.sh android-download"
 
 
 def test_docker_is_called_once_per_release_and_remains_manually_available():

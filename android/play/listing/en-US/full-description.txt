@@ -1,19 +1,28 @@
-AI Shuffle is the phone companion for AI Shuffle, the self-hosted agent workspace from HobbyCoders. Your agents run on your own AI Shuffle worker: a home server or another Docker host, or the AI Shuffle desktop app. This app connects to it so you can keep working away from your desk.
+Run AI coding and automation agents on your own machines from your phone.
+
+AI Shuffle connects to the AI Shuffle worker you run on a computer, server or NAS. Start work, follow replies and approve requests without sitting at that machine. Agents run on the worker, not on the phone.
 
 What you can do
-• Start sessions and chat with your agents, with streaming replies and file downloads.
-• Approve or deny tool requests from anywhere, so long-running work does not stall.
-• Talk to an agent with voice chat, right in the chat.
-• Switch between several workers, on your home network or through protected remote access.
-• Optionally let an agent use phone tools you allow, such as timers or maps, with every action approved by you.
+- Start coding and automation sessions and continue existing conversations.
+- Follow streaming replies, review tool requests and download files.
+- Switch between your workers.
+- Use voice with a speech provider configured on your worker.
+- Enable optional phone tools, such as timers and maps. Location requests and each optional screen-control action require local approval.
 
-Your worker, your accounts
-AI Shuffle does not provide AI models. Agents run on your worker with the AI accounts and API keys you set up there. Conversations and files stay on your worker; the optional AI Shuffle account only links your devices and workers.
+Free local use
+AI Shuffle is free and open source. Run it on your own hardware with your own supported AI accounts. Local use does not require a HobbyCoders account or a paid plan. Connect directly using a secure worker address on your network or VPN.
+
+Optional remote access
+A free HobbyCoders account includes one remote worker. An optional AI Shuffle Cloud plan provides three remote-worker seats and additional hosted services. Local use stays free if a plan ends. AI usage is separate and is billed by your chosen provider; this app does not include AI credits or models.
+
+Your data
+Conversations and files are stored on your worker. Prompts, attachments and tool results can be sent to the AI providers you configure. Managed remote access carries traffic through our tunnel provider. Account services store the identity and device records needed to connect your workers. Support reports are sent to HobbyCoders only when you choose to send them.
 
 Requirements
-• A running AI Shuffle worker (sold separately). This app does not run agents on the phone.
-• Android 8.0 or newer.
+- Android 8.0 or newer.
+- A running AI Shuffle worker with a secure connection, and a supported AI provider or local model configured there.
 
-Try the offline demo from Settings to see the app without a worker or an account.
+You can try the offline demo from Settings without a worker or an account. The demo does not run live agents.
 
-Delete your account at any time from Settings > Delete account in the app, or at https://hobbycoders.com/delete-account.
+Account deletion: Settings > Account > Delete account, or https://hobbycoders.com/delete-account.
+Privacy policy: https://hobbycoders.com/privacy.

@@ -120,6 +120,21 @@ class PlayWorkflowTests(unittest.TestCase):
                         self.assertNotIn("tools", packages)
         self.assertGreater(setups, 0)
 
+    def test_production_listing_fits_play_and_describes_free_local_use(self):
+        listing = ROOT / "android/play/listing/en-US"
+        for name, maximum in (("title.txt", 30), ("short-description.txt", 80),
+                              ("full-description.txt", 4000), ("changelogs/default.txt", 500)):
+            text = (listing / name).read_text().strip()
+            self.assertGreater(len(text), 0)
+            self.assertLessEqual(len(text), maximum, name)
+            self.assertNotRegex(text.lower(), r"claude|anthropic|openai|chatgpt|openrouter|gemini|grok")
+        full = (listing / "full-description.txt").read_text()
+        self.assertIn("Local use stays free", full)
+        self.assertIn("one remote worker", full)
+        self.assertIn("three remote-worker seats", full)
+        self.assertNotIn("sold separately", full)
+        self.assertIn("https://hobbycoders.com/delete-account", full)
+
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():
             for step in job["steps"]:

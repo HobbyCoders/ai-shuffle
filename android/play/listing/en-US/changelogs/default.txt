@@ -1,0 +1,2 @@
+First production release of AI Shuffle for Android.
+Connect to your own AI Shuffle worker to start coding and automation sessions, follow replies and approve tool requests. Includes an offline demo and optional phone tools.
