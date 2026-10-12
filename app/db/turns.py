@@ -808,30 +808,37 @@ def start_turn(
 
 
 def stop_orphaned_turns(
-    session_id: str, turn_id: Optional[str] = None,
+    session_id: str, turn_id: Optional[str] = None, *, _conn: Any = None,
+    stop_background: bool = True,
 ) -> List[Dict[str, Any]]:
     """Stop stranded live turns, never a session with a valid execution lease.
 
     The lease guard is part of the UPDATE, not an earlier read. A late Stop
     remains bound to its original turn and cannot stop a successor.
     """
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         sql = (
             "UPDATE turns SET state='aborted', stop_reason='interrupted', "
-            "interrupt_mode='stop', stop_background=TRUE, ended_at=NOW() "
+            "interrupt_mode='stop', stop_background=%s, ended_at=NOW() "
             "WHERE session_id=%s AND state IN ('running','interrupting','draining') "
             "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id=turns.session_id "
             "AND r.state='active' AND r.lease_expires_at >= NOW())"
         )
-        params = [session_id]
+        params = [bool(stop_background), session_id]
         if turn_id is not None:
             sql += " AND id=%s"
             params.append(turn_id)
         cursor.execute(sql + " RETURNING *", tuple(params))
         stopped = _rows(cursor.fetchall())
-    for row in stopped:
-        _bank_live_segment(row.get("session_id"), row.get("started_at"), _dead_runner_end(row))
+    def bank():
+        for row in stopped:
+            _bank_live_segment(row.get("session_id"), row.get("started_at"), _dead_runner_end(row))
+    if _conn is not None:
+        from app.db.base import after_commit
+        after_commit(_conn, bank)
+    else:
+        bank()
     return stopped
 
 
@@ -840,7 +847,7 @@ def interrupt_turn(
     mode: str,
     stop_background: bool = False,
     turn_id: Optional[str] = None,
-    *, source: Optional[str] = None,
+    *, source: Optional[str] = None, _conn: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Transition a session's ``running`` turn to ``interrupting``.
 
@@ -854,7 +861,7 @@ def interrupt_turn(
     no-op, never touching the successor. When ``turn_id`` is absent this is
     the legacy session-scoped stop.
     """
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         if turn_id is not None:
             cursor.execute(
@@ -1061,6 +1068,7 @@ def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
 def settle_parked_turns(
     session_id: str, exclude_turn_id: Optional[str] = None,
     *, resolved_before: Optional[datetime] = None,
+    turn_ids: Optional[List[str]] = None, _conn: Any = None,
 ) -> int:
     """Settle every ``parked`` turn row for ``session_id`` to ``completed``.
 
@@ -1087,6 +1095,11 @@ def settle_parked_turns(
         "WHERE session_id=%s AND state='parked' "
     )
     params: tuple = (session_id,)
+    if turn_ids is not None:
+        if not turn_ids:
+            return 0
+        sql += "AND id IN (" + ",".join(["%s"] * len(turn_ids)) + ") "
+        params += tuple(turn_ids)
     if exclude_turn_id is not None:
         sql += "AND id != %s "
         params += (exclude_turn_id,)
@@ -1107,7 +1120,7 @@ def settle_parked_turns(
         # parked row (a session may have a long completed-turn history).
         params += (resolved_before, session_id, settings.effective_instance_id,
                    resolved_before, session_id, resolved_before)
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         if resolved_before is not None:
             # enqueue_turn/start_turn use this same lock. The UPDATE gets a
@@ -1130,7 +1143,7 @@ def settle_parked_turns(
                 })
         if events:
             session_events.append_events(session_id, events, _conn=conn)
-    if events:
+    if events and _conn is None:
         session_events.notify_session_write(session_id, "session_events")
     return len(rows or [])
 

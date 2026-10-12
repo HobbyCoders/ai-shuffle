@@ -3010,7 +3010,10 @@ class SessionRuntime:
         # flips each pending row via ``interactions.cancel_interaction`` and
         # then ``notify_changed``-es the session's waiters.
         try:
-            await permission_handler.cancel_all_requests(sid)
+            # Settlement already resolved its captured identities atomically.
+            # A session-wide sweep here would deny prompts from a newer turn.
+            if recorded_source != "session_settled":
+                await permission_handler.cancel_all_requests(sid)
         except Exception:
             logger.warning(
                 "SessionRuntime: cancel_all_requests failed for %s", sid, exc_info=True

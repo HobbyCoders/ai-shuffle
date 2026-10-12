@@ -212,6 +212,179 @@ async def test_local_settle_commits_while_joining_worker_bootstraps(workers, mon
         assert bool(database.get_session("boot-settle")["is_active"]) is False
 
 
+
+
+@pytest.mark.parametrize("via", ["local", "control", "mirror", "replication"])
+@pytest.mark.parametrize("kind", ["permission", "question", "prose", "private"])
+async def test_settlement_dismisses_wait_on_execution_owner(workers, monkeypatch, via, kind):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.core import chat_access, interaction_events
+    from app.core.global_events import global_events
+    from app.core.permission_handler import permission_handler
+    from app.core.user_question_handler import user_question_handler
+    from app.db import interactions, session_events
+    from app.network import session_active, session_runtime, startup
+    from tests.core.network.harness import exchange
+
+    a, b = workers("owner"), workers("mirror")
+    served = connect_owner(monkeypatch, a)
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    _new_session(a, "waiting", "Waiting on owner")
+    converge([a, b])
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "owner", None)))
+    waiter = None
+    with a.active():
+        if kind == "permission":
+            registered = asyncio.Event()
+            emit = interaction_events.emit_interaction_requested
+
+            async def requested(*args, **kwargs):
+                await emit(*args, **kwargs)
+                registered.set()
+            monkeypatch.setattr(interaction_events, "emit_interaction_requested", requested)
+            waiter = asyncio.create_task(permission_handler.request_permission(
+                "request", "waiting", "default", "Bash", {"command": "true"}, AsyncMock()))
+            await asyncio.wait_for(registered.wait(), 5)
+        elif kind == "question":
+            await user_question_handler.post_question(request_id="request", tool_use_id="tool",
+                session_id="waiting", questions=[{"question": "Proceed?", "header": "Confirm"}],
+                broadcast_func=AsyncMock())
+        elif kind == "prose":
+            session_events.append_events("waiting", [{"type": "message.assistant", "payload": {"content": "Proceed?"}}])
+        else:
+            await broker.request("waiting", "service", "Read a service")
+        session_runtime.publish_owned(engine.context(), session_ids=["waiting"])
+    converge([a, b])
+    try:
+        if via == "local":
+            with a.active():
+                await session_active.set_local("waiting", False)
+        elif via == "control":
+            with b.active():
+                store.touch_member(a.device_id, endpoints=[served.base_url])
+                await session_active.set_remote(a.device_id, "waiting", False)
+        elif via == "mirror":
+            with b.active():
+                store.touch_member(a.device_id, endpoints=[served.base_url])
+                await settle("waiting", False)
+        else:
+            with b.active():
+                store.touch_member(a.device_id, endpoints=[])
+                transport._links.clear()
+                await settle("waiting", False)
+            with a.active():
+                assert database.get_session("waiting")["is_active"]
+            # Use the real applied-record hook, not a direct dismissal call.
+            finished = asyncio.Event()
+            real_dismiss = session_active.dismiss_replicated
+
+            async def dismissed(ids):
+                await real_dismiss(ids)
+                finished.set()
+            monkeypatch.setattr(session_active, "dismiss_replicated", dismissed)
+            monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop())
+            unsubscribe = engine.on_applied(startup._on_applied)
+            try:
+                exchange(b, a)
+                with a.active():
+                    await asyncio.wait_for(finished.wait(), 5)
+            finally:
+                unsubscribe()
+        with a.active():
+            assert not database.get_session("waiting")["is_active"]
+            assert not interactions.get_pending_interactions("waiting")
+            assert database.get_session("waiting")["last_assistant_question_seq"] is None
+            assert not broker.pending_count("waiting")
+            if waiter:
+                assert (await asyncio.wait_for(waiter, 5)).behavior == "deny"
+            assert session_runtime.for_sessions(["waiting"])["waiting"]["state"] == "idle"
+        converge([a, b])
+        with b.active():
+            assert session_runtime.for_sessions(["waiting"])["waiting"]["state"] == "idle"
+            assert database.get_session("waiting")["last_assistant_question_seq"] is None
+            await settle("waiting", True)
+        converge([a, b])
+        with a.active():
+            assert database.get_session("waiting")["is_active"]
+    finally:
+        if waiter and not waiter.done():
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        broker.dismiss_pending("waiting")
+        with a.active():
+            await asyncio.gather(*broker._notifications)
+
+
+
+
+@pytest.mark.parametrize("reopened", [True, False])
+async def test_delayed_fast_path_does_not_rewrite_newer_membership(workers, monkeypatch, reopened):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.core import chat_access
+    from app.core.user_question_handler import user_question_handler
+    from app.db import interactions, session_events
+    from app.db.base import get_db
+    from app.network import session_active
+
+    a, b = workers("owner"), workers("mirror")
+    served = connect_owner(monkeypatch, a)
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    _new_session(a, "late-settle", "Waiting")
+    converge([a, b])
+    calls = []
+    real_call = control.call
+
+    async def delayed(owner, command, payload):
+        calls.append((owner, command, payload))
+        raise control.RunnerUnreachable("Delivery delayed")
+    monkeypatch.setattr(control, "call", delayed)
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        await settle("late-settle", False)
+    assert len(calls) == 1
+    assert calls[0][1] == "session-settle-dismiss"  # Old owners safely refuse, never re-settle.
+    assert "settled_membership" in calls[0][2]
+    converge([a, b])
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "owner", None)))
+    with a.active():
+        await session_active.set_local("late-settle", True)
+        if not reopened:
+            await session_active.set_local("late-settle", False)
+        permission = interactions.create_interaction("late-settle", "permission", {"request_id": "fresh"}, 300)
+        await user_question_handler.post_question(request_id="fresh-question", tool_use_id="tool",
+            session_id="late-settle", questions=[{"question": "Fresh?"}], broadcast_func=AsyncMock())
+        private = await broker.request("late-settle", "service", "Fresh access")
+        session_events.append_events("late-settle", [{"type": "message.assistant", "payload": {"content": "Fresh prose?"}}])
+        with get_db() as conn:
+            before = store.get_record(conn.cursor(), "session_active", "late-settle")
+    try:
+        with b.active():
+            reply = await real_call(*calls[0])
+        assert reply == {"dismissed": False}
+        with a.active():
+            assert bool(database.get_session("late-settle")["is_active"]) is reopened
+            assert interactions.get_interaction(permission["id"])["state"] == "pending"
+            assert len(interactions.get_pending_interactions("late-settle")) == 2
+            assert private["request_id"] in broker.requests
+            assert database.get_session("late-settle")["last_assistant_question_seq"] is not None
+            with get_db() as conn:
+                assert store.get_record(conn.cursor(), "session_active", "late-settle") == before
+    finally:
+        with a.active():
+            broker.dismiss_pending("late-settle")
+            await asyncio.gather(*broker._notifications)
+
+
 @pytest.mark.parametrize("active", [None, "false", 0, 1, []])
 async def test_control_rejects_non_boolean_state(active):
     from app.network import session_active

@@ -25,6 +25,7 @@ import ipaddress
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -479,6 +480,7 @@ class Broker:
         self.grants: dict[str, Grant] = {}
         self.actions: dict[str, Action] = {}
         self.requests: dict[str, AccessRequest] = {}
+        self._pending_lock = threading.RLock()
         self._notifications: set[asyncio.Task] = set()
         # Subagent session -> the main chat that shows its access (main_session_of).
         self._main: OrderedDict[str, str] = OrderedDict()
@@ -647,7 +649,8 @@ class Broker:
                                 suggested_url=suggested_url, plugin_id=plugin, plugin_service=service,
                                 suggested_host=suggested_host, suggested_port=suggested_port,
                                 suggested_username=suggested_username)
-        self.requests[request.id] = request
+        with self._pending_lock:
+            self.requests[request.id] = request
         self._notify(session_id, owner)
         keep_pending = False
         try:
@@ -781,6 +784,36 @@ class Broker:
         self._notify(session_id, owner, saved=True)
         return {"updated": True, "revoked": revoked,
                 "host_key_cleared": bool(old.fingerprint) and not new.fingerprint}
+
+    def snapshot_pending(self, session_id: str) -> tuple[list, list]:
+        """Capture identities, never a future session-wide dismissal selector."""
+        with self._pending_lock:
+            requests = [r for r in list(self.requests.values())
+                        if self._shown_in(r.session_id) == session_id and not r.result.done()]
+            actions = [a for a in list(self.actions.values())
+                       if self._shown_in(a.session_id) == session_id and not a.decision.done()]
+        return requests, actions
+
+    def dismiss_pending(self, session_id: str, *, snapshot=None) -> set[str]:
+        """Deny this panel's waits, without revoking grants or killing operations.
+
+        Subagent waits shown in the parent panel are dismissed too; unrelated
+        background work and already approved access are untouched.
+        """
+        requests, actions = self.snapshot_pending(session_id) if snapshot is None else snapshot
+        waiting = set()
+        for request in requests:
+            if self.requests.get(request.id) is request and not request.result.done():
+                waiting.add(request.session_id)
+                self._finish_request(request)
+        for action in actions:
+            if self.actions.get(action.id) is action and not action.decision.done():
+                waiting.add(action.session_id)
+                action.decision.set_result(False)
+                grant = self.grants.get(action.grant_id)
+                if grant is not None:
+                    self._notify(action.session_id, grant.owner)
+        return waiting
 
     async def decline(self, session_id: str, request_id: str):
         request = self.requests.get(request_id)
@@ -1160,7 +1193,8 @@ class Broker:
         action = Action(uuid.uuid4().hex, grant.id, grant.session_id, operation,
                         dict(arguments), min(grant.expires_at, time.time() + 240),
                         asyncio.get_running_loop().create_future())
-        self.actions[action.id] = action
+        with self._pending_lock:
+            self.actions[action.id] = action
         self._notify(grant.session_id, grant.owner)
         try:
             await self._show_in_main(grant.session_id, grant.owner)

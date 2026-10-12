@@ -98,7 +98,10 @@ def trailing_question_seq(cursor, session_id):
         answered_mid_stream = user_seq is not None and origin < user_seq < position
         return True, position if closed and not answered_mid_stream and asks_question(text) else None
 
+    dismissed_through = 0
     for seq, kind, payload in _tail(cursor, session_id):
+        if seq <= dismissed_through:
+            return finish()[1] if pieces else None
         if kind == "system.note" and payload.get("subtype") in ("background_tasks_changed", "model_info"):
             continue
         if pieces and kind in _CLOSE_TEXT:
@@ -107,6 +110,20 @@ def trailing_question_seq(cursor, session_id):
                 return question
             pieces = []
             position = origin = None
+        # Settlement dismisses the prose before this durable boundary. Keeping
+        # the boundary in the log prevents later task/usage events resurrecting
+        # the old question (and lets a new question after reopen project normally).
+        if kind == "system.note" and payload.get("subtype") == "session_settled":
+            # A post-commit event may arrive after fresh prose. Dismiss only
+            # the log prefix captured by the settlement, in the same epoch.
+            cursor.execute("SELECT id FROM session_events WHERE session_id=%s ORDER BY seq LIMIT 1", (session_id,))
+            first = cursor.fetchone()
+            epoch = str(first["id"]) if first else None
+            if payload.get("epoch", epoch) == epoch:
+                cutoff = payload.get("through_seq", seq)
+                if isinstance(cutoff, int):
+                    dismissed_through = max(dismissed_through, cutoff)
+            continue
         if kind == "message.user" and is_user_message("user", payload):
             user_seq = seq if user_seq is None else user_seq
         if kind == "system.note" and payload.get("subtype") == "provider_retry":

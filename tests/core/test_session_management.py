@@ -427,3 +427,324 @@ async def test_mcp_bridge_accepts_session_ids(chats, monkeypatch):
     summary = json.loads(result["content"][0]["text"])
     assert (summary["settled"], summary["refused"]) == (1, 1)
     assert _state("target") == (False, "active")
+
+async def _settle_prompt_via(chats, monkeypatch, via):
+    if via == "ui":
+        from starlette.requests import Request
+        from app.api import sessions as api
+        await api.set_session_active(Request({"type": "http", "headers": []}), "target",
+                                     api.SessionActiveUpdate(is_active=False), token="admin")
+    elif via == "mcp":
+        from app.mcp import inproc
+        from app.mcp.builtin_tools import create_builtin_tools_server
+        captured = {}
+        real_create = inproc.create_tool_server
+
+        def capture(**kwargs):
+            captured.update({item.name: item for item in kwargs["tools"]})
+            return real_create(**kwargs)
+        monkeypatch.setattr(inproc, "create_tool_server", capture)
+        create_builtin_tools_server(session_id="caller", profile_id="agent")
+        result = await captured["SettleSession"].handler({"session_id": "target"})
+        assert not result.get("isError"), result
+    else:
+        selector = {"session_ids": ["target"]} if via == "bulk" else {"session_id": "target"}
+        result = await invoke(chats, "SettleSession", **selector)
+        assert not result.is_error, result.text
+
+
+@pytest.mark.parametrize("via", ["ui", "native", "bulk", "mcp"])
+@pytest.mark.parametrize("kind", ["permission", "question", "private", "prose"])
+async def test_settle_dismisses_owner_wait_producers(chats, monkeypatch, via, kind):
+    import asyncio
+    from app.core import chat_access, interaction_events, query_session_lifecycle
+    from app.core.global_events import global_events
+    from app.core.permission_handler import permission_handler
+    from app.core.sync_engine import sync_engine
+    from app.core.user_question_handler import user_question_handler
+    from app.db import interactions, session_events
+
+    frames = AsyncMock()
+    lifecycle = Mock()
+    stop_all = AsyncMock(side_effect=AssertionError("Settle must not sweep background work"))
+    monkeypatch.setattr(sync_engine, "_broadcast_user_message", frames)
+    monkeypatch.setattr(global_events, "lifecycle", lifecycle)
+    monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", stop_all)
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    turn = turns.enqueue_turn("target", "user", prompt="Run", profile_id="agent")
+    turns.start_turn(turn["id"])
+    waiter = None
+    if kind == "permission":
+        registered = asyncio.Event()
+        emit = interaction_events.emit_interaction_requested
+
+        async def requested(*args, **kwargs):
+            await emit(*args, **kwargs)
+            registered.set()
+        monkeypatch.setattr(interaction_events, "emit_interaction_requested", requested)
+        waiter = asyncio.create_task(permission_handler.request_permission(
+            "request", "target", "agent", "Bash", {"command": "true"}, AsyncMock()))
+        await asyncio.wait_for(registered.wait(), 5)
+    elif kind == "question":
+        await user_question_handler.post_question(request_id="request", tool_use_id="tool",
+            session_id="target", questions=[{"question": "Proceed?", "header": "Confirm"}],
+            broadcast_func=AsyncMock())
+        turns.park_turn(turn["id"])
+    elif kind == "private":
+        await broker.request("target", "service", "Read a service")
+    else:
+        session_events.append_events("target", [{"type": "message.assistant", "payload": {"content": "Proceed?"}}])
+        turns.park_turn(turn["id"])
+        assert sessions.get_session("target")["last_assistant_question_seq"] is not None
+    pending = interactions.get_pending_interactions("target")
+    try:
+        await _settle_prompt_via(chats, monkeypatch, via)
+        assert not sessions.get_session("target")["is_active"]
+        assert not interactions.get_pending_interactions("target")
+        assert not broker.pending_count("target")
+        stop_all.assert_not_called()
+        sent = [c.args[1] if len(c.args) > 1 else c.kwargs["message"] for c in frames.call_args_list]
+        assert any(f["type"] == "session_attention" and f["count"] == 0 for f in sent)
+        if kind == "permission":
+            assert (await asyncio.wait_for(waiter, 5)).behavior == "deny"
+            assert interactions.get_interaction(pending[0]["id"])["answer"]["decision"] == "deny"
+            assert any(f["type"] == "permission_queue_update" and f["resolved_ids"] == ["request"]
+                       and f["remaining_count"] == 0 for f in sent)
+            assert turns.get_turn(turn["id"])["state"] == "aborted"
+        elif kind == "question":
+            assert interactions.get_interaction(pending[0]["id"])["state"] == "cancelled"
+            assert turns.get_turn(turn["id"])["state"] == "completed"
+            assert any(f["type"] == "user_question_timeout" and f["request_id"] == "request" for f in sent)
+        elif kind == "private":
+            assert not broker.requests
+            assert any(f["type"] == "chat_access_changed" and f["pending"] == 0 for f in sent)
+        else:
+            assert turns.get_turn(turn["id"])["state"] == "parked"
+            assert sessions.get_session("target")["last_assistant_question_seq"] is None
+            assert any(c.args[1].get("updates", {}).get("last_assistant_question_seq", "missing") is None
+                       for c in lifecycle.call_args_list)
+            # Later non-prose activity must not resurrect the dismissed question.
+            session_events.append_events("target", [{"type": "system.note", "payload": {"subtype": "background_tasks_changed"}}])
+            assert sessions.get_session("target")["last_assistant_question_seq"] is None
+        assert not (await invoke(chats, "UnsettleSession", session_id="target")).is_error
+        assert sessions.get_session("target")["is_active"]
+        # Reopen is fresh: a genuinely NEW prose question still needs the owner.
+        session_events.append_events("target", [{"type": "message.assistant", "payload": {"content": "Try again?"}}])
+        assert sessions.get_session("target")["last_assistant_question_seq"] is not None
+    finally:
+        if waiter and not waiter.done():
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        broker.dismiss_pending("target")
+        await asyncio.gather(*broker._notifications)
+
+async def test_settle_prompt_keeps_background_agent_and_monitor(chats, monkeypatch):
+    from app.core.task_registry import task_registry
+    from app.core.user_question_handler import user_question_handler
+    from app.core import query_session_lifecycle
+
+    stop_all = AsyncMock(side_effect=AssertionError("No background sweep"))
+    monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", stop_all)
+    turn = turns.enqueue_turn("target", "user", prompt="Run", profile_id="agent")
+    turns.start_turn(turn["id"])
+    for task_id, kind in (("shell", "shell"), ("child", "agent")):
+        task_registry.start_task("target", task_id, kind, task_id)
+    turns.park_turn(turn["id"], ["shell", "child"])
+    await user_question_handler.post_question(request_id="request", tool_use_id="tool",
+        session_id="target", questions=[{"question": "Proceed?"}], broadcast_func=AsyncMock())
+    before = task_registry.get_parking_background_work("target")
+    assert before
+    assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+    assert task_registry.get_parking_background_work("target") == before
+    assert turns.get_turn(turn["id"])["state"] == "parked"
+    assert not task_registry.is_user_stopped("target")
+    stop_all.assert_not_called()
+
+
+async def test_settle_answered_prose_is_idle_noop(chats, monkeypatch):
+    from app.core import turn_manager
+    from app.db import session_events
+    session_events.append_events("target", [
+        {"type": "message.assistant", "payload": {"content": "Proceed?"}},
+        {"type": "message.user", "payload": {"content": "Yes"}},
+    ])
+    before = session_events.get_max_seq("target")
+    attention_keys = ("last_assistant_question_seq", "last_assistant_question_epoch",
+                      "last_user_message_seq", "last_user_message_epoch")
+    before_attention = {key: sessions.get_session("target")[key] for key in attention_keys}
+    interrupt = AsyncMock()
+    monkeypatch.setattr(turn_manager, "interrupt_async", interrupt)
+    assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+    # Persist the idempotency receipt, but do not clear attention or interrupt.
+    assert session_events.get_max_seq("target") == before + 1
+    receipt = session_events.get_latest_system_note("target", "session_settled")
+    assert receipt["empty_snapshot"] is True
+    assert receipt["through_seq"] == 0
+    assert {key: sessions.get_session("target")[key] for key in attention_keys} == before_attention
+    interrupt.assert_not_called()
+
+
+async def test_settle_denies_private_action_without_revoking_access(chats, monkeypatch):
+    import asyncio
+    import time
+    from app.core import chat_access
+
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    grant = chat_access.Grant("grant", "target", (None, "worker", None), "Service", "service",
+                              "example", time.time() + 60)
+    broker.grants[grant.id] = grant
+    registered = asyncio.Event()
+    monkeypatch.setattr(broker, "_notify", lambda *args, **kwargs: registered.set())
+    waiter = asyncio.create_task(broker.approve(grant, "http", {"method": "POST"}))
+    await asyncio.wait_for(registered.wait(), 5)
+    assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+    with pytest.raises(chat_access.AccessDenied, match="denied"):
+        await asyncio.wait_for(waiter, 5)
+    assert not broker.pending_count("target")
+    assert broker.grants[grant.id] is grant and not grant.revoked
+
+@pytest.mark.parametrize("kind", ["permission", "private"])
+async def test_settle_redirected_wait_interrupts_only_waiting_child(chats, monkeypatch, kind):
+    import asyncio
+    from app.core import chat_access
+    from app.db import interactions
+
+    sessions.create_session("child-wait", "agent", parent_session_id="target")
+    root_turn = turns.enqueue_turn("target", "user", prompt="Keep working", profile_id="agent")
+    child_turn = turns.enqueue_turn("child-wait", "user", prompt="Ask", profile_id="agent")
+    turns.start_turn(root_turn["id"])
+    turns.start_turn(child_turn["id"])
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    if kind == "permission":
+        interactions.create_interaction("target", "permission", {
+            "request_id": "child-request", "tool_name": "Bash", "tool_input": {},
+            "provider_agent": {"worker_session_id": "child-wait"},
+        }, 300)
+    else:
+        await broker.request("child-wait", "service", "Read service")
+        broker._main["child-wait"] = "target"
+    try:
+        assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+        assert turns.get_turn(root_turn["id"])["state"] == "running"
+        assert turns.get_turn(child_turn["id"])["state"] == "aborted"
+        assert not broker.pending_count("target")
+    finally:
+        broker.dismiss_pending("target")
+        await asyncio.gather(*broker._notifications)
+
+async def test_settle_snapshot_preserves_successor_and_all_new_prompts(chats, monkeypatch):
+    import asyncio
+    from app.core import chat_access, session_settlement, turn_manager
+    from app.db import interactions, runs, session_events
+
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    old = turns.enqueue_turn("target", "user", prompt="Old", profile_id="agent")
+    lease = runs.claim_run("target", "runner", 60)
+    turns.start_turn(old["id"], lease["id"], "runner")
+    old_permission = interactions.create_interaction("target", "permission", {"request_id": "same-id"}, 300)
+    old_question = interactions.create_interaction("target", "question", {"request_id": "same-question"}, 300)
+    await broker.request("target", "service", "Old access")
+    session_events.append_events("target", [{"type": "message.assistant", "payload": {"content": "Old question?"}}])
+    real_run = session_settlement.run_sync
+    successor = {}
+    signals = Mock()
+    monkeypatch.setattr(turn_manager, "_fire_interrupt_executor", signals)
+
+    async def interleave(fn, *args, **kwargs):
+        value = await real_run(fn, *args, **kwargs)
+        if fn is session_settlement._capture_and_dismiss:
+            assert value is not None
+            assert turns.get_turn(old["id"])["state"] == "interrupting"
+            # Old runtime exits, owner reopens, then fresh work arrives before
+            # any post-commit notifications/private releases/runtime signal.
+            turns.settle_turn(old["id"], "completed")
+            sessions.set_session_active("target", True)
+            new_turn = turns.enqueue_turn("target", "user", prompt="Fresh", profile_id="agent")
+            turns.start_turn(new_turn["id"], lease["id"], "runner")
+            successor["turn"] = new_turn
+            successor["permission"] = interactions.create_interaction("target", "permission", {"request_id": "same-id"}, 300)
+            successor["question"] = interactions.create_interaction("target", "question", {"request_id": "same-question"}, 300)
+            broker.dismiss_pending("target", snapshot=value["private"])
+            successor["private"] = await broker.request("target", "service", "Fresh access")
+            session_events.append_events("target", [{"type": "message.assistant", "payload": {"content": "Fresh question?"}}])
+        return value
+
+    monkeypatch.setattr(session_settlement, "run_sync", interleave)
+    try:
+        assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+        assert turns.get_turn(successor["turn"]["id"])["state"] == "running"
+        signals.assert_called_once_with("target", "stop", old["id"])
+        assert interactions.get_interaction(old_permission["id"])["answer"]["decision"] == "deny"
+        assert interactions.get_interaction(old_question["id"])["state"] == "cancelled"
+        assert interactions.get_interaction(successor["permission"]["id"])["state"] == "pending"
+        assert interactions.get_interaction(successor["question"]["id"])["state"] == "pending"
+        assert successor["private"]["request_id"] in broker.requests
+        assert broker.pending_count("target") == 1
+        assert sessions.get_session("target")["is_active"]
+        assert sessions.get_session("target")["last_assistant_question_seq"] is not None
+    finally:
+        broker.dismiss_pending("target")
+        await asyncio.gather(*broker._notifications)
+
+
+async def test_settlement_runtime_interrupt_does_not_sweep_new_permissions(chats, monkeypatch):
+    from app.core import session_runtime, query_session_lifecycle
+    from app.db import interactions
+
+    turn = turns.enqueue_turn("target", "user", prompt="Old", profile_id="agent")
+    turns.start_turn(turn["id"])
+    turns.interrupt_turn("target", "stop", turn_id=turn["id"], source="session_settled")
+    fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+
+    async def signal(_sid):
+        turns.settle_turn(turn["id"], "aborted")
+    monkeypatch.setattr(query_session_lifecycle, "interrupt_session", signal)
+    monkeypatch.setattr(session_runtime, "record_interrupting", AsyncMock())
+    await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
+    assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+
+
+async def test_local_delayed_settlement_revision_cannot_dismiss_a_new_settle(chats):
+    from app.db import interactions
+    from app.network import session_active
+
+    stale = session_active.write_shared("target", False)
+    session_active.write_shared("target", True)
+    session_active.write_shared("target", False)
+    fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+    await session_active._apply_settle_change(stale, False)
+    assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+
+@pytest.mark.parametrize("initial_wait", [True, False])
+async def test_repeated_settle_revision_preserves_post_snapshot_wait(chats, monkeypatch, initial_wait):
+    from app.core import user_question_handler
+    from app.core.session_settlement import dismiss_owner_waits
+    from app.db import interactions
+    from app.network import session_active
+
+    turn = turns.enqueue_turn("target", "user", prompt="Streaming", profile_id="agent")
+    turns.start_turn(turn["id"])
+    attention = AsyncMock()
+    monkeypatch.setattr(user_question_handler, "publish_session_attention", attention)
+    if initial_wait:
+        interactions.create_interaction("target", "permission", {"request_id": "old"}, 300)
+    row = session_active.write_shared("target", False)
+    revision = row["_settled_revision"]
+    assert await dismiss_owner_waits("target", expected_revision=revision) is initial_wait
+    if not initial_wait:
+        assert turns.get_turn(turn["id"])["state"] == "running"
+        attention.assert_not_called()
+    turn_after_first_delivery = turns.get_turn(turn["id"])
+    fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+    assert not await dismiss_owner_waits("target", expected_revision=revision)
+    assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+    assert turns.get_turn(turn["id"]) == turn_after_first_delivery
+    assert attention.await_count == int(initial_wait)

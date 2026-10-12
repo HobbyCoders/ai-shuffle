@@ -80,4 +80,4 @@ A subagent's chat is for reading and for messaging the subagent. It has no Git c
 
 ## Organizing chats
 
-When you ask, an agent can settle chats (move them out of Active), bring them back, or archive them. It never deletes a conversation.
+When you ask, an agent can settle chats (move them out of Active), bring them back, or archive them. It never deletes a conversation. Settling dismisses a pending prompt.
