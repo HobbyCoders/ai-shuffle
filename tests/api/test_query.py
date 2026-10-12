@@ -52,7 +52,7 @@ class TestRequireClaudeAuth:
     """Tests for the require_claude_auth dependency."""
 
     async def test_require_claude_auth_passes_when_licensed(self):
-        """Only the license is checked here, not the Claude credential."""
+        """Credentials are checked per turn, not by this compatibility dependency."""
         from app.api.query import require_claude_auth
         from app.core import credential_gate
         from app.core import license as license_mod
@@ -62,19 +62,13 @@ class TestRequireClaudeAuth:
                              return_value=(False, credential_gate.NOT_SIGNED_IN_MESSAGE)):
             assert await require_claude_auth() is None
 
-    async def test_require_claude_auth_raises_without_a_license(self):
-        """Should raise 503 with the license reason when runs are not licensed."""
-        from fastapi import HTTPException
+    async def test_require_claude_auth_never_reads_cloud_state(self):
         from app.api.query import require_claude_auth
         from app.core import license as license_mod
 
         with patch.object(license_mod, "license_allows_agent_runs",
-                          return_value=(False, "This worker has no license.")):
-            with pytest.raises(HTTPException) as exc_info:
-                await require_claude_auth()
-
-        assert exc_info.value.status_code == 503
-        assert exc_info.value.detail == "This worker has no license."
+                          side_effect=AssertionError("Cloud state must not gate queries")):
+            assert await require_claude_auth() is None
 
 
 # =============================================================================
@@ -85,7 +79,7 @@ class TestRequireClaudeAuth:
 class TestPerLegCredentialGate:
     """Subscription mode with the Claude Code CLI signed out: a run on a
     ChatGPT provider row starts, a run on a Claude model is refused with the
-    setup message, and a missing license still refuses everything."""
+    setup message, and a missing Cloud plan does not refuse either provider."""
 
     @pytest.fixture
     def signed_out(self, mock_db):
@@ -154,16 +148,13 @@ class TestPerLegCredentialGate:
         assert exc_info.value.status_code == 503
         start.assert_not_awaited()
 
-    async def test_a_missing_license_still_refuses(self, signed_out):
-        from fastapi import HTTPException
-
+    async def test_a_missing_cloud_plan_still_starts(self, signed_out):
         lic, start = signed_out
         lic.return_value = (False, "This worker has no license.")
-        with pytest.raises(HTTPException) as exc_info:
-            await self._start("gpt-agent")
-        assert exc_info.value.status_code == 503
-        assert exc_info.value.detail == "This worker has no license."
-        start.assert_not_awaited()
+        result = await self._start("gpt-agent")
+        assert result["status"] == "started"
+        start.assert_awaited_once()
+        lic.assert_not_called()
 
     @pytest.mark.parametrize("endpoint,model", [
         ("one_shot_query", "QueryRequest"),

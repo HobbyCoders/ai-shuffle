@@ -152,11 +152,10 @@ when the reviewed workflow revision reaches `main`; run nothing before then.
   D1 ID and signing key and tests the private key against
   `desktop/build/application-update-key.pem`. Presence is not proof of token
   permissions or a deployed/migrated D1 database. Never print those secrets.
-- Deploy/migrate the hub, license server and registry, configure their
-  bindings/keys and private GHCR access, and test the licensed pull path.
-  `docs/install/registry.md` is the registry runbook. No digest is supplied by
-  source preparation: record the **actual** published image digest only after
-  the build and registry verification succeed.
+- Deploy/migrate the hub and license server and configure their bindings/keys.
+  The owner must make `ghcr.io/hobbycoders/ai-shuffle-server` public, then test
+  an anonymous version-pinned pull. No digest is supplied by source preparation:
+  record the **actual** published image digest after the build and pull succeed.
 - Complete `desktop/RELEASING.md` signing/notarization and first-run checks.
   Confirm Play signing continuity, internal tester access and
   `ANDROID_WORKERS_READY=true` only after compatible workers are verified.
@@ -384,8 +383,8 @@ a fix has shipped since, the fix stays served.
    missing key; that workflow belongs to the desktop work and should then be
    switched off or given a separate edge key that customer builds do not
    trust).
-5. **Make the image package private** and handle the frozen public one:
-   see `docs/install/registry.md`.
+5. **Make `ghcr.io/hobbycoders/ai-shuffle-server` public** (owner action).
+   The app no longer uses a private registry; the old-image issue #2157 is moot.
 6. **Deploy the hub** so migration 0018 runs. Until the first stable release
    is signed, installed apps get a 404 from the update check.
 7. **Set up withdrawal** ([A bad stable release](#a-bad-stable-release))

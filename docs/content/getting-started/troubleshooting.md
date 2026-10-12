@@ -1,6 +1,6 @@
 <!--
 title: Troubleshooting
-description: Fixes for install, access, sign-in, license, update and everyday problems
+description: Fixes for install, access, sign-in, Cloud, update and everyday problems
 order: 12
 -->
 
@@ -13,15 +13,15 @@ With Docker, most problems show up in the container log. Read it first:
 
 ## Installing and pulling the image
 
-**`Set AI_SHUFFLE_PULL_TOKEN in .env`**: the `.env` file is missing, is not next to `compose.yaml`, or has no pull token. See [Install with Docker](/docs/getting-started/install-docker-compose).
 
-**`denied: This pull token is not valid`**: the token is mistyped or was replaced by a newer one. Copy it again from your license email or your account page on hobbycoders.com.
 
-**`denied: Your AI Shuffle license has ended`**: after a license ends, you can still download exact versions like `0.9.1`, but not `latest`. Use an exact version, or renew.
+
+
+
 
 **`manifest unknown`**: that version does not exist. Check the version number.
 
-**A temporary error or `503` from `registry.hobbycoders.com`**: try again in a few minutes. Running containers are not affected.
+**A temporary error or `503` from `ghcr.io`**: try again in a few minutes. Running containers are not affected.
 
 **`exec format error` or `no matching manifest for linux/arm64`**: the machine is ARM. AI Shuffle needs a 64-bit Intel or AMD machine for now.
 
@@ -65,7 +65,7 @@ The message in the app says which of these it is.
 - **A subscription sign-in stopped working.** Sign in again in **Settings → Providers**.
 - **Your plan's usage limit was reached.** Agents pause until it resets. To continue by itself after the reset, turn on **Settings → General → Usage limits → Resume when the limit resets**. See [Modes and costs](/docs/getting-started/modes-and-costs).
 - **The API key is refused.** The key was deleted, or the account is out of credit or at its spend limit. Check your provider's console, then paste a new key.
-- **The license banner says new agent runs are paused.** See [License](/docs/getting-started/license). Your data is not affected.
+
 
 ### Claude
 
@@ -116,4 +116,4 @@ When the app does not start, save the container log and email it instead:
 docker logs --tail 500 ai-shuffle > ai-shuffle.log
 ```
 
-Read the file and remove anything private first. Email it to support@hobbycoders.com with your AI Shuffle version and what you were doing. Never send passwords, API keys, license keys, pull tokens or sign-in codes.
+Read the file and remove anything private first. Email it to support@hobbycoders.com with your AI Shuffle version and what you were doing. Never send passwords, API keys, license keys or sign-in codes.

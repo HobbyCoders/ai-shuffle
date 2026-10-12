@@ -434,7 +434,6 @@ SUITES = [
           "Account hub Worker tests and deploy guard"),
     Suite("site", ["android/site/*", "android/app/src/test/js/*"], site, "Website Worker tests"),
     Suite("license", ["android/license/*"], node_package("android/license", "typecheck", "test"), "License server tests"),
-    Suite("registry", ["android/registry/*"], node_package("android/registry", "typecheck", "test"), "Registry tests"),
     Suite("uptime", ["android/uptime/*"], node_package("android/uptime", "typecheck", "test"), "Uptime monitor tests"),
     Suite("android-play", ["android/ci/*", ".github/workflows/android-play*.yml", ".github/workflows/release.yml"],
           android_play, "Play workflow safety checks"),

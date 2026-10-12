@@ -47,8 +47,8 @@ If you use Claude, the Claude Code CLI keeps itself up to date, as on any comput
 - **What comes back:** a small signed file naming the newest release and its notes. Nothing is downloaded until you choose to.
 - **Turning it off:** **Settings → System → Updates → Allow updates**.
 
-Once licensing is live, update requests will also include your worker's license, because updates are part of what a license pays for. See [License](/docs/getting-started/license) and the [privacy policy](https://hobbycoders.com/privacy#updates).
+Updates are free with or without a Cloud account. A linked worker may send its signed Cloud lease to the hub; that lease controls remote capacity, not access to updates. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
-## If your license ends
+## If your Cloud plan ends
 
-Your install keeps running the version it has, and that exact version can still be downloaded again, for example on a new machine. New versions need an active license.
+Your install keeps running, including agent runs, and you can still download and install new versions for free. Only paid Cloud services change when a plan ends.

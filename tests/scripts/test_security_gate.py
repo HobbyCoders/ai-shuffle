@@ -120,8 +120,14 @@ def test_actual_hook_blocks_scratch_history_even_with_cached_clean_tree(remote_e
 def test_commit_scan_handles_binary_and_unusual_names(tmp_path):
     init(tmp_path)
     base = commit(tmp_path)
-    (tmp_path / 'quoted " name.txt').write_bytes(b"\0" + b"ghp_" + b"A" * 36)
-    tip = commit(tmp_path)
+    # Git trees can contain this path even where the filesystem cannot
+    # (Windows forbids double quotes). Keep the exact unusual-name coverage.
+    blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=tmp_path,
+                                   input=b"\0" + b"ghp_" + b"A" * 36).strip()
+    entries = subprocess.check_output(["git", "ls-tree", "-z", base], cwd=tmp_path)
+    entries += b'100644 blob ' + blob + b'\tquoted " name.txt\0'
+    tree = subprocess.check_output(["git", "mktree", "-z"], cwd=tmp_path, input=entries).decode().strip()
+    tip = git(tmp_path, "commit-tree", tree, "-p", base, "-m", "Binary unusual-name fixture")
     assert secret_scan.scan(tmp_path, tip, base) == 1
     assert secret_scan.scan(tmp_path, revision=tip) == 1
 

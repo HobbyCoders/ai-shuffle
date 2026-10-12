@@ -11,14 +11,15 @@ For any Docker host: a Linux server, a NAS or a desktop running Docker.
 - 4 GB of free memory for light use; 8 GB or more if you run several agents at
   once. Swap on the host is strongly recommended: without it a burst of agents
   can run the host out of memory.
-- Your **pull token** from your license email. It lets Docker download the
-  image and nothing else.
+No account, license key or Docker login is needed. Compose downloads the
+public `ghcr.io/hobbycoders/ai-shuffle-server` image at the version pinned by
+`AI_SHUFFLE_VERSION`.
 
 ## Install
 
 1. Make an empty folder and put two files in it:
    [`compose.yaml`](compose.yaml) and [`env.example`](env.example).
-2. Copy `env.example` to `.env` and set `AI_SHUFFLE_PULL_TOKEN`.
+2. Copy `env.example` to `.env` and adjust the version and local settings if needed.
 3. Start it:
 
    ```bash
@@ -52,18 +53,15 @@ in the sidebar. They are signed releases only, never unreleased code, and
 **Settings → General → Allow updates** turns them off. See
 [update checks](../README.md#update-checks) for what the check sends.
 
-## Your pull token
+## Optional Cloud account
 
-The pull token only downloads the image; there is nothing to log in to, and
-it keeps working after a reboot. It appears in `docker ps` and in logs, so if
-you have shared it by accident (a screenshot, a forum post), get a new one
-from your account on hobbycoders.com, put it in `.env` and run
-`docker compose up -d`. The old token stops working within a minute; your
-running container is not affected.
+Local use and updates are free, with or without a Cloud account. You can
+always download the pinned version or update to a new release anonymously.
 
-If your license ends, AI Shuffle keeps running and your data stays yours. The
-exact version in `.env` can still be downloaded again (for example on a new
-host), but new versions need an active license.
+An optional free Cloud account serves one remote worker. A paid plan serves
+three; you can link its key in Settings → Cloud or supply `LICENSE_KEY` at
+install time. If a plan ends, nothing local stops working and updates stay
+free. See [AI Shuffle Cloud](../../content/getting-started/cloud.md).
 
 ## Back up
 

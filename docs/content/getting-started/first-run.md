@@ -1,6 +1,6 @@
 <!--
 title: First Run
-description: The setup wizard step by step: owner password, license, AI provider, workspace and first agent
+description: The setup wizard step by step: owner password, optional Cloud account, AI provider, workspace and first agent
 order: 6
 -->
 
@@ -31,11 +31,11 @@ Phones and browsers linked through your HobbyCoders account sign in with their o
 
 To change the password later, open **Settings → Security → Owner password**.
 
-## 3. License
+## 3. Optional Cloud plan
 
-Enter your license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`, from your license email) and choose **Activate**. During the beta, this step reads **Beta: no license needed** and you just continue. If you gave the key when you installed, it is already active.
+No key is needed to run AI Shuffle. If you have a paid Cloud plan, you can enter its license key to link this worker. A key supplied at install time is activated automatically.
 
-No key yet? Choose **Add it later** and add it in **Settings → System → License**. Until a license is active, agents do not start new runs. See [License](/docs/getting-started/license).
+You can skip linking a plan and use every local feature now. Manage remote access and paid seats in **Settings → Cloud**. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
 ## 4. AI provider
 
@@ -114,7 +114,7 @@ Choose **Finish**, then continue with the [Quick start](/docs/getting-started/qu
 
 ## Which steps you can skip
 
-- The license key, if you do not have one yet. Agents do not start new runs until a license is active.
+- Cloud linking is optional. Agents run without a Cloud account or key.
 - The first agent run, after a failed attempt.
 - The account and GitHub step.
 

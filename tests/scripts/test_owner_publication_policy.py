@@ -13,7 +13,7 @@ REPO = "HobbyCoders/ai-shuffle"
 MAIN = "refs/heads/main"
 TAG = "refs/tags/v0.8.19"
 MAIN_SHA = "a" * 40
-DEPLOY = ["deploy-hub.yml", "deploy-license.yml", "deploy-registry.yml", "deploy-site.yml", "deploy-uptime.yml"]
+DEPLOY = ["deploy-hub.yml", "deploy-license.yml", "deploy-site.yml", "deploy-uptime.yml"]
 JOBS = [(name, "deploy", "main") for name in DEPLOY] + [
     ("release.yml", "preflight", "tag"),
     ("release.yml", "create-release", "tag"),
@@ -105,7 +105,6 @@ def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
 
 @pytest.mark.parametrize("name,job,commands", [
     ("ci-license.yml", "license-server", ["npm run typecheck", "npm test"]),
-    ("ci-registry.yml", "registry", ["npm run typecheck", "npm test"]),
     ("ci-uptime.yml", "uptime", ["npm run typecheck", "npm test"]),
     ("ci-browser-workspace.yml", "smoke",
      ["npm run build --prefix browser-mcp", "npm test --prefix browser-mcp -- test/editors.test.ts"]),

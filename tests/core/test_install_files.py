@@ -29,8 +29,8 @@ def test_compose_runs_a_pinned_release_image_never_a_build_or_moving_tag():
     ai_shuffle = service()
     assert "build" not in ai_shuffle
     image = ai_shuffle["image"]
-    assert image.endswith(f"/ai-shuffle:${{AI_SHUFFLE_VERSION:-{__version__}}}")
-    assert "${AI_SHUFFLE_PULL_TOKEN:?" in image, "a missing pull token must fail with a message"
+    assert image == f"ghcr.io/hobbycoders/ai-shuffle-server:${{AI_SHUFFLE_VERSION:-{__version__}}}"
+    assert "TOKEN" not in image
     assert "latest" not in image and "edge" not in image
     assert env_example()["AI_SHUFFLE_VERSION"] == __version__
 
@@ -47,9 +47,8 @@ def test_compose_carries_the_runtime_settings_the_image_needs():
 
 
 def test_env_example_lists_only_what_a_buyer_sets():
-    assert set(env_example()) == {"AI_SHUFFLE_PULL_TOKEN", "AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
+    assert set(env_example()) == {"AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
                                   "COOKIE_SECURE", "OWNER_PASSWORD", "LICENSE_KEY", "WORKSPACE_DIR", "PUID", "PGID"}
-    assert env_example()["AI_SHUFFLE_PULL_TOKEN"] == ""
     # The owner password is optional and seeds the first start only.
     assert env_example()["OWNER_PASSWORD"] == ""
     assert service()["environment"]["OWNER_PASSWORD"] == "${OWNER_PASSWORD:-}"
@@ -76,6 +75,20 @@ def test_buyer_compose_is_verified_in_ci():
     job = release["jobs"]["buyer-install"]
     assert job["runs-on"] == "ubuntu-latest" and job["needs"] == ["create-release", "docker"]
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in job["steps"])
+
+
+def test_private_registry_is_retired():
+    assert not (ROOT / "android/registry").exists()
+    for workflow in ("ci-registry.yml", "deploy-registry.yml"):
+        assert not (ROOT / ".github/workflows" / workflow).exists()
+    assert not (ROOT / "docs/install/registry.md").exists()
+    for name in ("compose.yaml", "env.example", "README.md"):
+        text = (COMPOSE / name).read_text()
+        assert not re.search(r"pull[ _-]tokens?", text, re.I)
+        assert "registry.hobbycoders.com" not in text
+    readme = (COMPOSE / "README.md").read_text()
+    assert "ghcr.io/hobbycoders/ai-shuffle-server" in readme
+    assert "Local use and updates are free" in readme
 
 
 def test_retired_install_templates_are_gone():

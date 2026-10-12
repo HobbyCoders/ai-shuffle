@@ -17,7 +17,7 @@ FRONTEND_BUYER = ROOT / "frontend/src/lib/docs/content/getting-started"
 
 REQUIRED = {
     "_index", "overview", "requirements", "installation", "install-docker-compose",
-    "first-run", "modes-and-costs", "quick-start", "remote-access", "updates", "license",
+    "first-run", "modes-and-costs", "quick-start", "remote-access", "updates", "cloud",
     "troubleshooting", "faq", "changelog",
 }
 # The changelog remains available in the app, but is intentionally not published
@@ -125,6 +125,20 @@ def test_prose_is_not_hard_wrapped(slug):
         if line.strip() and previous.strip() and not structural.match(line) and not structural.match(previous):
             pytest.fail(f"{slug}: hard-wrapped paragraph at {line!r}")
         previous = line
+
+
+def test_cloud_docs_explain_free_local_use_and_optional_remote_capacity():
+    text = pages()["cloud"]
+    for phrase in ("# AI Shuffle Cloud", "without an account or a key", "Updates are free",
+                   "1 remote worker", "no card", "3 remote workers", "same-LAN sync",
+                   "across different networks", "connector endpoints", "OAuth relay", "support",
+                   "$14/month", "$140/year", "$20/month", "$200/year",
+                   "Nothing in the app stops working", "7 days of your first charge",
+                   "European Union or the United Kingdom"):
+        assert phrase in text, phrase
+    assert not (BUYER / "license.md").exists()
+    for name, page in pages().items():
+        assert not re.search(r"pull[ _-]tokens?", page, re.I), name
 
 
 def test_readme_is_for_buyers():

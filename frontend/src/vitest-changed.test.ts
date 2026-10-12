@@ -1,9 +1,10 @@
 // CI's changed-only test selection (scripts/vitest-changed.mjs) must keep
 // the tests that read a changed file as text, which Vitest's import graph
 // cannot see.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { resolve } from 'node:path';
-import { testFiles, textReferences } from '../scripts/vitest-changed.mjs';
+import { runRelated, testFiles, textReferences } from '../scripts/vitest-changed.mjs';
+import type { spawnSync } from 'node:child_process';
 
 describe('vitest-changed selection', () => {
 	const sources: Record<string, string> = {
@@ -13,6 +14,18 @@ describe('vitest-changed selection', () => {
 	};
 	const tests = Object.keys(sources);
 	const read = (path: string) => sources[path];
+
+	it('runs long worktree paths without the Windows command shell', () => {
+		const related = Array.from({ length: 100 }, (_, i) => `${'long worktree/'.repeat(8)}${i}.ts`);
+		expect(related.join(' ').length).toBeGreaterThan(8192);
+		const spawn = vi.fn().mockReturnValue({ status: 0 });
+		expect(runRelated(related, spawn as unknown as typeof spawnSync).status).toBe(0);
+		const [command, args, options] = spawn.mock.calls[0];
+		expect(command).toBe(process.execPath);
+		expect(args[0].replaceAll('\\', '/')).toMatch(/\/vitest\/vitest\.mjs$/);
+		expect(args.slice(1)).toEqual(['related', '--run', '--passWithNoTests', ...related]);
+		expect(options).toEqual({ stdio: 'inherit', shell: false });
+	});
 
 	it('adds tests that name a changed file', () => {
 		const changed = ['/repo/frontend/src/lib/components/chat/MessageArea.svelte'];

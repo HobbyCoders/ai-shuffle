@@ -328,10 +328,10 @@ class Settings(BaseSettings):
     mobile_account_hub_verify_ttl_seconds: float = 90.0
     mobile_account_hub_grace_seconds: float = 1800.0
 
-    # Licensing (app/core/license.py). With no license server URL, or with
-    # LICENSE_BETA=true (a release image sets it at build time while the beta
-    # runs), every install gets an always-valid beta lease and nothing is
-    # checked. A release build sets LICENSE_SERVER_URL=https://hobbycoders.com.
+    # Optional paid Cloud leases (app/core/license.py), never local run gates.
+    # With no server URL, LICENSE_BETA=true, or no verification keys, skip
+    # acquisition/renewal. Linked free accounts still have one remote worker.
+    # A release build sets LICENSE_SERVER_URL=https://hobbycoders.com.
     license_server_url: str = ""
     license_beta: bool = False
 

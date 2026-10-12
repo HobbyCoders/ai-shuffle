@@ -25,7 +25,7 @@ The Docker image runs on 64-bit Intel or AMD machines only. Check the [requireme
 - **Docker** suits a machine that is always on, like a server or NAS. Agents run inside the container, away from the rest of the machine.
 - **The desktop app** suits a single PC. Agents run as your own user, with your files and programs. It is the only install that can use **computer use** (agents controlling the screen), because a container has no desktop.
 
-You can use both: one license covers up to 3 workers, and you can connect them so they share settings and chats.
+You can use both for free on your LAN or VPN. Same-LAN sync is free. An optional [Cloud account](/docs/getting-started/cloud) adds managed remote access: 1 worker for free or 3 on the paid plan.
 
 ## What every install has in common
 
@@ -36,8 +36,8 @@ You can use both: one license covers up to 3 workers, and you can connect them s
 
 ## After installing
 
-Open AI Shuffle and follow [First run](/docs/getting-started/first-run): set your owner password, enter your license key, connect an AI provider, pick a workspace and run your first agent.
+Open AI Shuffle and follow [First run](/docs/getting-started/first-run): set your owner password, connect an AI provider, pick a workspace and run your first agent.
 
 ## More than one worker
 
-Install each worker the same way, activate your license on each one, and link them under **Settings → Devices**. Each worker keeps its own data. Never point two workers at the same data folder.
+Install each worker the same way and link them under **Settings → Devices**. No license is required for local use. Each worker keeps its own data. Never point two workers at the same data folder.

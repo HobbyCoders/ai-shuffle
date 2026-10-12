@@ -1,6 +1,6 @@
 """/api/v1/license: license status, activation and deactivation for this worker.
 
-Anyone signed in can read the status (the banner needs it). Only the owner can
+Anyone signed in can read Cloud plan information for Settings. Only the owner can
 activate, deactivate or free a seat. Nothing here touches user data.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,7 +12,7 @@ from app.core import license as licensing
 from app.core import preview_access
 from app.db.async_database import run_sync
 
-router = APIRouter(prefix="/api/v1/license", tags=["License"])
+router = APIRouter(prefix="/api/v1/license", tags=["Cloud"])
 
 
 class ActivateRequest(BaseModel):
@@ -28,7 +28,7 @@ class ReleaseRequest(BaseModel):
 
 def require_license_owner(request: Request, token=Depends(require_admin)):
     if preview_access.grant(request) is not None:
-        raise HTTPException(403, "Agent previews cannot change the license")
+        raise HTTPException(403, "Agent previews cannot change the Cloud plan")
     return token
 
 

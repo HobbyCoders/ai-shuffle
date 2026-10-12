@@ -169,11 +169,11 @@ def test_status_reports_the_refusal_for_the_ui(supervisor):
     refusal_info = result['refusal']
     assert {k: refusal_info[k] for k in ('code', 'limit', 'used', 'licensed')} == {
         'code': 'tunnel_limit', 'limit': 1, 'used': 1, 'licensed': False}
-    assert 'Settings > System > License' in refusal_info['message']
+    assert 'Settings > Cloud' in refusal_info['message']
     assert 'Local use is not affected' in refusal_info['message']
     managed._set_refusal(account_hub.TunnelLimitError(3, 3, True))
     message = managed.status()['refusal']['message']
-    assert 'all 3 remote connections its license covers' in message and 'Settings > System > License' not in message
+    assert 'all 3 remote connections its paid Cloud plan covers' in message and 'Settings > Cloud' not in message
     managed._set_refusal(None)
     assert managed.status()['refusal'] is None and managed.status()['status'] == 'connecting'
 
@@ -215,7 +215,7 @@ async def test_a_license_activation_cuts_the_backoff_short(supervisor, monkeypat
         ticks.append(delay)
         clock[0] += delay
         if len(ticks) == 2:
-            managed.retry_soon()  # Settings > System > License: a key was just activated.
+            managed.retry_soon()  # Settings > Cloud: a key was just activated.
         if len(ticks) >= 6:
             raise asyncio.CancelledError()
     monkeypatch.setattr(managed.asyncio, 'sleep', tick)

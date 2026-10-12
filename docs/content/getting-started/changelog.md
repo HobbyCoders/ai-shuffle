@@ -127,7 +127,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### Install and packaging
 
 - The code-mode sandbox around agents' Python code is now on by default: the compose file passes the Docker security options it needs (`seccomp=unconfined`, `systempaths=unconfined` and `apparmor=unconfined`, which relax Docker's default filters for the whole container). Remove those lines or set `CODE_MODE_OS_SANDBOX=off` to opt out. **Settings → System** shows whether the sandbox is active and, when it is not, why. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox).
-- The Docker image is now private. You download it from `registry.hobbycoders.com` with the pull token from your license email; the token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
+- The earlier private Docker distribution has been retired. Current installs download the public `ghcr.io/hobbycoders/ai-shuffle-server` image by version, without signing in.
 - New buyer compose file with a pinned version, the right shared-memory size for the built-in browser, a 90-second clean shutdown, and a volume for the built-in browser's profile. It listens on this computer only until you choose an address.
 - The Claude Code CLI is installed on demand from setup or Settings > Providers > Claude with Anthropic's own installer and kept in its own volume, so it updates itself and survives image updates. It is reinstalled at start only while Keep Claude Code installed is on. AI Shuffle runs only that standard CLI and no longer carries a copy of its own.
 - The app shows its real version everywhere, taken from the release.

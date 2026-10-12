@@ -40,7 +40,7 @@ Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chr
 
 ## Accounts you need
 
-- **An AI Shuffle license**, or a trial. Your license email contains your **license key** (you enter it in the app) and your **pull token** (Docker uses it to download the image). See [License](/docs/getting-started/license).
+- **No AI Shuffle account or key is required** for local use. An optional [Cloud account](/docs/getting-started/cloud) gives you one remote worker for free, with no card.
 - **Your own AI account** with at least one supported provider: Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway. AI Shuffle includes no AI usage. See [Modes and costs](/docs/getting-started/modes-and-costs).
 - **Optional:** more AI providers, fal.ai for images, video and audio, a GitHub account for repository features, and a free HobbyCoders account for the Android app and remote access.
 
@@ -48,8 +48,8 @@ Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chr
 
 The worker needs outbound internet access to:
 
-- `registry.hobbycoders.com`, to download the AI Shuffle image;
-- `hobbycoders.com`, for update checks, license checks and (only if you turn it on) remote access;
+- `ghcr.io`, to download the public AI Shuffle image;
+- `hobbycoders.com`, for free update checks and, only if linked, Cloud lease renewals and remote access;
 - the AI providers you connect;
 - Anthropic's download servers, if you install the Claude Code CLI;
 - the public Python and npm package registries, while an in-app update or a connector installs.
@@ -58,4 +58,4 @@ Nothing needs to reach the worker from the internet. Never forward its port from
 
 ## Where you can buy
 
-At launch, licenses cannot be sold to buyers in the European Union or the United Kingdom. Prices are in US dollars.
+At launch, paid Cloud plans cannot be sold to buyers in the European Union or the United Kingdom. Prices are in US dollars.

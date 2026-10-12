@@ -107,8 +107,9 @@ class CostPolicyTests(unittest.TestCase):
         import local_ci  # pyright: ignore[reportMissingImports]
         suites = {suite.name for suite in local_ci.SUITES}
         for name in ("backend", "fluid", "frontend", "mobile", "tools", "browser-mcp", "docs", "desktop",
-                     "hub", "site", "license", "registry", "uptime", "android-play", "workflows", "update-reach"):
+                     "hub", "site", "license", "uptime", "android-play", "workflows", "update-reach"):
             self.assertIn(name, suites)
+        self.assertNotIn("registry", suites, "the private registry has been retired")
         hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")
         self.assertIn("scripts/local_ci.py", hook)
         self.assertIn("pre-push", hook)

@@ -12,7 +12,7 @@ You need:
 
 - a 64-bit Intel or AMD machine (see [Requirements](/docs/getting-started/requirements));
 - Docker Engine 24 or later with Docker Compose 2.24 or later (`docker compose version` shows yours);
-- your **pull token**, from your license email or your account page on hobbycoders.com.
+No account or Docker login is needed to download the public image.
 
 Many NAS and home server systems have a Docker or "Container" app with a Compose or "Project" screen. Paste the two files below there, or use a terminal on the machine.
 
@@ -28,7 +28,7 @@ Make an empty folder, for example `~/ai-shuffle`, and put two files in it.
 # AI Shuffle with Docker Compose.
 #
 # 1. Put this file and env.example in an empty folder.
-# 2. Copy env.example to .env and set AI_SHUFFLE_PULL_TOKEN from your license email.
+# 2. Copy env.example to .env and adjust the settings if needed.
 # 3. Run: docker compose up -d
 # 4. Open http://localhost:8000 on this computer.
 #
@@ -44,9 +44,8 @@ name: ai-shuffle
 
 services:
   ai-shuffle:
-    # A pinned release, pulled through your licensed registry path. The pull
-    # token is read-only and is not your license key.
-    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.9.3}
+    # A pinned public release. No account or Docker login is needed.
+    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-0.9.3}
     container_name: ai-shuffle
     restart: unless-stopped
 
@@ -80,7 +79,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Seeds the owner password on the first start only (see env.example).
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
-      # Activates your license on the first start (see env.example).
+      # Optional: links a paid Cloud plan on the first start (see env.example).
       LICENSE_KEY: ${LICENSE_KEY:-}
       # Optional: each applies only once uncommented here (a line in .env alone
       # does not reach the container). The install guide explains each one.
@@ -146,7 +145,7 @@ volumes:
   browser-profile:
 ```
 
-`.env`: your settings. Copy this, then fill in `AI_SHUFFLE_PULL_TOKEN`.
+`.env`: your settings. Copy this and adjust the values if needed.
 
 ```bash
 # AI Shuffle settings for Docker Compose.
@@ -154,12 +153,7 @@ volumes:
 # These are the only settings a normal install needs; everything else is set
 # in the app.
 
-# --- Required ---------------------------------------------------------------
-
-# Your pull token, from your license email or your account page on
-# hobbycoders.com. It only lets Docker download AI Shuffle; it is not your
-# license key and cannot sign in to anything.
-AI_SHUFFLE_PULL_TOKEN=
+# --- Version ----------------------------------------------------------------
 
 # The release to run. Pinned on purpose: nothing changes until you change it.
 # To update: set the new version here, then run `docker compose up -d`.
@@ -189,13 +183,13 @@ COOKIE_SECURE=false
 # browser on first visit instead. At least 12 characters.
 OWNER_PASSWORD=
 
-# --- License key ---------------------------------------------------------------
+# --- Optional Cloud plan -------------------------------------------------------
 
-# Optional. Your license key (ASH-XXXXX-XXXXX-XXXXX-XXXXX) from your license
-# email. On the first start AI Shuffle activates it for this install, then
-# ignores this line: the license lives in AI Shuffle from then on, so you can
-# clear it. Leave it empty to paste the key in Settings > System > License instead.
-# While the beta runs, no key is needed and this line is not used.
+# Optional. Your paid Cloud plan's license key (ASH-XXXXX-XXXXX-XXXXX-XXXXX).
+# On the first start AI Shuffle links it for this install. After a definitive
+# answer it will not retry the same key; Settings > Cloud shows the result.
+# You can clear this line after linking, or leave it empty and link in Settings.
+# Local use and updates are free and never need a key.
 LICENSE_KEY=
 
 # --- Files and permissions ---------------------------------------------------
@@ -238,8 +232,8 @@ PGID=1000
 
 ### 2. Fill in your settings
 
-- **`AI_SHUFFLE_PULL_TOKEN`**: paste your pull token. It only downloads the image. It is not your license key and cannot sign in to anything. Docker needs no `docker login`.
-- **`LICENSE_KEY`** (optional): paste your license key and AI Shuffle activates it on the first start. You can also enter it in the app later. During the beta, no key is needed.
+
+- **`LICENSE_KEY`** (optional): links a paid Cloud plan on the first start. You can enter it in Settings later instead. Local use and updates never need a key.
 - **`OWNER_PASSWORD`** (optional): set the owner password now, or leave it empty and create it in your browser on the first visit.
 - **`WORKSPACE_DIR`**: the folder where your projects live. The default is `./workspace` next to `compose.yaml`.
 - **`PUID` and `PGID`**: the user and group that should own your project files. On Linux, `id -u` and `id -g` show yours. Keep 1000 on a single-user machine.
@@ -271,7 +265,7 @@ Open the address you chose, for example <http://localhost:8000>, and follow [Fir
 
 ## Install with docker run
 
-If you prefer one command, this starts the same container as the compose file. Replace `YOUR_PULL_TOKEN`, and use the current version number.
+If you prefer one command, this starts the same container as the compose file. Use the current version number.
 
 ```bash
 mkdir -p ~/ai-shuffle/workspace
@@ -296,7 +290,7 @@ docker run -d \
   -v ai-shuffle_local-home:/home/appuser/.local \
   -v ai-shuffle_gh-auth:/home/appuser/.config/gh \
   -v ai-shuffle_browser-profile:/home/appuser/chrome-profile \
-  registry.hobbycoders.com/YOUR_PULL_TOKEN/ai-shuffle:0.9.3
+  ghcr.io/hobbycoders/ai-shuffle-server:0.9.3
 ```
 
 - Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).
@@ -340,7 +334,7 @@ With Docker Compose:
 With `docker run`: pull the new version, then stop and remove the container and run the same command again with the new version number. Your volumes and workspace stay as they are.
 
 ```bash
-docker pull registry.hobbycoders.com/YOUR_PULL_TOKEN/ai-shuffle:NEW_VERSION
+docker pull ghcr.io/hobbycoders/ai-shuffle-server:NEW_VERSION
 docker stop ai-shuffle
 docker rm ai-shuffle
 ```
