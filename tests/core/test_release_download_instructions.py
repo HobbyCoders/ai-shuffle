@@ -240,7 +240,11 @@ def test_signing_prerequisites_fail_before_publication(tmp_path):
     gate = next(step for step in steps if step.get("name", "").startswith("Check stable signing"))
     assert steps.index(gate) < next(i for i, step in enumerate(steps) if "action-gh-release" in step.get("uses", ""))
     assert gate["if"] == "steps.promote.outputs.promote_latest == 'true'"
-    script = gate["run"].split("<<'JS'\n", 1)[1].rsplit("\nJS", 1)[0]
+    assert gate["run"] == "node desktop/scripts/signing-preflight.mjs"
+    scripts = tmp_path / "desktop/scripts"
+    scripts.mkdir(parents=True)
+    for name in ("signing-preflight.mjs", "trusted-keys.mjs"):
+        shutil.copyfile(ROOT / "desktop/scripts" / name, scripts / name)
     runtime_env = {key: os.environ[key] for key in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP") if key in os.environ}
     # Ephemeral test keys, never production keys or repository artifacts.
     key = Ed25519PrivateKey.generate()
@@ -254,7 +258,7 @@ def test_signing_prerequisites_fail_before_publication(tmp_path):
         "RELEASE_GITHUB_REPO": "HobbyCoders/ai-shuffle", "RELEASE_GITHUB_REPO_ID": "42"}
 
     def run(values):
-        return subprocess.run(["node", "--input-type=module", "-e", script], cwd=tmp_path, env=values,
+        return subprocess.run(["node", "desktop/scripts/signing-preflight.mjs"], cwd=tmp_path, env=values,
                               capture_output=True, text=True, timeout=15)
 
     result = run(env)
@@ -262,8 +266,15 @@ def test_signing_prerequisites_fail_before_publication(tmp_path):
     for name in gate["env"]:
         result = run({k: v for k, v in env.items() if k != name})
         assert result.returncode != 0 and f"{name} is missing" in result.stderr
-    public.write_bytes(Ed25519PrivateKey.generate().public_key().public_bytes(
-        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    other_public = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    # Exercise the actual CLI with the signing key second in the shipped bundle.
+    public.write_bytes(other_public + public.read_bytes())
+    result = run(env)
+    assert result.returncode == 0, result.stderr
+    result = run({**env, "ACCOUNT_HUB_DATABASE_ID": "invalid"})
+    assert result.returncode != 0 and "Invalid ACCOUNT_HUB_DATABASE_ID" in result.stderr
+    public.write_bytes(other_public)
     result = run(env)
     assert result.returncode != 0 and "does not match" in result.stderr
 

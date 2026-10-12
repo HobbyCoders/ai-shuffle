@@ -22,6 +22,40 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
 
 
+def test_manifest_trust_key_rotation():
+    keys = [Ed25519PrivateKey.generate() for _ in range(3)]
+    public = [key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo) for key in keys]
+    manifest = {"format": 2, "revision": A, "sha256": "b" * 64, "size": 1, "sequence": 1,
+                "container": {"sequence": 1, "runtime": RUNTIME}}
+    payload = json.dumps(manifest).encode()
+    garbage = b"-----BEGIN PUBLIC KEY-----\ninvalid\n-----END PUBLIC KEY-----\n"
+    for signer, key in enumerate(keys):
+        raw = json.dumps({"payload": base64.b64encode(payload).decode(),
+                          "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
+        for trusted in ((0,), (1,), (0, 1), (1, 0)):
+            bundle = b"".join(public[i] for i in trusted)
+            if signer in trusted:
+                assert verify_manifest(raw, bundle) == manifest
+                assert verify_manifest(raw, garbage + bundle) == manifest
+            else:
+                with pytest.raises(UpdateError, match="Invalid or unsigned"):
+                    verify_manifest(raw, bundle)
+        for invalid in (b"", b"garbage", garbage):
+            with pytest.raises(UpdateError, match="No valid Ed25519"):
+                verify_manifest(raw, invalid)
+
+
+def test_manifest_rejects_non_ed25519_trust_keys(feed):
+    from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
+
+    updater, publish, *_ = feed
+    wrong_type = generate_private_key(SECP256R1()).public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    raw = publish()
+    with pytest.raises(UpdateError, match="No valid Ed25519"):
+        verify_manifest(raw, wrong_type)
+    assert verify_manifest(raw, wrong_type + updater.public_key)["revision"] == B
+
+
 class FakeDatabase:
     """The container_runtime.Database rollback-copy surface, in memory.
 

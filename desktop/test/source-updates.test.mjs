@@ -674,7 +674,7 @@ test('the desktop tree digest matches the publisher for ordering and non-ASCII p
  assert.equal(treeDigest(files),publishedTree(archive));assert.equal(treeDigest([...files].reverse()),treeDigest(files));
 });
 test('release fields are validated when present and older installed manifests without them stay readable',async t=>{
- const f=await fixture(t);const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+ const f=await fixture(t);const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
  const signed=fields=>{const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,...fields}));return JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});};
  assert.equal(verifySourceManifest(signed({}),publicKey).channel,undefined);
  assert.equal(verifySourceManifest(signed({channel:'edge',version:'1.2.3',notes:'x'.repeat(4000),tree:KEY}),publicKey).notes.length,4000);
@@ -694,7 +694,7 @@ test('a compatibility preflight failure never writes booting or blocks the next 
  assert.equal(state.pending,undefined);assert.equal(state.staged,A);assert.equal(next.hasSourceState,false);
 });
 test('#1821 D5: desktop.launcher is validated when present; manifests without it need no launcher and still install',async t=>{
- const f=await fixture(t);const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+ const f=await fixture(t);const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
  const signed=fields=>{const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,...fields}));return JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});};
  assert.equal(requiredLauncher(verifySourceManifest(signed({}),publicKey)),0);
  assert.equal(requiredLauncher(verifySourceManifest(signed({desktop:{}}),publicKey)),0);

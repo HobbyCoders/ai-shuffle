@@ -2,6 +2,7 @@
 import { readFile, access, mkdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { verify } from 'node:crypto';
+import { trustedKeys } from './trusted-keys.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -48,7 +49,7 @@ if (state.active && /^[a-f0-9]{40}$/.test(state.active)) {
   const dir = path.join(root, 'versions', state.active);
   const signed = JSON.parse(await readFile(path.join(dir, 'release.json'), 'utf8'));
   const payload = Buffer.from(signed.payload, 'base64');
-  if (!verify(null, payload, publicKey, Buffer.from(signed.signature, 'base64')) || JSON.parse(payload).revision !== state.active) throw new Error('Installed source signature is invalid');
+  if (!trustedKeys(publicKey).some(key => verify(null, payload, key, Buffer.from(signed.signature, 'base64'))) || JSON.parse(payload).revision !== state.active) throw new Error('Installed source signature is invalid');
   implementation = path.join(dir, 'source/desktop');
 }
 const compiled = path.join(implementation, 'dist/main/source-updates.js');

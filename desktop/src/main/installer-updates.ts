@@ -15,6 +15,7 @@
  * /v1/desktop/installer/<platform> address.
  */
 import { createHash, verify } from 'node:crypto';
+import { trustedKeys } from './trusted-keys';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { SOURCE_ORIGIN } from './source-auth';
@@ -62,7 +63,8 @@ export function verifyInstallerEntry(entry: unknown, publicKey: string, platform
   const e = entry as { payload?: unknown; signature?: unknown } | null;
   if (!e || typeof e.payload !== 'string' || typeof e.signature !== 'string') throw new Error('The installer entry is not signed');
   const payload = Buffer.from(e.payload, 'base64');
-  if (!verify(null, payload, publicKey, Buffer.from(e.signature, 'base64'))) throw new Error('Invalid installer signature');
+  const signature = Buffer.from(e.signature, 'base64');
+  if (!trustedKeys(publicKey).some(key => verify(null, payload, key, signature))) throw new Error('Invalid installer signature');
   const p = JSON.parse(payload.toString('utf8')) as InstallerPayload;
   if (p.type !== 'desktop-installer' || p.format !== 1 || p.platform !== platform || typeof p.arch !== 'string'
     || typeof p.version !== 'string' || !RELEASE.test(p.version) || typeof p.revision !== 'string' || !/^[a-f0-9]{40}$/.test(p.revision)

@@ -25,6 +25,7 @@ import time
 import zipfile
 
 import httpx
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -110,16 +111,36 @@ def verify_tree(directory, manifest):
             raise UpdateError("Application source files changed after download; download the update again")
 
 
+def trusted_keys(public_key):
+    """Parse public-only Ed25519 PEM blocks, refusing an empty trust bundle."""
+    keys = []
+    for block in re.findall(rb"-----BEGIN PUBLIC KEY-----[\s\S]*?-----END PUBLIC KEY-----", public_key):
+        try:
+            key = load_pem_public_key(block)
+        except (ValueError, UnsupportedAlgorithm):
+            continue
+        if isinstance(key, Ed25519PublicKey):
+            keys.append(key)
+    if not keys:
+        raise UpdateError("No valid Ed25519 update trust keys")
+    return keys
+
+
 def verify_manifest(text, public_key):
     if len(text) > 32768:
         raise UpdateError("Source manifest exceeds limits")
     try:
         envelope = json.loads(text)
         payload = base64.b64decode(envelope["payload"], validate=True)
-        key = load_pem_public_key(public_key)
-        if not isinstance(key, Ed25519PublicKey):
-            raise ValueError("wrong key type")
-        key.verify(base64.b64decode(envelope["signature"], validate=True), payload)
+        signature = base64.b64decode(envelope["signature"], validate=True)
+        for key in trusted_keys(public_key):
+            try:
+                key.verify(signature, payload)
+                break
+            except InvalidSignature:
+                continue
+        else:
+            raise InvalidSignature
         result = json.loads(payload)
         if (result["format"] != 2 or not REVISION.fullmatch(result["revision"])
                 or not DIGEST.fullmatch(result["sha256"])

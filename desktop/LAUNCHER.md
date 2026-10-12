@@ -30,8 +30,13 @@ and the release may replace an older launcher as described below.
   built before #1821 have neither and are version 0.
 - A manifest without `desktop.launcher` needs launcher 0.
 
-Raise `minimum` only after a Windows acceptance run of the new launcher has
-passed. Raising it is what makes installed apps replace their launcher.
+Raising `minimum` is what makes installed apps replace their launcher. The
+signing-key transition sets both version and minimum to **3**: an old-key-signed
+bridge must replace the installed old-key-only verifier before new-key updates.
+The owner accepted this bump for the sole existing Windows install; the release
+workflow verifies the transitional installer on a clean Windows runner. This is
+not evidence of an existing-install migration: verify that swap before switching
+signers. Future minimum bumps should follow a Windows acceptance run.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.

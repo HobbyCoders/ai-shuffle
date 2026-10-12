@@ -9,7 +9,7 @@ const launcherJson = new URL('../launcher.json', import.meta.url);
 
 test('#1821 D5: desktop/launcher.json holds a launcher version and a minimum no newer than it', () => {
  const { version, minimum } = readLauncher(readFileSync(launcherJson, 'utf8'));
- assert(version >= 1 && minimum >= 0 && minimum <= version);
+ assert(version >= 3 && minimum >= 3 && minimum <= version);
  assert.deepEqual(readLauncher('{"version":2,"minimum":2}'), { version: 2, minimum: 2 });
  for (const bad of ['{}', 'null', '[]', '{"version":0,"minimum":0}', '{"version":1,"minimum":2}', '{"version":1.5,"minimum":0}',
   '{"version":"1","minimum":0}', '{"version":1,"minimum":-1}', '{"version":1}'])

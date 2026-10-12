@@ -29,12 +29,9 @@ if (!(Test-Path -LiteralPath $node)) {
     } finally { Remove-Item -LiteralPath $temporary -Recurse -Force }
 }
 $starter = Join-Path $Root 'starter'
-if (!(Test-Path (Join-Path $starter 'scripts\bootstrap.mjs'))) {
-    New-Item -ItemType Directory -Path $starter -Force | Out-Null
-    foreach ($name in @('src', 'scripts', 'build', 'package.json', 'package-lock.json', 'tsconfig.json', 'runtime-contract.json')) {
-        Copy-Item -LiteralPath (Join-Path $desktop $name) -Destination $starter -Recurse -Force
-    }
-}
+# Rerunning a newer downloaded bootstrap refreshes the verifier/key, not user data.
+& $node (Join-Path $desktop 'scripts\refresh-starter.mjs') $Root
+if ($LASTEXITCODE -ne 0) { throw 'Starter refresh failed. Your existing application and data were retained.' }
 $launch = Join-Path $Root 'Start AI Shuffle.cmd'
 $command = '@echo off' + "`r`n" + 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0starter\scripts\bootstrap.ps1" -Root "%~dp0."' + "`r`n"
 [IO.File]::WriteAllText($launch, $command, [Text.Encoding]::ASCII)

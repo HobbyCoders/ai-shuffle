@@ -18,6 +18,7 @@
 // Environment: GH_TOKEN, DESKTOP_APPLICATION_SIGNING_KEY,
 // ACCOUNT_HUB_DATABASE_ID, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, RUNNER_TEMP.
 import { createHash, sign, verify } from 'node:crypto';
+import { trustedKeys } from './trusted-keys.mjs';
 import { createReadStream } from 'node:fs';
 import { readdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -82,7 +83,7 @@ if (!asset || asset.state !== 'uploaded' || asset.size !== size || asset.digest 
 // The signed payload is what clients trust; the hub also lists its fields.
 const payload = Buffer.from(JSON.stringify({ type: 'desktop-installer', format: 1, platform, arch: target.arch, version, revision, file, size, sha256 }));
 const signature = sign(null, payload, key);
-if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw Error('Signing key does not match the desktop trust key');
+if (!trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, signature))) throw Error('Signing key does not match the desktop trust key');
 
 const config = path.join(process.env.RUNNER_TEMP, `desktop-${platform}-installer-d1.json`);
 try {

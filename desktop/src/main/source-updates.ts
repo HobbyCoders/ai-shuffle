@@ -1,5 +1,6 @@
 /** Signed source updates (stable releases, or edge for the owner): signed metadata, local builds, atomic restart activation. */
 import { createHash, randomUUID, verify } from 'node:crypto';
+import { trustedKeys } from './trusted-keys';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { extractSource, type ExtractedFile } from './source-archive';
@@ -108,7 +109,7 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
   const envelope = JSON.parse(text);
   if (typeof envelope.payload !== 'string' || typeof envelope.signature !== 'string') throw new Error('Unsigned source manifest');
   const payload = Buffer.from(envelope.payload, 'base64');
-  if (!verify(null, payload, publicKey, Buffer.from(envelope.signature, 'base64'))) throw new Error('Invalid source manifest signature');
+  if (!trustedKeys(publicKey).some(key => verify(null, payload, key, Buffer.from(envelope.signature, 'base64')))) throw new Error('Invalid source manifest signature');
   const m = JSON.parse(payload.toString('utf8')) as SourceManifest;
   if (m.format !== 2 || typeof m.revision !== 'string' || !REVISION.test(m.revision) || typeof m.sha256 !== 'string' || !DIGEST.test(m.sha256) || !Number.isSafeInteger(m.sequence) || m.sequence <= 0 || !Number.isSafeInteger(m.size) || m.size <= 0 || m.size > MAX_SIZE) throw new Error('Invalid source manifest');
   // Optional release fields, checked as strictly as the container updater does.

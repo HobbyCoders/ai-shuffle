@@ -15,6 +15,7 @@ const { packAsar, readAsarMember } = require('../dist/main/asar.js');
 const swap = require('../dist/main/launcher-swap.js');
 const { SourceUpdates } = require('../dist/main/source-updates.js');
 const realDesktop = fileURLToPath(new URL('..', import.meta.url));
+const realLauncher = readLauncher(fs.readFileSync(path.join(realDesktop, 'launcher.json'), 'utf8')).version;
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 const ENTRY = 'dist/main/managed-entry.js';
@@ -116,7 +117,7 @@ test('the launcher reads launcher.json exactly as the build scripts do', () => {
   let actual; try { actual = swap.parseLauncher(text); } catch { actual = 'error'; }
   assert.deepEqual(actual, expected, text);
  }
- assert.deepEqual(swap.parseLauncher(fs.readFileSync(path.join(realDesktop, 'launcher.json'), 'utf8')).version, 2);
+ assert.deepEqual(swap.parseLauncher(fs.readFileSync(path.join(realDesktop, 'launcher.json'), 'utf8')).version, realLauncher);
 });
 
 test('the new archive holds exactly the packed launcher files from the update, with the installed package.json', t => {
@@ -188,22 +189,23 @@ test('the real self-test passes from the real launcher files, alone in their arc
  const candidate = path.join(f.dir, 'isolated', 'app.new.asar');
  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
  write(candidate, Object.fromEntries(members.map(m => [m.name, m.data])));
- await swap.selfTest(process.execPath, candidate, 2, f.root);
- await assert.rejects(swap.selfTest(process.execPath, candidate, 3, f.root), /different launcher version/);
+ await swap.selfTest(process.execPath, candidate, realLauncher, f.root);
+ await assert.rejects(swap.selfTest(process.execPath, candidate, realLauncher + 1, f.root), /different launcher version/);
  // A selected release that does not verify with the archive's key fails the test.
  const payload = Buffer.from(JSON.stringify({ format: 2, revision: B, sequence: 5, sha256: 'e'.repeat(64), size: 10, desktop: { launcher: 2 } }));
  write(f.root, { 'state.json': JSON.stringify({ active: A, pending: B }), [`versions/${B}/release.json`]: JSON.stringify({ payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') }) });
- await assert.rejects(swap.selfTest(process.execPath, candidate, 2, f.root), /signature/);
- write(candidate, { 'build/application-update-key.pem': publicKey.export({ type: 'spki', format: 'pem' }) });
- await swap.selfTest(process.execPath, candidate, 2, f.root);
+ await assert.rejects(swap.selfTest(process.execPath, candidate, realLauncher, f.root), /signature/);
+ // The new signer is second: real launcher self-test must try beyond the old key.
+ write(candidate, { 'build/application-update-key.pem': generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }) + publicKey.export({ type: 'spki', format: 'pem' }) });
+ await swap.selfTest(process.execPath, candidate, realLauncher, f.root);
  fs.writeFileSync(path.join(f.root, 'state.json'), '{"active":"not a revision"}');
- await assert.rejects(swap.selfTest(process.execPath, candidate, 2, f.root), /Invalid installed revision/);
+ await assert.rejects(swap.selfTest(process.execPath, candidate, realLauncher, f.root), /Invalid installed revision/);
  fs.rmSync(path.join(f.root, 'installed-host.json'));
  fs.rmSync(path.join(f.root, 'state.json'));
- await assert.rejects(swap.selfTest(process.execPath, candidate, 2, f.root), /No installed launcher record/);
+ await assert.rejects(swap.selfTest(process.execPath, candidate, realLauncher, f.root), /No installed launcher record/);
  // Not from an archive: refused.
  const loose = path.join(f.dir, 'isolated', 'loose'); fs.cpSync(candidate, loose, { recursive: true });
- await assert.rejects(swap.selfTest(process.execPath, loose, 2, f.root), /not running from an archive/);
+ await assert.rejects(swap.selfTest(process.execPath, loose, realLauncher, f.root), /not running from an archive/);
 });
 
 test('an older launcher than the release needs is swapped: app.new.asar, self-test, app.asar.old, trial record, rename', async t => {
@@ -418,15 +420,15 @@ test('real Electron in node mode opens the packed app.new.asar and passes its se
  const members = swap.launcherMembers(realDesktop, path.join(f.resources, 'app.asar'), fs);
  const candidate = path.join(f.resources, swap.NEW_ASAR);
  fs.writeFileSync(candidate, packAsar(members));
- await swap.selfTest(electron, candidate, 2, f.root);
- await assert.rejects(swap.selfTest(electron, candidate, 3, f.root), /different launcher version/);
+ await swap.selfTest(electron, candidate, realLauncher, f.root);
+ await assert.rejects(swap.selfTest(electron, candidate, realLauncher + 1, f.root), /different launcher version/);
  // The same bytes under the name the design first suggested are not opened as an archive.
  const misnamed = path.join(f.resources, 'app.asar.new');
  fs.copyFileSync(candidate, misnamed);
- await assert.rejects(swap.selfTest(electron, misnamed, 2, f.root), /failed/);
+ await assert.rejects(swap.selfTest(electron, misnamed, realLauncher, f.root), /failed/);
  // An archive without yauzl's dependency fails before any swap.
  fs.writeFileSync(candidate, packAsar(members.filter(m => !m.name.startsWith('node_modules/pend/'))));
- await assert.rejects(swap.selfTest(electron, candidate, 2, f.root), /pend/);
+ await assert.rejects(swap.selfTest(electron, candidate, realLauncher, f.root), /pend/);
 });
 test('real Electron in node mode runs the restore helper over a real archive with original-fs', { skip: electron ? false : 'no Electron binary installed' }, async t => {
  const f = install(t);

@@ -13,6 +13,7 @@
 // zipball of the whole repository. The signed payload keeps format 2 and every
 // existing field, and adds channel, version, notes, tree and desktop.launcher.
 import { sign, verify } from 'node:crypto';
+import { trustedKeys } from './trusted-keys.mjs';
 import { createReadStream } from 'node:fs';
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -112,7 +113,7 @@ try {
   if (published.release_repository !== repo || published.release_repository_id !== repositoryId ||
       manifest.revision !== revision || manifest.channel !== channel || published.asset_id !== asset?.id ||
       asset?.state !== 'uploaded' || manifest.size !== asset.size || asset.digest !== `sha256:${manifest.sha256}` ||
-      !verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), Buffer.from(signed.signature, 'base64'))) {
+      !trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, Buffer.from(signed.signature, 'base64')))) {
    throw new Error('Existing source publication is invalid; refusing to overwrite it');
   }
   console.log(`Already published ${channel} ${revision}; leaving the signed update sequence unchanged.`);
@@ -147,7 +148,7 @@ try {
   const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends },
    desktop: { launcher }, channel, version, notes, tree }));
   const signature = sign(null, payload, key);
-  if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw new Error('Signing key does not match launcher trust key');
+  if (!trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, signature))) throw new Error('Signing key does not match launcher trust key');
   const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });
   if (signed.length > 32768) throw new Error('Signed manifest exceeds the 32 KiB client limit; shorten the release notes');
   if (!asset) {

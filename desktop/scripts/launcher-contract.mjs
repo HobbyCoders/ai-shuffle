@@ -10,8 +10,8 @@
 //            any launcher, including those built before the stamp existed.
 //
 // When a launcher older than `minimum` starts a release, the release replaces
-// it from its own verified source (desktop/LAUNCHER.md). Raise `minimum` only
-// after a Windows acceptance run of the new launcher has passed.
+// it from its own verified source (desktop/LAUNCHER.md). Minimum 3 is the
+// owner-accepted signing-key bridge; future bumps need Windows acceptance.
 export function readLauncher(text) {
  const value = JSON.parse(text);
  const count = n => Number.isSafeInteger(n) && n >= 0;
