@@ -1016,6 +1016,39 @@ describe('WorkLogGroup', () => {
 				expect(['read-a', 'read-b'].map(shown)).toEqual([true, true]);
 			});
 
+			// Review of #2297: the reducer acks an optimistic steer by keeping its
+			// `id` and adding a `serverId`, and rows are keyed by `serverId` first.
+			// A range opened before the ack must still name the run after it.
+			it('keeps a run that starts at a steer open through the steer ack, closes it, and settles closed', async () => {
+				const folds = createFoldState(memoryStorage());
+				const steer: ChatMessage = { id: 'steer-opt', role: 'user', content: 'Check the tests too', turnId: 'turn-1' };
+				const readS = { ...message, id: 'read-s', content: 'Read S' };
+				const proseS: ChatMessage = { id: 'prose-s', role: 'assistant', type: 'text', content: 'Tests checked.' };
+				const tail = { ...message, id: 'tail', content: 'Tail', toolStatus: 'running' as const, streaming: true };
+				const live = (first: ChatMessage) => [prompt, readA, { ...finding, streaming: false }, first, readS, proseS, tail];
+				const view = render(WorkLogGroup, { ...logOf(true, live(steer)), folds });
+				const labels = screen.getAllByRole('button', { name: /^Show work details/ });
+				expect(labels).toHaveLength(2);
+				await fireEvent.click(labels[1]);
+				expect(shown('read-s')).toBe(true);
+				expect(folds.current).toEqual({ 'prompt:run-steer-opt..prose-s': true });
+
+				// The ack: same row, now with its server id.
+				const acked = live({ ...steer, serverId: 'srv-steer' });
+				await view.rerender(logOf(true, acked));
+				expect(shown('read-s')).toBe(true);
+				expect(folds.current).toEqual({ 'prompt:run-srv-steer..prose-s': true });
+
+				await fireEvent.click(screen.getByRole('button', { name: /^Hide work details:/ }));
+				expect(shown('read-s')).toBe(false);
+				expect(folds.current).toEqual({});
+
+				const settled = acked.filter((m) => m.id !== 'tail');
+				await view.rerender(logOf(false, settled));
+				expect(folds.isOpen('prompt:turn')).toBe(false);
+				expect(shown('read-s')).toBe(false);
+			});
+
 			it('does not open a run of another session whose turn has the same key', async () => {
 				const folds = createFoldState(memoryStorage());
 				const first = render(WorkLogGroup, { ...logOf(true, whole()), folds });

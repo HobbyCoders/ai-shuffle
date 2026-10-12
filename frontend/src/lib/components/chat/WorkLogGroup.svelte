@@ -129,9 +129,18 @@
 		? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
 		: Object.keys(localRuns).filter((id) => localRuns[id]));
 	const rowId = (entry: WorkLogEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+	// A row is found by its `id` as well as its `serverId`: the reducer acks an
+	// optimistic row (a steer) by adding a `serverId` and keeping its `id`, so
+	// a range stored before the ack still names it, and the reconcile below
+	// moves the range onto the server id in one write.
 	const rowPositions = $derived.by(() => {
 		const position = new Map<string, number>();
-		if (mode === 'live') sequence.forEach((entry, at) => position.set(rowId(entry), at));
+		if (mode !== 'live') return position;
+		sequence.forEach((entry, at) => {
+			const { id } = entry.message;
+			if (id && !position.has(id)) position.set(id, at);
+		});
+		sequence.forEach((entry, at) => position.set(rowId(entry), at));
 		return position;
 	});
 	const runSpans = $derived.by(() => {
