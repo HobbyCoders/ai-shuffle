@@ -6,11 +6,29 @@ Provides worktree management: list, add, remove, and prune worktrees.
 
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.git_cache import _native_reader
 
 logger = logging.getLogger(__name__)
+
+# git serialises index and ref updates, but not worktree creation: two
+# concurrent `git worktree add` calls on one repository can read each other's
+# half-written `.git/worktrees/<name>/commondir` and die with "failed to read
+# ... commondir". Every worktree mutation of a repository takes its lock.
+_REPO_LOCKS: Dict[str, threading.RLock] = {}
+_REPO_LOCKS_GUARD = threading.Lock()
+
+
+def repo_worktree_lock(main_dir: str) -> threading.RLock:
+    """The process-wide lock serialising worktree add/remove/prune for a repository."""
+    key = os.path.realpath(main_dir)
+    with _REPO_LOCKS_GUARD:
+        lock = _REPO_LOCKS.get(key)
+        if lock is None:
+            lock = _REPO_LOCKS[key] = threading.RLock()
+        return lock
 
 
 def forget_stale_worktree_metadata(main_dir: str, worktree_path: str) -> None:
@@ -163,6 +181,23 @@ def forget_stale_worktree_metadata(main_dir: str, worktree_path: str) -> None:
 class GitWorktreeMixin:
     """Mixin providing worktree operations for GitService."""
 
+    def add_worktree(self, main_dir: str, path: str, branch: str, new_branch: bool = False,
+                     base_branch: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        """Add a worktree; serialised per repository (see repo_worktree_lock)."""
+        with repo_worktree_lock(main_dir):
+            return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch, base_branch=base_branch)
+
+    def remove_worktree(self, main_dir: str, path: str, force: bool = False) -> bool:
+        """Remove a worktree; serialised per repository (see repo_worktree_lock)."""
+        with repo_worktree_lock(main_dir):
+            return self._remove_worktree_unlocked(main_dir, path, force=force)
+
+    def prune_worktrees(self, main_dir: str) -> bool:
+        """Prune stale worktree entries; serialised per repository (see repo_worktree_lock)."""
+        with repo_worktree_lock(main_dir):
+            return self._prune_worktrees_unlocked(main_dir)
+
+
     def list_worktrees(self, working_dir: str) -> List[Dict[str, Any]]:
         """
         List all worktrees for a repository.
@@ -248,7 +283,7 @@ class GitWorktreeMixin:
             logger.error(f"Error listing worktrees: {e}")
             return []
 
-    def add_worktree(
+    def _add_worktree_unlocked(
         self,
         main_dir: str,
         path: str,
@@ -326,7 +361,7 @@ class GitWorktreeMixin:
                 return registered
         return path
 
-    def remove_worktree(
+    def _remove_worktree_unlocked(
         self,
         main_dir: str,
         path: str,
@@ -384,7 +419,7 @@ class GitWorktreeMixin:
             logger.error(f"Error removing worktree: {e}")
             return False
 
-    def prune_worktrees(self, main_dir: str) -> bool:
+    def _prune_worktrees_unlocked(self, main_dir: str) -> bool:
         """
         Prune stale worktree tracking entries.
 

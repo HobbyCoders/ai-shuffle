@@ -1610,3 +1610,38 @@ def test_remote_existing_branch_op_still_shares_the_checkout(
     assert first["status"] == "done", first
     assert second["status"] == "done", second
     assert second["result"]["path"] == first["result"]["path"]
+
+
+def test_worktree_mutations_hold_the_repository_lock(base_checkout, monkeypatch):
+    # git does not serialise `worktree add`; two concurrent adds on one
+    # repository can read each other's half-written commondir and fail. Every
+    # mutation must run under the per-repository lock.
+    from app.core import git_worktree_ops as ops
+
+    git_service = checkout_manager.git_service
+    seen = []
+    real_run = git_service._run_git
+
+    def observing_run_git(main_dir, args, *a, **kw):
+        if args and args[0] == "worktree":
+            # RLock exposes no `locked()`: acquiring non-blocking from another
+            # thread fails only while this thread holds it.
+            holder = {}
+            import threading
+            def probe():
+                holder["acquired"] = ops.repo_worktree_lock(main_dir).acquire(blocking=False)
+                if holder["acquired"]:
+                    ops.repo_worktree_lock(main_dir).release()
+            t = threading.Thread(target=probe); t.start(); t.join()
+            seen.append((args[1], not holder["acquired"]))
+        return real_run(main_dir, args, *a, **kw)
+
+    monkeypatch.setattr(git_service, "_run_git", observing_run_git)
+    path = base_checkout / ".fluid" / "worktrees" / "locked-branch"
+    ok, err = git_service.add_worktree(str(base_checkout), str(path), "fix/locked", new_branch=True)
+    assert ok, err
+    assert git_service.remove_worktree(str(base_checkout), str(path), force=True)
+    assert git_service.prune_worktrees(str(base_checkout))
+    # remove_worktree also lists/prunes on its own; every call ran under the lock.
+    assert {"add", "remove", "prune"} <= {op for op, _ in seen}
+    assert all(held for _, held in seen), seen
