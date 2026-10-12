@@ -1,5 +1,5 @@
 """User-message revisions are persisted and delivered without opening the chat."""
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,7 +16,30 @@ def stamp(sid):
     return datetime.fromisoformat(value) if isinstance(value, str) else value
 
 
-def test_prompt_then_steer_and_non_user_messages():
+@pytest.fixture
+def revision_clock(monkeypatch):
+    from app.db import session_events
+
+    class Clock(datetime):
+        value = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.value
+
+        @classmethod
+        def advance(cls):
+            cls.value += timedelta(seconds=1)
+
+    # These tests check distinct wall-clock revisions, not OS clock resolution.
+    # The question writer imports datetime inside the transaction.
+    monkeypatch.setattr("datetime.datetime", Clock)
+    monkeypatch.setattr(sessions, "datetime", Clock)
+    monkeypatch.setattr(session_events, "datetime", Clock)
+    return Clock
+
+
+def test_prompt_then_steer_and_non_user_messages(revision_clock):
     database.create_session("revision", "default")
     assert stamp("revision") is None
     prompt = database.add_session_message("revision", "user", "Start")
@@ -25,12 +48,13 @@ def test_prompt_then_steer_and_non_user_messages():
     assert first.utcoffset().total_seconds() == 0
     database.add_session_message("revision", "assistant", "Which one?")
     assert stamp("revision") == first
+    revision_clock.advance()
     steer = database.add_session_message("revision", "user", "The first one")
     assert stamp("revision") == datetime.fromisoformat(steer["created_at"])
     assert stamp("revision") > first
 
 
-def test_event_batch_stamps_latest_inserted_user_not_batch_end():
+def test_event_batch_stamps_latest_inserted_user_not_batch_end(revision_clock):
     from app.db import session_events
 
     sid = "batch-seq"
@@ -49,6 +73,7 @@ def test_event_batch_stamps_latest_inserted_user_not_batch_end():
         first = publish.call_args.args[1]["updates"]["updated_at"]
         assert first == Session(**database.get_session(sid)).model_dump(mode="json")["updated_at"]
         # A duplicate after a new user in the same allocation must not win.
+        revision_clock.advance()
         session_events.append_events(sid, [
             {"type": "message.user", "payload": {}}, events[1],
         ])
@@ -58,6 +83,7 @@ def test_event_batch_stamps_latest_inserted_user_not_batch_end():
         assert second == Session(**database.get_session(sid)).model_dump(mode="json")["updated_at"]
         assert second > first
         # Legacy-only delivery has no event position, so must preserve it.
+        revision_clock.advance()
         database.add_session_message(sid, "user", "Legacy")
         assert database.get_session(sid)["last_user_message_seq"] == 5
         assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 5

@@ -7,7 +7,7 @@ Only the native receiver's submit method is mocked on the messaging path.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -481,12 +481,47 @@ async def _run_queued(engine, session_id):
 
 @pytest_asyncio.fixture
 async def _no_wake_timers():
-    from app.core import wakeup_service
+    from app.core import turn_scheduler, wakeup_service
 
     yield
-    for task in list(wakeup_service._timers.values()):
+    # Terminal delivery also starts a scheduler batch-window timer. Leaving it
+    # alive lets it call the real kick after monkeypatch restores the mock, or
+    # leaves a closed-loop task for a later runtime test to gather.
+    tasks = set(wakeup_service._timers.values()) | set(turn_scheduler._kick_tasks)
+    for task in tasks:
         task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     wakeup_service._timers.clear()
+    turn_scheduler._batch_kick_tasks.clear()
+
+
+async def test_wake_timer_fixture_drains_scheduler_batch_tasks(monkeypatch):
+    from app.core import turn_scheduler, wakeup_service
+
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 60)
+    kick = MagicMock()
+    monkeypatch.setattr(turn_scheduler, "kick", kick)
+    cleanup = _no_wake_timers.__wrapped__()
+    await anext(cleanup)
+    turn_scheduler._kick_after_batch_window("fixture-cleanup")
+    batch_task = turn_scheduler._batch_kick_tasks["fixture-cleanup"]
+    wake_task = asyncio.create_task(asyncio.sleep(60))
+    wakeup_service._timers["fixture-cleanup"] = wake_task
+    # Enter the tasks so cancellation must unwind their awaited work/finally.
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(StopAsyncIteration):
+            await anext(cleanup)
+        assert batch_task.cancelled()
+        assert wake_task.cancelled()
+        assert batch_task not in turn_scheduler._kick_tasks
+        assert "fixture-cleanup" not in turn_scheduler._batch_kick_tasks
+        assert "fixture-cleanup" not in wakeup_service._timers
+        kick.assert_not_called()
+    finally:
+        batch_task.cancel()
+        wake_task.cancel()
+        await asyncio.gather(batch_task, wake_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

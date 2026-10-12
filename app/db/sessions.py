@@ -2064,14 +2064,16 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
         )
         epoch = str(cursor.fetchone()["id"])
         # Event order is authoritative even if the wall clock moves backwards.
+        # Keep any newer question revision stamped above in this transaction.
         cursor.execute(
             f"UPDATE sessions SET last_user_message_at = {ph()}, last_user_message_seq = {ph()}, "
-            f"last_user_message_epoch = {ph()}, updated_at = {ph()} WHERE id = {ph()} "
+            f"last_user_message_epoch = {ph()}, "
+            f"updated_at = CASE WHEN updated_at > {ph()} THEN updated_at ELSE {ph()} END WHERE id = {ph()} "
             f"AND (last_user_message_seq IS NULL OR last_user_message_seq < {ph()} "
             f"OR last_user_message_epoch IS NULL OR last_user_message_epoch != {ph()}) "
             "RETURNING api_user_id, updated_at, last_user_message_seq, last_user_message_epoch, "
             "last_assistant_question_seq, last_assistant_question_epoch",
-            (now, seq, epoch, now, session_id, seq, epoch),
+            (now, seq, epoch, now, now, session_id, seq, epoch),
         )
     row = cursor.fetchone()
     if row is None:

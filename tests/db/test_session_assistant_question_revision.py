@@ -2,6 +2,7 @@
 import importlib
 import json
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ from app.db import session_questions as questions
 from tests.db import schema_lifecycle_helpers as lifecycle
 
 
-CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_questions.json").read_text())
+CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_questions.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["content"])
@@ -24,7 +25,7 @@ def test_shared_question_predicate(case):
     assert questions.asks_question(case["content"]) is case["expected"]
 
 
-EVENT_CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_question_events.json").read_text())
+EVENT_CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_question_events.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("case", EVENT_CASES, ids=lambda case: case["name"])
@@ -105,6 +106,50 @@ def test_question_frames_carry_stored_row_revision_even_for_null_epoch_stamp(cha
             assert updates["updated_at"] == Session(**row()).model_dump(mode="json")["updated_at"]
             assert updates["updated_at"] > previous
             previous = updates["updated_at"]
+
+
+def test_question_revision_initializes_missing_timestamp(chat):
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET updated_at = NULL WHERE id = %s", (chat,))
+    with patch.object(global_events, "lifecycle") as publish:
+        session_events.append_events(chat, [event(content="Which?")])
+    publish.assert_called_once()
+    updates = publish.call_args.args[1]["updates"]
+    assert updates["last_assistant_question_seq"] == 1
+    assert updates["updated_at"] is not None
+    assert updates["updated_at"] == Session(**row()).model_dump(mode="json")["updated_at"]
+
+
+@pytest.mark.parametrize("with_user", [False, True])
+@pytest.mark.parametrize("clock_offset", [timedelta(0), timedelta(seconds=-1)])
+def test_question_revisions_advance_with_stalled_or_reversed_clock(chat, clock_offset, with_user):
+    stored = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET updated_at = %s WHERE id = %s", (stored.isoformat(), chat))
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return stored + clock_offset
+
+    previous = stored
+    # Exercise real append commits, including clearing a previously set question.
+    with patch("datetime.datetime", FixedClock), patch.object(session_events, "datetime", FixedClock), \
+            patch.object(global_events, "lifecycle") as publish:
+        for content, expected_seq in [("Which?", 1), ("Or this?", 2), ("Done.", None)]:
+            publish.reset_mock()
+            batch = [event(content=content)]
+            if with_user:
+                batch.insert(0, event("message.user", content="Next"))
+                expected_seq = expected_seq * 2 if expected_seq is not None else None
+            session_events.append_events(chat, batch)
+            publish.assert_called_once()
+            updates = publish.call_args.args[1]["updates"]
+            assert updates["last_assistant_question_seq"] == expected_seq
+            assert updates["updated_at"] == Session(**row()).model_dump(mode="json")["updated_at"]
+            current = datetime.fromisoformat(updates["updated_at"])
+            assert current == previous + timedelta(microseconds=1)
+            previous = current
 
 
 @pytest.mark.parametrize("name", ["AskUser", "AskUserQuestion"])

@@ -142,9 +142,11 @@ def record_question(cursor, session_id, *, force_notify=False):
     )
     first = cursor.fetchone()
     epoch = str(first["id"]) if first else None
+    # Serialize timestamp writers without blocking composer inserts' FK
+    # KEY SHARE checks while append later takes their advisory lock.
     cursor.execute(
-        "SELECT api_user_id, last_assistant_question_seq, last_assistant_question_epoch, "
-        "last_user_message_seq, last_user_message_epoch FROM sessions WHERE id = %s",
+        "SELECT api_user_id, updated_at, last_assistant_question_seq, last_assistant_question_epoch, "
+        "last_user_message_seq, last_user_message_epoch FROM sessions WHERE id = %s FOR NO KEY UPDATE",
         (session_id,),
     )
     row = cursor.fetchone()
@@ -152,16 +154,24 @@ def record_question(cursor, session_id, *, force_notify=False):
         row["last_assistant_question_seq"], row["last_assistant_question_epoch"]
     ) == (seq, epoch)):
         return None
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     # A first, still-streaming delta only establishes a null projection's
     # epoch. It must not turn a backfilled/idle session into recent activity.
     # Actual question changes do refresh the catalog's incremental scan key.
     changed = row["last_assistant_question_seq"] != seq
+    now = datetime.now(timezone.utc)
+    if changed and row["updated_at"] is not None:
+        previous = datetime.fromisoformat(str(row["updated_at"]))
+        if previous.tzinfo is None:
+            previous = previous.replace(tzinfo=timezone.utc)
+        # Windows clocks can repeat across commits; wall clocks can also move
+        # backwards. Hold the session row lock while advancing its revision.
+        now = max(now, previous + timedelta(microseconds=1))
     cursor.execute(
         "UPDATE sessions SET last_assistant_question_seq = %s, last_assistant_question_epoch = %s, "
         "updated_at = CASE WHEN %s THEN %s ELSE updated_at END WHERE id = %s RETURNING updated_at",
-        (seq, epoch, changed, datetime.now(timezone.utc).isoformat(), session_id),
+        (seq, epoch, changed, now.isoformat(), session_id),
     )
     from app.core.session_payload import serialize_session_updated_at
 
