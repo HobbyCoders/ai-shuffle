@@ -13,7 +13,7 @@ permissions:
 jobs:
   smoke:
     name: Browser editor smoke checks
-    # Keep every browser smoke check on a standard GitHub runner rather than a separately billed runner.
+    # Keep every smoke check on a standard GitHub-hosted runner.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -31,7 +31,7 @@ jobs:
     name: Real browser workspace
     needs: smoke
     timeout-minutes: 10
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     env:

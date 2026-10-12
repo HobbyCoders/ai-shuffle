@@ -1,5 +1,5 @@
 name: CI Backend
-run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} vCPU)"
+run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} test workers)"
 
 # Manual only. Pull requests run no CI: scripts/local_ci.py runs the backend
 # tests on the developer's machine before a push, and edge publication waits
@@ -7,12 +7,12 @@ run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} vCPU)"
 # Dispatch this for what a local machine cannot run: the real-PostgreSQL
 # contracts and root-account isolation steps below, before a stable release.
 #
-# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 on:
   workflow_dispatch:
     inputs:
       runner_cpus:
-        description: 'Runner vCPUs (compare the same commit before changing defaults)'
+        description: 'Pytest workers (legacy input name; runner is always ubuntu-latest)'
         type: choice
         options: ['2', '4']
         default: '2'
@@ -32,11 +32,8 @@ jobs:
     # Keep a hard job timeout so a silent suite wedge cannot run until the platform default. Schema creation is
     # reused per worker; validate the resulting behavior before lowering the cap.
     timeout-minutes: 35
-    # Same-commit comparison on 2026-09-15: 2 vCPU / 2 workers passed in 415s;
-    # 4 vCPU / 4 workers passed in 287s (runs 35005402929 / 35005406199).
-    # The lower runner tier avoids unnecessary cost. Keep worker count
-    # matched to the runner: four workers previously starved 2-vCPU fixtures.
-    runs-on: ${{ inputs.runner_cpus == '4' && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # Standard public Linux runner; the dispatch input controls test workers only.
+    runs-on: ubuntu-latest
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -53,9 +50,7 @@ jobs:
           # would then fetch old blobs one by one during the test run.
           fetch-depth: 0
 
-      # Upstream actions/setup-* on purpose: Blacksmith archived its
-      # useblacksmith/setup-* forks and now routes the official cache actions
-      # through its colocated cache transparently.
+      # Official setup actions use the GitHub Actions dependency cache.
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -88,8 +83,8 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the job
         # timeout with no diagnosis.
-        # One pytest-xdist worker per vCPU; the dispatch input selects both
-        # runner size and worker count for repeatable comparisons.
+        # The legacy runner_cpus input selects test parallelism only;
+        # every run uses the standard GitHub-hosted Linux runner.
         # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
         # The excluded files run in full in a step of this job with the same
         # or a stronger setup (named in each step's comment), so they are not

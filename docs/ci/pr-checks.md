@@ -6,6 +6,17 @@ request or a push to a branch. The daily schedule only publishes an attested
 nightly; it never runs tests. CI minutes go only to work no local machine can do: release builds, signing, publishing, deploys, and the
 macOS and iOS platform checks.
 
+Public-app workflows use standard GitHub-hosted `ubuntu-latest`,
+`windows-latest` and `macos-latest` runners (some existing jobs pin an OS
+version). These runners are free when the repository is public; larger paid
+runners are not required. Docker jobs use the official Buildx/build-push
+actions with the GitHub Actions layer cache (`type=gha`, scope `Dockerfile`).
+Cache access follows GitHub branch isolation: a branch can restore the default
+branch cache, not another branch's private cache. No sticky disk is required.
+The cloud-service workflows are being moved separately to the private
+repository; their runner migration is not part of this change. Cancelling the
+Blacksmith subscription is an owner action after that migration.
+
 ## Before every push
 
 ```bash
@@ -210,7 +221,7 @@ change does not start publication; the next schedule or owner dispatch reads it.
   the release notes. Edge never waits for Windows.
 - Mac-only checks, when the release changes them: `ios.yml` and
   `ci-folder-confinement.yml`.
-- The real-PostgreSQL and container contracts that only run in the paid
+- The real-PostgreSQL and container contracts that only run in the hosted
   backend job: `gh workflow run ci-backend.yml --ref main`, when the release
   touches the container runtime, the network database or agent isolation.
 - The release workflow itself builds and verifies the container image, the

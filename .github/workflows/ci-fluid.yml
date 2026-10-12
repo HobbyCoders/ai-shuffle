@@ -12,7 +12,7 @@ name: CI fluid
 # It stays a separate workflow because fluid's dev extras need mcp>=2 while
 # the app pins mcp 1.x; the two suites cannot share one environment.
 #
-# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 on:
   workflow_dispatch:
 
@@ -27,8 +27,8 @@ jobs:
   unit:
     name: fluid unit tests
     timeout-minutes: 20
-    # Use a smaller runner for the single-process Fluid test suite.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # A single-process pytest run needs no larger runner.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

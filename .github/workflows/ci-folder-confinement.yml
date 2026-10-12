@@ -1,7 +1,9 @@
 name: Folder confinement (macOS)
 
-# Keep platform-specific checks available without duplicating ordinary backend validation on an additional paid
-# runner.
+# Native macOS checks for the private folder and upload broker. Linux runs the
+# same tests in CI Backend. No Mac is available locally, so dispatch this
+# on a standard GitHub-hosted macOS runner when the broker needs a native check:
+# `gh workflow run ci-folder-confinement.yml --ref <branch>`.
 on:
   workflow_dispatch:
 
@@ -15,7 +17,7 @@ concurrency:
 jobs:
   macos:
     name: macOS folder confinement
-    runs-on: blacksmith-6vcpu-macos-latest
+    runs-on: macos-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

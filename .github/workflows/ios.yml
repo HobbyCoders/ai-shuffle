@@ -7,7 +7,7 @@ name: iOS CI
 # them. Manual only: no Mac is
 # available locally, so the owner dispatches it before an iOS release.
 #
-# macOS runners are PAID per minute and cost more than Linux ones. This
+# Standard GitHub-hosted macOS runners are free in public repositories. This
 # workflow never signs, uploads or publishes; TestFlight stays a manual,
 # owner-gated step (ios/RELEASING.md).
 on:
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   simulator:
     name: Build and test iOS app (Simulator)
-    runs-on: blacksmith-6vcpu-macos-latest
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

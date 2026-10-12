@@ -85,16 +85,63 @@ class CostPolicyTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", text)
 
-    def test_manual_benchmarks_keep_their_runner_inputs(self):
+    def test_manual_checks_use_standard_runners_and_keep_backend_parallelism(self):
         backend = workflow("ci-backend.yml")
         javascript = workflow("ci-frontend.yml")
         self.assertEqual(backend["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "2")
-        self.assertEqual(javascript["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "4")
+        self.assertEqual(javascript["on"]["workflow_dispatch"], "")
         self.assertEqual(backend["jobs"]["backend"]["env"]["PYTEST_WORKERS"], "${{ inputs.runner_cpus == '4' && '4' || '2' }}")
         for config, key, timeout in [(backend, "backend", "35"), (javascript, "frontend", "20")]:
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
+            self.assertEqual(config["jobs"][key]["runs-on"], "ubuntu-latest")
         command = next(step["run"] for step in backend["jobs"]["backend"]["steps"] if step.get("name") == "Run fast test subset")
         self.assertIn('-n "$PYTEST_WORKERS"', command)
+
+    def test_public_app_workflows_use_standard_hosted_runners(self):
+        # These workflows are moving to hobbycoders-cloud in a separate PR.
+        private_cloud = {
+            "deploy-hub.yml", "deploy-license.yml", "deploy-site.yml", "deploy-uptime.yml",
+            "ci-license.yml", "ci-uptime.yml", "withdraw-release.yml",
+        }
+        allowed = {"ubuntu-latest", "ubuntu-24.04", "windows-latest", "macos-latest", "macos-14"}
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            if path.name in private_cloud:
+                continue
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("blacksmith", text.lower())
+                for job in workflow(path.name)["jobs"].values():
+                    if "runs-on" not in job:  # Reusable workflow call.
+                        continue
+                    runner = job["runs-on"]
+                    if runner == "${{ matrix.os }}":
+                        self.assertLessEqual(set(job["strategy"]["matrix"]["os"]), allowed)
+                    else:
+                        self.assertIn(runner, allowed)
+
+    def test_docker_jobs_use_branch_scoped_github_cache_and_verify_before_push(self):
+        for name in ("build-branch.yml", "container-postgres.yml", "docker-publish.yml"):
+            with self.subTest(workflow=name):
+                jobs = workflow(name)["jobs"]
+                job = jobs.get("build", jobs.get("container-postgres"))
+                steps = job["steps"]
+                setup = next(s for s in steps if s.get("uses") == "docker/setup-buildx-action@v3")
+                self.assertNotIn("cache-key", setup.get("with", {}))
+                build = next(s for s in steps if s.get("uses") == "docker/build-push-action@v6")
+                options = build["with"]
+                self.assertEqual(options["cache-from"], "type=gha,scope=Dockerfile")
+                self.assertEqual(options["cache-to"], "type=gha,mode=max,scope=Dockerfile")
+                self.assertEqual(options["load"], "true")
+                self.assertEqual(options["push"], "false")
+                self.assertEqual(options["platforms"], "linux/amd64")
+                verify = next(i for i, s in enumerate(steps)
+                              if "scripts/verify_container_postgres.py" in s.get("run", ""))
+                self.assertGreater(verify, steps.index(build))
+                if name != "container-postgres.yml":
+                    push = next(i for i, s in enumerate(steps)
+                                if 'docker push "$tag"' in s.get("run", ""))
+                    self.assertGreater(push, verify)
+                self.assertNotIn("fstrim", (WORKFLOWS / name).read_text(encoding="utf-8"))
 
     def test_browser_diagnostics_are_failure_only_and_short_lived(self):
         steps = workflow("ci-browser-workspace.yml")["jobs"]["workspace"]["steps"]

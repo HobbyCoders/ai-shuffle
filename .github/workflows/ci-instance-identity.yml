@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         # Linux is covered by CI Backend; exercise the native desktop paths too.
-        os: [blacksmith-2vcpu-windows-2025, blacksmith-6vcpu-macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     env:

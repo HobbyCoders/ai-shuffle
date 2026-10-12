@@ -1,33 +1,26 @@
 name: CI JavaScript
-run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
 # Manual only. Pull requests run no CI: scripts/local_ci.py runs these checks
 # on the developer's machine before a push. Dispatch this only when a check
 # cannot run locally.
 #
-# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 on:
   workflow_dispatch:
-    inputs:
-      runner_cpus:
-        description: 'Runner vCPUs (compare the same commit before changing defaults)'
-        type: choice
-        options: ['4', '2']
-        default: '4'
 
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-frontend-${{ github.ref }}-${{ inputs.runner_cpus || '4' }}
+  group: ci-frontend-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   frontend:
     name: JavaScript package checks
-    # Cap well below the 6-hour default (paid runners).
+    # Cap well below the 6-hour default.
     timeout-minutes: 20
-    # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
-    runs-on: ${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    # Standard public Linux runner; no paid runner-size selection.
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
@@ -35,9 +28,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      # Upstream actions/setup-* on purpose: Blacksmith archived its
-      # useblacksmith/setup-* forks and now routes the official cache actions
-      # through its colocated cache transparently.
+      # Official setup actions use the GitHub Actions dependency cache.
       - name: Set up Node 22
         uses: actions/setup-node@v4
         with:

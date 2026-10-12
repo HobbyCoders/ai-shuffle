@@ -54,7 +54,7 @@ jobs:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
     timeout-minutes: 45
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -96,12 +96,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
 
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v2
-        with:
-          # Shared with build-branch.yml — both build the same root Dockerfile,
-          # so main and lab-branch builds reuse each other's layers.
-          cache-key: Dockerfile
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -140,7 +136,7 @@ jobs:
             type=raw,value=sha-${{ steps.source.outputs.short_sha }}
 
       - name: Build candidate image
-        uses: useblacksmith/build-push-action@v2
+        uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.release_tag && 'release-source' || '.' }}
           file: ${{ inputs.release_tag && 'release-source/Dockerfile' || './Dockerfile' }}
@@ -149,6 +145,9 @@ jobs:
           tags: ai-shuffle:postgres-candidate
           load: true
           push: false
+          # Shared scope; GitHub cache access remains branch-isolated.
+          cache-from: type=gha,scope=Dockerfile
+          cache-to: type=gha,mode=max,scope=Dockerfile
           # inputs.no_cache is '' on tag pushes; coerce to a strict boolean
           # (the action rejects anything but YAML true/false literals).
           no-cache: ${{ inputs.no_cache == true }}
@@ -157,19 +156,6 @@ jobs:
             GIT_SHA=${{ steps.source.outputs.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
             APP_VERSION=${{ steps.source.outputs.app_version }}
-          # Layer caching is automatic via Blacksmith's sticky disk:
-          # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
-          # runs, so no cache-from/cache-to registry round-trip is needed.
-
-      # The sticky disk is billed by the blocks its snapshot holds, not by what
-      # the filesystem uses. Backend GC frees filesystem space, but that alone does
-      # not discard its blocks from the underlying snapshot. The action
-      # commits the ext4 volume without discarding the blocks GC freed, so
-      # the snapshot still accounts for freed blocks. Trim free blocks before the
-      # post step unmounts and commits. Harmless on the local-builder fallback,
-      # where the path is not a mount and fstrim fails.
-      - name: Discard freed blocks on the layer cache disk
-        run: sudo fstrim -v /var/lib/buildkit || echo "fstrim skipped"
 
       # The container verification (boot the image, PostgreSQL bootstrap, UI
       # through a browser) roughly triples the job. Release tags get it;

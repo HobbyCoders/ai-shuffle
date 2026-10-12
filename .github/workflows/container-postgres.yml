@@ -2,12 +2,12 @@ name: Container PostgreSQL
 
 # Builds the production image and exercises a real container: PostgreSQL
 # bootstrap, lifecycle, the buyer Compose install and the UI through a browser.
-# That is a full image build on a paid runner, so it runs only by hand, where
+# That is a full image build, so it runs only by hand, where
 # Docker is not available locally
 # (`gh workflow run container-postgres.yml --ref <branch>`). Every release runs
 # the same container verification in docker-publish.yml before the image is pushed.
 #
-# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 on:
   workflow_dispatch:
 
@@ -21,8 +21,8 @@ concurrency:
 jobs:
   container-postgres:
     name: Single-container PostgreSQL and browser
-    # Use the smaller image-build runner with the sticky layer cache; retain the full container verification.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Standard Linux runner with BuildKit layers cached in GitHub Actions.
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -31,12 +31,10 @@ jobs:
       - name: Image provenance for application updates
         id: source
         run: echo "sequence=$(git rev-list --first-parent --count HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v2
-        with:
-          cache-key: Dockerfile
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Build candidate image
-        uses: useblacksmith/build-push-action@v2
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -44,16 +42,12 @@ jobs:
           tags: ai-shuffle:postgres-candidate
           load: true
           push: false
+          # Shared scope; GitHub cache access remains branch-isolated.
+          cache-from: type=gha,scope=Dockerfile
+          cache-to: type=gha,mode=max,scope=Dockerfile
           build-args: |
             GIT_SHA=${{ github.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
-      # This job shares the "Dockerfile" layer cache disk with docker-publish.yml
-      # and build-branch.yml and runs more often than either. The disk is billed
-      # by the blocks its snapshot holds, so trim the blocks buildkit GC freed
-      # before the post step commits it (see docker-publish.yml). Without this
-      # freed blocks remained allocated in the snapshot.
-      - name: Discard freed blocks on the layer cache disk
-        run: sudo fstrim -v /var/lib/buildkit || echo "fstrim skipped"
       - name: Validate embedded-only Compose configuration
         run: docker compose config --quiet
       - name: Verify actual container lifecycle and UI

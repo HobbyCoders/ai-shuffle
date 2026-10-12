@@ -69,7 +69,7 @@ jobs:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.launcher_acceptance != true &&
       (inputs.candidate_run_id == '')
-    runs-on: blacksmith-2vcpu-windows-2025
+    runs-on: windows-latest
     timeout-minutes: 50
     outputs:
       signed: ${{ steps.signing.outputs.signed }}
@@ -172,7 +172,7 @@ jobs:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.launcher_acceptance != true &&
       (always() && (needs.build.result == 'success' || needs.build.result == 'skipped'))
-    runs-on: blacksmith-2vcpu-windows-2025
+    runs-on: windows-latest
     timeout-minutes: 35
     env:
       EXPECT_SIGNED: ${{ needs.build.outputs.signed }}
@@ -291,7 +291,7 @@ jobs:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor &&
       github.event_name == 'workflow_dispatch' && inputs.launcher_acceptance == true
-    runs-on: blacksmith-2vcpu-windows-2025
+    runs-on: windows-latest
     timeout-minutes: 75
     permissions:
       contents: read

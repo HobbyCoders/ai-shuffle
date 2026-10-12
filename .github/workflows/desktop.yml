@@ -12,7 +12,7 @@ name: Desktop CI
 # Dispatch it when a Windows install must be verified on a clean machine
 # and no Windows worker is available.
 #
-# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 #
 # Nothing here is code signed: this workflow never sees the signing secrets. Release builds come from desktop-installer.yml (Windows,
 # signed), desktop-macos-artifact.yml (signed and notarized) and
@@ -42,7 +42,7 @@ jobs:
   check:
     name: Typecheck and unit tests
     timeout-minutes: 10
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: desktop
@@ -61,7 +61,7 @@ jobs:
     name: Package Windows shell
     timeout-minutes: 15
     needs: check
-    runs-on: blacksmith-2vcpu-windows-2025
+    runs-on: windows-latest
     defaults:
       run:
         working-directory: desktop
@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 20
     if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
     needs: check
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: desktop
@@ -125,7 +125,7 @@ jobs:
   windows-preview:
     name: Windows preview installer and fresh database
     needs: check
-    runs-on: blacksmith-2vcpu-windows-2025
+    runs-on: windows-latest
     timeout-minutes: 35
     defaults:
       run:
