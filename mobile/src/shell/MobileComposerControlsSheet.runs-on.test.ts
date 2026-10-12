@@ -86,7 +86,7 @@ async function openRunsOn(busy: { running: boolean; tasks: string[] }) {
 	// The tile reads as "Runs on" over the worker, a label the panel draws.
 	expect(panel.querySelector('.mcp-setup .ctx-chip.runner')).toBe(tile);
 	await fireEvent.click(tile);
-	await fireEvent.click(await within(panel).findByRole('menuitem', { name: 'Unraid' }));
+	await fireEvent.click(await within(panel).findByRole('menuitemradio', { name: 'Unraid' }));
 	return panel;
 }
 

@@ -41,9 +41,15 @@ if never stamped.
 
 After commit, the global WebSocket feed emits `user_session_updated` with
 `session_id`, `updates.last_user_message_at`, `updates.last_user_message_seq`,
-and `updates.last_user_message_epoch`,
+`updates.last_user_message_epoch`, and `updates.updated_at`,
 even when that session is not open on the receiving tab. These match the persisted
-revision. Account/paired subscribers and other workers receive a session-list
+revision. Both user-message and assistant-question stamp frames carry the row's
+`updated_at` captured in the writing transaction, not the notification's delivery
+time. It uses the same ISO 8601 serialization as the session list (including
+fractional-second precision and the `Z` suffix for UTC), so clients can order row
+snapshots consistently across delivery paths. A changed question sequence bumps
+this timestamp; a null-question epoch-only stamp does not, but still sends the
+row's current `updated_at`. Account/paired subscribers and other workers receive a session-list
 invalidation and reload their authorized rows; worker replication carries all three fields.
 
 Use event order, not wall-clock timestamps, for causal comparisons: a user answer
@@ -338,6 +344,11 @@ After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, n
 
 Get live session state for streaming. Returns current partial messages and streaming status.
 
+`session_meta.updated_at` carries the session row's current revision timestamp,
+serialized identically to the session list and the stamp frames' `updates.updated_at`.
+It is included both with messages and with `?include_messages=false`, so clients
+can order this snapshot against list rows and WebSocket updates.
+
 The response's `session_meta.last_user_message_at` is a nullable UTC ISO 8601
 string with the same value and [user-message revision](#user-message-revision)
 semantics as the session row, serialized identically to list/detail responses
@@ -388,6 +399,8 @@ Update session metadata.
 
 `title` and `status` are query parameters, not a JSON body.
 
+The assistant’s built-in home chat refuses any supplied `title` (including an empty title) with `409` and `{"detail": "Your personal assistant is a persistent conversation and cannot be renamed"}`. Status-only updates are unchanged.
+
 ```bash
 curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Title&status=archived" \
   -H "Authorization: Bearer aih_your_key"
@@ -396,6 +409,8 @@ curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Tit
 ### DELETE /api/v1/sessions/{session_id}
 
 Delete a session and all its messages.
+
+The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be deleted"}`. Its conversation and home binding are preserved.
 
 ```bash
 curl -X DELETE http://localhost:8000/api/v1/sessions/sess_abc123 \
@@ -516,7 +531,7 @@ curl -X POST http://localhost:8000/api/v1/sessions/batch-delete \
   -d '{"session_ids": ["sess_abc123", "sess_def456"]}'
 ```
 
-Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`.
+Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`. The assistant’s built-in home chat is also skipped, with `Access denied for session {id}: Your personal assistant is a persistent conversation and cannot be deleted` in `errors`. Other sessions in the batch are still deleted; the response remains `200` and the home binding is preserved.
 
 ### POST /api/v1/sessions/{session_id}/archive
 
@@ -779,9 +794,9 @@ A session that is running a turn, has messages queued behind it, has a scheduled
 
 | Method | Path | Body | Result |
 |---|---|---|---|
-| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"worker", "target_id", "by", "moving"} or null}` |
-| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "worker": "DesktopWorker", "after": "turn" or "queued"}` |
-| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool}` |
+| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"handoff_id", "worker", "target_id", "by", "moving"} or null}` |
+| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "handoff_id": "uuid", "worker": "DesktopWorker", "after": "turn" or "queued"}` |
+| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool, "handoff_id": "uuid" or null}` |
 
 **Auth:** Required
 
@@ -796,6 +811,12 @@ Scheduled wake-ups, such as a resume after a usage limit, move with the session.
 Known limits: if the new worker stops between taking ownership and storing the moved wake-ups, those wake-ups are lost. Files attached to held messages stay on the old worker. A message sent to the new worker while the old one is still delivering held messages there can run before them. A Stop pressed on the old worker is not remembered if that worker restarts before the move's delivery finishes, so the resume turn can still start.
 
 The session records `handoff` rows for queued, cancelled, started and the outcome (`moved`, `failed`, `timeout`), so every device shows the pending move; the `moved` row is written on the new worker, which then owns the session. For an agent's hand-off its `resume` field is `send`, or `unsupported` / `unknown` when the new worker cannot take the resume turn; a resume turn the new worker refused adds a `resume_failed` row. A queued move is stored on the owning worker, so it survives a restart of that worker; a move that cannot resume is recorded as cancelled. Returns `409` when a move is already queued, the target is unknown or offline, the owning worker cannot be reached, or an approval, question or access card is open ("Answer or dismiss the open prompt first.").
+
+Each new request gets a UUID4 string, `handoff_id`, persisted with the pending move across restarts. Repeating the agent's request for the same pending destination returns the same id; cancelling and queuing another move (even to the same worker) gets a fresh id. `HandOffSession` returns `{"queued": true, "handoff_id": "uuid", "worker": "DesktopWorker", "message": "..."}`, or, with `cancel: true`, `{"cancelled": bool, "handoff_id": "uuid" or null}`. A cancellation with nothing pending has a null id. Replacement requests are refused while cancellation is being recorded; retry after the cancellation response.
+
+Transcript events have `type: "system"`, `subtype: "handoff"`, `content`, and `data: {"handoff_id": "uuid", "status": "...", "content": "...", ...}`. Group the tool result and these rows by id, not worker label. The same id travels in the transferred `started` row and in the destination note control payloads for `moved`, `held_failed` and `resume_failed`. Existing status-specific fields (`worker`, `by`, `note`, `after`, `still`, `reason`, `resume`, message counts and texts) are unchanged. Historical records and notes from older workers may lack the id; new notices about pre-id legacy moves or `nothing_queued` have a null id and must not settle a newer identified move.
+
+**Source-side completion:** no `sent` transcript row is added. The destination imports the transcript snapshot before asking the source to commit ownership. Before that commit, success is not known; after it, a new source row would not be in the transferred snapshot (and would consume a sequence number independently of destination events). Instead the source emits `user_session_updated` with `session_id` and `updates: {"owner_device_id": "target-device-id", "instance_id": "target-device-id", "placement": {"where": "runner:target-device-id"}}` when ownership commits, including on an idempotent commit retry. This does not depend on the outer receive call returning. The source UI should settle its current hand-off when the session's `owner_device_id` becomes its target device id; use `GET /handoff`'s `pending.target_id` rather than a worker label. Reconnecting clients read the authoritative session owner. Account/paired clients receive a sessions resource-change notification and refetch their authorized session instead of receiving the legacy lifecycle payload. The destination's `moved` row remains the transcript outcome.
 
 ## Session Sync
 
@@ -888,6 +909,8 @@ Import a Claude Code CLI JSONL session.
 ### POST /api/v1/sessions/{session_id}/fork
 
 Fork a session at a specific message, creating a branch.
+
+The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be forked"}`. No fork is created and its home binding is preserved.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/fork \

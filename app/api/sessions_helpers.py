@@ -400,6 +400,17 @@ def check_session_access(request: Request, session: dict) -> None:
     check_session_access_for_api_user(get_api_user_from_request(request), session)
 
 
+async def refuse_assistant_home_mutation(session_id: str, action: str) -> None:
+    """Use the settle/archive home predicate, including legacy account homes."""
+    from app.db.assistant import home_session_ids
+
+    if session_id in await run_sync(home_session_ids, [session_id]):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Your personal assistant is a persistent conversation and cannot be {action}",
+        )
+
+
 async def require_session(request: Request, session_id: str) -> dict:
     """Fetch a session, verify it exists, and check access in one call.
 

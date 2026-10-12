@@ -2446,7 +2446,7 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("session_moves")
-    for column, definition in (("wake_token", "TEXT"),
+    for column, definition in (("handoff_id", "TEXT"), ("wake_token", "TEXT"),
                                ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE")):
         if not column_exists(cursor, "session_moves", column):
             cursor.execute(f"ALTER TABLE session_moves ADD COLUMN {column} {definition}")

@@ -11,12 +11,13 @@ epochs (DOUBLE PRECISION), as in ``pending_wakeups``.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_cursor, get_db, parse_jsonb, rows_to_list
 from app.db.compat import ph, phs
 
-_COLUMNS = ("session_id", "target_id", "label", "note", "requested_by", "requested_at", "expires_at")
+_COLUMNS = ("session_id", "target_id", "label", "note", "requested_by", "requested_at", "expires_at", "handoff_id")
 
 
 def _parse(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -29,7 +30,7 @@ def _parse(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def save(session_id: str, *, target_id: str, label: str, note: str, requested_by: str,
-         requested_at: float, expires_at: float) -> None:
+         requested_at: float, expires_at: float, handoff_id: Optional[str] = None) -> None:
     """Insert or replace the queued move of ``session_id``; held messages are kept."""
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -38,9 +39,9 @@ def save(session_id: str, *, target_id: str, label: str, note: str, requested_by
             f"VALUES ({phs(len(_COLUMNS))}, '[]') "
             "ON CONFLICT (session_id) DO UPDATE SET target_id=EXCLUDED.target_id, "
             "label=EXCLUDED.label, note=EXCLUDED.note, requested_by=EXCLUDED.requested_by, "
-            "requested_at=EXCLUDED.requested_at, expires_at=EXCLUDED.expires_at",
+            "requested_at=EXCLUDED.requested_at, expires_at=EXCLUDED.expires_at, handoff_id=EXCLUDED.handoff_id",
             (session_id, target_id, label, note or "", requested_by,
-             float(requested_at), float(expires_at)),
+             float(requested_at), float(expires_at), handoff_id or str(uuid.uuid4())),
         )
 
 

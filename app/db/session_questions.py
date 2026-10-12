@@ -160,11 +160,15 @@ def record_question(cursor, session_id, *, force_notify=False):
     changed = row["last_assistant_question_seq"] != seq
     cursor.execute(
         "UPDATE sessions SET last_assistant_question_seq = %s, last_assistant_question_epoch = %s, "
-        "updated_at = CASE WHEN %s THEN %s ELSE updated_at END WHERE id = %s",
+        "updated_at = CASE WHEN %s THEN %s ELSE updated_at END WHERE id = %s RETURNING updated_at",
         (seq, epoch, changed, datetime.now(timezone.utc).isoformat(), session_id),
     )
+    from app.core.session_payload import serialize_session_updated_at
+
+    updated_at = serialize_session_updated_at(cursor.fetchone()["updated_at"])
     owner = row["api_user_id"]
     updates = {
+        "updated_at": updated_at,
         "last_assistant_question_seq": seq,
         "last_assistant_question_epoch": epoch,
         "last_user_message_seq": row["last_user_message_seq"],

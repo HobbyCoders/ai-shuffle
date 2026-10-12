@@ -61,7 +61,8 @@ import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { get } from 'svelte/store';
 import { rateLimit } from '../rate-limit';
-import { _resetProseQuestions, proseQuestionSessions, rememberLeavingProseQuestion } from './prose-questions';
+import { _resetProseQuestions, proseQuestionSessions, observeSessionRows,
+	rememberLeavingProseQuestion } from './prose-questions';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -2115,6 +2116,97 @@ describe('ws-message-handlers', () => {
 				rememberLeavingProseQuestion('elsewhere', asked);
 				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'elsewhere' });
 				expect(remembered()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+	});
+
+	describe('user_session_updated handler (assistant-question revision, #2263)', () => {
+		const question = (seq: number | null) => ({
+			last_assistant_question_seq: seq,
+			last_assistant_question_epoch: 'evt-1',
+			last_user_message_seq: 9,
+			last_user_message_epoch: 'evt-1',
+		});
+		const marked = () => get(proseQuestionSessions).has('never-opened');
+
+		it('marks a session this tab never opened and patches the row without a reload', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				expect(marked()).toBe(true);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('never-opened', question(12));
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+
+				// Later non-question prose clears it.
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(null) });
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('the clear\'s client timestamp never orders revisions: new-epoch row → frame → refetch', () => {
+			vi.useFakeTimers();
+			try {
+				// This tab's clock runs an hour ahead of the server.
+				vi.setSystemTime(new Date('2026-10-11T11:00:00Z'));
+				let rowA: Record<string, unknown> = {
+					id: 'never-opened', updated_at: '2026-10-11T10:00:00.000000+00:00', ...question(12),
+				};
+				deps = createMockDeps({
+					mergeSessionPatch: vi.fn((_id: string, patch: Record<string, unknown>) => {
+						rowA = { ...rowA, ...patch };
+						return true;
+					}),
+				});
+				handlers = createMessageHandlers(deps);
+				observeSessionRows([rowA as never]);
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'never-opened' });
+				// AppPage observes the patched row (client 11:00 stamp).
+				observeSessionRows([rowA as never]);
+				expect(marked()).toBe(false);
+				const newLog = (seq: number | null, at: string) => ({
+					id: 'never-opened', updated_at: at,
+					last_assistant_question_seq: seq, last_assistant_question_epoch: 'evt-2',
+					last_user_message_seq: null, last_user_message_epoch: null,
+				});
+				// A new-epoch question row at 10:01 server time is applied…
+				observeSessionRows([newLog(2, '2026-10-11T10:01:00.000000+00:00')]);
+				expect(marked()).toBe(true);
+				// …a frame keeps it…
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: {
+					last_assistant_question_seq: 2, last_assistant_question_epoch: 'evt-2',
+					last_user_message_seq: null, last_user_message_epoch: null,
+				} });
+				expect(marked()).toBe(true);
+				// …and a later authoritative refetch at 10:02 still clears it.
+				observeSessionRows([newLog(null, '2026-10-11T10:02:00.000000+00:00')]);
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('a clear nulls both pairs on the row and a delayed pre-clear frame does not re-mark', () => {
+			try {
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'never-opened' });
+				expect(marked()).toBe(false);
+				expect(deps.mergeSessionPatch).toHaveBeenLastCalledWith('never-opened', expect.objectContaining({
+					last_user_message_seq: null,
+					last_user_message_epoch: null,
+					last_assistant_question_seq: null,
+					last_assistant_question_epoch: null,
+				}));
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				expect(marked()).toBe(false);
 			} finally {
 				_resetProseQuestions();
 			}

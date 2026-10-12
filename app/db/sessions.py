@@ -2045,7 +2045,7 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
         cursor.execute(
             f"UPDATE sessions SET last_user_message_at = {ph()}, updated_at = {ph()} "
             f"WHERE id = {ph()} AND (last_user_message_at IS NULL OR last_user_message_at < {ph()}) "
-            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch, "
+            "RETURNING api_user_id, updated_at, last_user_message_seq, last_user_message_epoch, "
             "last_assistant_question_seq, last_assistant_question_epoch",
             (now, now, session_id, now),
         )
@@ -2069,13 +2069,16 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
             f"last_user_message_epoch = {ph()}, updated_at = {ph()} WHERE id = {ph()} "
             f"AND (last_user_message_seq IS NULL OR last_user_message_seq < {ph()} "
             f"OR last_user_message_epoch IS NULL OR last_user_message_epoch != {ph()}) "
-            "RETURNING api_user_id, last_user_message_seq, last_user_message_epoch, "
+            "RETURNING api_user_id, updated_at, last_user_message_seq, last_user_message_epoch, "
             "last_assistant_question_seq, last_assistant_question_epoch",
             (now, seq, epoch, now, session_id, seq, epoch),
         )
     row = cursor.fetchone()
     if row is None:
         return None
+    from app.core.session_payload import serialize_session_updated_at
+
+    updated_at = serialize_session_updated_at(row["updated_at"])
     owner = row["api_user_id"]
 
     def notify():
@@ -2085,6 +2088,7 @@ def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=
             "type": "user_session_updated",
             "session_id": session_id,
             "updates": {
+                "updated_at": updated_at,
                 "last_user_message_at": now,
                 "last_user_message_seq": row["last_user_message_seq"],
                 "last_user_message_epoch": row["last_user_message_epoch"],

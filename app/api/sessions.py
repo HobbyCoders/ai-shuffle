@@ -36,7 +36,7 @@ from app.api.common import api_error_handler
 from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.git_owner import refuse_subagent_git
 from app.core.project_utils import get_project_working_dir
-from app.core.session_payload import client_view
+from app.core.session_payload import client_view, serialize_session_updated_at
 
 import logging
 logger = logging.getLogger(__name__)
@@ -61,6 +61,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     check_transcript_access,
     filter_readable_sessions,
     require_session,
+    refuse_assistant_home_mutation,
     require_transcript_session,
     enrich_sessions_with_tags,
     fetch_and_enrich_sessions,
@@ -531,7 +532,7 @@ async def _queued_move(session: dict, op: str, target: Optional[str] = None, *, 
 async def queued_move_status(request: Request, session_id: str, token: str = Depends(require_auth)):
     """What keeps this chat from moving now, and any move already queued.
 
-    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"worker", "target_id", "by", "moving"} | null}``,
+    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"handoff_id", "worker", "target_id", "by", "moving"} | null}``,
     read on the owning worker. The worker selector and Resume here ask first:
     a running or parked chat is offered "Move when this turn ends".
     """
@@ -1238,6 +1239,7 @@ async def get_live_session(
     # paths so the frontend can correct any stale state on switch.
     from app.core.workspace_folders import normalize_workspace_project_ids
     session_meta = {
+        "updated_at": serialize_session_updated_at(session.get("updated_at")),
         "mode": session.get("mode"),
         "project_id": session.get("project_id"),
         "project_v2_id": session.get("project_v2_id"),
@@ -1494,6 +1496,8 @@ async def update_session(
 ):
     """Update session title or status. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
+    if title is not None:
+        await refuse_assistant_home_mutation(session_id, "renamed")
 
     # Sync title rename to Claude SDK session if available. Only a Claude CLI
     # conversation id (a UUID) names a transcript the CLI owns; a fluid
@@ -1721,6 +1725,7 @@ async def delete_session(
     the HTTP response on slow worktree/subprocess lock release.
     """
     existing = await require_session(request, session_id)
+    await refuse_assistant_home_mutation(session_id, "deleted")
 
     # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
@@ -2063,6 +2068,7 @@ async def batch_delete_sessions(
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
+            await refuse_assistant_home_mutation(session_id, "deleted")
             await run_sync(database.delete_session, session_id)
             from app.core import browser_runtime
             await browser_runtime.close_session(session_id)

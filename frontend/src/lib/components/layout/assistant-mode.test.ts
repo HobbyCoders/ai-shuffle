@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { isAssistantHome } from '$lib/stores/assistant';
+import { chatIdentity, isAssistantHome } from '$lib/stores/assistant';
 import type { AssistantState } from '$lib/api/assistant';
 
 // HTML comments only: a block-comment pattern would also eat `accept="image/*"`.
@@ -34,6 +34,22 @@ describe('isAssistantHome', () => {
 	});
 });
 
+describe('chatIdentity (fails closed for Rename / Fork / Delete)', () => {
+	const state = { home_session_id: 'home' } as AssistantState;
+	it('is unknown until the auth status and, for an admin, the assistant state are loaded', () => {
+		expect(chatIdentity('home', null, state)).toBe('unknown');
+		expect(chatIdentity('other', true, null)).toBe('unknown');
+	});
+	it('names the home and ordinary chats once known', () => {
+		expect(chatIdentity('home', true, state)).toBe('assistant');
+		expect(chatIdentity('other', true, state)).toBe('ordinary');
+		expect(chatIdentity('other', true, { home_session_id: null } as AssistantState)).toBe('ordinary');
+	});
+	it('treats a non-admin chat as ordinary without the assistant state', () => {
+		expect(chatIdentity('other', false, null)).toBe('ordinary');
+	});
+});
+
 describe('assistant mode flag', () => {
 	it('is decided once in MainPanel and passed down as a prop', () => {
 		expect(mainPanel).toContain('const assistantMode = $derived(isAssistantHome(activeTab?.sessionId, $assistantState));');
@@ -42,6 +58,11 @@ describe('assistant mode flag', () => {
 		expect(chatView).toMatch(/<ChatInput[^>]*\{assistantMode\}/);
 		expect(chatInput).toMatch(/<ControlsDock[\s\S]*?\{assistantMode\}/);
 		for (const source of [chatView, chatInput, messageArea]) expect(source).not.toContain('home_session_id');
+	});
+
+	it('loads the assistant state for an open chat even before any sidebar mounts', () => {
+		// The phone shell mounts its sidebar drawer on first open only.
+		expect(mainPanel).toContain('if ($isAdmin && activeTab?.sessionId && !$assistantState) void refreshAssistant().catch(() => {});');
 	});
 
 	it('hides the header download and Git in the home only', () => {

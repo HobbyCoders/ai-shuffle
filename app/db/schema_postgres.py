@@ -2105,6 +2105,7 @@ def create_postgres_schema(cursor) -> None:
             requested_at DOUBLE PRECISION NOT NULL,
             expires_at DOUBLE PRECISION NOT NULL,
             held JSONB NOT NULL DEFAULT '[]',
+            handoff_id TEXT,
             wake_token TEXT,
             wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
         )

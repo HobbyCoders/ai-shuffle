@@ -46,16 +46,24 @@ def test_event_batch_stamps_latest_inserted_user_not_batch_end():
         assert database.get_session(sid)["last_user_message_seq"] == 2
         assert publish.call_count == 1
         assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 2
+        first = publish.call_args.args[1]["updates"]["updated_at"]
+        assert first == Session(**database.get_session(sid)).model_dump(mode="json")["updated_at"]
         # A duplicate after a new user in the same allocation must not win.
         session_events.append_events(sid, [
             {"type": "message.user", "payload": {}}, events[1],
         ])
         assert database.get_session(sid)["last_user_message_seq"] == 5
         assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 5
+        second = publish.call_args.args[1]["updates"]["updated_at"]
+        assert second == Session(**database.get_session(sid)).model_dump(mode="json")["updated_at"]
+        assert second > first
         # Legacy-only delivery has no event position, so must preserve it.
         database.add_session_message(sid, "user", "Legacy")
         assert database.get_session(sid)["last_user_message_seq"] == 5
         assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 5
+        latest = publish.call_args.args[1]["updates"]["updated_at"]
+        assert latest == Session(**database.get_session(sid)).model_dump(mode="json")["updated_at"]
+        assert latest > second
 
 
 def test_clear_resets_event_revision_for_new_log_epoch():

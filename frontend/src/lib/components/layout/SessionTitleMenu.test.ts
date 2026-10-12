@@ -28,8 +28,17 @@ const mocks = vi.hoisted(() => {
 		newChat: vi.fn(),
 		setTitle: vi.fn(),
 		toastPush: vi.fn(),
+		auth: store({ status: { is_admin: true } as { is_admin: boolean } | null }),
+		getAssistant: vi.fn(),
 	};
 });
+
+vi.mock('$lib/stores/auth.svelte', () => ({ auth: mocks.auth }));
+
+vi.mock('$lib/api/assistant', () => ({
+	getAssistant: mocks.getAssistant,
+	getAgentIdentities: () => Promise.resolve([]),
+}));
 
 vi.mock('$lib/stores/app-data.svelte', () => ({
 	appData: {
@@ -56,6 +65,23 @@ vi.mock('$lib/stores/notifications', () => ({
 
 import SessionTitleMenu from './SessionTitleMenu.svelte';
 import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
+import { assistantState, acceptAssistant } from '$lib/stores/assistant';
+import type { AssistantState } from '$lib/api/assistant';
+
+/** Only the home id matters to the title menu; a loaded state with no home
+ *  makes every chat ordinary. */
+function setAssistantHome(id: string | null) {
+	acceptAssistant({ home_session_id: id } as AssistantState);
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function renderMenu(props: { title?: string; sessionId?: string | null; variant?: 'crumb' | 'sheet'; projectLabel?: string } = {}) {
 	return render(SessionTitleMenu, {
@@ -75,6 +101,8 @@ async function openMenu(name = 'Design review') {
 beforeEach(() => {
 	vi.clearAllMocks();
 	openHeaderDropdown.set(null);
+	mocks.auth.set({ status: { is_admin: true } });
+	setAssistantHome(null);
 	mocks.activeSession.set({ sessionId: null, title: '' });
 	mocks.deleteSession.mockResolvedValue(undefined);
 	mocks.renameSession.mockResolvedValue(undefined);
@@ -84,6 +112,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	openHeaderDropdown.set(null);
+	assistantState.set(null);
 	cleanup();
 });
 
@@ -265,6 +294,138 @@ describe('SessionTitleMenu', () => {
 			await fireEvent.keyDown(window, { key: 'Escape' });
 			expect(screen.queryByRole('dialog')).toBeNull();
 			expect(document.activeElement).toBe(chevron);
+		});
+	});
+	describe('assistant home chat (built in)', () => {
+		it('crumb: renders a plain title with no menu', async () => {
+			setAssistantHome('session-a');
+			renderMenu({ title: 'Assistant' });
+
+			expect(screen.queryByRole('button', { name: 'Assistant' })).toBeNull();
+			expect(screen.getByText('Assistant').tagName).toBe('SPAN');
+			// Even a stale open request shows no actions.
+			openHeaderDropdown.set('session-title');
+			await Promise.resolve();
+			expect(screen.queryByRole('menu')).toBeNull();
+			expect(screen.queryByRole('menuitem')).toBeNull();
+		});
+
+		it('sheet: renders no chevron and no sheet', () => {
+			setAssistantHome('session-a');
+			renderMenu({ variant: 'sheet', title: 'Assistant' });
+
+			expect(screen.queryByRole('button', { name: 'Chat actions' })).toBeNull();
+			expect(screen.queryByRole('dialog')).toBeNull();
+		});
+
+		it('closes an open menu if the chat becomes the assistant home', async () => {
+			renderMenu();
+			await openMenu();
+			expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeTruthy();
+
+			setAssistantHome('session-a');
+			await Promise.resolve();
+
+			expect(screen.queryByRole('menuitem')).toBeNull();
+			expect(screen.queryByRole('button', { name: 'Design review' })).toBeNull();
+		});
+
+		for (const variant of ['crumb', 'sheet'] as const) {
+			const actionable = () =>
+				variant === 'crumb'
+					? screen.queryByRole('button', { name: 'Design review' })
+					: screen.queryByRole('button', { name: 'Chat actions' });
+
+			it(`${variant}: offers no actions while the assistant state is loading, then returns them for an ordinary chat`, async () => {
+				assistantState.set(null);
+				const load = deferred<AssistantState>();
+				mocks.getAssistant.mockReturnValue(load.promise);
+				renderMenu({ variant });
+				await flush();
+
+				expect(mocks.getAssistant).toHaveBeenCalled();
+				expect(actionable()).toBeNull();
+				openHeaderDropdown.set('session-title');
+				await flush();
+				expect(screen.queryByRole('menuitem')).toBeNull();
+				expect(screen.queryByRole('dialog')).toBeNull();
+				expect(document.body.textContent).not.toMatch(/Rename session|Fork session/);
+				expect(mocks.renameSession).not.toHaveBeenCalled();
+				expect(mocks.forkSession).not.toHaveBeenCalled();
+				expect(mocks.deleteSession).not.toHaveBeenCalled();
+
+				load.resolve({ home_session_id: 'assistant-home' } as AssistantState);
+				await flush();
+				expect(actionable()).toBeTruthy();
+			});
+
+			it(`${variant}: stays closed when the assistant state load is for the home`, async () => {
+				assistantState.set(null);
+				const load = deferred<AssistantState>();
+				mocks.getAssistant.mockReturnValue(load.promise);
+				renderMenu({ variant });
+				await flush();
+				expect(actionable()).toBeNull();
+
+				load.resolve({ home_session_id: 'session-a' } as AssistantState);
+				await flush();
+				expect(actionable()).toBeNull();
+				expect(screen.queryByRole('menuitem')).toBeNull();
+			});
+
+			it(`${variant}: stays closed when the assistant state load fails`, async () => {
+				assistantState.set(null);
+				const load = deferred<AssistantState>();
+				mocks.getAssistant.mockReturnValue(load.promise);
+				renderMenu({ variant });
+				await flush();
+
+				load.reject(new Error('offline'));
+				await flush();
+				expect(actionable()).toBeNull();
+				openHeaderDropdown.set('session-title');
+				await flush();
+				expect(screen.queryByRole('menuitem')).toBeNull();
+				expect(screen.queryByRole('dialog')).toBeNull();
+				expect(mocks.deleteSession).not.toHaveBeenCalled();
+				expect(mocks.renameSession).not.toHaveBeenCalled();
+				expect(mocks.forkSession).not.toHaveBeenCalled();
+			});
+
+			it(`${variant}: stays closed while the auth status is unknown`, async () => {
+				assistantState.set(null);
+				mocks.auth.set({ status: null });
+				renderMenu({ variant });
+				await flush();
+				expect(actionable()).toBeNull();
+				expect(mocks.getAssistant).not.toHaveBeenCalled();
+			});
+
+			it(`${variant}: a non-admin's chat keeps its actions without loading the assistant`, async () => {
+				assistantState.set(null);
+				mocks.auth.set({ status: { is_admin: false } });
+				renderMenu({ variant });
+				await flush();
+				expect(actionable()).toBeTruthy();
+				expect(mocks.getAssistant).not.toHaveBeenCalled();
+			});
+		}
+
+		it('keeps the menu on an ordinary chat while an assistant exists', async () => {
+			setAssistantHome('assistant-home');
+			renderMenu();
+			await openMenu();
+
+			expect(screen.getByRole('menuitem', { name: 'Rename session' })).toBeTruthy();
+			expect(screen.getByRole('menuitem', { name: 'Fork session' })).toBeTruthy();
+			expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeTruthy();
+		});
+
+		it('sheet: keeps the chevron on an ordinary chat while an assistant exists', () => {
+			setAssistantHome('assistant-home');
+			renderMenu({ variant: 'sheet' });
+
+			expect(screen.getByRole('button', { name: 'Chat actions' })).toBeTruthy();
 		});
 	});
 });

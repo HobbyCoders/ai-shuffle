@@ -1,5 +1,22 @@
 """Session rows as a client may see them. Pure dict helpers, no I/O."""
 
+from datetime import datetime
+
+from pydantic import TypeAdapter
+
+
+_SESSION_TIMESTAMP = TypeAdapter(datetime)
+
+
+def serialize_session_updated_at(value: object) -> str | None:
+    """Match Session's datetime JSON precision and UTC suffix in untyped feeds."""
+    if value is None:
+        return None
+    return _SESSION_TIMESTAMP.dump_python(
+        _SESSION_TIMESTAMP.validate_python(value), mode="json",
+    )
+
+
 #: Session columns that travel between workers but never to a client.
 SERVER_ONLY_SESSION_FIELDS = ('provenance_owner',)
 

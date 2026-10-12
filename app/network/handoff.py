@@ -658,6 +658,20 @@ def finish(sid, target, payload):
         raise
 
 
+def _announce_owner(sid, target, session):
+    # begin exported the transcript before commit, so a terminal source row
+    # cannot travel in that snapshot. This local frame settles the source UI
+    # even if the destination's outer receive reply is lost.
+    from app.core.global_events import global_events
+
+    owner = session.get("api_user_id")
+    global_events.lifecycle(owner, {
+        "type": "user_session_updated", "session_id": sid,
+        "updates": {"owner_device_id": target, "instance_id": target,
+                    "placement": {"where": "runner:" + target}},
+    }, user_type="admin" if owner is None else "api_user")
+
+
 def _commit(sid, target, payload, token):
     session = database.get_session(sid)
     if session.get("owner_device_id") == target:
@@ -667,6 +681,7 @@ def _commit(sid, target, payload, token):
                         (token, sid, HANDOFF + target))
             if cur.fetchone():
                 _release_holds(cur, HOLD + token)
+                _announce_owner(sid, target, session)
                 return {"committed": True}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
@@ -732,6 +747,7 @@ def _commit(sid, target, payload, token):
     from app.core.global_events import global_events
 
     global_events.resources_changed("sessions")
+    _announce_owner(sid, target, session)
     engine.kick()
     return {"committed": True}
 
