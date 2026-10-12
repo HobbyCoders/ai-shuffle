@@ -18,7 +18,6 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ### Beta and accounts
 
-- Beta invites are automatic: approving someone on the waitlist emails them a key and download links.
 - Fixes to sign-in handling for compliance.
 
 ### Workers and data
