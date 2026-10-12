@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import re
+import signal
 import sys
 
 import pytest
@@ -569,3 +570,25 @@ async def test_spawn_uses_no_python_fork(reg, monkeypatch, tmp_path):
     assert os.getsid(term.pid) == term.pid != os.getsid(0)
     assert os.tcgetpgrp(term._fd) == term.pid
     assert sys.executable
+
+
+async def test_ctrl_c_works_when_the_app_was_started_with_sigint_ignored(reg, tmp_path):
+    # A worker launched as a background job of a non-interactive shell
+    # (`python -m app &` in an entrypoint script) inherits SIGINT/SIGQUIT as
+    # ignored, and an interactive shell cannot un-ignore them for its
+    # children. The spawn trampoline must reset them, or Ctrl-C never
+    # interrupts a command. Regression for #2342.
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+        await _ready(term)
+        await term.write(b"sleep 20\n")
+        assert await _until(lambda: term.refresh_busy() or term.busy)
+        deadline = asyncio.get_running_loop().time() + 8.0
+        while asyncio.get_running_loop().time() < deadline:
+            await term.write(b"\x03")
+            if await _until(lambda: (term.refresh_busy(), not term.busy)[1], timeout=0.5):
+                break
+        assert (term.refresh_busy(), not term.busy)[1]
+    finally:
+        signal.signal(signal.SIGINT, previous)

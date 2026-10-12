@@ -102,9 +102,16 @@ _SHELLS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 # Becomes a controlling-terminal session leader, then execs the shell. Run
 # through ``subprocess`` (fork+exec in C) rather than ``pty.fork`` so the
 # multi-threaded worker never runs Python between fork and exec.
+# Signal dispositions are inherited through exec. A worker started as a
+# background job of a non-interactive shell (`python -m app &` in an
+# entrypoint script) runs with SIGINT and SIGQUIT ignored, and a shell started
+# that way cannot reset them for its children, so Ctrl-C would never interrupt
+# a command in the terminal. Restore the defaults before handing over to the
+# shell.
 _TRAMPOLINE = (
-    "import os,sys,fcntl,termios;"
+    "import os,sys,fcntl,termios,signal;"
     "fcntl.ioctl(0,termios.TIOCSCTTY,0);"
+    "signal.signal(signal.SIGINT,signal.SIG_DFL);signal.signal(signal.SIGQUIT,signal.SIG_DFL);"
     "os.execv(sys.argv[1],sys.argv[1:])"
 )
 
