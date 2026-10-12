@@ -18,6 +18,7 @@ Three content paths, in order of dispatch:
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -119,7 +120,27 @@ def _read_image(path: Path, media_type: str) -> ToolOutcome:
             ),
             is_error=True,
         )
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    raw = path.read_bytes()
+    size = len(raw)
+    if not raw:
+        return ToolOutcome(
+            text=f"not a readable image: {path} is {size} bytes (empty file)",
+            is_error=True,
+        )
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        pass  # Preserve pass-through on workers without Pillow.
+    else:
+        try:
+            with PILImage.open(BytesIO(raw)) as image:
+                image.verify()
+        except Exception:
+            return ToolOutcome(
+                text=f"not a readable image: {path} is {size} bytes (cannot decode)",
+                is_error=True,
+            )
+    data = base64.b64encode(raw).decode("ascii")
     # The caption carries the FULL path, not just the file name: an image is
     # consumed once and then trimmed out of history (fluid.context.trim), and
     # the placeholder that replaces it can only tell the model to re-Read the

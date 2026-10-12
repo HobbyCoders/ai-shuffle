@@ -116,6 +116,8 @@ def tool_result_content(block: ToolResultBlock) -> str:
 
 
 def image_part(block: Image) -> dict[str, Any]:
+    if not block.data.strip():
+        return {"type": "text", "text": "[image omitted: empty data]"}
     media_type, data = condition_image(block.media_type, block.data)
     return {
         "type": "image_url",

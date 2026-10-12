@@ -70,6 +70,8 @@ def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None
             out["content"] = content
         return out
     if isinstance(block, Image):
+        if not block.data.strip():
+            return {"type": "text", "text": "[image omitted: empty data]"}
         media_type, data = condition_image(block.media_type, block.data)
         return {
             "type": "image",

@@ -1,15 +1,20 @@
 """Read tool image/binary/truncation paths + image plumbing through the stack."""
 
 import base64
+import sys
+
+import pytest
 
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.read import DEFAULT_LINE_LIMIT, MAX_LINE_CHARS
 from fluid.tools.mcp.client import _map_call_result
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
-# Smallest valid PNG header + a NUL-bearing payload — enough to exercise the
-# base64 path without shipping a real image fixture.
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+# A complete 1x1 PNG, including checksums, so Pillow can verify it.
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _registry() -> ToolRegistry:
@@ -33,6 +38,38 @@ async def test_read_image_returns_base64_not_text(tmp_path) -> None:
     # The model-facing text is a short label, never decoded binary.
     assert "shot.png" in out.text and len(out.text) < 200
     assert str(f) in ctx.read_files
+
+
+@pytest.mark.parametrize("payload", [b"", b"not an image", PNG_BYTES[:-16]])
+async def test_read_invalid_image_is_error(tmp_path, payload) -> None:
+    if payload:
+        pytest.importorskip("PIL.Image")
+    f = tmp_path / "bad.jpg"
+    f.write_bytes(payload)
+    ctx = ToolCtx(cwd=str(tmp_path))
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ctx)
+
+    assert out.is_error
+    assert not out.images
+    assert "not a readable image" in out.text
+    assert str(f) in out.text
+    assert f"{len(payload)} bytes" in out.text
+    assert str(f) not in ctx.read_files
+
+
+@pytest.mark.parametrize("payload", [b"", b"not an image"])
+async def test_read_image_without_pillow(tmp_path, monkeypatch, payload) -> None:
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    f = tmp_path / "shot.png"
+    f.write_bytes(payload)
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+
+    if not payload:
+        assert out.is_error and not out.images
+    else:
+        assert not out.is_error
+        assert base64.b64decode(out.images[0].data) == payload
 
 
 async def test_read_image_too_large_is_error(tmp_path, monkeypatch) -> None:

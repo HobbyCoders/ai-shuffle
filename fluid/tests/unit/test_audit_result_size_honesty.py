@@ -17,6 +17,7 @@ content and then describes the drop in a way that costs a paid re-fetch:
   the rows were already above.
 """
 
+import base64
 from pathlib import Path
 
 from fluid.codemode import _runner
@@ -322,8 +323,12 @@ def test_read_captions_an_image_with_its_full_path(tmp_path) -> None:
     # The caption is the only place the path survives once the image itself is
     # trimmed, so the placeholder can only name a re-Read target if it is here.
     shot = tmp_path / "shot.png"
-    shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    shot.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
     outcome = read_tool._read_image(shot, "image/png")
+    assert not outcome.is_error
     assert str(shot) in outcome.text
     assert image_source_path(outcome.text) == str(shot)
 

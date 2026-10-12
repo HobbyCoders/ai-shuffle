@@ -85,6 +85,8 @@ def _strip_for_resend(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _image_part(block: Image) -> dict[str, Any]:
+    if not block.data.strip():
+        return {"type": "input_text", "text": "[image omitted: empty data]"}
     media_type, data = condition_image(block.media_type, block.data)
     return {
         "type": "input_image",
