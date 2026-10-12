@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
-import { handoffEpisodes, resetOwnerTransitions, sameHandoffs, settleByOwner, type HandoffEpisode } from './handoff-episodes';
+import { beginHandoffPendingRead, handoffEpisodes, resetOwnerTransitions, sameHandoffs, settleByOwner, type HandoffEpisode, type HandoffPendingView } from './handoff-episodes';
 import { pendingHandoff } from '$lib/components/chat/pending-handoff';
 
 let seq = 0;
@@ -14,6 +14,8 @@ const row = (status: string, content: string, data: Record<string, unknown> = {}
 	id: `row-${++seq}`, role: 'system', type: 'system', content, systemSubtype: 'handoff',
 	systemData: { status, worker: 'DesktopWorker', ...data, content }
 });
+/** A pending read sent now, after the move was seen. */
+const fresh = (pending: HandoffPendingView['pending']): HandoffPendingView => ({ known: true, pending, seq: beginHandoffPendingRead() });
 const said = (content: string): ChatMessage => ({ id: `said-${++seq}`, role: 'assistant', type: 'text', content });
 const queued = JSON.stringify({ queued: true, worker: 'DesktopWorker', message: 'Hand-off to DesktopWorker is queued.' });
 
@@ -252,40 +254,88 @@ describe('review fixes (#2304)', () => {
 		// Pending not read yet: equality proves nothing.
 		expect(settleByOwner(handoffEpisodes(messages), gaming, 'h1', { known: false, pending: null }).open?.phase).toBe('sending');
 		// The new owner reports nothing pending: done (target known only by name after a reload).
-		expect(settleByOwner(handoffEpisodes(messages), gaming, 'h1', { known: true, pending: null }).open).toBeNull();
-		expect(pendingHandoff(messages, gaming, 'h1', { known: true, pending: null })).toBeNull();
+		const nothing = fresh(null);
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'h1', nothing).open).toBeNull();
+		expect(pendingHandoff(messages, gaming, 'h1', nothing)).toBeNull();
 	});
 
 	it('#2308: owned by the target while X is still pending and moving stays sending', () => {
 		resetOwnerTransitions();
 		const messages = [row('queued', 'q', { by: 'owner', handoff_id: 'X' }), row('started', 's', { handoff_id: 'X' })];
 		const gaming = { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' };
-		const stillMoving = { known: true, pending: { handoff_id: 'X', target_id: 'dev_gaming', moving: true } };
+		settleByOwner(handoffEpisodes(messages), gaming, 'h2');
+		const stillMoving = fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true });
 		for (let i = 0; i < 2; i++) {
 			expect(settleByOwner(handoffEpisodes(messages), gaming, 'h2', stillMoving).open?.phase).toBe('sending');
 		}
 		expect(pendingHandoff(messages, gaming, 'h2', stillMoving)).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
 		// Another move pending (a different id) means X ended: done.
-		expect(settleByOwner(handoffEpisodes(messages), gaming, 'h2', { known: true, pending: { handoff_id: 'Y', target_id: 'dev_other' } }).open).toBeNull();
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'h2', fresh({ handoff_id: 'Y', target_id: 'dev_other' })).open).toBeNull();
 	});
 
 	it('#2308: with the target device known, ids decide, not names', () => {
 		resetOwnerTransitions();
 		const messages = [row('queued', 'q', { by: 'owner', handoff_id: 'X' }), row('started', 's', { handoff_id: 'X' })];
-		const pending = { known: true, pending: { handoff_id: 'X', target_id: 'dev_gaming', moving: true } };
+		const unraid = { deviceId: 'dev_serverworker', deviceName: 'Unraid' };
+		settleByOwner(handoffEpisodes(messages), unraid, 'h3');
 		// Seen pending while this worker owns it: the target id is learned.
-		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'h3', pending).open?.phase).toBe('sending');
+		expect(settleByOwner(handoffEpisodes(messages), unraid, 'h3', fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true })).open?.phase).toBe('sending');
 		// A device merely NAMED like the target, with no pending move, is not the target.
-		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_imposter', deviceName: 'DesktopWorker' }, 'h3', { known: true, pending: null }).open?.phase).toBe('sending');
+		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_imposter', deviceName: 'DesktopWorker' }, 'h3', fresh(null)).open?.phase).toBe('sending');
 	});
 
 	it('#2308: live, the owner_device_id changing to the target settles even before pending is read again', () => {
 		resetOwnerTransitions();
 		const messages = [call(JSON.stringify({ queued: true, worker: 'DesktopWorker', handoff_id: 'X', message: 'queued' })), row('started', 's', { handoff_id: 'X' })];
-		const stale = { known: true, pending: { handoff_id: 'X', target_id: 'dev_gaming', moving: true } };
+		settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'h4');
+		const stale = fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true });
 		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'h4', stale).open?.phase).toBe('sending');
 		// user_session_updated: owner_device_id is now the target device.
 		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'h4', stale).open).toBeNull();
+	});
+
+	it('round 7 P1: a pending read sent before the move was seen never settles it', () => {
+		resetOwnerTransitions();
+		const messages = [row('queued', 'q', { by: 'owner', handoff_id: 'X' }), row('started', 's', { handoff_id: 'X' })];
+		const gaming = { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' };
+		// The move menu's status check, from before X existed, saw nothing pending.
+		const before = fresh(null);
+		expect(settleByOwner(handoffEpisodes(messages.slice(0, 1)), gaming, 'r1', before).open?.phase).toBe('starting');
+		// The saved owner already names the target (stale): still sending.
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r1', before).open?.phase).toBe('sending');
+		// A fresh read reporting X moving keeps it sending; one reporting nothing ends it.
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r1', fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true })).open?.phase).toBe('sending');
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r1', fresh(null)).open).toBeNull();
+	});
+
+	it('round 7 P1: settling on "no longer pending" is not kept when a newer read reports X again', () => {
+		resetOwnerTransitions();
+		const messages = [row('queued', 'q', { by: 'owner', handoff_id: 'X' }), row('started', 's', { handoff_id: 'X' })];
+		const gaming = { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' };
+		settleByOwner(handoffEpisodes(messages), gaming, 'r2');
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r2', fresh(null)).open).toBeNull();
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r2', fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true })).open?.phase).toBe('sending');
+	});
+
+	it('round 7 P2: a legacy confirmed cancel and its record are one row', () => {
+		const q = row('queued', 'Move to DesktopWorker queued for when this turn ends.', { by: 'owner' });
+		const cancel = call(JSON.stringify({ cancelled: true }), { cancel: true });
+		const record = row('cancelled', 'Queued move to DesktopWorker cancelled.');
+		const result = handoffEpisodes([q, cancel, record]);
+		expect(result.byAnchor.size).toBe(1);
+		expect(result.byAnchor.get(q)?.phase).toBe('cancelled');
+		expect(result.byAnchor.get(q)?.reason).toBe('agent');
+		expect(result.absorbed.has(cancel) && result.absorbed.has(record)).toBe(true);
+		expect(result.open).toBeNull();
+		// A newer move queued before that record still stands: the record confirms the old one.
+		const b = row('queued', 'Move to DesktopWorker queued for when this turn ends.', { by: 'owner' });
+		const late = handoffEpisodes([q, cancel, b, record]);
+		expect(late.byAnchor.get(q)?.phase).toBe('cancelled');
+		expect(late.byAnchor.get(b)?.phase).toBe('starting');
+		expect(late.open).toBe(late.byAnchor.get(b));
+		// A confirmed cancel with nothing loaded to settle, then its record: one row.
+		const alone = handoffEpisodes([cancel, record]);
+		expect(alone.byAnchor.size).toBe(1);
 	});
 
 	it('P1: a late cancel of a replaced move keeps the newer move pending (no id)', () => {

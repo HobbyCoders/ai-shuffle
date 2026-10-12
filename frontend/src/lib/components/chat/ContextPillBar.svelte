@@ -34,7 +34,7 @@
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import WorkerMenuList from '$lib/components/ui/WorkerMenuList.svelte';
 	import { pendingHandoff, handoffActivitySince, moveBlocked } from './pending-handoff';
-	import { handoffPending, recordHandoffPending } from '$lib/stores/handoff-pending';
+	import { beginHandoffPendingRead, handoffPending, recordHandoffPending } from '$lib/stores/handoff-pending';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -322,9 +322,10 @@
 			runnerChecking = true;
 			let busy: QueuedMoveBusy | null = null;
 			try {
+				const read = beginHandoffPendingRead();
 				const state = await getQueuedMove(sessionId);
 				busy = state.busy;
-				if (state && 'pending' in state) recordHandoffPending(sessionId, state.pending ?? null);
+				if (state && 'pending' in state) recordHandoffPending(sessionId, state.pending ?? null, read);
 			} catch {
 				// An older owner cannot say: the move itself still refuses a busy chat.
 			} finally {

@@ -148,6 +148,14 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 	 * the newer one. Only needed while records carry no id.
 	 */
 	let replaced: HandoffEpisode[] = [];
+	/**
+	 * Moves without an id that a confirmed HandOffSession cancel already
+	 * settled. The call sits before the `cancelled` record it causes, so that
+	 * record is the same cancel, confirmed: it joins this row instead of opening
+	 * a second one. Taken before the open move, like a replaced move's late
+	 * record, so it never settles a newer move.
+	 */
+	let cancelledByCall: HandoffEpisode[] = [];
 
 	const absorbOnly = (message: ChatMessage, into: HandoffEpisode) => {
 		(absorbed ??= new Set()).add(message);
@@ -195,6 +203,11 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 				replaced = replaced.filter((e) => e !== stale);
 				return stale;
 			}
+			const confirmed = cancelledByCall.find((e) => matches(e, worker));
+			if (confirmed) {
+				cancelledByCall = cancelledByCall.filter((e) => e !== confirmed);
+				return confirmed;
+			}
 		}
 		const current = open.at(-1);
 		return current && matches(current, worker) ? current : null;
@@ -224,10 +237,13 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 				if (current && !isSettledPhase(current.phase)) {
 					// Only a confirmed cancel settles the move. Until the call returns
 					// it is "cancelling"; `cancelled: false` means it had already started.
-					if (confirmed) absorb(message, current, { phase: 'cancelled', reason: 'agent', cancelling: undefined });
-					else absorb(message, current, { cancelling: result ? undefined : true });
+					if (confirmed) {
+						absorb(message, current, { phase: 'cancelled', reason: 'agent', cancelling: undefined });
+						if (!current.id) cancelledByCall.push(current);
+					} else absorb(message, current, { cancelling: result ? undefined : true });
 				} else if (confirmed) {
-					start(message, index, { worker: asked, by: 'agent', phase: 'cancelled', reason: 'agent' });
+					const made = start(message, index, { worker: asked, by: 'agent', phase: 'cancelled', reason: 'agent', id });
+					if (!made.id) cancelledByCall.push(made);
 				}
 				// An unresolved or refused cancel with nothing open renders as the call itself.
 				return;
@@ -299,6 +315,9 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 					...(worker ? { worker } : {}), ...(id ? { id } : {})
 				};
 				if (current) {
+					// The record confirming a cancel the call already settled keeps
+					// the call's reason when it names none.
+					if (current.phase === 'cancelled' && phase === 'cancelled' && !patch.reason) patch.reason = current.reason;
 					absorb(message, current, patch);
 					return;
 				}
@@ -385,7 +404,24 @@ function ownerChanged(before: Seen, now: Seen): boolean {
 export interface HandoffPendingView {
 	known: boolean;
 	pending: { handoff_id?: string | null; target_id?: string | null; moving?: boolean } | null;
+	/**
+	 * When the read was sent (`beginHandoffPendingRead`). It counts for a move
+	 * only if it was sent after the page first saw that move: an answer from
+	 * before says nothing about it.
+	 */
+	seq?: number;
 }
+
+/** Reads of `GET /handoff` sent so far, page-wide. */
+let pendingReads = 0;
+
+/** Number a pending read before it is sent; the answer is recorded with it. */
+export function beginHandoffPendingRead(): number {
+	return ++pendingReads;
+}
+
+/** Reads sent before each open move was first seen, by session and episode. */
+const readsAtFirstSight = new Map<string, number>();
 
 /** Target device of each identified move, learned from the pending move while it was pending. */
 const targetById = new Map<string, string>();
@@ -424,11 +460,11 @@ export function settleByOwner(
 	pendingView?: HandoffPendingView | null
 ): HandoffEpisodes {
 	const current = handoffs.open;
-	if (!current || current.phase !== 'sending') return handoffs;
+	if (!current) return handoffs;
 	const slot = `${sessionId ?? ''}\0${current.key}`;
+	if (!readsAtFirstSight.has(slot)) readsAtFirstSight.set(slot, pendingReads);
+	if (current.phase !== 'sending') return handoffs;
 	if (!ownerMoved.has(slot) && !decide(current, slot, owner, pendingView)) return handoffs;
-	ownerMoved.add(slot);
-	ownerAtSend.delete(slot);
 	const cached = settledByOwner.get(handoffs);
 	if (cached) return cached;
 	const done: HandoffEpisode = { ...current, phase: 'done', cancelling: undefined };
@@ -446,13 +482,16 @@ function decide(
 	owner: HandoffOwner | null | undefined,
 	pendingView: HandoffPendingView | null | undefined
 ): boolean {
-	const pending = pendingView?.pending ?? null;
+	// Only a read sent after this move was first seen answers for it.
+	const fresh = !!pendingView?.known && (pendingView.seq ?? 0) > (readsAtFirstSight.get(slot) ?? Infinity);
+	const pending = fresh ? (pendingView?.pending ?? null) : null;
 	if (current.id && pending && text(pending.handoff_id) === current.id) noteHandoffTarget(current.id, pending.target_id);
 	if (!owner || (!owner.deviceId && !text(owner.deviceName))) return false;
 	const target = current.targetId || (current.id ? targetById.get(current.id) : undefined);
 	const ownedNow = target ? !!owner.deviceId && owner.deviceId === target : ownedByTarget(current, owner);
 	// The authoritative pair: owned by the target, and X is no longer pending there.
-	const noLongerPending = !!current.id && !!pendingView?.known && text(pending?.handoff_id) !== current.id;
+	// Not kept: a newer read reporting X pending again takes it back.
+	const noLongerPending = !!current.id && fresh && text(pending?.handoff_id) !== current.id;
 	if (ownedNow && noLongerPending) return true;
 	// Otherwise only a change of owner the page saw happen.
 	const now = seenOf(owner);
@@ -466,6 +505,8 @@ function decide(
 		ownerAtSend.set(slot, { id: seen.id || now.id, name: now.name || seen.name });
 		return false;
 	}
+	// A change the page saw happen is kept.
+	if (ownedNow) ownerMoved.add(slot);
 	return ownedNow;
 }
 
@@ -474,6 +515,7 @@ export function resetOwnerTransitions(): void {
 	ownerAtSend.clear();
 	targetById.clear();
 	ownerMoved.clear();
+	readsAtFirstSight.clear();
 }
 
 /** Same anchors rendering the same episodes (by value): a rebuild changed nothing here. */
