@@ -39,13 +39,16 @@ export function recordHandoffPending(sessionId: string, pending: HandoffPendingV
 const inFlight = new Map<string, Promise<void>>();
 const retries = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** A read with no answer by then counts as failed. */
+export const HANDOFF_PENDING_READ_TIMEOUT_MS = 20_000;
+
 /** A failed read is tried once more after this long (a worker restarting, a dropped request). */
 export const HANDOFF_PENDING_RETRY_MS = 15_000;
 
 /**
  * Read the pending hand-off of `sessionId` now. `reason` identifies what
  * changed (open move, phase, owner): the same reason is not read twice at
- * once. A failed read leaves the previous view, so nothing settles on it, and
+ * once. A failed or unanswered (HANDOFF_PENDING_READ_TIMEOUT_MS) read leaves the previous view, so nothing settles on it, and
  * is tried once more after HANDOFF_PENDING_RETRY_MS unless a newer answer
  * arrived meanwhile. A later change of reason or a remount reads again too.
  */
@@ -59,7 +62,14 @@ export function refreshHandoffPending(sessionId: string, reason = '', retry = tr
 		retries.delete(key);
 	}
 	const seq = beginHandoffPendingRead();
-	const read = getQueuedMove(sessionId)
+	// A read that never answers must not hold the key: past the deadline it
+	// counts as failed (retry, remount and key changes read again), and its
+	// late answer is dropped with it.
+	let expire: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_, reject) => {
+		expire = setTimeout(() => reject(new Error('handoff pending read timed out')), HANDOFF_PENDING_READ_TIMEOUT_MS);
+	});
+	const read = Promise.race([getQueuedMove(sessionId), deadline])
 		.then((state) => void recordHandoffPending(sessionId, state?.pending ?? null, seq))
 		.catch(() => {
 			if (!retry) return;
@@ -69,7 +79,10 @@ export function refreshHandoffPending(sessionId: string, reason = '', retry = tr
 				void refreshHandoffPending(sessionId, reason, false);
 			}, HANDOFF_PENDING_RETRY_MS));
 		})
-		.finally(() => inFlight.delete(key));
+		.finally(() => {
+			clearTimeout(expire);
+			if (inFlight.get(key) === read) inFlight.delete(key);
+		});
 	inFlight.set(key, read);
 	return read;
 }

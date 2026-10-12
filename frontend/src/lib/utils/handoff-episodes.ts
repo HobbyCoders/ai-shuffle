@@ -420,7 +420,7 @@ export function beginHandoffPendingRead(): number {
 	return ++pendingReads;
 }
 
-/** Reads sent before each open move was first seen, by session and episode. */
+/** Reads sent before each move was first seen sending, by session and episode. */
 const readsAtFirstSight = new Map<string, number>();
 
 /** Target device of each identified move, learned from the pending move while it was pending. */
@@ -462,8 +462,11 @@ export function settleByOwner(
 	const current = handoffs.open;
 	if (!current) return handoffs;
 	const slot = `${sessionId ?? ''}\0${current.key}`;
-	if (!readsAtFirstSight.has(slot)) readsAtFirstSight.set(slot, pendingReads);
 	if (current.phase !== 'sending') return handoffs;
+	// The boundary is set once the move is known AND sending: an earlier
+	// placeholder (the call still running, its id unknown) shares the anchor
+	// but says nothing about which move a read answered.
+	if (!readsAtFirstSight.has(slot)) readsAtFirstSight.set(slot, pendingReads);
 	if (!ownerMoved.has(slot) && !decide(current, slot, owner, pendingView)) return handoffs;
 	const cached = settledByOwner.get(handoffs);
 	if (cached) return cached;

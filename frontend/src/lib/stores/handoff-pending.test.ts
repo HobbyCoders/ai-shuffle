@@ -4,7 +4,7 @@ import { get } from 'svelte/store';
 vi.mock('$lib/api/sessions', () => ({ getQueuedMove: vi.fn() }));
 
 import { getQueuedMove } from '$lib/api/sessions';
-import { HANDOFF_PENDING_RETRY_MS, beginHandoffPendingRead, handoffPending, recordHandoffPending, refreshHandoffPending, resetHandoffPending } from './handoff-pending';
+import { HANDOFF_PENDING_READ_TIMEOUT_MS, HANDOFF_PENDING_RETRY_MS, beginHandoffPendingRead, handoffPending, recordHandoffPending, refreshHandoffPending, resetHandoffPending } from './handoff-pending';
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -75,5 +75,37 @@ describe('handoff-pending', () => {
 		// A remount (the effect running again) reads again.
 		await refreshHandoffPending('s6', 'reload');
 		expect(getQueuedMove).toHaveBeenCalledTimes(3);
+	});
+
+	it('a read that never answers expires, frees the key, and its late answer is dropped', async () => {
+		vi.useFakeTimers();
+		let answerLate!: (value: unknown) => void;
+		vi.mocked(getQueuedMove).mockReturnValueOnce(new Promise((resolve) => { answerLate = resolve as (value: unknown) => void; }) as never);
+		const hung = refreshHandoffPending('s7', 'reload');
+		// The same key while it hangs: still the one read.
+		void refreshHandoffPending('s7', 'reload');
+		expect(getQueuedMove).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(HANDOFF_PENDING_READ_TIMEOUT_MS + 10);
+		await hung;
+		expect(get(handoffPending).s7).toBeUndefined();
+		// Past the deadline a remount reads again, and gets its answer.
+		vi.mocked(getQueuedMove).mockResolvedValueOnce({ busy: { running: false, tasks: [] }, pending: { handoff_id: 'X', worker: 'DesktopWorker', target_id: 'dev_gaming', moving: true } } as never);
+		await refreshHandoffPending('s7', 'reload');
+		expect(getQueuedMove).toHaveBeenCalledTimes(2);
+		expect(get(handoffPending).s7?.pending?.handoff_id).toBe('X');
+		// The expired read's answer, arriving now, changes nothing.
+		answerLate({ busy: { running: false, tasks: [] }, pending: null });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(get(handoffPending).s7?.pending?.handoff_id).toBe('X');
+	});
+
+	it('an expired read is retried once by the timer', async () => {
+		vi.useFakeTimers();
+		vi.mocked(getQueuedMove).mockReturnValueOnce(new Promise(() => {}) as never);
+		void refreshHandoffPending('s8', 'reload');
+		vi.mocked(getQueuedMove).mockResolvedValueOnce({ busy: { running: false, tasks: [] }, pending: null });
+		await vi.advanceTimersByTimeAsync(HANDOFF_PENDING_READ_TIMEOUT_MS + HANDOFF_PENDING_RETRY_MS + 20);
+		expect(getQueuedMove).toHaveBeenCalledTimes(2);
+		expect(get(handoffPending).s8).toMatchObject({ known: true, pending: null });
 	});
 });

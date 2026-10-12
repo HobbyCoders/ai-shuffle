@@ -317,6 +317,26 @@ describe('review fixes (#2304)', () => {
 		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r2', fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true })).open?.phase).toBe('sending');
 	});
 
+	it('round 8 P1: a read sent while the call was still running does not count for the move it then queued', () => {
+		resetOwnerTransitions();
+		const gaming = { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' };
+		const id = 'call-early';
+		const running = call(undefined, { worker: 'DesktopWorker' }, { id, toolStatus: 'running', toolResult: undefined });
+		// The saved owner already names DesktopWorker; the call has no result yet.
+		expect(settleByOwner(handoffEpisodes([running]), gaming, 'r8').open?.requesting).toBe(true);
+		// A status read answers: nothing pending (X does not exist yet).
+		const early = fresh(null);
+		expect(settleByOwner(handoffEpisodes([running]), gaming, 'r8', early).open?.phase).toBe('starting');
+		// The call returns X, and X starts: still sending on that early answer.
+		const queuedX = call(JSON.stringify({ queued: true, worker: 'DesktopWorker', handoff_id: 'X', message: 'queued' }), { worker: 'DesktopWorker' }, { id });
+		const messages = [queuedX, row('started', 's', { handoff_id: 'X' })];
+		expect(settleByOwner(handoffEpisodes(messages.slice(0, 1)), gaming, 'r8', early).open?.phase).toBe('starting');
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r8', early).open?.phase).toBe('sending');
+		expect(pendingHandoff(messages, gaming, 'r8', early)).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		// Reload recovery still works: a read sent now, with X gone, ends it.
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 'r8', fresh(null)).open).toBeNull();
+	});
+
 	it('round 7 P2: a legacy confirmed cancel and its record are one row', () => {
 		const q = row('queued', 'Move to DesktopWorker queued for when this turn ends.', { by: 'owner' });
 		const cancel = call(JSON.stringify({ cancelled: true }), { cancel: true });
