@@ -12,6 +12,9 @@ import urllib.error
 import urllib.request
 
 URL = "https://hobbycoders.com/v1/desktop/manifest/edge"  # same pointer as /nightly
+# Cloudflare answers 403 to urllib's default "Python-urllib/x.y" agent, which
+# silently stopped every scheduled edge publication (2026-10-12). Name the caller.
+USER_AGENT = "ai-shuffle-ci/1 (+https://github.com/HobbyCoders/ai-shuffle)"
 
 
 def changed(revision, fetch):
@@ -31,7 +34,8 @@ def changed(revision, fetch):
 
 
 def fetch():
-    with urllib.request.urlopen(URL, timeout=20) as response:
+    request = urllib.request.Request(URL, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=20) as response:
         raw = response.read(32769)
     if len(raw) > 32768:
         raise ValueError("Manifest exceeds limits")

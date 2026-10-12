@@ -28,3 +28,26 @@ def test_first_publication_and_transport_failure():
         nightly.changed("a" * 40, unavailable)
     with pytest.raises(ValueError):
         nightly.changed("a" * 40, lambda: "not json")
+
+
+def test_fetch_names_the_caller(monkeypatch):
+    """Cloudflare rejects urllib's default agent with 403; the request must carry ours."""
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+        def read(self, limit):
+            return b"{}"
+
+    def urlopen(request, timeout):
+        seen["agent"] = request.get_header("User-agent")
+        seen["url"] = request.full_url
+        return Response()
+
+    monkeypatch.setattr(nightly.urllib.request, "urlopen", urlopen)
+    assert nightly.fetch() == b"{}"
+    assert seen == {"agent": nightly.USER_AGENT, "url": nightly.URL}
+    assert not nightly.USER_AGENT.lower().startswith("python")
