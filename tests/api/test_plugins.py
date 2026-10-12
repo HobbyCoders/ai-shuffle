@@ -29,6 +29,28 @@ from app.api.auth import require_auth, require_admin
 # Fixtures
 # =============================================================================
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint,method", [
+    ("list_available_plugins", "get_available_plugins"),
+    ("list_installed_plugins", "get_installed_plugins"),
+    ("list_file_based_agents", "get_file_based_agents"),
+])
+async def test_plugin_scans_run_off_event_loop(monkeypatch, endpoint, method):
+    import threading
+    from app.api import plugins
+    loop_thread = threading.get_ident()
+    calls = []
+    service = MagicMock()
+    def scan(*args):
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return []
+    getattr(service, method).side_effect = scan
+    monkeypatch.setattr(plugins, "get_plugin_service", lambda: service)
+    assert await getattr(plugins, endpoint)(token="test") == []
+    assert len(calls) == 1
+
+
 @pytest.fixture
 def mock_plugin_service():
     """Create a mock plugin service."""
@@ -58,6 +80,8 @@ def sample_marketplace():
     marketplace.url = "https://github.com/test/plugins.git"
     marketplace.install_location = "/path/to/marketplace"
     marketplace.last_updated = datetime(2024, 1, 15, 10, 30, 0)
+    marketplace.display_name = None
+    marketplace.error = None
     return marketplace
 
 
@@ -201,6 +225,8 @@ class TestListMarketplaces:
         marketplace.url = "https://example.com/plugins.git"
         marketplace.install_location = "/path"
         marketplace.last_updated = None
+        marketplace.display_name = "Anthropic official plugins"
+        marketplace.error = "Source unavailable; retry Sync."
         mock_plugin_service.get_marketplaces.return_value = [marketplace]
 
         with patch("app.api.plugins.get_plugin_service", return_value=mock_plugin_service):
@@ -209,6 +235,8 @@ class TestListMarketplaces:
 
         assert response.status_code == 200
         assert response.json()[0]["last_updated"] is None
+        assert response.json()[0]["display_name"] == "Anthropic official plugins"
+        assert response.json()[0]["error"] == "Source unavailable; retry Sync."
 
 
 class TestAddMarketplace:
@@ -1203,6 +1231,8 @@ class TestMultipleMarketplaces:
         mp1.url = "https://github.com/test/mp1.git"
         mp1.install_location = "/path/to/mp1"
         mp1.last_updated = datetime(2024, 1, 15, 10, 30, 0)
+        mp1.display_name = None
+        mp1.error = None
 
         mp2 = MagicMock()
         mp2.id = "marketplace2"
@@ -1210,6 +1240,8 @@ class TestMultipleMarketplaces:
         mp2.url = "https://github.com/test/mp2.git"
         mp2.install_location = "/path/to/mp2"
         mp2.last_updated = None
+        mp2.display_name = None
+        mp2.error = None
 
         mock_plugin_service.get_marketplaces.return_value = [mp1, mp2]
 

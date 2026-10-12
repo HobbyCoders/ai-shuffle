@@ -8,7 +8,33 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
-## Next release
+## 0.9.3
+
+### Voice
+
+- Voice calls read whole replies aloud, including question cards.
+- The call bar can be moved, and on desktop it can pop out into its own window.
+- Call volume is in Settings.
+
+### Beta and accounts
+
+- Fixes to sign-in handling for compliance.
+
+### Workers and data
+
+- Workers on the same network sync with each other directly over the LAN.
+- Export all of your data as one ZIP file.
+- Clone a project straight from your GitHub repositories.
+
+### Plugins and connectors
+
+- Plugins can use Google sign-in.
+- The Signal, iMessage and BlueBubbles connectors work again.
+
+### Fixes
+
+- Windows: the app starts reliably, and the Updates settings no longer fail with "access denied".
+- Docker: updates install correctly.
 
 ### Action needed
 
@@ -100,7 +126,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### Install and packaging
 
 - The code-mode sandbox around agents' Python code is now on by default: the compose file passes the Docker security options it needs (`seccomp=unconfined`, `systempaths=unconfined` and `apparmor=unconfined`, which relax Docker's default filters for the whole container). Remove those lines or set `CODE_MODE_OS_SANDBOX=off` to opt out. **Settings → System** shows whether the sandbox is active and, when it is not, why. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox).
-- The Docker image is now private. You download it from `registry.hobbycoders.com` with the pull token from your license email; the token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
+- The earlier private Docker distribution has been retired. Current installs download the public `ghcr.io/hobbycoders/ai-shuffle-server` image by version, without signing in.
 - New buyer compose file with a pinned version, the right shared-memory size for the built-in browser, a 90-second clean shutdown, and a volume for the built-in browser's profile. It listens on this computer only until you choose an address.
 - The Claude Code CLI is installed on demand from setup or Settings > Providers > Claude with Anthropic's own installer and kept in its own volume, so it updates itself and survives image updates. It is reinstalled at start only while Keep Claude Code installed is on. AI Shuffle runs only that standard CLI and no longer carries a copy of its own.
 - The app shows its real version everywhere, taken from the release.
@@ -120,7 +146,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### License
 
 - New **Settings → License** card and an app-wide license banner. During the beta it reads **Beta: no license needed**.
-- Licenses cover one account with up to 3 workers. Leases last 14 days offline, with 14 days of grace after a failed payment. An unlicensed worker only stops starting new agent runs; your data is never locked.
+- Licenses covered one account with up to 3 workers. Leases lasted 14 days offline, with 14 days of grace after a failed payment. Without a license, a worker kept your data available but did not start new agent runs. AI Shuffle is now free to run; see [AI Shuffle Cloud](/docs/getting-started/cloud).
 - You can free the seat of a worker you no longer use from any worker.
 
 ### Security

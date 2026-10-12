@@ -1,7 +1,12 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 HobbyCoders.
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+extra["license"] = "AGPL-3.0-only"
 
 android {
     namespace = "com.hobbycoders.aishuffle"
@@ -12,7 +17,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = System.getenv("ANDROID_VERSION_CODE")?.toInt() ?: 13
-        versionName = System.getenv("ANDROID_VERSION_NAME") ?: "0.9.1"
+        versionName = System.getenv("ANDROID_VERSION_NAME") ?: "0.9.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appAuthRedirectScheme"] = "com.hobbycoders.aishuffle"

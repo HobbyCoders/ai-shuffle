@@ -4,9 +4,8 @@
  * and auto-update. Load, install, enable, approve, update and remove live
  * here so the collection and its details stay thin and this stays testable.
  *
- * Connector types, accounts, sources and updates are owner-only (main's
- * plugin hub loaded them only for admins); a read-only device sees the
- * packages.
+ * Connector types, accounts and updates are owner-only. A read-only device
+ * sees packages and source health, but cannot manage sources.
  */
 import { getContext, setContext } from 'svelte';
 import { api } from '$lib/api/client';
@@ -273,6 +272,7 @@ export class PluginsModel {
 			this.#publish();
 			this.loading = false;
 			if (admin) await this.loadManagement();
+			else this.marketplaces = await pluginsApi.getMarketplaces();
 		} catch (err) {
 			if (request !== this.#generation) return;
 			if (isForbidden(err)) this.forbidden = true;

@@ -1330,13 +1330,14 @@ def _remote_dispatch_owner_refusal(
     that cannot travel, and background observation may not delegate at all.
     """
     from app.core import api_user_scope
+    from app.core import mobile_tool_identity as identity
     from app.db import mobile_tool_identity, turns as turns_db
 
     refusal = "Only the owner's chats can run a subagent on another worker."
     if api_user_scope.session_api_user_id(caller_row):
         return refusal
-    principal = mobile_tool_identity.read(caller_session_id)
-    if principal and principal.get("kind") != "admin":
+    # The owner's own paired phone or browser is the owner (#2218).
+    if not identity.owner_principal(mobile_tool_identity.read(caller_session_id)):
         return refusal
     turn = (turns_db.get_live_turn(caller_session_id)
             or turns_db.get_latest_turn(caller_session_id) or {})

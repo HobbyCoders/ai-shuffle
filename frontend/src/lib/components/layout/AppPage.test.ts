@@ -1,9 +1,10 @@
 /** Render the shared desktop/mobile bootstrap, with chrome and backend I/O isolated. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { createRawSnippet } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
 import { get, type Writable } from 'svelte/store';
 import type { AppShellProps } from './app-shell';
+import { _resetProseQuestions, proseQuestionSessions, rememberLeavingProseQuestion } from '$lib/stores/session/prose-questions';
 import type { ViewType } from '$lib/stores/layout.svelte';
 type ActiveView = { type: ViewType; sessionId?: string | null };
 
@@ -17,7 +18,7 @@ vi.mock('$lib/stores/auth.svelte', async () => {
 });
 vi.mock('$lib/stores/active-session', async () => {
  const { writable } = await import('svelte/store');
- return { activeSession: { ...writable({ sessionId: null, draft: '', project: null }), ...mocks } };
+ return { activeSession: { ...writable({ sessionId: null, draft: '', project: null }), ...mocks }, backgroundPermissions: writable(new Map()), streamingSessions: writable(new Map()) };
 });
 vi.mock('$lib/stores/app-data.svelte', async () => {
  const { writable } = await import('svelte/store');
@@ -51,6 +52,8 @@ import AppPage from './AppPage.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { isAdmin } from '$lib/stores/auth.svelte';
+import { sessions as sessionList } from '$lib/stores/app-data.svelte';
+import { backgroundPermissions } from '$lib/stores/active-session';
 const active = activeSession as unknown as Writable<{ sessionId: string | null; draft: string; project: null }>;
 const admin = isAdmin as unknown as Writable<boolean>;
 const views = activeView as unknown as Writable<ActiveView | null>;
@@ -231,5 +234,78 @@ describe('AppPage initial Assistant landing', () => {
   expect(mocks.openSession).not.toHaveBeenCalled();
   expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(window.location.search).toBe('');
+ });
+});
+
+// Spec §5: the tab title carries the one "Needs you" count, the open
+// session's own prompts and prose question included.
+describe('AppPage tab title', () => {
+ const list = sessionList as unknown as Writable<unknown[]>;
+ const attention = backgroundPermissions as unknown as Writable<Map<string, { count: number; kind: string }>>;
+ const asked = [{ id: 'u1', role: 'user', content: 'Deploy it' }, { id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?' }];
+ afterEach(() => { list.set([]); attention.set(new Map()); _resetProseQuestions(); });
+ it('prefixes the count of everything waiting on you, and drops it on the next user message', async () => {
+  list.set([{ id: 'work', status: 'active' }, { id: 'other', status: 'active' }]);
+  attention.set(new Map([['other', { count: 1, kind: 'permission' }]]));
+  views.set({ type: 'session', sessionId: 'work' });
+  const open = (state: Record<string, unknown>) => active.set({ sessionId: 'work', draft: '', project: null, pendingPermissions: [], ...state } as never);
+  open({ messages: asked, pendingQuestions: [{ request_id: 'q1' }] });
+  await boot();
+  await waitFor(() => expect(document.title).toBe('(3) AI Shuffle'));
+  open({ messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }], pendingQuestions: [] });
+  await waitFor(() => expect(document.title).toBe('(1) AI Shuffle'));
+  attention.set(new Map());
+  await waitFor(() => expect(document.title).toBe('AI Shuffle'));
+ });
+
+ it('keeps an unanswered prose question counting across A -> B -> A until a loaded transcript answers it', async () => {
+  list.set([{ id: 'work', status: 'active', work_started_at: null }, { id: 'other', status: 'active', work_started_at: null }]);
+  views.set({ type: 'session', sessionId: 'work' });
+  const open = (state: Record<string, unknown>) => active.set({ draft: '', project: null, pendingPermissions: [], pendingQuestions: [], ...state } as never);
+  open({ sessionId: 'work', messages: asked });
+  await boot();
+  await waitFor(() => expect(document.title).toBe('(1) AI Shuffle'));
+  // What the switcher does on leaving: remember, then show B.
+  rememberLeavingProseQuestion('work', asked as never);
+  open({ sessionId: 'other', messages: [] });
+  await tick();
+  expect(document.title).toBe('(1) AI Shuffle');
+  // Back on A while its history loads, then loaded.
+  open({ sessionId: 'work', messages: [], isLoadingSession: true });
+  await tick();
+  expect(document.title).toBe('(1) AI Shuffle');
+  open({ sessionId: 'work', messages: asked });
+  await tick();
+  expect(document.title).toBe('(1) AI Shuffle');
+  // Leave again. A permission resume moves the turn's working time: not an answer.
+  open({ sessionId: 'other', messages: [] });
+  list.set([{ id: 'work', status: 'active', work_started_at: '2026-10-11T00:00:00Z' }, { id: 'other', status: 'active', work_started_at: null }]);
+  await tick();
+  expect(document.title).toBe('(1) AI Shuffle');
+  // Reopened with the answer loaded and left again: the switcher drops it.
+  open({ sessionId: 'work', messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] });
+  rememberLeavingProseQuestion('work', [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] as never);
+  open({ sessionId: 'other', messages: [] });
+  await waitFor(() => expect(document.title).toBe('AI Shuffle'));
+  expect(get(proseQuestionSessions).has('work')).toBe(false);
+ });
+
+ it('drops a remembered prose question when a list refresh shows a later user message (#2249)', async () => {
+  const rev = (seq: number) => ({ last_user_message_seq: seq, last_user_message_epoch: 'evt-1' });
+  const positioned = asked.map((m, i) => ({ ...m, seq: 4 + i, epoch: 'evt-1' }));
+  list.set([{ id: 'work', status: 'active', ...rev(4) }, { id: 'other', status: 'active' }]);
+  views.set({ type: 'session', sessionId: 'other' });
+  active.set({ sessionId: 'other', messages: [], draft: '', project: null, pendingPermissions: [], pendingQuestions: [] } as never);
+  rememberLeavingProseQuestion('work', positioned as never, rev(4));
+  await boot();
+  await waitFor(() => expect(document.title).toBe('(1) AI Shuffle'));
+  // Working time and a revision at or before the question are not an answer.
+  list.set([{ id: 'work', status: 'active', ...rev(5), work_started_at: '2026-10-11T10:01:00Z' }, { id: 'other', status: 'active' }]);
+  await tick();
+  expect(document.title).toBe('(1) AI Shuffle');
+  // Answered from another device: the refreshed row carries a later seq.
+  list.set([{ id: 'work', status: 'active', ...rev(6) }, { id: 'other', status: 'active' }]);
+  await waitFor(() => expect(document.title).toBe('AI Shuffle'));
+  expect(get(proseQuestionSessions).has('work')).toBe(false);
  });
 });

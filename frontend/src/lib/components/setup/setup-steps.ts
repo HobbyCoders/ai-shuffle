@@ -21,7 +21,7 @@ export interface SetupStep {
 const LABELS: Record<SetupStepId, string> = {
 	welcome: 'Welcome',
 	owner: 'Password',
-	license: 'License',
+	license: 'Cloud',
 	provider: 'AI provider',
 	workspace: 'Workspace',
 	'first-run': 'First run',

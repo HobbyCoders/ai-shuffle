@@ -4,42 +4,46 @@ app.core.builtin_subagents over the unified agents table)."""
 
 from unittest.mock import patch
 
+import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 
 
-async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(mock_db):
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
+async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(mock_db, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.core.api_user_scope import worker_refusal
     from app.core.config import settings
     from app.core import wakeup_service, turn_scheduler
     from app.db import database, wakeups, turns, session_events
 
-    database.create_profile("Explore", "Explore", None, {}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_profile("retirement-other", "Other", None, {})
-    database.create_api_user("retirement-only", "Explore only", "only-test-hash", profile_ids=["Explore"])
-    database.create_api_user("retirement-mixed", "Mixed", "mixed-test-hash", profile_ids=["Explore", "retirement-other"])
+    database.create_api_user("retirement-only", "Explore only", "only-test-hash", profile_ids=[retired_id])
+    database.create_api_user("retirement-mixed", "Mixed", "mixed-test-hash", profile_ids=[retired_id, "retirement-other"])
     database.create_api_user("retirement-open", "Open", "open-test-hash")
-    assert worker_refusal("retirement-only", "general-purpose") is not None
-    database.create_session("retirement-chat", profile_id="Explore")
-    wakeups.create_wakeup(id="retirement-wake", session_id="retirement-chat", profile_id="Explore",
+    assert worker_refusal("retirement-only", "unrelated-agent") is not None
+    database.create_session("retirement-chat", profile_id=retired_id)
+    wakeups.create_wakeup(id="retirement-wake", session_id="retirement-chat", profile_id=retired_id,
                          prompt="continue", fire_at=9999999999)
-    turn = turns.enqueue_turn("retirement-chat", "user", profile_id="Explore", prompt="work")
+    turn = turns.enqueue_turn("retirement-chat", "user", profile_id=retired_id, prompt="work")
     with database.get_db() as conn:
         conn.cursor().execute("UPDATE turns SET state = 'parked' WHERE id = %s", (turn["id"],))
     seed_builtin_subagents()
     seed_builtin_subagents()
-    assert database.get_api_user("retirement-only")["profile_ids"] == ["Explore"]
-    assert worker_refusal("retirement-only", "general-purpose") is not None
+    assert database.get_api_user("retirement-only")["profile_ids"] == [retired_id]
+    assert worker_refusal("retirement-only", "unrelated-agent") is not None
     assert worker_refusal("retirement-mixed", "retirement-other") is None
-    assert worker_refusal("retirement-mixed", "general-purpose") is not None
-    assert worker_refusal("retirement-open", "general-purpose") is None
+    assert worker_refusal("retirement-mixed", "unrelated-agent") is not None
+    assert worker_refusal("retirement-open", "unrelated-agent") is None
     # The assistant's connector authorization reads the raw junction table,
     # rather than database.get_api_user. It must stay restricted too.
     from app.db.assistant import connector_grant_available
     with patch("app.db.assistant.owner_connector", return_value=True), database.get_db() as conn:
-        assert not connector_grant_available(conn, {"api_user_id": "retirement-only"}, "general-purpose")
+        assert not connector_grant_available(conn, {"api_user_id": "retirement-only"}, "unrelated-agent")
         assert connector_grant_available(conn, {"api_user_id": "retirement-mixed"}, "retirement-other")
-        assert connector_grant_available(conn, {"api_user_id": "retirement-open"}, "general-purpose")
+        assert connector_grant_available(conn, {"api_user_id": "retirement-open"}, "unrelated-agent")
     assert turns.get_turn(turn["id"])["state"] == "aborted"
     pending = [r for r in wakeups.get_pending_wakeups() if r["session_id"] == "retirement-chat"]
     assert len(pending) == 2
@@ -51,28 +55,29 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
         submit.assert_not_called()
     assert not [r for r in wakeups.get_pending_wakeups() if r["session_id"] == "retirement-chat"]
     notes = session_events.get_events("retirement-chat")
-    assert any("Explore was removed" in str(n["payload"]) for n in notes)
+    assert any(f"{retired_id} was removed" in str(n["payload"]) for n in notes)
     successor = await turn_scheduler._enqueue_context_wake("retirement-chat", "unpark", [], [], "continue")
     assert successor["id"] is None
     assert not turns.get_queued_turns("retirement-chat")
     # The owner's explicit reassignment can replace the obsolete restriction.
     database.update_api_user("retirement-only", profile_ids=["retirement-other"])
     assert worker_refusal("retirement-only", "retirement-other") is None
-    assert worker_refusal("retirement-only", "general-purpose") is not None
+    assert worker_refusal("retirement-only", "unrelated-agent") is not None
 
 
-async def test_retired_session_announces_the_cancelled_continuation_once(mock_db):
-    """Every background task that finishes on a cancelled Explore session asks
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
+async def test_retired_session_announces_the_cancelled_continuation_once(mock_db, retired_id):
+    """Every background task that finishes on a cancelled retired-agent session asks
     for a context wake; each refusal used to post another identical notice."""
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.core import wakeup_service, turn_scheduler
     from app.db import database, wakeups, turns, session_events
 
-    database.create_profile("Explore", "Explore", None, {}, is_builtin=True)
-    database.create_session("retired-busy-chat", profile_id="Explore")
-    wakeups.create_wakeup(id="retired-busy-wake", session_id="retired-busy-chat", profile_id="Explore",
+    create_unchanged_builtin(retired_id)
+    database.create_session("retired-busy-chat", profile_id=retired_id)
+    wakeups.create_wakeup(id="retired-busy-wake", session_id="retired-busy-chat", profile_id=retired_id,
                          prompt="continue", fire_at=9999999999)
-    turn = turns.enqueue_turn("retired-busy-chat", "user", profile_id="Explore", prompt="work")
+    turn = turns.enqueue_turn("retired-busy-chat", "user", profile_id=retired_id, prompt="work")
     with database.get_db() as conn:
         conn.cursor().execute("UPDATE turns SET state = 'parked' WHERE id = %s", (turn["id"],))
     seed_builtin_subagents()
@@ -92,9 +97,10 @@ async def test_retired_session_announces_the_cancelled_continuation_once(mock_db
     assert not turns.get_queued_turns("retired-busy-chat")
     notes = dropped()
     assert len(notes) == 1, [n["payload"] for n in notes]
-    assert "Explore was removed" in str(notes[0]["payload"])
+    assert f"{retired_id} was removed" in str(notes[0]["payload"])
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_startup_seeding_keeps_keys_granted_to_built_ins(mock_db):
     """#1875 review: seeding runs on every start. Keys that name built-in
     agents keep their grants and stay switched on across restarts."""
@@ -147,43 +153,42 @@ _CHS_DEF = {
 }
 
 
-def test_retirement_preserves_history_and_disables_automations(mock_db):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
+def test_retirement_preserves_history_and_disables_automations(mock_db, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.db import database
 
-    database.create_profile("Explore", "Renamed built-in", None, {
-        "system_prompt": {"type": "custom", "content": "Old search prompt"},
-        "provider_models": {"__native__": "haiku", "__voice__": "opus"},
-    }, is_builtin=True)
-    database.create_session("old-search", profile_id="Explore")
+    create_unchanged_builtin(retired_id)
+    database.create_session("old-search", profile_id=retired_id)
     database.create_automation("old-search-job", "Saved search", "interval", {"seconds": 300},
-                               "Explore", prompt="Find it", enabled=True)
+                               retired_id, prompt="Find it", enabled=True)
     database.create_profile("other-builtin", "Other built-in profile", None, {}, is_builtin=True)
 
-    assert seed_builtin_subagents()["Explore"] == "retired"
-    assert database.get_profile("Explore") is None
+    assert seed_builtin_subagents()[retired_id] == "retired"
+    assert database.get_profile(retired_id) is None
     assert database.get_session("old-search")["profile_id"] is None
     assert database.get_profile("other-builtin") is not None
     automation = database.get_automation("old-search-job")
-    assert automation["profile_id"] == "general-purpose"
+    assert automation["profile_id"] is None
     assert not automation["is_enabled"]
     assert automation["prompt"] == "Find it"
-    assert "Explore was removed" in automation["last_error"]
-    assert "Explore" not in seed_builtin_subagents()  # idempotent
+    assert f"{retired_id} was removed" in automation["last_error"]
+    assert retired_id not in seed_builtin_subagents()  # idempotent
 
 
-def test_retirement_keeps_owner_created_explore(mock_db):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
+def test_retirement_keeps_owner_created_agents(mock_db, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.db import database
 
-    database.create_profile("Explore", "Explore", None, {"model": "opus"})
-    database.create_profile("custom-search", "Explore", None, {"model": "sonnet"})
+    database.create_profile(retired_id, retired_id, None, {"model": "opus"})
+    database.create_profile("custom-search", retired_id, None, {"model": "sonnet"})
     database.create_automation("custom-job", "Custom search", "interval", {"seconds": 300},
-                               "Explore", prompt="Find it", enabled=True)
+                               retired_id, prompt="Find it", enabled=True)
     seed_builtin_subagents()
-    assert not database.get_profile("Explore")["is_builtin"]
+    assert not database.get_profile(retired_id)["is_builtin"]
     assert database.get_profile("custom-search") is not None
-    assert database.get_automation("custom-job")["profile_id"] == "Explore"
+    assert database.get_automation("custom-job")["profile_id"] == retired_id
     assert database.get_automation("custom-job")["is_enabled"]
 
 
@@ -293,6 +298,66 @@ import json
 
 import pytest
 
+from app.core.agent_templates import GENERAL_PURPOSE_PROMPT, FRONTEND_DESIGNER_PROMPT
+
+
+@pytest.fixture
+def legacy_builtin_catalog(monkeypatch):
+    """Simulate a pre-retirement release only for defaults-refresh contracts.
+
+    Production ships an empty catalog; these tests still protect the generic
+    refresh machinery without keeping legacy defaults in application code.
+    """
+    from app.core import builtin_subagents
+    from app.core.agent_templates import STARTER_TEAM_AGENTS
+    from app.network import engine
+
+    monkeypatch.setattr(builtin_subagents, "BUILTIN_SUBAGENTS", STARTER_TEAM_AGENTS)
+    monkeypatch.setattr(builtin_subagents, "RETIRED_BUILTIN_IDS", ("Explore", "Plan"))
+    monkeypatch.setattr(engine, "RETIRED_BUILTIN_IDS", ("Explore", "Plan"))
+    monkeypatch.setattr(builtin_subagents, "_PRE_RECORD_DEFAULTS", LEGACY_DEFAULTS)
+
+
+# Frozen defaults of the release simulated by legacy_builtin_catalog.
+LEGACY_DEFAULTS = {
+    "general-purpose": {
+        "name": frozenset({
+            "fe9fa5778e6299904ef31d5f6e87aed494f00eb96d5aba3ab8b23beed99759c9",  # e118eec68
+        }),
+        "description": frozenset({
+            "0138b6fdaf12f08409e1b4ad09de1e6273ed0a945b2469e1e7d6a2099765d8db",  # e118eec68
+            "5d73f8e4a5b3920448ae7fa9da33c37ac43be167b08c4d54b7d2a3abab58eb63",  # a35139f4f
+            "f9356bec2757c7f31c0861ff41e9f02d8c84c9e87e07a32a1592ab60e8b25f7d",  # 4870adeab
+            "cfee2cc5fb38c8f7bf9e8281d35af699e97e21669307f094f30b7b60aaea6976",  # ee6e421a4
+        }),
+        "prompt": frozenset({
+            "cb5321c2af621df53183143ff79fcbba004fbde2cf48e141149030900817f7d1",  # e118eec68
+            "08ce19676ce38692007623e6df41b1e9fe5294a7205c8a3210fa6ea080025162",  # a35139f4f
+            "0a14d917ae27494cfece2b875ee3c1c1cf58be69f07be49350102efc6a71c979",  # 908a2999e
+            "0502c1f5f30d0d1cbd12d11e3b8cb741eb35c1cf8c1aa1c685d3c1a3be7007fd",  # 4870adeab
+            "8afc9aab8cd543ab6af037be132e41096ef04cabe8749bc202c5d003ae1d5a8a",  # 3e561728c
+            "67e3baea6ff863526dbb55f5ed9ba0182baad683d634834c809db0f180d20a8f",  # ee6e421a4
+        }),
+    },
+    "frontend-designer": {
+        "name": frozenset({
+            "41d3f28a34f2c7426e52245f950142fff0bf3e2227c7da0074ce47139797c63c",  # e118eec68
+        }),
+        "description": frozenset({
+            "09f16a8955e221e916db851147adde1fbe3a840b09e8b8b6f8f5ca6b13968d8c",  # e118eec68
+            "9169238cdbaf672377f55bcecd4883e3a0830e82cfffc9608f4ddff8df09628f",  # 3e561728c
+        }),
+        "prompt": frozenset({
+            "b225623790310d30ef2a327f9cf6906775a07f969c974a86471bb0134d7d57fe",  # e118eec68
+            "539e87b1f955e24a33e6fe9d4e9a697931758695a2236e85b9bd8ff8c14f1497",  # a35139f4f
+            "cdaf54192f93b351e2d76eb056bb0ac97f24870cf87514d26babe538c70fd80d",  # b91ec8191
+            "575bcd55879747d5c82bd4055bf9afdc94188590ace973e59e4f9d747534dc95",  # 3e561728c
+            "a30c0b784fbed4b77818e5ddd4c385af30499f1ebff8995ed96b9ebe1a4bfef3",  # ee6e421a4
+        }),
+    },
+}
+
+
 # The General Purpose text shipped before #1861 (git show ee6e421a4^), which
 # still sends searches to the removed Explore agent.
 _OLD_GP_DESCRIPTION = (
@@ -318,13 +383,13 @@ _OWNER_SETTINGS = {
     "memory": "The owner prefers small PRs.",
     "skills": ["unslop"],
     "mcp_servers": [{"name": "docs"}],
-    "enabled_agents": ["Plan"],
+    "enabled_agents": ["frontend-designer"],
     "agent_invoke_mode": "custom",
 }
 
 
 def _old_gp_prompt() -> str:
-    from app.core.builtin_subagents import GENERAL_PURPOSE_PROMPT
+    from app.core.agent_templates import GENERAL_PURPOSE_PROMPT
 
     start = GENERAL_PURPOSE_PROMPT.index("Scope:\n") + len("Scope:\n")
     end = GENERAL_PURPOSE_PROMPT.index("\n\nHow to work:")
@@ -332,7 +397,7 @@ def _old_gp_prompt() -> str:
 
 
 def _old_fd_prompt() -> str:
-    from app.core.builtin_subagents import FRONTEND_DESIGNER_PROMPT
+    from app.core.agent_templates import FRONTEND_DESIGNER_PROMPT
 
     return FRONTEND_DESIGNER_PROMPT.replace(
         "You are the specialist for frontend", "You are the sole agent responsible for all frontend", 1)
@@ -374,6 +439,7 @@ def _assert_owner_settings_kept(row: dict, settings: dict = _OWNER_SETTINGS) -> 
     assert row["is_builtin"]
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_old_general_purpose_fixture_is_the_shipped_text():
     """Guards the fixture: it must be the pre-#1861 default byte for byte."""
     import hashlib
@@ -387,9 +453,10 @@ def test_old_general_purpose_fixture_is_the_shipped_text():
         "frontend-designer"]["prompt"]
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_startup_refreshes_unmodified_old_general_purpose(mock_db):
     from app.core.builtin_subagents import (
-        BUILTIN_DEFAULTS_REVISION, GENERAL_PURPOSE_PROMPT, get_builtin_subagent_definition,
+        BUILTIN_DEFAULTS_REVISION, get_builtin_subagent_definition,
         seed_builtin_subagents,
     )
 
@@ -407,9 +474,10 @@ def test_startup_refreshes_unmodified_old_general_purpose(mock_db):
     assert set(row["config"]["builtin_defaults"]["sha256"]) == {"name", "description", "prompt"}
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_startup_refreshes_unmodified_old_frontend_designer_prompt(mock_db):
     from app.core.builtin_subagents import (
-        FRONTEND_DESIGNER_PROMPT, get_builtin_subagent_definition, seed_builtin_subagents,
+        get_builtin_subagent_definition, seed_builtin_subagents,
     )
 
     seed_builtin_subagents()
@@ -422,13 +490,14 @@ def test_startup_refreshes_unmodified_old_frontend_designer_prompt(mock_db):
     _assert_owner_settings_kept(row)
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_second_startup_changes_nothing(mock_db):
     from app.core.builtin_subagents import seed_builtin_subagents
 
     seed_builtin_subagents()
     _store_existing_row("general-purpose", description=_OLD_GP_DESCRIPTION, prompt=_old_gp_prompt())
     assert seed_builtin_subagents()["general-purpose"] == "refreshed"
-    after_first = {agent_id: _raw(agent_id) for agent_id in ("general-purpose", "Plan", "frontend-designer")}
+    after_first = {agent_id: _raw(agent_id) for agent_id in ("general-purpose", "frontend-designer")}
 
     results = seed_builtin_subagents()
 
@@ -436,6 +505,7 @@ def test_second_startup_changes_nothing(mock_db):
     assert {agent_id: _raw(agent_id) for agent_id in after_first} == after_first
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_customised_prompt_is_kept_while_untouched_description_moves(mock_db):
     from app.core.builtin_subagents import get_builtin_subagent_definition, seed_builtin_subagents
 
@@ -450,8 +520,10 @@ def test_customised_prompt_is_kept_while_untouched_description_moves(mock_db):
     _assert_owner_settings_kept(row)
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_customised_description_is_kept_while_untouched_prompt_moves(mock_db):
-    from app.core.builtin_subagents import GENERAL_PURPOSE_PROMPT, seed_builtin_subagents
+    from app.core.agent_templates import GENERAL_PURPOSE_PROMPT
+    from app.core.builtin_subagents import seed_builtin_subagents
 
     seed_builtin_subagents()
     _store_existing_row("general-purpose", description="My routing advice.", prompt=_old_gp_prompt())
@@ -463,6 +535,7 @@ def test_customised_description_is_kept_while_untouched_prompt_moves(mock_db):
     _assert_owner_settings_kept(row)
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_refresh_failure_does_not_stop_startup_seeding(mock_db, monkeypatch):
     from app.core.builtin_subagents import BUILTIN_SUBAGENTS, seed_builtin_subagents
     from app.db import database
@@ -477,6 +550,7 @@ def test_refresh_failure_does_not_stop_startup_seeding(mock_db, monkeypatch):
     assert {results[d["id"]] for d in BUILTIN_SUBAGENTS} == {"exists"}
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_fully_customised_row_is_not_written(mock_db):
     from app.core.builtin_subagents import seed_builtin_subagents
 
@@ -487,6 +561,7 @@ def test_fully_customised_row_is_not_written(mock_db):
     assert _raw("general-purpose") == before
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_owner_text_matching_an_older_default_is_kept_once_recorded(mock_db):
     """A valid record decides alone: text set after seeding is the owner's,
     even when it equals an older shipped default."""
@@ -503,6 +578,7 @@ def test_owner_text_matching_an_older_default_is_kept_once_recorded(mock_db):
     assert row["config"]["system_prompt"]["content"] == _old_gp_prompt()
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_fresh_install_seeds_current_defaults_with_a_record(bare_db):
     from app.core.builtin_subagents import (
         BUILTIN_DEFAULTS_REVISION, BUILTIN_SUBAGENTS, seed_builtin_subagents,
@@ -526,6 +602,7 @@ def test_fresh_install_seeds_current_defaults_with_a_record(bare_db):
     assert {k: _raw(k) for k in first} == first
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_record_from_a_newer_build_is_never_downgraded(mock_db):
     """A newer worker's refresh synced here: this older build leaves it alone,
     even a field that still holds text this build recognises as shipped."""
@@ -540,6 +617,30 @@ def test_record_from_a_newer_build_is_never_downgraded(mock_db):
     assert _raw("general-purpose") == before
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
+def test_plan_retirement_refreshes_recorded_general_purpose_description(mock_db, monkeypatch):
+    from app.core import builtin_subagents
+    from app.db import database
+
+    previous = [dict(definition) for definition in builtin_subagents.BUILTIN_SUBAGENTS]
+    previous[0]["description"] = previous[0]["description"].replace(
+        "rendered UI work fits", "implementation plans fit Plan, and rendered UI work fits")
+    with monkeypatch.context() as old_build:
+        old_build.setattr(builtin_subagents, "BUILTIN_SUBAGENTS", previous)
+        old_build.setattr(builtin_subagents, "BUILTIN_DEFAULTS_REVISION", 1)
+        builtin_subagents.seed_builtin_subagents()
+    assert "implementation plans fit Plan" in database.get_subagent("general-purpose")["description"]
+    database.update_subagent("general-purpose", prompt="Owner prompt", model="owner-model")
+
+    assert builtin_subagents.seed_builtin_subagents()["general-purpose"] == "refreshed"
+    agent = database.get_subagent("general-purpose")
+    assert agent["description"] == builtin_subagents.BUILTIN_SUBAGENTS[0]["description"]
+    assert agent["prompt"] == "Owner prompt"
+    assert agent["model"] == "owner-model"
+    assert builtin_subagents.seed_builtin_subagents()["general-purpose"] == "exists"
+
+
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_future_default_change_refreshes_through_the_record(mock_db, monkeypatch):
     """A later revision needs no new fingerprints: the record written at seed
     time and kept through an owner edit in the Agents editor decides."""
@@ -548,9 +649,9 @@ def test_future_default_change_refreshes_through_the_record(mock_db, monkeypatch
     from app.db import database
 
     seed_builtin_subagents()
-    # The owner edits only the model and the Plan prompt via the agent store.
-    database.update_subagent("Plan", prompt="Owner plan prompt", model="sonnet")
-    assert _raw("Plan")["config"]["builtin_defaults"]["sha256"].get("prompt")
+    # The owner edits only the model and the Frontend Designer prompt via the agent store.
+    database.update_subagent("frontend-designer", prompt="Owner design prompt", model="sonnet")
+    assert _raw("frontend-designer")["config"]["builtin_defaults"]["sha256"].get("prompt")
 
     changed = []
     for definition in BUILTIN_SUBAGENTS:
@@ -563,16 +664,17 @@ def test_future_default_change_refreshes_through_the_record(mock_db, monkeypatch
                         builtin_subagents.BUILTIN_DEFAULTS_REVISION + 1)
 
     results = seed_builtin_subagents()
-    assert results["general-purpose"] == results["Plan"] == "refreshed"
+    assert results["general-purpose"] == results["frontend-designer"] == "refreshed"
     gp = database.get_subagent("general-purpose")
     assert gp["description"].endswith(" (v2)") and gp["prompt"].endswith("\n(v2)")
-    plan = database.get_subagent("Plan")
-    assert plan["prompt"] == "Owner plan prompt"
-    assert plan["model"] == "sonnet"
-    assert plan["description"].endswith(" (v2)")
-    assert seed_builtin_subagents()["Plan"] == "exists"
+    designer = database.get_subagent("frontend-designer")
+    assert designer["prompt"] == "Owner design prompt"
+    assert designer["model"] == "sonnet"
+    assert designer["description"].endswith(" (v2)")
+    assert seed_builtin_subagents()["frontend-designer"] == "exists"
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_owner_edit_in_the_agents_editor_keeps_the_record(authenticated_client, monkeypatch):
     from app.core import builtin_subagents
     from app.core.builtin_subagents import BUILTIN_SUBAGENTS, seed_builtin_subagents
@@ -598,6 +700,7 @@ def test_owner_edit_in_the_agents_editor_keeps_the_record(authenticated_client, 
     assert row["description"].endswith(" (v2)")
 
 
+@pytest.mark.usefixtures("legacy_builtin_catalog")
 def test_restore_defaults_stamps_the_record(authenticated_client):
     from app.core.builtin_subagents import BUILTIN_DEFAULTS_REVISION, seed_builtin_subagents
 
@@ -614,7 +717,7 @@ def test_restore_defaults_stamps_the_record(authenticated_client):
 
 # Bump BUILTIN_DEFAULTS_REVISION whenever a built-in's name, description or
 # prompt changes, then update this pin to (new revision, new digest).
-_DEFAULTS_PIN = (1, "f3db39f9e32860100861adadb13c3c88da32606a5f9b51f760c0db45f06a18d6")
+_DEFAULTS_PIN = (3, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945")
 
 
 def _current_defaults_digest() -> str:

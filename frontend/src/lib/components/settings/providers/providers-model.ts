@@ -70,13 +70,7 @@ export interface CredentialKindDef {
 	multiple: boolean;
 	/** At most 5 words. */
 	hint: string;
-	/** Signs in with a consumer subscription the provider does not offer to apps. */
-	unofficial?: boolean;
 }
-
-/** One line shown with every "Unofficial" ChatGPT or SuperGrok subscription label. */
-export const UNOFFICIAL_SIGN_IN_HELP =
-	'Uses your own subscription through an unofficial sign-in. The provider may change or block it.';
 
 const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
 	claude: [
@@ -85,11 +79,11 @@ const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
 		{ label: 'Cloud provider or gateway', flavor: 'cloud', multiple: false, hint: 'Bedrock, Vertex, Foundry, gateway' }
 	],
 	openai: [
-		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'ChatGPT sign-in, no key', unofficial: true },
+		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'ChatGPT sign-in, no key' },
 		{ label: 'API key', flavor: 'key', multiple: true, hint: 'Paste a key' }
 	],
 	grok: [
-		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'SuperGrok sign-in, no key', unofficial: true },
+		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'SuperGrok sign-in, no key' },
 		{ label: 'API key', flavor: 'key', multiple: true, hint: 'Paste a key' }
 	],
 	openrouter: [{ label: 'API key', flavor: 'key', multiple: true, hint: 'One key, many models' }],

@@ -37,6 +37,12 @@ from app.api.ws_utils import WSPayloadEncodeError
 logger = logging.getLogger(__name__)
 
 
+def _valid_client_message_id(value: Any) -> bool:
+    """Bound loggable client correlation handles; never accept prompt text."""
+    return (isinstance(value, str) and value.startswith("client-")
+            and len(value) == 39 and all(c in "0123456789abcdef" for c in value[7:]))
+
+
 # v2 core: the command layer + durable turns table the WS handlers
 # delegate to. The v2 turns path is now unconditional (the legacy pipeline and
 # its gating flag are gone). Lightweight modules (no import cycle: turn_manager
@@ -144,6 +150,7 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
             created = created.isoformat()
         rows.append({
             "id": turn["id"],
+            **({"client_message_id": turn["command_id"]} if _valid_client_message_id(turn.get("command_id")) else {}),
             "session_id": session_id,
             "content": turn.get("prompt") or "",
             "profile_id": turn.get("profile_id"),
@@ -163,6 +170,7 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
         held_at = held.get("held_at")
         rows.append({
             "id": held.get("id"),
+            **({"client_message_id": held["command_id"]} if _valid_client_message_id(held.get("command_id")) else {}),
             "session_id": session_id,
             "content": held.get("prompt") or "",
             "profile_id": held.get("profile_id"),
@@ -1254,6 +1262,10 @@ class ChatWebSocketHandler:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
+        client_message_id = data.get("client_message_id")
+        if client_message_id is not None and not _valid_client_message_id(client_message_id):
+            await self.send_json({"type": "error", "message": "Invalid client message id"})
+            return
         session_id = data.get("session_id")
         if session_id and not await self._may_act_on_session(session_id):
             return
@@ -1770,7 +1782,7 @@ class ChatWebSocketHandler:
                 await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
-                    owner_send=True,
+                    owner_send=True, command_id=client_message_id,
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -1794,9 +1806,14 @@ class ChatWebSocketHandler:
             overrides=overrides or None,
             explicit_permission=True,
             payload=payload or None,
+            command_id=client_message_id,
             no_kick=placed_remote,
         )
 
+        logger.info(
+            "steer enqueue session=%s row=%s client_id=%s at=%.6f",
+            session_id, turn_id, client_message_id, time.time(),
+        )
         if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
             # Held for the queued move: a pending bubble until it is sent.
             await self._v2_broadcast_queue(session_id)
@@ -2638,29 +2655,66 @@ class ChatWebSocketHandler:
         message_id = data.get("message_id")
         session_id = data.get("session_id") or self.current_session_id
 
+        client_message_id = data.get("client_message_id")
+        if not await self._may_act_on_session(session_id):
+            return
+        if client_message_id is not None and not _valid_client_message_id(client_message_id):
+            await self.send_json({"type": "error", "session_id": session_id,
+                                  "message": "Invalid client message id"})
+            return
+        if client_message_id:
+            logger.info("steer cancel-request session=%s client_id=%s at=%.6f",
+                        session_id, client_message_id, time.time())
+            # Resolve against durable storage, never a browser's expiring map.
+            # A command can only name a row in this authorized session.
+            from app.db import session_moves
+
+            withdrawn = await run_sync(session_moves.held_withdrawal, session_id,
+                                       command_id=client_message_id)
+            if withdrawn:
+                await self._send_removal_outcome(
+                    session_id, withdrawn["id"], "cancelled", client_message_id=client_message_id,
+                )
+                return
+            row = await run_sync(turns_db.get_turn_by_command, session_id, client_message_id)
+            if row is None:
+                from app.core import session_handoff
+
+                row = next((h for h in await run_sync(session_handoff.held_view, session_id)
+                            if h.get("command_id") == client_message_id), None)
+            if row is None:
+                await self._send_removal_outcome(
+                    session_id, message_id, "not_found", client_message_id=client_message_id,
+                )
+                return  # unknown is NOT a successful withdrawal
+            message_id = row["id"]
         if not message_id:
             return
-        if self.api_user_id:
-            # The owner may name any queued turn; an API user only one of its
-            # own session's (the turn id alone would reach any session).
-            if not await self._may_act_on_session(session_id):
-                return
-            turn = await run_sync(turns_db.get_turn, message_id)
-            if turn is not None and turn.get("session_id") != session_id:
-                await self.send_json({
-                    "type": "error",
-                    "session_id": session_id,
-                    "message": SESSION_ACCESS_DENIED,
-                })
-                return
-
+        row = await run_sync(turns_db.get_turn, message_id)
+        if row is not None and row.get("session_id") != session_id:
+            await self.send_json({"type": "error", "session_id": session_id,
+                                  "message": SESSION_ACCESS_DENIED})
+            return
+        logger.info(
+            "steer cancel-request session=%s row=%s client_id=%s at=%.6f",
+            session_id, row.get("id") if row else None,
+            row.get("command_id") if row else None, time.time(),
+        )
         if session_id and str(message_id).startswith("held-"):
             # A message held for a queued move (#1819): never a turn or a steer.
             from app.core import session_handoff
 
-            await run_sync(session_handoff.drop_held, session_id, message_id)
+            removed = await run_sync(session_handoff.drop_held, session_id, message_id)
+            # Absence is not proof of delivery. Successful removal records a
+            # durable event, which survives deleting the move and worker restart.
+            from app.db import session_moves
+
+            withdrawal = await run_sync(session_moves.held_withdrawal, session_id, held_id=message_id)
             await self._v2_broadcast_queue(session_id)
-            await self._send_removal_outcome(session_id, message_id, "cancelled")
+            await self._send_removal_outcome(
+                session_id, message_id, "cancelled" if removed or withdrawal else "not_found",
+                client_message_id=client_message_id or (withdrawal or {}).get("command_id"),
+            )
             return
 
         # A pending message sent into a busy session is handed to the running
@@ -2708,6 +2762,7 @@ class ChatWebSocketHandler:
 
     async def _send_removal_outcome(
         self, session_id: Optional[str], message_id: str, outcome: str,
+        *, client_message_id: Optional[str] = None,
     ) -> None:
         """Answer a ``remove_queued_message`` with what actually happened.
 
@@ -2716,11 +2771,23 @@ class ChatWebSocketHandler:
         so it is part of the conversation and the client must show it as sent.
         ``not_found``: this worker knows no such queued message.
         """
+        row = await run_sync(turns_db.get_turn, message_id)
+        client_message_id = client_message_id or (row.get("command_id") if row else None)
+        if not _valid_client_message_id(client_message_id):
+            client_message_id = None  # legacy command ids are not client handles
+        verdict = "withdrawn" if outcome == "cancelled" else outcome
+        logger.info(
+            "steer cancel-verdict session=%s row=%s client_id=%s verdict=%s at=%.6f",
+            session_id, row.get("id") if row else None, client_message_id,
+            verdict, time.time(),
+        )
         await self.send_json({
             "type": "queued_message_removal",
             "session_id": session_id,
             "message_id": message_id,
-            "outcome": outcome,
+            "client_message_id": client_message_id,
+            "outcome": outcome,  # compatibility with clients before #2275
+            "verdict": verdict,
         })
 
     # ------------------------------------------------------------------

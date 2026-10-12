@@ -8,9 +8,15 @@ order: 10
 
 AI Shuffle never changes under you. Your install runs the version you chose until you update it.
 
-## Release channel
+## Release channels
 
-Customer installs get **stable** releases only. Every release is tested before it is published, and in-app updates are signed and verified before they install. Read what changed in the release notes shown next to the update button.
+**Stable** is the default: tested releases. **Nightly** follows yesterday's `main`: it may break. A signed nightly is published at 06:00 UTC only when `main` changed and that exact revision has a local full-suite pass. If the pass is missing, the previous nightly stays available. Both channels verify signatures before installing.
+
+**There is no way back from nightly to stable without a reinstall.** Database migrations do not run backwards. Keep a backup before switching; pointing an older stable version at a nightly database is not a downgrade path.
+
+For Docker, set `UPDATE_CHANNEL=nightly` (or `stable`). An explicit environment value overrides the saved local choice and makes it read-only in the channel API. Without that override, the owner API saves `application-updates/update-channel.json` in the data volume; restart the container to apply a change. Desktop stores `{"channel":"nightly"}` in `updates/update-channel.json` under its user-data directory. The choice applies to this install, not every worker on the account.
+
+For one release, existing `edge` settings are accepted as an alias of `nightly` and log a deprecation line. Publishing a nightly does not switch channels, install it or restart a worker. Read the release notes next to the update button before updating.
 
 ## In-app updates
 
@@ -47,8 +53,8 @@ If you use Claude, the Claude Code CLI keeps itself up to date, as on any comput
 - **What comes back:** a small signed file naming the newest release and its notes. Nothing is downloaded until you choose to.
 - **Turning it off:** **Settings → System → Updates → Allow updates**.
 
-Once licensing is live, update requests will also include your worker's license, because updates are part of what a license pays for. See [License](/docs/getting-started/license) and the [privacy policy](https://hobbycoders.com/privacy#updates).
+Updates are free with or without a Cloud account. A linked worker may send its signed Cloud lease to the hub; that lease controls remote capacity, not access to updates. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
-## If your license ends
+## If your Cloud plan ends
 
-Your install keeps running the version it has, and that exact version can still be downloaded again, for example on a new machine. New versions need an active license.
+Your install keeps running, including agent runs, and you can still download and install new versions for free. Only paid Cloud services change when a plan ends.

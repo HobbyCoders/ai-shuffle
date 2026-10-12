@@ -1,6 +1,6 @@
 import { updateVoiceContext, type VoiceExecutionContext } from '$lib/api/voice';
 import type { ActiveSessionState } from '$lib/stores/active-session';
-import { contextWindowForChoice } from '$lib/constants/model-context';
+import { selectedContextWindow } from '$lib/stores/session/context-window';
 import { getDefaultModel } from '$lib/constants/models';
 import { get } from 'svelte/store';
 import { assistantState, isAssistantHome } from '$lib/stores/assistant';
@@ -14,7 +14,7 @@ export function voiceContextFor(state: ActiveSessionState): VoiceExecutionContex
 		// The assistant's home carries no effort at all (see effortToSend).
 		...(isAssistantHome(state.sessionId, get(assistantState)) ? {} : { effort: state.effortLevelOverride || null }),
 		permission_mode: state.permissionModeOverride || null,
-		context_window: contextWindowForChoice(model, state.contextWindowChoice) ?? null,
+		context_window: selectedContextWindow(state) ?? null,
 		fast: state.fastMode
 	};
 }

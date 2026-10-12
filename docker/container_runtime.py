@@ -861,11 +861,17 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
             return 1
         elif monitor is not None and time.monotonic() >= next_probe:
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
+            previous_failures = monitor.failures
             if monitor.check():
                 failure = f"application readiness probe failed {monitor.failures} times in a row"
-            elif updates is not None and monitor.ever_ready and monitor.failures == 0:
-                updates.healthy()
-                confirm_handover(updates.root)
+            else:
+                if monitor.failures == 1:
+                    log("application readiness degraded; waiting for subsequent probes")
+                elif previous_failures and monitor.failures == 0:
+                    log("application readiness recovered")
+                if updates is not None and monitor.ever_ready and monitor.failures == 0:
+                    updates.healthy()
+                    confirm_handover(updates.root)
         if failure is None and updates is not None and time.monotonic() >= next_update:
             next_update = time.monotonic() + 1
             if updates.install_requested.is_set():
@@ -1030,12 +1036,13 @@ def run(settings, action, filename=None):
                         response.raise_for_status()
                         return response.json()
 
-                # Customers follow signed releases. UPDATE_CHANNEL=edge follows
-                # every main revision and is meant for the owner's own workers.
-                channel = os.environ.get("UPDATE_CHANNEL", "stable").strip().lower() or "stable"
-                if channel not in ("stable", "edge"):
-                    log(f"ignoring UPDATE_CHANNEL={channel!r}; following stable releases")
-                    channel = "stable"
+                from app.core.update_channel import selection
+                try:
+                    channel, _ = selection(root)
+                except (ValueError, KeyError, TypeError) as exc:
+                    raise RuntimeFailure("Invalid update channel configuration") from exc
+                # The API compares the saved choice with this running supervisor.
+                env["SHUFFLE_UPDATE_CHANNEL"] = channel
                 def lease():
                     # D8: the app's license lease for the hub's gated feed. The
                     # updater sends it to the hub's update endpoints only.

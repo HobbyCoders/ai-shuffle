@@ -2,8 +2,9 @@
 // Archives live in a private GitHub release; signed metadata lives in the
 // account hub's D1. No R2 and no application or installer build.
 //
-// SOURCE_CHANNEL=edge (default, desktop-source.yml after merged-main CI passes):
-//   the current main revision, served at /v1/desktop/manifest/edge.
+// SOURCE_CHANNEL=nightly (desktop-source.yml, daily after a local full pass):
+//   current main, served at /v1/desktop/manifest/nightly and its /edge alias.
+// The workflow keeps SOURCE_CHANNEL=edge for the first compatibility release.
 // SOURCE_CHANNEL=stable (release.yml, after the release image passed container
 //   verification): the commit of RELEASE_TAG, which must be on main. Served at
 //   /v1/desktop/manifest, the address every customer install follows.
@@ -19,7 +20,9 @@ import path from 'node:path';
 import { readLauncher } from './launcher-contract.mjs';
 const repo = 'HobbyCoders/ai-shuffle';
 const channel = process.env.SOURCE_CHANNEL || 'edge';
-if (!['stable', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or edge');
+if (!['stable', 'nightly', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or nightly (edge is a transition alias)');
+// Both public aliases share the existing D1 lane; never relabel signed bytes.
+const storageChannel = channel === 'nightly' ? 'edge' : channel;
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 const releaseTag = process.env.RELEASE_TAG ?? '';
 let revision, version, notes = '';
@@ -53,7 +56,7 @@ const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.git
 async function api(route, options = {}) {
  return fetch(`https://api.github.com/repos/${repo}/${route}`, { ...options, headers: { ...headers, ...options.headers } });
 }
-// Edge follows main: a superseded push publishes nothing. Stable is pinned to its tag.
+// Nightly follows main: a superseded run publishes nothing. Stable is pinned to its tag.
 async function current() {
  if (channel === 'stable') {
   // Ignore legacy milestone tags, and never make an older final look like a
@@ -99,7 +102,7 @@ try {
  const wrangler = (...args) => execFileSync(process.execPath, ['android/hub/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
  // Several CI completions can authorize the same revision. Preserve its original
  // signed sequence rather than turning each completion into another update.
- const existing = channel === 'edge' ? JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(channel)};`, '--json')) : [];
+ const existing = channel !== 'stable' ? JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json')) : [];
  const published = existing.flatMap(item => item.results ?? [])[0];
  if (published) {
   const signed = JSON.parse(published.manifest);
@@ -146,11 +149,11 @@ try {
   if (!Number.isSafeInteger(asset.id) || asset.id <= 0 || asset.state !== 'uploaded' || asset.size !== size || asset.digest !== `sha256:${sha256}`) throw new Error('GitHub source asset checksum or size did not match');
   if (!(await current())) { console.log('Source stored, but main moved ahead; pointer unchanged.'); }
   else {
-   const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${quote(channel)},${quote(version)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision,channel) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence,version=excluded.version WHERE asset_id=excluded.asset_id AND size=excluded.size;`;
+   const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${quote(storageChannel)},${quote(version)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision,channel) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence,version=excluded.version WHERE asset_id=excluded.asset_id AND size=excluded.size;`;
    // Small queries use the query API. --file invokes the bulk import path,
    // which emits upload progress even with --json and can pause DB queries.
    wrangler('--command', insert);
-   const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(channel)};`, '--json'));
+   const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json'));
    const row = result.flatMap(item => item.results ?? [])[0];
    if (row?.manifest !== signed || row?.asset_id !== asset.id) throw new Error('Source pointer read-back did not match');
    console.log(`Published ${channel} ${version} (${revision}): ${size} runtime source bytes in GitHub asset ${asset.id}; signed D1 manifest verified.`);

@@ -262,7 +262,9 @@ def _removal_frame(session_id, message_id, outcome):
         "type": "queued_message_removal",
         "session_id": session_id,
         "message_id": message_id,
+        "client_message_id": None,
         "outcome": outcome,
+        "verdict": "withdrawn" if outcome == "cancelled" else outcome,
     }
 
 

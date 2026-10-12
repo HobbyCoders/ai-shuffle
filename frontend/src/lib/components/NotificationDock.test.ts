@@ -138,12 +138,6 @@ describe('every migrated notification renders through the dock', () => {
 		expect(inDock(await screen.findByText('Saved credentials are locked on this install'))).toBe(true);
 	});
 
-	it('the license notice', async () => {
-		api.get.mockResolvedValue({ mode: 'licensed', state: 'grace', allowed: true, banner: { severity: 'warning', message: 'Your last payment failed.' } });
-		render((await import('./LicenseBanner.svelte')).default);
-		expect(inDock(await screen.findByText('Your last payment failed.'))).toBe(true);
-	});
-
 	it('the Claude Code CLI sign-in notice', async () => {
 		setAuth({ authenticated: true, is_admin: true, claude_cli: { relogin_notice: { message: 'Sign out and in again.' } } });
 		render((await import('./ClaudeReloginBanner.svelte')).default);
@@ -234,7 +228,7 @@ describe('dock position and drag regions (source)', () => {
 		// those two rules are the only fixed positioning it may have.
 		const userMoved = (src: string) => src.replace(/\t\.call-bounds \{[^}]*\}/, '').replace(/\t\.call-float \{[^}]*\}/, '');
 		for (const file of ['./ComputerUseBanner.svelte', './voice/ActiveVoiceCallBar.svelte', './InstallPrompt.svelte',
-			'./CredentialStorageBanner.svelte', './LicenseBanner.svelte', './ClaudeReloginBanner.svelte', './layout/ChatView.svelte']) {
+			'./CredentialStorageBanner.svelte', './ClaudeReloginBanner.svelte', './layout/ChatView.svelte']) {
 			const src = read(file);
 			expect(src, file).toContain('<NotificationSlot');
 			if (file !== './layout/ChatView.svelte') expect(userMoved(src), file).not.toMatch(/position:\s*fixed|class="fixed/);

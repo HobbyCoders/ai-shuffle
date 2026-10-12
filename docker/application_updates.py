@@ -28,7 +28,12 @@ import httpx
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from app.core.application_updates import atomic_json
+def atomic_json(path, value):
+    # Manifest verification is also used by offline publication checks. Do not
+    # initialize app settings/database imports until the updater writes state.
+    from app.core.application_updates import atomic_json as write_json
+
+    return write_json(path, value)
 
 ORIGIN = "https://hobbycoders.com"
 REVISION = re.compile(r"[a-f0-9]{40}")
@@ -38,9 +43,14 @@ MAX_NOTES = 4000
 # "0.9.0" on a release, "0.9.0-dev.12+gabc1234" on an edge build.
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?")
 # stable: tagged releases, signed only after the release image passed container
-# verification. edge: every main revision, for the owner's own workers. The
-# channel is inside the signed payload, so the hub cannot relabel an edge build.
-CHANNELS = ("stable", "edge")
+# verification. nightly: daily main builds; edge is a one-release alias.
+# The signed channel prevents the hub from relabeling nightly as stable.
+CHANNELS = ("stable", "nightly", "edge")
+_alias_logged = False
+
+
+def normalize_channel(channel):
+    return "nightly" if channel == "edge" else channel
 # D8: the hub's gated source feed (android/hub/src/license-gate.ts) reads this
 # worker's license lease from this header. The value is the signed envelope as
 # base64url (app/core/license.py lease_header), within the hub's 4 KiB limit.
@@ -269,7 +279,11 @@ class ContainerUpdates:
     def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", lease=None, database=None):
         if channel not in CHANNELS:
             raise UpdateError("Unknown update channel")
-        self.channel = channel
+        global _alias_logged
+        if channel == "edge" and not _alias_logged:
+            print("Update channel edge is deprecated; using nightly", flush=True)
+            _alias_logged = True
+        self.channel = normalize_channel(channel)
         # The supervisor's managed database (container_runtime.Database), for
         # the copy taken before an update's first start. None keeps the
         # original contract: a failed first boot blocks.
@@ -329,7 +343,7 @@ class ContainerUpdates:
             staged_manifest = self.manifest(pending)
             staged = staged_manifest["container"]
             if (staged["sequence"] <= self.image["sequence"] or missing_capabilities(staged, self.image)
-                    or staged_manifest.get("channel") != self.channel):
+                    or normalize_channel(staged_manifest.get("channel")) != self.channel):
                 self.state.pop("pending")
                 self.save()
             else:
@@ -562,7 +576,7 @@ class ContainerUpdates:
         return value if isinstance(value, str) and LEASE_VALUE.fullmatch(value) else None
 
     def fetch(self, endpoint, destination=None, manifest=None):
-        if not re.fullmatch(r"manifest|manifest/edge|sources/[a-f0-9]{40}", endpoint):
+        if not re.fullmatch(r"manifest|manifest/(?:nightly|edge)|sources/[a-f0-9]{40}", endpoint):
             raise UpdateError("Invalid source endpoint")
         limit = manifest["size"] if manifest else 32768
         chunks, size, digest = [], 0, hashlib.sha256()
@@ -641,10 +655,10 @@ class ContainerUpdates:
             self.publish("ready", "Update ready. Choose Update and restart.")
             return
         self.publish("checking")
-        signed = self.fetch("manifest" if self.channel == "stable" else "manifest/edge")
+        signed = self.fetch("manifest" if self.channel == "stable" else "manifest/nightly")
         manifest = verify_manifest(signed, self.public_key)
         self.checked_at = time.time()
-        if manifest.get("channel") != self.channel:
+        if normalize_channel(manifest.get("channel")) != self.channel:
             raise UpdateError(f"The update feed did not return a signed {self.channel} release")
         if not manifest.get("tree"):
             raise UpdateError("The update has no signed source tree; install a newer image")

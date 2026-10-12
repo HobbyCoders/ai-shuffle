@@ -1,45 +1,18 @@
-"""License leases on the worker.
+"""Cloud leases on the worker.
 
-The license server (android/license) hands each activated worker an
-Ed25519-signed lease. This module verifies leases offline against the public
-keys built into the app, keeps the lease in the settings store, renews it once
-a day with jittered retry, and answers one question for the rest of the app:
-``license_allows_agent_runs()``.
+Signed leases describe paid remote-worker capacity to the account hub. The
+worker verifies and stores them, renews daily with jittered retry, and exposes
+quiet Settings information. Missing, invalid or expired leases never block
+local use, agent runs, data access or updates. The hub enforces tunnel limits.
 
-Rules it follows:
+Activation sends the key, random install id, hashed machine fingerprint,
+display name and app version, never prompts or provider credentials. Renewal
+rotates install tokens and drops leases when a seat is lost.
 
-- A lease is good for 14 days, so a worker can stay offline for two weeks.
-- After a failed payment the server keeps issuing leases for 14 days with
-  ``grace: true``; the worker shows a banner and keeps running.
-- Without a valid lease the worker is *unlicensed*: it refuses to start new
-  agent runs and nothing else. Sessions, files, settings, exports and backups
-  stay readable and writable. Nothing here deletes or locks data.
-
-Beta: with no license server URL configured, with ``LICENSE_BETA=true`` (set
-at build time while the beta runs), or in a build without a lease public key,
-every call reports an always-valid beta lease and no network call is made.
-
-What the worker sends to the license server: the license key (on activation
-only), a random install id, a SHA-256 fingerprint of that id and the machine
-id, on desktop installs a SHA-256 hash of the computer's machine id (so a
-reinstall on the same computer reuses its seat), the host name as a display
-name, and the app version. Never prompts, model traffic or provider
-credentials.
-
-Seats: each renewal returns a new install token and the old one stops working
-a day later, so two copies of one data directory cannot share a seat. When the
-server says this worker holds no seat any more (freed elsewhere, taken over by
-a copy, or no seat left after going stale) the lease is dropped at once and new
-agent runs pause until the key is entered again.
-
-First-install key: a key given before the worker ever ran is activated on its
-own when the worker starts (:func:`activate_first_install_key`). It comes from
-the desktop launcher's ``license-key.json`` in the update folder
-(``SHUFFLE_SOURCE_ROOT``; the desktop deletes that file itself once a lease
-has opened its update feed) or from ``LICENSE_KEY`` in the environment
-(Docker, Unraid), which is taken out of the environment at startup so agents
-never inherit it. Each key is tried once: after the license server answered,
-yes or no, the same key is not sent again.
+First-install keys still come from the desktop's license-key.json or LICENSE_KEY.
+The environment key is removed at startup so agents never inherit it. Each key
+is tried once after a definitive server answer. Unconfigured/beta builds skip
+lease acquisition, not local functionality.
 """
 from __future__ import annotations
 
@@ -149,7 +122,7 @@ def _load_state(cached: bool = False) -> dict:
         value = json.loads(raw)
         return value if isinstance(value, dict) else {}
     except (TypeError, ValueError):
-        logger.warning("Saved license state is unreadable; treating this worker as unlicensed")
+        logger.warning("Saved Cloud lease state is unreadable; local use is unchanged")
         return {}
 
 
@@ -316,10 +289,18 @@ def _day(seconds: float) -> str:
     return f"{moment:%B} {moment.day}, {moment.year}"
 
 
-def _beta_status() -> dict:
+def _account_status() -> dict:
+    from app.db import mobile_hub
+
+    binding = mobile_hub.get_binding()
+    linked = bool(binding)
     return {
-        "mode": "beta", "state": "beta", "allowed": True, "reason": None, "banner": None,
-        "plan": "beta", "seats": None, "seats_used": None, "account_id": None, "license_id": None,
+        "mode": "cloud", "state": "free" if linked else "not_linked",
+        "linked": linked, "allowed": True, "reason": None, "banner": None,
+        "message": "Free account: 1 remote worker." if linked else "Not linked to AI Shuffle Cloud. Local use is free.",
+        "remote_worker_limit": 1 if linked else 0, "lease_state": "none",
+        "plan": "free" if linked else None, "seats": 1 if linked else 0,
+        "seats_used": None, "account_id": None, "license_id": None,
         "key_hint": None, "install_id": None, "issued_at": None, "expires_at": None,
         "grace": False, "grace_until": None, "last_refresh_at": None, "next_refresh_at": None,
         "last_error": None, "server_status": None, "server_configured": bool(server_url()),
@@ -327,76 +308,57 @@ def _beta_status() -> dict:
 
 
 def status(now: float | None = None, *, cached: bool = False) -> dict:
-    """The license picture for this worker, as the API and the gate see it."""
+    """Settings-only Cloud information; never an authorization verdict.
+
+    The hub enforces remote capacity from the signed lease, not these fields.
+    ``allowed``, ``reason`` and ``banner`` remain for older clients.
+    """
+    result = _account_status()
     if beta_mode():
-        return _beta_status()
+        return result
     now = time.time() if now is None else now
     state = _load_state(cached=cached)
-    result = _beta_status() | {
-        "mode": "licensed", "plan": None,
+    result |= {
         "key_hint": state.get("key_hint"), "install_id": state.get("install_id"),
         "last_refresh_at": _iso(state.get("last_refresh_at")),
         "next_refresh_at": _iso(state.get("next_refresh_at")),
         "last_error": state.get("last_error"), "server_status": state.get("server_status"),
     }
     lease = state.get("lease")
-    lost = state.get("server_status") or {}
-    if not lease and lost.get("code") in SEAT_LOST_CODES:
-        message = lost.get("message") or "This worker no longer holds a seat on its license."
-        return result | {
-            "state": "unlicensed", "allowed": False,
-            "reason": f"{message} New agent runs are paused until this worker is activated again. Your data is not affected.",
-            "banner": {"severity": "error", "message": f"{message} New agent runs are paused until this worker is activated again."},
-        }
+    server_status = state.get("server_status") or {}
     if not lease:
-        return result | {
-            "state": "unlicensed", "allowed": False,
-            "reason": "No license is active on this worker, so new agent runs are paused. Add your license key in Settings > System > License. Your data is not affected.",
-            "banner": {"severity": "error", "message": "No license is active on this worker. New agent runs are paused until you add a license key."},
-        }
+        if server_status.get("code") in SEAT_LOST_CODES:
+            result |= {"lease_state": "seat_lost", "message": "This worker no longer holds a paid Cloud seat. Local use is unchanged."}
+        return result
     try:
         payload = verify_lease(lease, state.get("install_id"))
     except LeaseError as exc:
-        logger.warning("Saved license lease rejected: %s", exc)
-        return result | {
-            "state": "invalid", "allowed": False,
-            "reason": "The saved license lease could not be verified, so new agent runs are paused. Enter your license key again in Settings > System > License.",
-            "banner": {"severity": "error", "message": "The saved license could not be verified. Enter your license key again."},
-        }
+        logger.warning("Saved Cloud lease rejected: %s", exc)
+        return result | {"lease_state": "invalid", "message": "The saved Cloud lease could not be verified. Link your paid plan again in Settings > Cloud. Local use is unchanged."}
     expires = float(payload["expires_at"])
     grace_until = payload.get("grace_until")
     result |= {
-        "plan": payload.get("plan"), "seats": payload.get("seats"), "seats_used": payload.get("seats_used"),
         "account_id": payload.get("account_id"), "license_id": payload.get("license_id"),
         "key_hint": payload.get("key_hint") or state.get("key_hint"),
         "issued_at": _iso(payload["issued_at"]), "expires_at": _iso(expires),
         "grace": bool(payload.get("grace")), "grace_until": _iso(grace_until) if isinstance(grace_until, int) else None,
     }
     if now >= expires:
-        return result | {
-            "state": "expired", "allowed": False,
-            "reason": f"This worker's license lease ended on {_day(expires)}, so new agent runs are paused. Connect it to the internet or renew your license in Settings > System > License. Your data is not affected.",
-            "banner": {"severity": "error", "message": f"The license lease ended on {_day(expires)}. New agent runs are paused until it renews."},
-        }
-    server_status = state.get("server_status") or {}
+        return result | {"lease_state": "expired", "message": f"The paid Cloud lease ended on {_day(expires)}. Renew it to restore paid remote capacity. Local use is unchanged."}
+    result |= {
+        "state": "paid", "plan": payload.get("plan"),
+        "seats": payload["seats"], "seats_used": payload.get("seats_used"),
+        "remote_worker_limit": payload["seats"], "lease_state": "active",
+        "message": "Paid Cloud plan. Local use does not depend on this plan.",
+    }
     if server_status.get("code"):
-        message = server_status.get("message") or "The license server no longer renews this worker."
-        return result | {
-            "state": "ending", "allowed": True, "reason": None,
-            "banner": {"severity": "warning", "message": f"{message} Agents can start new runs until {_day(expires)}."},
-        }
+        return result | {"lease_state": "ending", "message": f"The paid Cloud lease is not renewing and ends on {_day(expires)}. Local use is unchanged."}
     if result["grace"]:
         until = grace_until if isinstance(grace_until, int) else expires
-        return result | {
-            "state": "grace", "allowed": True, "reason": None,
-            "banner": {"severity": "warning", "message": f"Your last payment failed. Agents keep running until {_day(until)}; update your payment method to keep your license."},
-        }
+        return result | {"lease_state": "grace", "message": f"Your last Cloud payment failed. Update your payment method before {_day(until)} to keep paid remote capacity. Local use is unchanged."}
     if expires - now < WARN_BEFORE_EXPIRY:
-        return result | {
-            "state": "expiring", "allowed": True, "reason": None,
-            "banner": {"severity": "warning", "message": f"This worker could not renew its license and its lease ends on {_day(expires)}. Check its internet connection."},
-        }
-    return result | {"state": "trialing" if payload.get("status") == "trialing" else "active", "allowed": True, "reason": None}
+        return result | {"lease_state": "expiring", "message": f"This worker could not renew its Cloud lease, which ends on {_day(expires)}. Check its internet connection. Local use is unchanged."}
+    return result
 
 
 LEASE_HEADER = "X-Shuffle-Lease"
@@ -406,10 +368,9 @@ def lease_header() -> str | None:
     """The current lease as the value of the ``X-Shuffle-Lease`` header: the
     signed envelope as JSON, base64url. None in beta mode or without a lease.
 
-    Sent only to the account hub: on the gated source feed
-    (android/hub/src/license-gate.ts) and on the worker's activate and
-    connector calls, where it lifts the account's tunnel cap
-    (android/hub/src/tunnel-capacity.ts, app/core/account_hub.py)."""
+    Sent only to the account hub, including update, worker activation and
+    connector calls. The hub uses it for paid remote capacity; local use and
+    updates never require it (app/core/account_hub.py)."""
     if beta_mode():
         return None
     lease = _load_state(cached=True).get("lease")
@@ -420,23 +381,8 @@ def lease_header() -> str | None:
 
 
 def license_allows_agent_runs() -> tuple[bool, str | None]:
-    """Whether this worker may start a new agent run, and why not.
-
-    Returns ``(True, None)`` when licensed, in grace, in beta, or when the
-    license state cannot be read (the license is a soft check and must never
-    be the reason a working install breaks). Otherwise ``(False, reason)``
-    with a message fit to show the user. Only new runs are gated; callers
-    must not use this to block reading or exporting data.
-    """
-    try:
-        if beta_mode():
-            return True, None
-        current = status(cached=True)
-        return bool(current["allowed"]), current["reason"]
-    except Exception:
-        logger.exception("License check failed; allowing the run")
-        return True, None
-
+    """Compatibility helper: Cloud plans never restrict local agent runs."""
+    return True, None
 
 # ---------------------------------------------------------------------------
 # Talking to the license server
@@ -488,7 +434,7 @@ def _server_message(data: dict, fallback: str) -> str:
 async def activate(key: str) -> dict:
     """Activate this worker with a license key and store the lease."""
     if beta_mode():
-        raise LicenseError(409, "This build is part of the beta and needs no license key.")
+        raise LicenseError(409, "Paid Cloud linking is not configured in this build. Local use is free.")
     if not isinstance(key, str) or not key.strip() or len(key) > 64:
         raise LicenseError(400, "Enter a license key.")
     async with _state_lock():
@@ -548,7 +494,7 @@ def _nudge_remote_access() -> None:
 async def deactivate() -> dict:
     """Give this worker's seat back and forget the lease. Data is untouched."""
     if beta_mode():
-        raise LicenseError(409, "This build is part of the beta and needs no license key.")
+        raise LicenseError(409, "Paid Cloud linking is not configured in this build. Local use is free.")
     released = False
     async with _state_lock():
         state = await asyncio.to_thread(_load_state)
@@ -569,7 +515,7 @@ async def release_seat(key: str, install_id: str) -> dict:
     """Free the seat of another worker on the same license (one that is gone),
     so this worker can activate. Needs the license key."""
     if beta_mode():
-        raise LicenseError(409, "This build is part of the beta and needs no license key.")
+        raise LicenseError(409, "Paid Cloud linking is not configured in this build. Local use is free.")
     if not isinstance(key, str) or not key.strip() or len(key) > 64:
         raise LicenseError(400, "Enter a license key.")
     if not isinstance(install_id, str) or not 8 <= len(install_id) <= 128:
@@ -632,15 +578,15 @@ async def refresh() -> dict:
         elif data.get("code") in SEAT_LOST_CODES and code in (401, 409, 410):
             # The server says this worker no longer holds a seat (freed from
             # the account page or another worker, taken by a copy of this
-            # worker's data, or gone stale with no seat left). Stop now
-            # instead of running out the lease, so a freed seat is really
+            # worker's data, or gone stale with no seat left). Drop the lease
+            # instead of running it out, so a freed seat is really
             # free. The install id stays, so entering the key again reuses it.
             code_name = data.get("code") or f"http_{code}"
             state = {"install_id": install_id, "key_hint": state.get("key_hint"),
                      "last_refresh_at": now, "failures": 0, "last_error": None,
                      "server_status": {"code": str(code_name)[:40],
                                        "message": _server_message(data, "This worker no longer holds a seat on its license.")}}
-            logger.warning("License server says this worker holds no seat (%s); new agent runs are paused", code_name)
+            logger.warning("Cloud worker seat released (%s); local use is unchanged", code_name)
         else:
             # The server answered and said no (cancelled, expired, revoked).
             # The current lease still runs to its end; check again daily.

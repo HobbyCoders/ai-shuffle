@@ -165,6 +165,7 @@ def _runtime_env(*, pump):
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.settle = AsyncMock()
 
     session_runtime.register_broadcaster(AsyncMock(name="broadcaster"))
     session_runtime.register_scheduler(MagicMock(name="on_turn_settled"))

@@ -586,12 +586,16 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             the automation in the state this call already reported."""
             auto = database.get_automation(args["automation_id"])
             if not auto:
-                return None, None
-            return auto, database.update_automation(
+                return None, None, None
+            if args["enabled"] and not auto.get("profile_id"):
+                return "Choose an agent before re-enabling this automation", auto, None
+            return None, auto, database.update_automation(
                 args["automation_id"], is_enabled=args["enabled"]
             )
 
-        auto, updated = await run_sync(_read_and_toggle)
+        error, auto, updated = await run_sync(_read_and_toggle)
+        if error:
+            return _error(error)
         if not auto:
             return _error(f"Automation not found: {args['automation_id']}")
 

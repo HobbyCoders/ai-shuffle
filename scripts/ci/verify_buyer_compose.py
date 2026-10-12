@@ -15,17 +15,16 @@ network address, so the host is not loopback to the app):
   status says the password step is required;
 - the owner password can be created through the API, a wrong one is refused
   and the right one signs in;
-- the license status reports the beta lease;
+- Cloud status is not linked, with local agent runs allowed;
 - ``/api/v1/auth/claude/cli`` reports no CLI login on a fresh container;
 - an agent turn without any credential is refused with a setup message.
 
 After a forced recreation the owner password still signs in. Then it removes
 everything it created.
 
---image names an image already present locally (built by CI, or pulled from
-the private registry on a clean runner). It is re-tagged under the buyer's
-registry path so the compose file itself is used unmodified, and the run never
-pulls. Stdlib only.
+--image names an image already present locally. It is re-tagged under the
+public package name with a temporary version so the compose file itself is
+used unmodified, and the run never pulls. Stdlib only.
 """
 from __future__ import annotations
 
@@ -44,7 +43,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL = ROOT / "docs" / "install" / "compose"
-REGISTRY, TOKEN, VERSION = "ci.invalid", "ci-pull-token", "ci-candidate"
+IMAGE, VERSION = "ghcr.io/hobbycoders/ai-shuffle-server", "ci-candidate"
 PROJECT = "ai-shuffle-buyer-check"
 VOLUMES = {"/data", "/home/appuser/.fluid", "/home/appuser/.claude", "/home/appuser/.local",
            "/home/appuser/.config/gh", "/home/appuser/chrome-profile"}
@@ -59,7 +58,7 @@ def run(*args, cwd=None, check=True, timeout=900):
 
 def buyer_env(folder: Path, port: int) -> None:
     """env.example with only the lines a buyer edits changed."""
-    values = {"AI_SHUFFLE_PULL_TOKEN": TOKEN, "AI_SHUFFLE_VERSION": VERSION, "PORT": str(port)}
+    values = {"AI_SHUFFLE_VERSION": VERSION, "PORT": str(port)}
     lines, seen = [], set()
     for line in (INSTALL / "env.example").read_text().splitlines():
         key = line.split("=", 1)[0]
@@ -70,8 +69,6 @@ def buyer_env(folder: Path, port: int) -> None:
     missing = set(values) - seen
     if missing:
         raise RuntimeError(f"env.example no longer offers {', '.join(sorted(missing))}")
-    # Not a buyer setting: points the unmodified compose file at the local image.
-    lines.append(f"AI_SHUFFLE_REGISTRY={REGISTRY}")
     (folder / ".env").write_text("\n".join(lines) + "\n")
 
 
@@ -203,9 +200,9 @@ def check_first_session(api: Api) -> tuple[list[str], str]:
 
     status, license_status = api.call("GET", "/api/v1/license", bearer=token)
     assert status == 200, f"license status answered {status}: {detail(license_status)}"
-    assert license_status.get("mode") == "beta" and license_status.get("state") == "beta" \
-        and license_status.get("allowed") is True, f"license is not the beta lease: {license_status}"
-    report.append("license status: beta, agent runs allowed")
+    assert license_status.get("mode") == "cloud" and license_status.get("state") == "not_linked" \
+        and license_status.get("allowed") is True, f"fresh worker should allow local use without Cloud: {license_status}"
+    report.append("Cloud status: not linked, local agent runs allowed")
 
     status, cli = api.call("GET", "/api/v1/auth/claude/cli?refresh=true", bearer=token)
     assert status == 200, f"CLI status answered {status}: {detail(cli)}"
@@ -252,11 +249,11 @@ def check(image: str, port: int, timeout: int, artifacts: Path | None) -> None:
     shutil.copy(INSTALL / "compose.yaml", folder / "compose.yaml")
     buyer_env(folder, port)
     compose = ["docker", "compose", "-p", PROJECT]
-    run("docker", "tag", image, f"{REGISTRY}/{TOKEN}/ai-shuffle:{VERSION}")
+    run("docker", "tag", image, f"{IMAGE}:{VERSION}")
     try:
         config = json.loads(run(*compose, "config", "--format", "json", cwd=folder))
         service = config["services"]["ai-shuffle"]
-        assert service["image"] == f"{REGISTRY}/{TOKEN}/ai-shuffle:{VERSION}", service["image"]
+        assert service["image"] == f"{IMAGE}:{VERSION}", service["image"]
         run(*compose, "up", "-d", "--pull", "never", cwd=folder)
         container = wait_healthy(folder, timeout)
         host = container["HostConfig"]
@@ -288,7 +285,7 @@ def check(image: str, port: int, timeout: int, artifacts: Path | None) -> None:
                 run(*compose, "logs", "--no-color", cwd=folder, check=False))
         # This project owns every volume it names; a buyer never runs -v.
         run(*compose, "down", "-v", "--timeout", "120", cwd=folder, check=False)
-        run("docker", "rmi", f"{REGISTRY}/{TOKEN}/ai-shuffle:{VERSION}", check=False)
+        run("docker", "rmi", f"{IMAGE}:{VERSION}", check=False)
         shutil.rmtree(folder, ignore_errors=True)
 
 

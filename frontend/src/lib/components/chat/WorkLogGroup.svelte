@@ -3,22 +3,41 @@
 	 * WorkLogGroup — the fold that hides a turn's routine steps.
 	 *
 	 * Two modes, both rendered as flat rows with no card chrome:
-	 *  - live: the newest tool row stays on screen and the earlier ones hide
-	 *    behind "+N previous tool calls".
+	 *  - live: the turn so far, cut into runs at its protected rows. Each earlier
+	 *    run hides behind its own live label ("Read 3 files and ran 2 commands");
+	 *    the protected row that ended it stays visible below, and the current run
+	 *    shows every row (transcript-organization spec §2).
 	 *  - settled: the whole run — tool rows plus the turn's non-final commentary
 	 *    — hides behind one "Worked for {duration}" row.
+	 *
+	 * Live and settled render the SAME keyed row list, so when the turn settles
+	 * only `mode` flips: every row that stays on screen keeps its component, and
+	 * with it any tool, thinking or worker card the reader expanded (spec §6). A
+	 * row the reader clicked into stays mounted (hidden) while a fold hides it,
+	 * so reopening the fold shows it as they left it.
+	 *
+	 * Open/closed folds live in the fold-state store, keyed by `foldKey`, so they
+	 * survive a remount, a session switch and a reload. Without a key (tests,
+	 * legacy callers) the group keeps them locally.
+	 *
+	 * An open fold repeats its fold row as the group's header (spec §7): it sticks
+	 * to the top of the transcript while the group is on screen, and clicking it
+	 * collapses the group, the same as "Show fewer log entries" at the bottom.
 	 *
 	 * The rows themselves are rendered by the caller through the `row` snippet,
 	 * so this component owns the fold and nothing else; MessageArea keeps the one
 	 * dispatch table that decides which component a message becomes.
 	 */
-	import type { Snippet } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import type { Action } from 'svelte/action';
 	import { isNavigableUserTurn, turnAnchorId } from '$lib/utils/transcript-navigation';
 	import type { ChatMessage } from '$lib/stores/types';
 	import MediaGallery from './MediaGallery.svelte';
+	import { trackRunHeader } from './run-header-placement';
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
-	import type { WorkLogEntry, WorkLogSequenceEntry } from '$lib/utils/work-log';
+	import type { WorkLogEntry, WorkLogRun, WorkLogSequenceEntry } from '$lib/utils/work-log';
+	import { foldState, type FoldState } from '$lib/stores/session/fold-state';
+	import { openRunKeys, parseRange, rangeId, rangesOver, reconcileRanges, type RunSpan } from './run-fold-ranges';
 
 	interface Props {
 		mode: 'live' | 'settled';
@@ -26,8 +45,16 @@
 		folded: WorkLogEntry[];
 		/** Rows always visible (live mode's newest row). */
 		tail: WorkLogEntry[];
-		/** Ordered settled turn; protected/final rows stay visible while collapsed. */
+		/** Ordered turn; protected/final rows stay visible while collapsed. */
 		sequence?: WorkLogSequenceEntry[];
+		/** Live turn: the earlier runs, each folded on its own. */
+		runs?: WorkLogRun[];
+		/** Fold-state key of the turn (server id of its opening row). */
+		foldKey?: string | null;
+		/** Optimistic id `foldKey` replaced: its folds move onto `foldKey`. */
+		foldAlias?: string | null;
+		/** Injected in tests; the app uses the shared store. */
+		folds?: FoldState;
 		/** "Worked for 2m 14s" / "You stopped after 12s"; null when unknown. */
 		durationLabel?: string | null;
 		/** Action-specific description of the folded work. */
@@ -44,6 +71,10 @@
 		folded,
 		tail,
 		sequence = [],
+		runs = [],
+		foldKey = null,
+		foldAlias = null,
+		folds = foldState,
 		gallery = [],
 		durationLabel = null,
 		summary = null,
@@ -51,10 +82,140 @@
 		row,
 		observeTurnAnchor = () => {}
 	}: Props = $props();
-	const retainedSequence = $derived(sequence.filter((entry) => !entry.hiddenWhenCollapsed));
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
 
-	let open = $state(false);
+	// ── Fold state ─────────────────────────────────────────────────────────
+	// Seeded synchronously: the pre-effects below run before the subscription
+	// does, and must see what is already open on a remount.
+	let stored = $state<Readonly<Record<string, true>>>(untrack(() => folds.current));
+	$effect(() => folds.subscribe((value) => { stored = value; }));
+	// An optimistic send keeps its id as the row key (no remount); once the
+	// server id is known, folds recorded under the optimistic id move onto it.
+	$effect.pre(() => {
+		if (foldKey && foldAlias && foldAlias !== foldKey) folds.remap(foldAlias, foldKey);
+	});
+
+	let localOpen = $state(false);
+	// Runs are keyed by the row they start at (`WorkLogRun.key`), not by
+	// ordinal: prose that finishes later inserts a boundary and shifts
+	// ordinals. Without a fold key the open ranges are kept here.
+	let localRuns = $state<Record<string, boolean>>({});
+	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
+	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
+	const openIds = $derived(runPrefix
+		? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
+		: Object.keys(localRuns).filter((id) => localRuns[id]));
+	const rowId = (entry: WorkLogEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+	// A row is found by its `id` as well as its `serverId`: the reducer acks an
+	// optimistic row (a steer) by adding a `serverId` and keeping its `id`, so
+	// a range stored before the ack still names it, and the reconcile below
+	// moves the range onto the server id in one write.
+	const rowPositions = $derived.by(() => {
+		const position = new Map<string, number>();
+		sequence.forEach((entry, at) => {
+			const { id } = entry.message;
+			if (id && !position.has(id)) position.set(id, at);
+		});
+		sequence.forEach((entry, at) => position.set(rowId(entry), at));
+		return position;
+	});
+	// Settling merges the runs into the turn's one fold: an open run opens it,
+	// so the reader's open fold does not close under them (spec §6). Until the
+	// store records the promotion, read any open run as the turn being open.
+	const anyRunOpen = $derived(runPrefix
+		? Object.keys(stored).some((key) => key.startsWith(runPrefix))
+		: Object.values(localRuns).some(Boolean));
+	const runOpenHere = $derived(anyRunOpen && openIds.some((id) => parseRange(id, rowPositions) !== null));
+	const open = $derived(turnFold
+		? stored[turnFold] === true || (mode === 'settled' && runOpenHere)
+		: localOpen);
+	// Only a run range that names a row of this turn opens the settled fold. A
+	// range none of whose rows exist any more (an optimistic id gone after a
+	// reload) is dropped instead, so it cannot reopen work the reader closed.
+	// Residual: a different session whose turn has the SAME turn key would
+	// lose its stored live runs here; turn keys are server ids, so this needs
+	// a server id collision.
+	$effect.pre(() => {
+		if (mode !== 'settled' || !foldKey || !runPrefix || !anyRunOpen) return;
+		if (runOpenHere) folds.promoteRuns(foldKey);
+		else folds.update(openIds.map((id) => `${runPrefix}${id}`), []);
+	});
+	function setOpen(next: boolean) {
+		if (turnFold) folds.setOpen(turnFold, next);
+		else localOpen = next;
+	}
+	/**
+	 * Open runs are stored as row ranges, one per open run: the run's first
+	 * row through its last (run-fold-ranges.ts). Runs merge and split as prose
+	 * finishes; a run is open when its rows overlap a stored range, so the
+	 * reader's open work stays open through a merge, a split, a remount or a
+	 * reload, decided from the store and the current runs alone.
+	 */
+	const runSpans = $derived.by(() => {
+		const spans = new Map<number, RunSpan>();
+		if (mode !== 'live' || runs.length === 0) return spans;
+		const keyOfRun = new Map(runs.map((run) => [run.index, run.key]));
+		sequence.forEach((entry, at) => {
+			const key = entry.run === undefined ? undefined : keyOfRun.get(entry.run);
+			if (key === undefined) return;
+			const span = spans.get(entry.run!);
+			if (span) { span.end = at; span.through = rowId(entry); }
+			else spans.set(entry.run!, { key, start: rowPositions.get(key) ?? at, end: at, through: rowId(entry) });
+		});
+		return spans;
+	});
+	const openRuns = $derived(openRunKeys(openIds, [...runSpans.values()], rowPositions));
+	function runOpen(run: WorkLogRun): boolean {
+		return openRuns.has(run.key);
+	}
+	function writeRuns(close: string[], open: string[]) {
+		if (close.length === 0 && open.length === 0) return;
+		if (runPrefix) {
+			folds.update(close.map((id) => `${runPrefix}${id}`), open.map((id) => `${runPrefix}${id}`));
+			return;
+		}
+		const next = { ...localRuns };
+		for (const id of close) delete next[id];
+		for (const id of open) next[id] = true;
+		localRuns = next;
+	}
+	/**
+	 * A run's range as drawn. Fold rows carry it, and a click acts on the
+	 * range it reads back from the clicked row: a click that lands while a
+	 * split or merge is queued opens or closes the rows the reader saw, and
+	 * the next reconcile fits the range to the new runs.
+	 */
+	function drawnRange(run: WorkLogRun): string | undefined {
+		const span = runSpans.get(run.index);
+		return span && rangeId(span);
+	}
+	function setRunOpen(run: WorkLogRun, next: boolean, drawn?: string) {
+		const span = runSpans.get(run.index);
+		const seen = drawn === undefined ? null : parseRange(drawn, rowPositions);
+		if (next) {
+			const id = seen ? drawn! : span && rangeId(span);
+			if (id) writeRuns([], [id]);
+			return;
+		}
+		const close = new Set<string>();
+		for (const range of [seen, span]) if (range) for (const id of rangesOver(openIds, range, rowPositions)) close.add(id);
+		writeRuns([...close], []);
+	}
+	const drawnOf = (event: Event) => (event.currentTarget as HTMLElement | null)?.dataset.runRange;
+	// Keep one range per open run at its current extent. Idempotent: once the
+	// ranges match the runs there is nothing to write, so this writes only
+	// when a run's extent changes (prose finishing), never per row.
+	$effect.pre(() => {
+		if (mode !== 'live') return;
+		const { add, remove } = reconcileRanges(openIds, [...runSpans.values()], rowPositions);
+		writeRuns(remove, add);
+	});
+	// A settled turn with nothing to hide keeps its group (so settling does not
+	// remount its rows) but draws no disclosure.
+	const foldable = $derived(
+		sequence.some((entry) => entry.hiddenWhenCollapsed) || gallery.length > 1
+	);
+
 	let previousMode = $state<'live' | 'settled' | null>(null);
 
 	// Reserve space below the live group: the active tool row is replaced every
@@ -70,6 +231,9 @@
 	// tail row shrinks (the user collapsed a tool or worker), drop the
 	// floor to the new content height. A shorter successor with a new id
 	// still keeps the peak, which is the swap-jitter case.
+	//
+	// A live turn rendered as runs keeps every row in place (nothing is
+	// swapped), so it reserves nothing.
 	let sectionEl = $state<HTMLElement | null>(null);
 	let contentEl = $state<HTMLElement | null>(null);
 	let reservedPx = $state(0);
@@ -83,7 +247,7 @@
 		if (!contentEl || typeof ResizeObserver === 'undefined') return;
 		const el = contentEl;
 		const apply = () => {
-			if (mode !== 'live' || open) return;
+			if (mode !== 'live' || open || sequence.length > 0) return;
 			const height = el.getBoundingClientRect().height;
 			const key = tailIdentity(tail);
 			if (height > reservedPx) {
@@ -100,17 +264,18 @@
 	});
 
 	$effect(() => {
-		if (mode !== 'live') {
+		if (mode !== 'live' || sequence.length > 0) {
 			reservedPx = 0;
 			reservedTailKey = '';
 		}
 	});
 
-	// A live run may be open while the user inspects it. Once the turn settles,
-	// deliberately return to the compact finished presentation.
+	// Without a fold key the group keeps its folds locally: at settle the turn
+	// fold opens exactly when the reader had a run open. With one, the store
+	// carries the same rule across a reload (`promoteRuns`, spec §6).
 	$effect(() => {
 		const currentMode = mode;
-		if (previousMode === 'live' && currentMode === 'settled') open = false;
+		if (previousMode === 'live' && currentMode === 'settled' && !turnFold) localOpen = anyRunOpen;
 		previousMode = currentMode;
 	});
 
@@ -122,6 +287,144 @@
 	const disclosureLabel = $derived(
 		open ? 'Hide work details' : `Show work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
 	);
+
+	// ── Header (spec §7) ───────────────────────────────────────────────────
+	const headerLabel = $derived(
+		`Hide work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
+	);
+	/**
+	 * Collapse from the header. When the header was stuck (the group's top had
+	 * scrolled away), bring the collapsed group back to the top of the view so
+	 * the reader stays where they were rather than wherever the rows below
+	 * happen to land.
+	 *
+	 * Only the nearest scrolling ancestor moves, and only by the distance the
+	 * group's top sits above the line the header was stuck to. `scrollIntoView`
+	 * would also scroll overflow-hidden layout boxes around the transcript
+	 * (the chat column), shifting the whole conversation under the top bar.
+	 */
+	function collapseFromHeader(event: MouseEvent, close: () => void) {
+		const header = event.currentTarget as HTMLElement;
+		const section = sectionEl;
+		const stuckAt = header.getBoundingClientRect().top;
+		const stuck = !!section && stuckAt - section.getBoundingClientRect().top > 1;
+		close();
+		if (stuck && section) landAt(section, () => section, stuckAt);
+	}
+
+	/**
+	 * Collapse an open live run from its header. When the header was stuck
+	 * (or being pushed off by the run's end), the collapsed run's fold row is
+	 * brought back to where the header was, so a long earlier run does not
+	 * collapse to a row far above the view. The origin is the run's own fold
+	 * row, not the section top.
+	 */
+	function collapseRunFromHeader(event: MouseEvent, run: WorkLogRun) {
+		const header = event.currentTarget as HTMLElement;
+		const drawn = header.dataset.runRange;
+		const stuckAt = header.getBoundingClientRect().top;
+		const line = scrollParent(header)?.getBoundingClientRect().top;
+		const stuck = line !== undefined && stuckAt - line < 1;
+		setRunOpen(run, false, drawn);
+		if (stuck) landAt(header, () => sectionEl?.querySelector<HTMLElement>(`[data-run-fold="${run.index}"]`), stuckAt);
+	}
+
+	/** Scroll only the nearest scroller so `target()` lands at viewport y `at`. */
+	function landAt(from: HTMLElement, target: () => HTMLElement | null | undefined, at: number) {
+		const scroller = scrollParent(from);
+		if (!scroller) return;
+		requestAnimationFrame(() => {
+			const el = target();
+			if (el) scroller.scrollTop += el.getBoundingClientRect().top - at;
+		});
+	}
+
+	function scrollParent(el: HTMLElement): HTMLElement | null {
+		for (let node = el.parentElement; node; node = node.parentElement) {
+			const overflow = getComputedStyle(node).overflowY;
+			if (overflow === 'auto' || overflow === 'scroll') return node;
+		}
+		return null;
+	}
+
+	// ── Live runs ──────────────────────────────────────────────────────────
+	const runByIndex = $derived(new Map(runs.map((run) => [run.index, run])));
+	/** Sequence positions of each folded run's first and last hidden row. */
+	const runEdges = $derived.by(() => {
+		const first = new Map<number, number>();
+		const last = new Map<number, number>();
+		if (mode !== 'live') return { first, last };
+		sequence.forEach((entry, position) => {
+			if (!entry.foldsInRun || entry.run === undefined || !runByIndex.has(entry.run)) return;
+			if (!first.has(entry.run)) first.set(entry.run, position);
+			last.set(entry.run, position);
+		});
+		return { first, last };
+	});
+	function runLabel(run: WorkLogRun): string {
+		return run.summary ?? `+${run.folded.length} previous tool ${run.folded.length === 1 ? 'call' : 'calls'}`;
+	}
+
+	/**
+	 * Keep an open run's sticky header inside its run. A sticky element is
+	 * bounded by its parent, and a run's rows sit in the turn's container
+	 * beside other rows, so CSS alone would keep the header stuck to the end
+	 * of the turn. Once the run's last row ("Show fewer log entries") rises to
+	 * the header's bottom edge, the header is translated up with it, the way
+	 * section headers hand over in a list; when it is fully off the line it
+	 * is marked `data-run-header-off`.
+	 *
+	 * The placement depends on geometry as well as scroll position, so it is
+	 * recalculated on scroll, when the header or the work log's content
+	 * resizes (a breakpoint changes the header height, a row expands or folds
+	 * inside the run), after any click in the group, and on window resize.
+	 * All open headers share one frame that measures every header before
+	 * writing any, and skips headers far off-screen (run-header-placement.ts).
+	 */
+	const stickWithinRun: Action<HTMLElement, number> = (node, runIndex) => {
+		let current = runIndex;
+		const tracked = trackRunHeader({
+			node,
+			scroller: scrollParent(node),
+			end: () => sectionEl?.querySelector<HTMLElement>(`[data-run-end="${current}"]`)
+		});
+		const group = sectionEl;
+		group?.addEventListener('click', tracked.place);
+		const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(tracked.place);
+		observer?.observe(node);
+		if (contentEl) observer?.observe(contentEl);
+		return {
+			update(next: number) { current = next; tracked.place(); },
+			destroy() {
+				group?.removeEventListener('click', tracked.place);
+				observer?.disconnect();
+				tracked.release();
+			}
+		};
+	};
+
+	// ── Row visibility ─────────────────────────────────────────────────────
+	function rowKey(entry: WorkLogEntry): string {
+		return entry.message.id ?? String(entry.index);
+	}
+	function rowVisible(entry: WorkLogSequenceEntry): boolean {
+		if (mode === 'settled') return open || !entry.hiddenWhenCollapsed;
+		const run = entry.run === undefined ? undefined : runByIndex.get(entry.run);
+		return !entry.foldsInRun || !run || runOpen(run);
+	}
+	// Rows the reader clicked into (expanded a tool, a thought, a worker card).
+	let touched = $state<Record<string, true>>({});
+	const trackTouch: Action<HTMLElement, string> = (node, key) => {
+		let current = key;
+		const mark = () => {
+			if (!touched[current]) touched = { ...touched, [current]: true };
+		};
+		node.addEventListener('click', mark, true);
+		return {
+			update(next: string) { current = next; },
+			destroy() { node.removeEventListener('click', mark, true); }
+		};
+	};
 
 	function isAssistantProse(entry: WorkLogSequenceEntry): boolean {
 		return entry.message.role === 'assistant' && (entry.message.type === 'text' || !entry.message.type);
@@ -137,31 +440,158 @@
 	data-work-log-mode={mode}
 >
 	<div class="worklog-measure" bind:this={contentEl}>
-	{#if open}
-		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
-		{#if mode === 'settled' && sequence.length > 0}
-			<div class="work-sequence is-expanded">
-				{#each sequence as entry (entry.message.id ?? entry.index)}
+	{#if sequence.length > 0}
+		<!-- One keyed row list for live and settled: settling must not remount rows. -->
+		{#if mode === 'settled' && foldable}
+			{#if open}
+				<button
+					type="button"
+					class="wlrow fold hairline"
+					data-fold-header
+					onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
+					aria-expanded="true"
+					aria-label={headerLabel}
+				>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="m18 15-6-6-6 6" />
+					</svg>
+					<span class="fold-label">{collapsedLabel}</span>
+					{#if summary}
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+					{/if}
+				</button>
+			{:else}
+				<button
+					type="button"
+					class="wlrow fold hairline"
+					onclick={() => setOpen(true)}
+					aria-expanded="false"
+					aria-label={disclosureLabel}
+				>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="m6 9 6 6 6-6" />
+					</svg>
+					<span class="fold-label">{collapsedLabel}</span>
+					{#if summary}
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+					{/if}
+				</button>
+			{/if}
+		{/if}
+		<div class="work-sequence" class:is-expanded={mode === 'settled' && open} class:is-collapsed={!(mode === 'settled' && open)}>
+			{#if mode === 'settled' && !open && gallery.length > 1}<MediaGallery items={gallery} />{/if}
+			{#each sequence as entry, position (rowKey(entry))}
+				{@const run = mode === 'live' && entry.run !== undefined ? runByIndex.get(entry.run) : undefined}
+				{@const visible = rowVisible(entry)}
+				{#if run && runEdges.first.get(run.index) === position}
+					{#if runOpen(run)}
+						<!-- The run's fold row heads it while open and sticks (§7). A run's
+						     rows share the turn's container, so `stickWithinRun` pushes the
+						     header off the stuck line as the run's last row passes: it
+						     never rides over later rows and hands over to the next run's. -->
+						<button
+							type="button"
+							class="wlrow fold"
+							data-run-header={run.index}
+							data-run-range={drawnRange(run)}
+							use:stickWithinRun={run.index}
+							onclick={(event) => collapseRunFromHeader(event, run)}
+							aria-expanded="true"
+							aria-label={`Hide work details: ${runLabel(run)}`}
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="m18 15-6-6-6 6" />
+							</svg>
+							<span class="fold-label">
+								{#if run.summary && run.compactSummary}
+									<span class="fold-prose" title={run.summary}>{run.summary}</span>
+									<span class="fold-compact">{run.compactSummary}</span>
+								{:else}
+									{runLabel(run)}
+								{/if}
+							</span>
+						</button>
+					{:else}
+						<button
+							type="button"
+							class="wlrow fold"
+							data-run-fold={run.index}
+							data-run-range={drawnRange(run)}
+							onclick={(event) => setRunOpen(run, true, drawnOf(event))}
+							aria-expanded="false"
+							aria-label={`Show work details: ${runLabel(run)}`}
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="m6 9 6 6 6-6" />
+							</svg>
+							<span class="fold-label">
+								{#if run.summary && run.compactSummary}
+									<span class="fold-prose" title={run.summary}>{run.summary}</span>
+									<span class="fold-compact">{run.compactSummary}</span>
+								{:else}
+									{runLabel(run)}
+								{/if}
+							</span>
+						</button>
+					{/if}
+				{/if}
+				{#if visible || touched[rowKey(entry)]}
 					<div
 						class="sequence-row"
 						class:is-prose={isAssistantProse(entry)}
+						hidden={!visible}
 						id={entry.message.id && isNavigableUserTurn(entry.message) ? turnAnchorId(entry.message.id) : undefined}
 						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
 						use:observeTurnAnchor
+						use:trackTouch={rowKey(entry)}
 					>
-						{@render row(entry.message, entry.index)}
+						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined)}
 					</div>
-				{/each}
-			</div>
-		{:else}
-			{#each folded as entry (entry.message.id ?? entry.index)}
-				{@render row(entry.message, entry.index)}
+				{/if}
+				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
+					<button type="button" class="wlrow fold" data-run-end={run.index} data-run-range={drawnRange(run)} onclick={(event) => setRunOpen(run, false, drawnOf(event))} aria-expanded="true" aria-label="Hide work details">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<path d="m18 15-6-6-6 6" />
+						</svg>
+						Show fewer log entries
+					</button>
+				{/if}
 			{/each}
-			{#each tail as entry (entry.message.id ?? entry.index)}
-				{@render row(entry.message, entry.index)}
-			{/each}
+		</div>
+		{#if mode === 'settled' && foldable && open}
+			<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="m18 15-6-6-6 6" />
+				</svg>
+				Show fewer log entries
+			</button>
 		{/if}
-		<button type="button" class="wlrow fold" onclick={() => (open = false)} aria-expanded="true" aria-label={disclosureLabel}>
+	{:else if open}
+		<!-- Legacy shape (folded rows + visible tail, no ordered sequence). -->
+		<button
+			type="button"
+			class="wlrow fold"
+			class:hairline={mode === 'settled'}
+			data-fold-header
+			onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
+			aria-expanded="true"
+			aria-label={headerLabel}
+		>
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="m18 15-6-6-6 6" />
+			</svg>
+			<span class="fold-label">{collapsedLabel}</span>
+			{#if mode === 'settled' && summary}
+				<span class="fold-summary" title={summary}>· {summary}</span>
+			{/if}
+		</button>
+		{#each folded as entry (entry.message.id ?? entry.index)}
+			{@render row(entry.message, entry.index)}
+		{/each}
+		{#each tail as entry (entry.message.id ?? entry.index)}
+			{@render row(entry.message, entry.index)}
+		{/each}
+		<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m18 15-6-6-6 6" />
 			</svg>
@@ -172,7 +602,7 @@
 			type="button"
 			class="wlrow fold"
 			class:hairline={mode === 'settled'}
-			onclick={() => (open = true)}
+			onclick={() => setOpen(true)}
 			aria-expanded="false"
 			aria-label={disclosureLabel}
 		>
@@ -193,26 +623,9 @@
 				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
 			{/if}
 		</button>
-		{#if mode === 'settled' && sequence.length > 0}
-			<div class="work-sequence is-collapsed">
-				{#if gallery.length > 1}<MediaGallery items={gallery} />{/if}
-				{#each retainedSequence as entry (entry.message.id ?? entry.index)}
-					<div
-						class="sequence-row"
-						class:is-prose={isAssistantProse(entry)}
-						id={entry.message.id && isNavigableUserTurn(entry.message) ? turnAnchorId(entry.message.id) : undefined}
-						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
-						use:observeTurnAnchor
-					>
-						{@render row(entry.message, entry.index, gallerySources)}
-					</div>
-				{/each}
-			</div>
-		{:else}
-			{#each tail as entry (entry.message.id ?? entry.index)}
-				{@render row(entry.message, entry.index)}
-			{/each}
-		{/if}
+		{#each tail as entry (entry.message.id ?? entry.index)}
+			{@render row(entry.message, entry.index)}
+		{/each}
 	{/if}
 	</div>
 </section>
@@ -232,20 +645,6 @@
 
 	.worklog.is-settled {
 		animation: worklog-settle 180ms ease-out both;
-	}
-
-	.wlhead {
-		padding: 10px 8px 5px;
-		font-size: 10.5px;
-		font-weight: 600;
-		letter-spacing: 0.045em;
-		color: var(--subtle-foreground);
-	}
-
-	.wlhead span {
-		font-weight: 400;
-		letter-spacing: 0;
-		text-transform: none;
 	}
 
 	.work-sequence {
@@ -334,6 +733,27 @@
 
 	.wlrow.fold:active {
 		background: var(--active-overlay, var(--scrim));
+	}
+
+	/* Spec §7: the open group's fold row is its header and stays at the top of
+	   the transcript while the group is on screen. The page background keeps
+	   rows from showing through it; hover lays the usual scrim over that. */
+	.wlrow.fold[data-fold-header],
+	.wlrow.fold[data-run-header] {
+		position: sticky;
+		top: 0;
+		z-index: 1;
+		background: var(--background);
+	}
+
+	.wlrow.fold[data-fold-header]:hover,
+	.wlrow.fold[data-run-header]:hover {
+		background: linear-gradient(var(--scrim), var(--scrim)), var(--background);
+	}
+
+	.wlrow.fold[data-fold-header]:active,
+	.wlrow.fold[data-run-header]:active {
+		background: linear-gradient(var(--active-overlay, var(--scrim)), var(--active-overlay, var(--scrim))), var(--background);
 	}
 
 	.wlrow.fold:focus-visible {

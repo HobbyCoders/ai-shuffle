@@ -8,25 +8,59 @@ import {
 	normalizeModel
 } from './models';
 
-/** The user's semantic context-window preference, independent of model family. */
+/**
+ * The user's semantic context-window preference, independent of model family.
+ * `standard` is a cap the user can raise (from the family default up to just
+ * below the full window); `1m` is Extended, locked to the model's full window.
+ */
 export type ContextWindowChoice = 'standard' | '1m';
 
 export const DEFAULT_CONTEXT_WINDOW_CHOICE: ContextWindowChoice = '1m';
 const CLAUDE_STANDARD_CONTEXT = 200_000;
 const GPT_STANDARD_CONTEXT = 256_000;
 const GPT_272K_CONTEXT = 272_000;
+/** The opt-in long-context window that makes a model's context adjustable. */
 const EXTENDED_CONTEXT = 1_000_000;
 
+/** Smallest unit the Standard cap is edited in: whole K tokens. */
+export const CONTEXT_CAP_UNIT = 1_000;
+/** Grid the slider and arrow keys snap to. */
+export const CONTEXT_CAP_STEP = 10_000;
+
 export interface ModelContextControl {
-	standardTokens: typeof CLAUDE_STANDARD_CONTEXT | typeof GPT_STANDARD_CONTEXT | typeof GPT_272K_CONTEXT;
-	extendedTokens: typeof EXTENDED_CONTEXT;
-	standardLabel: '200K' | '256K' | '272K';
-	extendedLabel: '1M';
+	/** The family's default Standard window, and the floor of the cap. */
+	standardTokens: number;
+	/** The highest Standard cap: one slider step below Extended. */
+	standardMaxTokens: number;
+	/** The model's full window. Extended always runs at this; never editable. */
+	extendedTokens: number;
+	standardLabel: string;
+	extendedLabel: string;
+}
+
+/** `200K`, `272K`, `1M`, `1.5M` — compact K/M labels for token counts. */
+export function formatContextTokens(tokens: number): string {
+	if (tokens >= 1_000_000) {
+		const millions = tokens / 1_000_000;
+		return `${Number.isInteger(millions) ? millions : Number(millions.toFixed(2))}M`;
+	}
+	return `${Math.round(tokens / CONTEXT_CAP_UNIT)}K`;
+}
+
+function control(standard: number, extended: number): ModelContextControl {
+	return {
+		standardTokens: standard,
+		standardMaxTokens: Math.max(standard, extended - CONTEXT_CAP_STEP),
+		extendedTokens: extended,
+		standardLabel: formatContextTokens(standard),
+		extendedLabel: formatContextTokens(extended)
+	};
 }
 
 /**
- * Use the registry's selectable windows, which can exceed a model's default.
- * Older registries without explicit choices fall back to the advertised window.
+ * Use the registry's selectable windows (`[standard, full]`), which can exceed
+ * a model's default. Older registries without explicit choices fall back to
+ * the advertised window.
  */
 export function getModelContextControl(
 	model: string | null | undefined
@@ -46,49 +80,77 @@ export function getModelContextControl(
 		? getProviderContextWindow(composite.modelId, composite.providerId)
 		: getClaudeContextWindow(model) ?? getProviderContextWindow(modelId);
 
+	let extended: number;
 	if (choices !== undefined) {
-		if (!choices.includes(EXTENDED_CONTEXT)) return null;
-	} else if (registeredWindow == null || registeredWindow < EXTENDED_CONTEXT) return null;
+		if (choices.length === 0) return null;
+		extended = Math.max(...choices);
+		if (extended < EXTENDED_CONTEXT) return null;
+	} else {
+		if (registeredWindow == null || registeredWindow < EXTENDED_CONTEXT) return null;
+		extended = registeredWindow;
+	}
 
 	const identity = `${modelId} ${getModelLabel(model)}`.toLowerCase();
 	if (nativeClaude || identity.includes('claude')) {
 		if (choices && !choices.includes(CLAUDE_STANDARD_CONTEXT)) return null;
-		return {
-			standardTokens: CLAUDE_STANDARD_CONTEXT,
-			extendedTokens: EXTENDED_CONTEXT,
-			standardLabel: '200K',
-			extendedLabel: '1M'
-		};
+		return control(CLAUDE_STANDARD_CONTEXT, extended);
 	}
 	if (identity.includes('gpt')) {
 		const standard = choices?.includes(GPT_272K_CONTEXT) ? GPT_272K_CONTEXT : GPT_STANDARD_CONTEXT;
 		if (choices && !choices.includes(standard)) return null;
-		return {
-			standardTokens: standard,
-			extendedTokens: EXTENDED_CONTEXT,
-			standardLabel: standard === GPT_272K_CONTEXT ? '272K' : '256K',
-			extendedLabel: '1M'
-		};
+		return control(standard, extended);
 	}
 	return null;
 }
 
-/** Concrete request value for a supported model, or null when no override applies. */
-export function contextWindowForChoice(
-	model: string | null | undefined,
-	choice: ContextWindowChoice
-): number | null {
-	const control = getModelContextControl(model);
-	if (!control) return null;
-	return choice === '1m' ? control.extendedTokens : control.standardTokens;
+/** A Standard cap fitted into the model's range, in whole K tokens. */
+export function clampStandardCap(controlFor: ModelContextControl, tokens: number): number {
+	if (!Number.isFinite(tokens)) return controlFor.standardTokens;
+	const whole = Math.round(tokens / CONTEXT_CAP_UNIT) * CONTEXT_CAP_UNIT;
+	return Math.min(controlFor.standardMaxTokens, Math.max(controlFor.standardTokens, whole));
 }
 
-/** Convert an optional server/session row value back to the semantic picker choice. */
+/** Quick picks for the Standard cap: the default, then round steps that fit. */
+export function standardCapPresets(controlFor: ModelContextControl): number[] {
+	const steps = [400_000, 600_000, 800_000, 1_200_000, 1_600_000, 2_000_000];
+	return [
+		controlFor.standardTokens,
+		...steps
+			.filter((value) => value > controlFor.standardTokens && value <= controlFor.standardMaxTokens)
+			.slice(0, 3)
+	];
+}
+
+/**
+ * Concrete request value for a supported model, or null when no override
+ * applies. `standardCap` is the raised Standard cap in effect (the chat's saved
+ * pin or the owner's per-model default); absent, Standard is the family default.
+ */
+export function contextWindowForChoice(
+	model: string | null | undefined,
+	choice: ContextWindowChoice,
+	standardCap?: number | null
+): number | null {
+	const controlFor = getModelContextControl(model);
+	if (!controlFor) return null;
+	if (choice === '1m') return controlFor.extendedTokens;
+	return typeof standardCap === 'number' && standardCap > 0
+		? clampStandardCap(controlFor, standardCap)
+		: controlFor.standardTokens;
+}
+
+/**
+ * Convert an optional server/session row value back to the semantic picker
+ * choice. With the chat's model known, only its full window reads as Extended;
+ * without it, the 1M opt-in threshold decides.
+ */
 export function contextChoiceFromWindow(
-	value: number | null | undefined
+	value: number | null | undefined,
+	model?: string | null
 ): ContextWindowChoice | null {
 	if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
-	return value >= EXTENDED_CONTEXT ? '1m' : 'standard';
+	const extended = (model ? getModelContextControl(model)?.extendedTokens : null) ?? EXTENDED_CONTEXT;
+	return value >= extended ? '1m' : 'standard';
 }
 
 export function isContextWindowChoice(value: unknown): value is ContextWindowChoice {

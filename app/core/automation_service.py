@@ -763,6 +763,14 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
         if not existing:
             return None, False
 
+        # Retired agents leave disabled, unlinked rows. Every edit surface must
+        # require reassignment before enabling, not just the /enable endpoint.
+        if "profile_id" in kwargs:
+            kwargs["profile_id"] = kwargs["profile_id"] or None
+        effective_profile = kwargs.get("profile_id", existing.get("profile_id"))
+        if kwargs.get("is_enabled", existing.get("is_enabled")) and not effective_profile:
+            raise ValueError("Choose an agent before re-enabling this automation")
+
         # Validate profile if being changed
         if "profile_id" in kwargs and kwargs["profile_id"]:
             profile = database.get_profile(kwargs["profile_id"])

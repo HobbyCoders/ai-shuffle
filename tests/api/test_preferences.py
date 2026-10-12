@@ -13,6 +13,31 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
+@pytest.mark.asyncio
+async def test_preference_identity_resolution_runs_off_loop(monkeypatch):
+    import threading
+    from app.api import preferences
+    loop_thread = threading.get_ident()
+    calls = []
+    def identity(request):
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return "admin", "owner"
+    monkeypatch.setattr(preferences, "get_user_identity", identity)
+    monkeypatch.setattr(preferences.database, "get_all_user_preferences", lambda *a: [])
+    monkeypatch.setattr(preferences.database, "get_user_preference", lambda *a: None)
+    monkeypatch.setattr(preferences.database, "delete_user_preference", lambda *a: True)
+    monkeypatch.setattr(preferences.database, "set_user_preference",
+                        lambda *a, **kw: {"key": "theme", "value": "dark"})
+    body = preferences.PreferenceValue(key="theme", value="dark")
+    await preferences.get_all_preferences(None)
+    await preferences.get_preference(None, "theme")
+    await preferences.set_preference(None, "theme", body)
+    await preferences.set_preference_post(None, "theme", body)
+    await preferences.delete_preference(None, "theme")
+    assert len(calls) == 5
+
+
 class TestPreferencesModuleImports:
     """Verify preferences module can be imported correctly."""
 

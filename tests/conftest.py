@@ -26,8 +26,60 @@ os.environ["TESTING"] = "1"
 # fixture setup. Disposable PostgreSQL jobs opt in below with TEST_POSTGRES_DSN.
 _TEST_DATA = tempfile.TemporaryDirectory(prefix="shuffle-tests-")
 os.environ["DATA_DIR"] = _TEST_DATA.name
+# The FastAPI TestClient issues same-origin requests but sends no Origin/Referer
+# header and reports a client host of "testclient" (not localhost), so the CSRF
+# middleware would reject every state-changing request (POST/PUT/DELETE/PATCH)
+# with a 403. Running the main app in wildcard CORS mode puts the CSRF middleware
+# into development mode, where it skips these checks — matching how the app is
+# exercised locally. This must be set before app.core.config.settings is built
+# below (settings reads CORS_ORIGINS from the environment at instantiation).
+# The dedicated CSRF middleware tests build their own app with an explicit
+# non-wildcard origin, so they are unaffected by this default. This is forced
+# (not setdefault) because the host environment may export a real CORS_ORIGINS
+# for the live deployment, which must not leak into the test process.
+os.environ["CORS_ORIGINS"] = "*"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# ─── No host worker configuration in tests ──────────────────────────────────
+# A run started from a chat on a running worker (the on-device suites,
+# scripts/local_ci.py) inherits that worker's own configuration: APP_VERSION,
+# TOOLS_DIR, BROWSER_MCP_ENTRY and the rest of what ``Settings`` reads. CI has
+# none of these, and the tests of the defaults must see the same here. Every
+# name ``Settings`` reads is dropped, except the three set above, and the global
+# ``settings`` is rebuilt from the cleaned environment before any other app
+# module binds it. Test-control variables (ALLOW_REAL_PG, TEST_POSTGRES_DSN,
+# AI_SHUFFLE_ALLOW_REAL_CLAUDE, ...) are not settings and stay.
+
+_TEST_SET_ENV = {"TESTING", "DATA_DIR", "CORS_ORIGINS"}
+_DIRECT_ENV_READS = {"BROWSER_MCP_ENTRY"}
+
+
+def settings_env_names() -> set:
+    """Every environment name ``app.core.config.Settings`` reads, upper-cased."""
+    from pydantic import AliasChoices
+    from app.core.config import Settings
+
+    names = set()
+    for name, field in Settings.model_fields.items():
+        names.add(name.upper())
+        alias = field.validation_alias
+        choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
+        names.update(choice.upper() for choice in choices if isinstance(choice, str))
+    return names
+
+
+def _drop_host_worker_environment() -> None:
+    from app.core import config
+
+    dropped = settings_env_names() | _DIRECT_ENV_READS
+    for name in list(os.environ):
+        if name.upper() in dropped and name.upper() not in _TEST_SET_ENV:
+            del os.environ[name]
+    config.settings = config.Settings()
+
+
+_drop_host_worker_environment()
 
 # ─── No real ``claude`` CLI in tests ────────────────────────────────────────
 # A test that forgets to point the delegated leg at a fake would otherwise run
@@ -78,6 +130,16 @@ def strip_real_claude_dirs(path_value: str, allowed_roots) -> str:
     return os.pathsep.join(kept)
 
 
+def reapply_claude_guard(allowed_roots) -> bool:
+    """Strip ``claude`` directories from the live PATH again; True when one was."""
+    current = os.environ.get("PATH", "")
+    stripped = strip_real_claude_dirs(current, allowed_roots)
+    if stripped == current:
+        return False
+    os.environ["PATH"] = stripped
+    return True
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _no_real_claude_on_path():
     """Keep the machine's real ``claude`` CLI off PATH for the whole run."""
@@ -88,6 +150,21 @@ def _no_real_claude_on_path():
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("PATH", strip_real_claude_dirs(os.environ.get("PATH", ""), roots))
         yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_on_path_each_test():
+    """Re-apply the session guard before every test.
+
+    ``app.core.startup.check_prerequisites`` prepends ``~/.local/bin`` to the
+    process PATH in place. A module-scoped app fixture runs it before the
+    per-test ``reset_environment`` snapshot, so that snapshot — and every
+    later test on the same xdist worker — would carry the real ``claude``
+    again (seen as a flaky ``test_the_session_guard_left_no_real_claude_on_path``).
+    """
+    if os.environ.get("AI_SHUFFLE_ALLOW_REAL_CLAUDE") != "1":
+        reapply_claude_guard((REPO_ROOT, tempfile.gettempdir()))
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -189,19 +266,6 @@ def bundled_connector_catalog(monkeypatch):
     from app.core import connector_packages
     monkeypatch.setattr(connector_packages, "require_installed", connector_packages.package_id)
 
-
-# The FastAPI TestClient issues same-origin requests but sends no Origin/Referer
-# header and reports a client host of "testclient" (not localhost), so the CSRF
-# middleware would reject every state-changing request (POST/PUT/DELETE/PATCH)
-# with a 403. Running the main app in wildcard CORS mode puts the CSRF middleware
-# into development mode, where it skips these checks — matching how the app is
-# exercised locally. This must be set before app.core.config.settings is first
-# imported (settings reads CORS_ORIGINS from the environment at instantiation).
-# The dedicated CSRF middleware tests build their own app with an explicit
-# non-wildcard origin, so they are unaffected by this default. This is forced
-# (not setdefault) because the host environment may export a real CORS_ORIGINS
-# for the live deployment, which must not leak into the test process.
-os.environ["CORS_ORIGINS"] = "*"
 
 # =============================================================================
 # SAFETY: forbid opening a real Postgres pool during tests
@@ -554,6 +618,26 @@ def isolate_fluid_skills_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "fluid-skills"))
     monkeypatch.setattr(fluid_memory, "prose_skills_root",
                         lambda: Path(settings.fluid_skills_dir).parent / "prose-skills")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_fluid_plugin_home(monkeypatch, tmp_path):
+    """Keep the plugin store (``~/.fluid/plugins``) out of the real user home.
+
+    ``_get_fluid_dir`` names ``/home/appuser/.fluid`` in Docker mode whatever
+    HOME says, so a run on a worker would read the worker's own installed and
+    authored plugins (the network memory tests saw its drafts) and could write
+    there. Every module that resolves the plugin home gets one under tmp_path,
+    and the per-process service cache starts empty so no test is served a
+    service built for another home.
+    """
+    from app.core import connector_packages, plugin_models, plugin_service
+
+    home = tmp_path / "fluid-home"
+    for module in (plugin_models, plugin_service, connector_packages):
+        monkeypatch.setattr(module, "_get_fluid_dir", lambda: home)
+    monkeypatch.setattr(plugin_service, "_plugin_services", {})
     yield
 
 

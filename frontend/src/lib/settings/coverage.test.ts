@@ -109,10 +109,14 @@ describe('assertCategoryCoverage', () => {
 const CONDITIONAL_ROWS: Partial<Record<CategoryId, Record<string, string>>> = {
 	voice: { 'voice.hotkey': 'only while global voice input is on' },
 	security: { 'security.runsAs': 'desktop app only' },
-	system: {
-		'system.seats': 'only with a license lease or a full-seats answer',
-		'system.licenseKey': 'only in licensed (non-beta) builds',
-		'system.deactivate': 'only with a license lease'
+	cloud: {
+		'cloud.link': 'only once the status says the account is not linked',
+		'cloud.remoteWorkers': 'only once the Cloud status loaded',
+		'cloud.plan': 'only on a paid plan',
+		'cloud.renewal': 'only on a paid plan or with a saved plan key',
+		'cloud.upgrade': 'only when not on a paid plan',
+		'cloud.key': 'only in builds with a lease server',
+		'cloud.deactivate': 'only with a saved plan key'
 	}
 };
 

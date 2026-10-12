@@ -35,7 +35,7 @@ async function fixture(t) {
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-source-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
  const bodies=new Map();const requests=[];let signed;let sequence=100;let builds=0;let fail=false;
- const options={root,publicKey,bootstrapNode:process.execPath,fetch:async url=>{requests.push(url);const feed=url.endsWith('/manifest')||url.endsWith('/manifest/edge');return new Response(feed?signed:bodies.get(url)||'missing',{status:feed||bodies.has(url)?200:404});},build:async(source,stage,revision)=>{
+ const options={root,publicKey,bootstrapNode:process.execPath,fetch:async url=>{requests.push(url);const feed=url.endsWith('/manifest')||url.endsWith('/manifest/nightly');return new Response(feed?signed:bodies.get(url)||'missing',{status:feed||bodies.has(url)?200:404});},build:async(source,stage,revision)=>{
   builds++;if(fail)throw Error('Local build failed');
   for(const name of ['server/app/main.py','server/app/static/index.html','source/desktop/dist/main/managed-entry.js']){await fs.mkdir(path.dirname(path.join(stage,name)),{recursive:true});await fs.writeFile(path.join(stage,name),revision);}
   const electron=path.join(root,'dependencies',KEY,process.platform==='win32'?'electron.exe':'electron');
@@ -610,7 +610,7 @@ test('public source requests omit credentials and reject off-origin URLs and red
  const request=module.exports.publicSourceFetch;
  await request('https://hobbycoders.com/v1/desktop/manifest');
  assert.equal(requests[0][1].credentials,'omit');assert.equal(requests[0][1].redirect,'error');assert.equal(requests[0][1].headers,undefined);
- await request('https://hobbycoders.com/v1/desktop/manifest/edge');
+ await request('https://hobbycoders.com/v1/desktop/manifest/nightly');
  for(const url of ['https://evil.example/v1/desktop/manifest','https://user:secret@hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest?token=secret','https://hobbycoders.com/v1/desktop/manifest/beta'])await assert.rejects(request(url),/Invalid source/);
  assert.equal(requests.length,2);
  // The lease header goes only to the hub's update endpoints, never with a redirect or credentials.
@@ -638,18 +638,29 @@ test('only signed stable releases are accepted by default; edge and unlabelled m
  }
  await f.release(A);assert.equal((await u.download()).kind,'ready');
 });
-test('the owner can opt one install into edge; the edge feed must be signed edge',async t=>{
+for (const configured of ['nightly','edge']) for (const signed of ['nightly','edge']) {
+ test(`${configured} follows nightly and accepts signed ${signed} during the transition`,async t=>{
+  const f=await fixture(t);const u=f.create();await u.load();
+  await fs.writeFile(path.join(f.root,'update-channel.json'),JSON.stringify({channel:configured}));
+  assert.equal(await u.channel(),'nightly');
+  await f.release(A);await assert.rejects(u.check(),/did not return a signed nightly release/);
+  assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest/nightly']);
+  await f.release(A,undefined,{channel:signed,version:'0.9.1-dev.3+gabc1234'});assert.equal((await u.download()).kind,'ready');
+  for(const text of ['{"channel":"beta"}','not json','{}']){
+   await fs.writeFile(path.join(f.root,'update-channel.json'),text);await assert.rejects(u.channel(),/update-channel.json must contain/);
+  }
+  await fs.rm(path.join(f.root,'update-channel.json'));assert.equal(await u.channel(),'stable');
+  assert.equal(await new SourceUpdates({...f.options,channel:'edge'}).channel(),'nightly');
+ });
+}
+test('channel setter persists the picker choice and refuses a downgrade',async t=>{
  const f=await fixture(t);const u=f.create();await u.load();
- await fs.writeFile(path.join(f.root,'update-channel.json'),JSON.stringify({channel:'edge'}));
- assert.equal(await u.channel(),'edge');
- await f.release(A);await assert.rejects(u.check(),/did not return a signed edge release/);
- assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest/edge']);
- await f.release(A,undefined,{channel:'edge',version:'0.9.1-dev.3+gabc1234'});assert.equal((await u.download()).kind,'ready');
- for(const text of ['{"channel":"beta"}','not json','{}']){
-  await fs.writeFile(path.join(f.root,'update-channel.json'),text);await assert.rejects(u.channel(),/update-channel.json must contain/);
- }
- await fs.rm(path.join(f.root,'update-channel.json'));assert.equal(await u.channel(),'stable');
- assert.equal(await new SourceUpdates({...f.options,channel:'edge'}).channel(),'edge');
+ assert.deepEqual(await u.channelConfig(),{channel:'stable',source:'default',editable:true});
+ await u.setChannel('nightly');
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'update-channel.json'),'utf8')),{channel:'nightly'});
+ assert.deepEqual(await f.create().channelConfig(),{channel:'nightly',source:'file',editable:true});
+ await assert.rejects(u.setChannel('stable'),/reinstall/);
+ await assert.rejects(u.setChannel('beta'),/cannot be changed/);
 });
 test('a tree digest that does not match the extracted files stops the update before the build',async t=>{
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();

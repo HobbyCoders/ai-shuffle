@@ -1,12 +1,12 @@
 <!--
 title: FAQ
-description: Your own AI accounts, what HobbyCoders sees, requirements, licensing, trials, refunds and support
+description: Your own AI accounts, what HobbyCoders sees, requirements, Cloud plans, refunds and support
 order: 13
 -->
 
 # Frequently asked questions
 
-You bring your own AI account. HobbyCoders sells the workspace, not the AI. These answers match the [FAQ on hobbycoders.com](https://hobbycoders.com/ai-shuffle/faq).
+You bring your own AI account. The app is free; HobbyCoders sells optional Cloud services, not AI usage. These answers match the [FAQ on hobbycoders.com](https://hobbycoders.com/ai-shuffle/faq).
 
 ## Do I need my own AI account?
 
@@ -30,38 +30,38 @@ If you use remote access from your phone or another browser, that traffic travel
 
 ## What does AI Shuffle's own server see?
 
-Very little, and never your prompts. Your install checks for updates and, once licensing is live, checks its license. Activation sends your license key, an install ID, a machine ID, the machine name and the app version. The daily check sends only the install ID, the machine ID and the app version. If you link a phone or use remote access, the connection service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists every address the app contacts and why.
+Your install checks for free updates. Linking a paid Cloud plan sends your key, an install ID, hashed machine identifiers, the machine name and the app version. Lease renewals send the install token, install ID, hashed fingerprint and app version, never prompts or AI provider credentials. If you use Cloud remote access, the service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists the services it contacts.
 
 ## What do I need to run it?
 
 Any of these:
 
 - **Docker** on a Linux computer, NAS or home server (64-bit Intel or AMD).
-- **Windows 10 or 11**, with the desktop app (in beta).
-- **Linux** (64-bit Intel or AMD), with the desktop app (in beta).
+- **Windows 10 or 11**, with the desktop app.
+- **Linux** (64-bit Intel or AMD), with the desktop app.
 - **macOS desktop app**: coming soon.
 
 The **Android app** is optional, for using your workspace away from your desk. An iPhone and iPad app is coming soon; use a browser for now. See [Requirements](/docs/getting-started/requirements).
 
-## How many machines does a license cover?
+## How many machines can I use?
 
-One license covers one account with up to 3 workers, the machines that run AI Shuffle. The Android app on your phones is included. See [License](/docs/getting-started/license) and the [license terms](https://hobbycoders.com/license).
+Run as many local workers as you need on your LAN or VPN. An optional free Cloud account serves 1 remote worker; the paid plan serves 3. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
 ## How much does AI Shuffle cost?
 
-A monthly or yearly subscription, after a 14-day trial. Beta users get a founder price, locked for as long as their subscription stays active. Current prices are on [hobbycoders.com](https://hobbycoders.com/ai-shuffle).
+The app and updates are free. AI Shuffle Cloud has a free account with 1 remote worker and no card, or a paid plan with 3 remote workers. Founder pricing is $14/month or $140/year; regular pricing is $20/month or $200/year.
 
-## Is there a free trial?
+## Is there a free account?
 
-Yes. Every license starts with a 14-day trial with every feature. There is no permanent free tier.
+Yes. One remote worker, no card and no time limit. There is no trial, and local use needs no account.
 
 ## Does it work offline?
 
-Yes. The app keeps working for up to 14 days between license checks, so a short outage on our side or yours never stops you. Your AI provider still needs internet access.
+Yes. Local use has no license checks or time limit. Your AI provider may still need internet access.
 
 ## What happens if I cancel?
 
-Your license stays active until the end of the period you paid for. After that, the app stops starting new agent runs. Your projects, sessions and database stay on your machine, untouched. At any time, **Settings → System → Export all data** downloads every chat (as a private backup `.jsonl` and as Markdown), every agent and your project list in one ZIP. To keep everything else, including project files, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
+Your paid Cloud plan stays active until the end of the period you paid for. After that, the hub stops serving extra tunnels; your free account keeps one remote worker. Nothing in the app stops working, and updates stay free. Your projects, sessions and database stay on your machine, untouched. At any time, **Settings → System → Export all data** downloads every chat (as a private backup `.jsonl` and as Markdown), every agent and your project list in one ZIP. To keep everything else, including project files, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
 
 ## Can I get a refund?
 
@@ -69,11 +69,11 @@ Yes. If AI Shuffle isn't for you, email support@hobbycoders.com within 7 days of
 
 ## Can I buy it from anywhere?
 
-Not quite. At launch we can't sell to buyers in the European Union or the United Kingdom. We plan to add them later; join the waitlist on hobbycoders.com and we'll tell you when.
+Not quite. At launch we can't sell to buyers in the European Union or the United Kingdom. We plan to add them later. The app itself is free to download and use anywhere.
 
 ## Is there a team plan?
 
-Not yet. A license is for one person's account. Each person uses their own AI accounts; sharing one AI subscription between several people is against the AI providers' terms, and AI Shuffle is not built for it.
+Not yet. A Cloud account is for one person. Each person uses their own AI accounts; sharing one AI subscription between several people is against the AI providers' terms, and AI Shuffle is not built for it.
 
 ## Is AI Shuffle made by an AI provider?
 

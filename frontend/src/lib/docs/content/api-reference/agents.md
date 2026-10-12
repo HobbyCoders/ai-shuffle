@@ -8,7 +8,7 @@ order: 5
 
 > **Renamed from `/profiles`.** Agent endpoints live at `/api/v1/agents`. Response shapes did not change. The old `/api/v1/profiles` and `/api/v1/subagents` paths return `404`; see [Former `/subagents` API](#former-subagents-api) below.
 
-Endpoints for managing agents — configurations that control an agent's behavior, prompt, and tool access. Every session runs under an agent. Paths and fields that say `profile` hold an agent id.
+Endpoints for managing agents — configurations that control an agent's behavior, prompt, and tool access. Sessions may run without a saved agent. Paths and fields that say `profile` hold an agent id.
 
 An agent does not pin a model: the model, reasoning effort, and permission mode are chosen when a session is created and stored on the session, not on the agent.
 
@@ -54,11 +54,29 @@ curl http://localhost:8000/api/v1/agents \
 
 ### GET /api/v1/agents/templates
 
-Built-in system prompts offered as starting points for a new agent. Nothing is applied until you copy one into an agent's config.
+Legacy system-prompt template endpoint. Returns an empty list now that no built-in agents ship. Use the opt-in team endpoints below instead.
 
 **Auth:** Required
 
 Returns a list of `{"id", "name", "description", "prompt", "tools"}`.
+
+### GET /api/v1/agents/team-templates
+
+List the single available opt-in team and which members already exist.
+
+**Auth:** Owner only
+
+Returns `[{"id": "starter-team", "name": "Starter team", "description": "…", "agents": [{"key": "general-purpose", "name": "General Purpose", "existing_agent_id": null}, {"key": "frontend-designer", "name": "Frontend Designer", "existing_agent_id": null}]}]`. Installed members have their ordinary agent ID in `existing_agent_id`.
+
+### POST /api/v1/agents/templates/starter-team/install
+
+Install General Purpose and Frontend Designer as ordinary editable, deletable owner agents (`is_builtin: false`) with fresh IDs. No request body. Returns the same template object with the installed IDs.
+
+**Auth:** Owner only
+
+Idempotent: creates only missing members. Existing team members are recognized even after renaming, and an ordinary agent with the same name is left untouched. Reinstallation does not reset prompts, model assignments or other owner edits. Removing a member allows a later install to recreate it with a new ID, without inheriting old API-key grants.
+
+On upgrade, customized legacy General Purpose and Frontend Designer rows become ordinary agents (`is_builtin: false`) without changing their IDs, config, API-key scopes or references. Only rows proven to match known historical shipped defaults are removed; unknown or unmatchable states are kept. Preserved legacy role IDs count as existing members even after renaming, without being marked as starter installations. Installation adds only the other missing role and never overwrites a preserved row.
 
 ### GET /api/v1/agents/{agent_id}
 
@@ -95,7 +113,7 @@ Optional top-level `avatar_color` sets the colour the Agents page shows for the 
 
 ### PUT /api/v1/agents/{agent_id}
 
-Update an existing agent. All agents (including built-ins) are editable.
+Update an existing owner agent, including agents installed from the starter team.
 
 **Auth:** Owner only
 
@@ -115,13 +133,13 @@ curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123 \
 
 ### DELETE /api/v1/agents/{agent_id}
 
-Delete an agent. Built-in agents cannot be deleted.
+Delete an owner agent, including an agent installed from the starter team. Historical sessions are preserved.
 
 **Auth:** Owner only
 
 ### POST /api/v1/agents/{agent_id}/restore
 
-Restore a built-in agent (**General Purpose**, **Plan** or **Frontend Designer**) to its original defaults: name, description, prompt, tools and model. Skills, memory and MCP servers you added are kept. A custom agent has no defaults to restore to and returns `400`.
+Legacy built-in restore endpoint. No built-in subagents ship. Ordinary agents, including starter-team agents, have no managed defaults and return `400`.
 
 **Auth:** Owner only
 
@@ -166,16 +184,16 @@ Get the full nested-agent objects enabled for this agent.
 ```json
 [
   {
-    "id": "Plan",
-    "name": "Plan",
-    "description": "Software architect agent for designing implementation plans",
-    "prompt": "You are a software architect and planning specialist...",
-    "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
+    "id": "agent_installed_uuid",
+    "name": "General Purpose",
+    "description": "Coding agent for backend and general implementation work",
+    "prompt": "You are a coding subagent for AI Shuffle...",
+    "tools": null,
     "model": null,
     "skills": null,
     "memory": null,
     "mcp_servers": null,
-    "is_builtin": true,
+    "is_builtin": false,
     "created_at": "2025-01-01T00:00:00Z",
     "updated_at": "2025-01-01T00:00:00Z"
   }
@@ -256,7 +274,7 @@ Replace the entire enabled agents list.
 curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123/enabled-agents \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"enabled_agents": ["Plan", "my-custom-agent"]}'
+  -d '{"enabled_agents": ["agent_installed_uuid", "my-custom-agent"]}'
 ```
 
 ### POST /api/v1/agents/{agent_id}/enabled-agents/{subagent_id}

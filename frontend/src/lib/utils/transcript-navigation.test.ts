@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
 import {
+	needsYouTurnIds,
+	turnsOwningTools,
 	compactTurnLabel,
 	deriveUserTurnNavigationItems,
 	isNavigableUserTurn,
@@ -55,6 +57,41 @@ describe('transcript navigation derivation', () => {
 		expect(isNavigableUserTurn(message({ role: 'user' }))).toBe(true);
 		expect(isNavigableUserTurn(message({ role: 'user', type: 'command' }))).toBe(false);
 		expect(isNavigableUserTurn(message({ role: 'assistant' }))).toBe(false);
+	});
+});
+
+describe('turn navigation stops (#2268)', () => {
+	const prompt = (id: string, turnId?: string) => message({ id, role: 'user', content: `Prompt ${id}`, turnId });
+	const reply = (id: string) => message({ id, content: 'ok' });
+
+	it('counts a steered turn once, on the prompt that opened it', () => {
+		const items = deriveUserTurnNavigationItems([
+			prompt('u1', 't1'), reply('a1'), prompt('u2', 't1'), reply('a2'), reply('a3')
+		]);
+		expect(items.map((item) => item.id)).toEqual(['u1']);
+	});
+
+	it('gives two ordinary turns a stop each', () => {
+		const items = deriveUserTurnNavigationItems([
+			prompt('u1', 't1'), reply('a1'), prompt('u2', 't2'), reply('a2')
+		]);
+		expect(items.map((item) => item.id)).toEqual(['u1', 'u2']);
+	});
+
+	it('keeps one stop per prompt when there is no real turn id', () => {
+		const items = deriveUserTurnNavigationItems([
+			prompt('u1'), reply('a1'), prompt('u2'), prompt('u3', 'backfill'), prompt('u4', 'backfill')
+		]);
+		expect(items.map((item) => item.id)).toEqual(['u1', 'u2', 'u3', 'u4']);
+	});
+
+	it('puts a question asked after a steer on the turn the steer joined', () => {
+		const messages = [
+			prompt('u1', 't1'),
+			prompt('u2', 't1'),
+			message({ id: 'q', type: 'tool_use', toolName: 'AskUserQuestion', toolId: 'ask-1' })
+		];
+		expect(turnsOwningTools(messages, ['ask-1'])).toEqual(new Map([['ask-1', 'u1']]));
 	});
 });
 
@@ -127,5 +164,31 @@ describe('live turn anchor', () => {
 	it('falls back to the first message when there is no user prompt', () => {
 		expect(resolveLiveTurnStartedAt([message({ id: 'a1', timestamp: started })], 'turn-1')).toBe(started);
 		expect(resolveLiveTurnStartedAt([], 'turn-1')).toBeNull();
+	});
+});
+
+describe('needsYouTurnIds (spec §5 rail dot)', () => {
+	const older: ChatMessage[] = [
+		{ id: 'u1', role: 'user', content: 'Plan the release' },
+		{ id: 't1', role: 'assistant', type: 'tool_use', toolName: 'AskUserQuestion', toolId: 'ask-1', content: '' },
+		{ id: 'a1', role: 'assistant', type: 'text', content: 'Asked; carrying on meanwhile.' },
+		{ id: 'u2', role: 'user', content: 'Also bump the version' },
+		{ id: 'a2', role: 'assistant', type: 'text', content: 'Bumped.' }
+	];
+
+	it('keeps a surviving question on the turn that asked it after another user message', () => {
+		expect(turnsOwningTools(older, ['ask-1'])).toEqual(new Map([['ask-1', 'u1']]));
+		expect(needsYouTurnIds(1, older, ['ask-1'], 'u2')).toEqual(['u1']);
+	});
+
+	it('puts what no tool call explains on the newest turn, beside the older question', () => {
+		// The question plus a permission prompt in the newest turn.
+		expect(needsYouTurnIds(2, older, ['ask-1'], 'u2')).toEqual(['u1', 'u2']);
+		// A question whose call is not in the transcript (queue loaded first).
+		expect(needsYouTurnIds(1, older, ['ask-missing'], 'u2')).toEqual(['u2']);
+	});
+
+	it('marks nothing when nothing waits', () => {
+		expect(needsYouTurnIds(0, older, ['ask-1'], 'u2')).toEqual([]);
 	});
 });

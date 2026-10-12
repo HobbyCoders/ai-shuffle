@@ -14,11 +14,12 @@ import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecuti
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, newLocalPendingId } from './pending-queue';
-import { contextWindowForChoice } from '$lib/constants/model-context';
+import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { effortToSend } from '../assistant';
@@ -181,10 +182,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	 * would silently produce no override.
 	 */
 	function contextWindowOverride(state: ActiveSessionState): number | null {
-		return contextWindowForChoice(
-			state.modelOverride || getDefaultModel(),
-			state.contextWindowChoice
-		);
+		return selectedContextWindow(state);
 	}
 
 	function buildOverrides(): Record<string, string | string[] | number | boolean> | undefined {
@@ -499,10 +497,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// landed since the send began: the server has described the queue for
 			// this window, so a local row added on top of it is a second copy that
 			// no later frame is guaranteed to replace.
+			const clientMessageId = newLocalPendingId();
 			const queuedEcho = sendWhileStreaming && !options?.skipMessageAppend;
 			const optimisticQueuedId = queuedEcho
 				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
-				? newLocalPendingId()
+				? clientMessageId
 				: null;
 
 			// Single atomic update — avoids intermediate render where streaming
@@ -530,6 +529,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					...s,
 					queuedMessages: [...s.queuedMessages, {
 						id: optimisticQueuedId,
+						clientMessageId,
 						content: prompt,
 						queuedAt: Date.now(),
 					}],
@@ -540,6 +540,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					const baseMessages = s.messages;
 					// eslint-disable-next-line no-console
 					if (STREAM_DEBUG) console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
+					// A send into a parked turn is a steer: carry that turn's id so the
+					// transcript keeps it inside the turn instead of folding the turn.
+					const steerTurnId = parkedSendTurnId(s);
 					return {
 						...s,
 						messages: [...baseMessages, {
@@ -547,13 +550,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							role: 'user' as const,
 							content: prompt,
 							profileId: queryProfileId,
-							// V2 Phase 1: stamp the client-generated adoption token as the
-							// commandId so the SSE reducer can reconcile the eventual
-							// `message.user` event onto THIS optimistic row (in place, no
-							// remount) instead of appending a duplicate. Only set for a
-							// new-session query (requestId is null for existing sessions —
-							// the reducer then falls back to content+recency matching).
-							commandId: requestId || undefined,
+							...(steerTurnId ? { turnId: steerTurnId } : {}),
+							// The same command identity comes back on the durable receipt.
+							commandId: clientMessageId,
 							timestamp: new Date().toISOString(),
 						}],
 						// S6: declared optimistic flip (see the skipMessageAppend
@@ -569,6 +568,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const remoteOnly = !_state.project && !!_state.projectV2Id;
 			const querySent = wsConn.send({
 				type: 'query',
+				client_message_id: clientMessageId,
 				prompt,
 				session_id: _state.sessionId,
 				profile: _state.profile,
@@ -1115,25 +1115,26 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			});
 		},
 
-		/** Unsend a message that hasn't reached the model yet. Returns its text. */
+		/** Request withdrawal; the verdict handler restores the draft on success. */
 		removeQueuedMessage(id: string): string | null {
 			const _state = getState();
 			const entry = _state.queuedMessages.find(m => m.id === id);
 			if (!entry) return null;
-			// An optimistic echo carries an id only this tab has ever seen, so the
-			// server cannot act on it — naming it in a remove frame just triggers a
-			// rebroadcast that puts the bubble back. Drop it here and let
-			// pendingQueue re-aim the removal at the real row when it arrives.
-			const serverId = pendingQueue.requestRemoval(_state.sessionId, entry);
-			update(s => ({ ...s, queuedMessages: s.queuedMessages.filter(m => m.id !== id) }));
-			if (serverId) {
-				wsConn.send({
-					type: 'remove_queued_message',
-					message_id: serverId,
-					session_id: _state.sessionId,
-				});
+			if (entry.status) return null;
+			const key = pendingQueue.requestRemoval(_state.sessionId, entry);
+			const sent = wsConn.send({
+				type: 'remove_queued_message',
+				message_id: entry.id,
+				client_message_id: entry.clientMessageId,
+				session_id: _state.sessionId,
+			});
+			if (!sent) {
+				pendingQueue.removalFailed(_state.sessionId, key);
+				update(s => ({ ...s, error: 'Connection lost before cancellation was sent. Please try again.' }));
+				return null;
 			}
-			return entry.content;
+			update(s => ({ ...s, queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages) }));
+			return null; // restore the draft only after a withdrawn verdict
 		},
 	};
 }

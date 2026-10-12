@@ -23,15 +23,19 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { Check, LayoutGrid, Search, Star } from 'lucide-svelte';
-	import { tick } from 'svelte';
+	import { Check, CircleDashed, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
+	import { onDestroy, tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
-	import { UNOFFICIAL_SIGN_IN_HELP } from '$lib/components/settings/providers/providers-model';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
 	import { getModelLabel } from '$lib/constants/models';
 	import {
+		CONTEXT_CAP_STEP,
+		CONTEXT_CAP_UNIT,
+		clampStandardCap,
+		formatContextTokens,
 		getModelContextControl,
+		standardCapPresets,
 		type ContextWindowChoice
 	} from '$lib/constants/model-context';
 	import {
@@ -39,6 +43,12 @@
 		isFavoriteModel,
 		toggleFavoriteModel
 	} from '$lib/stores/modelFavorites.svelte';
+	import {
+		MODEL_WINDOW_MAX,
+		MODEL_WINDOW_MIN,
+		getModelWindowInfo,
+		saveModelWindow
+	} from '$lib/stores/model-window';
 
 	interface ExtraRow {
 		value: string;
@@ -60,6 +70,13 @@
 		/** Optional session context control. Omit both props on profile-only pickers. */
 		contextChoice?: ContextWindowChoice;
 		onContextChoiceSelect?: (choice: ContextWindowChoice) => void;
+		/**
+		 * The Standard cap in effect (tokens). With `onContextStandardChange` it
+		 * makes Standard adjustable, from the family default up to just below the
+		 * full window. Extended is always the model's full window and not editable.
+		 */
+		contextStandardTokens?: number | null;
+		onContextStandardChange?: (tokens: number) => void | Promise<void>;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
 		/**
@@ -81,6 +98,8 @@
 		ariaLabel = 'Model',
 		contextChoice,
 		onContextChoiceSelect,
+		contextStandardTokens = null,
+		onContextStandardChange,
 		onRequestClose,
 		startOnAll = false
 	}: Props = $props();
@@ -102,10 +121,23 @@
 			.filter((o): o is PickerOption => o != null)
 	);
 	const hasFavorites = $derived(favoriteOptions.length > 0);
-	const contextControl = $derived(
-		contextChoice && onContextChoiceSelect && options.some(option => option.value === value)
-			? getModelContextControl(value) : null
+	/** The host opted into the context section and the value is one of its models. */
+	const contextHosted = $derived(
+		onContextChoiceSelect != null && options.some(option => option.value === value)
 	);
+	const contextControl = $derived(
+		contextHosted && contextChoice ? getModelContextControl(value) : null
+	);
+	/**
+	 * Every other hosted model still gets the section: one known window, or an
+	 * unknown one (never guessed). Its window is the provider entry's own
+	 * `context_window`, which the owner can set from here.
+	 */
+	const modelWindow = $derived.by(() => {
+		if (!contextHosted || contextControl) return null;
+		const info = getModelWindowInfo(value);
+		return info && info.kind !== 'choice' ? info : null;
+	});
 
 	// ---- rail selection -------------------------------------------------------
 	// Initial rail pick: All (when requested), else favorites when any exist,
@@ -147,10 +179,9 @@
 		isSearching || effectiveRailKey === FAVORITES || effectiveRailKey === ALL || !showRail
 	);
 
-	/** Rail tooltip: brand, auth subtext and, for a ChatGPT/SuperGrok subscription, the unofficial note. */
+	/** Rail tooltip: brand and auth subtext. */
 	function railLabel(g: PickerGroup): string {
-		const base = g.subtext ? `${g.name} · ${g.subtext}` : g.name;
-		return g.unofficial ? `${base} · Unofficial sign-in` : base;
+		return g.subtext ? `${g.name} · ${g.subtext}` : g.name;
 	}
 
 	function groupFor(o: PickerOption): PickerGroup | undefined {
@@ -224,12 +255,315 @@
 		if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
 		e.preventDefault();
 		e.stopPropagation();
+		// A group of one: arrows keep focus on the only radio and change nothing.
+		if (!contextControl) return;
 		const next: ContextWindowChoice = e.key === 'Home' ? 'standard'
 			: e.key === 'End' ? '1m'
 			: contextChoice === 'standard' ? '1m' : 'standard';
 		onContextChoiceSelect?.(next);
 		(e.currentTarget as HTMLElement)
 			.querySelector<HTMLButtonElement>(`[data-context-choice="${next}"]`)?.focus();
+	}
+
+	// ---- Standard cap editor --------------------------------------------------
+	// Standard is a cap the owner can raise: the slider snaps to a 10K grid,
+	// the field takes any whole-K value in range, and Extended stays the full
+	// window. A local draft keeps the control responsive while the chat's
+	// run-settings save is in flight; it drops back to the prop once saved.
+	const editorId = $props.id();
+	/** Arrow keys arrive in bursts; save the settled value, not every step. */
+	const KEY_COMMIT_DELAY_MS = 300;
+	const PAGE_STEP = 100_000;
+
+	const capEditable = $derived(
+		contextControl != null && onContextStandardChange != null
+			&& contextControl.standardMaxTokens > contextControl.standardTokens
+	);
+	const savedCap = $derived(
+		contextControl ? clampStandardCap(contextControl, contextStandardTokens ?? contextControl.standardTokens) : 0
+	);
+	let capDraft = $state<number | null>(null);
+	const shownCap = $derived(contextControl ? (capDraft ?? savedCap) : 0);
+	const capRaised = $derived(contextControl != null && shownCap > contextControl.standardTokens);
+	const capPresets = $derived(contextControl ? standardCapPresets(contextControl) : []);
+	const capFill = $derived.by(() => {
+		if (!contextControl) return 0;
+		const span = contextControl.standardMaxTokens - contextControl.standardTokens;
+		return span > 0 ? ((shownCap - contextControl.standardTokens) / span) * 100 : 0;
+	});
+
+	let capEditorOpen = $state(false);
+	let capText = $state('');
+	let capTextFocused = $state(false);
+	let capError = $state<string | null>(null);
+	let capTimer: ReturnType<typeof setTimeout> | null = null;
+	let pendingCap: number | null = null;
+
+	// The field mirrors the cap in effect unless the owner is typing in it.
+	$effect(() => {
+		const whole = String(Math.round(shownCap / CONTEXT_CAP_UNIT));
+		if (!capTextFocused) capText = whole;
+	});
+
+	async function commitCap(tokens: number) {
+		if (!contextControl || !onContextStandardChange) return;
+		const next = clampStandardCap(contextControl, tokens);
+		// A direct pick supersedes any arrow-key burst still waiting to save.
+		if (capTimer) clearTimeout(capTimer);
+		capTimer = null;
+		pendingCap = null;
+		capDraft = next;
+		capError = null;
+		try {
+			await onContextStandardChange(next);
+		} finally {
+			// A newer drag may have started meanwhile; only clear our own draft.
+			if (capDraft === next) capDraft = null;
+		}
+	}
+
+	function flushCapCommit() {
+		if (capTimer) clearTimeout(capTimer);
+		capTimer = null;
+		const tokens = pendingCap;
+		pendingCap = null;
+		if (tokens != null) void commitCap(tokens);
+	}
+
+	function scheduleCapCommit(tokens: number) {
+		capDraft = tokens;
+		pendingCap = tokens;
+		if (capTimer) clearTimeout(capTimer);
+		capTimer = setTimeout(flushCapCommit, KEY_COMMIT_DELAY_MS);
+	}
+
+	onDestroy(flushCapCommit);
+
+	/** Pointer positions snap to the 10K grid; the range ends stay reachable. */
+	function snapCap(tokens: number): number {
+		if (!contextControl) return tokens;
+		const { standardTokens: min, standardMaxTokens: max } = contextControl;
+		if (tokens <= min) return min;
+		if (tokens >= max) return max;
+		return clampStandardCap(contextControl, Math.round(tokens / CONTEXT_CAP_STEP) * CONTEXT_CAP_STEP);
+	}
+
+	/** One grid step up or down from `from`, landing on the grid (272K → 280K). */
+	function stepCap(from: number, direction: 1 | -1, size: number): number {
+		if (!contextControl) return from;
+		const target = direction > 0
+			? Math.floor(from / size) * size + size
+			: Math.ceil(from / size) * size - size;
+		return clampStandardCap(contextControl, target);
+	}
+
+	function onCapSliderKeydown(e: KeyboardEvent) {
+		if (!contextControl) return;
+		let next: number | null = null;
+		if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = stepCap(shownCap, 1, CONTEXT_CAP_STEP);
+		else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = stepCap(shownCap, -1, CONTEXT_CAP_STEP);
+		else if (e.key === 'PageUp') next = stepCap(shownCap, 1, PAGE_STEP);
+		else if (e.key === 'PageDown') next = stepCap(shownCap, -1, PAGE_STEP);
+		else if (e.key === 'Home') next = contextControl.standardTokens;
+		else if (e.key === 'End') next = contextControl.standardMaxTokens;
+		if (next == null) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (next !== shownCap) scheduleCapCommit(next);
+	}
+
+	function onCapSliderInput(e: Event) {
+		capDraft = snapCap(Number((e.currentTarget as HTMLInputElement).value));
+	}
+
+	function onCapSliderChange(e: Event) {
+		void commitCap(snapCap(Number((e.currentTarget as HTMLInputElement).value)));
+	}
+
+	/**
+	 * Free entry in K tokens: `450`, `450k`, `0.5m`, `1.2M`. A bare number of
+	 * 10,000 or more is read as raw tokens, so pasting `450000` works too.
+	 */
+	function parseCapText(text: string): number | null {
+		const match = text.trim().toLowerCase().replace(/[,_\s]/g, '')
+			.match(/^(\d+(?:\.\d+)?)(k|m)?(?:tokens?)?$/);
+		if (!match) return null;
+		const amount = Number(match[1]);
+		const tokens = match[2] === 'm' ? amount * 1_000_000
+			: match[2] === 'k' || amount < 10_000 ? amount * CONTEXT_CAP_UNIT
+			: amount;
+		return Number.isFinite(tokens) && tokens > 0 ? Math.round(tokens) : null;
+	}
+
+	function capProblem(tokens: number | null): string | null {
+		if (!contextControl) return null;
+		if (tokens == null) return 'Enter a size in K tokens, like 450.';
+		if (tokens < contextControl.standardTokens) {
+			return `Standard can't go below ${contextControl.standardLabel}.`;
+		}
+		if (tokens > contextControl.standardMaxTokens) {
+			return `Up to ${formatContextTokens(contextControl.standardMaxTokens)}. `
+				+ `For the full ${contextControl.extendedLabel}, choose Extended.`;
+		}
+		return null;
+	}
+
+	function onCapTextInput() {
+		capError = capText.trim() ? capProblem(parseCapText(capText)) : null;
+	}
+
+	function submitCapText(): boolean {
+		const tokens = parseCapText(capText);
+		const problem = capProblem(tokens);
+		capError = problem;
+		if (problem || tokens == null) return false;
+		if (!contextControl) return false;
+		const next = clampStandardCap(contextControl, tokens);
+		if (next !== shownCap) void commitCap(next);
+		capText = String(Math.round(next / CONTEXT_CAP_UNIT));
+		return true;
+	}
+
+	function onCapTextKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			e.stopPropagation();
+			submitCapText();
+		} else if (e.key === 'Escape' && (capError || capText !== String(Math.round(shownCap / CONTEXT_CAP_UNIT)))) {
+			// Revert the field first; a second Escape closes the popover as usual.
+			e.preventDefault();
+			e.stopPropagation();
+			capText = String(Math.round(shownCap / CONTEXT_CAP_UNIT));
+			capError = null;
+		}
+	}
+
+	function onCapTextBlur() {
+		capTextFocused = false;
+		// An invalid entry is dropped on blur: the field shows the cap in effect.
+		if (!submitCapText()) {
+			capError = null;
+			capText = String(Math.round(shownCap / CONTEXT_CAP_UNIT));
+		}
+	}
+
+	function pickCapPreset(tokens: number) {
+		capError = null;
+		if (tokens !== shownCap) void commitCap(tokens);
+	}
+
+	// ---- Model limit editor (one known window, or none) ------------------------
+	// The window is the provider entry's own `context_window`: the turn runs and
+	// compacts against it, the usage meter divides by it. Saving writes that
+	// entry (as Settings → Providers does) and re-reads the registry.
+	let winEditorOpen = $state(false);
+	let winText = $state('');
+	let winTextFocused = $state(false);
+	/** True once the owner typed in the field since it last showed the saved window. */
+	let winDirty = $state(false);
+	let winError = $state<string | null>(null);
+	let winSaving = $state(false);
+	let winDraft = $state<number | null>(null);
+	const shownWindow = $derived(winDraft ?? modelWindow?.window ?? null);
+	/** Hosts that let Standard be adjusted let a single window be set too. */
+	const winEditable = $derived(!!modelWindow?.editable && onContextStandardChange != null);
+	const winPresets = $derived.by(() => {
+		const sizes = [64_000, 128_000, 200_000, 256_000, 400_000, 1_000_000, 2_000_000];
+		const current = modelWindow?.window;
+		if (!current) return [128_000, 200_000, 256_000, 1_000_000];
+		return [...sizes.filter((size) => size < current).slice(-3), current];
+	});
+
+	// A different model starts with the editor closed and no stale draft.
+	let winModel = '';
+	$effect(() => {
+		if (value === winModel) return;
+		winModel = value;
+		winEditorOpen = false;
+		winError = null;
+		winDraft = null;
+		winDirty = false;
+	});
+
+	$effect(() => {
+		const whole = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+		if (!winTextFocused) winText = whole;
+	});
+
+	function windowProblem(tokens: number | null): string | null {
+		if (tokens == null) return 'Enter a size in K tokens, like 128.';
+		if (tokens < MODEL_WINDOW_MIN) return `At least ${formatContextTokens(MODEL_WINDOW_MIN)}.`;
+		if (tokens > MODEL_WINDOW_MAX) return `Up to ${formatContextTokens(MODEL_WINDOW_MAX)}.`;
+		return null;
+	}
+
+	/**
+	 * Save `tokens` exactly as given: a quick size keeps its exact value and
+	 * the field's whole-K entry is already whole. The window in effect is a
+	 * no-op, so re-picking 1.05M never rewrites 1,048,576 as 1,049,000.
+	 */
+	async function commitWindow(tokens: number) {
+		const info = modelWindow;
+		if (!winEditable || !info?.providerId) return;
+		const next = Math.round(tokens);
+		if (next === (winDraft ?? info.window)) return;
+		winDraft = next;
+		winError = null;
+		winSaving = true;
+		try {
+			await saveModelWindow(info.providerId, info.modelId, next);
+		} catch (error) {
+			winError = `Could not save: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			winSaving = false;
+			if (winDraft === next) winDraft = null;
+		}
+	}
+
+	function submitWinText(): boolean {
+		// Only an edit is saved: an untouched field (1049 shown for 1,048,576)
+		// must never be written back as a rounded, slightly different window.
+		if (!winDirty) {
+			winError = null;
+			return true;
+		}
+		if (!winText.trim()) return false;
+		const tokens = parseCapText(winText);
+		const problem = windowProblem(tokens);
+		winError = problem;
+		if (problem || tokens == null) return false;
+		winDirty = false;
+		void commitWindow(tokens);
+		return true;
+	}
+
+	function onWinTextInput() {
+		winDirty = true;
+		winError = winText.trim() ? windowProblem(parseCapText(winText)) : null;
+	}
+
+	function onWinTextKeydown(e: KeyboardEvent) {
+		const whole = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			e.stopPropagation();
+			submitWinText();
+		} else if (e.key === 'Escape' && (winError || winText !== whole)) {
+			e.preventDefault();
+			e.stopPropagation();
+			winText = whole;
+			winError = null;
+			winDirty = false;
+		}
+	}
+
+	function onWinTextBlur() {
+		winTextFocused = false;
+		if (!submitWinText()) {
+			if (!winError?.startsWith('Could not save')) winError = null;
+			winText = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+			winDirty = false;
+		}
 	}
 
 </script>
@@ -323,7 +657,7 @@
 					aria-selected={value === o.value}
 					tabindex="-1"
 					data-value={o.value}
-					title={g?.unofficial ? `${o.description}\n${UNOFFICIAL_SIGN_IN_HELP}` : o.description}
+					title={o.description}
 					onclick={() => onSelect(o.value)}
 					onmouseenter={() => (highlighted = o.value)}
 				>
@@ -332,11 +666,7 @@
 						{#if showProviderLine && g}
 							<div class="mpp-row-sub">
 								<ProviderGlyph kind={g.glyph} size={12} />
-								<span>{g.name}{#if g.subtext}<span class="mpp-row-subtext"> · {g.subtext}</span>{/if}{#if g.unofficial}<span
-											class="mpp-row-unofficial"
-											data-testid="model-unofficial"
-											title={UNOFFICIAL_SIGN_IN_HELP}> · Unofficial</span
-										>{/if}</span>
+								<span>{g.name}{#if g.subtext}<span class="mpp-row-subtext"> · {g.subtext}</span>{/if}</span>
 							</div>
 						{/if}
 					</div>
@@ -389,15 +719,17 @@
 					type="button"
 					role="radio"
 					aria-checked={contextChoice === 'standard'}
-					aria-label="{contextControl.standardLabel} · Standard"
+					aria-label="{formatContextTokens(shownCap)} · Standard"
 					tabindex={contextChoice === 'standard' ? 0 : -1}
 					data-context-choice="standard"
 					class:on={contextChoice === 'standard'}
 					onclick={() => onContextChoiceSelect('standard')}
 				>
 					<span class="mpp-context-option-copy">
-						<span class="mpp-context-value">{contextControl.standardLabel}</span>
-						<span class="mpp-context-caption">Standard</span>
+						<span class="mpp-context-value">{formatContextTokens(shownCap)}</span>
+						<span class="mpp-context-caption">
+							Standard{#if capRaised}<span class="mpp-context-raised">{' · raised'}</span>{/if}
+						</span>
 					</span>
 					<Check size={14} class="mpp-context-check" aria-hidden="true" />
 				</button>
@@ -406,6 +738,7 @@
 					role="radio"
 					aria-checked={contextChoice === '1m'}
 					aria-label="{contextControl.extendedLabel} · Extended"
+					title="The model's full window. Not adjustable."
 					tabindex={contextChoice === '1m' ? 0 : -1}
 					data-context-choice="1m"
 					class:on={contextChoice === '1m'}
@@ -413,11 +746,233 @@
 				>
 					<span class="mpp-context-option-copy">
 						<span class="mpp-context-value">{contextControl.extendedLabel}</span>
-						<span class="mpp-context-caption">Extended</span>
+						<span class="mpp-context-caption">
+							<Lock size={9} class="mpp-context-lock" aria-hidden="true" />Extended · full
+						</span>
 					</span>
 					<Check size={14} class="mpp-context-check" aria-hidden="true" />
 				</button>
 			</div>
+
+			<div class="mpp-cap-summary" data-context-summary>
+				<p aria-live="polite">
+					{#if contextChoice === '1m'}
+						Uses the full <strong>{contextControl.extendedLabel}</strong> window before compacting
+					{:else}
+						Compacts near <strong>~{formatContextTokens(shownCap)}</strong> tokens{#if capRaised}<span class="mpp-cap-default">{` · default ${contextControl.standardLabel}`}</span>{/if}
+					{/if}
+				</p>
+				{#if capEditable && contextChoice === 'standard'}
+					<button
+						type="button"
+						class="mpp-cap-adjust"
+						class:open={capEditorOpen}
+						aria-expanded={capEditorOpen}
+						aria-controls="{editorId}-cap"
+						onclick={() => (capEditorOpen = !capEditorOpen)}
+					>
+						{capEditorOpen ? 'Done' : 'Adjust'}
+					</button>
+				{/if}
+			</div>
+
+			{#if capEditable && contextChoice === 'standard' && capEditorOpen}
+				<div
+					class="mpp-cap"
+					id="{editorId}-cap"
+					role="group"
+					aria-label="Standard context cap"
+					data-context-cap-editor
+				>
+					<div class="mpp-cap-track">
+						<input
+							type="range"
+							class="mpp-cap-slider"
+							min={contextControl.standardTokens}
+							max={contextControl.standardMaxTokens}
+							step={CONTEXT_CAP_UNIT}
+							value={shownCap}
+							style="--fill: {capFill}%"
+							aria-label="Standard context cap"
+							aria-valuetext="{formatContextTokens(shownCap)} tokens"
+							oninput={onCapSliderInput}
+							onchange={onCapSliderChange}
+							onkeydown={onCapSliderKeydown}
+						/>
+						<span
+							class="mpp-cap-locked"
+							title="{contextControl.extendedLabel} is Extended, the model's full window"
+							aria-hidden="true"
+						>
+							<Lock size={9} />{contextControl.extendedLabel}
+						</span>
+						<div class="mpp-cap-scale" aria-hidden="true">
+							<span>{contextControl.standardLabel}</span>
+							<span>{formatContextTokens(contextControl.standardMaxTokens)}</span>
+						</div>
+					</div>
+
+					<div class="mpp-cap-row">
+						<div class="mpp-cap-presets" role="group" aria-label="Quick sizes">
+							{#each capPresets as preset (preset)}
+								<button
+									type="button"
+									class="mpp-cap-chip"
+									class:on={preset === shownCap}
+									aria-pressed={preset === shownCap}
+									aria-label={preset === contextControl.standardTokens
+										? `${formatContextTokens(preset)}, default`
+										: formatContextTokens(preset)}
+									onclick={() => pickCapPreset(preset)}
+								>
+									{formatContextTokens(preset)}
+								</button>
+							{/each}
+						</div>
+						<label class="mpp-cap-field" class:invalid={capError}>
+							<span class="sr-only">Custom Standard cap in K tokens</span>
+							<input
+								type="text"
+								inputmode="decimal"
+								autocomplete="off"
+								spellcheck="false"
+								bind:value={capText}
+								aria-invalid={capError ? 'true' : undefined}
+								aria-describedby={capError ? `${editorId}-cap-error` : undefined}
+								onfocus={() => (capTextFocused = true)}
+								oninput={onCapTextInput}
+								onkeydown={onCapTextKeydown}
+								onblur={onCapTextBlur}
+							/>
+							<span class="mpp-cap-unit" aria-hidden="true">K</span>
+						</label>
+					</div>
+					{#if capError}
+						<p class="mpp-cap-error" id="{editorId}-cap-error" role="alert">{capError}</p>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	{:else if modelWindow}
+		{@const known = shownWindow != null}
+		{@const windowText = shownWindow != null ? formatContextTokens(shownWindow) : 'Unknown'}
+		<div class="mpp-context" data-model-context-control data-context-kind={modelWindow.kind}>
+			<div class="mpp-context-copy">
+				<span>Context window</span>
+				<small title={getModelLabel(value)}>{getModelLabel(value)}</small>
+			</div>
+			<div
+				class="mpp-context-toggle single"
+				role="radiogroup"
+				aria-label="Context window"
+				tabindex="-1"
+				onkeydown={onContextKeydown}
+			>
+				<button
+					type="button"
+					role="radio"
+					aria-checked="true"
+					aria-label={known ? `${windowText} · Model limit` : 'Unknown · Not advertised'}
+					title={known ? "This model's one window." : 'The provider does not advertise this model\'s window.'}
+					tabindex="0"
+					data-context-choice="model"
+					class="on"
+					class:unknown={!known}
+					class:saving={winSaving}
+				>
+					<span class="mpp-context-option-copy">
+						<span class="mpp-context-value">{windowText}</span>
+						<span class="mpp-context-caption">
+							{#if known}
+								<Lock size={9} class="mpp-context-lock" aria-hidden="true" />Model limit
+							{:else}
+								Not advertised
+							{/if}
+						</span>
+					</span>
+					{#if known}
+						<Check size={14} class="mpp-context-check" aria-hidden="true" />
+					{:else}
+						<CircleDashed size={14} class="mpp-context-check" aria-hidden="true" />
+					{/if}
+				</button>
+			</div>
+
+			<div class="mpp-cap-summary" data-context-summary>
+				<p aria-live="polite">
+					{#if known}
+						Compacts near <strong>~{windowText}</strong> tokens<span class="mpp-cap-default">{' · model limit'}</span>{#if !winEditable}<span class="mpp-win-pointer">{' Change it in Settings → Providers.'}</span>{/if}
+					{:else}
+						No known limit, so no usage percentage.{#if !winEditable}{' Set one in Settings → Providers.'}{/if}
+					{/if}
+				</p>
+				{#if winEditable}
+					<button
+						type="button"
+						class="mpp-cap-adjust"
+						class:open={winEditorOpen}
+						aria-expanded={winEditorOpen}
+						aria-controls="{editorId}-win"
+						onclick={() => (winEditorOpen = !winEditorOpen)}
+					>
+						{winEditorOpen ? 'Done' : known ? 'Adjust' : 'Set limit'}
+					</button>
+				{/if}
+			</div>
+
+			{#if winEditable && winEditorOpen}
+				<div
+					class="mpp-cap"
+					id="{editorId}-win"
+					role="group"
+					aria-label="Model context limit"
+					aria-busy={winSaving}
+					data-model-window-editor
+				>
+					<p class="mpp-win-note">
+						{known ? 'Lower it to compact sooner.' : 'Set the size this model accepts.'}
+						Saved on the model in Settings → Providers, so every chat on it uses this.
+					</p>
+					<div class="mpp-cap-row">
+						<div class="mpp-cap-presets" role="group" aria-label="Quick sizes">
+							{#each winPresets as preset (preset)}
+								<button
+									type="button"
+									class="mpp-cap-chip"
+									class:on={preset === shownWindow}
+									aria-pressed={preset === shownWindow}
+									disabled={winSaving}
+									onclick={() => { winError = null; void commitWindow(preset); }}
+								>
+									{formatContextTokens(preset)}
+								</button>
+							{/each}
+						</div>
+						<label class="mpp-cap-field" class:invalid={winError}>
+							<span class="sr-only">Model context limit in K tokens</span>
+							<input
+								type="text"
+								inputmode="decimal"
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="—"
+								bind:value={winText}
+								disabled={winSaving}
+								aria-invalid={winError ? 'true' : undefined}
+								aria-describedby={winError ? `${editorId}-win-error` : undefined}
+								onfocus={() => (winTextFocused = true)}
+								oninput={onWinTextInput}
+								onkeydown={onWinTextKeydown}
+								onblur={onWinTextBlur}
+							/>
+							<span class="mpp-cap-unit" aria-hidden="true">K</span>
+						</label>
+					</div>
+					{#if winError}
+						<p class="mpp-cap-error" id="{editorId}-win-error" role="alert">{winError}</p>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -691,9 +1246,6 @@
 	.mpp-row-subtext {
 		opacity: 0.85;
 	}
-	.mpp-row-unofficial {
-		color: var(--warning);
-	}
 
 	.mpp-fav {
 		display: inline-flex;
@@ -830,6 +1382,367 @@
 	.mpp-context-toggle button:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
+	}
+	.mpp-context-caption {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		white-space: nowrap;
+	}
+	.mpp-context-raised {
+		color: var(--primary);
+		font-weight: 500;
+	}
+	.mpp-context-caption :global(.mpp-context-lock) {
+		flex-shrink: 0;
+		opacity: 0.75;
+	}
+
+	/* A group of one: the model's only window, selected and not a toggle. */
+	.mpp-context-toggle.single {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	.mpp-context-toggle.single button,
+	.mpp-context-toggle.single button:hover {
+		cursor: default;
+		border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+		background: color-mix(in srgb, var(--primary) 8%, var(--popover));
+		color: var(--foreground);
+	}
+	.mpp-context-toggle.single button.unknown,
+	.mpp-context-toggle.single button.unknown:hover {
+		border-style: dashed;
+		border-color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+		background: repeating-linear-gradient(
+			-45deg,
+			transparent 0 4px,
+			color-mix(in srgb, var(--muted-foreground) 7%, transparent) 4px 6px
+		);
+		box-shadow: none;
+	}
+	.mpp-context-toggle.single button.unknown .mpp-context-value {
+		color: var(--muted-foreground);
+	}
+	.mpp-context-toggle.single button.unknown :global(.mpp-context-check) {
+		color: var(--muted-foreground);
+	}
+	.mpp-context-toggle.single button.saving .mpp-context-value {
+		animation: mpp-win-saving 0.9s ease-in-out infinite alternate;
+	}
+	@keyframes mpp-win-saving {
+		to {
+			opacity: 0.45;
+		}
+	}
+	.mpp-win-note {
+		margin: 0;
+		color: var(--muted-foreground);
+		font-size: 10.5px;
+		line-height: 1.4;
+	}
+	.mpp-cap-chip:disabled,
+	.mpp-cap-field input:disabled {
+		opacity: 0.55;
+		cursor: progress;
+	}
+
+	/* ---- Standard cap: summary line + inline editor ---------------------- */
+	.mpp-cap-summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		min-height: 24px;
+		padding: 0 2px;
+	}
+	.mpp-cap-summary p {
+		min-width: 0;
+		margin: 0;
+		color: var(--muted-foreground);
+		font-size: 11px;
+		line-height: 1.35;
+	}
+	.mpp-cap-summary strong {
+		color: var(--foreground);
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.mpp-cap-default {
+		white-space: nowrap;
+	}
+	.mpp-cap-adjust {
+		flex-shrink: 0;
+		height: 24px;
+		padding: 0 9px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--popover);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 11px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+	}
+	.mpp-cap-adjust:hover {
+		background: var(--mpp-hover);
+	}
+	.mpp-cap-adjust.open {
+		border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+		color: var(--primary);
+	}
+	.mpp-cap-adjust:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.mpp-cap {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 10px 10px 8px;
+		border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+		border-radius: 10px;
+		background: var(--popover);
+		animation: mpp-cap-in 0.16s ease-out;
+		container: mpp-cap / inline-size;
+	}
+	@keyframes mpp-cap-in {
+		from {
+			opacity: 0;
+			transform: translateY(-3px);
+		}
+	}
+
+	/* The slider covers Standard's range; the hatched stub after it is the
+	   Extended window — visibly past the end and locked. */
+	.mpp-cap-track {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		column-gap: 8px;
+	}
+	.mpp-cap-slider {
+		--thumb: 16px;
+		--rail: color-mix(in srgb, var(--muted-foreground) 22%, transparent);
+		width: 100%;
+		min-width: 0;
+		height: 24px;
+		margin: 0;
+		background: transparent;
+		cursor: pointer;
+		appearance: none;
+		-webkit-appearance: none;
+	}
+	.mpp-cap-slider::-webkit-slider-runnable-track {
+		height: 6px;
+		border-radius: 999px;
+		background: linear-gradient(to right, var(--primary) var(--fill), var(--rail) var(--fill));
+	}
+	.mpp-cap-slider::-moz-range-track {
+		height: 6px;
+		border-radius: 999px;
+		background: linear-gradient(to right, var(--primary) var(--fill), var(--rail) var(--fill));
+	}
+	.mpp-cap-slider::-webkit-slider-thumb {
+		width: var(--thumb);
+		height: var(--thumb);
+		margin-top: calc((6px - var(--thumb)) / 2);
+		border: 2px solid var(--primary);
+		border-radius: 50%;
+		background: var(--popover);
+		box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 22%, transparent);
+		appearance: none;
+		-webkit-appearance: none;
+		transition: transform 0.12s ease;
+	}
+	.mpp-cap-slider::-moz-range-thumb {
+		width: var(--thumb);
+		height: var(--thumb);
+		box-sizing: border-box;
+		border: 2px solid var(--primary);
+		border-radius: 50%;
+		background: var(--popover);
+		box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 22%, transparent);
+	}
+	.mpp-cap-slider:active::-webkit-slider-thumb {
+		transform: scale(1.12);
+	}
+	.mpp-cap-slider:focus {
+		outline: none;
+	}
+	.mpp-cap-slider:focus-visible::-webkit-slider-thumb {
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 55%, transparent);
+	}
+	.mpp-cap-slider:focus-visible::-moz-range-thumb {
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 55%, transparent);
+	}
+	.mpp-cap-locked {
+		display: inline-flex;
+		flex-shrink: 0;
+		align-items: center;
+		gap: 3px;
+		height: 18px;
+		padding: 0 6px;
+		border: 1px dashed color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+		border-radius: 999px;
+		background: repeating-linear-gradient(
+			-45deg,
+			transparent 0 3px,
+			color-mix(in srgb, var(--muted-foreground) 14%, transparent) 3px 5px
+		);
+		color: var(--muted-foreground);
+		font-size: 9.5px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.mpp-cap-scale {
+		display: flex;
+		justify-content: space-between;
+		/* Under the slider column only, not under the locked stub. */
+		grid-column: 1;
+		margin-top: -3px;
+		padding: 0 2px;
+		color: var(--muted-foreground);
+		font-size: 10px;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.mpp-cap-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 2px;
+	}
+	.mpp-cap-presets {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		min-width: 0;
+	}
+	.mpp-cap-chip {
+		min-width: 44px;
+		height: 28px;
+		padding: 0 8px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 11.5px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		cursor: pointer;
+		transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+	}
+	.mpp-cap-chip:hover {
+		background: var(--mpp-hover);
+		color: var(--foreground);
+	}
+	.mpp-cap-chip.on {
+		border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+		background: color-mix(in srgb, var(--primary) 12%, var(--popover));
+		color: var(--foreground);
+	}
+	.mpp-cap-chip:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+	/* Too narrow for chips and the field on one line (phones): the chips share
+	   a full line evenly and the field sits under them at the right. */
+	@container mpp-cap (max-width: 330px) {
+		.mpp-cap-row {
+			flex-wrap: wrap;
+		}
+		.mpp-cap-presets {
+			flex: 1 1 100%;
+			flex-wrap: nowrap;
+		}
+		.mpp-cap-chip {
+			flex: 1 1 0;
+			min-width: 0;
+		}
+		.mpp-cap-field {
+			margin-left: auto;
+		}
+	}
+
+	.mpp-cap-field {
+		display: inline-flex;
+		flex-shrink: 0;
+		align-items: center;
+		height: 28px;
+		padding: 0 8px 0 2px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: color-mix(in srgb, var(--muted) 35%, transparent);
+		cursor: text;
+		transition: border-color 0.12s ease, box-shadow 0.12s ease;
+	}
+	.mpp-cap-field:focus-within {
+		border-color: var(--ring);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 30%, transparent);
+	}
+	.mpp-cap-field.invalid {
+		border-color: var(--destructive);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--destructive) 22%, transparent);
+	}
+	.mpp-cap-field input {
+		width: 5ch;
+		height: 100%;
+		padding: 0 2px 0 6px;
+		border: 0;
+		outline: none;
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
+	}
+	.mpp-cap-unit {
+		color: var(--muted-foreground);
+		font-size: 11.5px;
+		font-weight: 600;
+	}
+	.mpp-cap-error {
+		margin: 0;
+		color: var(--destructive);
+		font-size: 10.5px;
+		line-height: 1.35;
+	}
+
+	/* Touch: full-size targets on phones and tablets. */
+	@media (pointer: coarse) {
+		.mpp-cap-adjust {
+			height: 32px;
+			padding: 0 12px;
+		}
+		.mpp-cap-slider {
+			--thumb: 22px;
+			height: 40px;
+		}
+		.mpp-cap-chip,
+		.mpp-cap-field {
+			height: 40px;
+		}
+		.mpp-cap-field input {
+			font-size: 16px; /* no iOS zoom on focus */
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.mpp-cap {
+			animation: none;
+		}
+		.mpp-cap-slider::-webkit-slider-thumb {
+			transition: none;
+		}
+		.mpp-context-toggle.single button.saving .mpp-context-value {
+			animation: none;
+		}
 	}
 
 	.mpp-empty {

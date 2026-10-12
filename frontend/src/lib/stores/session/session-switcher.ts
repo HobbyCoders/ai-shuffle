@@ -22,10 +22,17 @@ import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
+import {
+	beginUserMessageRevisionSeed,
+	finishUserMessageRevisionSeed,
+	observeLastUserMessage,
+	rememberLeavingProseQuestion
+} from './prose-questions';
 import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+import { pendingQueue } from './pending-queue';
 import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
@@ -91,6 +98,16 @@ interface LiveSnapshot {
 		is_worker?: boolean;
 		is_remote?: boolean;
 		device_name?: string | null;
+		/** Latest persisted user message, or null when none is stamped (#2249). */
+		last_user_message_at?: string | null;
+		/** Event-log position of that message (null when unknown or cleared). */
+		last_user_message_seq?: number | null;
+		/** Opaque log identity `last_user_message_seq` belongs to. */
+		last_user_message_epoch?: string | null;
+		/** Position of a trailing prose question (null: none; absent: older worker, #2263). */
+		last_assistant_question_seq?: number | null;
+		/** Opaque log identity `last_assistant_question_seq` belongs to. */
+		last_assistant_question_epoch?: string | null;
 	};
 	/** Durable background-task view (task registry `get_visible`), already in
 	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */
@@ -520,6 +537,18 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Session Navigation ──────────────────────────────────────────────
 
+	/** Keep the leaving session's unanswered prose question counting (spec §5). */
+	function rememberLeaving(state: ActiveSessionState) {
+		if (!state.sessionId) return;
+		// An empty or partial transcript mid-hydration says nothing about the
+		// question: keep whatever was remembered until history has loaded.
+		if (state.isLoadingSession || state.isRestoringSession) return;
+		// The row's user-message revision as of now: a later one in the
+		// question's log clears the remembered question without reopening.
+		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
+		rememberLeavingProseQuestion(state.sessionId, state.messages, row);
+	}
+
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
 		beginJourney('chat.open', sessionId);
 		const generation = ++_switchGeneration;
@@ -549,6 +578,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
+		if (state.sessionId !== sessionId) rememberLeaving(state);
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
@@ -621,7 +651,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			liveRequestedModel: null,
 			liveProvider: null,
 			liveCompaction: null,
-			pendingRestorePrompt: null,
+			pendingRestorePrompt: pendingQueue.takeWithdrawnDraft(sessionId),
 			isCreatingWorktree: false,
 			worktreeError: null,
 			sessionLocked: false,
@@ -727,7 +757,23 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// One-shot metadata snapshot: the feed carries the transcript, streaming
 		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
 		// /live so worktree/cloud fields are correct on switch-in.
-		void applyMetadataSnapshot(sessionId, generation);
+		// The session's user-message revision also comes from that snapshot, for
+		// a session opened without a loaded row (deep link, Spotlight, a row
+		// outside the loaded or filtered page). The claim scopes it to this visit.
+		applyMetadataSnapshot(sessionId, generation, claimUserMessageRevision(sessionId));
+	}
+
+	/**
+	 * Start this visit's claim on the opened session's user-message revision
+	 * (`last_user_message_seq`/`_epoch`), so a question left unanswered here
+	 * clears once a later user message in its log is seen (#2249). A loaded row
+	 * is observed at once; the `/live` snapshot resolves the claim.
+	 */
+	function claimUserMessageRevision(sessionId: string): number {
+		const claim = beginUserMessageRevisionSeed(sessionId);
+		const row = appData.current.sessions.find((s) => s.id === sessionId);
+		if (row) observeLastUserMessage(sessionId, row);
+		return claim;
 	}
 
 	/**
@@ -740,7 +786,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * switch generation + active sessionId so a stale response can't write into a
 	 * session the user already left.
 	 */
-	async function applyMetadataSnapshot(sessionId: string, generation: number) {
+	async function applyMetadataSnapshot(sessionId: string, generation: number, revisionClaim: number | null = null) {
 		const initialProject = getState().project;
 		const initialProjectV2Id = getState().projectV2Id;
 		const initialFolders = getState().workspaceProjectIds;
@@ -759,8 +805,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			);
 		} catch (e) {
 			console.warn('[ActiveSession] metadata snapshot failed:', e);
+			if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, undefined);
 			return;
 		}
+		// The revision is server truth whether or not the session is still open,
+		// so it is observed before the generation guard. Its seq/epoch decide
+		// whether it answers a question, so a late snapshot cannot clear early.
+		const revisionMeta = snap?.session_meta;
+		if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, revisionMeta);
+		else observeLastUserMessage(sessionId, revisionMeta, { snapshot: true });
 		if (!snap) return;
 		if (generation !== _switchGeneration) return;
 		if (getState().sessionId !== sessionId) return;
@@ -879,6 +932,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Save ephemeral for the session we're leaving
 		const leavingKey = leavingSessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
+		rememberLeaving(state);
 
 		// Tell backend to release session lock
 		if (leavingSessionId) {

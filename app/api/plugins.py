@@ -46,6 +46,8 @@ class MarketplaceResponse(BaseModel):
     url: str
     install_location: str
     last_updated: Optional[datetime] = None
+    display_name: Optional[str] = None
+    error: Optional[str] = None
     # Catalog entries this app does not offer, each with the reason, so the
     # owner sees them instead of them vanishing from Explore.
     skipped: List[SkippedEntryResponse] = Field(default_factory=list)
@@ -230,7 +232,7 @@ async def list_marketplaces(token: str = Depends(require_auth)):
         from app.core.plugin_marketplace import skipped_entries
 
         service = get_plugin_service()
-        marketplaces = service.get_marketplaces()
+        marketplaces = await run_sync(service.get_marketplaces)
         return [
             MarketplaceResponse(
                 id=mp.id,
@@ -238,6 +240,8 @@ async def list_marketplaces(token: str = Depends(require_auth)):
                 url=mp.url,
                 install_location=mp.install_location,
                 last_updated=mp.last_updated,
+                display_name=mp.display_name,
+                error=mp.error,
                 skipped=(
                     await run_sync(skipped_entries, Path(mp.install_location))
                     if mp.install_location else []
@@ -326,8 +330,8 @@ async def list_available_plugins(
 ):
     """List all available plugins from marketplaces"""
     async with api_error_handler("load available plugins"):
-        service = get_plugin_service()
-        plugins = service.get_available_plugins(marketplace)
+        service = await run_sync(get_plugin_service)
+        plugins = await run_sync(service.get_available_plugins, marketplace)
         return [
             AvailablePluginResponse(
                 id=p.id,
@@ -358,8 +362,8 @@ async def list_available_plugins(
 async def list_installed_plugins(token: str = Depends(require_auth)):
     """List all installed plugins"""
     async with api_error_handler("load installed plugins"):
-        service = get_plugin_service()
-        plugins = service.get_installed_plugins()
+        service = await run_sync(get_plugin_service)
+        plugins = await run_sync(service.get_installed_plugins)
         return [
             PluginResponse(
                 id=p.id,
@@ -392,8 +396,8 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
 async def list_file_based_agents(token: str = Depends(require_auth)):
     """List all file-based agents from enabled plugins"""
     async with api_error_handler("load file-based agents"):
-        service = get_plugin_service()
-        agents = service.get_file_based_agents()
+        service = await run_sync(get_plugin_service)
+        agents = await run_sync(service.get_file_based_agents)
         return [
             FileAgentResponse(
                 id=a["id"],
@@ -563,7 +567,7 @@ async def run_auto_update(token: str = Depends(require_admin)):
 async def get_enabled_plugins(token: str = Depends(require_auth)):
     """Get all plugin enable/disable states"""
     service = get_plugin_service()
-    enabled = service.get_enabled_plugins()
+    enabled = await run_sync(service.get_enabled_plugins)
     return PluginEnableStateResponse(enabled_plugins=enabled)
 
 
@@ -601,9 +605,9 @@ async def get_plugin_details(
     service = get_plugin_service()
 
     # Try installed first, then fall back to available
-    plugin = service.get_plugin_details(plugin_id)
+    plugin = await run_sync(service.get_plugin_details, plugin_id)
     if not plugin:
-        plugin = service.get_available_plugin_details(plugin_id)
+        plugin = await run_sync(service.get_available_plugin_details, plugin_id)
 
     if not plugin:
         raise HTTPException(

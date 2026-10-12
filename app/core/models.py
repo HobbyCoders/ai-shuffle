@@ -309,6 +309,8 @@ class SubagentChildMessage(BaseModel):
 class SessionMessage(BaseModel):
     """A message in a session"""
     id: Union[int, str]  # int from DB, string from JSONL
+    seq: Optional[int] = None  # Last contributing event; absent for legacy transcripts
+    epoch: Optional[str] = None  # Event-log identity; compare seq only within this epoch
     role: str  # user, assistant, system, tool
     content: str
     type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
@@ -337,7 +339,7 @@ class SessionMessage(BaseModel):
     created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
     # Subagent-specific fields (for type='subagent')
     agentId: Optional[str] = None  # The subagent's unique ID
-    agentType: Optional[str] = None  # The subagent type (e.g., 'general-purpose', 'Plan')
+    agentType: Optional[str] = None  # The subagent type (e.g., 'general-purpose', 'frontend-designer')
     agentDescription: Optional[str] = None  # Task description from the Task tool
     agentPrompt: Optional[str] = None  # The initial prompt sent to the subagent
     agentStatus: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
@@ -509,6 +511,11 @@ class Session(SessionBase):
     # The card shows ``work_ms`` plus the live interval while a turn runs.
     work_ms: int = 0
     work_started_at: Optional[datetime] = None
+    last_user_message_at: Optional[datetime] = None
+    last_user_message_seq: Optional[int] = None
+    last_user_message_epoch: Optional[str] = None
+    last_assistant_question_seq: Optional[int] = None
+    last_assistant_question_epoch: Optional[str] = None
 
     @field_validator("work_ms", mode="before")
     @classmethod
@@ -1536,7 +1543,7 @@ class Automation(BaseModel):
     triggers: Optional[List[Dict[str, Any]]] = None
     prompt: Optional[str] = None
     action_steps: Optional[List[Dict[str, Any]]] = None
-    profile_id: str
+    profile_id: Optional[str] = None  # Retired agents leave disabled, unlinked automations.
     project_id: Optional[str] = None
     output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
     max_turns: Optional[int] = 1  # None = unlimited

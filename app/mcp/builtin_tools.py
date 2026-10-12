@@ -1559,6 +1559,7 @@ def create_builtin_tools_server(
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
+    workflow_guidance: bool = False,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -1581,6 +1582,8 @@ def create_builtin_tools_server(
             the file/plugin agent definitions this session can delegate to —
             the delegated (CLI) leg has no fluid engine to publish them, so
             without it those agents are advertised but not dispatchable.
+        workflow_guidance: The host prompt supplies delegation/checkout rules;
+            omit those duplicates from Task. False keeps standalone callers safe.
 
     Returns:
         In-process MCP server config, or ``None`` if the tool helpers are
@@ -1749,6 +1752,7 @@ def create_builtin_tools_server(
         profile_id,
         provider_id,
         file_subagent_targets(agent_registry, model),
+        workflow_guidance=workflow_guidance,
     )
 
     @tool("Task", task_contract.description, task_contract.input_schema)
@@ -2711,8 +2715,13 @@ def create_builtin_tools_server(
     @tool(
         "GetUsage",
         "Read the latest cached subscription and provider usage observed by "
-        "the host. Reports used and remaining percentages, reset timestamps, "
-        "source, freshness, and unavailable data explicitly. Read-only: it "
+        "the host. Reports percent left (used_percent is 100 minus left), "
+        "reset timestamps, "
+        "source, freshness, and unavailable data explicitly. "
+        "Quote percentages as 'left': subscription rows in the Usage popover "
+        "show the same left number; some API-key provider windows and Settings "
+        "meters currently display used. "
+        "Read-only: it "
         "never refreshes providers or reads credentials.",
         {"type": "object", "properties": {}, "additionalProperties": False},
     )
@@ -2843,9 +2852,9 @@ def create_builtin_tools_server(
             return _err("Only the owner's sessions can be handed off between workers")
         from app.core import session_handoff
 
-        if args.get("cancel"):
-            return _ok({"cancelled": await session_handoff.cancel_async(session_id)})
         try:
+            if args.get("cancel"):
+                return _ok(await session_handoff.cancel_move(session_id))
             from app.db.async_database import run_sync
             return _ok(await run_sync(session_handoff.request, session_id,
                                       str(args.get("worker") or ""), str(args.get("note") or "")))

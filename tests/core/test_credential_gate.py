@@ -143,14 +143,14 @@ def test_a_provider_row_read_failure_never_breaks_the_payload(mock_db, monkeypat
     assert payload["ready"] is True and payload["ready_providers"] == ["claude"]
 
 
-def test_license_block_wins_over_ready_providers(mock_db, monkeypatch):
+def test_cloud_state_does_not_override_ready_providers(mock_db, monkeypatch):
     _provider_row("oa", "openai", auth_token="enc:key")
     monkeypatch.setattr(license_mod, "license_allows_agent_runs", lambda: (False, "No license is active."))
     payload = credential_gate.status_payload(_cli(signed_in=True))
-    assert payload["ready"] is False and payload["reason"] == "No license is active."
+    assert payload["ready"] is True and payload["reason"] is None
     assert payload["any_provider_ready"] is True
     ready, reason = credential_gate.record_startup(_cli(signed_in=True))
-    assert (ready, reason) == (False, "No license is active.")
+    assert (ready, reason) == (True, None)
 
 
 def test_claude_leg_still_refused_when_another_provider_is_ready(mock_db):
@@ -411,13 +411,13 @@ def test_startup_with_no_provider_warns_with_the_neutral_reason(mock_db, caplog)
     assert len(warnings) == 1 and credential_gate.NO_PROVIDER_MESSAGE in warnings[0].getMessage()
 
 
-def test_an_unlicensed_worker_is_blocked_with_the_license_reason(mock_db, monkeypatch):
+def test_an_unlinked_worker_can_run_every_configured_provider(mock_db, monkeypatch):
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
     claude_auth_mode.set_mode("api_key")
     monkeypatch.setattr(license_mod, "license_allows_agent_runs", lambda: (False, "No license is active."))
-    assert credential_gate.agent_credentials_ready() == (False, "No license is active.")
-    # A provider-row turn needs no Claude credential, but the license still applies.
-    assert credential_gate.turn_refusal("openai_responses") == "No license is active."
+    assert credential_gate.agent_credentials_ready() == (True, None)
+    # A provider-row turn needs no Claude credential or Cloud plan.
+    assert credential_gate.turn_refusal("openai_responses") is None
 
 
 def test_provider_leg_turn_needs_no_claude_credential(mock_db):
@@ -520,6 +520,7 @@ def _real_pump_env():
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.settle = AsyncMock()
 
     def _no_spawn(*_a, **_k):
         raise AssertionError("a refused turn must never build a CLI adapter")

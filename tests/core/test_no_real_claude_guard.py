@@ -76,3 +76,15 @@ def test_the_compliance_fixture_runs_its_recorder(monkeypatch, tmp_path):
     else:
         # POSIX keeps the real PATH search and it lands on the fake wrapper.
         assert ha._resolve_claude_cmd() == [str(cli["script"])]
+
+
+def test_a_claude_dir_prepended_after_the_session_guard_is_stripped_again(tmp_path, monkeypatch):
+    # app.core.startup.check_prerequisites prepends ~/.local/bin in place; the
+    # per-test fixture must undo it even when a module fixture did it before
+    # reset_environment took its snapshot. tmp_path is outside (REPO_ROOT,).
+    real = _dir_with(tmp_path, "local-bin", "claude")
+    monkeypatch.setenv("PATH", str(real) + os.pathsep + os.environ.get("PATH", ""))
+
+    assert conftest.reapply_claude_guard((conftest.REPO_ROOT,)) is True
+    assert str(real) not in os.environ["PATH"].split(os.pathsep)
+    assert conftest.reapply_claude_guard((conftest.REPO_ROOT,)) is False

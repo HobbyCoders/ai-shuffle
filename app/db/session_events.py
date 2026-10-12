@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -89,6 +90,8 @@ def append_events(
     events: List[Dict[str, Any]],
     run_id: Optional[str] = None,
     fence_token: Optional[int] = None,
+    *,
+    _conn: Any = None,
 ) -> Tuple[int, int]:
     """Append a batch of events, returning the ``(first_seq, last_seq)`` range.
 
@@ -107,7 +110,8 @@ def append_events(
         raise ValueError("fence_token is required when run_id is provided")
 
     n = len(events)
-    with get_db() as conn:
+    # With a caller-owned transaction, the caller also sends the post-commit wake.
+    with (get_db() if _conn is None else nullcontext(_conn)) as conn:
         cursor = conn.cursor()
 
         # 1. Fence check — reject a stale/superseded runner before writing.
@@ -152,13 +156,89 @@ def append_events(
             )
             for i, event in enumerate(events)
         ]
-        cursor.executemany(
+        from app.db.base import after_commit
+        from app.db.sessions import is_user_message, _record_user_message
+
+        insert_sql = (
             "INSERT INTO session_events "
             "(id, session_id, seq, run_id, turn_id, event_type, payload, command_id) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (id) DO NOTHING",
-            params,
+            "ON CONFLICT (id) DO NOTHING"
         )
+        user_params, other_params = [], []
+        for event, values in zip(events, params):
+            target = user_params if (
+                event["type"] == "message.user"
+                and is_user_message("user", event.get("payload"))
+            ) else other_params
+            target.append(values)
+        # Only genuinely inserted events may project a question or invalidate
+        # a suggestion: a stable-id replay is not fresh activity/completion.
+        inserted_other = False
+        activity_seq = completion_seq = 0
+        for values in other_params:
+            cursor.execute(insert_sql + " RETURNING seq", values)
+            inserted = cursor.fetchone()
+            if inserted is not None:
+                inserted_other = True
+                if values[5] == "turn.started":
+                    activity_seq = max(activity_seq, int(inserted["seq"]))
+                elif values[5] == "turn.completed":
+                    completion_seq = max(completion_seq, int(inserted["seq"]))
+        # The event log is authoritative on the EXECUTING worker. API, relay,
+        # connector and automation turns need not have a legacy message row.
+        # RETURNING distinguishes delivery from a retry of a stable event id;
+        # backfills/copies use separate helpers and never advance the revision.
+        user_seq = None
+        for values in user_params:
+            cursor.execute(insert_sql + " RETURNING seq", values)
+            inserted = cursor.fetchone()
+            if inserted is not None:
+                user_seq = int(inserted["seq"])
+        question_notify = None
+        if inserted_other or user_seq is not None:
+            from app.db.session_questions import record_question
+
+            # Rewinds retain the log epoch but remove causal user anchors in
+            # the discarded branch. The question projection reads surviving
+            # prose only. Both writes share the append transaction.
+            cursor.execute(
+                "SELECT seq, payload FROM session_events WHERE session_id = %s "
+                "AND seq >= %s AND seq <= %s AND event_type = 'transcript.rewound' ORDER BY seq",
+                (session_id, first_seq, last_seq),
+            )
+            rewinds = cursor.fetchall()
+            for rewind in rewinds:
+                cut = _parse_payload(rewind["payload"]).get("from_seq")
+                if isinstance(cut, int) and not isinstance(cut, bool):
+                    cursor.execute(
+                        "UPDATE sessions SET last_user_message_seq = NULL, last_user_message_epoch = NULL "
+                        "WHERE id = %s AND last_user_message_seq >= %s AND last_user_message_seq < %s",
+                        (session_id, cut, rewind["seq"]),
+                    )
+                    if user_seq is not None and cut <= user_seq < rewind["seq"]:
+                        user_seq = None
+            if user_seq is None:
+                question_notify = record_question(cursor, session_id, force_notify=bool(rewinds))
+            # Otherwise _record_user_message projects it while writing the row,
+            # then captures both pairs in the single user-activity broadcast.
+        if user_seq is not None:
+            now = datetime.now(timezone.utc).isoformat()
+            notify = _record_user_message(cursor, session_id, "user", now, seq=user_seq)
+            if notify:
+                after_commit(conn, notify)
+            activity_seq = max(activity_seq, user_seq)
+        elif question_notify:
+            after_commit(conn, question_notify)
+        # Both user and question session-row updates precede the suggestion
+        # advisory lock. Nothing below may update the session row under it.
+        if activity_seq or completion_seq:
+            from app.db import composer_suggestions
+
+            if activity_seq:
+                composer_suggestions.supersede(conn, session_id)
+            if completion_seq > activity_seq:
+                composer_suggestions.complete(conn, session_id)
 
         # 4. Best-effort notify (guarded: pg_notify is absent on the SQLite
         # shim, and delivery must not depend on it — the gateway also polls).
@@ -173,7 +253,8 @@ def append_events(
         except Exception:
             logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
 
-    notify_session_write(session_id, "session_events")
+    if _conn is None:
+        notify_session_write(session_id, "session_events")
     return first_seq, last_seq
 
 
@@ -273,6 +354,21 @@ def get_events(
     for row in rows:
         row["payload"] = _parse_payload(row.get("payload"))
     return rows
+
+
+def get_latest_task_updates(session_id: str) -> List[Dict[str, Any]]:
+    """Latest durable task projection per id, including pre-fix stale starts."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM ("
+            "SELECT payload, ROW_NUMBER() OVER ("
+            "PARTITION BY payload->>'task_id' ORDER BY seq DESC) AS position "
+            "FROM session_events WHERE session_id = %s AND event_type = 'task.updated'"
+            ") AS tasks WHERE position = 1",
+            (session_id,),
+        )
+        return [_parse_payload(row["payload"]) for row in cursor.fetchall()]
 
 
 def get_compaction_events_before(session_id: str, before_seq: int) -> List[Dict[str, Any]]:
@@ -472,6 +568,31 @@ def get_tool_use_seqs(
         key = (row.get("turn_id"), str(tool_use_id))
         seqs[key] = max(int(row["seq"]), seqs.get(key, 0))
     return seqs
+
+
+def get_watermark(session_id: str, *, at_seq: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Read the materialized log ceiling, epoch and tail identity in one statement.
+
+    Unlike the allocation counter, this reflects replicated clears/deletes too.
+    An absent session is unavailable; an existing empty log is (0, "0", "0").
+    ``at_seq`` reads the identity at an observed owner's ceiling instead of our
+    latest row, so newer local appends do not invalidate that owner's witness.
+    """
+    tail_filter = " AND seq = %s" if at_seq is not None else ""
+    params = (at_seq, session_id) if at_seq is not None else (session_id,)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE((SELECT MAX(seq) FROM session_events WHERE session_id = s.id), 0) AS seq, "
+            "COALESCE((SELECT id FROM session_events WHERE session_id = s.id "
+            "ORDER BY seq LIMIT 1), '0') AS epoch, "
+            "COALESCE((SELECT id FROM session_events WHERE session_id = s.id"
+            + tail_filter + " ORDER BY seq DESC LIMIT 1), '0') AS tail_id "
+            "FROM sessions s WHERE s.id = %s",
+            params,
+        )
+        row = cursor.fetchone()
+    return {"seq": int(row["seq"]), "epoch": str(row["epoch"]), "tail_id": str(row["tail_id"])} if row else None
 
 
 def get_max_seq(session_id: str) -> int:

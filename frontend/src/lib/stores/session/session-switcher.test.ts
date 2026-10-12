@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createSessionSwitcher,
 	setPersistedRunBinding,
@@ -7,15 +7,18 @@ import {
 	type SessionSwitcherDeps,
 } from './session-switcher';
 import { feedController } from './v2/feed-controller';
+import { pendingQueue } from './pending-queue';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
+import type { ChatMessage } from '../types';
 import { appMode } from '../sessionMode.svelte';
 import { composerPreferences } from '../composer-preferences';
 import { api } from '$lib/api/client';
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
+import { _resetProseQuestions, observeLastUserMessage, proseQuestionSessions } from './prose-questions';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -163,6 +166,24 @@ function makeSwitcher(initial: ActiveSessionState) {
 	const switcher = createSessionSwitcher(deps);
 	return { switcher, getState, ephemeralStore, deps };
 }
+
+describe('cancellation verdict across navigation', () => {
+	it('restores a delayed withdrawn message into its session, not the currently open one', async () => {
+		pendingQueue.reset(null, true);
+		const { switcher, getState } = makeSwitcher(fullState({ sessionId: 'session-A', draft: '' }));
+		pendingQueue.requestRemoval('session-A', { id: 'client-A', clientMessageId: 'client-A', content: 'unsent A', queuedAt: 1 });
+		await switcher.switchSession('session-B');
+		pendingQueue.reset('session-B'); // the real feed's start/stop calls reset
+		pendingQueue.applyRemovalVerdict('session-A', 'client-A', 'withdrawn');
+		expect(getState().pendingRestorePrompt).toBeNull();
+		await switcher.switchSession('session-A');
+		expect(getState().pendingRestorePrompt).toBe('unsent A');
+		expect(pendingQueue.takeWithdrawnDraft('session-A')).toBeNull();
+		await switcher.switchSession('session-B');
+		expect(getState().pendingRestorePrompt).toBeNull();
+		pendingQueue.reset(null, true);
+	});
+});
 
 describe('remembered new-chat worker', () => {
 	it('restores the preference after send cleared the active intent, without rerouting existing sessions', async () => {
@@ -1348,5 +1369,193 @@ describe('session-switcher · reconciledSessionMode', () => {
 		// missing from the list (foreign, filtered, deleted) has no row to read.
 		expect(reconciledSessionMode(null, rows)).toBeNull();
 		expect(reconciledSessionMode('not-in-list', rows)).toBeNull();
+	});
+});
+
+describe('leaving a session with an unanswered prose question (spec §5)', () => {
+	const asked = [
+		{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+		{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' },
+	];
+	beforeEach(() => { _resetProseQuestions(); _mockSessions.current = []; });
+
+	it('A -> B -> A keeps the question remembered, and answering it clears it on the next leave', async () => {
+		_mockSessions.current = [{ id: 'session-A', work_started_at: 'T1' }];
+		const { switcher, deps } = makeSwitcher(fullState({ messages: asked, isStreaming: true }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		await switcher.switchSession('session-A');
+		// Leaving B (no question) records nothing for it and keeps A.
+		expect([...get(proseQuestionSessions).keys()]).toEqual(['session-A']);
+		// History hydrated, then the user answered.
+		deps.update((s) => ({ ...s, isLoadingSession: false, messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] }));
+		switcher.newChat();
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	const E = 'evt-epoch-1';
+	const rev = (seq: number | null, epoch: string | null = E) => ({
+		last_user_message_seq: seq,
+		last_user_message_epoch: epoch
+	});
+	/** A transcript whose trailing question was rendered from event `seq`. */
+	const positioned = (seq: number, epoch = E): ChatMessage[] => [
+		{ id: 'u1', role: 'user', content: 'Deploy it', seq: seq - 1, epoch },
+		{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?', seq, epoch }
+	];
+
+	it('only a later seq in the question\'s log clears it after leaving (#2249)', async () => {
+		_mockSessions.current = [{ id: 'session-A', ...rev(4) }];
+		const { switcher } = makeSwitcher(fullState({ messages: positioned(5) }));
+		await switcher.switchSession('session-B');
+		observeLastUserMessage('session-A', rev(4));
+		observeLastUserMessage('session-A', rev(9, 'evt-other'));
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		observeLastUserMessage('session-A', rev(6));
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	it('does not mark a question whose answer the loaded row already carries', async () => {
+		_mockSessions.current = [{ id: 'session-A', ...rev(6) }];
+		const { switcher } = makeSwitcher(fullState({ messages: positioned(5) }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	describe('the opened session\'s own revision comes from its /live snapshot (#2249)', () => {
+		const isLive = (url: string) => url.startsWith('/sessions/session-A/live');
+		const detailCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => /^\/sessions\/session-A(\?|$)/.test(url)).length;
+		const liveCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => isLive(url)).length;
+		const leaveA = async (
+			switcher: ReturnType<typeof makeSwitcher>['switcher'],
+			deps: ReturnType<typeof makeSwitcher>['deps'],
+			messages: ChatMessage[] = positioned(5)
+		) => {
+			deps.update((st) => ({ ...st, messages, isLoadingSession: false, isRestoringSession: false }));
+			await switcher.switchSession('session-B');
+		};
+		beforeEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
+		afterEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
+
+		it('reads the revision from /live session_meta when no row is loaded, without a detail request', async () => {
+			_mockSessions.current = [];
+			vi.mocked(api.get).mockImplementation(async (url: string) =>
+				isLive(url) ? { session_meta: rev(6) } : null);
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(liveCalls()).toBe(1));
+			await new Promise((r) => setTimeout(r, 0));
+			// The transcript lags: the answer at seq 6 was already seen via /live.
+			await leaveA(switcher, deps);
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+			expect(detailCalls()).toBe(0);
+		});
+
+		it('a pre-question /live value keeps the mark; a cross-device answer afterwards clears it', async () => {
+			_mockSessions.current = [];
+			vi.mocked(api.get).mockImplementation(async (url: string) =>
+				isLive(url) ? { session_meta: rev(4) } : null);
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(liveCalls()).toBe(1));
+			await new Promise((r) => setTimeout(r, 0));
+			await leaveA(switcher, deps);
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			observeLastUserMessage('session-A', rev(4));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			observeLastUserMessage('session-A', rev(6));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+		});
+
+		it('a late /live snapshot carrying the pre-question value never clears, nor does a refresh of it', async () => {
+			_mockSessions.current = [];
+			let resolveLive!: (v: unknown) => void;
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				isLive(url) && !resolveLive ? new Promise((done) => { resolveLive = done; }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(resolveLive).toBeDefined());
+			observeLastUserMessage('session-A', rev(4));
+			await leaveA(switcher, deps);
+			resolveLive({ session_meta: rev(4) });
+			await new Promise((r) => setTimeout(r, 0));
+			observeLastUserMessage('session-A', rev(4));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		});
+
+		it('a /live snapshot taken after the answer clears the mark when it lands after leaving', async () => {
+			_mockSessions.current = [];
+			let resolveLive!: (v: unknown) => void;
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				isLive(url) && !resolveLive ? new Promise((done) => { resolveLive = done; }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(resolveLive).toBeDefined());
+			await leaveA(switcher, deps);
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			resolveLive({ session_meta: rev(7) });
+			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
+		});
+
+		it('overlapping visits: an earlier visit\'s late snapshot cannot clear a newer question', async () => {
+			_mockSessions.current = [];
+			const pending: Array<(v: unknown) => void> = [];
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				isLive(url) ? new Promise((done) => { pending.push(done); }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(pending.length).toBe(1));
+			await leaveA(switcher, deps, positioned(3));
+			// Answered elsewhere at seq 7; visit 2 hydrates a NEW question (seq 9) and leaves.
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(pending.length).toBe(2));
+			await leaveA(switcher, deps, [
+				...positioned(3),
+				{ id: 'u2', role: 'user', content: 'Prod only', seq: 7, epoch: E },
+				{ id: 'a2', role: 'assistant', type: 'text', content: 'Which region?', seq: 9, epoch: E }
+			]);
+			pending[1]({ session_meta: rev(7) });
+			pending[0]({ session_meta: rev(2) });
+			await new Promise((r) => setTimeout(r, 0));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			observeLastUserMessage('session-A', rev(10));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+		});
+
+		it('records a loaded row\'s revision on switch-in, so filtering the row out before leaving keeps it', async () => {
+			_mockSessions.current = [{ id: 'session-A', ...rev(6) }];
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			// A tag filter drops A's row while A stays open.
+			_mockSessions.current = [];
+			await leaveA(switcher, deps);
+			await new Promise((r) => setTimeout(r, 0));
+			expect(detailCalls()).toBe(0);
+			// The answer (seq 6) was already seen on the row: no mark.
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+		});
+	});
+
+	it('a question without a position never clears on a revision alone', async () => {
+		_mockSessions.current = [{ id: 'session-A', ...rev(null, null) }];
+		const { switcher } = makeSwitcher(fullState({ messages: asked }));
+		await switcher.switchSession('session-B');
+		observeLastUserMessage('session-A', rev(50));
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+	});
+
+	it('leaving A while its uncached history is still loading keeps the remembered question', async () => {
+		_mockSessions.current = [{ id: 'session-A', work_started_at: 'T1' }];
+		const { switcher, deps } = makeSwitcher(fullState({ messages: asked }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		// Reopen A with no cache: the switch starts it empty and loading.
+		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [], isLoadingSession: true }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		// A partial replay is not authoritative either.
+		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [asked[0]], isLoadingSession: true }));
+		switcher.newChat();
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
 	});
 });

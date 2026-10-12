@@ -34,7 +34,10 @@ Guards (all essential):
 
 from __future__ import annotations
 
+import copy
 import logging
+import logging.handlers
+import queue
 import threading
 
 logger = logging.getLogger(__name__)
@@ -43,7 +46,7 @@ _local = threading.local()
 _formatter = logging.Formatter()
 
 # Module-level singleton so install/uninstall are idempotent.
-_handler: "ErrorLogDBHandler | None" = None
+_handler: "_QueuedErrorLogHandler | None" = None
 
 # Conservative marker for the SDK reader-task fatal we most need forensics on.
 _FATAL_READER_MARKER = "Fatal error in message reader"
@@ -195,6 +198,58 @@ class ErrorLogDBHandler(logging.Handler):
             _local.in_emit = False
 
 
+class _QueuedErrorLogHandler(logging.handlers.QueueHandler):
+    """Bounded, nonblocking bridge; DB latency must never hold the loop/logger lock."""
+
+    def __init__(self) -> None:
+        super().__init__(queue.Queue(maxsize=1024))
+        self.setLevel(logging.WARNING)
+        self.dropped = 0
+        self.listener = logging.handlers.QueueListener(self.queue, ErrorLogDBHandler())
+        self.listener.start()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if (record.name.startswith("app.db") or record.name == __name__
+                or getattr(_local, "in_emit", False)):
+            return
+        try:
+            # ContextVars belong to the producer, not the persistence thread.
+            from app.core.session_context import get_current_session_id
+            prepared = copy.copy(record)
+            prepared.msg, prepared.args = record.getMessage(), None
+            if record.exc_info:
+                prepared.stack_info = _formatter.formatException(record.exc_info)
+            prepared.exc_info = prepared.exc_text = None
+            if getattr(prepared, "session_id", None) is None:
+                prepared.session_id = get_current_session_id()
+            self.enqueue(prepared)
+        except queue.Full:
+            # The file handler still retains the record. Never recurse into
+            # logging or block the producer when the DB is unavailable.
+            self.dropped += 1
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        # QueueListener.stop() joins without a timeout; a stuck DB must not
+        # block shutdown either. The listener is a daemon and drains normally.
+        thread = self.listener._thread
+        if thread is not None:
+            try:
+                self.listener.enqueue_sentinel()
+            except queue.Full:
+                # Make space for shutdown, retaining the bounded-loss policy.
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                except queue.Empty:
+                    pass
+                self.listener.enqueue_sentinel()
+            thread.join(timeout=2)
+            self.listener._thread = None
+        super().close()
+
+
 def install_error_log_handler() -> None:
     """Attach the DB error handler to the root logger (idempotent).
 
@@ -204,7 +259,7 @@ def install_error_log_handler() -> None:
     global _handler
     if _handler is not None:
         return
-    _handler = ErrorLogDBHandler()
+    _handler = _QueuedErrorLogHandler()
     logging.getLogger().addHandler(_handler)
     logger.info(
         "ErrorLogDBHandler attached — backend records at %s+ persist to error_log",
@@ -218,4 +273,5 @@ def uninstall_error_log_handler() -> None:
     if _handler is None:
         return
     logging.getLogger().removeHandler(_handler)
+    _handler.close()
     _handler = None

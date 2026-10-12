@@ -19,6 +19,7 @@ const available = { kind: 'available', version: 'bbbbbbbbbbbb' };
 const ready = { ...available, kind: 'ready' };
 function source(overrides = {}) { return {
  check: async () => available, download: async () => ready,
+ channelConfig: async () => ({channel:'stable',source:'default',editable:true}),
  version: 'a'.repeat(40), options: { root: 'C:/isolated/source' },
  application: async () => ({ node: 'C:/isolated/new-node/node.exe', desktopDir: 'C:/isolated/desktop' }), ...overrides
 }; }
@@ -35,6 +36,19 @@ test('worker bridge performs one-shot downloads and refuses expired or busy rest
  assert.match(updater.current.error,/Busy/);assert.equal(calls.length,0);
  updater.setBridge(async()=>({action:'install',expires_at:0}),async()=>true);await updater.exchange();assert.equal(calls.length,0);
  updater.stop();assert(seen.length>0);
+});
+test('worker channel requests write through the source updater and report the persisted choice', async () => {
+ const {updater}=fixture();let channel='stable';let request={};const seen=[];
+ updater.useApplications(source({
+  channelConfig:async()=>({channel,source:channel==='stable'?'default':'file',editable:true}),
+  setChannel:async value=>{channel=value;}
+ }));
+ updater.setBridge(async state=>{seen.push(state.channel_config);const next=request;request={};return next;},async()=>false);
+ updater.start();await new Promise(setImmediate);
+ request={action:'set_channel',channel:'nightly',expires_at:Date.now()/1000+10};
+ await updater.exchange();await new Promise(setImmediate);
+ assert.equal(channel,'nightly');assert.equal(seen.at(-1).channel,'nightly');
+ assert.equal(updater.current.phase,'idle');updater.stop();
 });
 test('account policy gates checks, downloads and staged installs, and failures fail closed', async () => {
  const { updater, calls } = fixture(); let enabled = false; let checks = 0;
@@ -331,7 +345,7 @@ test('NC-6: the worker bridge ticks every 30 s, not 2 s, and pushes a new phase 
  // A phase change during an exchange is reported right after it, not dropped.
  seen.length = 0; let hold;
  updater.setBridge(async state => { seen.push(state.phase); if (!hold) await new Promise(resolve => { hold = resolve; }); return {}; }, async () => false);
- const ex = updater.exchange(); updater.set({ phase: 'error' }); hold(); await ex; await new Promise(setImmediate);
+ const ex = updater.exchange(); await new Promise(setImmediate); updater.set({ phase: 'error' }); hold(); await ex; await new Promise(setImmediate);
  assert.deepEqual(seen, ['ready', 'error']);
  updater.stop(); seen.length = 0; updater.set({ phase: 'idle' }); await new Promise(setImmediate);
  assert.deepEqual(seen, [], 'nothing after stop');

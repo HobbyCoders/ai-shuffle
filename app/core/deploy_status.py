@@ -173,12 +173,12 @@ def _pr_merge_commit(repo: Path, pr: int) -> Dict[str, Any]:
 
 
 # scripts/ci/edge_publication_gate.py annotates a refusal that only the owner
-# can clear (the full suites, or a combined main tree, need owner-dispatched
-# CI on main) with this title and the exact `gh workflow run` commands (#1940).
+# can clear (main needs a local full-suite pass: `python scripts/local_ci.py
+# full --attest` on a clean checkout of main) with this title and the command.
 # The gate job itself stays green.
 EDGE_REFUSAL_TITLE = "Edge publication refused"
-# Unrelated PR CI completions re-run the gate on the same main revision; bound
-# how many of its runs are read for the annotation.
+# Pending and failed local/full-suite statuses re-run the gate on the same
+# main revision; bound how many of its runs are read for the annotation.
 EDGE_GATE_RUNS = 10
 _edge_refusals: Dict[str, tuple] = {}
 
@@ -393,15 +393,17 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
             item["action"] = f"{item['behind']} behind; {action}"
         workers.append(item)
 
-    # Edge publishes only origin/main: say why the gate refused it and how to unblock it.
-    if main and any("publish edge first" in item["action"] for item in workers):
+    # An older published update can be offered while main is held. Keep that
+    # actionable offer, but expose the current-main refusal independently of it.
+    held_candidates = [item for item in workers if item["online"] and item["channel"] == "edge"
+                       and (item["behind"] or 0) > 0]
+    if main and held_candidates:
         refusal = edge_refusal(repo, main)
         if refusal:
-            for item in workers:
-                if "publish edge first" in item["action"]:
-                    evidence: EdgePublicationRefusal = {"revision": main[:9], "reason": refusal}
-                    item["edge_publication_refusal"] = evidence
-                    item["action"] += f". Edge refused {main[:9]}: {refusal}"
+            for item in held_candidates:
+                evidence: EdgePublicationRefusal = {"revision": main[:9], "reason": refusal}
+                item["edge_publication_refusal"] = evidence
+                item["action"] += f". Edge refused {main[:9]}: {refusal}"
 
     android = None
     if change is not None:

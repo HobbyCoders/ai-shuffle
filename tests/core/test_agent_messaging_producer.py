@@ -7,7 +7,7 @@ Only the native receiver's submit method is mocked on the messaging path.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -481,12 +481,47 @@ async def _run_queued(engine, session_id):
 
 @pytest_asyncio.fixture
 async def _no_wake_timers():
-    from app.core import wakeup_service
+    from app.core import turn_scheduler, wakeup_service
 
     yield
-    for task in list(wakeup_service._timers.values()):
+    # Terminal delivery also starts a scheduler batch-window timer. Leaving it
+    # alive lets it call the real kick after monkeypatch restores the mock, or
+    # leaves a closed-loop task for a later runtime test to gather.
+    tasks = set(wakeup_service._timers.values()) | set(turn_scheduler._kick_tasks)
+    for task in tasks:
         task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     wakeup_service._timers.clear()
+    turn_scheduler._batch_kick_tasks.clear()
+
+
+async def test_wake_timer_fixture_drains_scheduler_batch_tasks(monkeypatch):
+    from app.core import turn_scheduler, wakeup_service
+
+    monkeypatch.setattr(turn_scheduler, "TERMINAL_BATCH_WINDOW_SECONDS", 60)
+    kick = MagicMock()
+    monkeypatch.setattr(turn_scheduler, "kick", kick)
+    cleanup = _no_wake_timers.__wrapped__()
+    await anext(cleanup)
+    turn_scheduler._kick_after_batch_window("fixture-cleanup")
+    batch_task = turn_scheduler._batch_kick_tasks["fixture-cleanup"]
+    wake_task = asyncio.create_task(asyncio.sleep(60))
+    wakeup_service._timers["fixture-cleanup"] = wake_task
+    # Enter the tasks so cancellation must unwind their awaited work/finally.
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(StopAsyncIteration):
+            await anext(cleanup)
+        assert batch_task.cancelled()
+        assert wake_task.cancelled()
+        assert batch_task not in turn_scheduler._kick_tasks
+        assert "fixture-cleanup" not in turn_scheduler._batch_kick_tasks
+        assert "fixture-cleanup" not in wakeup_service._timers
+        kick.assert_not_called()
+    finally:
+        batch_task.cancel()
+        wake_task.cancel()
+        await asyncio.gather(batch_task, wake_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -942,12 +977,24 @@ async def test_dispatched_worker_native_continuation_lifecycle(
                 (continuation,) = turns_db.get_queued_turns("native-child")
                 assert continuation["source"] == "unpark"
                 assert continuation["payload"]["agent_message_reply_to"] == "root"
-                outcome = await session_runtime.execute(continuation)
+                runtime = session_runtime.SessionRuntime(continuation)
+                outcome = await runtime.execute()
+                continuation = runtime.turn
             assert outcome == ("completed" if ending in {"completed", "parked_report"} else "aborted")
             assert len(provider.requests) == (3 if ending == "parked_report" else 2)
             # The native engine resumed its own stored conversation, not a fresh loop.
             assert "original native report" in str(provider.requests[1].messages)
         assert provider_agent_supervisor.get_worker("root", "native-child") is None
+        # The panel replays task.updated, not the registry or completion card.
+        from app.db.session_events import get_events
+        updates = [e["payload"] for e in get_events("root", limit=1000)
+                   if e["event_type"] == "task.updated"
+                   and e["payload"]["task_id"] == "native-child"]
+        expected_status = ("killed" if ending in {"stop_task", "stop_all", "queued_stop"}
+                           else "error" if ending == "error" else "completed")
+        assert updates[-1]["state"] == expected_status
+        starts = [e for e in updates if e["state"] == "running"]
+        assert starts[-1]["started_at"] != starts[0]["started_at"]
         row = task_registry.get_task("root", "native-child")
         if ending in {"stop_task", "stop_all", "queued_stop"}:
             assert row["status"] == "killed"

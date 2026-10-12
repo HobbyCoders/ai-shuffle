@@ -1,6 +1,6 @@
 """Owner-controlled, account-synced application updates."""
 from typing import Literal
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, StrictBool
 from app.api.auth import require_admin, require_auth
 from app.core import application_updates, preview_access
@@ -8,6 +8,12 @@ from app.db import database
 from app.db.async_database import run_sync
 
 updates_router = APIRouter()
+channel_router = APIRouter(prefix="/api/v1/updates", tags=["Updates"])
+
+
+class UpdateChannel(BaseModel):
+    channel: Literal["stable", "nightly", "edge"]
+    model_config = {"extra": "forbid"}
 
 
 class UpdatePolicy(BaseModel):
@@ -30,6 +36,25 @@ def require_update_owner(request: Request, token=Depends(require_admin)):
     if preview_access.grant(request) is not None:
         raise HTTPException(403, "Agent previews cannot change application updates")
     return token
+
+
+@channel_router.get("/channel")
+async def get_update_channel(_=Depends(require_update_owner)):
+    try:
+        return await run_sync(application_updates.channel_status)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(409, "Invalid update channel configuration") from exc
+
+
+@channel_router.put("/channel")
+async def put_update_channel(body: UpdateChannel, response: Response, _=Depends(require_update_owner)):
+    try:
+        result = await run_sync(application_updates.set_channel, body.channel)
+        if application_updates.control_root() is None:
+            response.status_code = 202  # launcher persists it on the next heartbeat
+        return result
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @updates_router.get("/application-updates")

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { privateAccessPending } from '$lib/stores/chat-access';
+import { _resetProseQuestions, observeLastUserMessage, rememberLeavingProseQuestion } from '$lib/stores/session/prose-questions';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
@@ -608,6 +609,102 @@ describe('Sidebar Needs you lane', () => {
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 		expect(lane()).toBeNull();
+	});
+
+	// Spec §5: the open session's own queues and a prose question count, and
+	// Needs you beats Working while its turn streams on.
+	it('lifts the open, still-working session while it waits on you, until the next user message', async () => {
+		type OpenState = Parameters<typeof mocks.activeSession.set>[0] & Record<string, unknown>;
+		const set = (state: Record<string, unknown>) => mocks.activeSession.set({
+			sessionId: 'active', isStreaming: true, optimisticStreaming: true, activeTasks: [], ...state
+		} as OpenState);
+		const asked = [
+			{ id: 'u1', role: 'user', content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?' }
+		];
+		render(Sidebar, { props: sidebarProps });
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [] });
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Awaiting input');
+		expect(cardFrame('Active chat').textContent).not.toContain('Working');
+
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [{ request_id: 'q1' }] });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Has question');
+
+		set({ messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }], pendingPermissions: [], pendingQuestions: [] });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+	});
+
+	// Spec §5: a question this tab saw before leaving a session keeps that row
+	// in Needs you; working-time changes on its row never clear it.
+	it('keeps a left session with an unanswered prose question in the lane through row updates', async () => {
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
+		];
+		rememberLeavingProseQuestion('settled', asked);
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(cardFrame('Settled chat').textContent).toContain('Awaiting input');
+
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('settled', 'Settled chat', 'visible-project', false, false, { work_started_at: '2026-10-11T00:00:00Z' }),
+			session('worker', 'Hidden worker', 'hidden-project', true, true),
+		]);
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		// Reopened here with the answer loaded, then left: the switcher drops it.
+		rememberLeavingProseQuestion('settled', [...asked, { id: 'u2', role: 'user' as const, content: 'Prod only' }]);
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+	});
+
+	// #2249: an answer sent from another device clears the lane without
+	// reopening the session here.
+	it('moves a left session out of Needs you when a later user message arrives', async () => {
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it', seq: 4, epoch: 'evt-1' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?', seq: 5, epoch: 'evt-1' }
+		];
+		const rev = (seq: number) => ({ last_user_message_seq: seq, last_user_message_epoch: 'evt-1' });
+		rememberLeavingProseQuestion('settled', asked, rev(4));
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+
+		observeLastUserMessage('settled', rev(5));
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+
+		observeLastUserMessage('settled', rev(6));
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+	});
+
+	it('marks a never-opened session from its row question and clears it on the answer (#2263)', async () => {
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+
+		const pair = { last_assistant_question_seq: 12, last_assistant_question_epoch: 'evt-1' };
+		observeLastUserMessage('settled', { ...pair, last_user_message_seq: 9, last_user_message_epoch: 'evt-1' });
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+
+		observeLastUserMessage('settled', { last_user_message_seq: 13, last_user_message_epoch: 'evt-1' });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+
+		// A question position from another log is never compared: unmarked.
+		observeLastUserMessage('settled', { ...pair, last_assistant_question_epoch: 'evt-2' });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});
 
 	it('takes a remote session from its owner state, not the local map', () => {
@@ -1667,6 +1764,31 @@ describe('Sidebar assistant row', () => {
 		await tick();
 		expect(screen.getByRole('button', { name: 'Open your assistant' }).getAttribute('aria-current')).toBe('page');
 		mocks.activeView.set(null);
+	});
+
+	it('offers no Rename, Fork or Delete for the built-in conversation', async () => {
+		mocks.sessions.set([
+			session('home', 'Assistant home chat', null, true),
+			session('active', 'Active chat', 'visible-project', true),
+		]);
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+		acceptAssistant(ready);
+		await tick();
+
+		const row = screen.getByRole('button', { name: 'Open your assistant' });
+		expect(row.hasAttribute('aria-haspopup')).toBe(false);
+		await fireEvent.contextMenu(row);
+		await fireEvent.keyDown(row, { key: 'F2' });
+		await fireEvent.keyDown(row, { key: 'Delete' });
+		await tick();
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(screen.queryByRole('menuitem')).toBeNull();
+		for (const label of [/rename/i, /fork/i, /delete/i]) {
+			expect(screen.queryByRole('button', { name: label })).toBeNull();
+			expect(screen.queryByTitle(label)).toBeNull();
+		}
+		// The home chat never appears as an ordinary row that could carry them.
+		expect(cardIds()).toEqual(['active']);
 	});
 
 	it('does not expose the assistant to non-admins', () => {

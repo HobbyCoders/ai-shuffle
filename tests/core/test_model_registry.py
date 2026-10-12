@@ -314,6 +314,51 @@ class TestContextWindowChoices:
     def test_choices_follow_the_serving_provider(self, model_id, provider, expected):
         assert m.context_window_choices(model_id, provider) == expected
 
+    def test_extended_is_the_models_full_window(self):
+        # A registry advertising more than 1M locks Extended to that window.
+        row = {"provider_type": "openrouter", "context_window": 2_000_000}
+        assert m.context_window_choices("anthropic/claude-future", row) == [200_000, 2_000_000]
+        assert m.context_window_bounds("anthropic/claude-future", row) == (200_000, 2_000_000)
+        gpt6 = {"provider_type": "openai", "models_json": [{"id": "gpt-6.1", "context_window": 1_500_000}]}
+        assert m.context_window_choices("gpt-6.1", gpt6) == [272_000, 1_500_000]
+
+
+class TestOfferedContextWindowRange:
+    """The Standard cap is adjustable: any whole token count from the family
+    default up to the model's full window is a valid session window."""
+
+    @pytest.mark.parametrize("value", [200_000, 200_001, 400_000, 600_000, 999_000, 1_000_000])
+    def test_claude_accepts_its_whole_range(self, value):
+        assert m.is_offered_context_window(value, "sonnet") is True
+
+    @pytest.mark.parametrize("value", [199_999, 1_000_001, 0, -1, 400_000.0, "400000", True, None])
+    def test_out_of_range_or_non_integer_is_refused(self, value):
+        assert m.is_offered_context_window(value, "sonnet") is False
+
+    def test_gpt6_floor_is_its_272k_standard(self):
+        row = {"provider_type": "openai", "models_json": [{"id": "gpt-6.1", "context_window": 272_000}]}
+        assert m.context_window_bounds("gpt-6.1", row) == (272_000, 1_000_000)
+        assert m.is_offered_context_window(256_000, "gpt-6.1", row) is False
+        assert m.is_offered_context_window(500_000, "gpt-6.1", row) is True
+
+    @pytest.mark.parametrize("model_id,provider", [
+        ("claude-haiku-4-5", None),
+        ("vendor/other", {"provider_type": "openrouter", "context_window": 1_000_000}),
+    ])
+    def test_models_without_a_larger_window_offer_nothing(self, model_id, provider):
+        assert m.context_window_bounds(model_id, provider) is None
+        assert m.is_offered_context_window(200_000, model_id, provider) is False
+
+    def test_offered_context_window_accepts_a_raised_cap(self, monkeypatch):
+        from app.db import model_providers
+
+        monkeypatch.setattr(model_providers, "get_model_provider", lambda _id: None)
+        session = {"model": "sonnet", "mode": "chat"}
+        assert m.offered_context_window(session, 450_000) == 450_000
+        assert m.offered_context_window(session, 1_000_000) == 1_000_000
+        assert m.offered_context_window(session, 150_000) is None
+        assert m.offered_context_window(session, 1_200_000) is None
+
 
 class TestRegistryPayloadProviders:
     """``providers`` is a lazily-sourced projection of enabled

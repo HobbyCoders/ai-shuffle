@@ -262,13 +262,27 @@ def test_populated_store_precedes_mirror_and_legacy(mirrored_chat, monkeypatch, 
     def unexpected(*args, **kwargs):
         pytest.fail("populated store consulted the mirror/legacy rescue")
 
-    monkeypatch.setattr(session_events, "get_events", unexpected)
+    # A populated store remains the rendered source, but its question now
+    # receives the position of the matching authoritative event.
+    session_events.append_events("remote-chat", [
+        {"type": "message.assistant", "payload": {"content": "Store reply"}},
+        {"type": "message.user", "payload": {"content": "After the reply"}},
+    ])
+    question_seq = session_events.get_max_seq("remote-chat") - 1
+    epoch = session_events.get_log_epoch("remote-chat")
     monkeypatch.setattr(session_events, "get_max_seq", unexpected)
     monkeypatch.setattr("app.api.sessions._legacy_db_messages", unexpected)
     monkeypatch.setattr("app.core.db_message_loader.load_messages_from_db", unexpected)
     response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix)
     assert response.status_code == 200, response.text
     assert [m["content"] for m in response.json()["messages"]] == ["Store reply"]
+    message = response.json()["messages"][0]
+    assert "store-reply" in message["id"]
+    assert message["seq"] == question_seq
+    assert message["epoch"] == epoch
+    meta = response.json()["session_meta"] if suffix else response.json()
+    assert meta["last_user_message_seq"] > question_seq
+    assert meta["last_user_message_epoch"] == epoch
 
 
 @pytest.mark.parametrize("suffix", ["", "/live"])

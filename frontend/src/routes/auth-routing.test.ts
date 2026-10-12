@@ -275,7 +275,7 @@ it('shows a fresh install the wizard welcome, then the owner password step, befo
 	expect(view.getByText('Update checks')).toBeTruthy();
 	expect(view.getByRole('link', { name: /What is sent/ }).getAttribute('href')).toBe('https://hobbycoders.com/privacy#updates');
 	const progress = view.getByRole('navigation', { name: 'Setup progress' });
-	for (const label of ['Welcome', 'Password', 'License', 'AI provider', 'Workspace', 'First run', 'Account & GitHub'])
+	for (const label of ['Welcome', 'Password', 'Cloud', 'AI provider', 'Workspace', 'First run', 'Account & GitHub'])
 		expect(progress.textContent).toContain(label);
 	await fireEvent.click(view.getByRole('button', { name: 'Continue' }));
 	await waitFor(() => expect(view.getByRole('heading', { name: 'Set an owner password' })).toBeTruthy());

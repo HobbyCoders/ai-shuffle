@@ -14,6 +14,7 @@ import * as plugins from './entries/plugins';
 import * as mcp from './entries/mcp';
 import * as hooks from './entries/hooks';
 import * as devices from './entries/devices';
+import * as cloud from './entries/cloud';
 import * as security from './entries/security';
 import * as system from './entries/system';
 import * as logs from './entries/logs';
@@ -30,6 +31,7 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	mcp,
 	hooks,
 	devices,
+	cloud,
 	security,
 	system,
 	logs

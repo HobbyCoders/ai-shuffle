@@ -104,3 +104,90 @@ export function createSettleHold(
 		}
 	};
 }
+
+export interface TurnHandoffInput {
+	sessionId: string | null | undefined;
+	/** Identity of the latest turn (`latestTurnKey`). */
+	latestTurnKey: string | null;
+	/** The effective (held) unsettled value for the latest turn. */
+	unsettled: boolean;
+	/** The turn is parked on background work (reducer `parked`). */
+	parked: boolean;
+}
+
+export interface TurnHandoffHold {
+	/**
+	 * Keys of earlier turns still inside their hold. Returns the same set
+	 * instance until it changes, so it is cheap to compare.
+	 */
+	update(input: TurnHandoffInput): ReadonlySet<string>;
+	dispose(): void;
+}
+
+/**
+ * The settle hold above only covers the LATEST turn. When a send (or wake)
+ * opens a newer turn while the latest one is still shown live — mid-hold, or
+ * parked — that turn stops being the latest and would fold at once. This keeps
+ * it flat for the rest of an ordinary hold window instead (the parked window
+ * when it was parked), so a send never short-circuits the hold.
+ *
+ * @param onExpire called when a hand-off runs out, so a reactive caller can
+ *   re-evaluate.
+ */
+export function createTurnHandoffHold(
+	onExpire: () => void,
+	timers: SettleHoldTimers = {
+		setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+		clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>)
+	}
+): TurnHandoffHold {
+	let sessionId: string | null | undefined;
+	let started = false;
+	let previousKey: string | null = null;
+	let previousUnsettled = false;
+	let previousParked = false;
+	const held = new Map<string, unknown>();
+	let snapshot: ReadonlySet<string> = new Set();
+
+	function publish() {
+		snapshot = new Set(held.keys());
+	}
+
+	function clearAll() {
+		for (const handle of held.values()) timers.clearTimeout(handle);
+		held.clear();
+		publish();
+	}
+
+	return {
+		update({ sessionId: id, latestTurnKey, unsettled, parked }) {
+			if (!started || id !== sessionId) {
+				started = true;
+				sessionId = id;
+				clearAll();
+			} else if (latestTurnKey !== previousKey && previousKey !== null && previousUnsettled) {
+				const key = previousKey;
+				if (held.has(key)) timers.clearTimeout(held.get(key));
+				held.set(key, timers.setTimeout(() => {
+					held.delete(key);
+					publish();
+					onExpire();
+				}, previousParked ? PARKED_SETTLE_HOLD_MS : SETTLE_HOLD_MS));
+				publish();
+			}
+			// The turn that is latest again (a rewind) is governed by the main hold.
+			if (latestTurnKey !== null && held.has(latestTurnKey)) {
+				timers.clearTimeout(held.get(latestTurnKey));
+				held.delete(latestTurnKey);
+				publish();
+			}
+			previousKey = latestTurnKey;
+			previousUnsettled = unsettled;
+			previousParked = parked;
+			return snapshot;
+		},
+		dispose() {
+			clearAll();
+		}
+	};
+}

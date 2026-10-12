@@ -133,6 +133,87 @@ async def test_read_text_default_line_limit_and_continuation(tmp_path) -> None:
     assert f"offset={DEFAULT_LINE_LIMIT + 1}" in body[-1]  # continuation hint
 
 
+async def test_read_explicit_limit_can_exceed_default(tmp_path) -> None:
+    f = tmp_path / "short-lines.txt"
+    f.write_text("\n".join(f"line{i}" for i in range(1, 2201)))
+    assert DEFAULT_LINE_LIMIT == 2_000
+
+    out = await _registry().dispatch(
+        "Read", {"file_path": str(f), "limit": 2100}, ToolCtx(cwd=str(tmp_path))
+    )
+
+    assert out.text.splitlines()[2099] == "2100\tline2100"
+    assert "offset=2101" in out.text
+
+
+async def test_read_wide_pages_recover_every_line_and_bound_edit_coverage(tmp_path) -> None:
+    import re
+
+    from fluid.tools import read_window
+    from fluid.tools.builtins.read import MAX_TEXT_CHARS
+
+    f = tmp_path / "wide-pages.txt"
+    source = [
+        f"row{i}: " + "é" * 990
+        for i in range(1, 2 * MAX_TEXT_CHARS // 990 + 2)
+    ]
+    f.write_text("\n".join(source), encoding="utf-8")
+    ctx = ToolCtx(cwd=str(tmp_path))
+    registry = _registry()
+    recovered = []
+    offset = 1
+    pages = 0
+    while offset <= len(source):
+        out = await registry.dispatch(
+            "Read", {"file_path": str(f), "offset": offset, "limit": 2000}, ctx
+        )
+        assert not out.is_error
+        lines = out.text.splitlines()
+        body = [line for line in lines if re.match(r"^\d+\t", line)]
+        assert body, "each page makes progress"
+        assert len("\n".join(body)) <= MAX_TEXT_CHARS
+        recovered.extend(line.split("\t", 1)[1] for line in body)
+        next_offset = offset + len(body)
+        if next_offset <= len(source):
+            assert f"offset={next_offset}" in lines[-1]
+            assert out.window_of.start == offset - 1
+            assert out.window_of.stop == next_offset - 1
+            if pages == 0:
+                assert read_window.windows_of(ctx, str(f)) == [(1, next_offset - 1)]
+                denied = await registry.dispatch(
+                    "Edit", {
+                        "file_path": str(f), "old_string": source[next_offset - 1],
+                        "new_string": "must not write an unread line",
+                    }, ctx,
+                )
+                assert denied.is_error
+                assert f.read_text(encoding="utf-8").splitlines() == source
+        else:
+            assert "output limited" not in out.text
+        offset = next_offset
+        pages += 1
+    assert pages > 1
+    assert recovered == source
+
+
+async def test_read_page_budget_exact_eof_and_one_more_line(tmp_path, monkeypatch) -> None:
+    from fluid.tools.builtins import read as read_mod
+
+    f = tmp_path / "boundary.txt"
+    f.write_text("abc\ndef", encoding="utf-8")
+    monkeypatch.setattr(read_mod, "MAX_TEXT_CHARS", len("1\tabc\n2\tdef"))
+    registry = _registry()
+    out = await registry.dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+    assert out.text == "1\tabc\n2\tdef"
+    assert out.window_of is None
+
+    f.write_text("abc\ndef\nghi", encoding="utf-8")
+    out = await registry.dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+    assert out.text.startswith("1\tabc\n2\tdef\n")
+    assert "offset=3" in out.text
+    assert out.window_of.stop == 2
+
+
 async def test_read_text_long_lines_truncated(tmp_path) -> None:
     f = tmp_path / "wide.txt"
     f.write_text("x" * (MAX_LINE_CHARS * 3) + "\nshort\n")

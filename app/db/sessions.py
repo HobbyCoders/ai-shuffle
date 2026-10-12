@@ -81,6 +81,11 @@ class SessionRow(TypedDict):
     turn_count: int
     created_at: str
     updated_at: str
+    last_user_message_at: Optional[str]
+    last_user_message_seq: Optional[int]
+    last_user_message_epoch: Optional[str]
+    last_assistant_question_seq: Optional[int]
+    last_assistant_question_epoch: Optional[str]
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
@@ -2016,6 +2021,87 @@ def get_session_messages(session_id: str) -> List[SessionMessageRow]:
         return rows
 
 
+def is_user_message(role: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """User/owner-configured prompts count; autonomous deliveries do not."""
+    metadata = metadata or {}
+    return role in ("user", "command") and metadata.get("source") not in {
+        "agent_message", "wakeup", "unpark", "unpark_pump", "auto_continue",
+        "promotion", "voice_system_note", "task_notification",
+    } and not metadata.get("agent_wake")
+
+
+def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=None, *, seq=None):
+    """Shared revision write for authoritative events and legacy messages.
+
+    Guard against a slower transaction overwriting a newer message revision.
+    The global feed reaches tabs that have never subscribed to this chat;
+    paired/account clients and other workers receive scoped invalidations.
+    """
+    if not is_user_message(role, metadata):
+        return None
+    if seq is None:
+        # Legacy rows have no event sequence. Preserve the last authoritative
+        # sequence rather than clearing it or inventing a causal position.
+        cursor.execute(
+            f"UPDATE sessions SET last_user_message_at = {ph()}, updated_at = {ph()} "
+            f"WHERE id = {ph()} AND (last_user_message_at IS NULL OR last_user_message_at < {ph()}) "
+            "RETURNING api_user_id, updated_at, last_user_message_seq, last_user_message_epoch, "
+            "last_assistant_question_seq, last_assistant_question_epoch",
+            (now, now, session_id, now),
+        )
+    else:
+        # Authoritative append: project the assistant counterpart before
+        # capturing the combined row snapshot. This is part of the session-row
+        # write phase, before append takes any composer-suggestion advisory lock.
+        from app.db.session_questions import record_question
+
+        record_question(cursor, session_id)
+        # Read the SSE log identity in the SAME transaction as the append and
+        # stamp. Never derive it later for a delayed broadcast or snapshot.
+        cursor.execute(
+            f"SELECT id FROM session_events WHERE session_id = {ph()} ORDER BY seq ASC LIMIT 1",
+            (session_id,),
+        )
+        epoch = str(cursor.fetchone()["id"])
+        # Event order is authoritative even if the wall clock moves backwards.
+        # Keep any newer question revision stamped above in this transaction.
+        cursor.execute(
+            f"UPDATE sessions SET last_user_message_at = {ph()}, last_user_message_seq = {ph()}, "
+            f"last_user_message_epoch = {ph()}, "
+            f"updated_at = CASE WHEN updated_at > {ph()} THEN updated_at ELSE {ph()} END WHERE id = {ph()} "
+            f"AND (last_user_message_seq IS NULL OR last_user_message_seq < {ph()} "
+            f"OR last_user_message_epoch IS NULL OR last_user_message_epoch != {ph()}) "
+            "RETURNING api_user_id, updated_at, last_user_message_seq, last_user_message_epoch, "
+            "last_assistant_question_seq, last_assistant_question_epoch",
+            (now, seq, epoch, now, now, session_id, seq, epoch),
+        )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    from app.core.session_payload import serialize_session_updated_at
+
+    updated_at = serialize_session_updated_at(row["updated_at"])
+    owner = row["api_user_id"]
+
+    def notify():
+        from app.core.global_events import global_events
+
+        global_events.lifecycle(owner, {
+            "type": "user_session_updated",
+            "session_id": session_id,
+            "updates": {
+                "updated_at": updated_at,
+                "last_user_message_at": now,
+                "last_user_message_seq": row["last_user_message_seq"],
+                "last_user_message_epoch": row["last_user_message_epoch"],
+                "last_assistant_question_seq": row["last_assistant_question_seq"],
+                "last_assistant_question_epoch": row["last_assistant_question_epoch"],
+            },
+        }, user_type="admin" if owner is None else "api_user")
+
+    return notify
+
+
 def add_session_message(
     session_id: str,
     role: str,
@@ -2056,15 +2142,17 @@ def add_session_message(
              (session_id, role, content, tool_name, tool_input, metadata, profile_id, jsonl_uuid, created_at)
              VALUES ({_phs9}) RETURNING id"""
 
-    if _conn is not None:
-        cursor = get_cursor(_conn)
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
+        cursor = get_cursor(conn)
         cursor.execute(sql, params)
         lastrowid = cursor.fetchone()["id"]
-    else:
-        with get_db() as conn:
-            cursor = get_cursor(conn)
-            cursor.execute(sql, params)
-            lastrowid = cursor.fetchone()["id"]
+        notify = _record_user_message(cursor, session_id, role, now, metadata)
+        if notify:
+            from app.db.base import after_commit
+            from app.db.composer_suggestions import supersede
+
+            supersede(conn, session_id)
+            after_commit(conn, notify)
 
     msg = {
         "id": lastrowid,
@@ -2115,6 +2203,7 @@ def add_session_messages_batch(
              VALUES ({_phs9}) RETURNING id"""
 
     results: List[SessionMessageRow] = []
+    notifications = []
 
     def _do_insert(conn):
         cursor = get_cursor(conn)
@@ -2135,6 +2224,12 @@ def add_session_messages_batch(
             )
             cursor.execute(sql, params)
             lastrowid = cursor.fetchone()["id"]
+            notify = _record_user_message(cursor, msg["session_id"], msg["role"], now, metadata)
+            if notify:
+                from app.db.composer_suggestions import supersede
+
+                supersede(conn, msg["session_id"])
+                notifications.append(notify)
             results.append({
                 "id": lastrowid,
                 "session_id": msg["session_id"],
@@ -2148,11 +2243,11 @@ def add_session_messages_batch(
                 "created_at": now,
             })
 
-    if _conn is not None:
-        _do_insert(_conn)
-    else:
-        with get_db() as conn:
-            _do_insert(conn)
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
+        _do_insert(conn)
+        from app.db.base import after_commit
+        for notify in notifications:
+            after_commit(conn, notify)
 
     return results
 
@@ -2400,6 +2495,10 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
         cursor.execute(
             f"""UPDATE sessions
                    SET sdk_session_id = NULL,
+                       last_user_message_seq = NULL,
+                       last_user_message_epoch = NULL,
+                       last_assistant_question_seq = NULL,
+                       last_assistant_question_epoch = NULL,
                        total_cost_usd = 0,
                        total_tokens_in = 0,
                        total_tokens_out = 0,

@@ -248,7 +248,7 @@
 			formTriggers = [{ type: automation.trigger_type, config: { ...automation.trigger_config } }];
 		}
 		formPrompt = automation.prompt || '';
-		formProfileId = automation.profile_id;
+		formProfileId = automation.profile_id ?? '';
 		formProjectId = automation.project_id || '';
 		formOutputType = (automation.output_config?.type as OutputType) || 'session';
 		formOutputConfig = { ...automation.output_config };

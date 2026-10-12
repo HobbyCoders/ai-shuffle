@@ -626,7 +626,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		// No guidance to act on: the credits line says what is known, and the
 		// meta line only says when it was checked.
 		expect(container.querySelector('.provider-status')).toBeNull();
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : 'Credit balance not available for this key');
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : undefined);
 		expect(container.querySelector('.usage-meta-text')?.textContent).toMatch(/^(Checked |Not checked yet$)/);
 		expect(container.textContent).not.toMatch(/Last known|Last reported|Refresh pending|Refresh timed out|Usage unavailable/);
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
@@ -639,7 +639,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable');
+		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : '—');
 	});
 
 	it.each(['stale', 'unavailable', 'never_fetched'] as const)('preserves sign-in guidance for %s credentials', async (status) => {
@@ -671,6 +671,33 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.textContent).not.toContain('extra credits');
 	});
 
+	it.each([12.34, 0, -2.5])('labels an entered OpenAI balance of %s as estimated with spend details', async (balance) => {
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
+				credits: { balance_remaining: balance, manual_balance: 20, estimated_spend: 20 - balance, set_at: 1750000000000 } },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain(`~$${balance.toFixed(2)} left (estimated)`);
+		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
+		const headline = container.querySelector('.sec-summary');
+		expect(headline?.textContent).toBe(`~$${balance.toFixed(2)} left (estimated)`);
+		expect(headline?.getAttribute('title')).toContain(`~$${(20 - balance).toFixed(2)} estimated spend on this worker since`);
+		expect(headline?.getAttribute('title')).toContain("Only this worker's tracked spend is deducted; paired workers' spend");
+	});
+
+	it('preserves the Admin reading alongside the entered balance estimate', async () => {
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'api', provider_type: 'openai', status: 'fresh',
+				credits: { spend_month: 5, balance_remaining: 12, manual_balance: 20, estimated_spend: 8, set_at: 1750000000000 } },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('~$12.00 left (estimated)');
+		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('$5.00 spent this month');
+	});
+
 	it('labels official organization costs as spend rather than credit remaining', async () => {
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'admin-api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
@@ -694,7 +721,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		// No billing access can expose an API key's prepaid balance, so a key
 		// without one is not asked for it.
 		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(status === 'stale' ? 'Billing access required' : null);
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(status === 'stale' ? '$12.34 left' : 'Credit balance not available for this key');
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(status === 'stale' ? '$12.34 left' : undefined);
 		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
@@ -728,7 +755,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('Credit balance not available for this key');
+		expect(container.textContent).not.toContain('Credit balance not available for this key');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).toContain('Balance unavailable for this key');
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
@@ -755,7 +782,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
 		expect(container.textContent).not.toMatch(/Last known usage|Refresh timed out/);
-		expect(container.textContent).toContain('Credit balance not available for this key');
+		expect(container.textContent).not.toContain('Credit balance not available for this key');
 		expect(container.textContent).not.toContain('$0.00');
 	});
 });
@@ -2200,6 +2227,85 @@ describe('ContextUsageBar — live per-call breakdown', () => {
 		await waitFor(() =>
 			expect(container.querySelector('.ctx-pct')?.textContent).toContain('90%')
 		);
+	});
+});
+
+describe('ContextUsageBar — unknown context window (#2274)', () => {
+	// An OpenRouter/xAI model the registry knows no window for, with no
+	// server-resolved bound: the meter must not measure it against 200k.
+	const UNKNOWN = 'prov:prov-xai:x-ai/grok-unlisted';
+	const report = (totalTokens: number, maxTokens: number | null) => ({
+		categories: [{ name: 'Messages', tokens: totalTokens, color: '#333' }],
+		totalTokens,
+		maxTokens,
+		rawMaxTokens: maxTokens,
+		percentage: maxTokens ? (totalTokens / maxTokens) * 100 : null,
+		model: 'x-ai/grok-unlisted',
+		isAutoCompactEnabled: false,
+	});
+
+	function unknownSession(extra: Partial<typeof mocks.DEFAULT> = {}) {
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's-grok',
+			modelOverride: UNKNOWN,
+			contextUsed: 12_345,
+			totalTokensIn: 2_345,
+			totalCacheReadTokens: 10_000,
+			...extra,
+		});
+	}
+
+	it('the pill shows tokens used with no ring fill and no percentage', async () => {
+		unknownSession();
+		const { container } = render(ContextUsageBar, { props: { showPercent: true } });
+		const pill = container.querySelector('.usage-indicator')!;
+		await waitFor(() =>
+			expect(pill.getAttribute('aria-label')).toBe(
+				'Context and usage — 12.3k tokens used, context window unknown'
+			)
+		);
+		expect(pill.getAttribute('title')).toContain('context window unknown');
+		expect(container.querySelector('.usage-ring')?.classList.contains('unknown')).toBe(true);
+		expect(container.querySelector('.ring-progress')).toBeNull();
+		expect(container.querySelector('.usage-percent')?.textContent).toBe('12.3k');
+	});
+
+	it('the popover states the window is unknown and where to set it', async () => {
+		unknownSession();
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const value = container.querySelector('.ctx-value')?.textContent ?? '';
+		expect(value).toContain('12.3k used');
+		expect(value).toContain('window unknown');
+		expect(value).not.toMatch(/%|200k/);
+		expect(container.querySelector('.ctx-unknown')?.textContent).toContain('Settings → Providers');
+		// No bar and no per-row share of a window nobody declared.
+		expect(container.querySelector('.ctx-segbar')).toBeNull();
+		expect(container.querySelector('.cat-pct')).toBeNull();
+		const labels = Array.from(container.querySelectorAll('.breakdown-row:not(.model-row) .breakdown-label'))
+			.map((n) => n.textContent?.trim());
+		expect(labels).not.toContain('Free space');
+	});
+
+	it('a null report keeps the unknown state rather than a fallback', async () => {
+		unknownSession();
+		mocks.getContextUsage.mockResolvedValue({ available: true, source: 'persisted', usage: report(9_000, null) });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(container.querySelector('.ctx-value')?.textContent).toContain('9k used'));
+		expect(container.querySelector('.ctx-unknown')).not.toBeNull();
+	});
+
+	it('the server-resolved bound gives the same model its percentage back', async () => {
+		unknownSession();
+		mocks.getContextUsage.mockResolvedValue({ available: true, source: 'persisted', usage: report(65_536, 131_072) });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(container.querySelector('.ctx-pct')?.textContent).toContain('50%'));
+		expect(container.querySelector('.ctx-value')?.textContent).toContain('65.5k / 131.1k');
+		expect(container.querySelector('.ctx-unknown')).toBeNull();
+		expect(container.querySelector('.ring-progress')).not.toBeNull();
 	});
 });
 

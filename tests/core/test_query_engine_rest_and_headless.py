@@ -426,8 +426,8 @@ async def test_headless_refusals_raise_before_spawning():
     with ExitStack() as stack:
         b = _headless_patches(stack, fresh_adapter(), session_row={"id": SID})
         stack.enter_context(patch.object(credential_gate, "refusal_for_options_async",
-                                         new=AsyncMock(return_value="No license")))
-        with pytest.raises(credential_gate.AgentSetupRequired, match="No license"):
+                                         new=AsyncMock(return_value="No provider configured")))
+        with pytest.raises(credential_gate.AgentSetupRequired, match="No provider configured"):
             await qe.execute_query("x", "claude-code", session_id=SID)
         b.make_adapter.assert_not_called()
 

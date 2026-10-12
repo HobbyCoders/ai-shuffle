@@ -54,7 +54,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class DesktopChannelConfig(BaseModel):
+    channel: Literal["stable", "nightly"]
+    source: Literal["file", "default"]
+    editable: bool
+
+
 class DesktopUpdateState(BaseModel):
+    channel_config: DesktopChannelConfig | None = None
     phase: Literal["idle", "checking", "available", "downloading", "ready", "error", "unsupported"]
     version: str | None = Field(default=None, max_length=64)
     running_version: str | None = Field(default=None, max_length=64)

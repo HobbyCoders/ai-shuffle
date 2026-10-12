@@ -816,6 +816,10 @@ def _run_column_migrations(cursor):
                 cursor.execute(f"ALTER TABLE usage_log ADD COLUMN {column} TEXT")
                 migrations_applied.append(f"usage_log.{column}")
 
+    # Retired agents leave disabled automations for the owner to reassign.
+    if table_exists(cursor, "automations"):
+        cursor.execute("ALTER TABLE automations ALTER COLUMN profile_id DROP NOT NULL")
+
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
         cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
@@ -1249,6 +1253,8 @@ def _run_column_migrations(cursor):
             ("codex_refresh_lease_owner", "TEXT"),
             ("codex_refresh_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
             ("openai_admin_key", "TEXT"),
+            ("manual_balance_usd", "DOUBLE PRECISION"),
+            ("manual_balance_set_at", "BIGINT"),
             ("openai_billing_org_id", "TEXT"),
             ("openai_billing_instance_id", "TEXT"),
         )
@@ -2048,9 +2054,20 @@ def _run_column_migrations(cursor):
         CREATE TABLE IF NOT EXISTS composer_suggestions (
             session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
             turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-            suggestion TEXT NOT NULL
+            suggestion TEXT NOT NULL,
+            activity_revision BIGINT NOT NULL DEFAULT -1
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestion_revisions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            activity_revision BIGINT NOT NULL DEFAULT 0,
+            completed_revision BIGINT
+        )
+    """)
+    if not column_exists(cursor, "composer_suggestions", "activity_revision"):
+        cursor.execute("ALTER TABLE composer_suggestions ADD COLUMN activity_revision BIGINT NOT NULL DEFAULT -1")
+
 
     # One-time seed: carry every existing queued_messages row into turns as a
     # source='queue' queued turn, preserving order via position. queued_messages
@@ -2250,6 +2267,23 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN pull_requests JSONB")
         migrations_applied.append("sessions.pull_requests")
 
+    # Nullable for old sessions; the source fingerprint applies this on upgrade.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_user_message_at"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_user_message_at TIMESTAMP WITH TIME ZONE")
+        migrations_applied.append("sessions.last_user_message_at")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_user_message_seq"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_user_message_seq BIGINT")
+        migrations_applied.append("sessions.last_user_message_seq")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_user_message_epoch"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_user_message_epoch TEXT")
+        migrations_applied.append("sessions.last_user_message_epoch")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_assistant_question_seq"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_assistant_question_seq BIGINT")
+        migrations_applied.append("sessions.last_assistant_question_seq")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "last_assistant_question_epoch"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_assistant_question_epoch TEXT")
+        migrations_applied.append("sessions.last_assistant_question_epoch")
+
     # Working time for the sidepanel. ``work_ms`` banks every finished turn's
     # live interval (app/db/turns.py), ``work_started_at`` is the live turn's
     # start. Both ride the session row so peer mirrors show them too. No
@@ -2412,7 +2446,7 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("session_moves")
-    for column, definition in (("wake_token", "TEXT"),
+    for column, definition in (("handoff_id", "TEXT"), ("wake_token", "TEXT"),
                                ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE")):
         if not column_exists(cursor, "session_moves", column):
             cursor.execute(f"ALTER TABLE session_moves ADD COLUMN {column} {definition}")
@@ -3511,7 +3545,7 @@ from app.db.profiles import (  # noqa: F401
     create_profile,
     update_profile,
     delete_profile,
-    retire_builtin_explore,
+    retire_builtin_subagent,
     get_profile_session_count,
     get_all_profile_session_counts,
     set_profile_builtin,

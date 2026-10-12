@@ -4,17 +4,13 @@ name: iOS CI
 # iOS Simulator without signing and runs the unit and WebKit tests. Chat loads
 # the phone UI from the paired worker's /mobile/, so the app bundles no UI and
 # mobile/ or frontend/ changes never need an app build; frontend CI covers
-# them. Paths-filtered like Android CI: only PRs that touch ios/ start it.
+# them. Manual only: no Mac is
+# available locally, so the owner dispatches it before an iOS release.
 #
 # macOS runners are PAID per minute and cost more than Linux ones. This
 # workflow never signs, uploads or publishes; TestFlight stays a manual,
 # owner-gated step (ios/RELEASING.md).
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'ios/**'
-      - '.github/workflows/ios.yml'
   workflow_dispatch:
 
 permissions:
@@ -22,13 +18,11 @@ permissions:
 
 concurrency:
   group: ios-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   simulator:
     name: Build and test iOS app (Simulator)
-    # Drafts run no paid CI; marking the PR ready starts it.
-    if: github.event.pull_request.draft != true
     runs-on: blacksmith-6vcpu-macos-latest
     timeout-minutes: 30
     steps:

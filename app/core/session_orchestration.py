@@ -81,10 +81,31 @@ def _local_top_level(row, *, allow_settled=False):
                 and row.get("owner_device_id") in (None, self_device_id()))
 
 
+def _as_owner_chat(owner):
+    """``owner`` with the install owner's own account counted as the owner.
+
+    A chat the owner starts from a signed-in phone or browser is labelled
+    ``account:<their account>``. Every worker of the network belongs to that
+    account, so the chat is the owner's chat on each of them, as the image and
+    transcript checks already decide (``same_install_owner``). Without this a
+    worker that mirrors such a chat refused it as a peer (#2218).
+    """
+    api_user_id, label = owner
+    if api_user_id is None and label.startswith("account:"):
+        from app.core.preference_identity import local_owner_account
+        try:
+            account = local_owner_account()
+        except Exception:  # noqa: BLE001 - an unreadable owner account fails closed
+            account = None
+        if account and label == "account:" + account:
+            return _OWNER_CHAT
+    return owner
+
+
 def _mirror_owner(row):
     """``_owner()`` of a chat another worker runs, from its synced label."""
     from app.db.mobile_tool_identity import mirrored
-    return (row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin"))
+    return _as_owner_chat((row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin")))
 
 
 def _list_entry(row):
@@ -103,7 +124,7 @@ def _principal(session_id):
 def _owner(row):
     principal = _principal(row["id"])
     # Legacy install-local chats remain usable without acquiring mobile grants.
-    return (row.get("api_user_id"), (principal or {}).get("owner", "install-admin"))
+    return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")))
 
 
 def _caller(session_id, *, allow_settled=False):
@@ -1118,10 +1139,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     assistant = action == "start" and is_primary_session(sender_id)
     project_v2_id = placement["project"]["id"] if placement is not None else None
     if remote is not None:
-        principal = _principal(sender_id)
+        from app.core.mobile_tool_identity import owner_principal
         # A tool identity is a credential of THIS install and cannot travel; the
         # destination runs the chat as its owner, so only owner chats may ask.
-        if sender.get("api_user_id") or (principal and principal.get("kind") != "admin"):
+        # The owner's own paired phone or browser is the owner (#2218).
+        if sender.get("api_user_id") or not owner_principal(_principal(sender_id)):
             raise PermissionError("Only the owner's chats can start chats on another worker.")
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
         (sender_id + ":" + request_id).encode()).hexdigest()
@@ -1425,7 +1447,7 @@ def _origin_turn(session_id, settled):
         return turns._row(cursor.fetchone())
 
 
-def _turn_report(session_id, turn_id, outcome, origin_id):
+def _turn_report(session_id, turn_id, outcome, origin_id, *, bound=True):
     """``(status, report text, needs-owner items)`` for one settled turn.
 
     Needs-owner items are approvals deferred since ``origin_id`` began."""
@@ -1464,7 +1486,9 @@ def _turn_report(session_id, turn_id, outcome, origin_id):
         status = "stopped"
     else:
         status = "failed" if failed else "completed"
-    report, _ = provider_agent.bound_report(text or "The chat ended without a written report.")
+    report = text or "The chat ended without a written report."
+    if bound:
+        report, _ = provider_agent.bound_report(report)
     return status, report, list(dict.fromkeys(needs))[:MAX_NEEDS_OWNER]
 
 

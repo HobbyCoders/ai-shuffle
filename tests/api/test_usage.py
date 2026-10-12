@@ -365,8 +365,11 @@ class TestUsageLimitsProviders:
         with patch("app.api.usage.usage_limits_monitor") as mon:
             mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
             body = _client().get("/api/v1/usage/limits").json()
+        if balance is None:
+            assert body["providers"] == []  # No Admin reading or entered balance.
+            return
         entry = body["providers"][0]
-        assert entry["status"] == ("stale" if balance is not None else "unavailable")
+        assert entry["status"] == "stale"
         assert entry["last_error_kind"] == "billing_access_denied"
         assert entry["fetched_at"] == (fetched if balance is not None else None)
         assert entry["credits"] == ({"spend_month": balance} if balance is not None else None)
@@ -455,12 +458,12 @@ class TestUsageLimitsProviders:
         body = response.json()
         _assert_claude_fields_unchanged(body)
         entries = {entry["provider_id"]: entry for entry in body["providers"]}
-        expected = {"prov-chatgpt", "prov-openai", "prov-openai-2"} if configured else {"prov-chatgpt"}
+        expected = {"prov-chatgpt", "prov-openai-2"} if configured else {"prov-chatgpt"}
         assert set(entries) == expected
         assert entries["prov-chatgpt"]["credits"] == {"balance": 99}
         assert entries["prov-chatgpt"]["windows"][0]["utilization"] == 12
         if configured:
-            assert entries["prov-openai"]["last_error_kind"] == "billing_access_denied"
+            assert "prov-openai" not in entries  # no Admin reading or entered balance
             assert entries["prov-openai-2"]["credits"] == {"spend_month": 0}
         assert any(row["provider_id"] == "openai-api" for row in db.get_all_provider_usage_snapshots())
 
@@ -530,7 +533,8 @@ class TestUsageLimitsProviders:
             db.upsert_provider_usage_snapshot(
                 "removed-account", provider_type, "SuperGrok",
                 [{"type": "seven_day", "utilization": 0}],
-                {"balance_remaining": 20}, {}, int(time.time() * 1000),
+                {"spend_month": 20} if provider_type == "openai" else {"balance_remaining": 20},
+                {"source": "openai_admin"} if provider_type == "openai" else {}, int(time.time() * 1000),
             )
 
         save_snapshot()
@@ -641,9 +645,7 @@ class TestUsageLimitsProviders:
 
         assert resp.status_code == 200
         providers = resp.json()["providers"]
-        assert [p["provider_id"] for p in providers] == ["prov-openai", "prov-or", "prov-grok"]
-        assert providers[0]["credits"] is None
-        assert providers[0]["last_error_kind"] == "missing_credentials"
+        assert [p["provider_id"] for p in providers] == ["prov-or", "prov-grok"]
         grok = next(p for p in providers if p["provider_id"] == "prov-grok")
         assert grok["provider_type"] == "grok"
         assert grok["plan_type"] == "SuperGrok"

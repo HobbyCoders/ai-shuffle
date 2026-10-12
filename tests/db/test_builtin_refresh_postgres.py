@@ -5,7 +5,10 @@ Runs the SQLite-shim seeding tests against a real database: JSONB config,
 """
 from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 
-pytestmark = requires_real_pg
+import pytest
+from tests.api.test_builtin_seeding import legacy_builtin_catalog  # noqa: F401
+
+pytestmark = [requires_real_pg, pytest.mark.usefixtures("legacy_builtin_catalog")]
 
 
 def _drop_builtins():
@@ -32,6 +35,8 @@ def test_refresh_contracts_on_postgres(monkeypatch):
         seeding.test_owner_text_matching_an_older_default_is_kept_once_recorded,
     ):
         test(None)
+    _drop_builtins()
+    seeding.test_plan_retirement_refreshes_recorded_general_purpose_description(None, monkeypatch)
     _drop_builtins()
     with monkeypatch.context() as patched:
         seeding.test_future_default_change_refreshes_through_the_record(None, patched)

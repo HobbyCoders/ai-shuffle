@@ -17,6 +17,7 @@ import {
 	type InternalMutableState,
 } from './ws-message-handlers';
 import type { ActiveSessionState } from '../active-session';
+import { sessionTimestamp } from '$lib/components/layout/session-card-data';
 
 // Mock the side-effect services the error handlers call. Keeps this a true unit
 // test of message dispatch — isolated from the heavy active-session/layout
@@ -60,6 +61,8 @@ import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { get } from 'svelte/store';
 import { rateLimit } from '../rate-limit';
+import { _resetProseQuestions, proseQuestionSessions, observeSessionRows,
+	rememberLeavingProseQuestion } from './prose-questions';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -183,6 +186,15 @@ describe('ws-message-handlers', () => {
 			const frame = { type: 'composer_suggestion', session_id: 'session-1', turn_id: 't', suggestion: 'Next?' };
 			handlers.handleMessage(envelope ? { event_type: 'stream_frame', data: frame } : frame);
 			expect(receive).toHaveBeenCalledWith(frame);
+			receive.mockRestore();
+		});
+		it.each(['turn.started', 'message.user'])('routes active-session %s through the suggestion reader', type => {
+			const receive = vi.spyOn(composerSuggestion, 'receive').mockImplementation(() => {});
+			const frame = { type, session_id: 'session-1', turn_id: 't', continued: true };
+			handlers.handleMessage({ ...frame, session_id: 'other' });
+			expect(receive).not.toHaveBeenCalled();
+			handlers.handleMessage({ event_type: 'stream_frame', data: frame });
+			expect(receive).toHaveBeenCalledExactlyOnceWith(frame);
 			receive.mockRestore();
 		});
 		it.each(['stopped', 'interrupted', 'error'])('invalidates current-session %s, not background events', type => {
@@ -761,7 +773,7 @@ describe('ws-message-handlers', () => {
 			const [message, opts] = (notify.warning as ReturnType<typeof vi.fn>).mock.calls[0];
 			expect(message).toMatch(/already sent/i);
 			expect(opts).toMatchObject({ session_id: 'session-1' });
-			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.update).toHaveBeenCalledTimes(1);
 		});
 
 		it('stays quiet when the cancel took effect', () => {
@@ -2002,6 +2014,235 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_session_updated handler (hand-off owner, #2308)', () => {
+		// The frame the source worker publishes on the global feed when a move
+		// commits (app/network/handoff.py _announce_owner).
+		const moved = {
+			owner_device_id: 'dev_gaming',
+			instance_id: 'dev_gaming',
+			placement: { where: 'runner:dev_gaming' },
+		};
+
+		it('patches owner_device_id, instance_id and placement into the row at once', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: moved });
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledTimes(1);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', moved);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				// The new owner's name and remote flag are not in the frame: a
+				// debounced reload brings them.
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
+	describe('user_session_updated handler (user-message revision, #2249)', () => {
+		// The question was rendered from event seq 5 of log `evt-1`.
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it', seq: 4, epoch: 'evt-1' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?', seq: 5, epoch: 'evt-1' },
+		];
+		const at = (seq: number | null, epoch: string | null = 'evt-1') => ({
+			last_user_message_at: '2026-10-11T10:05:00.000001+00:00',
+			last_user_message_seq: seq,
+			last_user_message_epoch: epoch,
+		});
+		const remembered = () => get(proseQuestionSessions).has('elsewhere');
+
+		it('clears a remembered prose question when another device answers: patches the row, then refreshes the list', async () => {
+			vi.useFakeTimers();
+			try {
+				rememberLeavingProseQuestion('elsewhere', asked, at(4));
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				const updates = at(6);
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates });
+
+				// The mark clears and the row is patched at once, before any reload…
+				expect(remembered()).toBe(false);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('elsewhere', updates);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				// …and the server's companion updated_at bump arrives by the reload.
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('moves the answered session up the last-activity order after the refresh', async () => {
+			vi.useFakeTimers();
+			try {
+				// The sidebar's rows: "elsewhere" is older, so it sorts second.
+				let rows: Record<string, unknown>[] = [
+					{ id: 'recent', updated_at: '2026-10-11T10:03:00+00:00', created_at: '2026-10-11T09:00:00+00:00' },
+					{ id: 'elsewhere', updated_at: '2026-10-11T10:00:00+00:00', created_at: '2026-10-11T09:00:00+00:00' },
+				];
+				const order = () => [...rows]
+					.sort((a, b) => sessionTimestamp(b as never) - sessionTimestamp(a as never))
+					.map((r) => r.id);
+				// The server stamps updated_at with the user message but the frame
+				// carries only last_user_message_at; the list endpoint has both.
+				const server = [
+					{ id: 'recent', updated_at: '2026-10-11T10:03:00+00:00', created_at: '2026-10-11T09:00:00+00:00' },
+					{ id: 'elsewhere', updated_at: '2026-10-11T10:05:00+00:00', created_at: '2026-10-11T09:00:00+00:00', last_user_message_at: '2026-10-11T10:05:00+00:00' },
+				];
+				deps = createMockDeps({
+					mergeSessionPatch: vi.fn((id: string, patch: Record<string, unknown>) => {
+						rows = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+						return true;
+					}),
+					appLoadSessions: vi.fn(() => { rows = server.map((r) => ({ ...r })); }),
+				});
+				handlers = createMessageHandlers(deps);
+				expect(order()).toEqual(['recent', 'elsewhere']);
+
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(6) });
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+
+				expect(order()).toEqual(['elsewhere', 'recent']);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('keeps it for a pre-question seq, another epoch, a null position or a working-time-only update', () => {
+			try {
+				rememberLeavingProseQuestion('elsewhere', asked, at(4));
+				// Same transaction as the question (voice): seq at or below it.
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(5) });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(20, 'evt-0') });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(null, null) });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { work_ms: 5000, work_started_at: '2026-10-11T11:00:00+00:00' } });
+				handlers.handleMessage({ event_type: 'session_updated', session_id: 'elsewhere', data: { updates: { is_active: true } } });
+				expect(remembered()).toBe(true);
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+
+		it('patches all three revision fields onto the row', () => {
+			try {
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(6) });
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('elsewhere', at(6));
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+
+		it('drops it when the conversation is cleared', () => {
+			try {
+				rememberLeavingProseQuestion('elsewhere', asked);
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'elsewhere' });
+				expect(remembered()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+	});
+
+	describe('user_session_updated handler (assistant-question revision, #2263)', () => {
+		const question = (seq: number | null) => ({
+			last_assistant_question_seq: seq,
+			last_assistant_question_epoch: 'evt-1',
+			last_user_message_seq: 9,
+			last_user_message_epoch: 'evt-1',
+		});
+		const marked = () => get(proseQuestionSessions).has('never-opened');
+
+		it('marks a session this tab never opened and patches the row without a reload', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				expect(marked()).toBe(true);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('never-opened', question(12));
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+
+				// Later non-question prose clears it.
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(null) });
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('the clear\'s client timestamp never orders revisions: new-epoch row → frame → refetch', () => {
+			vi.useFakeTimers();
+			try {
+				// This tab's clock runs an hour ahead of the server.
+				vi.setSystemTime(new Date('2026-10-11T11:00:00Z'));
+				let rowA: Record<string, unknown> = {
+					id: 'never-opened', updated_at: '2026-10-11T10:00:00.000000+00:00', ...question(12),
+				};
+				deps = createMockDeps({
+					mergeSessionPatch: vi.fn((_id: string, patch: Record<string, unknown>) => {
+						rowA = { ...rowA, ...patch };
+						return true;
+					}),
+				});
+				handlers = createMessageHandlers(deps);
+				observeSessionRows([rowA as never]);
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'never-opened' });
+				// AppPage observes the patched row (client 11:00 stamp).
+				observeSessionRows([rowA as never]);
+				expect(marked()).toBe(false);
+				const newLog = (seq: number | null, at: string) => ({
+					id: 'never-opened', updated_at: at,
+					last_assistant_question_seq: seq, last_assistant_question_epoch: 'evt-2',
+					last_user_message_seq: null, last_user_message_epoch: null,
+				});
+				// A new-epoch question row at 10:01 server time is applied…
+				observeSessionRows([newLog(2, '2026-10-11T10:01:00.000000+00:00')]);
+				expect(marked()).toBe(true);
+				// …a frame keeps it…
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: {
+					last_assistant_question_seq: 2, last_assistant_question_epoch: 'evt-2',
+					last_user_message_seq: null, last_user_message_epoch: null,
+				} });
+				expect(marked()).toBe(true);
+				// …and a later authoritative refetch at 10:02 still clears it.
+				observeSessionRows([newLog(null, '2026-10-11T10:02:00.000000+00:00')]);
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('a clear nulls both pairs on the row and a delayed pre-clear frame does not re-mark', () => {
+			try {
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'never-opened' });
+				expect(marked()).toBe(false);
+				expect(deps.mergeSessionPatch).toHaveBeenLastCalledWith('never-opened', expect.objectContaining({
+					last_user_message_seq: null,
+					last_user_message_epoch: null,
+					last_assistant_question_seq: null,
+					last_assistant_question_epoch: null,
+				}));
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+	});
+
 	describe('user_session_updated handler (hidden flip)', () => {
 		// The voice attach backfill hides a wake-word "command" session after
 		// the row already existed visibly (create→attach window). The flip is
@@ -2429,7 +2670,7 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 	}
 
 	beforeEach(() => {
-		pendingQueue.reset('session-1');
+		pendingQueue.reset('session-1', true);
 		state = mockState();
 		deps = createMockDeps({
 			update: vi.fn((fn) => { state = fn(state); }),
@@ -2457,6 +2698,41 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(state.pendingPeerMessages).toEqual([]);
 		handlers.handleMessage(peerFrame); // A stale pre-delivery snapshot must not resurrect it.
 		expect(state.pendingPeerMessages).toEqual([]);
+	});
+
+	it('retains cancellation across feed teardown and a delayed verdict for another session', () => {
+		const entry = { id: 'client-switch', clientMessageId: 'client-switch', content: 'restore only A', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		pendingQueue.reset(); // A's feed is torn down
+		state = { ...state, sessionId: 'session-2', draft: 'B draft', queuedMessages: [] };
+		pendingQueue.reset('session-2');
+		expect(pendingQueue.reconcile('session-1', [])).toEqual([{ ...entry, status: 'cancelling' }]);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			client_message_id: entry.id, message_id: 'turn-q', verdict: 'withdrawn' });
+		expect(state.sessionId).toBe('session-2');
+		expect(state.draft).toBe('B draft');
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-2')).toBeNull();
+		pendingQueue.reset();
+		pendingQueue.reset('session-1');
+		expect(pendingQueue.reconcile('session-1', [])).toHaveLength(0);
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBe(entry.content);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			client_message_id: entry.id, verdict: 'withdrawn' });
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+	});
+
+	it('retains a delivered chip and does not restore its text when delivery wins', () => {
+		const entry = { id: 'turn-q', clientMessageId: 'client-a', content: 'sent', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage(frame([]));
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'already_delivered' });
+		expect(state.queuedMessages).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(notify.warning).toHaveBeenCalledTimes(1);
+		handlers.handleMessage(frame([]));
+		expect(state.queuedMessages).toHaveLength(1);
 	});
 
 	it('renders the server snapshot', () => {
@@ -2496,19 +2772,20 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(pendingIds()).toEqual(['turn-q2']);
 	});
 
-	it('re-aims a deferred × at the server row once it appears', () => {
-		pendingQueue.noteOptimistic('session-1', 'queued-local-1');
-		pendingQueue.requestRemoval('session-1', {
-			id: 'queued-local-1', content: 'nope', queuedAt: 1,
+	it('keeps a cancelling chip until the server withdrawal verdict, then restores the draft', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'nope', queuedAt: 1 };
+		pendingQueue.noteOptimistic('session-1', entry.id);
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage(frame([])); // queue clearing must not hide a pending verdict
+		expect(pendingIds()).toEqual(['client-a']);
+		expect(state.queuedMessages[0].status).toBe('cancelling');
+		expect(state.pendingRestorePrompt).toBeNull();
+		handlers.handleMessage({
+			type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'withdrawn',
 		});
-
-		handlers.handleMessage(frame([{ id: 'turn-q', content: 'nope' }]));
-
-		expect(pendingIds()).toEqual([]);
-		expect(deps.wsSend).toHaveBeenCalledWith({
-			type: 'remove_queued_message',
-			message_id: 'turn-q',
-			session_id: 'session-1',
-		});
+		expect(pendingIds()).toHaveLength(0);
+		expect(state.pendingRestorePrompt).toBe('nope');
+		expect(deps.wsSend).not.toHaveBeenCalled();
 	});
 });

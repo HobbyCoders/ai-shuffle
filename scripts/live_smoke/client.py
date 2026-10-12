@@ -105,6 +105,34 @@ class HttpWorkerClient:
     def compact(self, session_id: str) -> dict:
         return self._req("POST", f"/sessions/{session_id}/compact")
 
+    def system_notes(self, session_id: str) -> list:
+        """The session's ``system.note`` events, read from its event log.
+
+        Notes such as a native ``compact_failed`` live only in the event log
+        (the web UI replays it); the message history leaves them out. Reads
+        the SSE backfill up to ``caught_up`` and closes the stream.
+        """
+        notes: list = []
+        event = None
+        try:
+            with self._http.stream("GET", API + f"/sessions/{session_id}/events",
+                                   headers={"Accept": "text/event-stream"}) as resp:
+                if resp.status_code >= 400:
+                    raise ClientError(f"GET /sessions/{session_id}/events: HTTP {resp.status_code}")
+                for line in resp.iter_lines():
+                    if line.startswith("event: "):
+                        event = line[len("event: "):].strip()
+                        if event in ("caught_up", "reset"):
+                            break
+                    elif line.startswith("data: ") and event == "system.note":
+                        try:
+                            notes.append(json.loads(line[len("data: "):]))
+                        except ValueError:
+                            pass
+        except httpx.TransportError as exc:
+            raise Unreachable(f"{self.base_url} unreachable: {type(exc).__name__}") from None
+        return notes
+
     def archive(self, session_id: str) -> None:
         self._req("PATCH", f"/sessions/{session_id}/active", json={"is_active": False, "archived": True})
 

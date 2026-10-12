@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Run only the Vitest files a change can reach. CI JavaScript uses this on
-// pull requests (`node scripts/vitest-changed.mjs HEAD^1`) in frontend/ and
-// mobile/; manual runs on main still run every test.
+// Run only the Vitest files a change can reach
+// (`node scripts/vitest-changed.mjs <base>`) in frontend/ and mobile/.
+// A full run (`scripts/local_ci.py full`) still runs every test.
 //
 // Vitest's own `--changed` follows imports only. Many tests here read a
 // component's source as text (readFileSync of MessageArea.svelte, app.html,
@@ -11,7 +11,8 @@
 // still runs everything.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 
 const TEST_FILE = /\.(test|spec)\.(js|ts)$/;
 
@@ -65,6 +66,17 @@ export function textReferences(changed, tests, read = (path) => readFileSync(pat
 	});
 }
 
+/** Run the installed CLI directly: cmd.exe caps npx argument strings at 8 KiB.
+ * @param {string[]} related
+ * @param {typeof spawnSync} [spawn]
+ */
+export function runRelated(related, spawn = spawnSync) {
+	const require = createRequire(resolve('package.json'));
+	const cli = join(dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
+	return spawn(process.execPath, [cli, 'related', '--run', '--passWithNoTests', ...related],
+		{ stdio: 'inherit', shell: false });
+}
+
 function main() {
 	const base = process.argv[2];
 	if (!base) {
@@ -82,11 +94,7 @@ function main() {
 		console.log('Nothing changed: no tests to run.');
 		return;
 	}
-	const result = spawnSync(
-		'npx',
-		['vitest', 'related', '--run', '--passWithNoTests', ...related],
-		{ stdio: 'inherit', shell: process.platform === 'win32' }
-	);
+	const result = runRelated(related);
 	process.exit(result.status ?? 1);
 }
 

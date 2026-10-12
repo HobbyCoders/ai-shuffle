@@ -25,6 +25,13 @@ class TurnQueued(EventBase):
     prompt_preview: str | None = None
 
 
+class QueuedMessageWithdrawn(EventBase):
+    """Content-free receipt for a held message withdrawn before it became a turn."""
+
+    type: Literal["queued_message.withdrawn"] = "queued_message.withdrawn"
+    message_id: str
+
+
 class TurnStarted(EventBase):
     type: Literal["turn.started"] = "turn.started"
     profile_id: str | None = None
@@ -201,6 +208,8 @@ class SubagentCompleted(EventBase):
     task_id: str
     status: Literal["completed", "failed", "killed"]
     result_preview: str | None = None
+    result: str | None = None
+    result_truncated: bool = False
     usage: dict | None = None
 
 
@@ -235,6 +244,8 @@ class TaskUpdated(EventBase):
     type: Literal["task.updated"] = "task.updated"
     task_id: str
     state: str
+    # Start of the current assignment, not the worker session's creation.
+    started_at: str | None = None
     description: str | None = None
     summary: str | None = None
     tool_use_id: str | None = None
@@ -375,6 +386,7 @@ SessionEvent = Annotated[
         TranscriptRewound,
         ArtifactCreated,
         TurnProviderAlive,
+        QueuedMessageWithdrawn,
     ],
     Field(discriminator="type"),
 ]
@@ -411,4 +423,5 @@ EVENT_TYPES: tuple[str, ...] = (
     "transcript.rewound",
     "artifact.created",
     "turn.provider_alive",
+    "queued_message.withdrawn",
 )

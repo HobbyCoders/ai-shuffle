@@ -196,6 +196,9 @@ def test_agents_index_is_sorted_and_body_free(git_repo: Path, tmp_path: Path, mo
 def test_agents_index_none_without_definitions(git_repo: Path, tmp_path: Path, monkeypatch):
     _empty_home(tmp_path, monkeypatch)
     assert agents_index(git_repo) is None
+    prompt = compile_system_prompt(PromptInputs(base="Agent", cwd=git_repo, tools={"Task", "Swarm"}))
+    assert prompt is not None
+    assert "# Available agent types" not in prompt
 
 
 def test_agents_section_sits_after_skills_before_environment(

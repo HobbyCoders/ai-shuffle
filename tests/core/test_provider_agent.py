@@ -1401,6 +1401,21 @@ class TestDispatchWorkerParentFeed:
             assert row["payload"]["task_id"] == worker
         task_registry.clear_session("parent-1")
 
+    def test_card_report_is_not_the_task_head_tail_truncation(
+        self, dispatch_env, feed_db, monkeypatch
+    ):
+        from app.core.task_registry import task_registry
+
+        report = "findings\n\n" + "x" * 61_000
+        monkeypatch.setattr(pa, "final_assistant_text", lambda sid: report)
+        outcome = _dispatch()
+        assert outcome.truncated is True  # Task has its own smaller report cap.
+        done = next(e for e in _parent_events() if e["event_type"] == "subagent.completed")
+        assert done["payload"]["result"] == report
+        assert done["payload"]["result_truncated"] is False
+        assert done["payload"]["result_preview"] == report[:1999] + "…"
+        task_registry.clear_session("parent-1")
+
     def test_the_worker_is_running_before_it_is_terminal(self, dispatch_env, feed_db):
         """A full dispatch writes a RUNNING ``task.updated`` and only later the
         terminal one. The v2 background-tasks strip, the spinner overlay and the

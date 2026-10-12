@@ -409,7 +409,9 @@ async def require_idle_pull_branches(project_id: str, repo: str, number: int, wo
         raise HTTPException(503, "Cannot verify PR branch activity. No GitHub change was made.") from exc
     if not pr:
         raise HTTPException(404, "Pull request not found")
-    await run_sync(require_idle_git_target, project_id, working_dir, (pr.head_branch, pr.base_branch))
+    # PR mutations affect shared GitHub state, not just this worker's checkout.
+    await run_sync(require_idle_git_target, project_id, working_dir,
+                   (pr.head_branch, pr.base_branch), include_remote=True)
 
 
 @router.post("/pulls/{number}/merge")

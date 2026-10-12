@@ -53,7 +53,7 @@ def local_state(project_v2_id: str, *, public: bool = False) -> dict[str, Any]:
 
 async def state(runner_id: str, project_v2_id: str) -> dict[str, Any]:
     ctx = engine.context()
-    target = device_id(runner_id)
+    target = await run_sync(device_id, runner_id)
     if ctx and target != ctx.device_id:
         return await control.call(target, "git-state", {"project_v2_id": project_v2_id})
     return await run_sync(local_state, project_v2_id)
@@ -62,7 +62,7 @@ async def state(runner_id: str, project_v2_id: str) -> dict[str, Any]:
 async def catalog(runner_id: str) -> list[str]:
     """Owner-reported eligibility only: no checkout paths or executable jobs."""
     ctx = engine.context()
-    target = device_id(runner_id)
+    target = await run_sync(device_id, runner_id)
     if ctx and target != ctx.device_id:
         return (await control.call(target, "git-catalog", {}))["project_ids"]
     return await run_sync(checkouts.eligible_base_project_ids, settings.effective_instance_id)
@@ -81,7 +81,7 @@ async def eligible(runner_id: str, project_v2_id: str) -> bool:
 
 async def enqueue(runner_id: str, operation: str, *, project_v2_id: str, params: dict | None = None) -> dict:
     ctx = engine.context()
-    target = device_id(runner_id)
+    target = await run_sync(device_id, runner_id)
     if ctx and target != ctx.device_id:
         return await control.call(target, "git-op", {
             "operation": operation, "project_v2_id": project_v2_id,
@@ -106,7 +106,7 @@ async def handle_op(body: dict, from_device: str) -> dict:
     ctx = engine.context()
     if ctx is None:
         raise PermissionError("Worker is not enrolled")
-    device_id(ctx.device_id)  # Reject work after local revocation as well.
+    await run_sync(device_id, ctx.device_id)  # Reject work after local revocation as well.
     operation = body.get("operation")
     if operation not in {"refresh_status", "ensure_worktree"}:
         raise ValueError("Unsupported remote Git operation")

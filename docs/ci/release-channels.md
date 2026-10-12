@@ -52,18 +52,17 @@ installer dispatch must select that existing tag as its workflow ref and
 supply the same version; a dispatch from `main` fails preflight, because a
 checkout does not change GitHub's tags-only environment authorization.
 
-Merges to protected `main` automatically publish a signed **edge** source update
-at `/v1/desktop/manifest/edge` after all applicable workflows pass. To reuse PR
-checks, the merged tree must equal the tested PR head. The gate checks the latest
-run of each workflow selected by its path filters and refuses missing, pending,
-failed, skipped, or cancelled runs. Update a stale PR branch before merging so
-its tested tree includes the current base. If another PR lands first, the owner
-can dispatch CI on the combined `main` revision. The gate then requires successful
-owner-started and owner-rerun checks on that exact SHA, including workflows for
-changes from the concurrent merge. A truncated comparison requires every PR
-workflow. PR results from an older tree cannot substitute for these checks.
-Push and trusted CI-completion events both check readiness; an owner dispatch
-can retry a missed or failed publication.
+The **nightly** source update is scheduled once a day at **06:00 UTC** from
+protected `main`, with an owner-only manual dispatch for retries. Pushes and
+status events do not publish. Before setting up dependencies, the workflow
+compares main's revision with the published manifest and exits if unchanged.
+
+Publication still requires the owner's successful `local/full-suite` commit
+status on that exact current main revision, posted by
+`python scripts/local_ci.py full --attest` on a clean checkout. GitHub Actions
+runs no tests. A pass on an older revision, a pending or failed status, or a
+successful-but-skipped publication workflow is not permission to publish.
+If the pass is missing, the previous nightly stays available.
 
 Only the current `main` revision can publish. The read-only gate runs before
 signing secrets are available and is repeated immediately before publication.
@@ -71,11 +70,32 @@ The publisher checks `main` again before writing the signed pointer. These
 checks use trusted main code, not PR artifacts or a PR checkout.
 
 Stable releases still require an owner-created release tag. Existing workers
-stay on their selected channel: publishing edge does not switch, install, or
-restart them. For your own Docker workers set `UPDATE_CHANNEL=edge`; for desktop
-set `{"channel":"edge"}` in `updates/update-channel.json` under the app's user-data
-directory. Both defaults remain stable. Manual `docker-publish.yml` runs on
-`main` produce the `edge` image tag.
+stay on their selected channel: publication never switches, installs or restarts
+them. Docker accepts `UPDATE_CHANNEL=stable|nightly`; desktop accepts
+`{"channel":"nightly"}` in `updates/update-channel.json` under its user-data
+directory. Both default to stable. Manual `docker-publish.yml` runs on `main`
+produce the `nightly` image tag. Returning from nightly to stable needs a
+reinstall, because database migrations do not run backwards.
+
+### Two-step edge transition
+
+1. Keep `SOURCE_CHANNEL: edge` in `desktop-source.yml` and publish this
+   compatibility build first. Existing edge workers reject a manifest signed
+   nightly until they have installed code that recognizes both names. Deploy
+   the hub aliases before updated clients request `/v1/desktop/manifest/nightly`.
+   Older Docker images without `source-supervisor` also need a compatible
+   image: a source-only update cannot replace their supervisor. Images with
+   that capability hand over to the updated supervisor after a restart.
+2. After the affected workers have that code, change the workflow's one
+   `SOURCE_CHANNEL` value to `nightly`. This PR deliberately leaves it `edge`.
+   `/v1/desktop/manifest/nightly` and `/v1/desktop/manifest/edge` serve identical
+   signed bytes from the existing D1 `edge` lane; the publisher keeps that
+   storage key even when it signs `nightly`. The hub never rewrites a signature.
+
+For one release, `edge` settings normalize to `nightly` with a deprecation log.
+New clients accept either signed name on that lane, but stable still accepts
+only stable. Remove the alias only after the compatibility release has reached
+workers that used it.
 
 ## Cutting a release
 
@@ -152,11 +172,10 @@ when the reviewed workflow revision reaches `main`; run nothing before then.
   D1 ID and signing key and tests the private key against
   `desktop/build/application-update-key.pem`. Presence is not proof of token
   permissions or a deployed/migrated D1 database. Never print those secrets.
-- Deploy/migrate the hub, license server and registry, configure their
-  bindings/keys and private GHCR access, and test the licensed pull path.
-  `docs/install/registry.md` is the registry runbook. No digest is supplied by
-  source preparation: record the **actual** published image digest only after
-  the build and registry verification succeed.
+- Deploy/migrate the hub and license server and configure their bindings/keys.
+  The owner must make `ghcr.io/hobbycoders/ai-shuffle-server` public, then test
+  an anonymous version-pinned pull. No digest is supplied by source preparation:
+  record the **actual** published image digest after the build and pull succeed.
 - Complete `desktop/RELEASING.md` signing/notarization and first-run checks.
   Confirm Play signing continuity, internal tester access and
   `ANDROID_WORKERS_READY=true` only after compatible workers are verified.
@@ -215,7 +234,7 @@ lockfiles' integrity hashes through `npm ci`.
 
 The desktop updater (`desktop/src/main/source-updates.ts`) follows the same
 rules: it accepts only a manifest signed for its channel (`stable` unless the
-owner writes `{"channel": "edge"}` to `update-channel.json` in the install's
+owner writes `{"channel": "nightly"}` to `update-channel.json` in the install's
 `updates` folder) that carries a tree digest, keeps the signature, size,
 checksum and sequence checks, and recomputes the tree digest over the
 extracted files before building. Its build (`desktop/src/main/source-build.ts`)
@@ -375,17 +394,15 @@ a fix has shipped since, the fix stays served.
      copies in R2: `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` with the
      repository variable `R2_INSTALLER_BUCKET`
      ([android/hub/README.md](../../android/hub/README.md#installer-downloads-from-r2)).
-4. **Decide what edge signing keeps.** `desktop-source.yml` still signs edge
-   builds with the same key from `account-hub-production`. Customer workers
-   reject edge manifests, but desktop builds and images already in the field
-   do not check the channel. The strongest setup is to remove
-   `DESKTOP_APPLICATION_SIGNING_KEY` from `account-hub-production`, which
-   stops edge publishing (the `desktop-source.yml` run then fails on the
-   missing key; that workflow belongs to the desktop work and should then be
-   switched off or given a separate edge key that customer builds do not
-   trust).
-5. **Make the image package private** and handle the frozen public one:
-   see `docs/install/registry.md`.
+4. **Keep nightly signing separate from stable authorization.**
+   `desktop-source.yml` uses the key in `account-hub-production` only after the
+   exact-main local attestation gate. Stable publishing uses the protected
+   release environment. Current stable workers reject nightly and transition
+   edge manifests; very old clients that predate channel checks need upgrading.
+   Changing the trust key requires an installer/image rollout, not just a hub
+   or workflow edit.
+5. **Make `ghcr.io/hobbycoders/ai-shuffle-server` public** (owner action).
+   The app no longer uses a private registry; the old-image issue #2157 is moot.
 6. **Deploy the hub** so migration 0018 runs. Until the first stable release
    is signed, installed apps get a 404 from the update check.
 7. **Set up withdrawal** ([A bad stable release](#a-bad-stable-release))

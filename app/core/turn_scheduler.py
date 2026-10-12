@@ -184,6 +184,7 @@ def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
         ):
             cursor.execute(
                 "SELECT * FROM turns WHERE session_id=%s AND " + state_clause + " "
+                "AND COALESCE(stop_reason, '') <> 'steered' "
                 "ORDER BY ended_at DESC, position DESC, created_at DESC, id DESC "
                 "LIMIT 1",
                 (session_id,),

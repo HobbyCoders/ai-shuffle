@@ -270,13 +270,11 @@ describe('setup: a gateway with no model list', () => {
 });
 
 describe('setup: a subscription sign-in', () => {
-	it.each(['openai', 'grok'] as const)('%s labels its subscription sign-in Unofficial, the API key not', (provider) => {
+	it.each(['openai', 'grok'] as const)('%s shows its subscription sign-in without an Unofficial label', (provider) => {
 		render(ProviderConnect, { provider });
 		const signIn = screen.getByRole('button', { name: /^Sign in with/ });
-		expect(signIn.textContent).toContain('Unofficial');
-		expect(signIn.textContent).toContain(
-			'Uses your own subscription through an unofficial sign-in. The provider may change or block it.'
-		);
+		expect(signIn.textContent).not.toContain('Unofficial');
+		expect(signIn.textContent).not.toContain('The provider may change or block it.');
 		expect(screen.getByRole('button', { name: /^API key/ }).textContent).not.toContain('Unofficial');
 	});
 });

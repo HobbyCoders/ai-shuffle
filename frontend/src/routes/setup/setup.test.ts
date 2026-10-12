@@ -64,7 +64,8 @@ const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_
 const waiting = { ...disconnected, status: 'waiting', code: 'TESTONLYCODE', authorization_url: 'https://account.example.com/claim?code=TESTONLYCODE', signup_url: 'https://account.example.com/claim?code=TESTONLYCODE&screen=signup' };
 const link = 'shuffle://network/join?endpoint=http%3A%2F%2F10.0.0.5%3A8000&code=ABCD-EFGH-JKLM&fp=' + fingerprint;
 const dockerOwner = { password_set: true, setup_allowed: false, required: true, trusted_lan: false, login_available: true, desktop_handoff: false, min_length: 12 };
-const beta = { mode: 'beta', state: 'beta', allowed: true, reason: null, banner: null, plan: 'beta', seats: null, seats_used: null,
+const beta = { mode: 'cloud', state: 'not_linked', linked: false, remote_worker_limit: 0, lease_state: 'none', message: null,
+	allowed: true, reason: null, banner: null, plan: null, seats: 0, seats_used: null,
 	account_id: null, license_id: null, key_hint: null, install_id: null, issued_at: null, expires_at: null, grace: false,
 	grace_until: null, last_refresh_at: null, next_refresh_at: null, last_error: null, server_status: null, server_configured: false };
 let status: NetworkStatus;
@@ -126,7 +127,7 @@ async function throughWelcome() {
 	render(Setup);
 	await screen.findByTestId('setup-welcome');
 	await click('Continue');
-	await screen.findByText('Beta: no license needed');
+	await screen.findByText('Local use is free');
 }
 async function throughLicense() {
 	await throughWelcome();
@@ -179,7 +180,7 @@ describe('setup wizard v2', () => {
 		await screen.findByTestId('setup-welcome');
 		const progress = screen.getByRole('navigation', { name: 'Setup progress' });
 		const labels = [...progress.querySelectorAll('li')].map((li) => li.textContent?.replace('Completed', '').replace(/^\d+/, '').trim());
-		expect(labels).toEqual(['Welcome', 'Password', 'License', 'AI provider', 'Workspace', 'First run', 'Account & GitHub']);
+		expect(labels).toEqual(['Welcome', 'Password', 'Cloud', 'AI provider', 'Workspace', 'First run', 'Account & GitHub']);
 		expect(screen.getByText('Agents act with your access')).toBeTruthy();
 		expect(screen.getByText(/never pays for, resells or shares model usage/)).toBeTruthy();
 		expect(screen.getByTestId('setup-welcome').textContent).not.toMatch(/Claude|Anthropic/);
@@ -201,7 +202,7 @@ describe('setup wizard v2', () => {
 	it('starts at the license once the owner gate showed the welcome', async () => {
 		sessionStorage.setItem('ai-shuffle.setup.welcome-seen', '1');
 		render(Setup);
-		expect(await screen.findByText('Beta: no license needed')).toBeTruthy();
+		expect(await screen.findByText('Local use is free')).toBeTruthy();
 		expect(screen.queryByTestId('setup-welcome')).toBeNull();
 	});
 

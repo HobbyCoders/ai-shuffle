@@ -32,6 +32,26 @@ from fluid.tools.registry import (
 # ─── URL guarding ────────────────────────────────────────────────────────────
 
 
+async def test_fetch_dns_validation_runs_off_loop(monkeypatch):
+    import threading
+    from fluid.tools.builtins import web
+    loop_thread = threading.get_ident()
+    calls = []
+    def check(url):
+        calls.append(url)
+        assert threading.get_ident() != loop_thread
+        return None
+    monkeypatch.setattr(web, "check_url", check)
+    def respond(request):
+        if request.url.path == "/":
+            return httpx.Response(302, headers={"location": "/done"})
+        return httpx.Response(200, text="done")
+    ctx = ToolCtx(extra={"web_transport": httpx.MockTransport(respond)})
+    result = await web.fetch_handler({"url": "https://example.com/"}, ctx)
+    assert not result.is_error
+    assert calls == ["https://example.com/", "https://example.com/done"]
+
+
 def test_check_url_schemes_and_private_hosts() -> None:
     assert check_url("ftp://example.com") is not None
     assert check_url("file:///etc/passwd") is not None

@@ -22,7 +22,6 @@
 	import MainPanel from './MainPanel.svelte';
 	import Sidebar from './Sidebar.svelte';
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
-	import LicenseBanner from '../LicenseBanner.svelte';
 	import ClaudeReloginBanner from '../ClaudeReloginBanner.svelte';
 	import FirstCopyBanner from '../FirstCopyBanner.svelte';
 
@@ -121,7 +120,6 @@
 
 <div class="app-shell" class:narrow>
 	<CredentialStorageBanner />
-	<LicenseBanner />
 	<ClaudeReloginBanner />
 	<FirstCopyBanner />
 

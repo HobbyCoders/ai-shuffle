@@ -10,6 +10,61 @@ from app.network import blobs, engine, memory_records, ownership, plugins_sync, 
 from tests.core.network.harness import converge, join
 
 
+def test_synced_manual_balance_deducts_only_serving_worker_spend(workers):
+    from app.db.analytics import get_manual_balance_credits
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Balance scope")
+        database.create_model_provider("openai-key", "OpenAI", "openai", "https://api.openai.com")
+        database.update_model_provider("openai-key", manual_balance_usd=20.5, manual_balance_set_at=1)
+        database.log_usage(None, None, "priced", 100, 20, 2.25, 1,
+                           provider_id="openai-key", provider_type="openai", billing="api")
+        engine.scan_all()
+        row_a = database.get_model_provider("openai-key")
+        assert get_manual_balance_credits(row_a)["balance_remaining"] == 18.25
+    join(a, b)
+    with b.active():
+        row_b = database.get_model_provider("openai-key")
+        assert row_b["manual_balance_usd"] == row_a["manual_balance_usd"]
+        assert row_b["manual_balance_set_at"] == row_a["manual_balance_set_at"]
+        credits = get_manual_balance_credits(row_b)
+        assert credits["estimated_spend"] == 0
+        assert credits["balance_remaining"] == 20.5
+        database.log_usage(None, None, "priced", 100, 20, 1, 1,
+                           provider_id="openai-key", provider_type="openai", billing="api")
+        assert get_manual_balance_credits(row_b)["balance_remaining"] == 19.5
+    with a.active():
+        assert get_manual_balance_credits(row_a)["balance_remaining"] == 18.25
+
+
+def test_authoritative_user_revision_and_event_sequences_replicate(workers):
+    from app.db import session_events
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Revision test")
+        database.create_session("revision-sync", "default")
+        session_events.append_events("revision-sync", [
+            {"type": "message.user", "payload": {"content": "Prompt"}},
+            {"type": "message.assistant", "payload": {"content": "Which one?"}},
+        ])
+        original = database.get_session("revision-sync")
+        engine.scan_all()
+    join(a, b)
+    converge([a, b])
+    with b.active():
+        mirrored = database.get_session("revision-sync")
+        assert mirrored["last_user_message_seq"] == original["last_user_message_seq"] == 1
+        assert mirrored["last_user_message_at"] == original["last_user_message_at"]
+        assert mirrored["last_user_message_epoch"] == original["last_user_message_epoch"]
+        assert mirrored["last_user_message_epoch"] == session_events.get_log_epoch("revision-sync")
+        assert mirrored["last_assistant_question_seq"] == original["last_assistant_question_seq"] == 2
+        assert mirrored["last_assistant_question_epoch"] == original["last_assistant_question_epoch"]
+        assert mirrored["last_assistant_question_epoch"] == session_events.get_log_epoch("revision-sync")
+        assert [e["seq"] for e in session_events.get_events("revision-sync", 0)] == [1, 2]
+
+
 def _skills_root(worker):
     return worker.data_dir / "fluid" / "skills"
 

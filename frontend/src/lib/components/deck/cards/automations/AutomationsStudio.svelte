@@ -246,7 +246,7 @@
 								</div>
 								<div class="as-meta">
 									{#each triggerTags(a) as tag}<span class="as-tag">{tag}</span>{/each}
-									{#if profileNames.get(a.profile_id)}<span class="as-tag">{profileNames.get(a.profile_id)}</span>{/if}
+									{#if !a.profile_id}<span class="as-tag as-tag-warn" title="Its agent was removed. Pick another agent.">No agent</span>{:else if profileNames.get(a.profile_id)}<span class="as-tag">{profileNames.get(a.profile_id)}</span>{/if}
 									<span class="as-tag" class:as-tag-warn={!!a.model_error} title={a.model_error || 'Model its runs use'}>{automationModelLabel(a)}</span>
 									<span class="as-stat as-stat--{stat.tone}">{stat.text}</span>
 								</div>

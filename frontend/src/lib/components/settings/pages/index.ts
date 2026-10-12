@@ -9,14 +9,16 @@ import ArchivedChatsPage from './ArchivedChatsPage.svelte';
 import VoicePage from './VoicePage.svelte';
 import SecurityPage from './SecurityPage.svelte';
 import SystemPage from './SystemPage.svelte';
+import CloudPage from './CloudPage.svelte';
 
-export type PreferenceCategory = 'general' | 'archived' | 'voice' | 'security' | 'system';
+export type PreferenceCategory = 'general' | 'archived' | 'voice' | 'cloud' | 'security' | 'system';
 export type CollectionCategory = Exclude<CategoryId, PreferenceCategory>;
 
 export const PREFERENCE_PAGES: Record<PreferenceCategory, Component> = {
 	general: GeneralPage,
 	archived: ArchivedChatsPage,
 	voice: VoicePage,
+	cloud: CloudPage,
 	security: SecurityPage,
 	system: SystemPage
 };

@@ -237,6 +237,14 @@ describe('SessionCard actions', () => {
 		expect(screen.getByText('Persistent')).toBeTruthy();
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 	});
+	it('offers no archive, rename, fork or delete for the persistent assistant home', () => {
+		assistantState.set({ home_session_id: 'session-a' } as AssistantState);
+		renderCard();
+		for (const title of ['Archive session', 'Rename session', 'Fork session', 'Delete session']) {
+			expect(screen.queryByTitle(title)).toBeNull();
+		}
+		expect(screen.queryByRole('menu')).toBeNull();
+	});
 	it('keeps settle and omits rename, fork, and delete controls', () => {
 		renderCard();
 

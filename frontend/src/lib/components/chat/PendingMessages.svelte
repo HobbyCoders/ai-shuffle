@@ -13,10 +13,19 @@
 	 * (same padding, radius, surface) but carries none of its machinery — a
 	 * pending prompt has no timestamp, no rewind target and no copy actions.
 	 *
-	 * Under the LAST bubble sits one quiet action row: the "Not seen yet" hint,
-	 * an Interrupt link that stops the current turn (which delivers the message
-	 * on the next one), and an "×" that unsends it and puts its text back in the
-	 * composer to edit. Earlier bubbles get the same "×" on hover.
+	 * Under the last ACTIONABLE bubble (no status) sits one quiet action row: the
+	 * "Not seen yet" hint, an Interrupt link that stops the current turn (which
+	 * delivers the message on the next one), and an "×" that unsends it and puts
+	 * its text back in the composer to edit. Other actionable bubbles get the same
+	 * "×" on hover. Interrupt is the only queue-preserving way to deliver what is
+	 * still pending, so a cancelling or already-sent tail never hides it.
+	 *
+	 * An unsend is a request, not a fact (#2275): while the server decides, the
+	 * bubble reads "Cancelling…" and its controls are disabled; if the agent had
+	 * already read it, it reads "Already sent" and loses its controls. The text
+	 * only returns to the composer on a confirmed withdrawal (store-side).
+	 * Screen-reader announcements of those verdicts live in
+	 * PendingStatusAnnouncer, outside the transcript's log region.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
 	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
@@ -30,37 +39,73 @@
 	}
 
 	let { messages, onRemove, onInterrupt }: Props = $props();
+
+	// The action row's bubble: the last one without a status, or — when every
+	// bubble has one — the last bubble (whose row then shows its status only).
+	const anchor = $derived.by(() => {
+		for (let i = messages.length - 1; i >= 0; i--) if (!messages[i].status) return i;
+		return messages.length - 1;
+	});
+
+	const STATUS_LABEL = { cancelling: 'Cancelling…', delivered: 'Already sent' } as const;
+
+	// Svelte delegates clicks at the root, where a synthetic click on a disabled
+	// button still arrives — so the guard lives here too, not only in `disabled`.
+	function unsend(msg: QueuedMessage) {
+		if (!msg.status) onRemove(msg.id);
+	}
+
+	function interrupt(msg: QueuedMessage) {
+		if (!msg.status) onInterrupt();
+	}
 </script>
 
 {#if messages.length > 0}
 	<div class="pending-messages">
 		{#each messages as msg, i (msg.id)}
+			{@const isAnchor = i === anchor}
 			<div class="userrow" role="article">
 				<div class="usercol">
-					<div class="bubble">
+					<div class="bubble" class:is-cancelling={msg.status === 'cancelling'}>
 						<div class="bubble-text" class:is-clamped={shouldCollapseUserMessage(msg.content)}>{msg.content}</div>
-						{#if i !== messages.length - 1}
+						{#if !isAnchor && msg.status !== 'delivered'}
 							<button
 								type="button"
 								class="hover-remove"
 								aria-label="Unsend message and edit it"
-								title="Unsend and edit"
-								onclick={() => onRemove(msg.id)}
+								title={msg.status === 'cancelling' ? 'Cancelling…' : 'Unsend and edit'}
+								disabled={msg.status === 'cancelling'}
+								onclick={() => unsend(msg)}
 							>×</button>
 						{/if}
 					</div>
-					{#if i === messages.length - 1}
+					{#if isAnchor || msg.status}
 						<div class="pending-actions">
-							<span class="pending-hint">Not seen yet</span>
-							<span class="pending-sep" aria-hidden="true">·</span>
-							<button type="button" class="pending-action" onclick={onInterrupt}>Interrupt</button>
-							<button
-								type="button"
-								class="pending-remove"
-								aria-label="Unsend message and edit it"
-								title="Unsend and edit"
-								onclick={() => onRemove(msg.id)}
-							>×</button>
+							{#if msg.status}
+								<span
+									class="pending-status"
+									class:is-delivered={msg.status === 'delivered'}
+								>{STATUS_LABEL[msg.status]}</span>
+							{:else}
+								<span class="pending-hint">Not seen yet</span>
+							{/if}
+							{#if isAnchor && msg.status !== 'delivered'}
+								<span class="pending-sep" aria-hidden="true">·</span>
+								<button
+									type="button"
+									class="pending-action"
+									disabled={msg.status === 'cancelling'}
+									onclick={() => interrupt(msg)}
+								>Interrupt</button>
+								<button
+									type="button"
+									class="pending-remove"
+									aria-label="Unsend message and edit it"
+									title={msg.status === 'cancelling' ? 'Cancelling…' : 'Unsend and edit'}
+									disabled={msg.status === 'cancelling'}
+									onclick={() => unsend(msg)}
+								>×</button>
+							{/if}
 						</div>
 					{/if}
 				</div>
@@ -153,8 +198,35 @@
 		pointer-events: auto;
 	}
 
-	.hover-remove:hover {
+	.hover-remove:hover:not(:disabled) {
 		color: var(--foreground);
+	}
+
+	/* ── Unsend in flight / refused ── */
+	.bubble.is-cancelling .bubble-text {
+		opacity: 0.6;
+	}
+
+	.pending-status.is-delivered {
+		color: var(--warning);
+	}
+
+	/* Light --warning is ~3.6:1 on the page at this 11px size; pulling it toward
+	   the foreground keeps the hue and clears 4.5:1. Dark --warning already does. */
+	:global(html.light) .pending-status.is-delivered {
+		color: color-mix(in oklab, var(--warning) 72%, var(--foreground));
+	}
+
+	.hover-remove:disabled,
+	.pending-action:disabled,
+	.pending-remove:disabled {
+		cursor: not-allowed;
+	}
+
+	.pending-action:disabled,
+	.pending-remove:disabled,
+	.bubble:hover .hover-remove:disabled {
+		opacity: 0.45;
 	}
 
 	/* ── The quiet metadata row under the last bubble ── */
@@ -188,8 +260,8 @@
 		line-height: 1;
 	}
 
-	.pending-action:hover,
-	.pending-remove:hover {
+	.pending-action:hover:not(:disabled),
+	.pending-remove:hover:not(:disabled) {
 		color: var(--foreground);
 	}
 
@@ -209,6 +281,10 @@
 		.hover-remove {
 			opacity: 1;
 			pointer-events: auto;
+		}
+
+		.hover-remove:disabled {
+			opacity: 0.45;
 		}
 	}
 

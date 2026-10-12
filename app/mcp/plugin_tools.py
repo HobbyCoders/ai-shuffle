@@ -91,8 +91,13 @@ def find_plugins(query: str) -> str:
         if plugin.id in installed or not hit(plugin.id, plugin.description):
             continue
         lines.append(f"- {plugin.id} (available): {plugin.description}")
+    marketplaces = svc.get_marketplaces()
+    warnings = [m.error for m in marketplaces if m.error]
+    warning_text = "\n".join(warnings)
+    if not lines and warnings:
+        return f"Plugin search is incomplete for {query!r}.\n{warning_text}"
     if not lines:
-        sources = ", ".join(m.id for m in svc.get_marketplaces()) or "none"
+        sources = ", ".join(m.id for m in marketplaces) or "none"
         return (
             f"No plugin matches {query!r} in this worker's plugin sources ({sources}). "
             "Build one with the build-plugin skill, or ask the owner to add a plugin "
@@ -100,7 +105,7 @@ def find_plugins(query: str) -> str:
         )
     more = len(lines) - _MAX_RESULTS
     shown = lines[:_MAX_RESULTS] + ([f"... and {more} more; narrow the query"] if more > 0 else [])
-    return "Plugins matching the query:\n" + "\n".join(shown)
+    return "Plugins matching the query:\n" + "\n".join(shown) + (f"\n\nSearch incomplete:\n{warning_text}" if warnings else "")
 
 
 # ─── check ───────────────────────────────────────────────────────────────────

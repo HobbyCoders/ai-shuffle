@@ -7,8 +7,8 @@ or installer to take effect, and some changes stop the update for older
 installs altogether. See docs/reviews/in-app-update-coverage-2026-10.md.
 
 Groups that fail the check (each can be acknowledged with --allow GROUP, or
-in CI with a pull request label named update-reach:GROUP and a re-run of the
-check, .github/workflows/ci-update-reach.yml):
+with a pull request label named update-reach:GROUP, which scripts/local_ci.py
+reads when it runs this check before a push):
 
   docker-image      The runtime string the release publishes
                     (docker/update_contract.py: REQUIRES) differs between base
@@ -45,10 +45,12 @@ Usage::
     python scripts/ci/update_reach.py                      # newest final tag .. HEAD
     python scripts/ci/update_reach.py --base v0.9.0 --head origin/main
     python scripts/ci/update_reach.py --allow docker-image # owner accepted a new base
-    python scripts/ci/update_reach.py --base origin/main --labels "$LABELS"  # CI
+    python scripts/ci/update_reach.py --base origin/main --labels "$LABELS"  # local_ci.py
     python scripts/ci/update_reach.py --json
 
 Exit status: 0 when nothing unacknowledged is out of reach, 1 otherwise.
+Only local draft/no-PR checks use --draft to report failures as notes with exit 0;
+ready PRs and the main publication attestation keep the strict verdict.
 """
 from __future__ import annotations
 
@@ -106,10 +108,18 @@ def git(*args: str, root: Path = ROOT) -> str:
 
 
 def reader(revision: str, root: Path = ROOT) -> Reader:
-    """Bytes of a path at a revision, or None when it does not exist there."""
+    """Bytes at a revision; None only for a proven absent path, never unreadable objects."""
     def read(path: str) -> Optional[bytes]:
         result = subprocess.run(["git", "show", f"{revision}:{path}"], cwd=root, capture_output=True)
-        return result.stdout if result.returncode == 0 else None
+        if result.returncode == 0:
+            return result.stdout
+        # A partial clone can have the tree but lack a promised blob. A failed
+        # lazy fetch must not erase that file from the launcher's import closure.
+        listing = subprocess.run(["git", "--literal-pathspecs", "ls-tree", "-z", revision, "--", path],
+                                 cwd=root, capture_output=True)
+        if listing.returncode == 0 and not listing.stdout:
+            return None
+        raise RuntimeError(f"Cannot read historical update-reach content: {revision}:{path}")
     return read
 
 
@@ -297,7 +307,7 @@ def latest_final_tag(root: Path = ROOT) -> Optional[str]:
     return max(tags, key=lambda t: tuple(int(p) for p in t[1:].split("."))) if tags else None
 
 
-def render(base: str, head: str, groups: dict, failing: list, allowed: Iterable[str]) -> str:
+def render(base: str, head: str, groups: dict, failing: list, allowed: Iterable[str], *, draft: bool = False) -> str:
     lines = [f"In-app update reach for {base}..{head}"]
     for name in GROUPS:
         paths = groups[name]
@@ -311,7 +321,12 @@ def render(base: str, head: str, groups: dict, failing: list, allowed: Iterable[
         lines.extend(f"    {p}" for p in paths[:8])
         if len(paths) > 8:
             lines.append(f"    ... and {len(paths) - 8} more")
-    if failing:
+    if failing and draft:
+        lines.append("NOTE — OUT OF REACH: " + ", ".join(failing) + ". Push/open a DRAFT PR only; "
+                     "before readiness/merge, move the change into updated source, add a migration path, "
+                     "or ask the owner to accept it with PR labels: "
+                     + ", ".join(LABEL + name for name in failing) + ".")
+    elif failing:
         lines.append("FAILED: move the change into the updated source, add a migration path, or have the owner "
                      "accept it (pull request label " + ", ".join(LABEL + name for name in failing)
                      + ", then re-run this check; locally --allow " + " --allow ".join(failing) + ").")
@@ -334,6 +349,8 @@ def main(argv: Optional[list] = None) -> int:
                         help="acknowledge an out-of-reach group the owner accepted (repeatable)")
     parser.add_argument("--labels", default="",
                         help="comma-separated pull request labels; update-reach:GROUP acknowledges GROUP")
+    parser.add_argument("--draft", action="store_true",
+                        help="local pre-push only: report unaccepted groups as notes for a draft/no PR")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     args.allow += allowed_by_labels(args.labels)
@@ -346,8 +363,8 @@ def main(argv: Optional[list] = None) -> int:
     if args.json:
         print(json.dumps({"base": base, "head": args.head, "groups": groups, "failing": failing}, indent=2))
     else:
-        print(render(base, args.head, groups, failing, args.allow))
-    return 1 if failing else 0
+        print(render(base, args.head, groups, failing, args.allow, draft=args.draft))
+    return 1 if failing and not args.draft else 0
 
 
 if __name__ == "__main__":

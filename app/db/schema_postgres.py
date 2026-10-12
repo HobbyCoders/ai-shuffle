@@ -341,6 +341,11 @@ def create_postgres_schema(cursor) -> None:
             -- (NULL when no turn holds the live slot). See app/db/turns.py.
             work_ms BIGINT DEFAULT 0,
             work_started_at TIMESTAMP WITH TIME ZONE,
+            last_user_message_at TIMESTAMP WITH TIME ZONE,
+            last_user_message_seq BIGINT,
+            last_user_message_epoch TEXT,
+            last_assistant_question_seq BIGINT,
+            last_assistant_question_epoch TEXT,
             -- Worker network: the device this session executes on. Replaces
             -- instance_id as the owner; NULL means "this worker" until the
             -- startup backfill stamps it.
@@ -1207,7 +1212,7 @@ def create_postgres_schema(cursor) -> None:
             trigger_type TEXT NOT NULL,
             trigger_config JSONB NOT NULL DEFAULT '{}',
             prompt TEXT NOT NULL,
-            profile_id TEXT NOT NULL,
+            profile_id TEXT,
             project_id TEXT,
             output_config JSONB NOT NULL DEFAULT '{"type": "session"}',
             max_turns INTEGER DEFAULT 1,
@@ -1411,6 +1416,8 @@ def create_postgres_schema(cursor) -> None:
             codex_refresh_lease_owner TEXT,
             codex_refresh_lease_expires_at TIMESTAMP WITH TIME ZONE,
             openai_admin_key TEXT,
+            manual_balance_usd DOUBLE PRECISION,
+            manual_balance_set_at BIGINT,
             openai_billing_org_id TEXT,
             openai_billing_instance_id TEXT,
             -- Last result of the provider's own model-catalog fetch: 'ok',
@@ -2007,9 +2014,18 @@ def create_postgres_schema(cursor) -> None:
         CREATE TABLE IF NOT EXISTS composer_suggestions (
             session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
             turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-            suggestion TEXT NOT NULL
+            suggestion TEXT NOT NULL,
+            activity_revision BIGINT NOT NULL DEFAULT -1
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestion_revisions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            activity_revision BIGINT NOT NULL DEFAULT 0,
+            completed_revision BIGINT
+        )
+    """)
+
 
     # ------------------------------------------------------------------
     # 57. git_ops — the durable cross-install git-operation queue.
@@ -2089,6 +2105,7 @@ def create_postgres_schema(cursor) -> None:
             requested_at DOUBLE PRECISION NOT NULL,
             expires_at DOUBLE PRECISION NOT NULL,
             held JSONB NOT NULL DEFAULT '[]',
+            handoff_id TEXT,
             wake_token TEXT,
             wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
         )

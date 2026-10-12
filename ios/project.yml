@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 HobbyCoders.
 # XcodeGen spec. Generate the project with `xcodegen generate` in ios/; the
 # .xcodeproj is not checked in. No Apple account or signing team is needed to
 # build for the iOS Simulator.
@@ -23,6 +25,7 @@ targets:
       path: Support/Info.plist
       properties:
         CFBundleDisplayName: AI Shuffle
+        NSHumanReadableCopyright: "Copyright (c) 2026 HobbyCoders. Licensed under AGPL-3.0-only."
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:

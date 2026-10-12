@@ -1,6 +1,7 @@
 /**
  * System: workspace folder, import from Claude Code and Codex, export all data,
- * updates, memory health, license, and Help (report a problem to HobbyCoders support). The legacy 'license' tab and AccountPanel land on `system.license`.
+ * updates, memory health and Help (report a problem to HobbyCoders support).
+ * The former License rows moved to Cloud (entries/cloud.ts).
  * SystemPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
@@ -48,6 +49,16 @@ export const entries: SettingEntry[] = [
 		default: false
 	},
 	{
+		id: 'system.updateChannel',
+		category: 'system',
+		section: 'Updates',
+		label: 'Update channel',
+		hint: 'Tested releases',
+		help: 'Stable gets tested releases. Nightly has the newest changes and may break. Nightly changes how your data is stored, so you cannot switch back to stable without reinstalling. This applies to the connected worker only.',
+		keywords: ['stable', 'nightly', 'edge', 'beta', 'release channel', 'main'],
+		default: 'stable'
+	},
+	{
 		id: 'system.checkUpdates',
 		category: 'system',
 		section: 'Updates',
@@ -80,37 +91,6 @@ export const entries: SettingEntry[] = [
 		hint: 'Checks itself every hour',
 		help: 'This worker checks its saved facts without using a model: whether learning works, what sessions get to see, and whether anything was lost. It archives exact duplicates and unconfirmed facts nobody used; Recall still finds them there. Facts you asked to keep are never removed.',
 		keywords: ['long-term memory', 'saved facts', 'remember', 'recall', 'learner', 'duplicates', 'prune', 'archive']
-	},
-	{
-		id: 'system.license',
-		category: 'system',
-		section: 'License',
-		label: 'License',
-		help: 'One license covers up to 3 workers. Without an active license, new agent runs pause; your sessions, files and settings always stay available.',
-		keywords: ['plan', 'status', 'beta', 'lease', 'grace', 'subscription']
-	},
-	{
-		id: 'system.seats',
-		category: 'system',
-		section: 'License',
-		label: 'Seats',
-		hint: 'Up to 3 workers',
-		keywords: ['license seats', 'free a seat', 'deactivate worker']
-	},
-	{
-		id: 'system.licenseKey',
-		category: 'system',
-		section: 'License',
-		label: 'License key',
-		keywords: ['activate', 'check now', 'use a different key']
-	},
-	{
-		id: 'system.deactivate',
-		category: 'system',
-		section: 'License',
-		label: 'Deactivate on this worker',
-		hint: 'New agent runs pause here',
-		keywords: ['license deactivate', 'free seat']
 	},
 	{
 		id: 'system.reportProblem',

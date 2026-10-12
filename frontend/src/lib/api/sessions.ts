@@ -79,6 +79,21 @@ export interface Session {
 	/** Start of the turn running now, null when none is. The card adds the
 	 *  live interval to `work_ms` while the turn runs. */
 	work_started_at?: string | null;
+	/** When the last user message (prompt, steer, command, REST/connector
+	 *  message) was persisted, UTC. Null until the first one after the column
+	 *  existed; agent notes and wakes do not move it. */
+	last_user_message_at?: string | null;
+	/** Event-log seq of that user message; null when unknown or cleared.
+	 *  Compare only within an equal `last_user_message_epoch` (#2249). */
+	last_user_message_seq?: number | null;
+	/** Opaque identity of the event log `last_user_message_seq` belongs to. */
+	last_user_message_epoch?: string | null;
+	/** Event-log seq of the newest nonempty assistant prose when it asks a
+	 *  question; null when it does not (or nothing is known). Absent from older
+	 *  workers. Compare only within an equal epoch (#2263). */
+	last_assistant_question_seq?: number | null;
+	/** Opaque identity of the event log `last_assistant_question_seq` belongs to. */
+	last_assistant_question_epoch?: string | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions
@@ -103,6 +118,8 @@ export interface Session {
 	project_v2_id?: string | null;  // Origin-keyed project (install-independent)
 	origin?: string | null;  // Grouping token (git:… / manual:… / local:<id>)
 	is_pinned?: boolean;  // Explicit runner:<id> placement pin (computed at read)
+	// Where the session runs, e.g. `{ where: 'runner:<device id>' }` after a hand-off.
+	placement?: { where?: string | null } | null;
 	automation_id?: string | null;  // Set when an automation run created this session
 	provider_id?: string | null;  // Bound model provider (null = native Claude)
 	// The run binding chosen when this session was created (agents no longer
@@ -343,7 +360,15 @@ export interface QueuedMoveBusy {
 export interface QueuedMoveState {
 	busy: QueuedMoveBusy;
 	/** A move already queued by the owner or the agent. */
-	pending: { worker: string; target_id: string; by: 'owner' | 'agent' | (string & {}) } | null;
+	pending: {
+		/** The move's id (#2308); older owners omit it. */
+		handoff_id?: string | null;
+		worker: string;
+		target_id: string;
+		by: 'owner' | 'agent' | (string & {});
+		/** Commit, push and move are running. */
+		moving?: boolean;
+	} | null;
 }
 
 export async function getQueuedMove(sessionId: string): Promise<QueuedMoveState> {
@@ -359,8 +384,8 @@ export async function queueMove(
 	sessionId: string,
 	targetInstanceId?: string,
 	stop = false
-): Promise<{ queued: boolean; worker: string; after?: 'turn' | 'queued' }> {
-	return api.post<{ queued: boolean; worker: string }>(`/sessions/${sessionId}/handoff`, {
+): Promise<{ queued: boolean; worker: string; after?: 'turn' | 'queued'; handoff_id?: string }> {
+	return api.post<{ queued: boolean; worker: string; after?: 'turn' | 'queued'; handoff_id?: string }>(`/sessions/${sessionId}/handoff`, {
 		...(targetInstanceId ? { target_instance_id: targetInstanceId } : {}),
 		stop
 	});

@@ -473,9 +473,12 @@ def apply_reencryption_plan(plan, db_module) -> None:
             uid, ctype = item.ref
             db_module.set_user_credential(uid, ctype, item.new_value)
         elif item.kind == "model_provider":
-            # Token-only update: the plaintext is unchanged, so no other column
-            # is touched (update_model_provider only writes auth_token here).
-            db_module.update_model_provider(item.ref, auth_token=item.new_value)
+            # The plan already decrypted/re-encrypted the same plaintext. Do
+            # not compare these blobs with the single active master key: it
+            # cannot decrypt both and would discard credential-bound state.
+            db_module.update_model_provider(
+                item.ref, auth_token=item.new_value, _auth_token_reencrypted=True,
+            )
         elif item.kind == "model_provider_codex_access":
             # Single Codex blob re-key: writes ONLY codex_access_token, leaving
             # the refresh token / account_id / expiry / last_refresh untouched.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, logger
@@ -761,11 +761,30 @@ def _provider_display_name(key: str, name: Optional[str]) -> str:
     return name or "Deleted provider"
 
 
+def get_manual_balance_credits(row: dict) -> dict | None:
+    """Entered balance less this worker's costs; peer ledgers are not synced."""
+    balance, set_at = row.get("manual_balance_usd"), row.get("manual_balance_set_at")
+    if balance is None or set_at is None:
+        return None
+    items = get_analytics_provider_breakdown(provider_id=row["id"], since_ms=set_at)
+    spent = sum(item["total_cost_usd"] for item in items)
+    return {
+        "balance_remaining": float(balance) - spent,
+        "manual_balance": float(balance),
+        "estimated_spend": spent,
+        "set_at": set_at,
+        "unpriced_turns": sum(item["unpriced_query_count"] for item in items),
+    }
+
+
 def get_analytics_provider_breakdown(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     api_user_id: Optional[str] = None,
     by_date: bool = False,
+    *,
+    provider_id: Optional[str] = None,
+    since_ms: Optional[int] = None,
 ) -> List[ProviderUsageEntry]:
     """Usage per provider leg for a date range (inclusive, YYYY-MM-DD).
 
@@ -788,6 +807,15 @@ def get_analytics_provider_breakdown(
     if api_user_id:
         where += " AND s.api_user_id = %s"
         params.append(api_user_id)
+
+    # Balance tracking requires exact recorded attribution, not the legacy
+    # fallback to a session's current provider, and a millisecond cutoff.
+    if provider_id is not None:
+        where += " AND ul.provider_id = %s"
+        params.append(provider_id)
+    if since_ms is not None:
+        where += " AND ul.created_at >= %s"
+        params.append(datetime.fromtimestamp(since_ms / 1000, timezone.utc).isoformat())
 
     inner_day = f", {date_expr} AS day" if by_date else ""
     outer_day = ", t.day AS day" if by_date else ""

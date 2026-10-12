@@ -62,7 +62,7 @@ ws.send(JSON.stringify({
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
 | `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered. Deferring a request marked `deferrable: false` returns an `error` and leaves it waiting | `session_id`, `request_id`, `result` |
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
-| `queued_message_removal` | Reply to `remove_queued_message`. `outcome` is `cancelled` (the message will never reach the agent), `already_delivered` (the running turn read it before the removal arrived, so it stays part of the conversation), or `not_found` | `session_id`, `message_id`, `outcome` |
+| `queued_message_removal` | Reply to `remove_queued_message`. `verdict` is `withdrawn` (never delivered) or `already_delivered` (too late; keep the chip as sent). An unknown identity returns `not_found`, never a successful withdrawal. Legacy `outcome` remains `cancelled`, `already_delivered`, or `not_found` | `session_id`, `message_id`, `client_message_id`, `verdict`, `outcome` |
 | `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
 | `pending_questions` | Reply to `get_pending_questions` | `session_id`, `questions` |
 | `tabs_sync` | Another of your devices sent `tabs_update` | `tabs`, `activeTabId`, `source_device_id` |
@@ -79,9 +79,9 @@ Other devices watching the same session receive the same control frames. Content
 
 | Type | Description | Key Fields |
 |------|-------------|------------|
-| `query` | Start a new query (creates a session if `session_id` is omitted) | `prompt`, `session_id`, `profile`, `project` |
+| `query` | Start a new query (creates a session if `session_id` is omitted) | `prompt`, `session_id`, `profile`, `project`, optional `client_message_id` |
 | `queue_message` | Queue a message to send after the current stream completes | `content`, `session_id`, `profile`, `project` |
-| `remove_queued_message` | Remove one queued message; answered with `queued_message_removal` | `message_id`, `session_id` |
+| `remove_queued_message` | Request withdrawal of one queued message; keep it visible until `queued_message_removal` confirms withdrawal | `session_id`, `client_message_id` (preferred), or legacy `message_id` |
 | `clear_queued_messages` | Remove every queued message for the session | `session_id` |
 | `load_session` | Load/switch to a session and receive its history | `session_id` |
 | `watch_session` | Follow a session without loading its history. The server sends its queue, if any, as a `sync` frame | `session_id` |
@@ -163,7 +163,7 @@ A `query` sent while a turn is running is queued and answered with `query_queued
 }
 ```
 
-Remove an entry with `{"type": "remove_queued_message", "message_id": "turn_789", "session_id": "sess_abc123"}`, or all of them with `clear_queued_messages`. A queued message the running turn has already read cannot be removed: the reply is a `queued_message_removal` frame with `outcome: "already_delivered"`, and the next `queue_updated` shows what is left. A message removed before the running turn reads it is never delivered (`outcome: "cancelled"`).
+Generate a fresh `client_message_id` (`client-` plus 32 lowercase hexadecimal random digits) for each `query`. It is stored as the turn command id, echoed in queue rows and cancellation replies, and carried through engine steering and delivery receipts. Cancel using the same identity and `session_id`, even before a queue acknowledgement arrives; no expiring local-id map or text matching is needed. Legacy callers may still name `message_id`. Keep the chip in a cancelling state until `verdict: "withdrawn"`, then remove it and restore its draft. If delivery wins, `verdict: "already_delivered"` leaves the chip marked sent and shows the warning; it must not restore the draft. A missing/error reply is not proof of withdrawal. `clear_queued_messages` requests removal of all queued messages. There is no guaranteed undo interval. Cancellation transactions survive switching chats within the tab: a late withdrawal verdict restores text only when its own chat is open again. Held-message withdrawals have a content-free `queued_message.withdrawn` receipt in the session event log, so retrying either identity still reports withdrawal after the move row is deleted; a missing held row alone is not evidence of delivery.
 
 A `query` queued behind a running turn is also offered to that turn, which can read it at its next step instead of waiting for the turn to end. It stays in the queue until the turn reads it, and removing it before then takes it back. A message the running turn cannot take (one for a different agent, model, effort, permission mode or set of `workspace_project_ids`, or any message on an agent backend that cannot accept messages mid-turn) runs as its own turn after the current one. For a session that runs on another device, the message is forwarded without `workspace_project_ids` and always keeps the session's own workspace folders, so the device you type on cannot add or remove folders.
 

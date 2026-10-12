@@ -266,6 +266,27 @@ it('round-trips fast mode per canonical model through the account adapter', asyn
  expect(mocks.save).toHaveBeenLastCalledWith('composer.modelFast.claude-opus-5', null);
 });
 
+it('round-trips the Standard context cap per canonical model through the account adapter', async () => {
+ const {composerPreferences:p, contextCapRevision} = await import('./composer-preferences');
+ let revisions = 0;
+ const stop = contextCapRevision.subscribe(() => { revisions += 1; });
+ expect(p.contextCapForModel('opus')).toBeNull();
+ p.rememberContextCap('prov:api:claude-opus-5[1m]', 450_000);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelContextCap.claude-opus-5', 450_000);
+ vi.resetModules();
+ const {composerPreferences:reloaded} = await import('./composer-preferences');
+ for (const alias of ['opus', 'prov:api:claude-opus-5', 'opus[1m]']) expect(reloaded.contextCapForModel(alias)).toBe(450_000);
+ mocks.adapters.get('composer.modelContextCap.claude-opus-5')!.apply(600_000);
+ expect(reloaded.contextCapForModel('opus')).toBe(600_000);
+ // Junk from another device is ignored rather than trusted.
+ mocks.adapters.get('composer.modelContextCap.claude-opus-5')!.apply('lots');
+ expect(reloaded.contextCapForModel('opus')).toBeNull();
+ reloaded.rememberContextCap('opus', null);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelContextCap.claude-opus-5', null);
+ expect(revisions).toBeGreaterThan(1);
+ stop();
+});
+
 it('migrates the legacy fast flag only for the last selected model', async () => {
  localStorage.setItem('aihub_lastModel','prov:api:claude-opus-5'); localStorage.setItem('aihub_lastFastMode','1');
  const {composerPreferences:p} = await import('./composer-preferences');

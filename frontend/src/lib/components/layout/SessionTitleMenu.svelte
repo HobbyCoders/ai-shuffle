@@ -12,6 +12,11 @@
 	 * The chevron opens a bottom sheet that shows the whole title (the bar can
 	 * only fit one ellipsized line) above the same actions; Rename edits the
 	 * title in place inside the sheet. Renders nothing for an unbound chat.
+	 *
+	 * The assistant's home chat counts as unbound in both variants: it is built
+	 * in, so it has no Rename / Fork / Delete. This fails closed: until the chat
+	 * is known to be an ordinary one (auth status and, for an admin, the
+	 * assistant state loaded) it also renders as a plain title.
 	 */
 	import { onDestroy } from 'svelte';
 	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
@@ -20,6 +25,8 @@
 	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { assistantState, chatIdentity, refreshAssistant } from '$lib/stores/assistant';
+	import { auth } from '$lib/stores/auth.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
@@ -36,7 +43,22 @@
 
 	let { title, sessionId = null, variant = 'crumb', projectLabel = null }: Props = $props();
 
-	const bound = $derived(!!sessionId);
+	// The assistant's home chat is built in: it cannot be renamed, forked or
+	// deleted, so it takes the unbound path (plain title, no chevron) everywhere.
+	// So does a chat not yet known to be ordinary: the actions fail closed.
+	const identity = $derived(
+		chatIdentity(sessionId, $auth.status ? !!$auth.status.is_admin : null, $assistantState)
+	);
+	const bound = $derived(!!sessionId && identity === 'ordinary');
+
+	// An admin's chat stays 'unknown' until the assistant state loads; ask for
+	// it (requests are shared) so an ordinary chat gets its menu. A failed load
+	// leaves the menu off until the next attempt.
+	$effect(() => {
+		if (sessionId && identity === 'unknown' && $auth.status?.is_admin) {
+			void refreshAssistant().catch(() => {});
+		}
+	});
 	const open = $derived($openHeaderDropdown === 'session-title');
 	const sheet = $derived(variant === 'sheet');
 
@@ -70,6 +92,15 @@
 	// header panel) closes it.
 	$effect(() => {
 		if (sheet && !open && renaming) cancelRename();
+	});
+
+	// Whenever the chat is not a known ordinary one (the assistant home, or its
+	// identity was lost on an owner change): drop the menu and any half-done action.
+	$effect(() => {
+		if (bound) return;
+		if (open) closeMenu();
+		if (renaming) cancelRename();
+		if (pendingDelete) pendingDelete = false;
 	});
 
 	// Register outside-click / Escape on the next frame so the opening click
@@ -125,7 +156,7 @@
 	}
 
 	async function commitRename() {
-		if (!renaming || !sessionId) return;
+		if (!renaming || !sessionId || !bound) return;
 		const next = renameValue.trim();
 		const current = storedTitle().trim();
 		cancelRename();
@@ -157,7 +188,7 @@
 	}
 
 	async function handleFork() {
-		if (!sessionId) return;
+		if (!sessionId || !bound) return;
 		if (sheet) closeSheet();
 		else closeMenu();
 		try {
@@ -177,7 +208,7 @@
 	}
 
 	async function confirmDelete() {
-		if (!sessionId) return;
+		if (!sessionId || !bound) return;
 		const id = sessionId;
 		pendingDelete = false;
 		try {

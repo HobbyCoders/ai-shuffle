@@ -163,7 +163,7 @@ A provider error carries the HTTP status and the provider's own short message (`
 
 ### POST /api/v1/model-providers/{provider_id}/fetch-models
 
-Fetch the provider's live model list from upstream so you can pick which ones to offer. Nothing is saved: send the models you want back through [PATCH](#patch-apiv1model-providersprovider_id) as `models`.
+Fetch the provider's live model list from upstream so you can pick which ones to offer. Send the models you want back through [PATCH](#patch-apiv1model-providersprovider_id) as `models`; refresh never adds or removes curated models. Known per-model context windows are included in the result and missing windows on already-curated models are backfilled from presets or the upstream catalog. Existing per-model windows, including owner edits, are kept. Concurrent provider edits take precedence over the backfill.
 
 **Auth:** Owner only
 
@@ -335,6 +335,34 @@ curl -X PUT http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61
 `spend` holds the latest reading (`spend_month` in USD with `input_tokens`, `output_tokens` and `num_model_requests`), or `null` until one arrives.
 
 **Errors:** `404` provider not found. `409` on PUT when the provider is disabled, and on DELETE when the key was saved by a different server instance. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
+
+### Entered OpenAI prepaid balance
+
+An official OpenAI API key with neither Admin usage nor an entered balance is
+omitted from the usage popover. In Settings > Providers > the key > Usage,
+enter the current balance in USD (two decimals) and Save; Clear removes only
+this estimate. Open billing links to the actual provider balance.
+
+Owner-only `PUT /api/v1/model-providers/{provider_id}/openai-usage/balance`
+accepts `{"balance_usd": 20.50}` (finite, 0–1,000,000,000 USD). The server rounds
+to cents and records the current millisecond timestamp. `DELETE` at the same
+path clears it; neither operation changes the inference or Admin key.
+The existing `GET .../openai-usage` response also includes `manual_balance`:
+`balance_remaining`, `manual_balance`, `estimated_spend`, `set_at` (epoch ms),
+and `unpriced_turns`, or null when not set.
+
+The popover shows **~$N left (estimated)**, not a provider reading. The app
+subtracts Analytics' recorded `usage_log.cost_usd` for the exact provider ID
+since Save. Reported and guessed token counts use the existing pricing path;
+unpriced turns, unattributed calls and spending outside this app are omitted.
+Prices and booking times may differ from billing; an in-flight turn booked
+after Save is deducted in full. Top-ups/refunds are not detected, and the
+estimate can go negative. Save again to reset the baseline. Changing the API
+key clears the baseline; resaving or re-encrypting the same key preserves it.
+Baselines sync with providers, but deductions cover only this worker's tracked
+spend: paired workers' spend is not included, as both UI surfaces state. If Admin
+usage is available, its organization spend stays primary with the manual
+estimate alongside it.
 
 ### OpenRouter usage key
 

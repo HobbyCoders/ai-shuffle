@@ -195,42 +195,65 @@ def delete_profile(profile_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def retire_builtin_explore() -> bool:
-    """Retire the removed built-in, never an owner-created agent with this id.
+RETIRED_BUILTIN_IDS = ("Explore", "Plan", "general-purpose", "frontend-designer")
 
-    Automations have a required/restricted agent FK. Preserve their definitions
-    on General Purpose, but disable them rather than silently run a different
-    prompt or tool surface. Session/history references are unlinked as on delete.
+
+def retire_builtin_subagent(subagent_id: str) -> bool:
+    """Retire a removed built-in, never an owner-created agent with this id.
+
+    Customized legacy starter roles become ordinary owner agents in this
+    transaction, before any reference can be cleared. Only proven unchanged
+    roles (and the previously retired Explore/Plan) enter the delete path.
+    Return True only when a row was deleted.
     """
+    if subagent_id not in RETIRED_BUILTIN_IDS:
+        return False
+
     from app.core.config import settings
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM agents WHERE id = %s AND is_builtin = TRUE FOR UPDATE", ("Explore",))
-        if cursor.fetchone() is None:
+        cursor.execute("SELECT * FROM agents WHERE id = %s AND is_builtin = TRUE FOR UPDATE", (subagent_id,))
+        agent = row_to_dict(cursor.fetchone())
+        if agent is None:
             return False
+        if subagent_id in ("general-purpose", "frontend-designer"):
+            from app.core.builtin_retirement import is_untouched_builtin
+
+            cursor.execute("SELECT 1 FROM permission_rules WHERE profile_id = %s LIMIT 1", (subagent_id,))
+            if cursor.fetchone() is not None or not is_untouched_builtin(agent):
+                # Keep the identity and ALL references/scopes; no recreate,
+                # template defaults, or reference-clearing writes happen first.
+                cursor.execute(
+                    "UPDATE agents SET is_builtin = FALSE WHERE id = %s", (subagent_id,)
+                )
+                # This is local upgrade upkeep, not a new owner edit. Do not
+                # give a stale replica a fresh clock that beats a peer's edits.
+                from app.network.engine import keep_local_rewrite
+                keep_local_rewrite(cursor, "agents", subagent_id, agent)
+                return False
         cursor.execute(
             "UPDATE automations SET profile_id = %s, is_enabled = FALSE, last_error = %s, updated_at = %s "
             "WHERE profile_id = %s",
-            ("general-purpose", "Built-in Explore was removed; review the General Purpose agent before re-enabling.",
-             datetime.now(timezone.utc).isoformat(), "Explore"),
+            (None, f"Built-in {subagent_id} was removed; choose an agent before re-enabling.",
+             datetime.now(timezone.utc).isoformat(), subagent_id),
         )
         # Persist cancellation notices until the wake service can record them in
         # the chat. They carry no runnable profile/prompt, and never submit a turn.
-        reason = "Built-in Explore was removed; its scheduled wake/parked continuation was cancelled."
+        reason = f"Built-in {subagent_id} was removed; its scheduled wake/parked continuation was cancelled."
         cursor.execute(
             "UPDATE pending_wakeups SET source = %s, reason = %s, profile_id = NULL, prompt = '', model = NULL, fire_at = %s, "
             "instance_id = COALESCE(instance_id, %s) "
             "WHERE profile_id = %s OR (profile_id IS NULL AND session_id IN "
             "(SELECT id FROM sessions WHERE profile_id = %s))",
-            ("profile_cancelled", reason, 0, settings.effective_instance_id, "Explore", "Explore"),
+            ("profile_cancelled", reason, 0, settings.effective_instance_id, subagent_id, subagent_id),
         )
         cursor.execute(
             "UPDATE turns SET state = 'aborted', stop_reason = 'profile_removed', error = %s, ended_at = NOW() "
             "WHERE state IN ('parked', 'queued') AND (profile_id = %s OR "
             "(profile_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE profile_id = %s))) "
             "RETURNING id, session_id, instance_id",
-            (reason, "Explore", "Explore"),
+            (reason, subagent_id, subagent_id),
         )
         for turn in cursor.fetchall():
             cursor.execute(
@@ -240,15 +263,15 @@ def retire_builtin_explore() -> bool:
                  "profile_cancelled", turn["instance_id"] or settings.effective_instance_id, 0),
             )
         cursor.execute(
-            "UPDATE sessions SET parked_task_kind = NULL WHERE profile_id = %s", ("Explore",)
+            "UPDATE sessions SET parked_task_kind = NULL WHERE profile_id = %s", (subagent_id,)
         )
         for table in ("sessions", "session_messages", "usage_log"):
-            cursor.execute(f"UPDATE {table} SET profile_id = NULL WHERE profile_id = %s", ("Explore",))
+            cursor.execute(f"UPDATE {table} SET profile_id = NULL WHERE profile_id = %s", (subagent_id,))
         # Forget the local sync version, not a network tombstone. Publishing an
         # agent delete ahead of the automation rewrite would hit RESTRICT on
         # an older worker. Updated peers retire the row independently.
-        cursor.execute("DELETE FROM sync_records WHERE collection = %s AND record_id = %s", ("agents", "Explore"))
-        cursor.execute("DELETE FROM agents WHERE id = %s AND is_builtin = TRUE", ("Explore",))
+        cursor.execute("DELETE FROM sync_records WHERE collection = %s AND record_id = %s", ("agents", subagent_id))
+        cursor.execute("DELETE FROM agents WHERE id = %s AND is_builtin = TRUE", (subagent_id,))
         return cursor.rowcount > 0
 
 

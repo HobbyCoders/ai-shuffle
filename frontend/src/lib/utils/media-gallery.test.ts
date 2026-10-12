@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { marked } from 'marked';
 import type { ChatMessage } from '$lib/stores/types';
 import { galleryMediaForTurn, rewriteWithGallery } from './media-gallery';
 import { buildDisplayItems } from './work-log';
@@ -14,6 +15,22 @@ const answer = message('a', { type: 'text', content: `My choices.
 
 ![Second](${image2})` });
 const options = { isStreaming: false, groupingEnabled: true };
+
+describe('gallery extraction cache (#1282)', () => {
+	it('lexes each prose text once, and still resolves media per session', () => {
+		const content = `Cached once.\n\n![One](${image})\n\n![Two](${image2})`;
+		const prose = message('cache-a', { type: 'text', content });
+		const lexer = vi.spyOn(marked, 'lexer');
+		const first = galleryMediaForTurn([prose], 's1');
+		const second = galleryMediaForTurn([{ ...prose }], 's2');
+		const calls = lexer.mock.calls.filter(([text]) => text === content).length;
+		lexer.mockRestore();
+		expect(calls).toBe(1);
+		expect(first).toHaveLength(2);
+		expect(second.map(item => item.label)).toEqual(first.map(item => item.label));
+		expect(second[0].src).not.toBe(first[0].src);
+	});
+});
 
 describe('settled turn media gallery', () => {
 	it('keeps gallery, inline suppression and downloads on the owning session', () => {
@@ -65,9 +82,12 @@ describe('settled turn media gallery', () => {
 	});
 	it('settles an earlier turn when the next user message arrives, without mixing turns', () => {
 		const items = buildDisplayItems([user, tool, answer, message('u2', { role: 'user', content: 'Next' }), message('a2', { content: `![single](${image2})` })], { ...options, isStreaming: true });
-		const groups = items.filter(item => item.kind === 'work_log');
+		// The live turn is one live work log; only the earlier turn is settled with a gallery.
+		const logs = items.filter(item => item.kind === 'work_log');
+		const groups = logs.filter(item => item.mode === 'settled');
 		expect(groups).toHaveLength(1);
 		expect(groups[0].gallery).toHaveLength(2);
+		expect(logs.filter(item => item.mode === 'live').every(item => !item.gallery?.length)).toBe(true);
 	});
 	it('splits galleries at same-turn steers only after the entire turn settles', () => {
 		const steer = message('steer', { role: 'user', turnId: 'turn-1', content: 'Try a different style' });
@@ -76,16 +96,21 @@ describe('settled turn media gallery', () => {
 		for (let length = 1; length <= messages.length; length++) {
 			for (const liveOptions of [{ ...options, isStreaming: true }, { ...options, latestTurnUnsettled: true }]) {
 				const items = buildDisplayItems(messages.slice(0, length), liveOptions);
-				expect(items.every(item => item.kind === 'message')).toBe(true);
+				// Live: at most the turn's one live work log, never a settled fold or a gallery.
+				expect(items.some(item => item.kind === 'work_log' && (item.mode === 'settled' || item.gallery?.length))).toBe(false);
 			}
 		}
 		const items = buildDisplayItems(messages, options);
-		expect(items.map(item => item.kind)).toEqual(['message', 'work_log', 'message', 'work_log']);
+		// One fold for the turn. Its gallery sits above the kept rows, so only
+		// media from before the steer joins it; later media stays in its row.
+		expect(items.map(item => item.kind)).toEqual(['message', 'work_log']);
 		const groups = items.filter(item => item.kind === 'work_log');
 		expect(groups.map(group => group.gallery?.map(media => media.src)))
-			.toEqual([[image, image2], ['/c.png', '/d.mp4']]);
+			.toEqual([[image, image2]]);
 		expect(groups.map(group => group.sequence.map(entry => entry.message.id)))
-			.toEqual([['t', 'a'], ['later']]);
+			.toEqual([['t', 'a', 'steer', 'later']]);
+		expect(groups[0].sequence.filter(entry => !entry.hiddenWhenCollapsed).map(entry => entry.message.id))
+			.toEqual(['a', 'steer', 'later']);
 		expect(buildDisplayItems(structuredClone(messages), options)).toEqual(items);
 	});
 	it('does not combine single images across a steer into a gallery', () => {
@@ -95,8 +120,14 @@ describe('settled turn media gallery', () => {
 			message('steer', { role: 'user', turnId: 'turn-1', content: 'Change it' }),
 			message('after', { type: 'text', content: '![After](/after.png)' })
 		];
-		expect(buildDisplayItems(messages, options).map(item => item.kind))
-			.toEqual(['message', 'message', 'message', 'message']);
+		const items = buildDisplayItems(messages, options);
+		// The turn keeps its group (nothing remounts at settle) but folds nothing
+		// and draws no gallery: every row stays on screen.
+		expect(items.map(item => item.kind)).toEqual(['message', 'work_log']);
+		const group = items[1];
+		if (group.kind !== 'work_log') throw new Error('Missing group');
+		expect(group.gallery ?? []).toEqual([]);
+		expect(group.sequence.every(entry => !entry.hiddenWhenCollapsed)).toBe(true);
 	});
 	it('does not override disabled work grouping', () => {
 		expect(buildDisplayItems([user, tool, answer], { ...options, groupingEnabled: false }).every(item => item.kind !== 'work_log')).toBe(true);

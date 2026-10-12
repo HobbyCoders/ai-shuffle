@@ -17,13 +17,19 @@ export const STALE_LOCK_MS = 10 * 60_000;
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][A-Za-z0-9.+-]{1,60})?$/;
 /**
  * stable: tagged releases, signed only after the release image passed
- * container verification. edge: every main revision, for the owner's own
- * testing. The channel is inside the signed payload, so the hub cannot relabel
- * an edge build as stable. See docs/ci/release-channels.md.
+ * container verification. nightly: daily main builds; edge is a transition
+ * alias. The signed channel prevents relabeling a nightly build as stable.
+ * See docs/ci/release-channels.md.
  */
-export const CHANNELS = ['stable', 'edge'] as const;
+export const CHANNELS = ['stable', 'nightly'] as const;
+let aliasLogged = false;
+export function normalizeChannel(channel: unknown): unknown {
+  if (channel !== 'edge') return channel;
+  if (!aliasLogged) { console.warn('Update channel edge is deprecated; using nightly'); aliasLogged = true; }
+  return 'nightly';
+}
 export type UpdateChannel = typeof CHANNELS[number];
-/** Owner-only override in the update root: {"channel": "edge"}. Absent means stable. */
+/** Local choice in the update root: {"channel": "nightly"}. Absent means stable. */
 export const CHANNEL_FILE = 'update-channel.json';
 /**
  * First-install license key in the update root: {"key": "ASH-..."}. Written
@@ -41,11 +47,11 @@ export class LicenseRequiredError extends Error {
       : 'Updates need an active AI Shuffle license. Enter your license key, or add it in Settings > System > License.');
   }
 }
-const FEEDS: Record<UpdateChannel, string> = { stable: SOURCE_ORIGIN + '/v1/desktop/manifest', edge: SOURCE_ORIGIN + '/v1/desktop/manifest/edge' };
+const FEEDS: Record<UpdateChannel, string> = { stable: SOURCE_ORIGIN + '/v1/desktop/manifest', nightly: SOURCE_ORIGIN + '/v1/desktop/manifest/nightly' };
 export interface SourceManifest {
   format: 2; revision: string; sequence: number; sha256: string; size: number;
   /** Added after format 2 shipped; older signed manifests (and installed release.json files) lack them. */
-  channel?: UpdateChannel; version?: string; notes?: string; tree?: string;
+  channel?: UpdateChannel | 'edge'; version?: string; notes?: string; tree?: string;
   /** launcher: the oldest Windows launcher (installed app.asar) this release runs under (#1821 D5). Absent means any. */
   desktop?: { launcher?: number };
 }
@@ -54,7 +60,7 @@ export function requiredLauncher(manifest: SourceManifest): number { return mani
 export interface SourceOptions {
   root: string;
   /** Overrides the update-channel.json setting; tests and owner builds only. */
-  channel?: UpdateChannel;
+  channel?: UpdateChannel | 'edge';
   publicKey: string;
   bootstrapNode: string;
   /** Trusted revision included in the installer, before its first source update. */
@@ -106,7 +112,7 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
   const m = JSON.parse(payload.toString('utf8')) as SourceManifest;
   if (m.format !== 2 || typeof m.revision !== 'string' || !REVISION.test(m.revision) || typeof m.sha256 !== 'string' || !DIGEST.test(m.sha256) || !Number.isSafeInteger(m.sequence) || m.sequence <= 0 || !Number.isSafeInteger(m.size) || m.size <= 0 || m.size > MAX_SIZE) throw new Error('Invalid source manifest');
   // Optional release fields, checked as strictly as the container updater does.
-  if (('channel' in m && !(CHANNELS as readonly unknown[]).includes(m.channel))
+  if (('channel' in m && !(CHANNELS as readonly unknown[]).includes(normalizeChannel(m.channel)))
     || ('tree' in m && !(typeof m.tree === 'string' && DIGEST.test(m.tree)))
     || ('version' in m && !(typeof m.version === 'string' && VERSION.test(m.version)))
     || ('notes' in m && !(typeof m.notes === 'string' && m.notes.length <= MAX_NOTES))
@@ -117,7 +123,7 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
 
 /** A freshly downloaded manifest must be signed for this install's channel and carry a tree digest. */
 export function requireRelease(manifest: SourceManifest, channel: UpdateChannel): SourceManifest {
-  if (manifest.channel !== channel) throw new Error(`The update feed did not return a signed ${channel} release. No update was downloaded.`);
+  if (normalizeChannel(manifest.channel) !== normalizeChannel(channel)) throw new Error(`The update feed did not return a signed ${channel} release. No update was downloaded.`);
   if (!manifest.tree) throw new Error('This update has no signed source tree digest. No update was downloaded.');
   return manifest;
 }
@@ -445,16 +451,32 @@ export class SourceUpdates {
       await this.save();
     }
   }
-  /** The release channel this install follows: stable unless the owner opted into edge. */
+  /** The release channel this install follows: stable unless the owner opted into nightly. */
   async channel(): Promise<UpdateChannel> {
-    if (this.options.channel) return this.options.channel;
+    if (this.options.channel) return normalizeChannel(this.options.channel) as UpdateChannel;
     let text: string;
     try { text = await fs.readFile(path.join(this.options.root, CHANNEL_FILE), 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'stable'; throw error; }
     let channel: unknown;
-    try { channel = JSON.parse(text)?.channel; } catch { channel = undefined; }
-    if (!(CHANNELS as readonly unknown[]).includes(channel)) throw new Error(`${CHANNEL_FILE} must contain {"channel": "stable"} or {"channel": "edge"}. No update was checked.`);
+    try { channel = normalizeChannel(JSON.parse(text)?.channel); } catch { channel = undefined; }
+    if (!(CHANNELS as readonly unknown[]).includes(channel)) throw new Error(`${CHANNEL_FILE} must contain {"channel": "stable"} or {"channel": "nightly"}. No update was checked.`);
     return channel as UpdateChannel;
+  }
+  async channelConfig(): Promise<{ channel: UpdateChannel; source: 'file' | 'default'; editable: boolean }> {
+    const channel = await this.channel();
+    const exists = await fs.stat(path.join(this.options.root, CHANNEL_FILE)).then(() => true, error => {
+      if (error.code === 'ENOENT') return false; throw error;
+    });
+    return { channel, source: exists ? 'file' : 'default', editable: !this.options.channel };
+  }
+  async setChannel(channel: UpdateChannel): Promise<void> {
+    if (!(CHANNELS as readonly string[]).includes(channel) || this.options.channel) throw new Error('Channel cannot be changed');
+    if (await this.channel() === 'nightly' && channel === 'stable') throw new Error('Returning to stable requires a reinstall');
+    if (this.pendingVersion || this.hasMigrationRisk) throw new Error('Finish the current update before changing channel');
+    await fs.mkdir(this.options.root, { recursive: true });
+    const file = path.join(this.options.root, CHANNEL_FILE);
+    await fs.writeFile(file + '.tmp', JSON.stringify({ channel }), { mode: 0o600 });
+    await fs.rename(file + '.tmp', file);
   }
   private async updatesAllowed(): Promise<boolean> {
     try {

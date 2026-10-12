@@ -7,6 +7,9 @@ import MirrorSyncGate from './MirrorSyncGate.svelte';
 const children = createRawSnippet(() => ({ render: () => '<div>2 running tasks, 2 agents</div>' }));
 const status = (state: string, pending_updates = 0) => new Response(JSON.stringify({ state, pending_updates }));
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+// The status slot stays mounted (a live region) once the chat is shown; it is
+// empty while the chat is current.
+const statusText = () => screen.queryByRole('status')?.textContent?.trim() ?? '';
 
 describe('mirrored session freshness', () => {
 	it('holds stale task/agent state, keeps the notice on poll errors, and refreshes on drain', async () => {
@@ -25,7 +28,7 @@ describe('mirrored session freshness', () => {
 		expect(onCaughtUp).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(2000);
 		expect(onCaughtUp).toHaveBeenCalledOnce();
-		expect(screen.queryByRole('status')).toBeNull();
+		expect(statusText()).toBe('');
 		expect(screen.getByText('2 running tasks, 2 agents')).toBeTruthy();
 		await vi.advanceTimersByTimeAsync(2000);
 		expect(onCaughtUp).toHaveBeenCalledOnce();
@@ -63,21 +66,85 @@ describe('mirrored session freshness', () => {
 		});
 		await vi.advanceTimersByTimeAsync(0);
 		expect(onCaughtUp).toHaveBeenCalledOnce();
-		expect(screen.queryByRole('status')).toBeNull();
+		expect(statusText()).toBe('');
 		await vi.advanceTimersByTimeAsync(6000);
 		expect(onCaughtUp).toHaveBeenCalledOnce();
 		expect(fetch).toHaveBeenCalledTimes(4);
 		expect(screen.getByText('2 running tasks, 2 agents')).toBeTruthy();
-		// A later, real backlog may reload once more, but never for the reload itself.
+		// A later backlog never unmounts the conversation, and never reloads it.
+		const conversation = screen.getByText('2 running tasks, 2 agents');
 		fetch.mockResolvedValueOnce(status('syncing', 3));
 		await vi.advanceTimersByTimeAsync(2000);
-		expect(screen.getByText('3 updates remaining')).toBeTruthy();
+		expect(screen.getByText('2 running tasks, 2 agents')).toBe(conversation);
+		expect(screen.queryByText('Catching up before showing the current conversation, tasks and agents.')).toBeNull();
 		await vi.advanceTimersByTimeAsync(2000);
-		expect(onCaughtUp).toHaveBeenCalledTimes(2);
-		expect(screen.queryByRole('status')).toBeNull();
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		expect(statusText()).toBe('');
 		await vi.advanceTimersByTimeAsync(4000);
-		expect(onCaughtUp).toHaveBeenCalledTimes(2);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
 		expect(fetch).toHaveBeenCalledTimes(8);
+	});
+
+	it('reloads only on the first catch-up across current → syncing(5) → current → syncing(3) → current', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn()
+			.mockResolvedValueOnce(status('current'))
+			.mockResolvedValueOnce(status('syncing', 5))
+			.mockResolvedValueOnce(status('current'))
+			.mockResolvedValueOnce(status('syncing', 3))
+			.mockImplementation(() => Promise.resolve(status('current')));
+		vi.stubGlobal('fetch', fetch);
+		const onCaughtUp = vi.fn();
+		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'Unraid', onCaughtUp, children });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		const conversation = screen.getByText('2 running tasks, 2 agents');
+		for (let poll = 0; poll < 6; poll++) {
+			await vi.advanceTimersByTimeAsync(2000);
+			// Each backlog lasts one poll — under the grace period, so no notice.
+			expect(statusText()).toBe('');
+			expect(screen.getByText('2 running tasks, 2 agents')).toBe(conversation);
+		}
+		expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(5);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+	});
+
+	it('shows the syncing notice only after a backlog outlasts the grace period, without moving the chat', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockResolvedValueOnce(status('current'))
+			.mockImplementation(() => Promise.resolve(status('syncing', 12)));
+		vi.stubGlobal('fetch', fetch);
+		const onCaughtUp = vi.fn();
+		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'Unraid', onCaughtUp, graceMs: 3000, children });
+		await vi.advanceTimersByTimeAsync(0);
+		const conversation = screen.getByText('2 running tasks, 2 agents');
+		await vi.advanceTimersByTimeAsync(2000); // first syncing poll arms the grace timer
+		expect(statusText()).toBe('');
+		await vi.advanceTimersByTimeAsync(2999);
+		expect(statusText()).toBe('');
+		await vi.advanceTimersByTimeAsync(1);
+		expect(statusText()).toBe('Syncing updates from Unraid… 12 updates remaining');
+		// The notice floats in its own slot; the conversation node is untouched.
+		expect(screen.getByText('2 running tasks, 2 agents')).toBe(conversation);
+		expect(screen.getByRole('status').classList.contains('mirror-status-slot')).toBe(true);
+		// Back to current: hidden at once, and still no second reload.
+		fetch.mockImplementation(() => Promise.resolve(status('current')));
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(statusText()).toBe('');
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+	});
+
+	it('keeps an offline owner visible after the chat was current', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockResolvedValueOnce(status('current'))
+			.mockImplementation(() => Promise.resolve(status('offline')));
+		vi.stubGlobal('fetch', fetch);
+		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, onCaughtUp: vi.fn(), children });
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(statusText()).toBe('Owning worker offline. Showing the last saved conversation.');
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(statusText()).toBe('Owning worker offline. Showing the last saved conversation.');
 	});
 
 	it('renders an unlisted local session once its loaded ownership arrives', async () => {

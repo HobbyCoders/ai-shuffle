@@ -114,3 +114,23 @@ describe('automation detail state', () => {
         expect(screen.queryByText(/agent was removed/)).toBeNull();
     });
 });
+
+describe('automation whose agent was deleted', () => {
+    const unlinked: Automation = { ...automation, profile_id: null, last_error: 'Its agent was deleted.' };
+
+    it('tags the Studio row No agent', () => {
+        render(AutomationsStudio, { automations: [unlinked], pendingApprovals: [], profiles: [{ id: 'gp', name: 'General Purpose' }] as never,
+            onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
+        expect(screen.getByText('No agent')).toBeTruthy();
+        expect(screen.queryByText('General Purpose')).toBeNull();
+    });
+    it('asks for another agent in the detail', () => {
+        render(AutomationDetail, { automation: unlinked, profiles: [{ id: 'gp', name: 'General Purpose' }] as never,
+            runs: [], runsLoading: false, expandedRunIds: new Set<string>(),
+            detailStats: null, onBack: vi.fn(), onEdit: vi.fn(), onTrigger: vi.fn(), onDelete: vi.fn(),
+            onToggleRunExpanded: vi.fn(), formatTime: () => 'Never', formatCost: () => '$0',
+            formatDuration: () => '0s', getStatusColor: () => 'var(--muted)',
+            getRunStatusBadgeClass: () => '', triggerTypeLabel: () => 'Interval' });
+        expect(screen.getByText(/Its agent was removed\. Pick another agent/)).toBeTruthy();
+    });
+});

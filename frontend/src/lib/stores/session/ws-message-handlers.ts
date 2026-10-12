@@ -12,6 +12,7 @@
  * - Session history loads via the feed's from_seq=0 replay, not WS.
  */
 
+import { forgetProseQuestion, noteLocalRowStamp, observeLastUserMessage } from './prose-questions';
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
@@ -26,6 +27,7 @@ import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
+import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -168,6 +170,12 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'device_name',
 	'instance_id',
 	'is_remote',
+	// A hand-off committed (#2308): the source worker publishes the new owner on
+	// the global feed. The row is the hand-off row's owner (handoff-episodes.ts
+	// settleByOwner), so this patch is what settles it live; see
+	// STALE_COMPANION_FIELDS for the owner's name and remote flag.
+	'owner_device_id',
+	'placement',
 	'turn_count',
 	'total_cost_usd',
 	'pr_number',
@@ -180,6 +188,15 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
 	'context_window',
+	// A user message was persisted (any device): patched at once so a
+	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
+	'last_user_message_at',
+	'last_user_message_seq',
+	'last_user_message_epoch',
+	// The trailing prose question changed (#2263): marks or clears Needs you on
+	// a row this tab has not opened.
+	'last_assistant_question_seq',
+	'last_assistant_question_epoch',
 ]);
 
 /**
@@ -188,6 +205,19 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
  * authoritative reload still has to follow — debounced.
  */
 const LIST_SHAPE_FIELDS: ReadonlySet<string> = new Set(['hidden', 'tags', 'project_id']);
+
+/**
+ * Fields the server changes together with others the frame does not carry, so
+ * the row patch lands at once and a debounced reload still follows to catch
+ * the rest. Recording a user message also bumps `updated_at`, which orders the
+ * sidebar and drives the card's last activity (#2249).
+ */
+const STALE_COMPANION_FIELDS: ReadonlySet<string> = new Set([
+	'last_user_message_at',
+	// The hand-off frame carries the new owner's id but not its `device_name`,
+	// `is_remote` or pin, which the reload brings.
+	'owner_device_id',
+]);
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
@@ -229,16 +259,21 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	/**
 	 * Merge a metadata-update payload into the sidebar row instead of refetching
 	 * the world (W1). Schedules a debounced reload only when the row is unknown
-	 * locally or the change reshapes the list server-side.
+	 * locally, the change reshapes the list server-side, or the server changed
+	 * fields the frame does not carry (STALE_COMPANION_FIELDS).
 	 */
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
 		const keys = Object.keys(updates);
+		// Also for rows not loaded here: the remembered question is per session.
+		// Ordered by its `updated_at` when the server sent one, else in arrival
+		// order; a stamp from this tab's clock is excluded (noteLocalRowStamp).
+		observeLastUserMessage(sessionId, updates);
 		const patch: Record<string, unknown> = {};
 		let needsReload = false;
 		for (const key of keys) {
 			if (ROW_PATCHABLE_FIELDS.has(key)) patch[key] = updates[key];
 			else needsReload = true;
-			if (LIST_SHAPE_FIELDS.has(key)) needsReload = true;
+			if (LIST_SHAPE_FIELDS.has(key) || STALE_COMPANION_FIELDS.has(key)) needsReload = true;
 		}
 		const patched =
 			!!sessionId && Object.keys(patch).length > 0 && mergeSessionPatch(sessionId, patch);
@@ -362,7 +397,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// (paged out, or created elsewhere) does change the list, so that case
 		// falls back to a debounced reload.
 		if (doneSessionId) {
-			const patched = mergeSessionPatch(doneSessionId, { updated_at: new Date().toISOString() });
+			// This tab's clock: sorts the row, never orders revisions (#2263).
+			const stamp = new Date().toISOString();
+			noteLocalRowStamp(doneSessionId, stamp);
+			const patched = mergeSessionPatch(doneSessionId, { updated_at: stamp });
 			if (!patched) scheduleSessionsReload();
 		}
 	}
@@ -412,6 +450,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			composerSuggestion.receive(data);
 			return;
 		}
+		if (['turn.started', 'message.user'].includes(msgType || eventType) &&
+			eventSessionId === state.sessionId) composerSuggestion.receive(data);
 		if (['stopped', 'interrupted', 'error'].includes(msgType) &&
 			(!eventSessionId || eventSessionId === state.sessionId)) composerSuggestion.invalidate();
 
@@ -443,8 +483,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (eventType === 'queue_updated' &&
 				(!eventSessionId || eventSessionId === state.sessionId)) {
 				const syncData = data.data as Record<string, unknown> | undefined;
-				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string }>;
-				const rows = messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() }));
+				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string; client_message_id?: string }>;
+				const rows = messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime(), clientMessageId: m.client_message_id }));
 				// The snapshot is authoritative about what EXISTS, but it is not
 				// ordered against the other producer of this frame (the turn pump's
 				// clearing broadcast), so a pre-absorption snapshot can land last and
@@ -452,11 +492,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sid = state.sessionId;
 				pendingQueue.noteAuthoritative(sid, rows);
 				const reconciled = pendingQueue.reconcile(sid, rows);
-				// An × on an optimistic id had no server row to name; now that the
-				// real one is here, aim the removal at it.
-				for (const removeId of pendingQueue.drainRemovalRequests()) {
-					wsSend({ type: 'remove_queued_message', message_id: removeId, session_id: sid });
-				}
 				const peers = (syncData?.pending_peer_messages ?? []) as Array<{
 					id: string; content: string; sender_label: string; sender_session_id?: string; created_at: string;
 				}>;
@@ -490,7 +525,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				// A context-window pick saved from another tab, device or worker:
 				// adopt it, so this composer neither shows nor sends the older one.
-				const pickedChoice = contextChoiceFromWindow(updates.context_window as number | null | undefined);
+				const pickedChoice = contextChoiceFromWindow(
+					updates.context_window as number | null | undefined,
+					getState().modelOverride || getDefaultModel()
+				);
 				if (pickedChoice && updatedSessionId && updatedSessionId === getState().sessionId) {
 					update(s => ({
 						...s, contextWindowChoice: pickedChoice,
@@ -583,12 +621,21 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 			// A cleared conversation has nothing left awaiting the user's input.
 			setNeedsAttention(sessionId, 0);
-			// Sidebar row: the server zeroed the counters as part of the clear —
-			// mirror that on the row (all patchable fields) instead of re-paging.
+			forgetProseQuestion(sessionId, { cleared: true });
+			// This tab's clock: sorts the row, never orders revisions (#2263).
+			const clearedAt = new Date().toISOString();
+			noteLocalRowStamp(sessionId, clearedAt);
+			// Sidebar row: the server zeroed the counters and both revision pairs
+			// as part of the clear — mirror that on the row (all patchable fields)
+			// instead of re-paging.
 			applyRowUpdates(sessionId, {
 				turn_count: 0,
 				total_cost_usd: 0,
-				updated_at: new Date().toISOString(),
+				updated_at: clearedAt,
+				last_user_message_seq: null,
+				last_user_message_epoch: null,
+				last_assistant_question_seq: null,
+				last_assistant_question_epoch: null,
 			});
 			return;
 		}
@@ -613,6 +660,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (getState().sessionId === sessionId) {
 				onNewChat();
 			}
+			// After the switch away, which records the leaving session.
+			forgetProseQuestion(sessionId);
 			return;
 		}
 
@@ -961,14 +1010,29 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'queued_message_removal': {
-				// The backend's answer to × on a pending message. `cancelled` is what
-				// the optimistic removal already shows. `already_delivered` means the
-				// running turn read the message before the × landed: it is part of
-				// the conversation (the transcript shows it once its delivery is
-				// recorded), so the user must not be left believing it was taken back.
-				if (data.outcome !== 'already_delivered') break;
 				const removalSessionId = data.session_id as string | undefined;
-				if (removalSessionId && removalSessionId !== getState().sessionId) break;
+				const sid = removalSessionId ?? getState().sessionId;
+				const key = (data.client_message_id ?? data.message_id) as string;
+				const verdict = data.verdict ?? (data.outcome === 'cancelled' ? 'withdrawn' : data.outcome);
+				const state = getState();
+				const entry = state.queuedMessages.find(m => (m.clientMessageId ?? m.id) === key);
+				if (verdict !== 'withdrawn' && verdict !== 'already_delivered') {
+					pendingQueue.removalFailed(sid, key);
+					if (sid !== state.sessionId) break;
+					update(s => ({ ...s,
+						queuedMessages: s.queuedMessages.map(m => m === entry ? { ...m, status: undefined } : m),
+						error: 'Cancellation was not confirmed. The message has not been withdrawn.',
+					}));
+					break;
+				}
+				pendingQueue.applyRemovalVerdict(sid, key, verdict);
+				if (sid !== state.sessionId) break; // retain for that session's next switch-in
+				const restored = pendingQueue.takeWithdrawnDraft(sid);
+				update(s => ({ ...s,
+					queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
+					...(restored !== null ? { pendingRestorePrompt: restored } : {}),
+				}));
+				if (verdict !== 'already_delivered') break;
 				notify.warning(
 					'Already sent: the agent read this message before it could be cancelled. Send a follow-up to correct it.',
 					{ category: 'queued-message-already-delivered', session_id: removalSessionId, persist: false }

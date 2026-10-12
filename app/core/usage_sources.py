@@ -28,10 +28,10 @@ RATE_LIMIT = "rate_limit"  # short-term request/token headroom
 SUBSCRIPTION_ALLOWANCE = "subscription_allowance"  # plan usage windows
 REPORTED_SPEND = "reported_spend"  # spend the provider reports for an account/org/key
 MONETARY_CREDIT = "monetary_credit"  # remaining purchased/prepaid credit
-# App-local estimates (token counts x catalog prices) never come from a source
-# in this registry; see docs/provider-usage-sources.md.
+LOCAL_ESTIMATE = "local_estimate"  # entered balance minus app-recorded costs
 
 MEASURE_LABELS = {
+    LOCAL_ESTIMATE: "Estimated credit balance",
     RATE_LIMIT: "Request/token rate limits",
     SUBSCRIPTION_ALLOWANCE: "Subscription allowance",
     REPORTED_SPEND: "Provider-reported spend",
@@ -45,6 +45,7 @@ UNOFFICIAL_SUBSCRIPTION = "unofficial_subscription"
 UNDOCUMENTED = "undocumented"
 
 SUPPORT_LABELS = {
+    LOCAL_ESTIMATE: "Local estimate, not a provider reading",
     DOCUMENTED: "Documented API",
     RESPONSE_METADATA: "Metadata on inference responses",
     UNOFFICIAL_SUBSCRIPTION: "Unofficial, subscription-specific endpoint",
@@ -273,6 +274,20 @@ _SOURCES: tuple[UsageSource, ...] = (
         unavailable=("OpenAI API spend", "OpenAI API credit balance"),
         poller="_poll_codex_provider",
         applies=is_codex_subscription_row,
+    ),
+    UsageSource(
+        id="openai_manual",
+        snapshot_type="openai_manual",
+        label="Entered balance minus estimated spend",
+        credential="User-entered balance (no billing credential)",
+        scope="api_key",
+        scope_label="Costs recorded by this app for this provider since the balance was entered",
+        measure=LOCAL_ESTIMATE,
+        collection=LOCAL_ESTIMATE,
+        support=LOCAL_ESTIMATE,
+        dashboard_url="https://platform.openai.com/settings/organization/billing/overview",
+        failure_policy="No provider request. Unpriced turns and spending outside this app are not deducted.",
+        unavailable=("provider-reported prepaid balance", "spending outside this app"),
     ),
     UsageSource(
         id="openai_admin",

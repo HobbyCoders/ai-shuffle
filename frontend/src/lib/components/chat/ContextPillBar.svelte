@@ -32,7 +32,9 @@
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
+	import WorkerMenuList from '$lib/components/ui/WorkerMenuList.svelte';
 	import { pendingHandoff, handoffActivitySince, moveBlocked } from './pending-handoff';
+	import { beginHandoffPendingRead, handoffPending, recordHandoffPending } from '$lib/stores/handoff-pending';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -199,7 +201,7 @@
 		const sid = $activeSession.sessionId;
 		const messages = $activeSession.messages;
 		if (queueCancelled?.sessionId === sid && !handoffActivitySince(messages, queueCancelled.seen)) return null;
-		const fromChat = pendingHandoff(messages);
+		const fromChat = pendingHandoff(messages, sessionRow ? { deviceId: sessionRow.owner_device_id, deviceName: sessionRow.device_name } : null, sid, sid ? $handoffPending[sid] : null);
 		if (fromChat) return fromChat;
 		if (ownerQueued?.sessionId === sid && !handoffActivitySince(messages, ownerQueued.seen)) {
 			return { worker: ownerQueued.worker, phase: 'queued' as const, afterQueued: ownerQueued.afterQueued };
@@ -213,7 +215,7 @@
 		}
 		if (!handoff) return null;
 		return handoff.phase === 'moving'
-			? { label: `Moving to ${handoff.worker}…`, title: MOVE_TITLE }
+			? { label: `Sending to ${handoff.worker}…`, title: MOVE_TITLE }
 			: {
 					label: handoff.afterQueued
 						? `Moving to ${handoff.worker} after the queued messages`
@@ -238,7 +240,9 @@
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
 			hasProject: sessionHasProject,
-			isWorktree: isWorktreeSession
+			isWorktree: isWorktreeSession,
+			ownerName: sessionRow?.device_name ?? null,
+			ownerOnline: typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null
 		})
 	);
 
@@ -318,7 +322,10 @@
 			runnerChecking = true;
 			let busy: QueuedMoveBusy | null = null;
 			try {
-				busy = (await getQueuedMove(sessionId)).busy;
+				const read = beginHandoffPendingRead();
+				const state = await getQueuedMove(sessionId);
+				busy = state.busy;
+				if (state && 'pending' in state) recordHandoffPending(sessionId, state.pending ?? null, read);
 			} catch {
 				// An older owner cannot say: the move itself still refuses a busy chat.
 			} finally {
@@ -589,32 +596,25 @@
 						{#if runnerActionError}
 							<div class="runner-error" role="alert">{runnerActionError}</div>
 						{/if}
-						{#if runnerMenuLoading}
-							<div class="runner-loading">
-								<Loader2 size={14} strokeWidth={1.5} class="spin" />
-								<span>Loading…</span>
-							</div>
-						{:else if runnerMenuError}
-							<div class="runner-loading" role="alert">{runnerMenuError}</div>
-							<button type="button" class="runner-item" role="menuitem" onclick={loadRunnerMenu}>Retry</button>
-						{:else if runnerMenu.length === 0}
-							<div class="runner-loading" role="status">No other workers available.</div>
-						{:else}
-							{#each runnerMenu as item (item.id)}
-								<button
-									type="button"
-									class="runner-item"
-									class:disabled={item.disabled}
-									role="menuitem"
-									disabled={item.disabled || runnerActionPending || runnerChecking}
-									title={item.title}
-									onclick={() => runMenuAction(item)}
-								>
-									<WorkerStatusDot online={item.online} />
-									<span class="ctx-chip-label">{item.label}</span>
-								</button>
-							{/each}
-						{/if}
+						<!-- Same rows as the new-chat picker: the worker this session
+						     runs on first (checked; picking it just closes the menu),
+						     then Continue here for a remote session, then every peer. -->
+						<WorkerMenuList
+							items={runnerMenuLoading || runnerMenuError ? [] : runnerMenu}
+							role="menuitemradio"
+							locked={runnerActionPending || runnerChecking}
+							loading={runnerMenuLoading}
+							error={runnerMenuError || null}
+							onRetry={loadRunnerMenu}
+							emptyText={runnerMenu.every((i) => i.checked) ? 'No other workers available.' : null}
+							onSelect={(row) => {
+								const item = runnerMenu.find((i) => i.id === row.id);
+								if (!item) return;
+								// The current worker never moves the session.
+								if (item.checked) closeDropdown('runner');
+								else void runMenuAction(item);
+							}}
+						/>
 						{/if}
 					</div>
 				{/if}
@@ -808,15 +808,6 @@
 		z-index: 100;
 	}
 
-	.runner-loading {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 10px;
-		color: var(--muted-foreground);
-		font-size: 0.75rem;
-	}
-
 	.runner-error {
 		padding: 8px 10px;
 		color: var(--destructive);
@@ -905,18 +896,6 @@
 	.queued-cancel:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
-	}
-
-	/* Dim the row's contents, not the row, so an offline worker's red dot
-	   stays readable next to its greyed name. */
-	.runner-item.disabled,
-	.runner-item:disabled {
-		cursor: default;
-	}
-
-	.runner-item.disabled > :global(:not(.worker-status-dot)),
-	.runner-item:disabled > :global(:not(.worker-status-dot)) {
-		opacity: 0.45;
 	}
 
 	:global(.spin) {

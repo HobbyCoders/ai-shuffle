@@ -203,6 +203,34 @@ async def test_backends_without_project_roots_still_work(tmp_path) -> None:
     assert "hidden" not in outcome.text
 
 
+async def test_recall_backends_run_off_loop(tmp_path):
+    import asyncio
+    import threading
+    from fluid.tools.builtins import session_search, session_view
+
+    loop_thread = threading.get_ident()
+    calls = []
+    def backend(*args, **kwargs):
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return []
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="current", extra={
+        "session_search": backend, "session_recent": backend,
+        "session_view": lambda *a, **kw: backend(*a, **kw) or None,
+    })
+    await session_search.handler({"query": "needle"}, ctx)
+    await session_search.handler({}, ctx)
+    await session_view.handler({"session_id": "other"}, ctx)
+    assert len(calls) == 3
+
+    async def async_backend(*args, **kwargs):
+        assert threading.get_ident() == loop_thread
+        await asyncio.sleep(0)
+        return []
+    ctx.extra["session_search"] = async_backend
+    assert "no stored session matched" in (await session_search.handler({"query": "needle"}, ctx)).text.lower()
+
+
 def test_scope_is_advertised_in_the_description() -> None:
     from fluid.tools.builtins.session_search import SPEC, describe
 

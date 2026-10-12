@@ -13,13 +13,20 @@
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { pushState } from '$app/navigation';
-	import { Bot, Plus } from 'lucide-svelte';
+	import { Bot, Plus, Users } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { updateAgentIdentity, assistantError, type AvatarId } from '$lib/api/assistant';
 	import { getSubagentDefault, putSubagentDefault, type SubagentDefault } from '$lib/api/subagentDefault';
+	import {
+		STARTER_TEAM_ID,
+		anyRoleInstalled,
+		installTeamTemplate,
+		listTeamTemplates,
+		type TeamTemplate
+	} from '$lib/api/teamTemplates';
 	import { refreshAssistant, assistantState, agentIdentities } from '$lib/stores/assistant';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
@@ -155,6 +162,50 @@
 		} finally {
 			loading = false;
 			toolsLoading = false;
+		}
+	}
+
+	// The opt-in starter team (owner only). null: not offered on this worker.
+	let starterTeam = $state<TeamTemplate | null>(null);
+	let installingTeam = $state(false);
+	/** Offered until any of its roles exists; then the owner manages agents one by one. */
+	const offerStarterTeam = $derived(!!starterTeam && !anyRoleInstalled(starterTeam));
+
+	async function loadTeamTemplates() {
+		if (!$isAdminStore) {
+			starterTeam = null;
+			return;
+		}
+		try {
+			starterTeam = (await listTeamTemplates()).find((t) => t.id === STARTER_TEAM_ID) ?? null;
+		} catch (e) {
+			console.warn('Failed to load team templates:', e);
+			starterTeam = null;
+		}
+	}
+	$effect(() => {
+		void $isAdminStore;
+		untrack(() => void loadTeamTemplates());
+	});
+
+	async function installStarterTeam() {
+		if (!starterTeam || installingTeam) return;
+		installingTeam = true;
+		try {
+			const result = await installTeamTemplate(starterTeam.id);
+			starterTeam = result;
+			await Promise.all([loadData(true), tabsStore.loadProfiles()]);
+			notify(`Installed the ${result.name.toLowerCase()}.`, { severity: 'success' });
+			// Open the first new agent unless something is already open.
+			const firstId = result.agents.find((a) => a.existing_agent_id)?.existing_agent_id;
+			const first = firstId ? profiles.find((p) => p.id === firstId) : undefined;
+			if (first && viewMode !== 'form' && !stacked) void selectProfile(first);
+		} catch (e: any) {
+			notify('Failed to install the starter team: ' + (e?.detail || e?.message || 'Unknown error'), {
+				severity: 'error'
+			});
+		} finally {
+			installingTeam = false;
 		}
 	}
 
@@ -856,6 +907,8 @@
 			await dropPending();
 			await tabsStore.deleteProfile(target.id);
 			notify(`Deleted ${target.name}.`, { severity: 'success' });
+			// Deleting a starter role can bring the offer back.
+			if (starterTeam) void loadTeamTemplates();
 			clearSelection();
 			const rest = order.filter((p) => p.id !== target.id);
 			const next = rest[Math.min(Math.max(at, 0), rest.length - 1)];
@@ -1023,7 +1076,7 @@
 	watchResources(['agents', 'templates', 'settings', 'mcp', 'plugins'], async () => {
 		const selected = editingProfile;
 		const snapshot = formSnapshot();
-		await Promise.all([loadData(true), tabsStore.loadProfiles()]);
+		await Promise.all([loadData(true), tabsStore.loadProfiles(), loadTeamTemplates()]);
 		if (!selected || editingProfile?.id !== selected.id || viewMode !== 'form') return;
 		const fresh = profiles.find((profile) => profile.id === selected.id);
 		if (saveTimer || saveInFlight || persistDirty || formSnapshot() !== lastPersisted || snapshot !== formSnapshot()) {
@@ -1050,7 +1103,20 @@
 	}
 
 	const builtinChoices = $derived(profiles.filter((p) => p.is_builtin).map((p) => ({ id: p.id, name: p.name })));
+	/** Workers ship no built-in agents now; the All / Yours / Built-in filter only shows when some exist. */
+	const hasBuiltins = $derived(builtinChoices.length > 0);
+	// A hidden filter must not keep narrowing the list.
+	$effect(() => {
+		if (!hasBuiltins && !loading && filter !== 'all') untrack(() => (filter = 'all'));
+	});
 	const noneOfYours = $derived(!profiles.some((p) => !p.is_builtin && p.id !== assistantId));
+	const emptyMessage = $derived(
+		offerStarterTeam && starterTeam && starterTeam.agents.length
+			? `Start blank, or install a starter team: ${new Intl.ListFormat('en', { type: 'conjunction' }).format(starterTeam.agents.map((a) => a.name))}.`
+			: builtinChoices.length
+				? 'Built-ins are ready. Yours go here.'
+				: 'Yours go here.'
+	);
 	const folderOptions = $derived([
 		{ value: '', label: 'All folders' },
 		...folders.map((f) => ({ value: f, label: f })),
@@ -1058,6 +1124,44 @@
 	]);
 	const openFolder = $derived(editingProfile ? folderOf(editingProfile.id, assignments, folders) : '');
 </script>
+
+{#snippet installTeamButton(small: boolean)}
+	<button
+		type="button"
+		class="st-btn"
+		class:sm={small}
+		title={starterTeam?.description || undefined}
+		aria-busy={installingTeam || undefined}
+		disabled={installingTeam}
+		onclick={installStarterTeam}
+	>
+		<Users />{installingTeam ? 'Installing…' : 'Install starter team'}
+	</button>
+{/snippet}
+
+{#snippet listFilters()}
+	{#if hasBuiltins}
+		<Segmented
+			size="sm"
+			label="Show"
+			bind:value={filter}
+			options={[
+				{ value: 'all', label: 'All' },
+				{ value: 'yours', label: 'Yours' },
+				{ value: 'builtin', label: 'Built-in' }
+			]}
+		/>
+	{/if}
+	{#if folders.length > 0}
+		<span class="folder-filter">
+			<SelectField label="Folder" bind:value={folderFilter} width={170} options={folderOptions} />
+		</span>
+	{/if}
+{/snippet}
+
+{#snippet starterToolbar()}
+	{@render installTeamButton(true)}
+{/snippet}
 
 <div
 	class="settings-shell agents-shell"
@@ -1075,24 +1179,9 @@
 		bind:filter={query}
 		onBack={null}
 		listLabel="Agent list"
+		toolbar={offerStarterTeam && !loading ? starterToolbar : undefined}
+		filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}
 	>
-		{#snippet filters()}
-			<Segmented
-				size="sm"
-				label="Show"
-				bind:value={filter}
-				options={[
-					{ value: 'all', label: 'All' },
-					{ value: 'yours', label: 'Yours' },
-					{ value: 'builtin', label: 'Built-in' }
-				]}
-			/>
-			{#if folders.length > 0}
-				<span class="folder-filter">
-					<SelectField label="Folder" bind:value={folderFilter} width={170} options={folderOptions} />
-				</span>
-			{/if}
-		{/snippet}
 		{#snippet list()}
 			<AgentList
 				{sections}
@@ -1102,6 +1191,7 @@
 				{selectedId}
 				loading={loading}
 				{noneOfYours}
+				{hasBuiltins}
 				{narrowed}
 				{query}
 				showYours={filter !== 'builtin'}
@@ -1177,8 +1267,9 @@
 					<span class="sk" style:height="180px"></span>
 				</div>
 			{:else if noneOfYours && !loading}
-				<EmptyDetail icon={Bot} title="Make your first agent" message="Built-ins are ready. Yours go here.">
+				<EmptyDetail icon={Bot} title="Make your first agent" message={emptyMessage}>
 					<button type="button" class="st-btn primary" onclick={() => (showNewDialog = true)}><Plus />New agent</button>
+					{#if offerStarterTeam}{@render installTeamButton(false)}{/if}
 				</EmptyDetail>
 			{:else}
 				<EmptyDetail icon={Bot} title="No agent selected" message="Pick one from the list." />

@@ -95,6 +95,13 @@ _last_contact: Dict[str, float] = {}
 _peer_watermarks: Dict[str, dict] = {}
 _snapshot_peers: set[str] = set()
 _peer_catalog_backlog: Dict[str, bool] = {}
+# Only viewed chats request transcript heads. Bound memory and exchange work;
+# a poll renews interest, while closed tabs expire without a separate unsubscribe.
+SESSION_WATERMARK_LIMIT = 128
+SESSION_WATERMARK_TTL = 120.0
+_session_watermark_lock = threading.Lock()
+_session_interests: dict[tuple[str, str], float] = {}
+_session_watermarks: dict[tuple[str, str], dict] = {}
 # Progress of the latest full state copy this worker received (a new worker's
 # first copy, or a re-copy a peer asked for). Status and the launch screen
 # read it; a first copy can run for many minutes with nothing else to show.
@@ -143,6 +150,81 @@ def _copy_progress(**fields) -> None:
     current = dict(_state_copy or {})
     current.update(fields, updated_at=time.time())
     _state_copy = current
+
+
+def _prune_session_interests() -> None:
+    cutoff = time.monotonic() - SESSION_WATERMARK_TTL
+    for key, seen in list(_session_interests.items()):
+        if seen < cutoff:
+            _session_interests.pop(key, None)
+            _session_watermarks.pop(key, None)
+
+
+def requested_session_watermarks(owner_device_id: str) -> list[str]:
+    with _session_watermark_lock:
+        _prune_session_interests()
+        return [sid for owner, sid in _session_interests if owner == owner_device_id]
+
+
+def note_session_watermarks(owner_device_id: str, requested: list[str], heads: Any) -> None:
+    """Accept only directly authenticated owner heads for logs we requested.
+
+    Missing/old-peer data falls back to owner freshness. Failed exchanges do not
+    call this, so a known transcript backlog survives a temporary disconnect.
+    Epochs are identities: replace, never max() across a clear.
+    """
+    with _session_watermark_lock:
+        for session_id in requested:
+            key = (owner_device_id, session_id)
+            if key not in _session_interests:
+                continue
+            head = heads.get(session_id) if isinstance(heads, dict) else None
+            if (isinstance(head, dict) and type(head.get("seq")) is int
+                    and head["seq"] >= 0 and isinstance(head.get("epoch"), str) and head["epoch"]
+                    and isinstance(head.get("tail_id"), str) and head["tail_id"]):
+                _session_watermarks[key] = {"seq": head["seq"], "epoch": head["epoch"],
+                                            "tail_id": head["tail_id"]}
+            else:
+                _session_watermarks.pop(key, None)
+
+
+def session_sync_status(session_id: str, owner_device_id: str | None) -> dict:
+    """Compare this log with its last observed owner seq/epoch, not other chats."""
+    from app.db.session_events import get_watermark
+
+    ctx = engine.context()
+    if not ctx or not owner_device_id or owner_device_id == ctx.device_id:
+        return {"state": "current", "pending_updates": 0, "scope": "session"}
+    key = (owner_device_id, session_id)
+    with _session_watermark_lock:
+        _prune_session_interests()
+        new = key not in _session_interests
+        if new and len(_session_interests) >= SESSION_WATERMARK_LIMIT:
+            oldest = min(_session_interests, key=_session_interests.get)
+            _session_interests.pop(oldest)
+            _session_watermarks.pop(oldest, None)
+        _session_interests[key] = time.monotonic()
+        head = _session_watermarks.get(key)
+    if new:
+        _kick_from_thread()
+    local = get_watermark(session_id, at_seq=head["seq"] if head else None)
+    if local is None or head is None:
+        return {**owner_sync_status(owner_device_id), "scope": "owner"}
+    same_epoch = local["epoch"] == head["epoch"]
+    pending = max(0, head["seq"] - local["seq"]) if same_epoch else head["seq"]
+    # A clear/reseed replaces low seqs first: the first row can already name
+    # the new epoch while MAX(seq) still names an old tail. The publisher emits
+    # retractions then replacements in seq order; require the observed final
+    # event's identity as evidence that this replacement reached its ceiling.
+    # Read that identity together with seq/epoch, even when local appends have
+    # since advanced beyond the observed ceiling. No ephemeral progress flag
+    # is needed, so this also holds across disconnects and process restarts.
+    tail_applied = local["tail_id"] == head["tail_id"]
+    if same_epoch and not tail_applied:
+        pending = max(1, pending)  # at least one replacement remains; not a message count
+    return {"state": "current" if same_epoch and tail_applied and not pending else "syncing",
+            "pending_updates": pending, "scope": "session", "seq": local["seq"], "epoch": local["epoch"],
+            "owner_seq": head["seq"], "owner_epoch": head["epoch"]}
 
 
 def owner_sync_status(owner_device_id: str | None) -> dict:
@@ -535,13 +617,16 @@ class PeerLink:
         marks = await asyncio.to_thread(store.local_watermarks)
         pull_deadline = time.monotonic() + SYNC_PULL_SECONDS
         while True:
+            session_ids = requested_session_watermarks(self.device_id)
             exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange", json_body={
+                "session_ids": session_ids,
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
                 "flush": catch_up and target is None,
                 "catalog_backlog": await asyncio.to_thread(catalog.has_events_backlog, ctx=ctx),
                 **(await asyncio.to_thread(_description)), "version": settings.version,
                 "platform": identity_mod.platform_name(),
             })
+            note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             theirs = exchange.get("watermarks") or {}
             note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")))
             if not exchange.get("snapshot_required"):
@@ -1410,6 +1495,9 @@ def forget_peers() -> None:
     _peer_watermarks.clear()
     _snapshot_peers.clear()
     _peer_catalog_backlog.clear()
+    with _session_watermark_lock:
+        _session_interests.clear()
+        _session_watermarks.clear()
     _tried_since_hold.clear()
 
 

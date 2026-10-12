@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
+from app.db.async_database import run_sync
 from app.api.common import validate_project_access, get_project_path_from_dict
 from app.core.plugin_service import (
     get_plugin_service,
@@ -176,7 +177,7 @@ async def list_available_plugins(
 
     # Get available plugins from global service (marketplaces are global)
     global_service = get_plugin_service()
-    available = global_service.get_available_plugins(marketplace)
+    available = await run_sync(global_service.get_available_plugins, marketplace)
 
     # Get installed project plugins to mark which are already installed
     installed = service.get_project_installed_plugins()

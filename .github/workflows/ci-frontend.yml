@@ -1,37 +1,12 @@
 name: CI JavaScript
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
-# One job on one runner checks only the JavaScript packages changed by a PR;
-# manual runs check all of them. The mobile UI (mobile/) compiles
-# frontend/src/lib, so its checks run when either mobile/ or frontend/
-# changes, after the frontend checks and on the same frontend/node_modules.
-# A PR that changes only docs/content gets the two cheap docs checks (the two
-# docs copies match, and the website's rendered docs.json is current) and
-# nothing else.
-#
-# On a pull request the frontend and mobile unit tests run only the files a
-# change reaches (frontend/scripts/vitest-changed.mjs: Vitest's import graph
-# plus tests that read a changed file as text); a dependency or config change
-# still runs them all. Builds, type checks and the contract check always run
-# in full. Draft PRs run nothing. Edge publication waits for a manual full run
-# on main (scripts/ci/edge_publication_gate.py MAIN_SUITES).
+# Manual only. Pull requests run no CI: scripts/local_ci.py runs these checks
+# on the developer's machine before a push. Dispatch this only when a check
+# cannot run locally.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'frontend/**'
-      - 'mobile/**'
-      - 'tools/**'
-      - 'browser-mcp/**'
-      - 'app/contract/schema/**'
-      # Docs: the in-app copy must match, and the website renders the buyer pages.
-      - 'docs/content/**'
-      - 'android/site/scripts/render-docs.mjs'
-      - 'android/site/src/content/docs.json'
-      - '.github/workflows/ci-frontend.yml'
-  # Manual run on any ref (`gh workflow run ci-frontend.yml`).
   workflow_dispatch:
     inputs:
       runner_cpus:
@@ -49,8 +24,6 @@ concurrency:
 jobs:
   frontend:
     name: JavaScript package checks
-    # Drafts run no paid CI; marking the PR ready starts it.
-    if: github.event.pull_request.draft != true
     # Cap well below the 6-hour default (paid runners).
     timeout-minutes: 20
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
@@ -60,46 +33,8 @@ jobs:
         working-directory: frontend
     permissions:
       contents: read
-      pull-requests: read
-    env:
-      # The checkout is the PR merge commit, so HEAD^1 is the base it merges
-      # into. The test selection diffs against it; empty on a manual run,
-      # which runs every test.
-      CHANGED_SINCE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The test selection needs the base commit next to the merge commit.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
-      - uses: dorny/paths-filter@v3
-        id: changes
-        with:
-          filters: |
-            frontend:
-              - 'frontend/**'
-              - 'app/contract/schema/**'
-              - '.github/workflows/ci-frontend.yml'
-            mobile:
-              - 'mobile/**'
-              - 'frontend/**'
-              - '.github/workflows/ci-frontend.yml'
-            tools:
-              - 'tools/**'
-              - 'tests/core/network/vectors.json'
-              - '.github/workflows/ci-frontend.yml'
-            browser:
-              - 'browser-mcp/**'
-              - '.github/workflows/ci-frontend.yml'
-            docs:
-              - 'docs/content/**'
-              - 'frontend/src/lib/docs/content/**'
-              - 'android/site/scripts/render-docs.mjs'
-              - 'android/site/src/content/docs.json'
-              - 'android/site/package.json'
-              - 'android/site/package-lock.json'
-              - '.github/workflows/ci-frontend.yml'
-
-
       # Upstream actions/setup-* on purpose: Blacksmith archived its
       # useblacksmith/setup-* forks and now routes the official cache actions
       # through its colocated cache transparently.
@@ -114,31 +49,21 @@ jobs:
             browser-mcp/package-lock.json
             android/site/package-lock.json
 
-      # mobile/ has no lockfile of its own: it links ../frontend/node_modules,
-      # so a mobile-only PR installs the frontend dependencies too.
+      # mobile/ has no lockfile of its own: it links ../frontend/node_modules.
       - name: Install dependencies
-        if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true' || steps.changes.outputs.mobile == 'true'
         run: npm ci
 
       # postbuild also builds mobile/ into build/mobile
       # (scripts/build-mobile-ui.mjs), which runs mobile's own postbuild check.
       - name: Build
-        id: build
-        if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
         run: npm run build
 
       - name: Svelte type-check
-        if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
         run: npx svelte-check --tsconfig ./tsconfig.json
 
       - name: Frontend tests and contract consistency
-        if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
         run: |
-          if [ -n "$CHANGED_SINCE" ]; then
-            node scripts/vitest-changed.mjs "$CHANGED_SINCE"
-          else
-            npm test
-          fi
+          npm test
           npm run contract:check
           npm audit --audit-level=high
 
@@ -146,41 +71,22 @@ jobs:
       # and iOS apps load it from the paired worker (the APK keeps one copy
       # only for its offline demo). It compiles the same frontend/src/lib with
       # its own shell, so a frontend change can break its type check, tests or
-      # build, and android.yml and ios.yml do not start for frontend/** or
-      # mobile/**. `npm run deps` links mobile/node_modules to the
+      # build `npm run deps` links mobile/node_modules to the
       # frontend/node_modules installed above; it is a no-op when the frontend
       # build already linked it.
       - name: Link mobile dependencies
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
         working-directory: mobile
         run: npm run deps
 
       - name: Mobile Svelte type-check
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
         working-directory: mobile
         run: npm run check
 
       - name: Mobile tests
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
         working-directory: mobile
-        run: |
-          if [ -n "$CHANGED_SINCE" ]; then
-            node ../frontend/scripts/vitest-changed.mjs "$CHANGED_SINCE"
-          else
-            npm test
-          fi
-
-      # The frontend Build step above already built mobile/ when it ran, so
-      # this runs only on a PR that changes mobile/ but not frontend/.
-      # postbuild (scripts/check-build.mjs) fails if a build-time constant such
-      # as __APP_VERSION__ was left unreplaced in the bundle.
-      - name: Mobile build
-        if: (github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true') && steps.build.outcome == 'skipped'
-        working-directory: mobile
-        run: npm run build
+        run: npm test
 
       - name: Build AI tools from source
-        if: github.event_name != 'pull_request' || steps.changes.outputs.tools == 'true'
         working-directory: tools
         run: npm ci --ignore-scripts && npm test && npm audit --audit-level=high
 
@@ -188,20 +94,17 @@ jobs:
       # the account hub and the mobile app use (tests/core/network/vectors.json
       # is also checked by the Python suite).
       - name: Verify worker-network crypto vectors with WebCrypto
-        if: github.event_name != 'pull_request' || steps.changes.outputs.tools == 'true' || steps.changes.outputs.frontend == 'true'
         working-directory: .
         run: node tools/scripts/verify-network-vectors.mjs
 
       - name: Browser MCP build and tests
-        if: github.event_name != 'pull_request' || steps.changes.outputs.browser == 'true'
         working-directory: browser-mcp
         run: npm ci --ignore-scripts && npm run build && npm test && npm audit --audit-level=high
 
       # The in-app Docs panel bundles its own copy of docs/content; the backend
       # serves docs/content itself. tests/test_buyer_docs.py checks the same
-      # thing, but backend CI does not start for a docs-only PR.
+      # thing.
       - name: Docs copies match
-        if: github.event_name != 'pull_request' || steps.changes.outputs.docs == 'true'
         working-directory: .
         run: diff -r docs/content frontend/src/lib/docs/content
 
@@ -210,6 +113,5 @@ jobs:
       # render (npm run render-docs in android/site) fails here, as does an em
       # dash the renderer cannot turn into site style.
       - name: Website docs render check
-        if: github.event_name != 'pull_request' || steps.changes.outputs.docs == 'true'
         working-directory: android/site
         run: npm ci && node scripts/render-docs.mjs --check

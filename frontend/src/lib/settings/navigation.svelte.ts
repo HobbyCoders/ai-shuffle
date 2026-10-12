@@ -30,12 +30,32 @@ export const LEGACY_TAB_MAP: Readonly<Record<string, SettingsTarget>> = {
 	chat: { category: 'general' },
 	voice: { category: 'voice' },
 	providers: { category: 'providers' },
-	license: { category: 'system', anchor: 'system.license' },
+	license: { category: 'cloud' },
+	cloud: { category: 'cloud' },
 	api: { category: 'integrations' },
 	plugins: { category: 'plugins' },
 	system: { category: 'security' },
 	logs: { category: 'logs' }
 };
+
+/**
+ * Rows that moved to another category. Old deep links (encoded targets in a
+ * saved layout, links in docs or notifications) still land on the new row.
+ */
+export const MOVED_ANCHORS: Readonly<Record<string, SettingsTarget>> = {
+	'system.license': { category: 'cloud', anchor: 'cloud.account' },
+	'system.seats': { category: 'cloud', anchor: 'cloud.remoteWorkers' },
+	'system.licenseKey': { category: 'cloud', anchor: 'cloud.key' },
+	'system.deactivate': { category: 'cloud', anchor: 'cloud.deactivate' }
+};
+
+/** A target whose anchor moved, rewritten to where that row lives now. */
+export function redirectTarget(target: SettingsTarget): SettingsTarget {
+	const moved = target.anchor ? MOVED_ANCHORS[target.anchor] : undefined;
+	if (!moved) return target;
+	const open = target.open && MOVED_ANCHORS[target.open]?.anchor;
+	return { ...moved, ...(open ? { open } : {}) };
+}
 
 const TARGET_KEYS = ['category', 'item', 'tab', 'anchor', 'open'] as const;
 
@@ -66,7 +86,7 @@ export function decodeTarget(raw: string | null | undefined): SettingsTarget | n
 		const value = params.get(key);
 		if (value) target[key] = value;
 	}
-	return target;
+	return redirectTarget(target);
 }
 
 const STORAGE_KEY = 'settings.nav';
@@ -154,7 +174,8 @@ export class SettingsNavigation {
 	}
 
 	/** Jump to a target: deep links, search results, cross-category links. */
-	go(target: SettingsTarget): void {
+	go(requested: SettingsTarget): void {
+		const target = redirectTarget(requested);
 		const { category } = target;
 		this.category = category;
 		if (target.item) {

@@ -41,11 +41,38 @@ export function isNavigableUserTurn(message: ChatMessage): boolean {
 	return message.role === 'user' && message.type !== 'command' && !agentDelivery(message);
 }
 
+/**
+ * Walks a transcript and reports, for each navigable prompt, whether it opens a
+ * turn. A prompt steered into a turn already under way carries that turn's id
+ * (the same rule `splitTurns` in work-log.ts uses) and has no rewind checkpoint
+ * of its own, so it is part of its turn, not a separate navigation stop. Any
+ * user row or idle agent wake can open a turn; prompts without a real turn id
+ * (optimistic sends, legacy transcripts) open one each.
+ */
+function createTurnOpenerTracker(): (message: ChatMessage) => boolean {
+	let currentTurnId: string | undefined;
+	let started = false;
+	return (message) => {
+		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
+		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+		if (!opens) return false;
+		const turnId = message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
+		const steered = !idleAgentWake && started && !!turnId && turnId === currentTurnId;
+		if (!steered) {
+			currentTurnId = turnId;
+			started = true;
+		}
+		return !steered && isNavigableUserTurn(message);
+	};
+}
+
+/** One navigation stop per turn, on the prompt that opened it. */
 export function deriveUserTurnNavigationItems(messages: ChatMessage[]): UserTurnNavigationItem[] {
 	const seen = new Set<string>();
 	const result: UserTurnNavigationItem[] = [];
+	const opensTurn = createTurnOpenerTracker();
 	for (const message of messages) {
-		if (!isNavigableUserTurn(message) || !message.id || seen.has(message.id)) continue;
+		if (!opensTurn(message) || !message.id || seen.has(message.id)) continue;
 		seen.add(message.id);
 		result.push({
 			id: message.id,
@@ -124,4 +151,52 @@ export function resolveTurnNavigationIndex(
 ): number {
 	if (itemCount <= 0) return 0;
 	return Math.max(0, Math.min(itemCount - 1, currentIndex + delta));
+}
+
+/**
+ * The user turn each tool call belongs to: the prompt that opened the turn
+ * it ran in (a mid-turn steer is not a turn of its own, see
+ * `deriveUserTurnNavigationItems`). Used to put a surviving prompt (a nonblocking AskUser can
+ * outlive its turn) on the tick of the turn that asked it. Ids not found in
+ * the transcript are left out.
+ */
+export function turnsOwningTools(
+	messages: readonly ChatMessage[],
+	toolUseIds: readonly string[]
+): Map<string, string> {
+	const owners = new Map<string, string>();
+	if (toolUseIds.length === 0) return owners;
+	const wanted = new Set(toolUseIds);
+	let turnId: string | null = null;
+	const opensTurn = createTurnOpenerTracker();
+	for (const message of messages) {
+		if (opensTurn(message) && message.id) {
+			turnId = message.id;
+			continue;
+		}
+		if (turnId && message.toolId && wanted.has(message.toolId) && !owners.has(message.toolId)) {
+			owners.set(message.toolId, turnId);
+			if (owners.size === wanted.size) break;
+		}
+	}
+	return owners;
+}
+
+/**
+ * The ticks that carry the amber "Needs you" dot (spec §5), given the open
+ * session's count. A pending question sits on the turn that asked it;
+ * everything else waiting (a permission, private access, a prose question,
+ * an owner state whose queue has not loaded) belongs to the newest turn.
+ */
+export function needsYouTurnIds(
+	count: number,
+	messages: readonly ChatMessage[],
+	pendingQuestionToolIds: readonly string[],
+	newestTurnId: string | null
+): string[] {
+	if (count <= 0) return [];
+	const owners = turnsOwningTools(messages, pendingQuestionToolIds);
+	const ids = new Set(owners.values());
+	if (newestTurnId && count > owners.size) ids.add(newestTurnId);
+	return [...ids];
 }

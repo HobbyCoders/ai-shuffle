@@ -1,5 +1,6 @@
 <script lang="ts">
-	/** Left-rail user-turn minimap. Each tick is a prompt; hover reveals the
+	/** Left-rail user-turn minimap. Each tick is a turn, on the prompt that
+	 *  opened it (a mid-turn steer is not a stop of its own); hover reveals the
 	 *  message. Stays in the transcript gutter and never touches the composer.
 	 *  One rail at every history length: when the ticks outgrow the rail it
 	 *  scrolls (wheel, touch, keyboard) instead of switching to another UI. */
@@ -11,9 +12,12 @@
 		items: UserTurnNavigationItem[];
 		currentIndex: number;
 		onSelect: (index: number) => void;
+		/** Turns waiting on the reader (spec §5 "Needs you"): their ticks
+		 *  carry the amber dot the sidebar's Needs-you rows use. */
+		needsYouIds?: readonly string[];
 	}
 
-	let { items, currentIndex, onSelect }: Props = $props();
+	let { items, currentIndex, onSelect, needsYouIds = [] }: Props = $props();
 	let focused = $state(false);
 	let hoveredIndex = $state<number | null>(null);
 	// Roving tab stop: one tick is in the Tab order (the focused one, else the
@@ -142,7 +146,7 @@
 				class:is-current={index === resolvedIndex}
 				class:is-hovered={hoveredIndex === index}
 				style="--proximity: {hoveredIndex === null ? 0 : Math.max(0, 1 - Math.abs(index - hoveredIndex) / 3)}"
-				aria-label="User message {index + 1} of {items.length}: {item.label}"
+				aria-label="Turn {index + 1} of {items.length}: {item.label}{needsYouIds.includes(item.id) ? ' (needs you)' : ''}"
 				aria-current={index === resolvedIndex ? 'true' : undefined}
 				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
 				onclick={(event) => {
@@ -163,6 +167,9 @@
 				}}
 			>
 				<span class="bar" aria-hidden="true"></span>
+				{#if needsYouIds.includes(item.id)}
+					<span class="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-warning" data-needs-you aria-hidden="true"></span>
+				{/if}
 			</button>
 		{/each}
 	</div>

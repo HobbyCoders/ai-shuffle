@@ -8,7 +8,149 @@ order: 2
 
 Endpoints for managing chat sessions — listing, searching, creating, updating, deleting, exporting, and importing.
 
+AI Shuffle no longer ships a default built-in agent. For ordinary session creation, supply an existing agent ID or configure a project default. Without either, the API selects the first configured agent; with no agents it returns `409` and asks you to create one. Install the optional starter team or create an agent first. Starter-team IDs are newly generated, not fixed IDs such as `general-purpose`.
+
 An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
+
+## User-message revision
+
+Session list (including paginated/cursor lists) and detail responses include
+`last_user_message_at`: a nullable, timezone-aware UTC timestamp, and
+`last_user_message_seq`: the nullable integer event sequence of the latest
+qualifying authoritative `message.user` event. `last_user_message_epoch` is its
+nullable string event-log identity (the same lowest-event ID as the SSE log epoch).
+The timestamp advances
+when a user message is persisted, including the initial prompt, a delivered
+mid-turn steer, a command, or a voice utterance. REST conversations, connector
+messages, forwarded prompts on the executing worker, and delivered
+owner-configured automation prompts also count. Autonomous agent notes,
+wakes, and backend-authored voice notes do not count, even when their transport
+role is `user`; their source provenance is preserved in both message stores.
+
+Queuing alone does not advance it. The authoritative event-log insertion and
+the legacy message insertion both update the session revision in their own
+transaction. Retrying an already committed stable event ID does not advance
+it or rebroadcast an answer. Event-log backfill/copy paths do not advance it.
+Existing sessions keep `null` until their next user message; it is not
+backfilled from turn counts or working time. Authoritative event inserts stamp
+all three fields atomically, using the last newly inserted qualifying user event's
+sequence (not the batch's final event). Stable-ID retries retain the original
+sequence and epoch; rollbacks change none of them. Legacy-only message writes
+update the timestamp but preserve the event sequence/epoch, which remain `null`
+if never stamped.
+
+After commit, the global WebSocket feed emits `user_session_updated` with
+`session_id`, `updates.last_user_message_at`, `updates.last_user_message_seq`,
+`updates.last_user_message_epoch`, and `updates.updated_at`,
+even when that session is not open on the receiving tab. These match the persisted
+revision. Both user-message and assistant-question stamp frames carry the row's
+`updated_at` captured in the writing transaction, not the notification's delivery
+time. It uses the same ISO 8601 serialization as the session list (including
+fractional-second precision and the `Z` suffix for UTC), so clients can order row
+snapshots consistently across delivery paths. A changed question sequence bumps
+this timestamp; a null-question epoch-only stamp does not, but still sends the
+row's current `updated_at`. Account/paired subscribers and other workers receive a session-list
+invalidation and reload their authorized rows; worker replication carries all three fields.
+
+Use event order, not wall-clock timestamps, for causal comparisons: a user answer
+is later than a question only when all positions are non-null,
+`last_user_message_epoch == question.epoch`, and
+`last_user_message_seq > question.seq`, within the same session. Ignore lower
+sequences from stale deliveries only within an equal epoch. Epochs are opaque
+identities, not ordered counters. Discard old question anchors on SSE reset; do
+not accept a snapshot from a different epoch as an answer to the current question.
+This handles same-transaction prompts/questions and delayed pre-clear snapshots.
+
+Event-backed detail and `/live` messages expose `seq` and `epoch`. The rendered
+message `seq` is the last contributing event sequence (including folded assistant
+deltas), not the first delta. Rich Fluid/store transcripts retain their IDs,
+metadata and presentation; their positions are reconciled with the event
+projection by stable event/tool IDs or exact text in occurrence order, before
+pagination/truncation. Ambiguous occurrence counts or an unavailable event log
+leave positions null rather than inventing a causal anchor. Legacy messages
+without an event position have nullable `seq`/`epoch`; pagination offsets are not
+event sequences. The SSE stream retains its event `seq` and supplies its log epoch
+through the existing reset/caught-up protocol. Legacy WebSocket message frames
+expose nullable positions too. Clearing resets `last_user_message_seq` and
+`last_user_message_epoch` to `null`; the next log has a different epoch even though
+its sequences restart at 1.
+
+## Assistant-question revision
+
+The same row, list/detail, `/live` `session_meta`, `/state`, global
+`user_session_updated` updates and replicated catalog expose
+`last_assistant_question_seq` (integer or `null`) and
+`last_assistant_question_epoch` (opaque string or `null`). They identify the
+newest nonempty assistant prose if it asks a question. The exact shared
+`asksQuestion` predicate ignores inline code and URL/link targets; any remaining
+ASCII `?` counts, not just one at the end. Thinking, routine tools and system
+cards are not prose. AskUser/AskUserQuestion tools suppress a prose preface so
+that a question is not counted twice.
+
+The append transaction stamps closed `message.assistant` prose and settled
+streamed prose (using the last contributing text-delta sequence). Peer deliveries
+and mid-turn steers do not split an open prose bubble. A steer answers that
+earlier bubble even if subsequent deltas advance its position. Connection-drop
+retries hide only prose whose bubble originated after the last attempt boundary,
+matching the transcript's retry-card folding. An unfinished stream or later
+non-question prose clears the sequence to `null` in the current epoch. Empty prose does not replace the previous nonempty prose. User answers
+advance the user pair, not the assistant pair. The post-commit notification
+captures the persisted epoch, never the epoch at delivery time. Stable-ID
+retries and rollbacks do not publish new positions. No in-memory stream buffer
+is required: streamed text is derived from the persisted log, including after a
+restart. Older sessions/peers without this pair read as `null`.
+
+Mark Needs you when the question sequence and epoch are non-null, the epoch is
+the current session log epoch, and either the user sequence is null or the user
+epoch matches and the question sequence is greater than the user sequence.
+Epochs are opaque: never compare sequence numbers from different epochs.
+Clearing resets **both** revision pairs to `null`. Rewind removes user anchors
+in the discarded branch and recomputes the question from surviving prose in the
+same epoch. Discard cached anchors on reset/clear; delayed pre-clear snapshots
+must not reintroduce them. An explicit null question sequence in a current-epoch
+row/update clears the row-derived mark; a missing field from an older worker
+remains available for the transcript-derived fallback.
+
+## Mirrored transcript freshness
+
+### GET /api/v1/sessions/{session_id}/sync-status
+
+Reports `state` (`checking`, `syncing`, `current`, or `offline`) and
+`pending_updates` without changing the transcript. Existing response fields are
+preserved. `scope` identifies the comparison:
+
+- `session`: for a materialized mirror with an observed owner transcript head,
+  compare local `seq`/`epoch` with `owner_seq`/`owner_epoch`. In the same epoch,
+  `pending_updates` is the non-negative sequence gap, not the owner's replication
+  operation count. Unrelated chats, session-row/catalog churn and snapshot work
+  do not make this chat `syncing`. Across epochs, the state is `syncing` and the
+  pending count is the new owner's sequence ceiling, even if that is zero after
+  a clear. Epoch identities are never numerically ordered. Sequence gaps are
+  positions, not message counts (compaction can leave gaps). During multi-batch
+  replacement, the new first-row epoch can coexist with an old tail. The mirror
+  must also hold the owner's tail event identity at `owner_seq` before reporting
+  `current`; until then the pending count is at least one even if the sequence
+  gap is zero. The peer-only `tail_id` witness is read atomically with the epoch
+  and ceiling and follows ordered replication; no in-memory replacement flag is
+  required, so disconnects and restarts do not falsely complete the replacement.
+- `owner`: the conservative owner-wide fallback until per-session data is
+  available, including older peers and a missing local copy. Initial transcript
+  downloads still return `state: syncing`, `transcript: downloading` and
+  `pending_updates: 0`. Unknown session IDs still return `404`.
+
+The authenticated peer exchange supplies requested owner-only transcript heads,
+including committed events not yet published to the replication outbox. Interest
+is bounded to 128 viewed sessions per receiving worker and expires 120 seconds
+without polling; the first poll wakes the exchange. Heads refresh with ordinary
+peer exchanges, not a new remote request per UI poll. Failed exchanges retain
+known backlog. `current` means caught up to the last observed head, not proof
+that the owner is online or has made no writes since that exchange. Locally owned
+sessions return `scope: session`, `state: current` without comparison fields.
+
+The head uses the same event sequence and lowest-event-ID epoch as SSE and
+transcript positions. `last_user_message_seq`/`last_user_message_epoch` identify
+only user messages and cannot substitute for this all-event watermark: assistant
+output and subagent progress must also count. No timestamp ordering is used.
 
 ## Read the Suggested Next Reply
 
@@ -18,7 +160,7 @@ An API key sees and acts only on the sessions it started (see [Own Sessions](/do
 
 Returns `{ "session_id": "…", "turn_id": "…", "suggestion": "…" }`, or `null` when no current eligible suggestion is available. This read never calls a model.
 
-With **Suggest next reply** enabled (**Settings → General**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. A newer turn, a cleared/rewound answer, or disabling the feature prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
+With **Suggest next reply** enabled (**Settings → General**), the latest generated hint is saved per code session, even if no browser is watching. The empty composer loads it on return/reconnect and after a turn completes. Switching sessions or reloading does not regenerate it. Starting or continuing a turn, or sending another user message, clears the hint on every watching device. Only the latest completed eligible turn can supply a new hint; reloading cannot restore a superseded hint. A cleared/rewound answer or disabling the feature also prevents the stale hint from being shown. An existing draft is never replaced. Pressing Tab or double-clicking/double-tapping the empty composer accepts the gray hint into the draft; it does not send the message. A single click/tap only focuses the input. Enter does not accept the hint. Escape dismisses it for that browser's current visit.
 
 ## List Sessions
 
@@ -202,9 +344,31 @@ After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, n
 
 Get live session state for streaming. Returns current partial messages and streaming status.
 
+`session_meta.updated_at` carries the session row's current revision timestamp,
+serialized identically to the session list and the stamp frames' `updates.updated_at`.
+It is included both with messages and with `?include_messages=false`, so clients
+can order this snapshot against list rows and WebSocket updates.
+
+The response's `session_meta.last_user_message_at` is a nullable UTC ISO 8601
+string with the same value and [user-message revision](#user-message-revision)
+semantics as the session row, serialized identically to list/detail responses
+(with a `Z` suffix for UTC). It is `null` until a qualifying user message is
+persisted. It is included both with messages (the default) and with
+`?include_messages=false`, which skips loading the transcript. Clients can use
+this metadata-only snapshot to seed the revision without fetching session detail.
+`session_meta.last_user_message_seq` and `session_meta.last_user_message_epoch`
+accompany it in both forms, with the same nullable values as list/detail and the
+session row. `session_meta.last_assistant_question_seq` and
+`session_meta.last_assistant_question_epoch` accompany them with the same
+[assistant-question revision](#assistant-question-revision) semantics.
+
 ### GET /api/v1/sessions/{session_id}/state
 
-Get session state for client reconnection.
+Get session state for client reconnection. The response includes the same
+nullable UTC ISO 8601 `last_user_message_at` and nullable integer
+`last_user_message_seq`, plus nullable string `last_user_message_epoch`, at the
+top level, together with nullable integer `last_assistant_question_seq` and
+nullable string `last_assistant_question_epoch`. This metadata-only route has no transcript.
 
 ### GET /api/v1/sessions/{session_id}/context-usage
 
@@ -235,6 +399,8 @@ Update session metadata.
 
 `title` and `status` are query parameters, not a JSON body.
 
+The assistant’s built-in home chat refuses any supplied `title` (including an empty title) with `409` and `{"detail": "Your personal assistant is a persistent conversation and cannot be renamed"}`. Status-only updates are unchanged.
+
 ```bash
 curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Title&status=archived" \
   -H "Authorization: Bearer aih_your_key"
@@ -243,6 +409,8 @@ curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Tit
 ### DELETE /api/v1/sessions/{session_id}
 
 Delete a session and all its messages.
+
+The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be deleted"}`. Its conversation and home binding are preserved.
 
 ```bash
 curl -X DELETE http://localhost:8000/api/v1/sessions/sess_abc123 \
@@ -294,7 +462,7 @@ Change effort or Fast mode while a chat runs, or save a context-window choice se
 { "context_window": 200000 }
 ```
 
-The chosen window must be one of the model's supported choices. The response acknowledges the saved `context_window`. It takes effect on the next turn, including a wake or retry; an in-flight request is not interrupted. A saved pin stays a ceiling when the model changes. An older chat whose picker choice was only remembered in its browser needs that choice selected again to save it on the worker. Unpinned chats keep their model's default window.
+The chosen window must fall within the model's range: from its Standard window (the smaller entry in `context_window_choices`) up to its Extended window (the larger, the model's full context). A value in between raises the Standard cap, so the chat compacts later than the default. The response acknowledges the saved `context_window`. It takes effect on the next turn, including a wake or retry; an in-flight request is not interrupted. A saved pin stays a ceiling when the model changes. An older chat whose picker choice was only remembered in its browser needs that choice selected again to save it on the worker. Unpinned chats keep their model's default window.
 
 ### POST /api/v1/sessions/{session_id}/compact
 
@@ -363,7 +531,7 @@ curl -X POST http://localhost:8000/api/v1/sessions/batch-delete \
   -d '{"session_ids": ["sess_abc123", "sess_def456"]}'
 ```
 
-Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`.
+Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`. The assistant’s built-in home chat is also skipped, with `Access denied for session {id}: Your personal assistant is a persistent conversation and cannot be deleted` in `errors`. Other sessions in the batch are still deleted; the response remains `200` and the home binding is preserved.
 
 ### POST /api/v1/sessions/{session_id}/archive
 
@@ -477,7 +645,7 @@ A swarm is a set of tasks an agent hands to other agents, some waiting on others
       "created_at": "...",
       "updated_at": "...",
       "tasks": [
-        { "id": "scan", "title": "Scan routes", "agent": "general-purpose", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
+        { "id": "scan", "title": "Scan routes", "agent": "agent_installed_uuid", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
       ]
     }
   ]
@@ -626,9 +794,9 @@ A session that is running a turn, has messages queued behind it, has a scheduled
 
 | Method | Path | Body | Result |
 |---|---|---|---|
-| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"worker", "target_id", "by", "moving"} or null}` |
-| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "worker": "DesktopWorker", "after": "turn" or "queued"}` |
-| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool}` |
+| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"handoff_id", "worker", "target_id", "by", "moving"} or null}` |
+| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "handoff_id": "uuid", "worker": "DesktopWorker", "after": "turn" or "queued"}` |
+| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool, "handoff_id": "uuid" or null}` |
 
 **Auth:** Required
 
@@ -643,6 +811,12 @@ Scheduled wake-ups, such as a resume after a usage limit, move with the session.
 Known limits: if the new worker stops between taking ownership and storing the moved wake-ups, those wake-ups are lost. Files attached to held messages stay on the old worker. A message sent to the new worker while the old one is still delivering held messages there can run before them. A Stop pressed on the old worker is not remembered if that worker restarts before the move's delivery finishes, so the resume turn can still start.
 
 The session records `handoff` rows for queued, cancelled, started and the outcome (`moved`, `failed`, `timeout`), so every device shows the pending move; the `moved` row is written on the new worker, which then owns the session. For an agent's hand-off its `resume` field is `send`, or `unsupported` / `unknown` when the new worker cannot take the resume turn; a resume turn the new worker refused adds a `resume_failed` row. A queued move is stored on the owning worker, so it survives a restart of that worker; a move that cannot resume is recorded as cancelled. Returns `409` when a move is already queued, the target is unknown or offline, the owning worker cannot be reached, or an approval, question or access card is open ("Answer or dismiss the open prompt first.").
+
+Each new request gets a UUID4 string, `handoff_id`, persisted with the pending move across restarts. Repeating the agent's request for the same pending destination returns the same id; cancelling and queuing another move (even to the same worker) gets a fresh id. `HandOffSession` returns `{"queued": true, "handoff_id": "uuid", "worker": "DesktopWorker", "message": "..."}`, or, with `cancel: true`, `{"cancelled": bool, "handoff_id": "uuid" or null}`. A cancellation with nothing pending has a null id. Replacement requests are refused while cancellation is being recorded; retry after the cancellation response.
+
+Transcript events have `type: "system"`, `subtype: "handoff"`, `content`, and `data: {"handoff_id": "uuid", "status": "...", "content": "...", ...}`. Group the tool result and these rows by id, not worker label. The same id travels in the transferred `started` row and in the destination note control payloads for `moved`, `held_failed` and `resume_failed`. Existing status-specific fields (`worker`, `by`, `note`, `after`, `still`, `reason`, `resume`, message counts and texts) are unchanged. Historical records and notes from older workers may lack the id; new notices about pre-id legacy moves or `nothing_queued` have a null id and must not settle a newer identified move.
+
+**Source-side completion:** no `sent` transcript row is added. The destination imports the transcript snapshot before asking the source to commit ownership. Before that commit, success is not known; after it, a new source row would not be in the transferred snapshot (and would consume a sequence number independently of destination events). Instead the source emits `user_session_updated` with `session_id` and `updates: {"owner_device_id": "target-device-id", "instance_id": "target-device-id", "placement": {"where": "runner:target-device-id"}}` when ownership commits, including on an idempotent commit retry. This does not depend on the outer receive call returning. The source UI should settle its current hand-off when the session's `owner_device_id` becomes its target device id; use `GET /handoff`'s `pending.target_id` rather than a worker label. Reconnecting clients read the authoritative session owner. Account/paired clients receive a sessions resource-change notification and refetch their authorized session instead of receiving the legacy lifecycle payload. The destination's `moved` row remains the transcript outcome.
 
 ## Session Sync
 
@@ -735,6 +909,8 @@ Import a Claude Code CLI JSONL session.
 ### POST /api/v1/sessions/{session_id}/fork
 
 Fork a session at a specific message, creating a branch.
+
+The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be forked"}`. No fork is created and its home binding is preserved.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/fork \

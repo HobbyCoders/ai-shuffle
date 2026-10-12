@@ -73,7 +73,10 @@ def _download_allowance(pages: list) -> int:
 
 def _reusable(manifest: dict) -> bool:
     """A finished capture may start a new download only within TTL of capture."""
-    return manifest["expires_at"] - _download_allowance(manifest["pages"]) > time.time()
+    # Preservation changes a local projection, not the log frontier. A cached
+    # pre-upgrade copy (including one on disk) cannot repair a missing parent.
+    return (manifest["expires_at"] - _download_allowance(manifest["pages"]) > time.time()
+            and manifest.get("preserved_builtin_ids", []) == store.preserved_builtin_ids())
 
 
 def requested_format(value) -> int:
@@ -247,7 +250,8 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                 manifest = {"format": fmt, "transfer": transfer, "network_id": ctx.network_id,
                             "publisher": ctx.device_id, "recipient": recipient, "generation": ctx.generation,
                             "expires_at": int(time.time()) + TTL, "watermarks": store.local_watermarks(conn),
-                            "keyring": keyring.for_recipient(ctx, member.encryption_public), "pages": []}
+                            "keyring": keyring.for_recipient(ctx, member.encryption_public), "pages": [],
+                            "preserved_builtin_ids": store.preserved_builtin_ids(_conn=conn)}
                 if fmt >= FORMAT_DEFERRED:
                     # Left out here; the recipient fetches them once it is ready.
                     manifest["deferred"] = deferred
