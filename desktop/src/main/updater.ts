@@ -9,6 +9,7 @@ export interface UpdateState {
   phase: UpdatePhase; version: string | null; percent: number | null;
   error: string | null; checkedAt: string | null; message?: string | null;
   running_version?: string | null;
+  channel_config?: { channel: 'stable' | 'nightly'; source: 'file' | 'default'; editable: boolean };
   /** Release name and notes from the signed manifest of the offered update. */
   release?: string | null; notes?: string | null;
   /** macOS and Linux: the verified installer just saved, for the web UI to announce. */
@@ -60,9 +61,17 @@ export class Updater {
     if (this.exchanging) { this.exchangeAgain = true; return; }
     this.exchanging = true;
     try {
-      const request = await this.bridge(this.current);
+      const state = this.current;
+      const channel_config = await this.applications?.channelConfig();
+      const request = await this.bridge({ ...state, ...(channel_config ? { channel_config } : {}) });
       if (!this.bridgeTimer || typeof request.expires_at !== 'number' || request.expires_at * 1000 < Date.now()) return;
-      if (request.action === 'check') void this.check();
+      if (request.action === 'set_channel' && (request.channel === 'stable' || request.channel === 'nightly')) {
+        if (this.checking || this.downloading || this.installing) return;
+        await this.applications?.setChannel(request.channel);
+        this.set({ phase: 'idle', version: null, release: null, notes: null, error: null });
+        this.exchangeAgain = true;
+      }
+      else if (request.action === 'check') void this.check();
       else if (request.action === 'download') void this.download();
       else if (request.action === 'install') {
         if (await this.safeToRestart()) void this.install();

@@ -24,6 +24,7 @@ _desktop_request = None
 # A download handed to a desktop shell that has not found the update yet: the
 # shell is sent a check and gets the download once it reports "available".
 _desktop_followup = None
+_desktop_channel_request = None
 # The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
 # desktop/src/main/updater.ts) and at once on a phase change. One missed
 # report means about 60 s of silence, so presence spans two intervals plus
@@ -66,7 +67,7 @@ def _epoch(value):
 
 def desktop_exchange(state):
     """Only called by the token-authenticated local launcher, never a browser."""
-    global _desktop_state, _desktop_seen, _desktop_request, _desktop_followup
+    global _desktop_state, _desktop_seen, _desktop_request, _desktop_followup, _desktop_channel_request
     state = dict(state)
     # When the shell last asked its feed. A worker that is idle but checked
     # before another worker found an update has simply not seen it yet.
@@ -74,6 +75,15 @@ def desktop_exchange(state):
     with _bridge_lock:
         _desktop_state = state
         _desktop_seen = time.monotonic()
+        # Retain a channel write until the launcher reports the persisted value.
+        # A lost HTTP reply must not lose the owner's accepted setting.
+        if _desktop_channel_request:
+            config = state.get("channel_config") or {}
+            if config.get("channel") == _desktop_channel_request:
+                _desktop_channel_request = None
+            elif config.get("editable") and state.get("phase") in ("idle", "error", "available"):
+                return {"action": "set_channel", "channel": _desktop_channel_request,
+                        "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
         # A phase-change report can race an already accepted action. The shell
         # refuses actions while checking or downloading, so leave the request
         # queued until it can accept it, without extending its original expiry.
@@ -188,6 +198,61 @@ def mirror_policy():
 def control_root():
     value = os.environ.get("SHUFFLE_CONTAINER_UPDATES")
     return Path(value) if value else None
+
+
+def channel_status():
+    from app.core.update_channel import CHANNELS, normalize, selection
+
+    root = control_root()
+    if root:
+        with service_files():
+            channel, source = selection(root)
+        running = normalize(os.environ.get("SHUFFLE_UPDATE_CHANNEL", channel))
+        return {"channel": channel, "available": list(CHANNELS), "source": source,
+                "editable": source != "env" and "SHUFFLE_UPDATE_CHANNEL" in os.environ,
+                "restart_required": channel != running}
+    with _bridge_lock:
+        config = _desktop_state.get("channel_config") if _desktop_present() else None
+        if config:
+            return {**config, "available": list(CHANNELS), "restart_required": False}
+    return {"channel": "stable", "available": list(CHANNELS), "source": "default",
+            "editable": False, "restart_required": False}
+
+
+_channel_lock = threading.Lock()
+
+
+def set_channel(value):
+    with _channel_lock:
+        return _set_channel(value)
+
+
+def _set_channel(value):
+    from app.core.update_channel import normalize
+
+    global _desktop_channel_request
+    channel = normalize(value)
+    current = channel_status()
+    if not current["editable"]:
+        raise ValueError("Update channel is controlled by UPDATE_CHANNEL or this launcher does not support editing it")
+    if current["channel"] == "nightly" and channel == "stable":
+        raise ValueError("Returning from nightly to stable requires a reinstall; migrations do not run backwards")
+    root = control_root()
+    if root:
+        atomic_json(root / "update-channel.json", {"channel": channel})
+    else:
+        with _bridge_lock:
+            # The launcher may have written nightly while its acknowledgement
+            # is still in flight. Never queue a reversal based on stale status.
+            latest = (_desktop_state.get("channel_config") or {}).get("channel")
+            if channel == "stable" and (_desktop_channel_request == "nightly" or latest == "nightly"):
+                raise ValueError("Returning from nightly to stable requires a reinstall; migrations do not run backwards")
+            if _desktop_state.get("phase") not in ("idle", "error", "available"):
+                raise ValueError("Finish the current update before changing channel")
+            _desktop_channel_request = channel
+    # Desktop reports the old value until its next authenticated heartbeat
+    # acknowledges the write. The picker must poll GET, not assume it persisted.
+    return channel_status()
 
 
 def status():

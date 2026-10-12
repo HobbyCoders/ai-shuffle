@@ -2,8 +2,8 @@
 
 Tests run on the machine where the change was made, before it is pushed.
 GitHub Actions does not test pull requests: no workflow starts on a pull
-request, a push to a branch or a schedule. CI minutes go only to work no
-local machine can do: release builds, signing, publishing, deploys, and the
+request or a push to a branch. The daily schedule only publishes an attested
+nightly; it never runs tests. CI minutes go only to work no local machine can do: release builds, signing, publishing, deploys, and the
 macOS and iOS platform checks.
 
 ## Before every push
@@ -178,9 +178,9 @@ refuses attestation.
 This does not revoke an already-posted status
 if labels are removed later; the existing publisher consumes the owner's status.
 
-## Full suite on main, and edge publication
+## Full suite on main, and nightly publication
 
-Edge publication waits for a full local pass on the exact `main` revision.
+Nightly publication waits for a full local pass on the exact `main` revision.
 On a clean checkout of the current `origin/main`, on any worker:
 
 ```bash
@@ -190,13 +190,15 @@ python scripts/local_ci.py full --attest
 This runs every suite, rebuilds the backend test map that later selections
 use, and posts the commit status `local/full-suite` (pending while it runs,
 then success or failure) through `gh`. "Publish desktop source update"
-starts on that status and publishes when the status comes from the owner's
+runs at 06:00 UTC or on owner dispatch, and skips main revisions already
+published. It publishes only when the status comes from the owner's
 account, says success, and names the current head of protected `main`
 (`scripts/ci/edge_publication_gate.py`). One pass covers every PR merged up
 to that revision. Until then the gate adds an "Edge publication refused"
 warning naming the command, and DeployStatus repeats it.
 
-Run it when an edge update is wanted, not after every merge.
+Run it before a nightly update is wanted, not after every merge. A status
+change does not start publication; the next schedule or owner dispatch reads it.
 
 ## Before a stable release
 

@@ -65,8 +65,8 @@ def verify_edge_manifest(raw) -> str:
     updater = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(updater)
     manifest = updater.verify_manifest(raw, (root / "desktop/build/application-update-key.pem").read_bytes())
-    if manifest.get("channel") != "edge":
-        raise ValueError("Expected an edge manifest")
+    if manifest.get("channel") not in ("edge", "nightly"):
+        raise ValueError("Expected a nightly manifest (or transition edge alias)")
     return manifest["revision"]
 
 
@@ -215,15 +215,11 @@ def event_allowed(env, event):
     if env.get("GITHUB_REPOSITORY") != REPOSITORY or env.get("GITHUB_REF") != "refs/heads/main":
         return False
     kind = env.get("GITHUB_EVENT_NAME")
-    if kind == "push":
-        return not event.get("deleted", False)
+    if kind == "schedule":
+        return event.get("schedule") == "0 6 * * *"
     if kind == "workflow_dispatch":
         return (env.get("GITHUB_ACTOR_ID") == OWNER_ID and bool(env.get("GITHUB_ACTOR"))
                 and env.get("GITHUB_TRIGGERING_ACTOR") == env["GITHUB_ACTOR"])
-    if kind == "status":
-        return (event.get("context") == CONTEXT and event.get("state") == "success"
-                and str((event.get("sender") or {}).get("id")) == OWNER_ID
-                and event.get("sha") == env.get("GITHUB_SHA"))
     return False
 
 

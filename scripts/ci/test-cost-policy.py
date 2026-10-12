@@ -2,7 +2,7 @@
 
 Tests run on the developer's machine (scripts/local_ci.py and the pre-push
 hook). Workflows start automatically only to publish: a release tag, and
-edge publication from main once a worker has posted a local full-suite pass.
+daily nightly publication from main after a worker posts a local full-suite pass.
 Everything else is a manual dispatch for what no local machine can do.
 """
 from pathlib import Path
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github/workflows"
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
-    "desktop-source.yml": {"push", "status", "workflow_dispatch"},
+    "desktop-source.yml": {"schedule", "workflow_dispatch"},
     "release.yml": {"push", "workflow_dispatch"},
 }
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
@@ -39,7 +39,8 @@ class CostPolicyTests(unittest.TestCase):
         for name in names:
             with self.subTest(workflow=name):
                 found = triggers(workflow(name))
-                self.assertFalse(found & FORBIDDEN, f"{name} starts on {sorted(found & FORBIDDEN)}")
+                self.assertFalse((found - AUTOMATIC.get(name, set())) & FORBIDDEN,
+                                 f"{name} starts on forbidden events")
                 if name in AUTOMATIC:
                     self.assertEqual(found, AUTOMATIC[name])
                 else:
@@ -48,7 +49,7 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_automatic_pushes_are_narrow(self):
         self.assertEqual(workflow("release.yml")["on"]["push"], {"tags": ["v*.*.*"]})
-        self.assertEqual(workflow("desktop-source.yml")["on"]["push"], {"branches": ["main"]})
+        self.assertEqual(workflow("desktop-source.yml")["on"]["schedule"], [{"cron": "0 6 * * *"}])
 
     def test_no_pr_only_machinery_is_left(self):
         for path in sorted(WORKFLOWS.glob("*.yml")):
@@ -61,10 +62,10 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_edge_publication_waits_for_the_owner_local_pass(self):
         config = workflow("desktop-source.yml")
-        self.assertEqual(config["on"]["status"] or None, None)
+        self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch"})
         gate = config["jobs"]["gate"]
-        for clause in ("github.event.context == 'local/full-suite'", "github.event.state == 'success'",
-                       "github.event.sender.id == 76577322", "github.event.sha == github.sha"):
+        for clause in ("github.event_name == 'schedule'", "github.ref == 'refs/heads/main'",
+                       "github.actor_id == '76577322'", "github.triggering_actor == github.actor"):
             self.assertIn(clause, gate["if"])
         step = next(s for s in gate["steps"] if "edge_publication_gate.py" in s.get("run", ""))
         self.assertEqual(step["name"], "Require a local full-suite pass on this revision")

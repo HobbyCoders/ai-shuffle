@@ -91,7 +91,7 @@ def test_unprotected_or_moved_main_refuses():
 
 
 def env(**changes):
-    values = {"GITHUB_REPOSITORY": gate.REPOSITORY, "GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "status",
+    values = {"GITHUB_REPOSITORY": gate.REPOSITORY, "GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "schedule",
               "GITHUB_SHA": REVISION, "GITHUB_ACTOR_ID": gate.OWNER_ID, "GITHUB_ACTOR": "Quickkill0",
               "GITHUB_TRIGGERING_ACTOR": "Quickkill0"}
     values.update(changes)
@@ -99,12 +99,12 @@ def env(**changes):
 
 
 def status_event(**changes):
-    event = {"context": gate.CONTEXT, "state": "success", "sha": REVISION, "sender": {"id": int(gate.OWNER_ID)}}
+    event = {"schedule": "0 6 * * *", "context": gate.CONTEXT, "state": "success", "sha": REVISION, "sender": {"id": int(gate.OWNER_ID)}}
     event.update(changes)
     return event
 
 
-@pytest.mark.parametrize("kind", ["push", "workflow_dispatch", "status"])
+@pytest.mark.parametrize("kind", ["schedule", "workflow_dispatch"])
 @pytest.mark.parametrize("passed", [False, True])
 def test_trigger_cannot_add_workflow_requirements(kind, passed):
     # #2202: dispatching suites used to turn a same-tree PR into a combined
@@ -121,14 +121,12 @@ def test_trigger_cannot_add_workflow_requirements(kind, passed):
 
 def test_event_predicate():
     assert gate.event_allowed(env(), status_event())
-    assert gate.event_allowed(env(GITHUB_EVENT_NAME="push"), {})
-    assert not gate.event_allowed(env(GITHUB_EVENT_NAME="push"), {"deleted": True})
+    assert not gate.event_allowed(env(GITHUB_EVENT_NAME="push"), {})
     assert gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_dispatch"), {})
     assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_ACTOR_ID="7"), {})
     assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_TRIGGERING_ACTOR="x"), {})
-    for change in [{"context": "ci/other"}, {"state": "pending"}, {"sha": OTHER}, {"sender": {"id": 7}}, {"sender": None}]:
-        assert not gate.event_allowed(env(), status_event(**change)), change
-    for name in ["pull_request", "workflow_run", "schedule"]:
+    assert not gate.event_allowed(env(), {"schedule": "0 7 * * *"})
+    for name in ["pull_request", "workflow_run", "status", "push"]:
         assert not gate.event_allowed(env(GITHUB_EVENT_NAME=name), status_event())
     assert not gate.event_allowed(env(GITHUB_REF="refs/heads/feature"), status_event())
     assert not gate.event_allowed(env(GITHUB_REPOSITORY="someone/ai-shuffle"), status_event())
@@ -152,7 +150,7 @@ def test_entrypoint_writes_output_and_annotates_refusal(statuses, ready, monkeyp
 
 def test_entrypoint_refuses_unauthorized_events(monkeypatch, tmp_path):
     event_path = tmp_path / "event.json"
-    event_path.write_text(json.dumps(status_event(state="failure")), encoding="utf-8")
+    event_path.write_text(json.dumps({"schedule": "0 7 * * *"}), encoding="utf-8")
     for key, value in env(GITHUB_EVENT_PATH=str(event_path)).items():
         monkeypatch.setenv(key, value)
     with pytest.raises(ValueError):
@@ -167,8 +165,14 @@ def test_workflow_wiring_matches_the_gate():
     config = yaml.load((ROOT / ".github/workflows/desktop-source.yml").read_text(encoding="utf-8"),
                        Loader=yaml.BaseLoader)
     condition = config["jobs"]["gate"]["if"]
-    assert f"github.event.context == '{gate.CONTEXT}'" in condition
-    assert f"github.event.sender.id == {gate.OWNER_ID}" in condition
+    assert "github.event_name == 'schedule'" in condition
+    assert f"github.actor_id == '{gate.OWNER_ID}'" in condition
+    assert set(config["on"]) == {"schedule", "workflow_dispatch"}
+    assert config["on"]["schedule"] == [{"cron": "0 6 * * *"}]
+    assert config["env"]["SOURCE_CHANNEL"] == "edge"
+    steps = config["jobs"]["gate"]["steps"]
+    assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
+    assert steps[-1]["if"] == "steps.changed.outputs.changed == 'true'"
     text = (ROOT / "scripts/local_ci.py").read_text(encoding="utf-8")
     assert f'ATTEST_CONTEXT = "{gate.CONTEXT}"' in text
     assert "local_ci.py full --attest" in gate.COMMAND

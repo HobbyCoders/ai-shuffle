@@ -1,12 +1,14 @@
 name: Publish desktop source update
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
   workflow_dispatch:
-  # A worker posts local/full-suite on main after running every suite
-  # (scripts/local_ci.py full --attest). That status is the publication signal.
-  status:
+
+# Transition step 1: ship alias-aware workers signed edge. Change only this
+# value to nightly after those workers have installed the compatibility build.
+env:
+  SOURCE_CHANNEL: edge
 
 permissions:
   contents: read
@@ -14,14 +16,11 @@ permissions:
 
 jobs:
   gate:
-    # Filter non-publishable CI completions before allocating the publication runner.
+    # Read-only: unchanged main stops before setup, attestation reads or signing.
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor) ||
-       (github.event_name == 'status' && github.event.context == 'local/full-suite' &&
-        github.event.state == 'success' && github.event.sender.id == 76577322 &&
-        github.event.sha == github.sha))
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -31,10 +30,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Skip an unchanged main revision
+        id: changed
+        run: python3 scripts/ci/nightly_changed.py
       - uses: actions/setup-python@v5
+        if: steps.changed.outputs.changed == 'true'
         with:
           python-version: '3.12'
       - name: Require a local full-suite pass on this revision
+        if: steps.changed.outputs.changed == 'true'
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,8 +47,7 @@ jobs:
   publish:
     needs: gate
     if: needs.gate.outputs.ready == 'true'
-    # Unrelated status events must not evict a ready main publication
-    # from GitHub's single pending slot. Serialize only authorized publishers.
+    # A manual retry must not interrupt a scheduled signing/database write.
     concurrency:
       group: desktop-source-publish
       cancel-in-progress: false
@@ -64,10 +67,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # Coalesce a burst of merges without interrupting a signing/database write.
       # Superseded jobs exit before installing the publication dependencies.
-      - name: Allow rapid merges to settle
-        run: sleep 120
       - name: Skip superseded publication before build setup
         id: settled
         env:
@@ -91,7 +91,6 @@ jobs:
       - name: Publish signed source revision
         if: steps.ci.outputs.ready == 'true'
         env:
-          SOURCE_CHANNEL: edge
           GH_TOKEN: ${{ github.token }}
           DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
