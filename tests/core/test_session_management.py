@@ -571,10 +571,18 @@ async def test_settle_answered_prose_is_idle_noop(chats, monkeypatch):
         {"type": "message.user", "payload": {"content": "Yes"}},
     ])
     before = session_events.get_max_seq("target")
+    attention_keys = ("last_assistant_question_seq", "last_assistant_question_epoch",
+                      "last_user_message_seq", "last_user_message_epoch")
+    before_attention = {key: sessions.get_session("target")[key] for key in attention_keys}
     interrupt = AsyncMock()
     monkeypatch.setattr(turn_manager, "interrupt_async", interrupt)
     assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
-    assert session_events.get_max_seq("target") == before
+    # Persist the idempotency receipt, but do not clear attention or interrupt.
+    assert session_events.get_max_seq("target") == before + 1
+    receipt = session_events.get_latest_system_note("target", "session_settled")
+    assert receipt["empty_snapshot"] is True
+    assert receipt["through_seq"] == 0
+    assert {key: sessions.get_session("target")[key] for key in attention_keys} == before_attention
     interrupt.assert_not_called()
 
 
@@ -715,15 +723,28 @@ async def test_local_delayed_settlement_revision_cannot_dismiss_a_new_settle(cha
     await session_active._apply_settle_change(stale, False)
     assert interactions.get_interaction(fresh["id"])["state"] == "pending"
 
-async def test_repeated_settle_revision_preserves_post_snapshot_wait(chats):
+@pytest.mark.parametrize("initial_wait", [True, False])
+async def test_repeated_settle_revision_preserves_post_snapshot_wait(chats, monkeypatch, initial_wait):
+    from app.core import user_question_handler
     from app.core.session_settlement import dismiss_owner_waits
     from app.db import interactions
     from app.network import session_active
 
-    interactions.create_interaction("target", "permission", {"request_id": "old"}, 300)
+    turn = turns.enqueue_turn("target", "user", prompt="Streaming", profile_id="agent")
+    turns.start_turn(turn["id"])
+    attention = AsyncMock()
+    monkeypatch.setattr(user_question_handler, "publish_session_attention", attention)
+    if initial_wait:
+        interactions.create_interaction("target", "permission", {"request_id": "old"}, 300)
     row = session_active.write_shared("target", False)
     revision = row["_settled_revision"]
-    assert await dismiss_owner_waits("target", expected_revision=revision)
+    assert await dismiss_owner_waits("target", expected_revision=revision) is initial_wait
+    if not initial_wait:
+        assert turns.get_turn(turn["id"])["state"] == "running"
+        attention.assert_not_called()
+    turn_after_first_delivery = turns.get_turn(turn["id"])
     fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
     assert not await dismiss_owner_waits("target", expected_revision=revision)
     assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+    assert turns.get_turn(turn["id"]) == turn_after_first_delivery
+    assert attention.await_count == int(initial_wait)

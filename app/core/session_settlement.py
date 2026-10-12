@@ -85,6 +85,15 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         prose = question_seq is not None and (user_seq is None or (
             row.get("last_user_message_epoch") == row.get("last_assistant_question_epoch") and question_seq > user_seq))
         if not (waiting or prose):
+            # An empty snapshot is still a processed revision. Otherwise a
+            # delayed duplicate could capture a prompt that arrived afterwards.
+            # No boundary/attention update or runtime interrupt is warranted.
+            session_events.append_events(session_id, [{
+                "id": receipt, "type": "system.note", "payload": {
+                    "subtype": "session_settled", "content": "Session settled.",
+                    "through_seq": 0, "epoch": None, "empty_snapshot": True,
+                },
+            }], _conn=conn)
             return None
         cur.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=%s", (session_id,))
         through_seq = cur.fetchone()["seq"]
