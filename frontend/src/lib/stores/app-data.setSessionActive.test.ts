@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
 	get: vi.fn(),
 	patchSession: vi.fn(),
+	dismissSettledPrompts: vi.fn(),
 }));
 
 vi.mock('$lib/api/client', () => ({
@@ -22,6 +23,7 @@ vi.mock('./active-session', () => ({
 		get current() { return { sessionId: null as string | null }; },
 		newChat: vi.fn(),
 		validateSelectedProfile: vi.fn(),
+		dismissSettledPrompts: mocks.dismissSettledPrompts,
 	},
 }));
 
@@ -112,5 +114,29 @@ describe('appData.setSessionActive vs stale list loads', () => {
 
 		await expect(appData.setSessionActive('session-b', true)).rejects.toThrow('network down');
 		expect(appData.current.sessions.find((s) => s.id === 'session-b')?.is_active).toBe(false);
+	});
+});
+
+// #2324: a confirmed settle dismisses the session's waits locally; unsettle
+// and a failed settle leave them alone.
+describe('appData.setSessionActive dismisses prompts on settle', () => {
+	it('dismisses the settled session\'s prompts once the PATCH succeeds', async () => {
+		await appData.loadSessions();
+		await appData.setSessionActive('session-b', false);
+		expect(mocks.dismissSettledPrompts).toHaveBeenCalledWith('session-b');
+	});
+
+	it('dismisses nothing on unsettle', async () => {
+		await appData.loadSessions();
+		await appData.setSessionActive('session-b', true);
+		expect(mocks.dismissSettledPrompts).not.toHaveBeenCalled();
+		await appData.setSessionActive('session-b', false);
+	});
+
+	it('dismisses nothing when the settle fails', async () => {
+		await appData.loadSessions();
+		mocks.patchSession.mockRejectedValueOnce(new Error('network down'));
+		await expect(appData.setSessionActive('session-a', false)).rejects.toThrow('network down');
+		expect(mocks.dismissSettledPrompts).not.toHaveBeenCalled();
 	});
 });

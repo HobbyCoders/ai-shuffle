@@ -27,6 +27,7 @@ import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
 import { markChatUnavailable } from '../unavailable-chat';
+import { dismissSettledSessionPrompts } from './settle-prompts';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -498,6 +499,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}));
 					onPersistSession();
 				}
+				// A settle dismisses the session's waits server-side (#2324);
+				// drop the local copies so the card and composer follow.
+				if (updates.is_active === false) {
+					dismissSettledSessionPrompts(updatedSessionId, { backgroundPermissions, getState, update });
+				}
 				// Row-level metadata (title backfill, is_active flip, …) is merged
 				// straight into the sidebar row — no refetch, so no chance of a
 				// stale paginated response re-flipping the card the user just
@@ -556,6 +562,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const title = updates.title;
 				update(s => ({ ...s, title }));
 				onPersistSession();
+			}
+			// A settle (from any device, or the SettleSession tool) dismisses the
+			// session's pending permission/question server-side (#2324): drop the
+			// local attention entry and the open session's prompt cards so the
+			// card status is derived fresh. Unsettle clears nothing.
+			if (updates.is_active === false) {
+				dismissSettledSessionPrompts(sessionId, { backgroundPermissions, getState, update });
 			}
 			// Same policy as session_updated: patch the row, and only reload when
 			// the row is unknown here or the change reshapes the list server-side

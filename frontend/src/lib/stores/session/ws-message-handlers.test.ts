@@ -2033,6 +2033,72 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	// #2324: settling dismisses the session's waits server-side, so the local
+	// attention entry and the open session's prompt cards go too. Unsettle
+	// starts fresh and clears nothing.
+	describe.each(['session_updated', 'user_session_updated'])('%s settle dismisses local prompts', (type) => {
+		type Attention = { count: number; kind: 'permission' | 'question' };
+		let attention: Map<string, Attention>;
+		let state: ActiveSessionState;
+
+		function frame(sessionId: string, updates: Record<string, unknown>) {
+			return type === 'session_updated'
+				? { event_type: type, session_id: sessionId, data: { updates } }
+				: { type, session_id: sessionId, updates };
+		}
+
+		beforeEach(() => {
+			attention = new Map<string, Attention>([
+				['session-1', { count: 1, kind: 'permission' }],
+				['other', { count: 2, kind: 'question' }],
+			]);
+			state = {
+				...mockState(),
+				sessionId: 'session-1',
+				pendingPermissions: [{ request_id: 'p1', tool_name: 'Bash' } as never],
+				deferredPermissions: [{ request_id: 'p0', tool_name: 'Edit' } as never],
+				pendingQuestions: [{ request_id: 'q1' } as never],
+			};
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+				backgroundPermissions: { update: vi.fn((fn) => { attention = fn(attention); }) },
+			});
+			handlers = createMessageHandlers(deps);
+		});
+
+		it('clears the settled open session\'s attention entry and prompt cards', () => {
+			handlers.handleMessage(frame('session-1', { is_active: false }));
+			expect(attention.has('session-1')).toBe(false);
+			expect(attention.get('other')).toEqual({ count: 2, kind: 'question' });
+			expect(state.pendingPermissions).toEqual([]);
+			expect(state.deferredPermissions).toEqual([]);
+			expect(state.pendingQuestions).toEqual([]);
+		});
+
+		it('clears only the attention entry when a background session is settled', () => {
+			handlers.handleMessage(frame('other', { is_active: false }));
+			expect(attention.has('other')).toBe(false);
+			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });
+			expect(state.pendingPermissions).toHaveLength(1);
+			expect(state.pendingQuestions).toHaveLength(1);
+		});
+
+		it('clears nothing on unsettle', () => {
+			handlers.handleMessage(frame('session-1', { is_active: true }));
+			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });
+			expect(state.pendingPermissions).toHaveLength(1);
+			expect(state.deferredPermissions).toHaveLength(1);
+			expect(state.pendingQuestions).toHaveLength(1);
+		});
+
+		it('clears nothing on an unrelated row update', () => {
+			handlers.handleMessage(frame('session-1', { title: 'Renamed' }));
+			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });
+			expect(state.pendingPermissions).toHaveLength(1);
+		});
+	});
+
 	describe('user_session_updated handler (is_active flip)', () => {
 		// Settle/unsettle from any device fans out as user_session_updated with
 		// { is_active }. Merging the row in place (no refetch) is what keeps a

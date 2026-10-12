@@ -589,25 +589,48 @@ describe('Sidebar Needs you lane', () => {
 		}
 	});
 
-	it('lifts rows waiting on a prompt out of Active and Settled, and back when answered', async () => {
-		mocks.backgroundPermissions.set(new Map([
-			['active', { count: 1, kind: 'permission' }],
-			['settled', { count: 1, kind: 'question' }],
-		]));
+	it('lifts an active row waiting on a prompt out of Active, and back when answered', async () => {
+		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind: 'permission' }]]));
 		render(Sidebar, { props: sidebarProps });
-		expect(labels()).toEqual(['Needs you 2', 'Active 0', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 		expect(lane()?.textContent).toContain('Active chat');
-		expect(lane()?.textContent).toContain('Settled chat');
-
-		mocks.backgroundPermissions.set(new Map([['settled', { count: 1, kind: 'question' }]]));
-		await tick();
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
-		expect(lane()?.textContent).not.toContain('Active chat');
 
 		mocks.backgroundPermissions.set(new Map());
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 		expect(lane()).toBeNull();
+	});
+
+	// #2324: settling is the user saying "not now" — a settled row never sits
+	// under Needs you, even while the server still reports a wait.
+	it('keeps a settled row that still reports a wait under Settled', () => {
+		mocks.backgroundPermissions.set(new Map([['settled', { count: 1, kind: 'question' }]]));
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(lane()).toBeNull();
+		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Settled chat');
+	});
+
+	it('moves a waiting row from Needs you to Settled the moment it is settled', async () => {
+		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind: 'permission' }]]));
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+
+		// The optimistic settle flips is_active before the attention entry clears.
+		mocks.sessions.set((mocks.sessions.current as { id: string }[]).map((r) => (r.id === 'active' ? { ...r, is_active: false } : r)));
+		await tick();
+		expect(labels()).toEqual(['Active 0', 'Settled 2']);
+		expect(lane()).toBeNull();
+		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Active chat');
+	});
+
+	it('keeps a settled mirror whose owner still reports a question under Settled', () => {
+		mocks.sessions.set([
+			session('remote', 'Remote chat', 'visible-project', false, false, { is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'question' }),
+		]);
+		render(Sidebar, { props: sidebarProps });
+		expect(lane()).toBeNull();
+		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Remote chat');
 	});
 
 	it('takes a remote session from its owner state, not the local map', () => {

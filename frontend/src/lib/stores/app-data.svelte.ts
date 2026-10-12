@@ -973,6 +973,10 @@ export const appData = {
 		try {
 			await apiSetSessionActive(sessionId, isActive);
 			confirmLocalEdits([sessionId]);
+			// Settling dismisses the session's pending permission/question on the
+			// server (#2324); drop the local copies now rather than waiting for the
+			// echoed frame. Unsettle starts fresh, so it clears nothing.
+			if (!isActive) activeSession.dismissSettledPrompts(sessionId);
 			// Reconcile with an authoritative reload.
 			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {

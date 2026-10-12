@@ -87,6 +87,14 @@ export function isAttentionStatus(status: SessionCardStatus): boolean {
 	return status === 'needs_permission' || status === 'has_question' || status === 'await';
 }
 
+/** Which sidebar lane a row belongs to. An active row parked on a prompt goes
+ *  to "Needs you"; a settled row always goes to Settled, even if the server
+ *  still reports a wait (#2324) — settling is the user saying "not now". */
+export function sidebarGroup(status: SessionCardStatus, isActive: boolean): 'needs' | 'active' | 'settled' {
+	if (!isActive) return 'settled';
+	return isAttentionStatus(status) ? 'needs' : 'active';
+}
+
 /** The states that get a live-ticking timer — in-flight, including a session
  *  parked on a permission/question prompt (its turn hasn't finished). */
 export function isLiveStatus(status: SessionCardStatus): boolean {
