@@ -1,7 +1,7 @@
 """Every agent prompt names the worker it runs on.
 
-The owner runs several networked workers ("Unraid", "DesktopWorker") and drives
-sessions on any of them from any device. Before this, an agent on Unraid could
+The owner runs several networked workers ("ServerWorker", "DesktopWorker") and drives
+sessions on any of them from any device. Before this, an agent on ServerWorker could
 not tell that a refusal came from DesktopWorker, or that the owner's screen was a
 different machine: nothing in its environment said which machine it was.
 
@@ -47,7 +47,7 @@ def _member(device_id, name, kind="worker"):
     return SimpleNamespace(device_id=device_id, name=name, kind=kind)
 
 
-def _network(monkeypatch, *, self_name="Unraid", peers=(("DesktopWorker", PEER),)):
+def _network(monkeypatch, *, self_name="ServerWorker", peers=(("DesktopWorker", PEER),)):
     """A networked worker: a loaded context plus the member listing."""
     from app.db import network as store
     from app.network import engine
@@ -99,11 +99,11 @@ def test_networked_worker_is_named_with_its_device_and_peers(monkeypatch, tmp_pa
     _network(monkeypatch)
     block = _block(tmp_path)
     assert (
-        f"Worker: Unraid (device {SELF}, in a container). Your shell, files and "
+        f"Worker: ServerWorker (device {SELF}, in a container). Your shell, files and "
         "tools run on this worker."
     ) in block
     assert "Other workers in the owner's network: DesktopWorker." in block
-    assert "did not come from Unraid" in block
+    assert "did not come from ServerWorker" in block
     # Names only: a client member is not a worker, and no address leaks.
     assert "Pixel" not in block
     assert "http" not in block.split("Worker:", 1)[1]
@@ -111,14 +111,14 @@ def test_networked_worker_is_named_with_its_device_and_peers(monkeypatch, tmp_pa
 
 def test_shared_rename_is_the_name_the_app_shows(monkeypatch, tmp_path):
     rows = _network(monkeypatch, self_name="old-hostname")
-    rows[0]["name"] = "Unraid"  # list_members applies the shared rename
-    assert "Worker: Unraid (" in _block(tmp_path)
+    rows[0]["name"] = "ServerWorker"  # list_members applies the shared rename
+    assert "Worker: ServerWorker (" in _block(tmp_path)
 
 
 def test_single_worker_network_has_no_peer_line(monkeypatch):
     _network(monkeypatch, peers=())
     lines = worker_identity_lines()
-    assert len(lines) == 1 and lines[0].startswith("Worker: Unraid (")
+    assert len(lines) == 1 and lines[0].startswith("Worker: ServerWorker (")
 
 
 def test_member_listing_failure_falls_back_to_the_loaded_context(monkeypatch):
@@ -131,7 +131,7 @@ def test_member_listing_failure_falls_back_to_the_loaded_context(monkeypatch):
 
     monkeypatch.setattr(store, "list_members", boom)
     lines = worker_identity_lines()
-    assert lines[0].startswith("Worker: Unraid (device ")
+    assert lines[0].startswith("Worker: ServerWorker (device ")
     assert "DesktopWorker" in lines[1]
 
 
@@ -186,7 +186,7 @@ def test_worker_line_sits_in_the_stable_half_and_is_byte_identical(monkeypatch, 
     one = _block(tmp_path, "runner:ai-shuffle-4aac1979")
     monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-02")
     two = _block(tmp_path, "runner:ai-shuffle-4aac1979")
-    assert "Worker: Unraid" in one
+    assert "Worker: ServerWorker" in one
     assert hashlib.sha256(one.encode()).digest() == hashlib.sha256(two.encode()).digest()
     # After the placement line, inside the <env> block.
     assert one.index("Runtime placement:") < one.index("Worker:") < one.index("</env>")
@@ -197,21 +197,21 @@ def test_worker_line_sits_in_the_stable_half_and_is_byte_identical(monkeypatch, 
 def test_moved_session_renders_the_new_worker(monkeypatch, tmp_path):
     """A move rebuilds the prompt in the adopting worker's process, which
     renders its own identity — never the previous worker's."""
-    _network(monkeypatch, self_name="Unraid", peers=(("DesktopWorker", PEER),))
+    _network(monkeypatch, self_name="ServerWorker", peers=(("DesktopWorker", PEER),))
     before = _block(tmp_path, "runner:dev_aaaaaaaaaaaaaaaaaaaaaaaa")
-    # The adopting worker: DesktopWorker is now "self", Unraid the peer.
+    # The adopting worker: DesktopWorker is now "self", ServerWorker the peer.
     monkeypatch.setattr(env_mod, "_in_container", lambda: False)
-    _network(monkeypatch, self_name="DesktopWorker", peers=(("Unraid", PEER),))
+    _network(monkeypatch, self_name="DesktopWorker", peers=(("ServerWorker", PEER),))
     after = _block(tmp_path, "runner:dev_aaaaaaaaaaaaaaaaaaaaaaaa")
-    assert "Worker: Unraid (" in before
+    assert "Worker: ServerWorker (" in before
     assert "Worker: DesktopWorker (" in after and "on the host" in after
-    assert "Other workers in the owner's network: Unraid." in after
+    assert "Other workers in the owner's network: ServerWorker." in after
 
 
 # ─── the harness adapter: native compile, delegated legs ─────────────────────
 
 WORKER = (
-    f"Worker: Unraid (device {SELF}, in a container). Your shell, files and "
+    f"Worker: ServerWorker (device {SELF}, in a container). Your shell, files and "
     "tools run on this worker."
 )
 
@@ -235,7 +235,7 @@ def test_native_compile_puts_the_worker_in_fluids_environment_section(isolated_h
     )
     env_sections = [s for s in compiled.sections if s.text.startswith("# Environment")]
     assert len(env_sections) == 1 and WORKER in env_sections[0].text
-    assert compiled.text.count("Worker: Unraid") == 1
+    assert compiled.text.count("Worker: ServerWorker") == 1
 
 
 def test_native_compile_with_app_env_block_does_not_double_the_line(isolated_home, tmp_path):
@@ -244,7 +244,7 @@ def test_native_compile_with_app_env_block_does_not_double_the_line(isolated_hom
     compiled = ha.HarnessAdapter._compile_prompt_sections(
         system, None, options, native=True, worker=WORKER
     )
-    assert compiled.text.count("Worker: Unraid") == 1
+    assert compiled.text.count("Worker: ServerWorker") == 1
 
 
 def test_delegated_full_replace_compile_carries_the_worker(isolated_home, tmp_path):
@@ -342,4 +342,4 @@ async def test_delegated_connect_sends_this_workers_name_and_a_move_sends_the_ne
     first, second, after_move = _FileLoop.prompts
     assert "# Worker\n" + WORKER in first
     assert first == second
-    assert moved in after_move and "Worker: Unraid" not in after_move
+    assert moved in after_move and "Worker: ServerWorker" not in after_move

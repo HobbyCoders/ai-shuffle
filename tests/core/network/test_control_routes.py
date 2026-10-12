@@ -257,8 +257,8 @@ def test_route_failure_reasons_are_plain_words(error, reason):
 
 def test_unreachable_message_lists_distinct_reasons():
     failures = [httpx.ConnectTimeout("t"), transport.PeerError("HTTP 530"), httpx.ConnectTimeout("t")]
-    assert (control._unreachable_message("DesktopWorker", "Unraid", failures, 3)
-            == "Couldn't reach DesktopWorker from Unraid (connection timed out / HTTP 530 on all 3 routes).")
+    assert (control._unreachable_message("DesktopWorker", "ServerWorker", failures, 3)
+            == "Couldn't reach DesktopWorker from ServerWorker (connection timed out / HTTP 530 on all 3 routes).")
 
 
 async def test_unknown_names_fall_back_to_neutral_words(network):

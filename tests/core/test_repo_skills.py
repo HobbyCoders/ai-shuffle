@@ -4,7 +4,8 @@ fluid discovers ``<dir>/.fluid/skills/<name>/SKILL.md`` walking up from the
 session cwd, so a skill committed at the checkout root is visible from every
 worktree the app provisions under it (the container keeps worktrees at
 ``<checkout>/.fluid/worktrees/<name>``) and on every worker that checks the
-project out. The two skills authored this round must parse and be findable.
+project out. The public skills must parse and be findable; owner-infrastructure
+skills belong in the owner's global skill directory, not the publication tree.
 """
 from __future__ import annotations
 
@@ -20,8 +21,8 @@ def _names(cwd):
     return {s.name for s in discover_skills(cwd, include_global=False, include_plugins=False)}
 
 
-def test_the_round_nine_skills_are_committed_with_valid_frontmatter():
-    for name in ("preview-branch", "play-internal-release"):
+def test_public_skills_are_committed_with_valid_frontmatter():
+    for name in ("preview-branch", "session-harness-audit"):
         path = SKILLS / name / "SKILL.md"
         assert path.is_file(), f"{path} missing"
         fields, body = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -37,12 +38,9 @@ def test_preview_skill_carries_the_real_commands():
         assert needle in text, needle
 
 
-def test_play_skill_names_the_workflow_and_its_gates():
-    text = (SKILLS / "play-internal-release" / "SKILL.md").read_text(encoding="utf-8")
-    for needle in ("android-play.yml", "publish_to_play", "PLAY_SIGNING_READY",
-                   "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "ai-shuffle-play-bundle",
-                   "com.hobbycoders.aishuffle", "android-play-enrollment.yml"):
-        assert needle in text, needle
+def test_owner_infrastructure_skills_are_not_published():
+    for name in ("live-test", "ship-release", "play-internal-release"):
+        assert not (SKILLS / name).exists(), name
 
 
 def test_skills_are_discovered_from_the_checkout_and_from_a_nested_worktree(tmp_path):
@@ -61,4 +59,4 @@ def test_skills_are_discovered_from_the_checkout_and_from_a_nested_worktree(tmp_
 
 
 def test_the_real_checkout_exposes_them_to_fluid():
-    assert {"preview-branch", "play-internal-release"} <= _names(REPO)
+    assert {"preview-branch", "session-harness-audit"} <= _names(REPO)

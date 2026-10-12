@@ -286,7 +286,7 @@ async def test_consolidation_retires_agent_fact_superseded_by_user_fact(tmp_path
     stale = store.save_memory(
         "Tdarr transcodes on the AMD Ryzen AI MAX+ 395 iGPU.", durable=True, key="unraid.tdarr-setup")
     current = store.save_memory(
-        "The user's Unraid server is now a Ryzen 9 5900XT; the AI MAX+ 395 machine is gone.",
+        "The user's ServerWorker server is now a Ryzen 9 5900XT; the AI MAX+ 395 machine is gone.",
         protected=True, key="unraid.current-hardware")
     provider = PromptRecordingProvider([
         f'<delete-memory id="{stale.id}"/>\n<delete-memory id="{current.id}"/>\n'

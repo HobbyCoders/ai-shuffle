@@ -26,7 +26,7 @@ const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 const INSTALLS: Install[] = [
-	install({ id: 'dev_self', device_id: 'dev_self', device_name: 'Unraid', is_self: true }),
+	install({ id: 'dev_self', device_id: 'dev_self', device_name: 'ServerWorker', is_self: true }),
 	install({ id: 'dev_pc', device_id: 'dev_pc', device_name: 'DesktopWorker', platform: 'windows' }),
 	install({ id: 'dev_lap', device_id: 'dev_lap', device_name: 'Laptop', online: false })
 ];
@@ -76,7 +76,7 @@ describe('worker options', () => {
 			install({ id: 'dev_gone', device_id: 'dev_gone', device_name: 'Gone', revoked_at: '2026-01-01' })
 		]);
 		expect(options.map((o) => [o.key, o.name, o.disabled, o.reason])).toEqual([
-			[null, 'Unraid', false, null],
+			[null, 'ServerWorker', false, null],
 			['dev_pc', 'DesktopWorker', false, null],
 			['dev_lap', 'Laptop', true, 'Offline']
 		]);
@@ -97,11 +97,11 @@ describe('Files worker picker', () => {
 	it('starts on this device and lists every worker with its state', async () => {
 		render(FilesStudio);
 		await within(list()).findByText('notes.md');
-		await waitFor(() => expect(chip().getAttribute('aria-label')).toContain('Unraid'));
+		await waitFor(() => expect(chip().getAttribute('aria-label')).toContain('ServerWorker'));
 		const menu = await openMenu();
 		const items = within(menu).getAllByRole('menuitemradio');
 		expect(items.map((i) => i.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-			'Unraid This device', 'DesktopWorker Online', 'Laptop Offline'
+			'ServerWorker This device', 'DesktopWorker Online', 'Laptop Offline'
 		]);
 		expect(items[0].getAttribute('aria-checked')).toBe('true');
 		expect(items[2].getAttribute('aria-disabled')).toBe('true');
@@ -114,7 +114,7 @@ describe('Files worker picker', () => {
 	it('switches to another worker without showing the old rows, then lists its files', async () => {
 		render(FilesStudio);
 		await within(list()).findByText('notes.md');
-		await waitFor(() => expect(chip().getAttribute('aria-label')).toContain('Unraid'));
+		await waitFor(() => expect(chip().getAttribute('aria-label')).toContain('ServerWorker'));
 		remote = 'hang';
 		const menu = await openMenu();
 		await fireEvent.click(within(menu).getByRole('menuitemradio', { name: /DesktopWorker/ }));

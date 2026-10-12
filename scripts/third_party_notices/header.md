@@ -1,6 +1,6 @@
 # Third-party notices
 
-AI Shuffle is proprietary software from HobbyCoders. It includes and
+AI Shuffle is AGPL-3.0-only software from HobbyCoders. It includes and
 redistributes third-party software under the licenses listed below. Each
 component remains under its own license; nothing here changes those terms.
 

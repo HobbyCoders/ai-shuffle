@@ -48,7 +48,7 @@ const now = Date.now();
 
 const installs = [
 	{ id: 'desktopworker', device_name: 'DesktopWorker', base_url: 'https://desktopworker.example', platform: 'windows', version: '0.8.24', capabilities: {}, last_seen: new Date().toISOString(), online: true, approved: true, is_self: true },
-	{ id: 'serverworker', device_name: 'Unraid', base_url: 'https://serverworker.example', platform: 'linux', version: '0.8.24', capabilities: {}, last_seen: new Date().toISOString(), online: true, approved: true, is_self: false }
+	{ id: 'unraid', device_name: 'ServerWorker', base_url: 'https://unraid.example', platform: 'linux', version: '0.8.24', capabilities: {}, last_seen: new Date().toISOString(), online: true, approved: true, is_self: false }
 ];
 const row = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
 	id, title, profile_id: 'default', project_id: 'ai-shuffle', status: 'active', is_active: true, total_cost_usd: 0,
@@ -60,7 +60,7 @@ const row = (id: string, title: string, extra: Record<string, unknown> = {}) => 
 const sessionRows = [
 	row(SESSION, TITLE, { work_started_at: turn === 'idle' ? null : new Date(now - 60e3).toISOString(), has_running_tasks: true }),
 	row('mem', 'Fix: memory health signals and running revisions', { work_started_at: new Date(now - 252e3).toISOString() }),
-	row('u-tdarr', 'Check Tdarr GPU transcoding', { instance_id: 'serverworker', owner_device_id: 'serverworker', device_name: 'Unraid', is_remote: true, remote_runtime_state: 'working' })
+	row('u-tdarr', 'Check Tdarr GPU transcoding', { instance_id: 'unraid', owner_device_id: 'unraid', device_name: 'ServerWorker', is_remote: true, remote_runtime_state: 'working' })
 ];
 
 const calls: { method: string; path: string; body: unknown }[] = [];
@@ -78,7 +78,7 @@ window.fetch = async (input, init) => {
 	else if (path === '/api/v1/projects') data = [project];
 	else if (path === '/api/v1/sessions/cursor' || path === '/api/v1/sessions/paginated') data = { items: sessionRows, total: sessionRows.length, has_more: false, next_cursor: null };
 	else if (path.endsWith(`/sessions/${SESSION}/handoff`) && method === 'GET') data = { busy: { running: turn !== 'idle', tasks: turn === 'idle' ? [] : ['Fix: memory health signals and running revisions', 'pytest -q tests/test_memory_health.py'] }, pending: null };
-	else if (path.endsWith(`/sessions/${SESSION}/handoff`) && method === 'POST') data = { queued: true, worker: 'Unraid' };
+	else if (path.endsWith(`/sessions/${SESSION}/handoff`) && method === 'POST') data = { queued: true, worker: 'ServerWorker' };
 	else if (path.endsWith('/git/status')) data = { is_git_repo: true, current_branch: branch, is_clean: true, default_branch: 'main' };
 	else if (path.endsWith('/git/branches')) data = { branches: [branch, 'main'].map((name) => ({ name, is_current: name === branch, is_remote: false })) };
 	else if (path.endsWith('/git/worktrees')) data = { worktrees: [] };
@@ -145,7 +145,7 @@ if (promptKind === 'access' || promptKind === 'all') {
 		sessionId: SESSION, pending: 2, active: 0, saved: 0, error: false,
 		items: [
 			{ id: 'a1', kind: 'action', detail: '$ ls /mnt/user/appdata/ai-shuffle' },
-			{ id: 'a2', kind: 'folder', detail: 'Compare the Linux paths with Unraid.' }
+			{ id: 'a2', kind: 'folder', detail: 'Compare the Linux paths with ServerWorker.' }
 		],
 		open: () => alert('Opens the private-access dialog'),
 		decide: async () => true

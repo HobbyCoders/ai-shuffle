@@ -42,7 +42,7 @@ SECURITY_GATE_VERSION = 2
 # (scripts/ci/edge_publication_gate.py).
 ATTEST_CONTEXT = "local/full-suite"
 # A full pass on Windows also posts this; a stable release waits for it
-# (.fluid/skills/ship-release). Edge does not, so DesktopWorker being off never
+# (the owner-local ship-release skill). Edge does not, so a Windows worker being off never
 # blocks Linux and Docker work.
 WINDOWS_CONTEXT = "local/windows-suite"
 MAP_PATH = Path(os.environ.get("LOCAL_CI_TEST_MAP")
@@ -460,7 +460,7 @@ NOT_LOCAL = [
 ] + ([] if os.name == "nt" else [
     (["desktop/*", "app/core/config.py", "app/core/process*.py", "app/core/*windows*", "run_local.*"],
      "Windows: not tested on this machine. A stable release waits for `python scripts/local_ci.py full --attest` "
-     "on a Windows worker (DesktopWorker); edge does not."),
+     "on a Windows worker; edge does not."),
 ])
 
 

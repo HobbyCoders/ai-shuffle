@@ -25,11 +25,11 @@ const url = process.env.UPDATE_BUTTON_FIXTURE_URL || 'http://127.0.0.1:5247/test
 const shots = process.env.SCREENSHOT_DIR;
 
 const self = { device_id: 'local', device_name: 'Current worker', online: true, supported: true, allow_updates: true, version: 'cccccccccccc', running_version: 'b'.repeat(40) };
-const unraid = { ...self, device_id: 'serverworker', device_name: 'Unraid' };
+const unraid = { ...self, device_id: 'unraid', device_name: 'ServerWorker' };
 const all = (workers, extra = {}) => ({ allow_updates: true, update_all_workers: true, server_time: 2_000_000, workers, ...extra });
 const finished = (completedAt) => ({ id: 'install-1', phase: 'complete', completed_at: completedAt, workers: [
 	{ device_id: 'local', device_name: 'Current worker', status: 'verified', message: 'Updated and verified' },
-	{ device_id: 'serverworker', device_name: 'Unraid', status: 'verified', message: 'Updated and verified' },
+	{ device_id: 'unraid', device_name: 'ServerWorker', status: 'verified', message: 'Updated and verified' },
 ] });
 let passed = 0;
 
@@ -85,7 +85,7 @@ async function harness(viewport, touch) {
 	const shot = async (page, file) => { if (shots) await page.screenshot({ path: join(shots, `${name}-${file}.png`) }); };
 	const refresh = (page) => page.evaluate(() => window.dispatchEvent(new Event('application-update-policy')));
 
-	// 1. Desktop staged, Unraid still building: no restart, real phase per worker.
+	// 1. Desktop staged, ServerWorker still building: no restart, real phase per worker.
 	let run = await open(all([{ ...self, phase: 'ready' }, { ...unraid, phase: 'downloading', message: 'Building frontend…' }]));
 	await button(run.page).waitFor();
 	check(await button(run.page).getAttribute('aria-label') === 'Downloading update', 'mixed phases are not ready', await button(run.page).getAttribute('aria-label'));
@@ -94,7 +94,7 @@ async function harness(viewport, touch) {
 	let text = await tip.innerText();
 	check(text.includes('1 of 2 staged'), 'summary counts staged workers', text);
 	check(/Current worker\s+Staged, awaiting restart/.test(text), 'staged worker row', text);
-	check(/Unraid\s+Building frontend…/.test(text), 'building worker row', text);
+	check(/ServerWorker\s+Building frontend…/.test(text), 'building worker row', text);
 	await inViewport(run.page, tip, 'mixed tooltip');
 	await shot(run.page, '1-mixed');
 	await button(run.page).click({ force: true });
@@ -107,7 +107,7 @@ async function harness(viewport, touch) {
 	await run.page.mouse.move(0, viewport.height - 1);
 	tip = await hover(run.page, button(run.page));
 	text = await tip.innerText();
-	check(/Unraid\s+Staged, awaiting restart/.test(text), 'staged Unraid row', text);
+	check(/ServerWorker\s+Staged, awaiting restart/.test(text), 'staged ServerWorker row', text);
 	check(!/running/i.test(text), 'no running text once staged', text);
 	await inViewport(run.page, tip, 'ready tooltip');
 	await shot(run.page, '2-ready');
@@ -122,8 +122,8 @@ async function harness(viewport, touch) {
 	await run.page.getByRole('button', { name: 'Check for updates' }).waitFor();
 	tip = await hover(run.page, button(run.page));
 	text = await tip.innerText();
-	check(text.includes('Restart waits for Unraid (Status unavailable)'), 'held summary names the unknown worker', text);
-	check(/Unraid\s+Status unavailable/.test(text), 'unknown worker row', text);
+	check(text.includes('Restart waits for ServerWorker (Status unavailable)'), 'held summary names the unknown worker', text);
+	check(/ServerWorker\s+Status unavailable/.test(text), 'unknown worker row', text);
 	await inViewport(run.page, tip, 'held tooltip');
 	await shot(run.page, '2b-held');
 	await run.context.close();

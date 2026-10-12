@@ -173,8 +173,8 @@ class ArtifactPolicyTests(unittest.TestCase):
         ):
             inputs = {"publish_download": enabled, "upload_preview": enabled, "release_tag": tag}
             github = {"event_name": event, "ref": ref, "repository": "HobbyCoders/ai-shuffle",
-                      "actor_id": "76577322" if owner else "7", "actor": "Quickkill0",
-                      "triggering_actor": "Quickkill0" if same_rerun_actor else "another-maintainer"}
+                      "actor_id": "76577322" if owner else "7", "actor": "example-maintainer",
+                      "triggering_actor": "example-maintainer" if same_rerun_actor else "another-maintainer"}
             permitted_ref = ref == "refs/heads/main" or ref.startswith("refs/tags/v")
             permitted_event = ((event == "workflow_dispatch" and permitted_ref)
                                or (event == "push" and ref.startswith("refs/tags/v")))

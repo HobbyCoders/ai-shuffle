@@ -18,9 +18,9 @@ describe('mirrored session freshness', () => {
 			.mockRejectedValueOnce(new Error('connection lost')).mockImplementation(() => Promise.resolve(status('current')));
 		vi.stubGlobal('fetch', fetch);
 		const onCaughtUp = vi.fn();
-		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'Unraid', onCaughtUp, children });
+		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'ServerWorker', onCaughtUp, children });
 		await vi.advanceTimersByTimeAsync(0);
-		expect(screen.getByRole('status').textContent).toContain('Syncing from Unraid');
+		expect(screen.getByRole('status').textContent).toContain('Syncing from ServerWorker');
 		expect(screen.getByText('40 updates remaining')).toBeTruthy();
 		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
 		await vi.advanceTimersByTimeAsync(2000);
@@ -95,7 +95,7 @@ describe('mirrored session freshness', () => {
 			.mockImplementation(() => Promise.resolve(status('current')));
 		vi.stubGlobal('fetch', fetch);
 		const onCaughtUp = vi.fn();
-		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'Unraid', onCaughtUp, children });
+		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'ServerWorker', onCaughtUp, children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(onCaughtUp).toHaveBeenCalledOnce();
 		const conversation = screen.getByText('2 running tasks, 2 agents');
@@ -115,7 +115,7 @@ describe('mirrored session freshness', () => {
 			.mockImplementation(() => Promise.resolve(status('syncing', 12)));
 		vi.stubGlobal('fetch', fetch);
 		const onCaughtUp = vi.fn();
-		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'Unraid', onCaughtUp, graceMs: 3000, children });
+		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'ServerWorker', onCaughtUp, graceMs: 3000, children });
 		await vi.advanceTimersByTimeAsync(0);
 		const conversation = screen.getByText('2 running tasks, 2 agents');
 		await vi.advanceTimersByTimeAsync(2000); // first syncing poll arms the grace timer
@@ -123,7 +123,7 @@ describe('mirrored session freshness', () => {
 		await vi.advanceTimersByTimeAsync(2999);
 		expect(statusText()).toBe('');
 		await vi.advanceTimersByTimeAsync(1);
-		expect(statusText()).toBe('Syncing updates from Unraid… 12 updates remaining');
+		expect(statusText()).toBe('Syncing updates from ServerWorker… 12 updates remaining');
 		// The notice floats in its own slot; the conversation node is untouched.
 		expect(screen.getByText('2 running tasks, 2 agents')).toBe(conversation);
 		expect(screen.getByRole('status').classList.contains('mirror-status-slot')).toBe(true);

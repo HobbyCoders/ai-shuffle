@@ -6,7 +6,7 @@ from tests.core.test_assistant_work_worker import network  # noqa: F401 - fixtur
 def test_read_and_save_the_work_worker(client, network):
     state = client.get("/api/v1/assistant/worker")
     assert state.status_code == 200 and state.json()["device_id"] is None
-    assert [row["name"] for row in state.json()["workers"]] == ["Laptop", "OldBox", "Unraid"]
+    assert [row["name"] for row in state.json()["workers"]] == ["Laptop", "OldBox", "ServerWorker"]
 
     saved = client.put("/api/v1/assistant/worker", json={"device_id": "dev-serverworker"})
     assert saved.status_code == 200 and saved.json()["device_id"] == "dev-serverworker"

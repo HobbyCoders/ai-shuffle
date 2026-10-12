@@ -552,7 +552,7 @@ async def _cancel_worker_prompts(record: WorkerRecord) -> None:
 
 
 def _with_worker(text: str, record: WorkerRecord) -> str:
-    """``text`` plus the worker a remote child ran on ("Stopped by user. Ran on Unraid.")."""
+    """``text`` plus the worker a remote child ran on ("Stopped by user. Ran on ServerWorker.")."""
     try:
         from app.core.remote_task import worker_display_name
 

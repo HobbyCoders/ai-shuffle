@@ -35,7 +35,7 @@ def workflow(name):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
-def permits(expression, *, actor_id=OWNER, actor="Quickkill0", triggering_actor=None,
+def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggering_actor=None,
             repo=REPO, event="workflow_dispatch", ref=MAIN, sha=MAIN_SHA, run_head=MAIN_SHA,
             open_pr_heads=(), **input_changes):
     """Small evaluation harness for the checked-in, boolean Actions predicates.

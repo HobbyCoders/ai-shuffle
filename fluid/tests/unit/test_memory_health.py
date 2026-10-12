@@ -135,7 +135,7 @@ def test_harvested_fact_no_longer_rewritten_is_not_churn(tmp_path):
 
 
 def test_many_unconfirmed_facts_are_reported_not_flagged(tmp_path):
-    # #1814: with the churn fixed, Unraid's row still read "needs attention"
+    # #1814: with the churn fixed, ServerWorker's row still read "needs attention"
     # for 21 unconfirmed facts, mostly recent learner facts in use. The count
     # is the designed flow (confirm, or archived unused after a month), and
     # nothing the owner can do changes it.

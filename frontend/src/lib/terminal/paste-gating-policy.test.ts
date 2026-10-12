@@ -6,7 +6,7 @@ import { backoff, closeAction, MAX_RECONNECTS } from './socket-policy';
 import type { CommandBlock } from './commands';
 
 const ready: ProbeState = {
-	status: 'ready', supported: true, reason: null, worker: 'Unraid', shells: ['bash', 'sh'],
+	status: 'ready', supported: true, reason: null, worker: 'ServerWorker', shells: ['bash', 'sh'],
 	defaultShell: 'bash', folder: '/workspace/app', folderSource: 'project', open: 1, limit: 8,
 };
 const block = (over: Partial<CommandBlock> = {}): CommandBlock => ({ command: 'ls', cwd: null, shell: null, on: null, host: false, ...over });
@@ -88,9 +88,9 @@ describe('blockAccess', () => {
 		expect(blockAccess(block({ on: 'serverworker' }), ready).kind).toBe('ready');
 	});
 	it('disables blocks for another worker, the host, a missing shell or a relative folder', () => {
-		expect(blockAccess(block({ on: 'DesktopWorker' }), ready)).toEqual({ kind: 'disabled', reason: 'This command is for DesktopWorker. Terminals open on Unraid only for now.' });
+		expect(blockAccess(block({ on: 'DesktopWorker' }), ready)).toEqual({ kind: 'disabled', reason: 'This command is for DesktopWorker. Terminals open on ServerWorker only for now.' });
 		expect(blockAccess(block({ host: true }), ready).kind).toBe('disabled');
-		expect(blockAccess(block({ shell: 'zsh' }), ready)).toEqual({ kind: 'disabled', reason: "zsh isn't available on Unraid." });
+		expect(blockAccess(block({ shell: 'zsh' }), ready)).toEqual({ kind: 'disabled', reason: "zsh isn't available on ServerWorker." });
 		expect(blockAccess(block({ cwd: 'src' }), ready).kind).toBe('disabled');
 	});
 	it('refuses a folder with . or .. parts, control or text-direction characters', () => {
@@ -127,14 +127,14 @@ describe('labels', () => {
 		expect(folderName(null)).toBe('');
 	});
 	it('builds the target line from the block, then the probe defaults', () => {
-		expect(targetLine(block(), ready)).toBe('Unraid · app · bash');
-		expect(targetLine(block({ cwd: '/tmp', shell: 'sh' }), ready)).toBe('Unraid · /tmp · sh');
+		expect(targetLine(block(), ready)).toBe('ServerWorker · app · bash');
+		expect(targetLine(block({ cwd: '/tmp', shell: 'sh' }), ready)).toBe('ServerWorker · /tmp · sh');
 		expect(targetLine(block(), { status: 'loading' })).toBe('');
 	});
 	it('shows a fence folder in full and flags one outside the chat folder', () => {
 		const outside = blockTarget(block({ cwd: '/mnt/user/appdata/ai-shuffle' }), ready)!;
-		expect(outside).toMatchObject({ worker: 'Unraid', shell: 'bash', folder: '/mnt/user/appdata/ai-shuffle', fromFence: true, outside: true });
-		expect(targetLine(block({ cwd: '/mnt/user/appdata/ai-shuffle' }), ready)).toBe('Unraid · /mnt/user/appdata/ai-shuffle · bash');
+		expect(outside).toMatchObject({ worker: 'ServerWorker', shell: 'bash', folder: '/mnt/user/appdata/ai-shuffle', fromFence: true, outside: true });
+		expect(targetLine(block({ cwd: '/mnt/user/appdata/ai-shuffle' }), ready)).toBe('ServerWorker · /mnt/user/appdata/ai-shuffle · bash');
 		expect(blockTarget(block({ cwd: '/workspace/app/src' }), ready)).toMatchObject({ outside: false, folder: '/workspace/app/src' });
 		expect(blockTarget(block({ cwd: '/workspace/app' }), ready)).toMatchObject({ outside: false });
 		expect(blockTarget(block({ cwd: '/workspace/application' }), ready)).toMatchObject({ outside: true });
@@ -148,7 +148,7 @@ describe('labels', () => {
 		expect(a.folder).toBe(alpha);
 		expect(b.folder).toBe(beta);
 		expect(a.folder).not.toContain('…');
-		expect(targetLine(block({ cwd: alpha }), ready)).toBe(`Unraid · ${alpha} · bash`);
+		expect(targetLine(block({ cwd: alpha }), ready)).toBe(`ServerWorker · ${alpha} · bash`);
 	});
 	it('refuses zero-width, format, separator and other hidden characters', () => {
 		const hidden = ['\u200b', '\ufeff', '\u00ad', '\u061c', '\u2028', '\u2029', '\u200d', '\u2060', '\u180e', '\ud800'];
@@ -166,7 +166,7 @@ describe('labels', () => {
 		]);
 		const target = blockTarget(block({ cwd: cyrillic }), { ...ready, folder: '/workspace' } as ProbeState)!;
 		expect(target).toMatchObject({ outside: false, unusual: true, path: cyrillic });
-		expect(targetLine(block({ cwd: cyrillic }), ready)).toBe('Unraid · /workspace/‹U+0441›onfig · bash');
+		expect(targetLine(block({ cwd: cyrillic }), ready)).toBe('ServerWorker · /workspace/‹U+0441›onfig · bash');
 		// A plain non-English name opens, flagged.
 		expect(cwdProblem('/workspace/caf\u00e9')).toBeNull();
 		expect(printableFolder('/workspace/caf\u00e9')).toBe('/workspace/caf‹U+00E9›');

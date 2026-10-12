@@ -149,7 +149,7 @@ reviewer gate: anyone trusted to change protected workflow code must be trusted
 with this policy. Secrets were not read, moved or changed.
 
 Production deployment jobs require repository `HobbyCoders/ai-shuffle`, immutable
-actor ID `76577322` (Quickkill0), and the same triggering actor on reruns. The hub,
+owner actor ID configured in the workflows, and the same triggering actor on reruns. The hub,
 license, registry and website accept only manual dispatch from `main`; a merge
 does not deploy those services. Edge source publication is the narrow exception:
 protected-main merges publish automatically after the exact-tree CI gate above.

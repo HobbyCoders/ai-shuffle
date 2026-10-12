@@ -187,7 +187,7 @@ describe('cancellation verdict across navigation', () => {
 
 describe('remembered new-chat worker', () => {
 	it('restores the preference after send cleared the active intent, without rerouting existing sessions', async () => {
-		const pick = { id: 'runner-1', name: 'Unraid' };
+		const pick = { id: 'runner-1', name: 'ServerWorker' };
 		setPersistedDeviceIntent(pick);
 		const { switcher, getState } = makeSwitcher(fullState({ deviceIntent: null }));
 		try {
@@ -205,7 +205,7 @@ describe('remembered new-chat worker', () => {
 	});
 
 	it('preserves a cached draft explicitly targeting Local instead of the remote default', () => {
-		setPersistedDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+		setPersistedDeviceIntent({ id: 'runner-1', name: 'ServerWorker' });
 		const { switcher, getState } = makeSwitcher(fullState({ sessionId: null, draft: 'Local draft', deviceIntent: null }));
 		try {
 			switcher.newChat();

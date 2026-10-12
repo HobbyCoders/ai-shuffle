@@ -98,7 +98,7 @@ afterEach(() => {
 
 describe('hand-off completion on the source side', () => {
 	it('live: the global user_session_updated frame patches the row and settles the hand-off row', async () => {
-		mocks.rows = [{ id: SID, title: 'Moving', owner_device_id: 'dev_unraid', instance_id: 'dev_unraid', device_name: 'Unraid', is_remote: false, updated_at: '2026-10-11T10:00:00Z' }];
+		mocks.rows = [{ id: SID, title: 'Moving', owner_device_id: 'dev_unraid', instance_id: 'dev_unraid', device_name: 'ServerWorker', is_remote: false, updated_at: '2026-10-11T10:00:00Z' }];
 		await appData.loadSessions();
 		// While sending, the owning worker (still this one) reports X pending.
 		mocks.getQueuedMove.mockResolvedValueOnce({

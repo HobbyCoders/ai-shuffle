@@ -14,12 +14,12 @@ from app.network import control, engine, transport
 from tests.core.network import test_start_session_remote as remote_start
 from tests.core.network.harness import converge
 
-# The remote-start harness: owner chats on two workers, "Unraid" and "Windows".
+# The remote-start harness: owner chats on two workers, "ServerWorker" and "Windows".
 agent_turns, network = remote_start.agent_turns, remote_start.network
 install_local_principal, kicks = remote_start.install_local_principal, remote_start.kicks
 
 
-def _chat(worker, session_id, title="Unraid chat", **fields):
+def _chat(worker, session_id, title="ServerWorker chat", **fields):
     """An open owner chat on ``worker``, published to the other workers."""
     with worker.active():
         database.create_session(session_id=session_id, profile_id="default", project_id=None,
@@ -88,8 +88,8 @@ async def test_lists_active_chats_on_another_online_worker(workers, monkeypatch,
     result = json.loads(outcome.text)
     remote = {entry["id"]: entry for entry in result["sessions"] if entry.get("worker")}
     assert set(remote) == {"target"}
-    assert remote["target"]["owner_device_id"] == a.device_id and remote["target"]["worker"] == "Unraid"
-    assert remote["target"]["title"] == "Unraid chat"
+    assert remote["target"]["owner_device_id"] == a.device_id and remote["target"]["worker"] == "ServerWorker"
+    assert remote["target"]["title"] == "ServerWorker chat"
     assert "MessageSession relays to them" in result["note"]
     assert ("POST", "/api/v1/network/peer/control/orchestration-peers") in served.requests
 
@@ -100,7 +100,7 @@ async def test_offline_worker_is_named_in_the_listing(workers, monkeypatch, kick
     with b.active():
         result = json.loads((await _tool("ListSessions", {})).text)
     assert [entry["id"] for entry in result["sessions"]] == []
-    assert "Not listed: chats on Unraid (offline)." in result["note"]
+    assert "Not listed: chats on ServerWorker (offline)." in result["note"]
 
 
 async def test_other_states_do_not_ask_other_workers(workers, monkeypatch, kicks):
@@ -121,7 +121,7 @@ async def test_message_is_relayed_to_the_owning_worker_once(workers, monkeypatch
         result = json.loads(outcome.text)
         assert result["session_id"] == "target" and result["status"] == "queued"
         assert result["delivery_status"] == "queued" and result["created"] is False
-        assert result["worker"] == {"device_id": a.device_id, "name": "Unraid"}
+        assert result["worker"] == {"device_id": a.device_id, "name": "ServerWorker"}
         # Caller-side accounting only: settled at birth, never runnable.
         [receipt] = _receipts()
         assert receipt["state"] == "completed" and receipt["command_id"].startswith("orchestration:message:")
@@ -175,7 +175,7 @@ async def test_offline_owner_is_named_in_the_refusal(workers, monkeypatch, kicks
     monkeypatch.setattr(control, "call", call)
     with b.active():
         outcome = await _tool("MessageSession", MESSAGE)
-        assert outcome.is_error and "Session target runs on Unraid, which is offline" in outcome.text
+        assert outcome.is_error and "Session target runs on ServerWorker, which is offline" in outcome.text
         assert "not an eligible peer" not in outcome.text and _receipts() == []
     call.assert_not_called()
 
@@ -185,7 +185,7 @@ async def test_unreachable_owner_keeps_the_receipt_for_a_retry(workers, monkeypa
     monkeypatch.setattr(control, "call", AsyncMock(side_effect=control.RunnerUnreachable("timed out")))
     with b.active():
         outcome = await _tool("MessageSession", MESSAGE)
-        assert outcome.is_error and "Unraid could not be reached" in outcome.text
+        assert outcome.is_error and "ServerWorker could not be reached" in outcome.text
         assert len(_receipts()) == 1
 
 
@@ -201,7 +201,7 @@ async def test_owning_worker_applies_its_own_peer_checks(workers, monkeypatch, k
         _update(a, "target", publish=False, **fields)
         with b.active():
             outcome = await _tool("MessageSession", {**MESSAGE, "request_id": f"check-{number}"})
-            assert outcome.is_error and "Unraid refused the message" in outcome.text, outcome.text
+            assert outcome.is_error and "ServerWorker refused the message" in outcome.text, outcome.text
             assert expected in outcome.text, outcome.text
             # Nothing was queued, so the reservation is given back.
             assert _receipts() == []

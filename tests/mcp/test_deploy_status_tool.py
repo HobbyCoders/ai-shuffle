@@ -44,13 +44,13 @@ def _body(result):
 
 def test_passes_pr_and_drops_empty_fields():
     report = {"origin_main": "abc", "reason": None, "change": {"pr": 5}, "android": None,
-              "summary": "Live on: Unraid ✓",
-              "workers": [{"label": "Unraid", "device_id": "d", "behind": 0, "reason": None, "action": "up to date"}]}
+              "summary": "Live on: ServerWorker ✓",
+              "workers": [{"label": "ServerWorker", "device_id": "d", "behind": 0, "reason": None, "action": "up to date"}]}
     with patch("app.core.deploy_status.deploy_status", new=AsyncMock(return_value=report)) as call:
         body = _body(asyncio.run(_handlers()["DeployStatus"].handler({"pr": 5})))
     call.assert_awaited_once_with(pr=5, commit=None)
-    assert body["summary"] == "Live on: Unraid ✓"
-    assert body["workers"] == [{"label": "Unraid", "behind": 0, "action": "up to date"}]
+    assert body["summary"] == "Live on: ServerWorker ✓"
+    assert body["workers"] == [{"label": "ServerWorker", "behind": 0, "action": "up to date"}]
     assert "reason" not in body and "android" not in body
 
 

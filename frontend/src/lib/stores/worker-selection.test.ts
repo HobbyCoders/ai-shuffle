@@ -7,7 +7,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('worker selection persistence', () => {
 	it('defaults to Local and remembers a worker through a module reload', async () => {
 		expect(getPersistedDeviceIntent()).toBeNull();
-		const pick = { id: 'runner-1', name: 'Unraid' };
+		const pick = { id: 'runner-1', name: 'ServerWorker' };
 		setPersistedDeviceIntent(pick);
 		vi.resetModules();
 		const reloaded = await import('./worker-selection');
@@ -15,7 +15,7 @@ describe('worker selection persistence', () => {
 	});
 
 	it('remembers an explicit return to Local', () => {
-		setPersistedDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+		setPersistedDeviceIntent({ id: 'runner-1', name: 'ServerWorker' });
 		setPersistedDeviceIntent(null);
 		expect(getPersistedDeviceIntent()).toBeNull();
 	});

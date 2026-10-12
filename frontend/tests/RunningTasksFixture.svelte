@@ -16,20 +16,20 @@
 		['agent', 'Fix: memory health signals and running revisions', 'DesktopWorker', 252],
 		['shell', 'pytest -q tests/test_memory_health.py', 'DesktopWorker', 58],
 		['agent', 'Docs: Linux desktop install guide screenshots', 'DesktopWorker', 1730],
-		['agent', 'Review: worker transfer queue edge cases', 'Unraid', 845],
+		['agent', 'Review: worker transfer queue edge cases', 'ServerWorker', 845],
 		['agent', 'Refactor: composer controls dock props', 'DesktopWorker', 2410],
-		['agent', 'Investigate: usage ring stale after reconnect', 'Unraid', 512],
+		['agent', 'Investigate: usage ring stale after reconnect', 'ServerWorker', 512],
 		['agent', 'Test: Android WebView keyboard insets', 'DesktopWorker', 96],
-		['agent', 'Fix: settled chats reopening on another worker', 'Unraid', 3305],
-		['agent', 'Audit: session cache hit rate, last 24 hours', 'Unraid', 1288],
+		['agent', 'Fix: settled chats reopening on another worker', 'ServerWorker', 3305],
+		['agent', 'Audit: session cache hit rate, last 24 hours', 'ServerWorker', 1288],
 		['agent', 'Port: model picker favorites to mobile', 'DesktopWorker', 640],
-		['agent', 'Fix: hub rate limit on live checks', 'Unraid', 177],
+		['agent', 'Fix: hub rate limit on live checks', 'ServerWorker', 177],
 		['agent', 'Draft: release notes for 0.8.24', 'DesktopWorker', 410],
 		['agent', 'General Purpose: AppImage auto-update feed', 'DesktopWorker', 1902],
 		['shell', 'npm run dist:linux', 'DesktopWorker', 212],
 		['shell', 'npm ci --prefix frontend', 'DesktopWorker', 31],
-		['shell', 'docker logs -f ai-shuffle', 'Unraid', 4020],
-		['shell', 'ruff check app/', 'Unraid', 12]
+		['shell', 'docker logs -f ai-shuffle', 'ServerWorker', 4020],
+		['shell', 'ruff check app/', 'ServerWorker', 12]
 	];
 	const now = Date.now();
 	const iso = (agoSec: number) => new Date(now - agoSec * 1000).toISOString();

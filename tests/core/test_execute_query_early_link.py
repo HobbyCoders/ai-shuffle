@@ -151,7 +151,7 @@ async def test_resume_repersists_launched_model_on_model_switch(engine_mocks):
     model must re-persist sessions.launched_model at init — even though the
     sdk_session_id link itself stays resume-gated.
 
-    The Unraid host-op guard reads sessions.launched_model with precedence
+    The ServerWorker host-op guard reads sessions.launched_model with precedence
     over the transcript's msg_model. When a pooled client is evicted/dead (or
     requires_reconnect) the resume spawns a fresh subprocess with whatever
     model options carry now; if that model differs from the last launch and we

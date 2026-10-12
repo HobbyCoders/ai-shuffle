@@ -26,7 +26,7 @@ from app.core import owner_auth, preview_access
 from app.core.config import settings
 
 SESSION = "sess-preview-1542"
-HOST = "10.0.0.135:18090"
+HOST = "10.0.0.30:18090"
 ORIGIN = f"http://{HOST}"
 VITE = {"X-Forwarded-Host": "localhost:5173"}
 # Obsolete ``session`` cookies another installation on the same host could
@@ -100,7 +100,7 @@ def _client(
     client = TestClient(
         Surface(app, ingress),
         base_url=ORIGIN,
-        client=("10.0.0.200", 54321),
+        client=("10.0.0.20", 54321),
         headers=headers,
     )
     if session:

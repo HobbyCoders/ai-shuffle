@@ -9,10 +9,10 @@ from tests.core.network.harness import converge, join
 
 
 def network(workers, *, online=True):
-    """A ("Unraid") and B ("Windows") on one account; tests run as B."""
+    """A ("ServerWorker") and B ("Windows") on one account; tests run as B."""
     a, b = workers("unraid"), workers("windows")
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
     join(a, b, name="Windows")
     converge([a, b])
     transport._last_contact.pop(a.device_id, None)
@@ -29,8 +29,8 @@ def resolve(value, **kwargs):
 def test_resolves_an_exact_name_or_device_id(workers):
     a, b = network(workers)
     with b.active():
-        assert resolve("unraid")["device_id"] == a.device_id
-        assert resolve(f"  {a.device_id} ")["device_name"] == "Unraid"
+        assert resolve("serverworker")["device_id"] == a.device_id
+        assert resolve(f"  {a.device_id} ")["device_name"] == "ServerWorker"
         own = resolve("Windows")
         assert own["is_self"] is True and own["device_id"] == b.device_id
         assert resolve(b.device_id)["is_self"] is True
@@ -41,14 +41,14 @@ def test_unknown_worker_is_refused_with_the_choices(workers):
     with b.active(), pytest.raises(ValueError) as refused:
         resolve("Laptop")
     assert "Unknown worker 'Laptop'" in str(refused.value)
-    assert "Unraid (online)" in str(refused.value) and "Windows (this worker)" in str(refused.value)
+    assert "ServerWorker (online)" in str(refused.value) and "Windows (this worker)" in str(refused.value)
 
 
 def test_offline_worker_is_refused_by_name_never_replaced_by_this_one(workers):
     _a, b = network(workers, online=False)
     with b.active(), pytest.raises(ValueError) as refused:
-        resolve("Unraid")
-    assert str(refused.value) == ("Unraid is offline; nothing was dispatched. Ask the user to bring it "
+        resolve("ServerWorker")
+    assert str(refused.value) == ("ServerWorker is offline; nothing was dispatched. Ask the user to bring it "
                                   "online, or omit worker to run it here.")
 
 
@@ -63,8 +63,8 @@ def test_inactive_member_is_refused(workers, monkeypatch):
                 return membership.Member(**{**found.__dict__, "status": "revoked"})
             return found
         monkeypatch.setattr(engine.context(), "member", member, raising=False)
-        with pytest.raises(ValueError, match="Unraid is not an active worker"):
-            resolve("Unraid")
+        with pytest.raises(ValueError, match="ServerWorker is not an active worker"):
+            resolve("ServerWorker")
         assert runners.other_workers() == []
 
 
@@ -85,7 +85,7 @@ def test_not_networked_is_refused(workers):
     solo = workers("solo")
     with solo.active():
         with pytest.raises(ValueError, match="not part of a worker network; omit worker to run it here"):
-            resolve("Unraid")
+            resolve("ServerWorker")
         assert runners.other_workers() == []
 
 
@@ -93,7 +93,7 @@ def test_other_workers_lists_peers_online_or_not(workers):
     _a, b = network(workers, online=False)
     with b.active():
         rows = runners.other_workers()
-    assert [(row["device_name"], row["online"]) for row in rows] == [("Unraid", False)]
+    assert [(row["device_name"], row["online"]) for row in rows] == [("ServerWorker", False)]
 
 
 def test_presence_carries_remote_task_and_provider_kinds(workers):

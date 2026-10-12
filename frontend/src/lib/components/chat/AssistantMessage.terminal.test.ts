@@ -14,7 +14,7 @@ import { TerminalApiError, type TerminalTargets } from '$lib/api/terminals';
 import { terminals } from '$lib/stores/terminals.svelte';
 
 const targets: TerminalTargets = {
-	worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+	worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
 	shells: [{ name: 'bash', default: true }], default_shell: 'bash',
 	default_folder: { path: '/workspace/app', source: 'project' }, limit: 8, open: 0,
 };
@@ -42,7 +42,7 @@ describe('command block terminal buttons', () => {
 		const copyAt = order.findIndex((label) => /copy/i.test(label));
 		expect(order.indexOf('Open terminal')).toBeLessThan(copyAt);
 		expect(order.indexOf('Open and paste')).toBeLessThan(copyAt);
-		expect(head(view).querySelector('.cb-target')?.textContent).toBe('Unraid · app · bash');
+		expect(head(view).querySelector('.cb-target')?.textContent).toBe('ServerWorker · app · bash');
 	});
 
 	it('queues the registry command for the panel when clicked, and runs nothing itself', async () => {
@@ -94,7 +94,7 @@ describe('command block terminal buttons', () => {
 		expect(row.classList.contains('outside')).toBe(true);
 		expect(row.querySelector('.cb-where-path')?.textContent).toBe('/mnt/user/appdata/ai-shuffle');
 		expect(row.querySelector('.cb-where-flag')?.textContent).toBe("Outside this chat's folder");
-		expect(row.querySelector('.cb-where-meta')?.textContent).toBe('Unraid · bash');
+		expect(row.querySelector('.cb-where-meta')?.textContent).toBe('ServerWorker · bash');
 		await fireEvent.click(head(view).querySelector('[data-act="paste"]')!);
 		expect(request).toHaveBeenCalledWith('s1', 'paste', expect.objectContaining({ command: 'rm -rf build', cwd: '/mnt/user/appdata/ai-shuffle' }), expect.anything());
 		request.mockRestore();

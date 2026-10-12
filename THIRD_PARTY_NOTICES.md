@@ -1,6 +1,6 @@
 # Third-party notices
 
-AI Shuffle is proprietary software from HobbyCoders. It includes and
+AI Shuffle is AGPL-3.0-only software from HobbyCoders. It includes and
 redistributes third-party software under the licenses listed below. Each
 component remains under its own license; nothing here changes those terms.
 
@@ -84,7 +84,7 @@ is at the end of this file.
 
 ## Python packages
 
-Installed into the Docker image and the desktop installer's Python runtime (`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the fluid harness, with their dependencies). No Claude Code CLI binary is bundled; the user's separately installed stock CLI is licensed by Anthropic under its own terms. Platform-specific dependencies were resolved for win32.
+Installed into the Docker image and the desktop installer's Python runtime (`requirements.txt`, `requirements-dev.txt`, `requirements-native.txt` and the fluid harness, with their dependencies). No Claude Code CLI binary is bundled; the user's separately installed stock CLI is licensed by Anthropic under its own terms. The inventory covers every platform in `requirements.lock` and `requirements-native.lock`, including build requirements and the patched pynput distribution, plus development dependencies. Added package licenses were checked against their versioned PyPI metadata. Regeneration must pass `tests/scripts/test_third_party_notices.py`; resolve any missing platform metadata instead of dropping its entries.
 
 | Package | Version | License | URL |
 | --- | --- | --- | --- |
@@ -98,6 +98,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | anyio | 4.15.1 | MIT | https://github.com/agronholm/anyio |
 | APScheduler | 3.11.3 | MIT License | https://github.com/agronholm/apscheduler |
 | asyncssh | 2.24.0 | EPL-2.0 OR GPL-2.0-or-later | http://asyncssh.timeheart.net |
+| audioop-lts | 0.2.2 | PSF-2.0 | https://pypi.org/project/audioop-lts/0.2.2/ |
 | attrs | 26.1.0 | MIT | https://github.com/python-attrs/attrs |
 | bcrypt | 4.2.1 | Apache Software License | https://github.com/pyca/bcrypt/ |
 | CacheControl | 0.14.4 | Apache-2.0 | https://pypi.org/project/CacheControl/ |
@@ -110,6 +111,8 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | coverage | 7.16.1 | Apache-2.0 | https://github.com/coveragepy/coveragepy |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | discord.py | 2.7.1 | MIT License | https://pypi.org/project/discord-py/ |
+| evdev | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev/2.0.0/ |
+| evdev-binary | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev-binary/2.0.0/ |
 | execnet | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
 | fastapi | 0.141.1 | MIT | https://github.com/fastapi/fastapi |
 | firebase-admin | 6.8.0 | Apache Software License | https://github.com/firebase/firebase-admin-python |
@@ -128,6 +131,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | grpcio | 1.84.0 | Apache-2.0 | https://grpc.io |
 | grpcio-status | 1.84.0 | Apache-2.0 | https://grpc.io |
 | h11 | 0.16.0 | MIT License | https://github.com/python-hyper/h11 |
+| hatchling | 1.32.4 | MIT | https://pypi.org/project/hatchling/1.32.4/ |
 | httpcore | 1.0.9 | BSD-3-Clause | https://www.encode.io/httpcore/ |
 | httplib2 | 0.32.0 | MIT License | https://github.com/httplib2/httplib2 |
 | httptools | 0.8.0 | MIT | https://github.com/MagicStack/httptools |
@@ -138,12 +142,14 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | jsonschema | 4.26.0 | MIT | https://github.com/python-jsonschema/jsonschema |
 | jsonschema-specifications | 2025.9.1 | MIT | https://github.com/python-jsonschema/jsonschema-specifications |
 | magic-filter | 1.0.12 | MIT | https://github.com/aiogram/magic-filter |
+| mcp | 1.27.2 | MIT License | https://modelcontextprotocol.io |
 | mcp | 1.30.0 | MIT License | https://modelcontextprotocol.io |
 | msgpack | 1.2.2 | Apache-2.0 | https://msgpack.org/ |
 | mss | 10.2.0 | MIT License | https://github.com/BoboTiG/python-mss |
 | multidict | 6.9.1 | Apache License 2.0 | https://github.com/aio-libs/multidict |
 | opentelemetry-api | 1.44.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-api |
 | packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
+| pathspec | 1.1.1 | MPL-2.0 | https://pypi.org/project/pathspec/1.1.1/ |
 | pillow | 12.3.0 | MIT-CMU | https://python-pillow.github.io |
 | pluggy | 1.6.0 | MIT License | https://pypi.org/project/pluggy/ |
 | propcache | 0.5.4 | Apache-2.0 | https://github.com/aio-libs/propcache |
@@ -160,7 +166,12 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | pygit2 | 1.20.1 | GPLv2 with linking exception | https://github.com/libgit2/pygit2 |
 | Pygments | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | PyJWT | 2.15.0 | MIT | https://github.com/jpadilla/pyjwt |
-| pynput | 1.8.2 | GNU Lesser General Public License v3 (LGPLv3) | https://github.com/moses-palmer/pynput |
+| pynput | 1.8.2+shuffle1 | GNU Lesser General Public License v3 (LGPLv3) | https://github.com/moses-palmer/pynput |
+| pyobjc-core | 12.2.2 | MIT | https://pypi.org/project/pyobjc-core/12.2.2/ |
+| pyobjc-framework-ApplicationServices | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-ApplicationServices/12.2.2/ |
+| pyobjc-framework-Cocoa | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-Cocoa/12.2.2/ |
+| pyobjc-framework-CoreText | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-CoreText/12.2.2/ |
+| pyobjc-framework-Quartz | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-Quartz/12.2.2/ |
 | pyparsing | 3.3.3 | MIT | https://github.com/pyparsing/pyparsing/ |
 | pytest | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | pytest-asyncio | 1.4.0 | Apache-2.0 | https://github.com/pytest-dev/pytest-asyncio |
@@ -172,6 +183,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | python-dateutil | 2.9.0.post0 | Apache Software License; BSD License | https://github.com/dateutil/dateutil |
 | python-dotenv | 1.2.2 | BSD-3-Clause | https://github.com/theskumar/python-dotenv |
 | python-multipart | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
+| python-xlib | 0.33 | LGPL-2.0-or-later | https://pypi.org/project/python-xlib/0.33/ |
 | pywin32 | 312 | Python Software Foundation License | https://github.com/mhammond/pywin32 |
 | PyYAML | 6.0.3 | MIT License | https://github.com/yaml/pyyaml |
 | qrcode | 8.2 | BSD License; Other/Proprietary License | https://github.com/lincolnloop/python-qrcode |
@@ -183,6 +195,8 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | sniffio | 1.3.1 | Apache Software License; MIT License | https://github.com/python-trio/sniffio |
 | sse-starlette | 3.4.11 | BSD-3-Clause | https://github.com/sysid/sse-starlette |
 | starlette | 1.6.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
+| tomlkit | 0.15.1 | MIT | https://pypi.org/project/tomlkit/0.15.1/ |
+| trove-classifiers | 2026.9.21.13 | Apache-2.0 | https://pypi.org/project/trove-classifiers/2026.9.21.13/ |
 | typing-inspection | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
 | typing_extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | tzdata | 2026.4 | Apache-2.0 | https://github.com/python/tzdata |
@@ -190,6 +204,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | uritemplate | 4.2.0 | BSD 3-Clause OR Apache-2.0 | https://github.com/python-hyper/uritemplate |
 | urllib3 | 2.8.0 | MIT | https://github.com/urllib3/urllib3 |
 | uvicorn | 0.32.1 | BSD License | https://www.uvicorn.org/ |
+| uvloop | 0.22.1 | Apache Software License; MIT License | https://github.com/MagicStack/uvloop |
 | watchfiles | 1.3.0 | MIT License | https://github.com/samuelcolvin/watchfiles |
 | websockets | 16.1.1 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 | yarl | 1.25.1 | Apache-2.0 | https://github.com/aio-libs/yarl |
@@ -360,6 +375,9 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | @vitest/snapshot | 4.1.11 | MIT | https://www.npmjs.com/package/@vitest/snapshot/v/4.1.11 |
 | @vitest/spy | 4.1.11 | MIT | https://www.npmjs.com/package/@vitest/spy/v/4.1.11 |
 | @vitest/utils | 4.1.11 | MIT | https://www.npmjs.com/package/@vitest/utils/v/4.1.11 |
+| @xterm/addon-fit | 0.11.0 | MIT | https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0 |
+| @xterm/addon-search | 0.16.0 | MIT | https://www.npmjs.com/package/@xterm/addon-search/v/0.16.0 |
+| @xterm/xterm | 6.0.0 | MIT | https://www.npmjs.com/package/@xterm/xterm/v/6.0.0 |
 | acorn | 8.18.0 | MIT | https://www.npmjs.com/package/acorn/v/8.18.0 |
 | agent-base | 7.1.4 | MIT | https://www.npmjs.com/package/agent-base/v/7.1.4 |
 | ansi-regex | 5.0.1 | MIT | https://www.npmjs.com/package/ansi-regex/v/5.0.1 |
@@ -387,10 +405,10 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | deepmerge | 4.3.1 | MIT | https://www.npmjs.com/package/deepmerge/v/4.3.1 |
 | dequal | 2.0.3 | MIT | https://www.npmjs.com/package/dequal/v/2.0.3 |
 | detect-libc | 2.1.2 | Apache-2.0 | https://www.npmjs.com/package/detect-libc/v/2.1.2 |
-| devalue | 5.9.2 | MIT | https://www.npmjs.com/package/devalue/v/5.9.2 |
+| devalue | 5.9.3 | MIT | https://www.npmjs.com/package/devalue/v/5.9.3 |
 | devlop | 1.1.0 | MIT | https://www.npmjs.com/package/devlop/v/1.1.0 |
 | dom-accessibility-api | 0.5.16 | MIT | https://www.npmjs.com/package/dom-accessibility-api/v/0.5.16 |
-| dompurify | 3.4.13 | (MPL-2.0 OR Apache-2.0) | https://www.npmjs.com/package/dompurify/v/3.4.13 |
+| dompurify | 3.4.16 | (MPL-2.0 OR Apache-2.0) | https://www.npmjs.com/package/dompurify/v/3.4.16 |
 | enhanced-resolve | 5.24.5 | MIT | https://www.npmjs.com/package/enhanced-resolve/v/5.24.5 |
 | entities | 6.0.1 | BSD-2-Clause | https://www.npmjs.com/package/entities/v/6.0.1 |
 | es-module-lexer | 2.1.0 | MIT | https://www.npmjs.com/package/es-module-lexer/v/2.1.0 |
@@ -491,7 +509,7 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | shiki | 4.4.3 | MIT | https://www.npmjs.com/package/shiki/v/4.4.3 |
 | siginfo | 2.0.0 | ISC | https://www.npmjs.com/package/siginfo/v/2.0.0 |
 | sirv | 3.0.2 | MIT | https://www.npmjs.com/package/sirv/v/3.0.2 |
-| source-map-js | 1.2.1 | BSD-3-Clause | https://www.npmjs.com/package/source-map-js/v/1.2.1 |
+| source-map-js | 1.2.2 | BSD-3-Clause | https://www.npmjs.com/package/source-map-js/v/1.2.2 |
 | space-separated-tokens | 2.0.2 | MIT | https://www.npmjs.com/package/space-separated-tokens/v/2.0.2 |
 | stackback | 0.0.2 | MIT | https://www.npmjs.com/package/stackback/v/0.0.2 |
 | std-env | 4.1.0 | MIT | https://www.npmjs.com/package/std-env/v/4.1.0 |
@@ -543,7 +561,7 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | Package | Version | License | URL |
 | --- | --- | --- | --- |
 | @hono/node-server | 2.1.0 | MIT | https://www.npmjs.com/package/@hono/node-server/v/2.1.0 |
-| @modelcontextprotocol/sdk | 1.30.0 | MIT | https://www.npmjs.com/package/@modelcontextprotocol/sdk/v/1.30.0 |
+| @modelcontextprotocol/sdk | 1.32.1 | MIT | https://www.npmjs.com/package/@modelcontextprotocol/sdk/v/1.32.1 |
 | accepts | 2.0.0 | MIT | https://www.npmjs.com/package/accepts/v/2.0.0 |
 | ajv | 8.20.0 | MIT | https://www.npmjs.com/package/ajv/v/8.20.0 |
 | ajv-formats | 3.0.1 | MIT | https://www.npmjs.com/package/ajv-formats/v/3.0.1 |
@@ -573,7 +591,7 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | express | 5.2.1 | MIT | https://www.npmjs.com/package/express/v/5.2.1 |
 | express-rate-limit | 8.6.0 | MIT | https://www.npmjs.com/package/express-rate-limit/v/8.6.0 |
 | fast-deep-equal | 3.1.3 | MIT | https://www.npmjs.com/package/fast-deep-equal/v/3.1.3 |
-| fast-uri | 3.1.7 | BSD-3-Clause | https://www.npmjs.com/package/fast-uri/v/3.1.7 |
+| fast-uri | 3.1.8 | BSD-3-Clause | https://www.npmjs.com/package/fast-uri/v/3.1.8 |
 | finalhandler | 2.1.1 | MIT | https://www.npmjs.com/package/finalhandler/v/2.1.1 |
 | forwarded | 0.2.0 | MIT | https://www.npmjs.com/package/forwarded/v/0.2.0 |
 | fresh | 2.0.0 | MIT | https://www.npmjs.com/package/fresh/v/2.0.0 |
@@ -583,11 +601,11 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | gopd | 1.2.0 | MIT | https://www.npmjs.com/package/gopd/v/1.2.0 |
 | has-symbols | 1.1.0 | MIT | https://www.npmjs.com/package/has-symbols/v/1.1.0 |
 | hasown | 2.0.4 | MIT | https://www.npmjs.com/package/hasown/v/2.0.4 |
-| hono | 4.13.5 | MIT | https://www.npmjs.com/package/hono/v/4.13.5 |
+| hono | 4.13.12 | MIT | https://www.npmjs.com/package/hono/v/4.13.12 |
 | http-errors | 2.0.1 | MIT | https://www.npmjs.com/package/http-errors/v/2.0.1 |
 | iconv-lite | 0.7.3 | MIT | https://www.npmjs.com/package/iconv-lite/v/0.7.3 |
 | inherits | 2.0.4 | ISC | https://www.npmjs.com/package/inherits/v/2.0.4 |
-| ip-address | 10.4.0 | MIT | https://www.npmjs.com/package/ip-address/v/10.4.0 |
+| ip-address | 10.7.2 | MIT | https://www.npmjs.com/package/ip-address/v/10.7.2 |
 | ipaddr.js | 1.9.1 | MIT | https://www.npmjs.com/package/ipaddr.js/v/1.9.1 |
 | is-promise | 4.0.0 | MIT | https://www.npmjs.com/package/is-promise/v/4.0.0 |
 | isexe | 2.0.0 | ISC | https://www.npmjs.com/package/isexe/v/2.0.0 |
@@ -610,7 +628,7 @@ From `browser-mcp/package-lock.json`, production dependencies.
 | path-to-regexp | 8.4.2 | MIT | https://www.npmjs.com/package/path-to-regexp/v/8.4.2 |
 | pkce-challenge | 5.0.1 | MIT | https://www.npmjs.com/package/pkce-challenge/v/5.0.1 |
 | playwright-core | 1.61.1 | Apache-2.0 | https://www.npmjs.com/package/playwright-core/v/1.61.1 |
-| proxy-addr | 2.0.7 | MIT | https://www.npmjs.com/package/proxy-addr/v/2.0.7 |
+| proxy-addr | 2.0.8 | MIT | https://www.npmjs.com/package/proxy-addr/v/2.0.8 |
 | qs | 6.16.0 | BSD-3-Clause | https://www.npmjs.com/package/qs/v/6.16.0 |
 | range-parser | 1.3.0 | MIT | https://www.npmjs.com/package/range-parser/v/1.3.0 |
 | raw-body | 3.0.2 | MIT | https://www.npmjs.com/package/raw-body/v/3.0.2 |
@@ -655,6 +673,34 @@ From `desktop/package-lock.json`, production dependencies.
 | --- | --- | --- | --- |
 | pend | 1.2.0 | MIT | https://www.npmjs.com/package/pend/v/1.2.0 |
 | yauzl | 3.4.0 | MIT | https://www.npmjs.com/package/yauzl/v/3.4.0 |
+
+## Mobile and Android packages
+
+`mobile/package.json` shares frontend's installed dependencies via `mobile/scripts/link-deps.mjs`; there is no separate mobile lockfile. Its JavaScript and font packages are included in the frontend table above.
+
+Direct app and test dependencies declared in `android/app/build.gradle.kts` are listed below; test dependencies do not ship in the APK. License sources are the linked Maven POMs. Gradle resolves additional transitive dependencies at build time (there is no committed Gradle dependency lock); the release build's resolved dependency report must be reviewed as well.
+
+| Package | Version | License | URL |
+| --- | --- | --- | --- |
+| androidx.appcompat:appcompat | 1.7.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/appcompat/appcompat/1.7.0/appcompat-1.7.0.pom |
+| androidx.constraintlayout:constraintlayout | 2.1.4 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/constraintlayout/constraintlayout/2.1.4/constraintlayout-2.1.4.pom |
+| androidx.core:core-ktx | 1.13.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/core/core-ktx/1.13.1/core-ktx-1.13.1.pom |
+| androidx.lifecycle:lifecycle-runtime-ktx | 2.7.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/lifecycle/lifecycle-runtime-ktx/2.7.0/lifecycle-runtime-ktx-2.7.0.pom |
+| androidx.security:security-crypto | 1.1.0-alpha06 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/security/security-crypto/1.1.0-alpha06/security-crypto-1.1.0-alpha06.pom |
+| androidx.test.espresso:espresso-core | 3.6.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/espresso/espresso-core/3.6.1/espresso-core-3.6.1.pom |
+| androidx.test.ext:junit | 1.2.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/ext/junit/1.2.1/junit-1.2.1.pom |
+| androidx.test:rules | 1.6.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/rules/1.6.1/rules-1.6.1.pom |
+| androidx.test:runner | 1.6.2 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/runner/1.6.2/runner-1.6.2.pom |
+| androidx.webkit:webkit | 1.10.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/webkit/webkit/1.10.0/webkit-1.10.0.pom |
+| com.google.android.material:material | 1.12.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/com/google/android/material/material/1.12.0/material-1.12.0.pom |
+| com.journeyapps:zxing-android-embedded | 4.3.0 | Apache-2.0 | https://repo.maven.apache.org/maven2/com/journeyapps/zxing-android-embedded/4.3.0/zxing-android-embedded-4.3.0.pom |
+| com.squareup.okhttp3:mockwebserver | 4.12.0 | Apache-2.0 | https://repo.maven.apache.org/maven2/com/squareup/okhttp3/mockwebserver/4.12.0/mockwebserver-4.12.0.pom |
+| com.squareup.okhttp3:okhttp | 4.12.0 | Apache-2.0 | https://repo.maven.apache.org/maven2/com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.pom |
+| junit:junit | 4.13.2 | EPL-1.0 | https://repo.maven.apache.org/maven2/junit/junit/4.13.2/junit-4.13.2.pom |
+| net.openid:appauth | 0.11.1 | Apache-2.0 | https://repo.maven.apache.org/maven2/net/openid/appauth/0.11.1/appauth-0.11.1.pom |
+| org.jetbrains.kotlinx:kotlinx-coroutines-android | 1.7.3 | Apache-2.0 | https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-android/1.7.3/kotlinx-coroutines-android-1.7.3.pom |
+| org.json:json | 20240303 | Public domain | https://repo.maven.apache.org/maven2/org/json/json/20240303/json-20240303.pom |
+| org.robolectric:robolectric | 4.16.1 | MIT | https://repo.maven.apache.org/maven2/org/robolectric/robolectric/4.16.1/robolectric-4.16.1.pom |
 
 ## Apache License 2.0
 

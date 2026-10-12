@@ -85,7 +85,7 @@ describe('mirrored chat sync drains (#2227)', () => {
 		const reloadSession = vi.fn(() => feedController.restart('s1'));
 
 		feedController.start('s1');
-		render(MirrorSyncGate, { sessionId: 's1', remote: true, deviceName: 'Unraid', onCaughtUp: reloadSession, children });
+		render(MirrorSyncGate, { sessionId: 's1', remote: true, deviceName: 'ServerWorker', onCaughtUp: reloadSession, children });
 		await vi.advanceTimersByTimeAsync(0);
 		// First catch-up: the one allowed full rebuild.
 		expect(reloadSession).toHaveBeenCalledOnce();

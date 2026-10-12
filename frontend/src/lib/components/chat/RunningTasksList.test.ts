@@ -137,9 +137,9 @@ describe('RunningTasksList grouping and counts', () => {
 	});
 
 	it('shows elapsed time and the worker on each row', () => {
-		setTasks([task('a', { subject: 'Remote job', worker: { name: 'Unraid' } }), task('b', { subject: 'Local job' })]);
+		setTasks([task('a', { subject: 'Remote job', worker: { name: 'ServerWorker' } }), task('b', { subject: 'Local job' })]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
-		expect(within(rowOf('Remote job')).getByText('Unraid')).toBeTruthy();
+		expect(within(rowOf('Remote job')).getByText('ServerWorker')).toBeTruthy();
 		expect(within(rowOf('Local job')).getByText('DesktopWorker')).toBeTruthy();
 		expect(within(rowOf('Local job')).getByText(/^1m \d+s$/)).toBeTruthy();
 	});
@@ -203,7 +203,7 @@ describe('RunningTasksList stopping', () => {
 	});
 
 	it('stops one task and keeps it as Stopped with its worker', async () => {
-		setTasks([task('a', { subject: 'Remote job', worker: { name: 'Unraid' } }), task('b')]);
+		setTasks([task('a', { subject: 'Remote job', worker: { name: 'ServerWorker' } }), task('b')]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Remote job' }));
 		expect(mocks.stopSessionTask).toHaveBeenCalledWith('s1', 'a');
@@ -211,7 +211,7 @@ describe('RunningTasksList stopping', () => {
 		// The next update drops it from the running list.
 		setTasks([task('b')]);
 		await waitFor(() => expect(within(rowOf('Remote job')).getByText('Stopped')).toBeTruthy());
-		expect(within(rowOf('Remote job')).getByText('Unraid')).toBeTruthy();
+		expect(within(rowOf('Remote job')).getByText('ServerWorker')).toBeTruthy();
 		expect(within(rowOf('Remote job')).queryByRole('button', { name: /Stop/ })).toBeNull();
 	});
 

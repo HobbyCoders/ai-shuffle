@@ -19,7 +19,7 @@ describe("loopback classification", () => {
     "treats %s as loopback",
     (host) => expect(isLoopbackHost(host)).toBe(true),
   );
-  it.each(["10.0.0.200", "172.17.0.5", "example.com", "192.168.1.4", "localhost.evil.com"])(
+  it.each(["10.0.0.20", "172.17.0.5", "example.com", "192.168.1.4", "localhost.evil.com"])(
     "treats %s as routable",
     (host) => expect(isLoopbackHost(host)).toBe(false),
   );

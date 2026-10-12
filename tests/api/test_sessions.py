@@ -333,7 +333,7 @@ class TestControllableAnnotation:
     def test_remote_online_with_base_url_is_controllable(self):
         """Online owner with a URL remains controllable."""
         installs = {"B": {"online": True, "device_name": "Worker",
-                          "base_url": "http://10.0.0.200:8000"}}
+                          "base_url": "http://10.0.0.20:8000"}}
         sessions = [{"id": "s1", "instance_id": "B"}]
         self._annotate(sessions, installs)
         assert sessions[0]["controllable"] is True
@@ -341,7 +341,7 @@ class TestControllableAnnotation:
     def test_remote_offline_is_not_controllable(self):
         """Offline owner → history stays readable but read-only."""
         installs = {"B": {"online": False, "device_name": "Worker",
-                          "base_url": "http://10.0.0.200:8000"}}
+                          "base_url": "http://10.0.0.20:8000"}}
         sessions = [{"id": "s1", "instance_id": "B"}]
         self._annotate(sessions, installs)
         assert sessions[0]["device_online"] is False

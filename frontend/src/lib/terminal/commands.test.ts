@@ -51,7 +51,7 @@ describe('stripPrompts', () => {
 
 describe('fenceKeys', () => {
 	it('parses quoted and bare values', () => {
-		expect(fenceKeys(`bash cwd='/a b' on="Unraid" shell=bash`)).toEqual({ cwd: '/a b', on: 'Unraid', shell: 'bash' });
+		expect(fenceKeys(`bash cwd='/a b' on="ServerWorker" shell=bash`)).toEqual({ cwd: '/a b', on: 'ServerWorker', shell: 'bash' });
 	});
 });
 

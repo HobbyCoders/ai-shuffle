@@ -203,8 +203,8 @@ describe('LAN-direct sync', () => {
 		api.put.mockResolvedValue({ enabled: false, addresses: [], advertised: [] });
 		await updateLanSettings({ enabled: false });
 		expect(api.put).toHaveBeenCalledWith('/network/lan', { enabled: false });
-		await updateLanSettings({ addresses: ['10.0.0.200:8001'] });
-		expect(api.put).toHaveBeenLastCalledWith('/network/lan', { addresses: ['10.0.0.200:8001'] });
+		await updateLanSettings({ addresses: ['10.0.0.20:8001'] });
+		expect(api.put).toHaveBeenLastCalledWith('/network/lan', { addresses: ['10.0.0.20:8001'] });
 	});
 
 	it('labels each peer route', () => {

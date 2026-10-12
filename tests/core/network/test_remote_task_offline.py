@@ -1,7 +1,7 @@
 """No parent waits forever on a worker that went away (S12).
 
-Two in-process workers over the real signed control endpoint: Unraid runs the
-child, Windows runs the parent chat. Unraid going away is the test router
+Two in-process workers over the real signed control endpoint: ServerWorker runs the
+child, Windows runs the parent chat. ServerWorker going away is the test router
 refusing its address; time is passed to ``check_targets``, never slept.
 """
 import asyncio
@@ -64,7 +64,7 @@ def after(since, minutes):
 
 
 def go_quiet(b, router, child):
-    """Unraid stops answering; the first check records since when. Returns that time."""
+    """ServerWorker stops answering; the first check records since when. Returns that time."""
     router.down.add(UNRAID_URL)
     with b.active():
         assert asyncio.run(remote_task.check_targets()) == 1
@@ -91,7 +91,7 @@ def test_a_quiet_worker_ends_the_wait_with_one_notice_after_30_minutes(workers, 
         [wake] = wakes()
         prompt = wake["prompt"]
         assert f"<task-id>{child}</task-id>" in prompt and "<status>error</status>" in prompt
-        assert f"Unraid {NOTICE}" in prompt and "may still be running there" in prompt
+        assert f"ServerWorker {NOTICE}" in prompt and "may still be running there" in prompt
         assert "its report still arrives here" in prompt
         # The wait is over: the record settled, nothing parks on it, no card spins.
         task = task_registry.get_task("caller", child)
@@ -106,7 +106,7 @@ def test_a_quiet_worker_ends_the_wait_with_one_notice_after_30_minutes(workers, 
         # Once per run, however long it stays away.
         notice(b, since, minutes=90)
         assert len(wakes()) == 1
-    # Nothing was sent to Unraid for it: the child may still be running there.
+    # Nothing was sent to ServerWorker for it: the child may still be running there.
     assert not [r for r in router.requests(UNRAID_URL) if r[1].endswith("/task-stop")]
 
 
@@ -156,7 +156,7 @@ def test_a_late_report_is_accepted_and_wakes_the_caller_once_more(workers, monke
         assert len(wakes()) == 2
         prompt = wakes()[-1]["prompt"]
         assert "<status>completed</status>" in prompt and "Disk is 40% full." in prompt
-        assert "Unraid answered again after the notice" in prompt
+        assert "ServerWorker answered again after the notice" in prompt
         task = task_registry.get_task("caller", child)
         assert task["status"] == "completed" and task["reportPath"]
         assert remote_tasks.get_dispatch(child)["completion_id"]
@@ -239,7 +239,7 @@ def test_stop_on_the_parent_after_the_notice_reaches_the_child_when_its_worker_r
         assert dispatch["stop_requested_at"] and dispatch["stop_reason"] == "user_stopped"
         assert dispatch["stop_state"] == remote_tasks.STOP_PENDING
     with a.active():
-        assert not remote_tasks.get_child(child)["stop_requested_at"]  # Unraid is still away
+        assert not remote_tasks.get_child(child)["stop_requested_at"]  # ServerWorker is still away
     # Stop again: idempotent, nothing new is asked for.
     assert press_stop(b) == []
 
@@ -335,11 +335,11 @@ def test_the_notice_withdraws_open_prompts_and_a_returned_child_asks_again(worke
             since = remote_tasks.get_dispatch(child)["unreachable_since"]
             await remote_task.check_targets(now=after(since, 31))
             assert interactions.get_interaction(row["id"])["state"] == "cancelled"
-            # The withdrawn prompt resolves as a deny it cannot deliver (Unraid is away).
+            # The withdrawn prompt resolves as a deny it cannot deliver (ServerWorker is away).
             await asyncio.wait_for(proxy, 10)
             assert interactions.get_pending_interactions("caller") == []
             router.down.clear()
-            # Unraid is back and the child still runs: its next prompt is shown.
+            # ServerWorker is back and the child still runs: its next prompt is shown.
             answer = await relay.handle_task_approval(request_body(child, approval_id="c" * 32),
                                                       a.device_id)
             assert answer["accepted"] is True and "duplicate" not in answer
@@ -353,9 +353,9 @@ def test_a_message_to_a_child_declared_offline_says_so(workers, monkeypatch):
     notice(b, go_quiet(b, router, child))
     outcome = send(b, child, "Also check the logs.")
     assert outcome.is_error
-    assert outcome.text.startswith("Could not deliver to Default on Unraid: Unraid has not answered since ")
+    assert outcome.text.startswith("Could not deliver to Default on ServerWorker: ServerWorker has not answered since ")
     assert "stopped waiting for it" in outcome.text and "may still be running there" in outcome.text
-    assert "Send the message again when Unraid is back" in outcome.text
+    assert "Send the message again when ServerWorker is back" in outcome.text
     router.down.clear()
     # Back, and the child still runs there: the message is delivered as usual.
     outcome = send(b, child, "Also check the logs.")
@@ -380,7 +380,7 @@ def test_spend_after_the_notice_is_still_counted_when_the_worker_returns(workers
         assert spent() == pytest.approx(2.0)
     notice(b, go_quiet(b, router, child))
     with a.active():
-        book(child, 1.5)  # it kept working while Unraid could not be reached
+        book(child, 1.5)  # it kept working while ServerWorker could not be reached
     with b.active():
         assert len(wakes()) == 1
         assert refresh() == [] and spent() == pytest.approx(2.0)
@@ -403,7 +403,7 @@ def run_swarm(a, b, router, finish):
     async def run():
         async def dispatch(data, ctx):
             result = await remote_task.dispatch_remote(
-                worker={"device_id": a.device_id, "device_name": "Unraid"},
+                worker={"device_id": a.device_id, "device_name": "ServerWorker"},
                 caller_row=database.get_session("caller"), caller_session_id="caller",
                 root_session_id="caller", depth=1, profile_id="default", agent_name="Default",
                 result_agent="default", provider_id=None, model_id="sonnet", effort=None,
@@ -494,7 +494,7 @@ def test_a_target_restart_reports_the_child_failed_and_it_can_be_continued(worke
     finish_wake(a, b, wake)
     outcome = send(b, child, "Carry on from where you were.")
     assert not outcome.is_error, outcome.text
-    assert outcome.text.startswith("Resume queued for Default on Unraid")
+    assert outcome.text.startswith("Resume queued for Default on ServerWorker")
 
 
 def test_a_child_whose_session_is_gone_after_a_restart_reports_failed(workers, monkeypatch):

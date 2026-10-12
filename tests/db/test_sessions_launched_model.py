@@ -4,7 +4,7 @@ via ``app.db.sessions.update_session``.
 
 The effective model a CLI/SDK session was launched (or switched) with is written
 to the durable ``sessions.launched_model`` column at spawn/link time so an
-out-of-process reader (the Unraid host-op guard) can authoritatively read the
+out-of-process reader (the ServerWorker host-op guard) can authoritatively read the
 model WITHOUT waiting for turn-end ``session_messages.metadata['model']``
 commits. This proves the write path lands the value on the row.
 

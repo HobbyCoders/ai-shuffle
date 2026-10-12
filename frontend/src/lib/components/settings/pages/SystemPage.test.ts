@@ -72,12 +72,12 @@ const unpublishedExplanation = /The newest main revision is not published as a n
 async function openDeployReport(worker: Record<string, unknown>, originMain: string | null = mainRevision) {
 	const get = transport.get.getMockImplementation()!;
 	transport.get.mockImplementation(async (path: string) => path === '/settings/application-updates/deploy-status'
-		? { origin_main: originMain, workers: [{ label: 'Unraid', is_self: true, short: '83e64013c', ...worker }] }
+		? { origin_main: originMain, workers: [{ label: 'ServerWorker', is_self: true, short: '83e64013c', ...worker }] }
 		: get(path));
 	render(SystemPage);
 	const row = document.querySelector('[data-setting-anchor="system.deployStatus"]')!;
 	await fireEvent.click(within(row as HTMLElement).getByRole('button', { name: /^Running revisions/ }));
-	await waitFor(() => expect(screen.getByText('Unraid (this worker)')).toBeTruthy());
+	await waitFor(() => expect(screen.getByText('ServerWorker (this worker)')).toBeTruthy());
 }
 
 it('shows unpublished main only for a current-main nightly publication refusal and renders the full reason', async () => {

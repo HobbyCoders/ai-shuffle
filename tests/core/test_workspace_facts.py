@@ -47,8 +47,8 @@ def test_card_names_the_facts_that_are_true_here(tmp_path, monkeypatch):
     monkeypatch.setattr(env, "_PYTEST_PROBE", {"value": sys.executable})
     root = _shuffle_checkout(tmp_path)
     card = env.workspace_facts_card(
-        str(root), browser_host="10.0.0.135", app_port=8000,
-        preview_url="http://10.0.0.135:8002/api/v1/auth/preview-access?token=t&next=/",
+        str(root), browser_host="10.0.0.30", app_port=8000,
+        preview_url="http://10.0.0.30:8002/api/v1/auth/preview-access?token=t&next=/",
     )
     assert card.startswith(env.WORKSPACE_FACTS_HEADER)
     # node_modules missing → the npm ci instruction, with the junction rule.
@@ -57,12 +57,12 @@ def test_card_names_the_facts_that_are_true_here(tmp_path, monkeypatch):
     # pytest interpreter + the PYTHONPATH=fluid invocation.
     assert sys.executable in card and "PYTHONPATH=fluid" in card
     # The browser lives elsewhere: bind 0.0.0.0, use the LAN address.
-    assert "0.0.0.0" in card and "http://10.0.0.135:<port>" in card
+    assert "0.0.0.0" in card and "http://10.0.0.30:<port>" in card
     # The app's own guard and the one-time preview URL.
     assert ":8000" in card and "rejects proxied/forwarded" in card
     assert "preview-access?token=t" in card
     # The link is on the preview-only port; the owner's port is named as refused.
-    assert "http://10.0.0.135:8002/" in card and "refused :8000" in card
+    assert "http://10.0.0.30:8002/" in card and "refused :8000" in card
     # Branch preview command, the vite config name, the pg_shim caveat.
     assert "python -m app.preview stamp" in card and "AI_SHUFFLE_PREVIEW=1" in card
     assert "frontend/vite.config.js" in card and "no vite.config.ts" in card
@@ -100,8 +100,8 @@ def test_card_is_byte_stable_and_bounded(tmp_path, monkeypatch):
     be identical, and it must stay under the ~600-token ceiling."""
     monkeypatch.setattr(env, "_PYTEST_PROBE", {"value": sys.executable})
     root = _shuffle_checkout(tmp_path)
-    kwargs = dict(browser_host="10.0.0.135", app_port=8000,
-                  preview_url="http://10.0.0.135:8002/api/v1/auth/preview-access?token=t&next=/")
+    kwargs = dict(browser_host="10.0.0.30", app_port=8000,
+                  preview_url="http://10.0.0.30:8002/api/v1/auth/preview-access?token=t&next=/")
     first = env.workspace_facts_card(str(root), **kwargs)
     second = env.workspace_facts_card(str(root), **kwargs)
     assert first == second

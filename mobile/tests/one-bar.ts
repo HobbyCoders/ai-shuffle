@@ -32,7 +32,7 @@ const project = { id: 'ai-shuffle', name: 'ai-shuffle', path: '/workspace/ai-shu
 const now = Date.now();
 
 const installs = [
-	{ id: 'unraid', device_name: 'Unraid', base_url: 'https://unraid.example', platform: 'linux', version: '0.8.24', capabilities: {}, last_seen: new Date().toISOString(), online: true, approved: true, is_self: true },
+	{ id: 'unraid', device_name: 'ServerWorker', base_url: 'https://unraid.example', platform: 'linux', version: '0.8.24', capabilities: {}, last_seen: new Date().toISOString(), online: true, approved: true, is_self: true },
 	{ id: 'desktopworker', device_name: 'DesktopWorker', base_url: 'https://desktopworker.example', platform: 'windows', version: '0.8.24', capabilities: {}, last_seen: new Date().toISOString(), online: true, approved: true, is_self: false }
 ];
 const row = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
@@ -40,12 +40,12 @@ const row = (id: string, title: string, extra: Record<string, unknown> = {}) => 
 	total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 84200,
 	turn_count: 3, tags: [], parent_session_id: null, fork_point_message_index: null, has_forks: false, hidden: false,
 	created_at: new Date(now - 3600e3).toISOString(), updated_at: new Date().toISOString(),
-	instance_id: 'unraid', device_name: 'Unraid', device_online: true, is_remote: false, controllable: true, mode: 'code', ...extra
+	instance_id: 'unraid', device_name: 'ServerWorker', device_online: true, is_remote: false, controllable: true, mode: 'code', ...extra
 });
 const parentRow = row(PARENT, 'Investigate why the Android worker bar flickers when the drawer opens on DeX');
 const childRow = row('fixture-subagent', 'Review the drawer history entry on Android', { hidden: true, parent_session_id: PARENT, is_worker: true });
 const sessionRows = [parentRow, row('mem', 'Fix: memory health signals and running revisions')];
-const grant = { id: 'g1', label: 'Unraid appdata', kind: 'folder', target: '/mnt/user/appdata/ai-shuffle', expires_at: Math.floor(now / 1000) + 3600, writable: false };
+const grant = { id: 'g1', label: 'ServerWorker appdata', kind: 'folder', target: '/mnt/user/appdata/ai-shuffle', expires_at: Math.floor(now / 1000) + 3600, writable: false };
 
 window.fetch = async (input, init) => {
 	const url = new URL(input instanceof Request ? input.url : String(input), location.href);

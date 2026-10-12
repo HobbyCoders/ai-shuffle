@@ -37,9 +37,9 @@ def test_errors_come_from_the_named_worker_and_say_so(workers, monkeypatch):
         error_logs.record_error("backend", "unraid database exploded", level="ERROR")
     with b.active():
         error_logs.record_error("backend", "windows only problem", level="ERROR")
-        body = _call("GetAppErrors", {"worker": "Unraid", "limit": 5})
+        body = _call("GetAppErrors", {"worker": "ServerWorker", "limit": 5})
     assert body["success"] is True, body
-    assert body["worker"] == "Unraid"
+    assert body["worker"] == "ServerWorker"
     assert [row["message"] for row in body["errors"]] == ["unraid database exploded"]
     assert _control_posts(router) == ["/api/v1/network/peer/control/app-logs"]
 
@@ -49,7 +49,7 @@ def test_logs_come_from_the_named_worker_with_local_caps(workers, monkeypatch):
     with b.active():
         body = _call("GetAppLogs", {"worker": a.device_id, "limit": 10_000})
     assert body["success"] is True, body
-    assert body["worker"] == "Unraid"
+    assert body["worker"] == "ServerWorker"
     assert body["count"] <= builtin_tools._APP_LOGS_MAX_LIMIT
     assert _control_posts(router) == ["/api/v1/network/peer/control/app-logs"]
 
@@ -66,7 +66,7 @@ def test_naming_this_worker_reads_here_and_says_so(workers, monkeypatch):
 
 @pytest.mark.parametrize("worker, expected", [
     ("Nowhere", "Unknown worker 'Nowhere'"),
-    ("Unraid", "Unraid is offline; nothing was read"),
+    ("ServerWorker", "ServerWorker is offline; nothing was read"),
 ])
 def test_an_unknown_or_offline_worker_is_refused_by_name(workers, monkeypatch, worker, expected):
     _a, b, router = network(workers, monkeypatch)
@@ -85,25 +85,25 @@ def test_an_older_worker_is_refused_as_older(workers, monkeypatch):
     _a, b, _ = network(workers, monkeypatch)
     monkeypatch.setattr(control, "known_action", lambda action: action != builtin_tools.APP_LOGS_ACTION)
     with b.active():
-        body = _call("GetAppLogs", {"worker": "Unraid"})
+        body = _call("GetAppLogs", {"worker": "ServerWorker"})
     assert body["success"] is False
-    assert body["error"].startswith("Unraid runs an older release that cannot share its logs")
-    assert body["worker"] == "Unraid"
+    assert body["error"].startswith("ServerWorker runs an older release that cannot share its logs")
+    assert body["worker"] == "ServerWorker"
 
 
 def test_a_peer_refusal_comes_back_by_name(workers, monkeypatch):
     _a, b, _ = network(workers, monkeypatch)
     with b.active():
-        body = _call("GetAppLogs", {"worker": "Unraid", "level": "LOUD"})
+        body = _call("GetAppLogs", {"worker": "ServerWorker", "level": "LOUD"})
     assert body["success"] is False
-    assert body["error"].startswith("Unraid refused the read: level must be one of")
+    assert body["error"].startswith("ServerWorker refused the read: level must be one of")
 
 
 def test_an_api_key_session_is_refused(workers, monkeypatch):
     _a, b, router = network(workers, monkeypatch)
     with b.active():
         for tool in ("GetAppErrors", "GetAppLogs"):
-            body = _call(tool, {"worker": "Unraid"}, is_admin=False)
+            body = _call(tool, {"worker": "ServerWorker"}, is_admin=False)
             assert body["success"] is False and "requires an owner session" in body["error"]
     assert _control_posts(router) == []
 

@@ -349,10 +349,10 @@ def test_environment_facts_are_harvested_with_stable_keys(tmp_path, monkeypatch)
 def test_browser_host_fact_is_harvested_from_a_browser_result() -> None:
     from fluid.context import runtime_facts as rf
 
-    out = "Cannot reach http://localhost:5193 from the browser host. Browse http://10.0.0.135:5193 instead."
+    out = "Cannot reach http://localhost:5193 from the browser host. Browse http://10.0.0.30:5193 instead."
     facts = rf.harvest_tool_facts("mcp__browser__browser_navigate", out)
     assert facts and facts[0][0] == "env.browser_host"
-    assert "10.0.0.135" in facts[0][1] and "0.0.0.0" in facts[0][1]
+    assert "10.0.0.30" in facts[0][1] and "0.0.0.0" in facts[0][1]
     assert rf.harvest_tool_facts("Read", out) == []
     assert rf.harvest_tool_facts("browser_navigate", "Browse http://localhost:1 instead") == []
 

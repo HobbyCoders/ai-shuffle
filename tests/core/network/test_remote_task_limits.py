@@ -1,6 +1,6 @@
 """The assistant's limits count and stop its jobs on another worker (S11).
 
-Two in-process workers over the real signed control endpoint: Unraid runs the
+Two in-process workers over the real signed control endpoint: ServerWorker runs the
 jobs, Windows runs the assistant's home ("caller"). No provider.
 """
 import asyncio
@@ -216,7 +216,7 @@ def test_remote_usage_answers_only_for_jobs_the_asking_worker_started(workers, m
     a, b, _ = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
-        database.create_session(session_id="own-chat", profile_id="default", title="Unraid's own chat")
+        database.create_session(session_id="own-chat", profile_id="default", title="ServerWorker's own chat")
         turns.enqueue_turn("own-chat", "user", prompt="hi", profile_id="default")
         book("own-chat", 9.0)
         body = {"version": limits.REMOTE_WIRE_VERSION, "session_ids": [child, "own-chat", "missing"]}
@@ -234,7 +234,7 @@ def test_the_target_never_links_a_child_another_worker_started_to_its_own_assist
     a, b, _ = assistant_network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
-        database.create_session(session_id="serverworker-home", profile_id="default", title="Unraid home")
+        database.create_session(session_id="serverworker-home", profile_id="default", title="ServerWorker home")
     make_home(a, "serverworker-home")
     with a.active():
         assert service.link_job("serverworker-home", child) is None
@@ -280,7 +280,7 @@ async def test_a_remote_start_session_chat_is_linked_to_the_assistant(workers, m
         return {"session_id": body["session_id"], "turn_id": "t1", "created": True, "owner_device_id": device_id,
                 "report_back": True}
     monkeypatch.setattr(control, "call", call)
-    plan = {"remote": {"device_id": a.device_id, "device_name": "Unraid"}, "reserved": False, "receipt_id": None,
+    plan = {"remote": {"device_id": a.device_id, "device_name": "ServerWorker"}, "reserved": False, "receipt_id": None,
             "body": {"session_id": "remote-chat", "title": "Check the disks", "report_back": True}}
     with b.active():
         task_registry.reset_all()

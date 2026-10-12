@@ -32,7 +32,7 @@ def vault(monkeypatch):
 
 
 def spec():
-    return GrantInput(kind="machine", label="Unraid", host="10.0.0.200", username="root",
+    return GrantInput(kind="machine", label="ServerWorker", host="10.0.0.20", username="root",
                       fingerprint="SHA256:" + "a" * 43, password="vault-only-password")
 
 
@@ -55,7 +55,7 @@ def test_explicit_save_encrypts_all_inputs_and_scope_binds_reuse(vault):
     connection_id = chat_vault.save(owner, spec())
     ciphertext = next(iter(vault.values()))
     assert ciphertext.startswith("enc:")
-    assert all(secret not in ciphertext for secret in ("vault-only-password", "10.0.0.200", "Unraid"))
+    assert all(secret not in ciphertext for secret in ("vault-only-password", "10.0.0.20", "ServerWorker"))
     assert chat_vault.load(owner, connection_id).password.get_secret_value() == "vault-only-password"
     assert "password" not in json.dumps(chat_vault.catalog(owner))
     with pytest.raises(AccessDenied):
@@ -171,11 +171,11 @@ def test_connections_are_never_network_shared():
 def test_duplicate_names_never_overwrite_credentials(vault):
     owner = ("local", "worker", None)
     first = chat_vault.save(owner, spec())
-    replacement = spec().model_copy(update={"label": "UNRAID"})
+    replacement = spec().model_copy(update={"label": "SERVERWORKER"})
     with pytest.raises(AccessDenied):
         chat_vault.save(owner, replacement)
     assert len(vault) == 1
-    assert chat_vault.load(owner, first).label == "Unraid"
+    assert chat_vault.load(owner, first).label == "ServerWorker"
 
 
 def test_service_credentials_are_encrypted_and_never_catalogued(vault):
@@ -210,7 +210,7 @@ def test_update_rewrites_in_place_and_refuses_without_writing(vault):
     first = chat_vault.save(owner, spec())
     other = chat_vault.save(owner, spec().model_copy(update={"label": "Backup"}))
     old, new = chat_vault.update(owner, first, lambda current: current.model_copy(update={"label": "serverworker", "port": 2222}))
-    assert (old.label, old.port, new.label, new.port) == ("Unraid", 22, "serverworker", 2222)
+    assert (old.label, old.port, new.label, new.port) == ("ServerWorker", 22, "serverworker", 2222)
     loaded = chat_vault.load(owner, first)
     # Same id and binding; the stored secret survives an edit that did not touch it.
     assert (loaded.label, loaded.port) == ("serverworker", 2222)
@@ -218,7 +218,7 @@ def test_update_rewrites_in_place_and_refuses_without_writing(vault):
     assert len(vault) == 2 and "vault-only-password" not in json.dumps(chat_vault.catalog(owner))
     before = dict(vault)
     with pytest.raises(AccessDenied, match="already saved"):
-        chat_vault.update(owner, other, lambda current: current.model_copy(update={"label": "UNRAID"}))
+        chat_vault.update(owner, other, lambda current: current.model_copy(update={"label": "SERVERWORKER"}))
     def refuse(current):
         raise AccessDenied("refused")
     with pytest.raises(AccessDenied, match="refused"):

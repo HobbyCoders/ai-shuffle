@@ -52,7 +52,7 @@ def no_gh():
 
 def test_drift_without_a_change(repo):
     root, shas = repo
-    report = ds.assess([_row("Unraid", shas["a"], is_self=True), _row("DesktopWorker", shas["c"])],
+    report = ds.assess([_row("ServerWorker", shas["a"], is_self=True), _row("DesktopWorker", shas["c"])],
                        repo=root, refresh=False)
     unraid, gaming = report["workers"]
     assert unraid["behind"] == 2 and unraid["short"] == shas["a"][:9]
@@ -60,26 +60,26 @@ def test_drift_without_a_change(repo):
     assert unraid["edge_publication_refusal"] is None  # GitHub is unavailable.
     assert gaming["behind"] == 0 and gaming["action"] == "up to date"
     assert report["android"] is None and report["change"] is None
-    assert report["summary"] == "Live on: Unraid ✗ · DesktopWorker ✓"
+    assert report["summary"] == "Live on: ServerWorker ✗ · DesktopWorker ✓"
 
 
 def test_pr_resolves_via_squash_subject_and_reports_containment(repo):
     root, shas = repo
-    report = ds.assess([_row("Unraid", shas["a"], offered=shas["c"][:12]), _row("DesktopWorker", shas["b"])],
+    report = ds.assess([_row("ServerWorker", shas["a"], offered=shas["c"][:12]), _row("DesktopWorker", shas["b"])],
                        pr=10, repo=root, refresh=False)
     assert report["change"]["commit"] == shas["b"]
     unraid, gaming = report["workers"]
     assert unraid["contains"] is False and unraid["action"] == "update this worker"
     assert gaming["contains"] is True and gaming["action"] == "up to date"
     assert report["android"]["build_needed"] is False
-    assert report["summary"] == "Live on: Unraid ✗ · DesktopWorker ✓ · Android: no build needed"
+    assert report["summary"] == "Live on: ServerWorker ✗ · DesktopWorker ✓ · Android: no build needed"
 
 
 def test_pr_via_gh_merge_commit(repo):
     root, shas = repo
     done = subprocess.CompletedProcess([], 0, json.dumps({"state": "MERGED", "mergeCommit": {"oid": shas["c"]}}), "")
     with patch("app.core.github_service.github_service._run_gh", return_value=done):
-        report = ds.assess([_row("Unraid", shas["b"])], pr=999, repo=root, refresh=False)
+        report = ds.assess([_row("ServerWorker", shas["b"])], pr=999, repo=root, refresh=False)
     assert report["change"]["commit"] == shas["c"]
     assert report["android"]["build_needed"] is True
     assert report["summary"].endswith("Android: Play build needed")
@@ -89,12 +89,12 @@ def test_unmerged_pr_and_offer_without_the_change(repo):
     root, shas = repo
     open_pr = subprocess.CompletedProcess([], 0, json.dumps({"state": "OPEN", "mergeCommit": None}), "")
     with patch("app.core.github_service.github_service._run_gh", return_value=open_pr):
-        report = ds.assess([_row("Unraid", shas["a"])], pr=12, repo=root, refresh=False)
+        report = ds.assess([_row("ServerWorker", shas["a"])], pr=12, repo=root, refresh=False)
     assert report["change"]["commit"] is None and "open" in report["change"]["reason"]
     # The offered build predates the change: edge has to publish first.
-    report = ds.assess([_row("Unraid", shas["a"], offered=shas["b"][:12])], commit=shas["c"], repo=root, refresh=False)
+    report = ds.assess([_row("ServerWorker", shas["a"], offered=shas["b"][:12])], commit=shas["c"], repo=root, refresh=False)
     assert report["workers"][0]["action"].startswith("publish edge first")
-    stable = ds.assess([_row("Unraid", shas["a"], channel="stable")], commit=shas["c"], repo=root, refresh=False)
+    stable = ds.assess([_row("ServerWorker", shas["a"], channel="stable")], commit=shas["c"], repo=root, refresh=False)
     assert "stable release" in stable["workers"][0]["action"]
 
 
@@ -113,7 +113,7 @@ def test_degrades_per_worker_without_raising(repo):
 
 def test_no_checkout_gives_a_reason(monkeypatch):
     monkeypatch.setattr(ds, "find_repo", lambda: None)
-    report = ds.assess([_row("Unraid", "abcdef123")], pr=1)
+    report = ds.assess([_row("ServerWorker", "abcdef123")], pr=1)
     assert report["reason"] and report["change"]["reason"] == report["reason"]
     assert report["workers"][0]["behind"] is None and report["workers"][0]["reason"] == report["reason"]
 
@@ -156,7 +156,7 @@ def test_find_repo_without_a_database_finds_nothing(monkeypatch, tmp_path):
 
 def test_collect_workers_reads_self_and_peers(monkeypatch):
     listing = {"self_device_id": "me", "runners": [
-        {"device_id": "me", "device_name": "Unraid", "is_self": True, "online": True},
+        {"device_id": "me", "device_name": "ServerWorker", "is_self": True, "online": True},
         {"device_id": "pc", "device_name": "DesktopWorker", "is_self": False, "online": True, "version": "0.9"},
         {"device_id": "off", "device_name": "Laptop", "is_self": False, "online": False},
         {"device_id": "old", "device_name": "Old", "is_self": False, "online": True},
@@ -170,7 +170,7 @@ def test_collect_workers_reads_self_and_peers(monkeypatch):
     with patch("app.core.update_workers._peer_status_for", new=AsyncMock(side_effect=lambda d, fresh: states[d])):
         rows = asyncio.run(ds.collect_workers())
     me, pc, off, old = rows
-    assert me["label"] == "Unraid" and me["revision"] == "a" * 40 and me["offered"] == "b" * 12
+    assert me["label"] == "ServerWorker" and me["revision"] == "a" * 40 and me["offered"] == "b" * 12
     assert pc["revision"] == "c" * 40 and pc["channel"] == "stable" and pc["app_version"] == "1.1"
     assert off["reason"] == "offline"
     assert old["revision"] is None and old["reason"] == "worker did not report its revision"
@@ -219,7 +219,7 @@ def test_publish_edge_first_names_the_refused_gate_and_local_command(repo, monke
     run_gh, calls = _gate_api(shas["c"], [{"annotation_level": "warning", "title": ds.EDGE_REFUSAL_TITLE,
                                            "message": message}])
     with patch("app.core.github_service.github_service._run_gh", side_effect=run_gh):
-        report = ds.assess([_row("Unraid", shas["a"], offered=shas["b"][:12]), _row("DesktopWorker", shas["c"])],
+        report = ds.assess([_row("ServerWorker", shas["a"], offered=shas["b"][:12]), _row("DesktopWorker", shas["c"])],
                            commit=shas["c"], repo=root, refresh=False)
         unraid, gaming = report["workers"]
         assert unraid["action"] == (
@@ -233,7 +233,7 @@ def test_publish_edge_first_names_the_refused_gate_and_local_command(repo, monke
         assert gaming["action"] == "up to date"
         assert gaming["edge_publication_refusal"] is None
         # Drift without a change carries the same next step; the lookup is cached.
-        drift = ds.assess([_row("Unraid", shas["a"])], repo=root, refresh=False)
+        drift = ds.assess([_row("ServerWorker", shas["a"])], repo=root, refresh=False)
         assert drift["workers"][0]["action"].endswith("python scripts/local_ci.py full --attest")
         assert drift["workers"][0]["edge_publication_refusal"] == unraid["edge_publication_refusal"]
     assert len(calls) == 3
@@ -248,7 +248,7 @@ def test_publish_edge_first_without_a_refusal_stays_plain(repo, monkeypatch, pub
     monkeypatch.setattr(ds, "_edge_refusals", {})
     run_gh, _ = _gate_api(shas["c"], annotations, published=published)
     with patch("app.core.github_service.github_service._run_gh", side_effect=run_gh):
-        report = ds.assess([_row("Unraid", shas["a"], offered=shas["b"][:12])], commit=shas["c"],
+        report = ds.assess([_row("ServerWorker", shas["a"], offered=shas["b"][:12])], commit=shas["c"],
                            repo=root, refresh=False)
     assert report["workers"][0]["action"] == "publish edge first (merged after the latest published build)"
     assert report["workers"][0]["edge_publication_refusal"] is None
@@ -265,7 +265,7 @@ def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
     monkeypatch.setattr(ds, "_edge_refusals", {})
     monkeypatch.setattr(ds, "find_repo", lambda: root)
     monkeypatch.setattr(ds, "_refresh", lambda repo: None)
-    row = _row("Unraid", shas["a"], is_self=True)
+    row = _row("ServerWorker", shas["a"], is_self=True)
     if scenario == "offered":
         row["offered"] = shas["b"]
     elif scenario == "stable":

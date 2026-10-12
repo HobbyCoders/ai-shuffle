@@ -685,8 +685,8 @@ def _run_column_migrations(cursor):
             cursor.execute("ALTER TABLE sessions ADD COLUMN parked_task_kind TEXT")
             migrations_applied.append("sessions.parked_task_kind")
         # Effective model the CLI/SDK session was launched (or switched) with,
-        # written at spawn/link time so the Unraid host-op guard
-        # (scripts/unraid-lab/host_op_guard.py) can read the session's model
+        # written at spawn/link time so external session-policy tooling
+        # can read the session's model
         # authoritatively without waiting for turn-end session_messages.metadata['model'].
         if not column_exists(cursor, "sessions", "launched_model"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN launched_model TEXT")

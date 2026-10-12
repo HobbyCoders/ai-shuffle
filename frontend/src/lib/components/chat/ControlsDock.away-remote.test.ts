@@ -35,7 +35,7 @@ function remoteRow(id: string, away: boolean | null | undefined): Record<string,
 		total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0,
 		cache_read_tokens: 0, context_tokens: 0, turn_count: 1, tags: [], parent_session_id: null,
 		fork_point_message_index: null, has_forks: false, created_at: NOW, updated_at: NOW,
-		owner_device_id: 'dev-serverworker', device_name: 'Unraid', is_remote: true, controllable: true,
+		owner_device_id: 'dev-unraid', device_name: 'ServerWorker', is_remote: true, controllable: true,
 		permission_mode: 'bypassPermissions'
 	};
 	if (away !== undefined) row.away_mode = away;

@@ -222,7 +222,7 @@ describe('automatic non-git fallback', () => {
 
 describe('worker picker persistence', () => {
 	it('selects the local owner when picking a legacy checkout after a remote worker', async () => {
-		activeSession.setDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+		activeSession.setDeviceIntent({ id: 'runner-1', name: 'ServerWorker' });
 		mocks.worktrees.set([{ id: 'legacy-local', branch_name: 'feature/local', exists: true }]);
 		render(ExecutionModeBar);
 		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
@@ -234,7 +234,7 @@ describe('worker picker persistence', () => {
 
 	it('converts a legacy checkout into a logical branch when changing workers', async () => {
 		vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [{
-			id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
+			id: 'runner-1', device_name: 'ServerWorker', online: true, base_url: null,
 			platform: 'linux', version: null, capabilities: {}, last_seen: null,
 		}] });
 		mocks.worktrees.set([{ id: 'legacy-worktree', branch_name: 'feature/shared', exists: true }]);
@@ -243,14 +243,14 @@ describe('worker picker persistence', () => {
 		await fireEvent.click(screen.getByText('feature/shared'));
 		expect(activeSession.current.worktreeId).toBe('legacy-worktree');
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-		await fireEvent.click(screen.getByRole('menuitemradio', { name: /Unraid/ }));
+		await fireEvent.click(screen.getByRole('menuitemradio', { name: /ServerWorker/ }));
 		expect(activeSession.current.deviceIntent?.id).toBe('runner-1');
 		expect(activeSession.current.worktreeId).toBeNull();
 		expect(activeSession.current.selectedWorktreeBranch).toBeNull();
 		expect(activeSession.current.worktreeBranch).toBe('feature/shared');
 		expect(activeSession.current.worktreeMode).toBe('new');
 		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
-		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: ServerWorker' }));
 		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Local' }));
 		expect(activeSession.current.worktreeId).toBeNull();
 		expect(activeSession.current.worktreeBranch).toBe('feature/shared');
@@ -259,16 +259,16 @@ describe('worker picker persistence', () => {
 
 	it('persists actual picker clicks and retains the worker on project changes', async () => {
 		vi.mocked(listInstalls).mockResolvedValueOnce({ self_instance_id: 'local', installs: [{
-			id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
+			id: 'runner-1', device_name: 'ServerWorker', online: true, base_url: null,
 			platform: 'linux', version: null, capabilities: {}, last_seen: null,
 		}] });
 		render(ExecutionModeBar);
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Unraid' }));
-		expect(getPersistedDeviceIntent()).toEqual({ id: 'runner-1', name: 'Unraid' });
+		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'ServerWorker' }));
+		expect(getPersistedDeviceIntent()).toEqual({ id: 'runner-1', name: 'ServerWorker' });
 		activeSession.setProject('another-project', null);
 		expect(activeSession.current.deviceIntent).toEqual(getPersistedDeviceIntent());
-		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: ServerWorker' }));
 		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Local' }));
 		expect(getPersistedDeviceIntent()).toBeNull();
 	});
@@ -279,7 +279,7 @@ describe('worker presence dots', () => {
 
 	it('marks Local and online workers green, offline workers red, and the picked worker on the chip', async () => {
 		vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [
-			{ id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
+			{ id: 'runner-1', device_name: 'ServerWorker', online: true, base_url: null,
 				platform: 'linux', version: null, capabilities: {}, last_seen: null },
 			{ id: 'runner-2', device_name: 'linux-worker', online: false, base_url: null,
 				platform: 'linux', version: null, capabilities: {}, last_seen: null }
@@ -289,14 +289,14 @@ describe('worker presence dots', () => {
 			expect(dotOf(screen.getByRole('button', { name: 'Runner: Local' }))).toBe('online');
 			await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
 			expect(dotOf(screen.getByRole('menuitemradio', { name: 'Local' }))).toBe('online');
-			const unraid = await screen.findByRole('menuitemradio', { name: 'Unraid' });
+			const unraid = await screen.findByRole('menuitemradio', { name: 'ServerWorker' });
 			expect(dotOf(unraid)).toBe('online');
 			// The offline row keeps its existing greyed, blocked state.
 			const popOs = screen.getByRole('menuitemradio', { name: /linux-worker/ });
 			expect(dotOf(popOs)).toBe('offline');
 			expect(popOs.getAttribute('aria-disabled')).toBe('true');
 			await fireEvent.click(unraid);
-			expect(dotOf(screen.getByRole('button', { name: 'Runner: Unraid' }))).toBe('online');
+			expect(dotOf(screen.getByRole('button', { name: 'Runner: ServerWorker' }))).toBe('online');
 		} finally {
 			vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
 		}
@@ -309,7 +309,7 @@ describe('worker presence dots', () => {
 	});
 
 	const registry = (online: boolean) => ({ self_instance_id: 'local', installs: [
-		{ id: 'runner-1', device_name: 'Unraid', online, base_url: null,
+		{ id: 'runner-1', device_name: 'ServerWorker', online, base_url: null,
 			platform: 'linux', version: null, capabilities: {}, last_seen: null }
 	] });
 
@@ -318,7 +318,7 @@ describe('worker presence dots', () => {
 		try {
 			render(ExecutionModeBar);
 			await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-			const before = await screen.findByRole('menuitemradio', { name: 'Unraid' });
+			const before = await screen.findByRole('menuitemradio', { name: 'ServerWorker' });
 			expect(dotOf(before)).toBe('online');
 			expect(before.getAttribute('aria-disabled')).toBe('false');
 
@@ -326,7 +326,7 @@ describe('worker presence dots', () => {
 			vi.mocked(listInstalls).mockResolvedValue(registry(false));
 			await refreshWorkerPresence();
 			await tick();
-			const after = screen.getByRole('menuitemradio', { name: /Unraid/ });
+			const after = screen.getByRole('menuitemradio', { name: /ServerWorker/ });
 			expect(dotOf(after)).toBe('offline');
 			expect(after.getAttribute('aria-disabled')).toBe('true');
 			await fireEvent.click(after);
@@ -339,15 +339,15 @@ describe('worker presence dots', () => {
 	it('turns the picked worker\'s chip red when it goes offline with the menu closed', async () => {
 		vi.mocked(listInstalls).mockResolvedValue(registry(true));
 		try {
-			activeSession.setDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+			activeSession.setDeviceIntent({ id: 'runner-1', name: 'ServerWorker' });
 			render(ExecutionModeBar);
 			// A picked worker is watched with the menu closed, so its presence loads.
-			await vi.waitFor(() => expect(dotOf(screen.getByRole('button', { name: 'Runner: Unraid' }))).toBe('online'));
+			await vi.waitFor(() => expect(dotOf(screen.getByRole('button', { name: 'Runner: ServerWorker' }))).toBe('online'));
 
 			vi.mocked(listInstalls).mockResolvedValue(registry(false));
 			await refreshWorkerPresence();
 			await tick();
-			expect(dotOf(screen.getByRole('button', { name: 'Runner: Unraid (offline)' }))).toBe('offline');
+			expect(dotOf(screen.getByRole('button', { name: 'Runner: ServerWorker (offline)' }))).toBe('offline');
 		} finally {
 			vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
 		}
@@ -454,7 +454,7 @@ describe('flat worker list (matches the active session runner menu)', () => {
 	});
 	const fixture = { self_instance_id: 'local', installs: [
 		{ ...peer('local', 'This worker'), is_self: true },
-		peer('runner-1', 'Unraid'),
+		peer('runner-1', 'ServerWorker'),
 		peer('runner-2', 'linux-worker', false),
 		peer('runner-3', 'Laptop')
 	] };
@@ -468,14 +468,14 @@ describe('flat worker list (matches the active session runner menu)', () => {
 		vi.mocked(listInstalls).mockResolvedValue(fixture);
 		render(ExecutionModeBar);
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-		await screen.findByRole('menuitemradio', { name: 'Unraid' });
+		await screen.findByRole('menuitemradio', { name: 'ServerWorker' });
 		const menu = screen.getByRole('menu', { name: 'Runner selection' });
 		const rows = [...menu.querySelectorAll('[role="menuitemradio"]')];
-		expect(rows.map(r => r.querySelector('.worker-row-name')?.textContent)).toEqual(['Local', 'Unraid', 'linux-worker', 'Laptop']);
+		expect(rows.map(r => r.querySelector('.worker-row-name')?.textContent)).toEqual(['Local', 'ServerWorker', 'linux-worker', 'Laptop']);
 		expect(screen.queryByRole('button', { name: 'Other workers' })).toBeNull();
 		expect(menu.querySelector('[aria-expanded]')).toBeNull();
 		expect(screen.getByRole('menuitemradio', { name: 'Local' }).getAttribute('aria-checked')).toBe('true');
-		expect(screen.getByRole('menuitemradio', { name: 'Unraid' }).getAttribute('aria-checked')).toBe('false');
+		expect(screen.getByRole('menuitemradio', { name: 'ServerWorker' }).getAttribute('aria-checked')).toBe('false');
 		expect(screen.getByRole('menuitemradio', { name: 'linux-worker offline' }).getAttribute('aria-disabled')).toBe('true');
 	});
 
@@ -505,11 +505,11 @@ describe('flat worker list (matches the active session runner menu)', () => {
 		vi.mocked(listInstalls).mockResolvedValue(fixture);
 		render(ExecutionModeBar);
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Unraid' }));
-		expect(activeSession.current.deviceIntent).toEqual({ id: 'runner-1', name: 'Unraid' });
+		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'ServerWorker' }));
+		expect(activeSession.current.deviceIntent).toEqual({ id: 'runner-1', name: 'ServerWorker' });
 		expect(screen.queryByRole('menu', { name: 'Runner selection' })).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
-		expect(screen.getByRole('menuitemradio', { name: 'Unraid' }).getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: ServerWorker' }));
+		expect(screen.getByRole('menuitemradio', { name: 'ServerWorker' }).getAttribute('aria-checked')).toBe('true');
 		expect(screen.getByRole('menuitemradio', { name: 'Local' }).getAttribute('aria-checked')).toBe('false');
 	});
 

@@ -186,7 +186,7 @@ _recent_authorization = {}
 # (app.network.hub) every ten minutes. Any successful network call proves this
 # server is still active, so the remote-access supervisor reuses that proof for
 # one interval plus a minute of slack instead of asking ``status`` on its own
-# (docs/reviews/cloudflare-cost-1000-users-2026-10.md).
+# (the review in the private archive).
 BACKGROUND_CHECK_SECONDS = 600.0
 AUTHORIZATION_REUSE_SECONDS = BACKGROUND_CHECK_SECONDS + 60.0
 # Network routes the hub answers only for an active, unrevoked server.

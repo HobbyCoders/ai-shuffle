@@ -77,7 +77,7 @@ async function openRunsOn(busy: { running: boolean; tasks: string[] }) {
 	appSessions.store.set([{ id: 'chat-1', project_v2_id: 'pv2', instance_id: 'desktopworker', is_remote: false, controllable: true }]);
 	listInstallsMock.mockResolvedValue({ installs: [
 		{ id: 'desktopworker', is_self: true, online: true, device_name: 'DesktopWorker' },
-		{ id: 'unraid', is_self: false, online: true, device_name: 'Unraid', base_url: 'https://unraid.test' }
+		{ id: 'unraid', is_self: false, online: true, device_name: 'ServerWorker', base_url: 'https://unraid.test' }
 	] });
 	vi.mocked(getQueuedMove).mockResolvedValue({ busy, pending: null });
 	render(MobileComposerControlsSheet, { props: props() });
@@ -86,13 +86,13 @@ async function openRunsOn(busy: { running: boolean; tasks: string[] }) {
 	// The tile reads as "Runs on" over the worker, a label the panel draws.
 	expect(panel.querySelector('.mcp-setup .ctx-chip.runner')).toBe(tile);
 	await fireEvent.click(tile);
-	await fireEvent.click(await within(panel).findByRole('menuitemradio', { name: 'Unraid' }));
+	await fireEvent.click(await within(panel).findByRole('menuitemradio', { name: 'ServerWorker' }));
 	return panel;
 }
 
 describe('Runs on in Chat controls', () => {
 	it('queues the move while the turn runs, then shows it and lets it be cancelled', async () => {
-		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'Unraid' });
+		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'ServerWorker' });
 		vi.mocked(cancelQueuedMove).mockResolvedValue(undefined);
 		const panel = await openRunsOn({ running: true, tasks: ['pytest -q'] });
 		expect(await within(panel).findByText('This chat is running')).toBeTruthy();
@@ -101,14 +101,14 @@ describe('Runs on in Chat controls', () => {
 		expect(queueMove).toHaveBeenCalledExactlyOnceWith('chat-1', 'unraid', false);
 		expect(moveSession).not.toHaveBeenCalled();
 		const tile = panel.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
-		await waitFor(() => expect(tile.textContent).toContain('Moving to Unraid after this turn'));
+		await waitFor(() => expect(tile.textContent).toContain('Moving to ServerWorker after this turn'));
 		expect(tile.disabled).toBe(true);
 		await fireEvent.click(within(panel).getByRole('button', { name: 'Cancel queued move' }));
 		expect(cancelQueuedMove).toHaveBeenCalledExactlyOnceWith('chat-1');
 	});
 
 	it('offers to stop parked work and move now', async () => {
-		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'Unraid' });
+		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'ServerWorker' });
 		const panel = await openRunsOn({ running: false, tasks: ['Watch CI'] });
 		expect(await within(panel).findByText('Background work is running')).toBeTruthy();
 		await fireEvent.click(within(panel).getByRole('menuitem', { name: 'Stop them and move now' }));

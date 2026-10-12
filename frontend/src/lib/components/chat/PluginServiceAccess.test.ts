@@ -180,8 +180,8 @@ describe('plugin service sign-in card', () => {
 	});
 
 	it('points a mirrored conversation to the device that runs it and still allows the grant', async () => {
-		mount({ owner: 'Unraid' });
-		expect(await screen.findByText(/sign in to cloudflare from AI Shuffle on Unraid/)).toBeTruthy();
+		mount({ owner: 'ServerWorker' });
+		expect(await screen.findByText(/sign in to cloudflare from AI Shuffle on ServerWorker/)).toBeTruthy();
 		expect(m.getSignInStatus).not.toHaveBeenCalled();
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		expect(m.post).toHaveBeenCalledWith(endpoint, { sign_in: true, writable: false, minutes: 60 });

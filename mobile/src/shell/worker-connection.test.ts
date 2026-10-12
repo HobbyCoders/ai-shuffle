@@ -4,7 +4,7 @@ import type { Session } from '$lib/api/sessions';
 import { connectionWorkers, switchRoute, type ConnectionWorker } from './worker-connection';
 
 const install = (id: string, extra: Partial<Install> = {}): Install => ({
-	id, device_name: id === 'pc' ? 'DesktopWorker' : 'Unraid', base_url: `https://${id}.test`, platform: null,
+	id, device_name: id === 'pc' ? 'DesktopWorker' : 'ServerWorker', base_url: `https://${id}.test`, platform: null,
 	version: null, capabilities: {}, last_seen: null, online: true, ...extra
 });
 const session = (id: string, extra: Partial<Session>): Session => ({ id, parent_session_id: null, ...extra } as Session);
@@ -23,7 +23,7 @@ describe('"Connected to" workers', () => {
 		);
 		expect(rows.map((r) => [r.name, r.current, r.running, r.online])).toEqual([
 			['DesktopWorker', true, 2, true],
-			['Unraid', false, 1, true],
+			['ServerWorker', false, 1, true],
 			['Laptop', false, 0, false]
 		]);
 	});
@@ -35,7 +35,7 @@ describe('"Connected to" workers', () => {
 });
 
 describe('switching the app\'s connection', () => {
-	const unraid: ConnectionWorker = { id: 'unraid', name: 'Unraid', online: true, current: false, running: 1, baseUrl: 'https://unraid.test/' };
+	const unraid: ConnectionWorker = { id: 'unraid', name: 'ServerWorker', online: true, current: false, running: 1, baseUrl: 'https://unraid.test/' };
 	const page = 'https://pc.test/mobile/chat?x=1';
 
 	it('asks the app to reconnect when it offers the switch', () => {
@@ -55,6 +55,6 @@ describe('switching the app\'s connection', () => {
 	it('does nothing for the current worker and refuses an offline one', () => {
 		expect(switchRoute({ ...unraid, current: true }, { inApp: false, canSwitch: false, pageUrl: page })).toEqual({ kind: 'current' });
 		expect(switchRoute({ ...unraid, online: false }, { inApp: false, canSwitch: false, pageUrl: page }))
-			.toEqual({ kind: 'unavailable', reason: 'Unraid is offline' });
+			.toEqual({ kind: 'unavailable', reason: 'ServerWorker is offline' });
 	});
 });

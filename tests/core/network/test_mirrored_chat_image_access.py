@@ -47,8 +47,8 @@ DEVICES = {
 
 
 def _network(workers):
-    """DesktopWorker views chats that Unraid runs."""
-    viewer, owner = workers("desktopworker"), workers("serverworker")
+    """DesktopWorker views chats that ServerWorker runs."""
+    viewer, owner = workers("desktopworker"), workers("unraid")
     for worker in (viewer, owner):
         with worker.active():
             mobile_tool_identity.init_schema()

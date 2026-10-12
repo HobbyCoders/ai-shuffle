@@ -582,8 +582,8 @@ def _never_checked_peer(remote, peer):
 
 
 def test_never_checked_peer_is_downloaded_before_anything_installs(setup):
-    # #1623: the desktop staged B while Unraid sat idle on A with no check since
-    # container start. Restart was offered and Unraid was never asked to download.
+    # #1623: the desktop staged B while ServerWorker sat idle on A with no check since
+    # container start. Restart was offered and ServerWorker was never asked to download.
     values, remote = setup
     values[updates.ALL_KEY] = "true"
     peer = {"supported": True, "allow_updates": True, "phase": "idle", "version": None,

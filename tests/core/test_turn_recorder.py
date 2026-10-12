@@ -415,7 +415,7 @@ async def test_system_task_updated_names_a_remote_childs_worker(mock_db):
     from app.core.task_registry import task_registry
     task_registry.reset_all()
     task_registry.start_task(SID, "t-remote", "agent", "bg", tool_use_id="tu_r",
-                             remote_device_id="dev_unraid", worker_name="Unraid")
+                             remote_device_id="dev_unraid", worker_name="ServerWorker")
     task_registry.start_task(SID, "t-local", "agent", "bg", tool_use_id="tu_l")
     _mk_session()
     rec = await _recorder()
@@ -425,7 +425,7 @@ async def test_system_task_updated_names_a_remote_childs_worker(mock_db):
             "data": {"task_id": task_id, "patch": {"status": "running"}},
         })
     remote, local = _rows()[-2:]
-    assert remote["payload"]["worker_name"] == "Unraid"
+    assert remote["payload"]["worker_name"] == "ServerWorker"
     assert "worker_name" not in local["payload"] or local["payload"]["worker_name"] is None
     await rec.close()
     task_registry.reset_all()

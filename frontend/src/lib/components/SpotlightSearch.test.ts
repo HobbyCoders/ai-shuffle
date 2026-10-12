@@ -120,7 +120,7 @@ describe('universal search', () => {
   expect(mocks.get.mock.calls.filter(([path]) => path === '/agents')).toHaveLength(2);
  });
  it('lists the Terminal page only when this viewer may open shells', async () => {
-  terminalTargets.mockResolvedValue({ worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true,
+  terminalTargets.mockResolvedValue({ worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true,
    unsupported_reason: null, targets: [], shells: [{ name: 'bash', default: true }], default_shell: 'bash',
    default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0 });
   const p = props(); render(SpotlightSearch, { props: p });

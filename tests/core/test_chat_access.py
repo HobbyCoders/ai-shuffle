@@ -660,7 +660,7 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("hints", [
-    {"suggested_host": "ssh://10.0.0.146"},
+    {"suggested_host": "ssh://10.0.0.50"},
     {"suggested_host": "user:password@host"},
     {"suggested_host": "user@host"},
     {"suggested_host": "host/path"},
@@ -711,7 +711,7 @@ async def test_machine_hints_reject_invalid_inputs_before_card(broker, hints):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["folder", "service"])
 @pytest.mark.parametrize("hints", [
-    {"suggested_host": "10.0.0.146"}, {"suggested_port": 22}, {"suggested_username": "x"},
+    {"suggested_host": "10.0.0.50"}, {"suggested_port": 22}, {"suggested_username": "x"},
 ])
 async def test_machine_hints_are_machine_only(broker, kind, hints):
     with pytest.raises(AccessDenied, match="only available for machine"):
@@ -721,7 +721,7 @@ async def test_machine_hints_are_machine_only(broker, kind, hints):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host,port,username", [
-    ("10.0.0.146", 22, "x"), ("192.0.2.1", 1, "_build-user"),
+    ("10.0.0.50", 22, "x"), ("192.0.2.1", 1, "_build-user"),
     ("2001:db8::1", 65535, "Build.user"), ("2001:db8::2", None, ""),
 ])
 async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, host, port, username):

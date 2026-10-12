@@ -40,7 +40,7 @@ def _op_count(worker):
 def _paired_on_old_text(workers):
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    a, b = workers("serverworker"), workers("desktopworker")
+    a, b = workers("unraid"), workers("desktopworker")
     with a.active():
         engine.create_network("Refresh")
         seed_builtin_subagents()

@@ -81,7 +81,7 @@ describe('check for updates', () => {
 		window.addEventListener('application-update-policy', events);
 		try {
 			await ready();
-			const peer = (phase: string, extra: Record<string, unknown> = {}) => ({ ...self(phase, extra), device_id: 'peer', device_name: 'Unraid' });
+			const peer = (phase: string, extra: Record<string, unknown> = {}) => ({ ...self(phase, extra), device_id: 'peer', device_name: 'ServerWorker' });
 			snapshots = [
 				[self('idle', { request_pending: true }), peer('idle', { request_pending: true })],
 				[self('checking'), peer('idle')],
@@ -89,7 +89,7 @@ describe('check for updates', () => {
 			];
 			transport.post.mockResolvedValueOnce({
 				results: [
-					{ device_id: 'peer', device_name: 'Unraid', accepted: true, reason: 'Request queued' },
+					{ device_id: 'peer', device_name: 'ServerWorker', accepted: true, reason: 'Request queued' },
 					{ device_id: 'off', device_name: 'Laptop', accepted: false, reason: 'Offline; not queued' },
 					{ device_id: 'self', device_name: 'Current worker', accepted: true, reason: 'Request queued' }
 				]
@@ -101,7 +101,7 @@ describe('check for updates', () => {
 			await vi.advanceTimersByTimeAsync(CHECK_POLL_MS * 2);
 			expect(state.checking).toBe(false);
 			expect(state.rows?.map((r) => [r.name, r.text])).toEqual([
-				['Unraid', 'Up to date'],
+				['ServerWorker', 'Up to date'],
 				['Laptop', 'Offline; not queued'],
 				['Current worker', 'Version cccccccccccc available']
 			]);
@@ -174,7 +174,7 @@ describe('describeWorker', () => {
 describe('newer Docker image hint (#1821)', () => {
 	it('says the current version keeps working and how to get a newer image', () => {
 		expect(IMAGE_HINT).toMatch(/^Your current version keeps working\. /);
-		expect(IMAGE_HINT).not.toMatch(/Unraid|Force update/);
+		expect(IMAGE_HINT).not.toMatch(/ServerWorker|Force update/);
 		expect(IMAGE_HINT).toContain('docker compose up -d');
 		expect(IMAGE_HINT).toContain('docker compose pull');
 		expect(imageHint(self('image-required'))).toBe(IMAGE_HINT);
@@ -187,7 +187,7 @@ describe('newer Docker image hint (#1821)', () => {
 	it('shows the hint once under the results of a check', async () => {
 		await ready();
 		transport.post.mockResolvedValue({ results: [] });
-		snapshots = [[self('image-required'), { ...self('image-required'), device_id: 'peer', device_name: 'Unraid' }]];
+		snapshots = [[self('image-required'), { ...self('image-required'), device_id: 'peer', device_name: 'ServerWorker' }]];
 		await state.check();
 		expect(state.checking).toBe(false);
 		expect(state.rows?.map((row) => row.hint)).toEqual([IMAGE_HINT, IMAGE_HINT]);

@@ -4,7 +4,7 @@ The in-app update replaces the signed runtime source (scripts/source_archive.py)
 and rebuilds it on the worker. Some files are only ever read from the Docker
 image or the installed Windows launcher, so a change to them needs a new image
 or installer to take effect, and some changes stop the update for older
-installs altogether. See docs/reviews/in-app-update-coverage-2026-10.md.
+installs altogether. See the review in the private archive
 
 Groups that fail the check (each can be acknowledged with --allow GROUP, or
 with a pull request label named update-reach:GROUP, which scripts/local_ci.py

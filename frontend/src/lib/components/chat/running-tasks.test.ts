@@ -80,8 +80,8 @@ describe('buildRows', () => {
 	});
 
 	it('names the worker from the task, a stop note, or the chat', () => {
-		expect(taskWorker({ worker: { name: 'Unraid' }, summary: null }, 'DesktopWorker')).toBe('Unraid');
-		expect(taskWorker({ summary: 'Stopped by user. Ran on Unraid.' }, 'DesktopWorker')).toBe('Unraid');
+		expect(taskWorker({ worker: { name: 'ServerWorker' }, summary: null }, 'DesktopWorker')).toBe('ServerWorker');
+		expect(taskWorker({ summary: 'Stopped by user. Ran on ServerWorker.' }, 'DesktopWorker')).toBe('ServerWorker');
 		expect(taskWorker({ summary: null }, 'DesktopWorker')).toBe('DesktopWorker');
 	});
 
@@ -114,12 +114,12 @@ describe('buildRows', () => {
 	});
 
 	it('keeps a row the user stopped as Stopped after it leaves the running list', () => {
-		const first = buildRows({ ...base, tasks: [task('a', { worker: { name: 'Unraid' } })] });
+		const first = buildRows({ ...base, tasks: [task('a', { worker: { name: 'ServerWorker' } })] });
 		const stopped = { [taskKey('a')]: { row: first[0], at: Date.parse('2026-10-04T10:05:00Z') } };
 		const after = buildRows({ ...base, tasks: [], stopped });
 		expect(after).toHaveLength(1);
 		expect(after[0].state).toBe('stopped');
-		expect(after[0].worker).toBe('Unraid');
+		expect(after[0].worker).toBe('ServerWorker');
 		expect(countRows(after).running).toBe(0);
 	});
 

@@ -302,7 +302,7 @@ class _Writer:
 
 @pytest.mark.parametrize(("peer", "local"), [
     (("127.0.0.1", 5000), True), (("::1", 5000, 0, 0), True), (("127.0.0.2", 1), True),
-    (("10.0.0.200", 5000), False), (("192.168.1.5", 1), False), (("fe80::1%eth0", 1, 0, 2), False),
+    (("10.0.0.20", 5000), False), (("192.168.1.5", 1), False), (("fe80::1%eth0", 1, 0, 2), False),
     (("not-an-ip", 1), False), ("", True), (None, True),
 ])
 def test_only_local_peers_are_served(peer, local) -> None:

@@ -17,7 +17,7 @@ WINDOWS_URL = "http://windows.local:8000"
 
 
 class Router:
-    """Answers as Unraid or Windows by base URL; a worker can be taken down."""
+    """Answers as ServerWorker or Windows by base URL; a worker can be taken down."""
 
     def __init__(self, a, b):
         self.served = {UNRAID_URL: ServedBy(a, UNRAID_URL), WINDOWS_URL: ServedBy(b, WINDOWS_URL)}
@@ -44,7 +44,7 @@ def kicks(monkeypatch):
 
 
 def network(workers, monkeypatch):
-    """A ("Unraid") runs the child; B ("Windows") runs the parent chat."""
+    """A ("ServerWorker") runs the child; B ("Windows") runs the parent chat."""
     a, b = workers("unraid"), workers("windows")
     router = Router(a, b)
     real_async = httpx.AsyncClient
@@ -55,7 +55,7 @@ def network(workers, monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", async_client)
     monkeypatch.setattr(control, "CONNECT_RETRY_DELAY", 0)
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
     join(a, b, name="Windows")
     with b.active():
         database.create_session(session_id="caller", profile_id="default", project_id=None,
@@ -82,7 +82,7 @@ def network(workers, monkeypatch):
 
 def dispatch(a, b, **changes):
     fields = dict(
-        worker={"device_id": a.device_id, "device_name": "Unraid"},
+        worker={"device_id": a.device_id, "device_name": "ServerWorker"},
         caller_row=database.get_session("caller"), caller_session_id="caller", root_session_id="caller",
         depth=1, profile_id="default", agent_name="Default", result_agent="default", provider_id=None,
         model_id="sonnet", effort=None, prompt="Check the disk.", label="Task · Default",
@@ -138,7 +138,7 @@ def test_parent_starts_a_child_on_the_other_worker(workers, monkeypatch, kicks):
     with b.active():
         result = dispatch(a, b)
     assert result["ok"] is True, result
-    assert result["worker"] == {"device_id": a.device_id, "name": "Unraid"}
+    assert result["worker"] == {"device_id": a.device_id, "name": "ServerWorker"}
     assert result["checkout"] == {"mode": "none", "branch": None}
     assert result["permission_mode"] == "acceptEdits"
     assert "you will be woken with its report" in result["note"]
@@ -169,7 +169,7 @@ def test_a_target_refusal_comes_back_by_name(workers, monkeypatch, kicks):
             cursor.execute("SELECT COUNT(*) AS n FROM remote_tasks")
             assert cursor.fetchone()["n"] == 0  # never started, so nothing is tracked
     assert result == {"ok": False, "error": (
-        "Unraid refused the subagent: The agent 'nobody' does not exist on this worker; nothing was "
+        "ServerWorker refused the subagent: The agent 'nobody' does not exist on this worker; nothing was "
         "started; nothing was dispatched.")}
     assert kicks == []
 
@@ -203,7 +203,7 @@ def test_the_report_comes_back_and_wakes_the_caller_once(workers, monkeypatch, k
         prompt = wake["prompt"]
         assert "<task-notification>" in prompt and f"<task-id>{child}</task-id>" in prompt
         assert "<status>completed</status>" in prompt and "<tool-use-id>toolu_remote</tool-use-id>" in prompt
-        assert "Ran on Unraid. Disk is 40% full." in prompt
+        assert "Ran on ServerWorker. Disk is 40% full." in prompt
         assert "held back for the owner" in prompt and "permission for Bash" in prompt
         record = remote_tasks.get_dispatch(child)
         assert record["completion_id"] == turn["id"] and record["status"] == "completed"

@@ -32,7 +32,7 @@ def setup(monkeypatch):
 def offer(monkeypatch):
     call = Mock(return_value={'ok': True})
     monkeypatch.setattr(account_hub, 'worker_link_call', call)
-    managed.begin('Unraid')
+    managed.begin('ServerWorker')
     return managed._pending(), call
 
 
@@ -155,7 +155,7 @@ def test_connection_api_requires_admin_and_omits_secrets(monkeypatch):
     app.include_router(mobile.router)
     client = TestClient(app)
     assert client.get('/api/v1/mobile/hub/connection').status_code == 403
-    assert client.post('/api/v1/mobile/hub/connection', json={'name': 'Unraid'}).status_code == 403
+    assert client.post('/api/v1/mobile/hub/connection', json={'name': 'ServerWorker'}).status_code == 403
     app.dependency_overrides[require_admin] = lambda: 'admin'
     response = client.get('/api/v1/mobile/hub/connection')
     assert response.status_code == 200

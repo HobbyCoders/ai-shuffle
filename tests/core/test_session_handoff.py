@@ -13,7 +13,7 @@ from tests.pg_shim import ShimConnectionClosedError
 from app.core import session_handoff as sh
 
 DIRECTORY = {"runners": [
-    {"device_id": "dev-unraid", "device_name": "Unraid", "online": True, "is_self": True},
+    {"device_id": "dev-unraid", "device_name": "ServerWorker", "online": True, "is_self": True},
     {"device_id": "dev-gaming", "device_name": "DesktopWorker", "online": True, "is_self": False},
     {"device_id": "dev-laptop", "device_name": "Laptop", "online": False, "is_self": False},
 ]}
@@ -148,8 +148,8 @@ def test_resolves_by_name_or_device_id_and_refuses_offline_or_self():
     assert sh.resolve_worker("dev-gaming")["device_name"] == "DesktopWorker"
     with pytest.raises(ValueError, match="offline"):
         sh.resolve_worker("Laptop")
-    with pytest.raises(ValueError, match="Unraid is this worker"):
-        sh.resolve_worker("Unraid")
+    with pytest.raises(ValueError, match="ServerWorker is this worker"):
+        sh.resolve_worker("ServerWorker")
     with pytest.raises(ValueError, match=r"Unknown worker 'Desktop'.*DesktopWorker \(online\)"):
         sh.resolve_worker("Desktop")
     with pytest.raises(ValueError, match="Name the worker"):
@@ -1229,7 +1229,7 @@ async def test_rule6_a_restart_keeps_the_original_ten_minute_limit():
 # ---------------------------------------------------------------------------
 
 GAMING_RESUME = {"device_id": "dev-gaming", "device_name": "DesktopWorker", "capabilities": {"move_wakes": 2}}
-UNRAID_ROW = {"device_id": "dev-unraid", "device_name": "Unraid", "capabilities": {"move_wakes": 2}}
+UNRAID_ROW = {"device_id": "dev-unraid", "device_name": "ServerWorker", "capabilities": {"move_wakes": 2}}
 
 
 def _runners(gaming):
@@ -1258,7 +1258,7 @@ def _queued(session_id="s1"):
 
 
 def _moving(gaming, call, move=None):
-    """Patches for a move to DesktopWorker that lands, seen from Unraid."""
+    """Patches for a move to DesktopWorker that lands, seen from ServerWorker."""
     from contextlib import ExitStack
     from types import SimpleNamespace
     stack = ExitStack()
@@ -1273,7 +1273,7 @@ def _moving(gaming, call, move=None):
     return stack
 
 
-RESUME_PROMPT = ("[hand-off] Moved from Unraid to DesktopWorker at the owner's request. Your hand-off note: "
+RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker at the owner's request. Your hand-off note: "
                  "tests pass; next: wire the UI Continue the work from where you left off. If it was already "
                  "complete, stop after a brief acknowledgement; do not invent new work.")
 
@@ -1295,7 +1295,7 @@ async def test_2012_an_agent_hand_off_resumes_the_chat_there_with_its_note():
     assert body["source"] == "wakeup" and body["prompt"] == RESUME_PROMPT
     assert body["profile_id"] == "default" and "owner_send" not in body
     assert body["command_id"].startswith(sh.RESUME_COMMAND_PREFIX)
-    assert body["payload"] == {sh.RESUME_PAYLOAD: {"from": "Unraid", "note": "tests pass; next: wire the UI",
+    assert body["payload"] == {sh.RESUME_PAYLOAD: {"from": "ServerWorker", "note": "tests pass; next: wire the UI",
                                                 "handoff_id": result["handoff_id"]}}
     assert _queued() == [("wakeup", RESUME_PROMPT)]
     assert session_moves.get("s1") is None
@@ -1371,7 +1371,7 @@ async def test_2012_a_chat_the_owner_stopped_is_not_resumed():
         # The new worker drops a resume that reaches a chat stopped there.
         from app.network import control
         resume = {"session_id": "s1", "source": "wakeup", "prompt": "resume", "profile_id": "default",
-                  "payload": {sh.RESUME_PAYLOAD: {"from": "Unraid", "note": ""}}, "command_id": "handoff-resume-1"}
+                  "payload": {sh.RESUME_PAYLOAD: {"from": "ServerWorker", "note": ""}}, "command_id": "handoff-resume-1"}
         reply = await control._turns(resume, "dev-unraid")
         assert reply["dropped"] == "stopped" and reply["turn_id"] is None
         assert _queued() == []

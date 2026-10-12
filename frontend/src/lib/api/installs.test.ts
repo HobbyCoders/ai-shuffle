@@ -30,7 +30,7 @@ const gitState: ClusterGitState = {
 		{
 			id: 'inst-a',
 			device_name: 'Desktop',
-			base_url: 'http://10.0.0.135:8000',
+			base_url: 'http://10.0.0.30:8000',
 			platform: 'windows',
 			version: '1.2.1',
 			capabilities: {},

@@ -124,7 +124,7 @@ describe('assistant limits', () => {
   await waitFor(() => expect(mocks.getAssistantWorker).toHaveBeenCalled());
   expect(screen.queryByRole('combobox', { name: 'Run work on' })).toBeNull();
   cleanup();
-  mocks.getAssistantWorker.mockResolvedValue({ device_id: null, workers: [{ device_id: 'dev-serverworker', name: 'Unraid', online: true, remote_task: true }] });
+  mocks.getAssistantWorker.mockResolvedValue({ device_id: null, workers: [{ device_id: 'dev-serverworker', name: 'ServerWorker', online: true, remote_task: true }] });
   render(AssistantLimits);
   const select = await screen.findByRole('combobox', { name: 'Run work on' }) as HTMLSelectElement;
   expect(select.closest('section')?.getAttribute('aria-labelledby')).toBe('limits-heading');

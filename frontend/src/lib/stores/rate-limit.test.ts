@@ -1013,7 +1013,7 @@ describe('network devices and refilled windows', () => {
 			snapshots: [
 				{ instance_id: 'ai-shuffle-local', device_id: 'dev_local', device_name: 'DesktopWorker', available: true,
 					windows: [{ type: 'five_hour', utilization: 70, resets_at: String(now + 3_600_000), observed_at: now }] },
-				{ instance_id: 'ai-shuffle-unraid', device_id: 'dev_unraid', device_name: 'Unraid', available: true,
+				{ instance_id: 'ai-shuffle-unraid', device_id: 'dev_unraid', device_name: 'ServerWorker', available: true,
 					windows: [{ type: 'five_hour', utilization: 99, resets_at: String(now + 3_600_000), observed_at: now }] },
 			],
 		});
@@ -1023,7 +1023,7 @@ describe('network devices and refilled windows', () => {
 		networkSnapshot();
 		const state = rateLimit.current;
 		expect(resolveBucketKey(state, 'dev_unraid')).toBe('ai-shuffle-unraid');
-		expect(resolveBucket(state, 'dev_unraid')?.deviceName).toBe('Unraid');
+		expect(resolveBucket(state, 'dev_unraid')?.deviceName).toBe('ServerWorker');
 		expect(resolveBucketKey(state, 'dev_local')).toBe('ai-shuffle-local');
 		expect(isSelfTarget(state, 'dev_local')).toBe(true);
 		expect(isSelfTarget(state, 'dev_unraid')).toBe(false);
@@ -1121,7 +1121,7 @@ describe('installs sharing one Claude account (#1980)', () => {
 
 	const HOUR = 3_600_000;
 
-	/** Unraid ran its last Claude turn hours ago; DesktopWorker just reported. */
+	/** ServerWorker ran its last Claude turn hours ago; DesktopWorker just reported. */
 	function sharedAccountSnapshot(accountKeys: [string | null, string | null] = ['acct', 'acct']) {
 		const now = Date.now();
 		const reset = String(now + HOUR);
@@ -1134,7 +1134,7 @@ describe('installs sharing one Claude account (#1980)', () => {
 			self_instance_id: 'ai-shuffle-unraid',
 			self_device_id: 'dev_unraid',
 			snapshots: [
-				{ instance_id: 'ai-shuffle-unraid', device_id: 'dev_unraid', device_name: 'Unraid', available: true,
+				{ instance_id: 'ai-shuffle-unraid', device_id: 'dev_unraid', device_name: 'ServerWorker', available: true,
 					account_key: accountKeys[0], windows: [unraid] },
 				{ instance_id: 'ai-shuffle-gaming', device_id: 'dev_gaming', device_name: 'DesktopWorker', available: true,
 					account_key: accountKeys[1], windows: [gaming] },
@@ -1152,7 +1152,7 @@ describe('installs sharing one Claude account (#1980)', () => {
 		const shown = resolveBucket(rateLimit.current, null);
 		expect(shown?.windows.five_hour.utilization).toBe(35);
 		// Still this install's bucket: its labels and self-ness are unchanged.
-		expect(shown?.deviceName).toBe('Unraid');
+		expect(shown?.deviceName).toBe('ServerWorker');
 		expect(resolveBucketKey(rateLimit.current, null)).toBe('ai-shuffle-unraid');
 		expect(isBucketStale(shown!, Date.now())).toBe(false);
 		expect(bucketReporters(shown!)).toEqual(['DesktopWorker']);
@@ -1176,7 +1176,7 @@ describe('installs sharing one Claude account (#1980)', () => {
 		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.2, instance_id: 'ai-shuffle-unraid' });
 		const shown = resolveBucket(rateLimit.current, 'dev_gaming');
 		expect(shown?.windows.five_hour.utilization).toBe(80);
-		expect(bucketReporters(shown!)).toEqual(['Unraid']);
+		expect(bucketReporters(shown!)).toEqual(['ServerWorker']);
 		// A later snapshot that has not seen the live reading yet keeps it.
 		sharedAccountSnapshot();
 		expect(resolveBucket(rateLimit.current, null)?.windows.five_hour.utilization).toBe(80);

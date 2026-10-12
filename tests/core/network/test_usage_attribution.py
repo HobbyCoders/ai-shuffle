@@ -38,7 +38,7 @@ def _peer_entries(worker, instance_id):
 def test_a_row_from_a_member_without_a_legacy_id_names_its_publisher(workers):
     a, b = workers("a"), workers("b")
     with _as(a, "ai-shuffle-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="ai-shuffle-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="ai-shuffle-a")
     # An account join: the certificate carries no instance id for B.
     join(a, b, name="DesktopWorker")
     _publish_usage(b, "ai-shuffle-b")
@@ -54,7 +54,7 @@ def test_rows_stored_before_the_update_are_attributed_on_read(workers):
     """Nothing is rewritten: a row a peer already holds resolves on its next read."""
     a, b = workers("a"), workers("b")
     with _as(a, "ai-shuffle-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="ai-shuffle-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="ai-shuffle-a")
     join(a, b, name="DesktopWorker")
     _publish_usage(b, "ai-shuffle-b")
     exchange(b, a)
@@ -69,7 +69,7 @@ def test_a_member_with_a_legacy_id_still_resolves_either_way(workers):
     the publisher lookup agree, and either alone is enough."""
     a, b = workers("a"), workers("b")
     with _as(a, "ai-shuffle-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="ai-shuffle-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="ai-shuffle-a")
     join(a, b, name="DesktopWorker", legacy_instance_id="ai-shuffle-b")
     _publish_usage(b, "ai-shuffle-b")
     exchange(b, a)
@@ -81,7 +81,7 @@ def test_a_member_with_a_legacy_id_still_resolves_either_way(workers):
 def test_the_founders_row_reaches_a_joiner_with_its_device(workers):
     a, b = workers("a"), workers("b")
     with _as(a, "ai-shuffle-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="ai-shuffle-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="ai-shuffle-a")
     join(a, b, name="DesktopWorker")
     _publish_usage(a, "ai-shuffle-a")
     exchange(a, b)
@@ -91,7 +91,7 @@ def test_the_founders_row_reaches_a_joiner_with_its_device(workers):
 def test_a_row_from_a_removed_device_is_still_dropped(workers):
     a, b = workers("a"), workers("b")
     with _as(a, "ai-shuffle-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="ai-shuffle-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="ai-shuffle-a")
     join(a, b, name="DesktopWorker")
     _publish_usage(b, "ai-shuffle-b")
     exchange(b, a)
@@ -104,7 +104,7 @@ def test_a_row_this_device_published_under_an_old_instance_id_is_not_a_second_de
     """The publisher lookup must not turn this device's stale row into a peer."""
     a, b = workers("a"), workers("b")
     with _as(a, "ai-shuffle-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="ai-shuffle-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="ai-shuffle-a")
     join(a, b, name="DesktopWorker")
     _publish_usage(b, "ai-shuffle-b-old")
     _publish_usage(b, "ai-shuffle-b")

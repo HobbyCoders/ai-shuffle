@@ -71,7 +71,7 @@ describe('worker presence store', () => {
 
 describe('presenceOf', () => {
 	const installs = [
-		install({ id: 'dev_unraid', device_id: 'dev_unraid', legacy_instance_id: 'ai-shuffle-unraid', device_name: 'Unraid', online: false }),
+		install({ id: 'dev_unraid', device_id: 'dev_unraid', legacy_instance_id: 'ai-shuffle-unraid', device_name: 'ServerWorker', online: false }),
 		install({ id: 'pop', device_name: 'linux-worker', online: true })
 	];
 
@@ -82,9 +82,9 @@ describe('presenceOf', () => {
 	});
 
 	it('falls back to a unique display name, else reports unknown', () => {
-		expect(presenceOf(installs, [], 'Unraid')).toBe(false);
+		expect(presenceOf(installs, [], 'ServerWorker')).toBe(false);
 		expect(presenceOf(installs, ['missing'], 'Elsewhere')).toBeNull();
-		expect(presenceOf([...installs, install({ id: 'x', device_name: 'Unraid' })], [], 'Unraid')).toBeNull();
+		expect(presenceOf([...installs, install({ id: 'x', device_name: 'ServerWorker' })], [], 'ServerWorker')).toBeNull();
 		expect(presenceOf(null, ['pop'])).toBeNull();
 	});
 });

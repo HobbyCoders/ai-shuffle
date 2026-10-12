@@ -60,9 +60,9 @@ def test_key_session_token_cannot_reach_owner_routes():
         return {"ok": True}
 
     client = TestClient(IngressApplication(api, local_port=18091),
-                        base_url="http://10.0.0.135:18091", client=("10.0.0.200", 54321))
+                        base_url="http://10.0.0.30:18091", client=("10.0.0.20", 54321))
     # The redirect refuses to set the cookie for a key session ...
-    landing = client.get(preview_access.preview_url(KEY, "10.0.0.135", 18091).split("18091", 1)[1],
+    landing = client.get(preview_access.preview_url(KEY, "10.0.0.30", 18091).split("18091", 1)[1],
                          follow_redirects=False)
     assert landing.status_code == 403
     # ... and a cookie planted by hand authenticates as nobody.
@@ -82,7 +82,7 @@ def test_workspace_card_carries_no_token_for_key_sessions(monkeypatch, session_i
     import app.core.mcp_config as mcp_config
     import app.core.provider.harness_adapter as ha
 
-    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.30")
     monkeypatch.setattr(environment, "workspace_facts_card",
                         lambda cwd, *, browser_host, app_port, preview_url, **_: f"card preview={preview_url}")
     adapter = ha.HarnessAdapter()
@@ -111,7 +111,7 @@ def test_workspace_card_is_byte_identical_across_reconnects(tmp_path, monkeypatc
     (root / "app" / "preview.py").write_text("# preview")
     (root / "fluid").mkdir()
     monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": sys.executable})
-    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.30")
     # One minute past a six-hour boundary (UTC): the two connects below fall
     # inside the same stable window.
     clock = [1_799_992_860.0]
@@ -149,7 +149,7 @@ def test_workspace_card_has_no_link_without_the_preview_listener(tmp_path, monke
     (root / "app" / "preview.py").write_text("# preview")
     (root / "fluid").mkdir()
     monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": sys.executable})
-    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.30")
     monkeypatch.setattr(preview_access, "_listener_port", None)
 
     adapter = ha.HarnessAdapter()
@@ -162,7 +162,7 @@ def test_workspace_card_has_no_link_without_the_preview_listener(tmp_path, monke
 @pytest.mark.parametrize("bind, host_in_link, local_line", [
     ("127.0.0.1", "127.0.0.1", True),
     ("localhost", "127.0.0.1", True),
-    ("0.0.0.0", "10.0.0.135", False),
+    ("0.0.0.0", "10.0.0.30", False),
 ])
 def test_workspace_card_link_names_an_address_the_listener_answers_on(
         tmp_path, monkeypatch, bind, host_in_link, local_line):
@@ -180,7 +180,7 @@ def test_workspace_card_link_names_an_address_the_listener_answers_on(
     (root / "app" / "preview.py").write_text("# preview")
     (root / "fluid").mkdir()
     monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": sys.executable})
-    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.30")
     monkeypatch.setattr(preview_access, "_listener_host", None)
     preview_access.set_listener_port(8002, bind)
 
@@ -190,8 +190,8 @@ def test_workspace_card_link_names_an_address_the_listener_answers_on(
     assert f"http://{host_in_link}:8002{preview_access.REDIRECT_PATH}" in card
     browser_line = next(line for line in card.splitlines() if line.startswith("- Agent browser:"))
     if local_line:
-        assert "10.0.0.135" not in card
+        assert "10.0.0.30" not in card
         assert "http://127.0.0.1:<port>" in browser_line
         assert "different host" not in browser_line
     else:
-        assert "http://10.0.0.135:<port>" in browser_line
+        assert "http://10.0.0.30:<port>" in browser_line

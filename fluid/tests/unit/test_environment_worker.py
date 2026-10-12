@@ -9,7 +9,7 @@ from fluid.context.compiler import PromptInputs, compile_prompt
 from fluid.context.environment import environment_block, environment_note
 
 WORKER = (
-    "Worker: Unraid (device dev_aaaaaaaaaaaaaaaaaaaaaaaa, in a container). Your "
+    "Worker: ServerWorker (device dev_aaaaaaaaaaaaaaaaaaaaaaaa, in a container). Your "
     "shell, files and tools run on this worker.\n"
     "Other workers in the owner's network: DesktopWorker."
 )
@@ -51,9 +51,9 @@ def test_compiler_threads_the_worker_into_the_environment_section(tmp_path):
 
 
 def test_moved_session_compiles_the_new_worker(tmp_path):
-    before = compile_prompt(PromptInputs(cwd=tmp_path, worker="Worker: Unraid (device a).",
+    before = compile_prompt(PromptInputs(cwd=tmp_path, worker="Worker: ServerWorker (device a).",
                                          include_skills=False, include_agents=False))
     after = compile_prompt(PromptInputs(cwd=tmp_path, worker="Worker: DesktopWorker (device b).",
                                         include_skills=False, include_agents=False))
-    assert "Worker: Unraid" in before.text and "Worker: DesktopWorker" in after.text
-    assert "Worker: Unraid" not in after.text
+    assert "Worker: ServerWorker" in before.text and "Worker: DesktopWorker" in after.text
+    assert "Worker: ServerWorker" not in after.text

@@ -617,7 +617,7 @@ class TestNetworkCopy:
         db.upsert_usage_snapshot("dev_peer", [], True, 1, 1)
         installs = {
             "dev_peer": {"id": "dev_peer", "device_name": "DesktopWorker", "online": False},
-            settings.effective_instance_id: {"id": "dev_self", "device_name": "Unraid", "online": True},
+            settings.effective_instance_id: {"id": "dev_self", "device_name": "ServerWorker", "online": True},
         }
         with patch.object(db, "get_installs_map", return_value=installs):
             snap = monitor._cluster_snapshot()
@@ -636,8 +636,8 @@ class TestNetworkCopy:
         db.upsert_usage_snapshot(settings.effective_instance_id, [], True, 1, 1)
         installs = {
             "dev_self": {"id": "dev_self", "device_name": "DesktopWorker", "online": True},
-            "dev_peer": {"id": "dev_peer", "device_name": "Unraid", "online": True},
-            "ai-shuffle-peer": {"id": "dev_peer", "device_name": "Unraid", "online": True},
+            "dev_peer": {"id": "dev_peer", "device_name": "ServerWorker", "online": True},
+            "ai-shuffle-peer": {"id": "dev_peer", "device_name": "ServerWorker", "online": True},
         }
         with patch.object(db, "get_installs_map", return_value=installs), \
                 patch("app.network.runners.self_device_id", return_value="dev_self"):
@@ -681,7 +681,7 @@ def _cluster(monitor, peers, self_key):
     this device signed in to ``self_key``'s account (None = not signed in)."""
     from app.core import claude_cli_status
     from app.db import database as db
-    installs = {settings.effective_instance_id: {"id": "dev_self", "device_name": "Unraid", "online": True}}
+    installs = {settings.effective_instance_id: {"id": "dev_self", "device_name": "ServerWorker", "online": True}}
     for peer_id, (windows, key) in peers.items():
         db.upsert_usage_snapshot(peer_id, windows, True, 1, 1, account_key=key)
         installs[peer_id] = {"id": peer_id, "device_name": "DesktopWorker", "online": True}

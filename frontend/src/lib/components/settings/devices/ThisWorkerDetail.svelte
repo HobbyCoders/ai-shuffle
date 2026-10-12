@@ -222,7 +222,7 @@
 							value={lanAddresses}
 							mono
 							width={220}
-							placeholder="10.0.0.200:8001"
+							placeholder="10.0.0.20:8001"
 							label="Extra LAN addresses"
 							disabled={!lan.enabled}
 							onchange={saveLanAddresses}

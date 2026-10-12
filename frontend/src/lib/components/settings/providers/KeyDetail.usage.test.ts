@@ -159,7 +159,7 @@ it('a gateway has no Usage tab', async () => {
 				id: 'gw-1',
 				name: 'Homelab vLLM',
 				provider_type: 'custom',
-				base_url: 'http://10.0.0.200:8000/v1'
+				base_url: 'http://10.0.0.20:8000/v1'
 			})
 		]
 	});

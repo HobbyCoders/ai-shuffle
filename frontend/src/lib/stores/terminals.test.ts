@@ -17,7 +17,7 @@ const info = (id: string, over: Partial<TerminalInfo> = {}): TerminalInfo => ({
 	state: 'live', exit_code: null, created_at: '', exited_at: null, busy: false, cols: 80, rows: 24, attached: 0, ...over,
 });
 const targets: TerminalTargets = {
-	worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+	worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
 	shells: [{ name: 'bash', default: true }, { name: 'sh', default: false }], default_shell: 'bash',
 	default_folder: { path: '/workspace/app', source: 'project' }, limit: 8, open: 0,
 };
@@ -30,7 +30,7 @@ beforeEach(() => {
 
 describe('probe mapping', () => {
 	it('maps targets to a ready probe', () => {
-		expect(probeFromTargets(targets)).toMatchObject({ status: 'ready', worker: 'Unraid', shells: ['bash', 'sh'], folder: '/workspace/app', folderSource: 'project' });
+		expect(probeFromTargets(targets)).toMatchObject({ status: 'ready', worker: 'ServerWorker', shells: ['bash', 'sh'], folder: '/workspace/app', folderSource: 'project' });
 	});
 	it('treats 401 and 403 as denied and keeps service codes', () => {
 		expect(probeFromError(new TerminalApiError('no', 403, 'http_403'))).toEqual({ status: 'denied' });
@@ -225,7 +225,7 @@ describe('terminals with no chat (the Terminal page)', () => {
 	it("lists only the worker's chatless terminals, never a chat's", async () => {
 		api.list.mockResolvedValue({
 			terminals: [info('chat', { session_id: 's1' }), info('own', { session_id: null })],
-			open: 2, running: 2, limit: 8, worker: { id: 'w', name: 'Unraid', platform: 'linux' },
+			open: 2, running: 2, limit: 8, worker: { id: 'w', name: 'ServerWorker', platform: 'linux' },
 		});
 		await terminals.load(WORKER_TERMINALS);
 		expect(api.list).toHaveBeenCalledWith(null);

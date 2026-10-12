@@ -41,11 +41,11 @@ def _caller(worker, session_id="caller", **fields):
 
 
 def network(workers, monkeypatch, *, online=True):
-    """A ("Unraid") owns the new chat; B ("Windows") runs the caller."""
+    """A ("ServerWorker") owns the new chat; B ("Windows") runs the caller."""
     a, b = workers("unraid"), workers("windows")
     served = connect_owner(monkeypatch, a)
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
     join(a, b, name="Windows")
     for worker in (a, b):
         with worker.active():
@@ -81,7 +81,7 @@ def agent_turns(session_id):
 
 
 ARGS = {"title": "Folder sandbox test", "prompt": "Run the private-folder test here.",
-        "request_id": "unraid-test", "worker": "Unraid"}
+        "request_id": "unraid-test", "worker": "ServerWorker"}
 
 
 @pytest.mark.parametrize("effort,expected", [(None, "max"), ("low", "low")])
@@ -166,7 +166,7 @@ async def test_starts_on_the_chosen_worker_once(workers, monkeypatch, kicks):
         assert not first.is_error, first.text
         result = json.loads(first.text)
         assert result["created"] is True and result["delivery_status"] == "queued"
-        assert result["worker"] == {"device_id": a.device_id, "name": "Unraid"}
+        assert result["worker"] == {"device_id": a.device_id, "name": "ServerWorker"}
         # The receipt is caller-side accounting only, settled at birth.
         [receipt] = receipts()
         assert receipt["state"] == "completed" and receipt["command_id"].startswith("orchestration:start:")
@@ -231,7 +231,7 @@ async def test_offline_worker_is_refused_not_started_here(workers, monkeypatch, 
     with b.active():
         before = len(database.get_sessions(limit=100))
         outcome = await start(ARGS)
-        assert outcome.is_error and "Unraid is offline" in outcome.text
+        assert outcome.is_error and "ServerWorker is offline" in outcome.text
         assert len(database.get_sessions(limit=100)) == before and receipts() == []
     call.assert_not_called()
 
@@ -241,7 +241,7 @@ async def test_unknown_worker_names_the_choices(workers, monkeypatch, kicks):
     with b.active():
         outcome = await start({**ARGS, "worker": "Laptop"})
     assert outcome.is_error and "Unknown worker 'Laptop'" in outcome.text
-    assert "Unraid (online)" in outcome.text and "Windows (this worker)" in outcome.text
+    assert "ServerWorker (online)" in outcome.text and "Windows (this worker)" in outcome.text
 
 
 async def test_removed_worker_is_refused(workers, monkeypatch, kicks):
@@ -269,7 +269,7 @@ async def test_destination_refusal_releases_the_reservation(workers, monkeypatch
     converge([a, b])
     with b.active():
         outcome = await start(ARGS)
-        assert outcome.is_error and "Unraid refused the new chat" in outcome.text
+        assert outcome.is_error and "ServerWorker refused the new chat" in outcome.text
         assert "not checked out on this worker" in outcome.text
         # Nothing was made, so the budget and request_id are given back.
         assert receipts() == []
@@ -284,7 +284,7 @@ async def test_unreachable_keeps_the_receipt_and_retry_is_idempotent(workers, mo
     async def flaky(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise control.RunnerUnreachable("Unraid did not answer in time.")
+            raise control.RunnerUnreachable("ServerWorker did not answer in time.")
         return await real_call(*args, **kwargs)
     monkeypatch.setattr(control, "call", flaky)
     with b.active():
@@ -350,7 +350,7 @@ async def test_the_owners_paired_device_may_start_remotely(workers, monkeypatch,
 async def test_destination_refuses_non_worker_devices(workers):
     a, b = workers("unraid"), workers("windows")
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
     join(a, b, name="Windows")
     with a.active():
         with pytest.raises(PermissionError):
@@ -403,7 +403,7 @@ async def test_assistant_project_runs_on_the_worker_with_the_checkout_and_report
                                "project": "ai-shuffle"})
         assert not outcome.is_error, outcome.text
         result = json.loads(outcome.text)
-        assert result["worker"]["name"] == "Unraid"
+        assert result["worker"]["name"] == "ServerWorker"
         assert "reports back to you automatically" in result["note"] and "Away mode" in result["note"]
         [receipt] = receipts()
         assert receipt["payload"]["report_to"] == "caller"
@@ -440,7 +440,7 @@ async def test_assistant_project_runs_on_the_worker_with_the_checkout_and_report
             cursor.execute("SELECT * FROM turns WHERE session_id='caller' AND source='unpark'")
             [wake] = [turns._row(r) for r in cursor.fetchall()]
     assert "<kind>session</kind>" in wake["prompt"] and "Fixed; push deferred." in wake["prompt"]
-    assert "on Unraid" in wake["prompt"] and "permission for Bash" in wake["prompt"]
+    assert "on ServerWorker" in wake["prompt"] and "permission for Bash" in wake["prompt"]
     assert wake["payload"]["orchestration_root"] == receipt["parent_turn_id"]
 
 
@@ -469,7 +469,7 @@ async def test_assistant_project_with_no_online_checkout_is_refused(workers, mon
         before = len(database.get_sessions(limit=100))
         outcome = await start({"title": "T", "prompt": "P", "request_id": "p3", "project": "ai-shuffle"})
         assert outcome.is_error and "No online worker has ai-shuffle checked out" in outcome.text
-        assert "Unraid (offline)" in outcome.text
+        assert "ServerWorker (offline)" in outcome.text
         assert len(database.get_sessions(limit=100)) == before and receipts() == []
 
 
@@ -512,7 +512,7 @@ async def test_a_named_model_starts_on_the_chosen_worker_with_its_provider(worke
     # registry to identify the provider, then the receiver validates its own.
     if wording != "prov:grok:grok-4.5":
         _grok(b)
-    _user_says(b, f"Run the test on Unraid with {wording}")
+    _user_says(b, f"Run the test on ServerWorker with {wording}")
     with b.active():
         outcome = await start({**ARGS, "model": wording})
     assert not outcome.is_error, outcome.text
@@ -538,11 +538,11 @@ async def test_the_destination_never_reinterprets_a_resolved_model_id(workers, m
         database.create_model_provider("grok", "Grok", "xai", "https://example.invalid/v1",
                                        models=[{"id": "different-id", "label": "Grok 4.5"}])
         before = len(database.get_sessions(limit=100))
-    _user_says(b, f"Run the test on Unraid with {wording}")
+    _user_says(b, f"Run the test on ServerWorker with {wording}")
     with b.active():
         outcome = await start({**ARGS, "model": wording})
         assert outcome.is_error, outcome.text
-        assert "Unraid refused the new chat" in outcome.text and "exact model id" in outcome.text
+        assert "ServerWorker refused the new chat" in outcome.text and "exact model id" in outcome.text
         assert "prov:grok:different-id" in outcome.text
         assert receipts() == []
     with a.active():
@@ -558,11 +558,11 @@ async def test_the_destination_refuses_a_model_it_cannot_run(workers, monkeypatc
     _grok(b)  # A local match is NOT evidence that the receiver can run it.
     with a.active():
         before = len(database.get_sessions(limit=100))
-    _user_says(b, f"Run the test on Unraid with {wording}")
+    _user_says(b, f"Run the test on ServerWorker with {wording}")
     with b.active():
         outcome = await start({**ARGS, "model": wording})
         assert outcome.is_error
-        assert "Unraid refused the new chat" in outcome.text and "cannot run on this worker" in outcome.text
+        assert "ServerWorker refused the new chat" in outcome.text and "cannot run on this worker" in outcome.text
         # Nothing was made there, so the receipt is given back.
         assert receipts() == []
     with a.active():

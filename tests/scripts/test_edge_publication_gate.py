@@ -92,8 +92,8 @@ def test_unprotected_or_moved_main_refuses():
 
 def env(**changes):
     values = {"GITHUB_REPOSITORY": gate.REPOSITORY, "GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "schedule",
-              "GITHUB_SHA": REVISION, "GITHUB_ACTOR_ID": gate.OWNER_ID, "GITHUB_ACTOR": "Quickkill0",
-              "GITHUB_TRIGGERING_ACTOR": "Quickkill0"}
+              "GITHUB_SHA": REVISION, "GITHUB_ACTOR_ID": gate.OWNER_ID, "GITHUB_ACTOR": "example-maintainer",
+              "GITHUB_TRIGGERING_ACTOR": "example-maintainer"}
     values.update(changes)
     return values
 

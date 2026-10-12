@@ -139,7 +139,7 @@ describe('remembered permission on first send', () => {
 
 describe('remembered worker on send', () => {
 	it('sends to the remembered worker, consumes the active intent but keeps the default', async () => {
-		const pick = { id: 'runner-1', name: 'Unraid' };
+		const pick = { id: 'runner-1', name: 'ServerWorker' };
 		setPersistedDeviceIntent(pick);
 		const { deps, wsConn, getState } = makeDeps(baseState({ deviceIntent: getPersistedDeviceIntent() }));
 		try {

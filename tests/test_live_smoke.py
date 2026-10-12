@@ -40,7 +40,7 @@ class FakeWorker:
         self.compact_note = None
 
     def deploy_status(self):
-        workers = [{"label": "Unraid", "device_id": "dev_self", "is_self": True, "online": True,
+        workers = [{"label": "ServerWorker", "device_id": "dev_self", "is_self": True, "online": True,
                     "revision": REV, "short": REV[:7], "app_version": "1.0"}]
         if self.has_peer:
             workers.append({"label": "DesktopWorker", "device_id": "dev_peer", "is_self": False,
@@ -48,7 +48,7 @@ class FakeWorker:
         return {"workers": workers}
 
     def installs(self):
-        rows = [{"id": "dev_self", "device_name": "Unraid", "online": True, "approved": True, "is_self": True}]
+        rows = [{"id": "dev_self", "device_name": "ServerWorker", "online": True, "approved": True, "is_self": True}]
         if self.has_peer:
             rows.append({"id": "dev_peer", "device_name": "DesktopWorker", "online": self.peer_online,
                          "approved": True, "is_self": False})
@@ -101,7 +101,7 @@ class FakeWorker:
         busy = bool(s["queue"])
         return {"id": sid, "messages": [dict(m) for m in s["messages"]],
                 "total_tokens_in": s["tokens"], "total_tokens_out": 0, "cache_read_tokens": 50,
-                "is_remote": s["remote"], "device_name": "DesktopWorker" if s["remote"] else "Unraid",
+                "is_remote": s["remote"], "device_name": "DesktopWorker" if s["remote"] else "ServerWorker",
                 "instance_id": "dev_peer" if s["remote"] else "dev_self",
                 "remote_runtime_state": ("working" if busy else "idle") if s["remote"] else None,
                 "_busy": busy}
@@ -157,11 +157,11 @@ def test_pass_writes_result_file_and_archives(tmp_path):
                  {"id": "t.3", "check": "Quit", "kind": "owner"})
     result, path = _run(worker, data, tmp_path)
 
-    assert path == tmp_path / REV / "Unraid.json"
+    assert path == tmp_path / REV / "ServerWorker.json"
     on_disk = json.loads(path.read_text())
     assert on_disk == result
     assert result["outcome"] == "pass"
-    assert result["revision"] == REV and result["worker"] == "Unraid"
+    assert result["revision"] == REV and result["worker"] == "ServerWorker"
     assert result["peer"] == {"label": "DesktopWorker", "revision": PEER_REV, "online": True}
     assert result["model"] == {"model": "haiku", "why": "cheapest by name ('haiku')"}
     rows = {r["id"]: r for r in result["rows"]}
@@ -211,7 +211,7 @@ def test_token_cap_stops_the_run(tmp_path):
     assert "s2" in worker.stopped
     assert sorted(worker.archived) == ["s1", "s2"]
     assert len(worker.sent) == 2
-    verdict = gate.evaluate(tmp_path, REV, ["Unraid"], data["suites"][0]["rows"])
+    verdict = gate.evaluate(tmp_path, REV, ["ServerWorker"], data["suites"][0]["rows"])
     assert verdict["verdict"] == "block"
 
 
@@ -292,7 +292,7 @@ def test_unreachable_worker_writes_nothing(tmp_path):
 def test_partial_run_writes_partial_file(tmp_path):
     worker = FakeWorker()
     result, path = _run(worker, _data(_script("t.1"), _script("t.2")), tmp_path, only=["t.2"])
-    assert path.name == "Unraid-partial-r1.json" and result["partial"] is True
+    assert path.name == "ServerWorker-partial-r1.json" and result["partial"] is True
     assert [r["id"] for r in result["rows"]] == ["t.2"]
     with pytest.raises(SetupError, match="unknown row ids"):
         _run(FakeWorker(), _data(_script("t.1")), tmp_path, only=["nope"])
@@ -486,7 +486,7 @@ ROWS = [
 ]
 
 
-def _write(tmp_path, worker="Unraid", revision=REV, **rows):
+def _write(tmp_path, worker="ServerWorker", revision=REV, **rows):
     statuses = {"s.1": "pass", "s.2": "pass", "s.3": "not_run", "s.4": "not_run", **rows}
     kinds = {r["id"]: r["kind"] for r in ROWS}
     data = {"revision": revision, "worker": worker, "outcome": "pass", "cap_exceeded": False,
@@ -498,21 +498,21 @@ def _write(tmp_path, worker="Unraid", revision=REV, **rows):
 def test_gate_pass(tmp_path):
     _write(tmp_path)
     _write(tmp_path, worker="DesktopWorker")
-    report = gate.evaluate(tmp_path, REV, ["Unraid", "DesktopWorker"], ROWS)
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker", "DesktopWorker"], ROWS)
     assert report["verdict"] == "pass" and report["blockers"] == []
-    assert report["owner_todo"] == ["Unraid: s.3 (c) needs the owner", "DesktopWorker: s.3 (c) needs the owner"]
-    assert report["release_notes_lines"] == [f"Live smoke passed on Unraid, DesktopWorker at {REV[:9]}."]
+    assert report["owner_todo"] == ["ServerWorker: s.3 (c) needs the owner", "DesktopWorker: s.3 (c) needs the owner"]
+    assert report["release_notes_lines"] == [f"Live smoke passed on ServerWorker, DesktopWorker at {REV[:9]}."]
 
 
 @pytest.mark.parametrize("rows, expect", [
-    ({"s.1": "fail"}, "Unraid: s.1 failed"),
-    ({"s.1": "not_run"}, "Unraid: s.1 not run"),
+    ({"s.1": "fail"}, "ServerWorker: s.1 failed"),
+    ({"s.1": "not_run"}, "ServerWorker: s.1 not run"),
     ({"s.2": "not_run"}, "s.2 not recorded"),
     ({"s.2": None}, "s.2 missing from the result"),
 ])
 def test_gate_blocks_on_rows(tmp_path, rows, expect):
     _write(tmp_path, **rows)
-    report = gate.evaluate(tmp_path, REV, ["Unraid"], ROWS)
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], ROWS)
     assert report["verdict"] == "block"
     assert any(expect in b for b in report["blockers"]), report["blockers"]
     assert report["release_notes_lines"] == []
@@ -520,7 +520,7 @@ def test_gate_blocks_on_rows(tmp_path, rows, expect):
 
 def test_gate_blocks_on_missing_file_and_wrong_revision(tmp_path):
     _write(tmp_path)
-    report = gate.evaluate(tmp_path, REV, ["Unraid", "DesktopWorker"], ROWS)
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker", "DesktopWorker"], ROWS)
     assert report["verdict"] == "block"
     assert any(b.startswith("no smoke result for DesktopWorker") for b in report["blockers"])
 
@@ -537,13 +537,13 @@ def test_gate_blocks_interrupted_and_over_cap(tmp_path):
     data = json.loads(path.read_text())
     data.update(outcome="interrupted", cap_exceeded=True, token_cap=600000)
     results.write(path, data)
-    blockers = gate.evaluate(tmp_path, REV, ["Unraid"], ROWS)["blockers"]
-    assert "Unraid's run was interrupted" in blockers
-    assert "Unraid's run hit the token cap (600000)" in blockers
+    blockers = gate.evaluate(tmp_path, REV, ["ServerWorker"], ROWS)["blockers"]
+    assert "ServerWorker's run was interrupted" in blockers
+    assert "ServerWorker's run hit the token cap (600000)" in blockers
 
 
 def test_gate_skip_is_recorded(tmp_path):
-    report = gate.evaluate(tmp_path, REV, ["Unraid"], ROWS, skip_reason="DesktopWorker is off for the week")
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], ROWS, skip_reason="DesktopWorker is off for the week")
     assert report["verdict"] == "skipped" and report["blockers"] == []
     assert report["would_block"]
     assert report["release_notes_lines"] == ["Live smoke skipped (--skip-smoke): DesktopWorker is off for the week"]
@@ -551,8 +551,8 @@ def test_gate_skip_is_recorded(tmp_path):
 
 def test_gate_discovers_workers_and_ignores_partials(tmp_path):
     _write(tmp_path)
-    results.write(results.result_path(tmp_path, REV, "Unraid", partial="r9"), {"revision": REV, "rows": []})
-    assert gate.discover_workers(tmp_path, REV) == ["Unraid"]
+    results.write(results.result_path(tmp_path, REV, "ServerWorker", partial="r9"), {"revision": REV, "rows": []})
+    assert gate.discover_workers(tmp_path, REV) == ["ServerWorker"]
 
 
 # -- record / check / import CLI ---------------------------------------------
@@ -564,13 +564,13 @@ def test_record_then_check_cli(tmp_path, capsys):
     scen_file = tmp_path / "scen.json"
     scen_file.write_text(json.dumps({"version": 1, "defaults": {}, "suites": [{"name": "s", "rows": [
         {**r, **({"steps": [{"op": "workers"}]} if r["kind"] == "script" else {})} for r in ROWS]}]}))
-    check = ["check", REV, "--worker", "Unraid", "--scenarios", str(scen_file), *base]
+    check = ["check", REV, "--worker", "ServerWorker", "--scenarios", str(scen_file), *base]
     assert cli.main(check) == 1
-    assert cli.main(["record", REV, "--worker", "Unraid", "--row", "s.1", "--status", "pass",
+    assert cli.main(["record", REV, "--worker", "ServerWorker", "--row", "s.1", "--status", "pass",
                      "--evidence", "x", *base]) == 1  # script rows are run, not recorded
-    assert cli.main(["record", REV, "--worker", "Unraid", "--row", "s.2", "--status", "pass",
+    assert cli.main(["record", REV, "--worker", "ServerWorker", "--row", "s.2", "--status", "pass",
                      "--evidence", "snapshot /tmp/s2.png", "--by", "owner", *base]) == 0
-    row = next(r for r in results.read(results.result_path(tmp_path, REV, "Unraid"))["rows"] if r["id"] == "s.2")
+    row = next(r for r in results.read(results.result_path(tmp_path, REV, "ServerWorker"))["rows"] if r["id"] == "s.2")
     assert row["status"] == "pass" and row["evidence"] == {"note": "snapshot /tmp/s2.png"}
     assert row["recorded"]["by"] == "owner"
     assert cli.main(check) == 0
@@ -582,7 +582,7 @@ def test_record_then_check_cli(tmp_path, capsys):
 
 def test_record_needs_evidence_and_a_run(tmp_path):
     with pytest.raises(FileNotFoundError):
-        results.record(results.result_path(tmp_path, REV, "Unraid"), "s.2", "pass", "x")
+        results.record(results.result_path(tmp_path, REV, "ServerWorker"), "s.2", "pass", "x")
     path = _write(tmp_path)
     with pytest.raises(ValueError, match="evidence"):
         results.record(path, "s.2", "pass", "  ")
@@ -602,7 +602,7 @@ def test_import_copies_another_workers_file(tmp_path):
 
 def test_result_path_rejects_non_revisions(tmp_path):
     with pytest.raises(ValueError):
-        results.result_path(tmp_path, "../etc", "Unraid")
+        results.result_path(tmp_path, "../etc", "ServerWorker")
     assert results.result_path(tmp_path, REV.upper(), "Gaming PC/x").name == "Gaming_PC_x.json"
 
 

@@ -1,6 +1,6 @@
 """Commits back from a Task child on another worker (S13).
 
-Two in-process workers over the real signed control endpoint: Unraid runs the
+Two in-process workers over the real signed control endpoint: ServerWorker runs the
 child, Windows runs the parent chat. Git moves through a local bare repository
 in the test's temp directory; nothing is pushed anywhere else and no provider
 runs. The child's work is simulated with real commits in its checkout.
@@ -168,7 +168,7 @@ def test_commits_are_pushed_there_and_fetched_here_without_touching_the_parent(w
     assert world.parent_state() == before
     prompt = world.wake()
     assert "Fixed it in two commits." in prompt
-    assert f"Git: 2 commits on {branch} (head {head[:12]}), pushed to origin from Unraid." in prompt
+    assert f"Git: 2 commits on {branch} (head {head[:12]}), pushed to origin from ServerWorker." in prompt
     assert f"`git log {branch}` shows them" in prompt
     # The child's checkout holds work, so it stays on the target for review.
     assert path.is_dir()
@@ -207,7 +207,7 @@ def test_uncommitted_changes_are_reported_not_committed(world):
     assert remote_tip(world.parent, branch) == head and local_tip(world.parent, branch) == head
     prompt = world.wake()
     assert "1 commit on" in prompt
-    assert "uncommitted changes in 2 files in its checkout on Unraid; they were not committed or copied" in prompt
+    assert "uncommitted changes in 2 files in its checkout on ServerWorker; they were not committed or copied" in prompt
 
 
 def test_uncommitted_changes_without_commits_keep_the_checkout(world):
@@ -240,7 +240,7 @@ def test_a_refused_push_is_reported_and_nothing_is_fetched(world):
     assert local_tip(world.parent, branch) is None
     prompt = world.wake()
     assert "Done, but see the git note." in prompt
-    assert f"1 commit on {branch}" in prompt and "were not pushed and stay in its checkout on Unraid" in prompt
+    assert f"1 commit on {branch}" in prompt and "were not pushed and stay in its checkout on ServerWorker" in prompt
     assert "Origin refused" in prompt
 
 
@@ -265,7 +265,7 @@ def test_a_parent_without_an_origin_remote_says_the_fetch_failed(world):
     assert world.sent_block(child)["pushed"] is True
     assert local_tip(world.parent, branch) is None
     prompt = world.wake()
-    assert f"(head {head[:12]}), pushed to origin from Unraid." in prompt
+    assert f"(head {head[:12]}), pushed to origin from ServerWorker." in prompt
     assert "It was not fetched here: This project has no usable origin remote on this worker" in prompt
     assert f"git fetch origin {branch}" in prompt
 
@@ -429,4 +429,4 @@ def test_an_older_target_without_a_git_block_adds_no_git_note(world):
     child = world.start()
     with world.b.active():
         row = database.get_session("caller")
-        assert asyncio.run(remote_task.bring_commits_here(row, child, "Unraid", None)) == ""
+        assert asyncio.run(remote_task.bring_commits_here(row, child, "ServerWorker", None)) == ""

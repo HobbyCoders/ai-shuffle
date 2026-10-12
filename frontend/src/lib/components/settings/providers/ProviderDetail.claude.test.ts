@@ -183,7 +183,7 @@ it('offers only setup when Claude is not connected and the CLI is absent', async
 });
 
 const terminalTargets = {
-	worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+	worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
 	shells: [{ name: 'bash', default: true }], default_shell: 'bash',
 	default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0
 };

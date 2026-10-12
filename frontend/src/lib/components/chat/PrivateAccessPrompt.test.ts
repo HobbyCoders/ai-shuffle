@@ -26,7 +26,7 @@ describe('PrivateAccessPrompt', () => {
 		const open = vi.fn();
 		chatAccessSummary.set(summary({
 			pending: 1, open,
-			items: [{ id: 'r1', kind: 'machine', detail: 'Check the Unraid container logs' }]
+			items: [{ id: 'r1', kind: 'machine', detail: 'Check the ServerWorker container logs' }]
 		}));
 		await tick();
 
@@ -34,7 +34,7 @@ describe('PrivateAccessPrompt', () => {
 		expect(region.textContent).toContain('Private access requested');
 		expect(region.textContent).toContain('Needs you');
 		expect(region.textContent).toContain('SSH machine');
-		expect(region.textContent).toContain('Check the Unraid container logs');
+		expect(region.textContent).toContain('Check the ServerWorker container logs');
 		await fireEvent.click(screen.getByRole('button', { name: 'Review' }));
 		expect(open).toHaveBeenCalledTimes(1);
 

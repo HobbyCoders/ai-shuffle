@@ -46,7 +46,7 @@ def test_invalid_effort_choice_rejected(effort):
         validate({"tasks": [{**spec("a"), "effort": effort}]})
 
 
-@pytest.mark.parametrize("worker", [None, "Unraid"])
+@pytest.mark.parametrize("worker", [None, "ServerWorker"])
 async def test_task_worker_choice_reaches_dispatch(worker):
     calls = []
 
@@ -75,7 +75,7 @@ def test_swarm_schema_offers_worker_only_when_the_host_passes_it():
     items = lambda schema: schema["properties"]["tasks"]["items"]["properties"]
     assert "worker" not in items(SPEC.input_schema)
     assert input_schema() == SPEC.input_schema
-    offered = {"type": "string", "description": "Other workers: Unraid."}
+    offered = {"type": "string", "description": "Other workers: ServerWorker."}
     assert items(input_schema(offered))["worker"] == offered
     assert {k: v for k, v in items(input_schema(offered)).items() if k != "worker"} == items(SPEC.input_schema)
 

@@ -9,7 +9,7 @@
 // only as the summary's paraphrase. The CLI sends the instructions in the
 // summarizer request's last user message, after the conversation it reuses as
 // its cached prefix, so the fixed line below never changes a cached prefix
-// (docs/reviews/claude-mods-compaction-2026-10-04.md, sections 5.3 and 8).
+// (the review in the private archive, sections 5.3 and 8).
 
 /** The line every compaction of the main conversation gets, always the same bytes. */
 export const FLUID_SUMMARY_NOTE =

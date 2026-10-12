@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 vi.mock('$lib/api/installs', () => ({
 	listInstalls: vi.fn().mockResolvedValue({ installs: [
 		{ id: 'pc', device_name: 'DesktopWorker', base_url: 'https://pc.test', platform: null, version: null, capabilities: {}, last_seen: null, online: true, is_self: true },
-		{ id: 'nas', device_name: 'Unraid', base_url: 'https://nas.test', platform: null, version: null, capabilities: {}, last_seen: null, online: true, is_self: false }
+		{ id: 'nas', device_name: 'ServerWorker', base_url: 'https://nas.test', platform: null, version: null, capabilities: {}, last_seen: null, online: true, is_self: false }
 	], self_instance_id: 'pc' })
 }));
 vi.mock('$lib/stores/app-data.svelte', async () => {
@@ -64,11 +64,11 @@ describe('ConnectedWorkerBar in the Android app', () => {
 		Object.defineProperty(window, 'location', { configurable: true, value: { href: 'https://pc.test/mobile/', origin: 'https://pc.test', assign } });
 		render(ConnectedWorkerBar);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Connected to DesktopWorker. Switch worker' }));
-		await screen.findByRole('radio', { name: /Unraid/ });
+		await screen.findByRole('radio', { name: /ServerWorker/ });
 		vi.useFakeTimers();
-		await fireEvent.click(screen.getByRole('radio', { name: /Unraid/ }));
+		await fireEvent.click(screen.getByRole('radio', { name: /ServerWorker/ }));
 		expect(assign).toHaveBeenCalledWith(expect.stringContaining('?connect=https%3A%2F%2Fnas.test'));
-		expect(screen.getByRole('button', { name: 'Connecting to Unraid' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Connecting to ServerWorker' })).toBeTruthy();
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(screen.getByRole('button', { name: 'Connected to DesktopWorker. Switch worker' })).toBeTruthy();
 	});

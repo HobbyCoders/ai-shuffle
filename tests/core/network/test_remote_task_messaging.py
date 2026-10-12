@@ -1,6 +1,6 @@
 """SendMessage to a Task child on another worker, and from it to `main` (S9).
 
-Two in-process workers over the real signed control endpoint: Unraid runs the
+Two in-process workers over the real signed control endpoint: ServerWorker runs the
 child, Windows runs the parent chat. No provider, no second machine.
 """
 import asyncio
@@ -105,7 +105,7 @@ def test_a_busy_child_gets_the_message_queued(workers, monkeypatch, kicks):
     child = started_child(a, b)
     outcome = send(b, child, "Also check the logs.")
     assert not outcome.is_error, outcome.text
-    assert outcome.text == "Queued for Default on Unraid"
+    assert outcome.text == "Queued for Default on ServerWorker"
     assert MESSAGE_PATH in router.requests(UNRAID_URL)
     with a.active():
         [queued] = message_turns(child)
@@ -174,12 +174,12 @@ def test_a_parked_child_holds_the_message_unless_urgent(workers, monkeypatch, ki
         assert turns.start_turn(turn["id"])
         turns.park_turn(turn["id"], ["bg-1"])
     held = send(b, child, "Ping when the scan is done.")
-    assert not held.is_error and "Default on Unraid" in held.text
-    assert held.text == agent_messaging.held_receipt("Default on Unraid")
+    assert not held.is_error and "Default on ServerWorker" in held.text
+    assert held.text == agent_messaging.held_receipt("Default on ServerWorker")
     with a.active():
         assert message_turns(child) == []
     urgent = send(b, child, "Stop the scan now.", urgent=True)
-    assert not urgent.is_error and urgent.text == "Queued for Default on Unraid"
+    assert not urgent.is_error and urgent.text == "Queued for Default on ServerWorker"
     with a.active():
         [wake] = message_turns(child)
         # The urgent wake carries the message held before it.
@@ -202,7 +202,7 @@ def test_a_finished_child_resumes_and_its_next_report_wakes_the_caller_again(
 
     outcome = send(b, child, "Now clean the cache.")
     assert not outcome.is_error, outcome.text
-    assert outcome.text.startswith("Resume queued for Default on Unraid (turn ")
+    assert outcome.text.startswith("Resume queued for Default on ServerWorker (turn ")
     assert "woken with its new report" in outcome.text
     with a.active():
         [resumed] = message_turns(child)
@@ -214,7 +214,7 @@ def test_a_finished_child_resumes_and_its_next_report_wakes_the_caller_again(
         assert record["completion_id"] is None
         assert remote_tasks.past_completions(child) == [first["id"]]
         assert task_registry.get_task("caller", child)["status"] == "running"
-        assert task_registry.get_task("caller", child)["worker"]["name"] == "Unraid"
+        assert task_registry.get_task("caller", child)["worker"]["name"] == "ServerWorker"
         assert provider_agent_supervisor.get_worker("caller", child) is not None
 
     finish_turn(a, child, resumed["id"], "Cache cleaned, 12 GB freed.")
@@ -351,7 +351,7 @@ def test_an_unreachable_target_is_named_and_nothing_is_claimed(workers, monkeypa
     child = started_child(a, b)
     router.down.add(UNRAID_URL)
     outcome = send(b, child, "Are you there?")
-    assert outcome.is_error and "Unraid cannot be reached right now" in outcome.text
+    assert outcome.is_error and "ServerWorker cannot be reached right now" in outcome.text
     assert "was not delivered" in outcome.text
 
 

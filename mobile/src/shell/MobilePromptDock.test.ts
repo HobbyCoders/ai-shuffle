@@ -98,7 +98,7 @@ describe('permission prompt', () => {
 	});
 
 	it.each([false, true])('ModelSwitch is chat-scoped and never offers an always rule (relayed=%s)', async (relayed) => {
-		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'Unraid' } : undefined;
+		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'ServerWorker' } : undefined;
 		const { onPermission } = renderDock({ permissions: [{ ...bash, tool_name: 'ModelSwitch', provider_agent }] });
 		expect(screen.queryByRole('checkbox', { name: 'Always do this' })).toBeNull();
 		expect(screen.getByText(/A yes covers this model for this chat, including after app restarts/)).toBeTruthy();
@@ -129,9 +129,9 @@ describe('permission prompt', () => {
 	});
 
 	it('offers no "Always" for a prompt relayed from another worker', () => {
-		renderDock({ permissions: [{ ...bash, provider_agent: { remote_approval_id: 'r1', worker_name: 'Unraid' } }] });
+		renderDock({ permissions: [{ ...bash, provider_agent: { remote_approval_id: 'r1', worker_name: 'ServerWorker' } }] });
 		expect(screen.queryByRole('checkbox', { name: 'Always do this' })).toBeNull();
-		expect(screen.getByText('From Unraid. Answer each time.')).toBeTruthy();
+		expect(screen.getByText('From ServerWorker. Answer each time.')).toBeTruthy();
 	});
 
 	it('cycles several waiting requests with "1 of N"', async () => {

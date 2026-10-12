@@ -44,7 +44,7 @@ def preview_app(mock_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "fluid_memory_enabled", False)
     monkeypatch.setattr(preview_access, "_listener_port", 8002)
     monkeypatch.setattr(preview_access, "_listener_host", "127.0.0.1")
-    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.135")
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.30")
     monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": None})
     monkeypatch.setattr(ha, "DelegatedLoop", CapturingLoop)
     monkeypatch.setattr(ha, "NativeLoop", CapturingLoop)

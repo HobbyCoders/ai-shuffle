@@ -136,7 +136,7 @@ MEM_ARGS=(
 # --ozone-override-screen-size=1920,1080: the headless ozone platform otherwise
 #   reports a 1x1 screen to pages (screen.width/height), an obvious "not a real
 #   desktop" signal. 1920x1080 is a common desktop size that fits the 1440x900
-#   window. Measured: no memory cost (docs/reviews/docker-browser-chrome-vs-chromium-2026-10-03.md).
+#   window. Measured: no memory cost (the review in the private archive).
 # --no-sandbox: Chrome's user-namespace sandbox is unavailable under Docker's
 #   default seccomp profile; the container provides isolation.
 # --disable-gpu: render via Chrome's bundled SwiftShader.

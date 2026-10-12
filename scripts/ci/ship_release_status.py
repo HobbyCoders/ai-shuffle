@@ -15,7 +15,7 @@ Usage::
 
     python scripts/ci/ship_release_status.py            # human summary
     python scripts/ci/ship_release_status.py --json     # machine-readable
-    python scripts/ci/ship_release_status.py --smoke-worker Unraid --smoke-worker DesktopWorker
+    python scripts/ci/ship_release_status.py --smoke-worker ServerWorker --smoke-worker DesktopWorker
     python scripts/ci/ship_release_status.py --skip-smoke "DesktopWorker away this week"
     python scripts/ci/ship_release_status.py --skip-windows "DesktopWorker away; no Windows changes"
 """

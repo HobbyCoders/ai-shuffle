@@ -95,35 +95,35 @@ def _smoke_file(base, worker, revision=CANDIDATE, **status):
         for k, v in statuses.items()]}))
 
 
-def _gate(tmp_path, workers=("Unraid", "DesktopWorker"), skip=None, revision=CANDIDATE):
+def _gate(tmp_path, workers=("ServerWorker", "DesktopWorker"), skip=None, revision=CANDIDATE):
     return srs.smoke_gate(revision, list(workers), skip, str(tmp_path), scenario_rows=SMOKE_ROWS)
 
 
 def test_smoke_gate_pass(tmp_path):
-    _smoke_file(tmp_path, "Unraid")
+    _smoke_file(tmp_path, "ServerWorker")
     _smoke_file(tmp_path, "DesktopWorker")
     report = _gate(tmp_path)
     assert report["verdict"] == "pass" and report["blockers"] == []
-    assert report["release_notes_lines"] == ["Live smoke passed on Unraid, DesktopWorker at 123456789."]
+    assert report["release_notes_lines"] == ["Live smoke passed on ServerWorker, DesktopWorker at 123456789."]
     assert len(report["owner_todo"]) == 2  # owner rows never block
 
 
 def test_smoke_gate_failing_row_blocks(tmp_path):
-    _smoke_file(tmp_path, "Unraid", **{"x.1": "fail"})
+    _smoke_file(tmp_path, "ServerWorker", **{"x.1": "fail"})
     _smoke_file(tmp_path, "DesktopWorker")
     report = _gate(tmp_path)
     assert report["verdict"] == "block"
-    assert report["blockers"] == ["Unraid: x.1 failed: x"]
+    assert report["blockers"] == ["ServerWorker: x.1 failed: x"]
 
 
 def test_smoke_gate_unrecorded_browser_row_blocks(tmp_path):
-    _smoke_file(tmp_path, "Unraid", **{"x.2": "not_run"})
-    report = _gate(tmp_path, workers=["Unraid"])
+    _smoke_file(tmp_path, "ServerWorker", **{"x.2": "not_run"})
+    report = _gate(tmp_path, workers=["ServerWorker"])
     assert report["verdict"] == "block" and "x.2 not recorded" in report["blockers"][0]
 
 
 def test_smoke_gate_missing_file_blocks(tmp_path):
-    _smoke_file(tmp_path, "Unraid")
+    _smoke_file(tmp_path, "ServerWorker")
     report = _gate(tmp_path)
     assert report["verdict"] == "block"
     assert report["blockers"][0].startswith("no smoke result for DesktopWorker at 123456789")
@@ -132,16 +132,16 @@ def test_smoke_gate_missing_file_blocks(tmp_path):
 
 def test_smoke_gate_wrong_revision_blocks(tmp_path):
     old = "f" * 40
-    _smoke_file(tmp_path, "Unraid", revision=old)
-    report = _gate(tmp_path, workers=["Unraid"])
+    _smoke_file(tmp_path, "ServerWorker", revision=old)
+    report = _gate(tmp_path, workers=["ServerWorker"])
     assert report["verdict"] == "block"
     # a pass for an older revision is not a pass for the candidate
-    assert _gate(tmp_path, workers=["Unraid"], revision=old)["verdict"] == "pass"
-    stale = tmp_path / CANDIDATE / "Unraid.json"
+    assert _gate(tmp_path, workers=["ServerWorker"], revision=old)["verdict"] == "pass"
+    stale = tmp_path / CANDIDATE / "ServerWorker.json"
     stale.parent.mkdir(parents=True, exist_ok=True)
-    stale.write_text((tmp_path / old / "Unraid.json").read_text())
-    assert _gate(tmp_path, workers=["Unraid"])["blockers"] == [
-        "Unraid's result is for revision fffffffff, not 123456789"]
+    stale.write_text((tmp_path / old / "ServerWorker.json").read_text())
+    assert _gate(tmp_path, workers=["ServerWorker"])["blockers"] == [
+        "ServerWorker's result is for revision fffffffff, not 123456789"]
 
 
 def test_smoke_gate_skip_is_recorded_for_the_release_notes(tmp_path):
@@ -180,13 +180,13 @@ def _fake_collect(monkeypatch, statuses):
 ])
 def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip, ready, notes):
     _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
-    report = srs.collect(["Unraid"], skip, str(tmp_path))
+    report = srs.collect(["ServerWorker"], skip, str(tmp_path))
     assert report["edge_published"] is True
     assert report["ready"] is ready
     assert report["release_notes_lines"] == notes
     if skip is None:
         assert report["blockers"] == [
-            f"Live smoke: no smoke result for Unraid at 123456789 ({tmp_path / CANDIDATE / 'Unraid.json'})"]
+            f"Live smoke: no smoke result for ServerWorker at 123456789 ({tmp_path / CANDIDATE / 'ServerWorker.json'})"]
     text = srs.render(report)
     assert "Live smoke: " + ("skipped (away)" if skip else "block") in text
     if skip:
@@ -195,7 +195,7 @@ def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip,
 
 def test_collect_waits_for_both_local_suites(tmp_path, monkeypatch):
     _fake_collect(monkeypatch, [_status("local/full-suite")])
-    report = srs.collect(["Unraid"], "away", str(tmp_path))
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
     assert not report["ready"]
     assert len(report["blockers"]) == 1
     assert "local/windows-suite" in report["blockers"][0] and "DesktopWorker" in report["blockers"][0]
@@ -204,13 +204,13 @@ def test_collect_waits_for_both_local_suites(tmp_path, monkeypatch):
 
 def test_skip_windows_releases_with_a_note(tmp_path, monkeypatch):
     _fake_collect(monkeypatch, [_status("local/full-suite")])
-    report = srs.collect(["Unraid"], "away", str(tmp_path), skip_windows="DesktopWorker off")
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="DesktopWorker off")
     assert report["ready"]
     assert "Windows full suite not run on this release (--skip-windows): DesktopWorker off" in report["release_notes_lines"]
 
 
 def test_linux_suite_cannot_be_skipped(tmp_path, monkeypatch):
     _fake_collect(monkeypatch, [_status("local/windows-suite")])
-    report = srs.collect(["Unraid"], "away", str(tmp_path), skip_windows="x")
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="x")
     assert not report["ready"]
     assert report["blockers"][0].startswith("local/full-suite")

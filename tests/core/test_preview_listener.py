@@ -115,9 +115,9 @@ def test_recorded_listener_port_round_trips(monkeypatch):
     ("127.0.0.1", True, "127.0.0.1"),
     ("::1", True, "::1"),
     ("localhost", True, "127.0.0.1"),
-    ("0.0.0.0", False, "10.0.0.134"),
-    ("10.0.0.134", False, "10.0.0.134"),
-    (None, False, "10.0.0.134"),
+    ("0.0.0.0", False, "10.0.0.40"),
+    ("10.0.0.40", False, "10.0.0.40"),
+    (None, False, "10.0.0.40"),
 ])
 def test_advertised_host_is_one_the_listener_answers_on(monkeypatch, bind, loopback, advertised):
     """#1789: a loopback-only listener must not be advertised by LAN address."""
@@ -125,7 +125,7 @@ def test_advertised_host_is_one_the_listener_answers_on(monkeypatch, bind, loopb
     monkeypatch.setattr(preview_access, "_listener_host", None)
     preview_access.set_listener_port(8002, bind)
     assert preview_access.listener_loopback_only() is loopback
-    assert preview_access.advertised_host("10.0.0.134") == advertised
+    assert preview_access.advertised_host("10.0.0.40") == advertised
 
 
 def test_no_listener_is_never_loopback_only(monkeypatch):
@@ -133,7 +133,7 @@ def test_no_listener_is_never_loopback_only(monkeypatch):
     monkeypatch.setattr(preview_access, "_listener_host", None)
     preview_access.set_listener_port(None, "127.0.0.1")
     assert preview_access.listener_loopback_only() is False
-    assert preview_access.advertised_host("10.0.0.134") == "10.0.0.134"
+    assert preview_access.advertised_host("10.0.0.40") == "10.0.0.40"
 
 
 # ─── the gate ────────────────────────────────────────────────────────────────

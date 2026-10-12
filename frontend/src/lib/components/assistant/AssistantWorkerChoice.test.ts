@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({ getAssistantWorker: vi.fn(), updateAssistantWo
 vi.mock('$lib/api/assistant', async original => ({ ...await original<typeof import('$lib/api/assistant')>(), ...mocks }));
 import AssistantWorkerChoice from './AssistantWorkerChoice.svelte';
 
-const UNRAID = { device_id: 'dev-serverworker', name: 'Unraid', online: true, remote_task: true };
+const UNRAID = { device_id: 'dev-serverworker', name: 'ServerWorker', online: true, remote_task: true };
 const OLD = { device_id: 'dev-old', name: 'OldBox', online: true, remote_task: false };
 const LAPTOP = { device_id: 'dev-laptop', name: 'Laptop', online: false, remote_task: true };
 let server: Choice;
@@ -44,7 +44,7 @@ describe('assistant work worker', () => {
   const select = await picker();
   expect(select.value).toBe('dev-serverworker');
   const options = [...select.options].map(o => [o.textContent, o.disabled]);
-  expect(options).toEqual([['This worker', false], ['Laptop · Offline', true], ['OldBox · Needs update', true], ['Unraid', false]]);
+  expect(options).toEqual([['This worker', false], ['Laptop · Offline', true], ['OldBox · Needs update', true], ['ServerWorker', false]]);
   const helper = screen.getByText('Where background jobs run');
   expect(helper.textContent!.split(/\s+/).length).toBeLessThanOrEqual(5);
   // Not an agent picker: the home tests rely on none existing.
@@ -63,11 +63,11 @@ describe('assistant work worker', () => {
  });
 
  it('restores the saved choice when the server refuses', async () => {
-  mocks.updateAssistantWorker.mockRejectedValue({ detail: 'Unraid is offline; it was not saved.' });
+  mocks.updateAssistantWorker.mockRejectedValue({ detail: 'ServerWorker is offline; it was not saved.' });
   render(AssistantWorkerChoice);
   const select = await picker();
   await fireEvent.change(select, { target: { value: 'dev-serverworker' } });
-  expect((await screen.findByRole('alert')).textContent).toBe('Unraid is offline; it was not saved.');
+  expect((await screen.findByRole('alert')).textContent).toBe('ServerWorker is offline; it was not saved.');
   expect(select.value).toBe('');
   expect(select.disabled).toBe(false);
  });

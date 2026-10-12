@@ -260,7 +260,7 @@ describe('setup wizard v2', () => {
 		expect(host.textContent).toContain('/workspace');
 		expect(host.textContent).toContain('WORKSPACE_DIR');
 		expect(host.textContent).toContain('./workspace');
-		expect(host.textContent).not.toMatch(/Unraid|template's Workspace path/);
+		expect(host.textContent).not.toMatch(/ServerWorker|template's Workspace path/);
 		await fireEvent.input(screen.getByLabelText('Or type a path manually'), { target: { value: '/tmp/projects' } });
 		expect(screen.getByText(/lost when the container is re-created/)).toBeTruthy();
 	});

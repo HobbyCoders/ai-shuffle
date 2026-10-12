@@ -57,7 +57,7 @@ async def test_worker_rename_retries_registration_and_survives_restart(workers, 
         _signed_in(fake, a)
         hub.register()
         # A pre-upgrade rename can exist in the DB with a stale cached context.
-        store.rename_member(a.device_id, "Unraid")
+        store.rename_member(a.device_id, "ServerWorker")
         original_call = account_hub.call
 
         def unavailable(*args, **kwargs):
@@ -73,8 +73,8 @@ async def test_worker_rename_retries_registration_and_survives_restart(workers, 
         engine.load_context()
         monkeypatch.setattr(account_hub, "call", original_call)
         await hub._loop_body()
-        assert fake.devices[a.device_id]["name"] == "Unraid"
-        assert hub._hub_state()["registered_name"] == "Unraid"
+        assert fake.devices[a.device_id]["name"] == "ServerWorker"
+        assert hub._hub_state()["registered_name"] == "ServerWorker"
         calls = fake.calls.count(("server-a", "POST", "network"))
         await hub._loop_body()
         assert fake.calls.count(("server-a", "POST", "network")) == calls
@@ -83,7 +83,7 @@ async def test_worker_rename_retries_registration_and_survives_restart(workers, 
 async def test_existing_registration_refreshes_name_after_upgrade(workers, fake):
     a = workers("a")
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
         _signed_in(fake, a)
         hub.register()
         state = hub._hub_state()
@@ -91,7 +91,7 @@ async def test_existing_registration_refreshes_name_after_upgrade(workers, fake)
         store.update_state(hub=state)
         fake.devices[a.device_id]["name"] = "Old name"
         await hub._loop_body()
-        assert fake.devices[a.device_id]["name"] == "Unraid"
+        assert fake.devices[a.device_id]["name"] == "ServerWorker"
 
 
 async def test_first_worker_to_sign_in_founds_the_account_network(workers, fake):

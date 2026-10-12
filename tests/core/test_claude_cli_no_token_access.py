@@ -4,8 +4,8 @@ Sign-in state comes from `claude auth status` and logout goes through
 `claude auth logout`. No module reads the CLI's credential file or its
 `claudeAiOauth` token, and none calls Anthropic's private subscription
 endpoints with it: Anthropic's terms do not let a third-party app collect or
-intermediate Claude.ai session tokens (docs/reviews/compliance-2026-10-09.md,
-finding 1; docs/reviews/prod-readiness-2026-09-23/BRIEF.md). Claude plan usage
+intermediate Claude.ai session tokens (the review in the private archive,
+finding 1; the review in the private archive). Claude plan usage
 comes only from what the stock `claude` CLI reports in its own output.
 """
 

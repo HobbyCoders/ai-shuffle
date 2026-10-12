@@ -125,7 +125,7 @@ describe('handoffEpisodes: one row per hand-off', () => {
 
 	it('matches by worker: a record for another worker does not land on the open row', () => {
 		const tool = call(queued);
-		const other = { ...row('failed', 'Hand-off to Unraid failed: x'), systemData: { status: 'failed', worker: 'Unraid', content: 'Hand-off to Unraid failed: x' } };
+		const other = { ...row('failed', 'Hand-off to ServerWorker failed: x'), systemData: { status: 'failed', worker: 'ServerWorker', content: 'Hand-off to ServerWorker failed: x' } };
 		const result = handoffEpisodes([tool, other]);
 		expect(result.byAnchor.size).toBe(2);
 		expect(result.byAnchor.get(tool)?.phase).toBe('starting');
@@ -133,11 +133,11 @@ describe('handoffEpisodes: one row per hand-off', () => {
 
 	it('a second hand-off after a settled one is a second row', () => {
 		const first = call(queued);
-		const second = call(JSON.stringify({ queued: true, worker: 'Unraid' }), { worker: 'Unraid' });
+		const second = call(JSON.stringify({ queued: true, worker: 'ServerWorker' }), { worker: 'ServerWorker' });
 		const result = handoffEpisodes([first, row('moved', 'Handed off to DesktopWorker.'), second]);
 		expect(result.byAnchor.get(first)?.phase).toBe('done');
-		expect(result.byAnchor.get(second)).toMatchObject({ phase: 'starting', worker: 'Unraid' });
-		expect(result.open?.worker).toBe('Unraid');
+		expect(result.byAnchor.get(second)).toMatchObject({ phase: 'starting', worker: 'ServerWorker' });
+		expect(result.open?.worker).toBe('ServerWorker');
 	});
 
 	it('drops a "nothing queued" row that closes nothing', () => {
@@ -187,8 +187,8 @@ describe('review fixes (#2304)', () => {
 		const handoffs = handoffEpisodes(messages);
 		expect(handoffs.open?.phase).toBe('sending');
 		// First seen sending while this worker owns it: the baseline, nothing changes.
-		expect(settleByOwner(handoffs, { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 's1')).toBe(handoffs);
-		expect(pendingHandoff(messages, { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 's1')).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		expect(settleByOwner(handoffs, { deviceId: 'dev_unraid', deviceName: 'ServerWorker' }, 's1')).toBe(handoffs);
+		expect(pendingHandoff(messages, { deviceId: 'dev_unraid', deviceName: 'ServerWorker' }, 's1')).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
 		// The session row then changes to the target: done, and the chip clears.
 		const settled = settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 's1');
 		expect(settled.byAnchor.get(tool)).toMatchObject({ phase: 'done', worker: 'DesktopWorker' });
@@ -242,8 +242,8 @@ describe('review fixes (#2304)', () => {
 		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e3').open?.phase).toBe('sending');
 		// A real change of id still settles, after an enriched baseline too.
 		resetOwnerTransitions();
-		expect(settleByOwner(sending(), { deviceName: 'Unraid' }, 'e4').open?.phase).toBe('sending');
-		expect(settleByOwner(sending(), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'e4').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceName: 'ServerWorker' }, 'e4').open?.phase).toBe('sending');
+		expect(settleByOwner(sending(), { deviceId: 'dev_unraid', deviceName: 'ServerWorker' }, 'e4').open?.phase).toBe('sending');
 		expect(settleByOwner(sending(), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'e4').open).toBeNull();
 	});
 
@@ -276,7 +276,7 @@ describe('review fixes (#2304)', () => {
 	it('#2308: with the target device known, ids decide, not names', () => {
 		resetOwnerTransitions();
 		const messages = [row('queued', 'q', { by: 'owner', handoff_id: 'X' }), row('started', 's', { handoff_id: 'X' })];
-		const unraid = { deviceId: 'dev_serverworker', deviceName: 'Unraid' };
+		const unraid = { deviceId: 'dev_unraid', deviceName: 'ServerWorker' };
 		settleByOwner(handoffEpisodes(messages), unraid, 'h3');
 		// Seen pending while this worker owns it: the target id is learned.
 		expect(settleByOwner(handoffEpisodes(messages), unraid, 'h3', fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true })).open?.phase).toBe('sending');
@@ -287,9 +287,9 @@ describe('review fixes (#2304)', () => {
 	it('#2308: live, the owner_device_id changing to the target settles even before pending is read again', () => {
 		resetOwnerTransitions();
 		const messages = [call(JSON.stringify({ queued: true, worker: 'DesktopWorker', handoff_id: 'X', message: 'queued' })), row('started', 's', { handoff_id: 'X' })];
-		settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'h4');
+		settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'ServerWorker' }, 'h4');
 		const stale = fresh({ handoff_id: 'X', target_id: 'dev_gaming', moving: true });
-		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 'h4', stale).open?.phase).toBe('sending');
+		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_unraid', deviceName: 'ServerWorker' }, 'h4', stale).open?.phase).toBe('sending');
 		// user_session_updated: owner_device_id is now the target device.
 		expect(settleByOwner(handoffEpisodes(messages), { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 'h4', stale).open).toBeNull();
 	});
@@ -411,7 +411,7 @@ describe('review fixes (#2304)', () => {
 
 	it('P2: an id with no loaded anchor never lands in another move\'s row', () => {
 		const b = row('queued', 'q', { by: 'owner', handoff_id: 'B' });
-		const heldA = row('held_failed', 'Unraid did not take 1 message.', { worker: 'Unraid', handoff_id: 'A' });
+		const heldA = row('held_failed', 'ServerWorker did not take 1 message.', { worker: 'ServerWorker', handoff_id: 'A' });
 		let result = handoffEpisodes([b, heldA]);
 		expect(result.byAnchor.get(b)?.followUps).toEqual([]);
 		expect(result.absorbed.has(heldA)).toBe(false);

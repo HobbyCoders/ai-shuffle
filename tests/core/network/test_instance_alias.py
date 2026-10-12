@@ -79,7 +79,7 @@ def test_startup_repairs_a_membership_without_an_install_id(workers):
     """A worker admitted before the fix: its certificate names no install id."""
     a, b, c = workers("a"), workers("b"), workers("c")
     with as_install(a, "inst-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="inst-a")
     with as_install(b, "inst-b"):
         pass
     # Admitted directly without an install id: the record such a join left.
@@ -122,7 +122,7 @@ def test_startup_repairs_a_membership_without_an_install_id(workers):
 def test_repair_never_approves_another_install_or_takes_another_devices_id(workers):
     a, b, c = workers("a"), workers("b"), workers("c")
     with as_install(a, "inst-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="inst-a")
     join(a, b, name="DesktopWorker", legacy_instance_id=None)
     join(a, c, name="Laptop", legacy_instance_id=None)
     with as_install(b, "inst-b"):
@@ -165,7 +165,7 @@ def test_presence_applies_only_from_the_device_it_describes(workers):
     """
     a, b, c = workers("a"), workers("b"), workers("c")
     with as_install(a, "inst-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="inst-a")
     join(a, b, name="DesktopWorker", legacy_instance_id="inst-b")
     join(a, c, name="Laptop", legacy_instance_id="inst-c")
     with as_install(b, "inst-b"):
@@ -204,7 +204,7 @@ def test_scan_never_republishes_another_devices_presence(workers):
     """The scanner publishes and retracts only this device's own presence row."""
     a, b = workers("a"), workers("b")
     with as_install(a, "inst-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="inst-a")
     join(a, b, name="DesktopWorker", legacy_instance_id="inst-b")
     with as_install(b, "inst-b"):
         engine.publish_presence(version="b-1", endpoints=["http://10.0.0.2:8000"])
@@ -245,7 +245,7 @@ def test_a_changed_install_id_still_finds_this_worker(workers):
 
     a, b = workers("a"), workers("b")
     with as_install(a, "inst-a"):
-        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+        engine.create_network("Home", device_name="ServerWorker", legacy_instance_id="inst-a")
     join(a, b, name="DesktopWorker", legacy_instance_id="inst-old")
     with as_install(b, "inst-new"):
         assert engine.heal_own_instance_alias() is False

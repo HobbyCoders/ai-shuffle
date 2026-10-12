@@ -153,13 +153,13 @@ describe('ContextUsageBar — resolved target', () => {
 			],
 		});
 		setTarget('ghost-worker');
-		_deviceName = 'Unraid';
+		_deviceName = 'ServerWorker';
 		const { container } = render(ContextUsageBar);
 		// The pill is always present now.
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		await openPopover(container);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Not reported from Unraid yet');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Not reported from ServerWorker yet');
 		// Same skeleton as a reported section: placeholder rows, no figures.
 		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(0);
 		expect(container.querySelectorAll('.popover-row.placeholder').length).toBe(2);

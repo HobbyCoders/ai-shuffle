@@ -1,4 +1,4 @@
-"""Regressions for the September 12 worker-network audit (docs/reviews/WORKER_NETWORK_AUDIT_2026-09-12.md).
+"""Regressions for the September 12 worker-network audit (the review in the private archive).
 
 Each test names the finding it pins down. They run several workers in one
 process through the real engine, like the rest of this package.

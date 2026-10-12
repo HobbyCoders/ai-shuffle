@@ -151,13 +151,13 @@ describe('GatewaySetup', () => {
 	it('defaults to the OpenAI chat dialect and sends no empty token', async () => {
 		await open();
 		await type('Name', 'Homelab vLLM');
-		await type('Endpoint', 'http://10.0.0.200:8000/v1');
+		await type('Endpoint', 'http://10.0.0.20:8000/v1');
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		await screen.findByRole('checkbox', { name: /^qwen3-coder/ });
 		expect(worker.sent('POST', '/model-providers')[0].body).toEqual({
 			name: 'Homelab vLLM',
 			provider_type: 'custom',
-			base_url: 'http://10.0.0.200:8000/v1',
+			base_url: 'http://10.0.0.20:8000/v1',
 			api_dialect: 'openai'
 		});
 	});

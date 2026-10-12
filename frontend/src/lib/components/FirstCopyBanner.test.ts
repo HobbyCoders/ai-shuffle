@@ -24,7 +24,7 @@ function status(bootstrap: 'ready' | 'syncing', firstCopy: object | null = null,
 }
 
 const downloading = (done: number) => ({
-	peer: 'peer-a', peer_name: 'Unraid', phase: 'downloading', pages_done: done, pages_total: 22362,
+	peer: 'peer-a', peer_name: 'ServerWorker', phase: 'downloading', pages_done: done, pages_total: 22362,
 	bytes_done: done * 400_000, bytes_total: 22362 * 400_000, error: null
 });
 
@@ -46,10 +46,10 @@ it('shows copy progress, updates it, and offers a reload when the copy is done',
 	render(FirstCopyBanner);
 	await vi.advanceTimersByTimeAsync(0);
 	const banner = screen.getByRole('status');
-	expect(banner.textContent).toContain('Copying your data from Unraid: 12,458 of 22,362 pages');
+	expect(banner.textContent).toContain('Copying your data from ServerWorker: 12,458 of 22,362 pages');
 	expect(screen.getByRole('progressbar', { name: 'Copy progress' })).toBeTruthy();
 	await vi.advanceTimersByTimeAsync(3000);
-	expect(screen.getByRole('status').textContent).toContain('Saving the data copied from Unraid');
+	expect(screen.getByRole('status').textContent).toContain('Saving the data copied from ServerWorker');
 	expect(screen.queryByRole('progressbar')).toBeNull();
 	await vi.advanceTimersByTimeAsync(3000);
 	expect(screen.getByRole('status').textContent).toContain('Your data is copied');
@@ -62,7 +62,7 @@ it('shows copy progress, updates it, and offers a reload when the copy is done',
 
 it('counts transcripts after the first copy and offers the reload with them', async () => {
 	const transcripts = (done: number) => ({
-		phase: 'transcripts', peer: 'peer-a', peer_name: 'Unraid', sessions_done: done, sessions_total: 1152,
+		phase: 'transcripts', peer: 'peer-a', peer_name: 'ServerWorker', sessions_done: done, sessions_total: 1152,
 		events_copied: 0, error: null
 	});
 	mocks.get
@@ -71,10 +71,10 @@ it('counts transcripts after the first copy and offers the reload with them', as
 		.mockResolvedValue(status('ready', { ...downloading(60), phase: 'done' }));
 	render(FirstCopyBanner);
 	await vi.advanceTimersByTimeAsync(0);
-	expect(screen.getByRole('status').textContent).toContain('Saving the data copied from Unraid');
+	expect(screen.getByRole('status').textContent).toContain('Saving the data copied from ServerWorker');
 	await vi.advanceTimersByTimeAsync(3000);
 	expect(screen.getByRole('status').textContent).toContain(
-		'Downloading transcripts from Unraid: 312 of 1,152 sessions');
+		'Downloading transcripts from ServerWorker: 312 of 1,152 sessions');
 	expect(screen.getByRole('progressbar', { name: 'Copy progress' })).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
 	await vi.advanceTimersByTimeAsync(10_000);

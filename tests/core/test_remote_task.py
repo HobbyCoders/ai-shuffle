@@ -27,7 +27,7 @@ from tests.shared_fixtures import LOCAL_ME
 PARENT = "dev-gaming"
 TARGET = "dev-unraid"
 TARGET_RUNNER = "unraid-runner"
-UNRAID = {"device_id": TARGET, "device_name": "Unraid", "online": True, "is_self": False,
+UNRAID = {"device_id": TARGET, "device_name": "ServerWorker", "online": True, "is_self": False,
           "capabilities": {"os": "linux", "remote_task": 1}}
 SELF = {"device_id": PARENT, "device_name": "DesktopWorker", "online": True, "is_self": True,
         "capabilities": {"os": "windows", "remote_task": 1}}
@@ -68,7 +68,7 @@ class FakeNetwork:
         if device_id not in self.status:
             return None
         return SimpleNamespace(kind=membership.KIND_WORKER, status=self.status[device_id],
-                               name={PARENT: "DesktopWorker", TARGET: "Unraid"}[device_id])
+                               name={PARENT: "DesktopWorker", TARGET: "ServerWorker"}[device_id])
 
     @contextlib.contextmanager
     def as_target(self):
@@ -172,7 +172,7 @@ def route_to_target(world, monkeypatch, calls):
 
 def dispatch(args):
     return asyncio.run(td.dispatch_task_tool(
-        {"agent": "coder", "prompt": "Fix the flaky test.", "worker": "Unraid", **args},
+        {"agent": "coder", "prompt": "Fix the flaky test.", "worker": "ServerWorker", **args},
         caller_session_id="parent"))
 
 
@@ -225,7 +225,7 @@ def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(worl
     route_to_target(world, monkeypatch, calls)
     result = dispatch({"mode": "background", "name": "fix-flaky"})
     assert result["ok"] is True, result
-    assert result["mode"] == "remote" and result["worker"] == {"device_id": TARGET, "name": "Unraid"}
+    assert result["mode"] == "remote" and result["worker"] == {"device_id": TARGET, "name": "ServerWorker"}
     child_id = result["worker_session_id"]
     assert "you will be woken with its report when it finishes" in result["note"]
     assert "Approvals it needs are shown to the owner in this conversation" in result["note"]
@@ -311,15 +311,15 @@ def test_no_project_runs_in_the_target_workspace(world):
 # --- parent side refusals ----------------------------------------------------
 
 @pytest.mark.parametrize("failure, expected, started_nothing", [
-    (control.RunnerUnreachable("Couldn't reach Unraid from DesktopWorker (connection refused on its only route)."),
-     "Unraid could not be reached: Couldn't reach Unraid", True),
+    (control.RunnerUnreachable("Couldn't reach ServerWorker from DesktopWorker (connection refused on its only route)."),
+     "ServerWorker could not be reached: Couldn't reach ServerWorker", True),
     (control.ControlRefused("The agent 'coder' does not exist on this worker; nothing was started."),
-     "Unraid refused the subagent: The agent 'coder' does not exist", True),
-    (control.ControlRefused("Unknown control action"), "Unraid refused the subagent: it runs an older release", True),
+     "ServerWorker refused the subagent: The agent 'coder' does not exist", True),
+    (control.ControlRefused("Unknown control action"), "ServerWorker refused the subagent: it runs an older release", True),
     # The request was sent and timed out: the child may exist, so no "nothing was dispatched".
-    (control.RunnerUnreachable("Unraid did not answer in time while handling a request from DesktopWorker. "
+    (control.RunnerUnreachable("ServerWorker did not answer in time while handling a request from DesktopWorker. "
                                "It may still have been applied; check before retrying."),
-     "Unraid did not confirm the subagent", False),
+     "ServerWorker did not confirm the subagent", False),
 ])
 def test_an_unreachable_or_refusing_target_releases_the_pushed_branch(world, monkeypatch, failure, expected,
                                                                       started_nothing):
@@ -356,7 +356,7 @@ def test_a_failed_publish_refuses_before_any_call(world, monkeypatch):
         raise AssertionError("no call without a published branch")
     monkeypatch.setattr(control, "call", call)
     result = dispatch({})
-    assert result["ok"] is False and "Could not publish the worker's branch to origin for Unraid" in result["error"]
+    assert result["ok"] is False and "Could not publish the worker's branch to origin for ServerWorker" in result["error"]
     assert result["error"].endswith("; nothing was dispatched.")
 
 
@@ -765,7 +765,7 @@ def test_sender_resolves_fast_for_a_preference_unaware_v4_receiver(
                 return result
             coordinator = SwarmCoordinator("parent", task, AsyncMock(), AsyncMock(), AsyncMock())
             snapshot, _ = await coordinator.start({"tasks": [
-                {"id": "fix", "agent": "coder", "prompt": "Fix the flaky test.", "worker": "Unraid"},
+                {"id": "fix", "agent": "coder", "prompt": "Fix the flaky test.", "worker": "ServerWorker"},
             ]}, ToolCtx())
             await coordinator.jobs[snapshot["id"]]
             assert coordinator.snapshot(snapshot["id"])["status"] == "completed"

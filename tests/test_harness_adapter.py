@@ -1228,13 +1228,13 @@ async def test_real_native_answer_reaches_the_running_turn_after_a_fast_mode_swi
             block = {"index": 0, "block_type": "tool_use", "tool_name": "AskUser", "tool_use_id": "ask"}
             delta = StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({"questions": [
                 {"question": "Route?", "header": "Route",
-                 "options": [{"label": "DesktopWorker"}, {"label": "Deploy from Unraid"}]}]})})
+                 "options": [{"label": "DesktopWorker"}, {"label": "Deploy from ServerWorker"}]}]})})
         elif n == 2:
             block = {"index": 0, "block_type": "tool_use", "tool_name": "Work", "tool_use_id": "work"}
             delta = StreamChunk("tool_args_delta", {"index": 0, "partial_json": "{}"})
         else:
             block = {"index": 0, "block_type": "text"}
-            delta = StreamChunk("text_delta", {"index": 0, "text": "Deploying from Unraid."})
+            delta = StreamChunk("text_delta", {"index": 0, "text": "Deploying from ServerWorker."})
         stop = "tool_use" if n < 3 else "end_turn"
         return [StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
                 StreamChunk("block_start", block), delta, StreamChunk("block_stop", {"index": 0}),
@@ -1299,11 +1299,11 @@ async def test_real_native_answer_reaches_the_running_turn_after_a_fast_mode_swi
         question, = handler.get_pending_questions(sid)
         assert question["nonblocking"] is True
         assert await control.handle("run-settings", {"session_id": sid, "fast": True},
-                                    from_device="dev_gamingpc") == {"effort": "high", "fast": True}
+                                    from_device="dev_desktopworker") == {"effort": "high", "fast": True}
         assert (await control.handle("question", {
             "session_id": sid, "request_id": question["request_id"],
-            "answers": {"Route?": "Deploy from Unraid"},
-        }, from_device="dev_gamingpc"))["success"]
+            "answers": {"Route?": "Deploy from ServerWorker"},
+        }, from_device="dev_desktopworker"))["success"]
         answer, = turns.get_queued_turns(sid)
         release.set()
         events = await asyncio.wait_for(collector, 5)
@@ -1315,7 +1315,7 @@ async def test_real_native_answer_reaches_the_running_turn_after_a_fast_mode_swi
                         if getattr(b, "tool_use_id", None) == "work"]
         carried = "".join(getattr(part, "text", "") for part in work_result.content)
         assert carried.count("Answer to your question") == 1
-        assert "Deploy from Unraid" in carried
+        assert "Deploy from ServerWorker" in carried
         assert "Answer to your question" not in repr(provider.requests[1].messages)
         assert provider.requests[-1].extra.get("service_tier") == "priority"  # the switch applied too
     finally:

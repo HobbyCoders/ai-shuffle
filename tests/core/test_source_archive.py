@@ -31,7 +31,7 @@ FILES = {
     "docs/LOCAL_ACCESS.md": "internal",
     "mockups/a.html": "internal",
     "videos/a.mp4": "internal",
-    "scripts/unraid-lab/lab.py": "internal",
+    "scripts/local_ci.py": "internal",
     "tests/test_app.py": "internal",
     "android/hub/src/index.ts": "internal",
     ".github/workflows/ci.yml": "internal",

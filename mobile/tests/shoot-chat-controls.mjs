@@ -87,7 +87,7 @@ const scenarios = {
 		await page.getByRole('button', { name: /^Runner:/ }).click();
 		await page.waitForTimeout(600);
 		await shot(page, `${theme}-13-runs-on-menu`);
-		const unraid = page.getByRole('menuitem', { name: 'Unraid' });
+		const unraid = page.getByRole('menuitem', { name: 'ServerWorker' });
 		if (await unraid.count()) { await unraid.click(); await page.waitForTimeout(600); }
 		await shot(page, `${theme}-14-runs-on-busy`);
 		await page.close();

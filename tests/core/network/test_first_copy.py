@@ -28,10 +28,10 @@ def isolated(monkeypatch):
 
 
 def joining(workers):
-    """A founder named Unraid and a newly enrolled worker that still needs its first copy."""
+    """A founder named ServerWorker and a newly enrolled worker that still needs its first copy."""
     a, b = workers("a"), workers("b")
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
         admission = engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
                                         encryption_public=b.identity.encryption_public, name="Pop")
     with b.active():
@@ -57,7 +57,7 @@ async def test_progress_is_reported_through_network_status(workers, monkeypatch)
             await transport.PeerLink(a.device_id, [served.base_url]).receive_state(client, engine.context())
         during = seen[0]
         assert during["phase"] == "applying"
-        assert during["peer"] == a.device_id and during["peer_name"] == "Unraid"
+        assert during["peer"] == a.device_id and during["peer_name"] == "ServerWorker"
         assert during["pages_total"] > 0 and during["pages_done"] == during["pages_total"]
         assert during["bytes_total"] > 0 and during["bytes_done"] == during["bytes_total"]
         status = network_api._status()
@@ -84,7 +84,7 @@ async def test_failed_copy_reports_why_in_status_and_launch_reason(workers, monk
         assert copy["phase"] == "failed" and "interrupted" in copy["error"]
         result = await startup_sync.synchronize()
         assert result["status"] == "partial"
-        assert result["reason"].startswith("Copying your data from Unraid stopped and will retry")
+        assert result["reason"].startswith("Copying your data from ServerWorker stopped and will retry")
 
 
 async def test_launch_reports_the_copy_and_status_follows_it(workers):

@@ -25,8 +25,8 @@ def _isolated_key(tmp_path, monkeypatch):
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
 
 
-def _request(*, peer="10.0.0.200", cookies=None, method="GET", path="/", client=True):
-    headers = [(b"host", b"10.0.0.135:8000")]
+def _request(*, peer="10.0.0.20", cookies=None, method="GET", path="/", client=True):
+    headers = [(b"host", b"10.0.0.30:8000")]
     if cookies:
         headers.append((b"cookie", "; ".join(f"{k}={v}" for k, v in cookies.items()).encode()))
     scope = {"type": "http", "method": method, "scheme": "http", "path": path, "query_string": b"",

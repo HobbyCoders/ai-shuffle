@@ -89,7 +89,7 @@ LOW_CALLS = [
     ("PowerShell", {"command": "Get-ChildItem src"}),
     ("Task", {"subagent_type": "general-purpose", "prompt": "Fix it"}),
     ("StartSession", {"title": "Fix", "prompt": "Fix", "request_id": "r"}),
-    ("StartSession", {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "Unraid", "project": "ai-shuffle"}),
+    ("StartSession", {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "ServerWorker", "project": "ai-shuffle"}),
     ("WebSearch", {"query": "svelte runes"}),
     ("WebFetch", {"url": "https://example.com"}),
     ("Remember", {"text": "Owner likes short replies"}),
@@ -152,16 +152,16 @@ HIGH_CALLS = [
     ("run_python", {"code": "import subprocess; subprocess.run(['git', 'push', '-f'])"}),
     ("run_python", {"code": "import shutil; shutil.rmtree('build')"}),
     # Starting work on another worker with no project; moving the conversation.
-    ("StartSession", {"title": "x", "prompt": "x", "request_id": "r", "worker": "Unraid"}),
-    ("HandOffSession", {"worker": "Unraid"}),
+    ("StartSession", {"title": "x", "prompt": "x", "request_id": "r", "worker": "ServerWorker"}),
+    ("HandOffSession", {"worker": "ServerWorker"}),
     ("Forget", {"memory_id": "m", "expected_revision": 1, "confirm": True}),
 ]
 
 
 @pytest.mark.parametrize("base", [
     {"title": "Fix", "prompt": "Fix", "request_id": "r"},
-    {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "Unraid", "project": "ai-shuffle"},
-    {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "Unraid"},
+    {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "ServerWorker", "project": "ai-shuffle"},
+    {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "ServerWorker"},
 ])
 @pytest.mark.parametrize("model", ["opus", "prov:lane:gpt-6-astra"])
 def test_start_session_model_never_lowers_the_level(base, model):
@@ -297,7 +297,7 @@ async def test_bundled_tools_on_the_cli_leg_ask_at_dispatch():
     registry.register_builtin(_spec("ListSessions", "safe"), handler)
     adapter = _adapter(SCOPE, PermissionResultDeny(message="Declined by the owner"))
     adapter._guard_assistant_dispatch(registry, adapter._options)
-    denied = await registry.dispatch("HandOffSession", {"worker": "Unraid"})
+    denied = await registry.dispatch("HandOffSession", {"worker": "ServerWorker"})
     assert denied.is_error and "Declined" in denied.text and not ran
     assert not (await registry.dispatch("ListSessions", {})).is_error and ran
 

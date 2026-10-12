@@ -16,7 +16,7 @@ from tests.db.test_assistant_store import assistant_fixture  # noqa: F401 - fixt
 
 SELF = {"device_id": "dev-gaming", "device_name": "DesktopWorker", "online": True, "is_self": True,
         "capabilities": {"os": "windows", "remote_task": 1}}
-UNRAID = {"device_id": "dev-serverworker", "device_name": "Unraid", "online": True, "is_self": False,
+UNRAID = {"device_id": "dev-unraid", "device_name": "ServerWorker", "online": True, "is_self": False,
           "capabilities": {"os": "linux", "remote_task": 1}}
 OLD = {"device_id": "dev-old", "device_name": "OldBox", "online": True, "is_self": False,
        "capabilities": {"os": "linux"}}
@@ -60,25 +60,25 @@ def test_read_lists_the_other_workers_and_defaults_to_this_one(mock_db, network)
     assert state == {"device_id": None, "workers": [
         {"device_id": "dev-laptop", "name": "Laptop", "online": False, "remote_task": True},
         {"device_id": "dev-old", "name": "OldBox", "online": True, "remote_task": False},
-        {"device_id": "dev-serverworker", "name": "Unraid", "online": True, "remote_task": True},
+        {"device_id": "dev-unraid", "name": "ServerWorker", "online": True, "remote_task": True},
     ]}
 
 
 def test_read_without_a_network_has_no_workers(mock_db, monkeypatch):
     monkeypatch.setattr(runners.engine, "context", lambda: None)
-    save("dev-serverworker")
+    save("dev-unraid")
     assert assistant_worker.read() == {"device_id": None, "workers": []}
 
 
-@pytest.mark.parametrize("pick", ["dev-serverworker", "Unraid"])
+@pytest.mark.parametrize("pick", ["dev-unraid", "ServerWorker"])
 def test_write_stores_the_device_id(mock_db, network, pick):
-    assert assistant_worker.write(pick)["device_id"] == "dev-serverworker"
-    assert stored() == "dev-serverworker"
+    assert assistant_worker.write(pick)["device_id"] == "dev-unraid"
+    assert stored() == "dev-unraid"
 
 
 @pytest.mark.parametrize("pick", [None, "", "  ", "dev-gaming", "DesktopWorker"])
 def test_empty_or_this_worker_clears_the_choice(mock_db, network, pick):
-    save("dev-serverworker")
+    save("dev-unraid")
     assert assistant_worker.write(pick)["device_id"] is None
     assert stored() is None
 
@@ -89,10 +89,10 @@ def test_empty_or_this_worker_clears_the_choice(mock_db, network, pick):
     ("dev-old", "OldBox needs an update before it can run the assistant's work."),
 ])
 def test_write_refuses_workers_that_cannot_take_work(mock_db, network, pick, error):
-    save("dev-serverworker")
+    save("dev-unraid")
     with pytest.raises(ValueError, match=error.replace("'", ".").replace("(", ".")):
         assistant_worker.write(pick)
-    assert stored() == "dev-serverworker"
+    assert stored() == "dev-unraid"
 
 
 @pytest.mark.parametrize("value", ["dev-gone", "dev-gaming", 7, ""])
@@ -102,21 +102,21 @@ def test_stale_or_self_id_reads_as_this_worker(mock_db, network, value):
 
 
 def test_each_worker_reads_its_own_choice(mock_db, network):
-    """Unraid's own choice (synced here) never steers this worker's home."""
-    save("dev-laptop", key=assistant_worker.PREFERENCE_KEY + ":dev-serverworker")
+    """ServerWorker's own choice (synced here) never steers this worker's home."""
+    save("dev-laptop", key=assistant_worker.PREFERENCE_KEY + ":dev-unraid")
     assert assistant_worker.read()["device_id"] is None
-    assistant_worker.write("dev-serverworker")
+    assistant_worker.write("dev-unraid")
     assert prefs.get_user_preference(*assistant_worker._identity(),
-                                     assistant_worker.PREFERENCE_KEY + ":dev-serverworker")["value"] == "dev-laptop"
+                                     assistant_worker.PREFERENCE_KEY + ":dev-unraid")["value"] == "dev-laptop"
 
 
 def test_a_revoked_worker_reads_as_this_worker(mock_db, network, monkeypatch):
-    save("dev-serverworker")
+    save("dev-unraid")
 
     class Revoked(_Ctx):
         @staticmethod
         def member(device_id):
-            status = membership.STATUS_ACTIVE if device_id != "dev-serverworker" else "revoked"
+            status = membership.STATUS_ACTIVE if device_id != "dev-unraid" else "revoked"
             return SimpleNamespace(kind=membership.KIND_WORKER, status=status)
 
     monkeypatch.setattr(runners.engine, "context", lambda: Revoked())
@@ -132,14 +132,14 @@ def test_default_applies_to_the_home_and_its_jobs_only(assistant_fixture, networ
     store.link_job(service.assistant_id(), "job-1")
     database.create_session("plain", "assistant-agent", title="Ordinary chat")
     assert assistant_worker.default_for(home) is None  # No choice yet.
-    save("dev-serverworker")
-    assert assistant_worker.default_for(home)["device_id"] == "dev-serverworker"
-    assert assistant_worker.default_for("job-1")["device_id"] == "dev-serverworker"
+    save("dev-unraid")
+    assert assistant_worker.default_for(home)["device_id"] == "dev-unraid"
+    assert assistant_worker.default_for("job-1")["device_id"] == "dev-unraid"
     assert assistant_worker.default_for("plain") is None
 
 
 def test_default_lookup_failure_runs_here(assistant_fixture, network, monkeypatch):
-    save("dev-serverworker")
+    save("dev-unraid")
     monkeypatch.setattr(assistant_worker, "_identity", lambda: (_ for _ in ()).throw(PermissionError("x")))
     assert assistant_worker.default_for(assistant_fixture["id"]) is None
 
@@ -179,7 +179,7 @@ def test_assistant_work_goes_to_the_default_worker(callers, network, monkeypatch
     """The real pick and the real dispatch path hand the work to the default."""
     from app.core import remote_task
 
-    save("dev-serverworker")
+    save("dev-unraid")
     seen = []
 
     async def remote(**kwargs):
@@ -189,28 +189,28 @@ def test_assistant_work_goes_to_the_default_worker(callers, network, monkeypatch
     monkeypatch.setattr(remote_task, "dispatch_remote", remote)
     payload, calls = dispatch(callers[role])
     assert payload == {"ok": True, "mode": "background", "task_id": "t1"}
-    assert calls == [] and seen[0]["worker"]["device_id"] == "dev-serverworker"
+    assert calls == [] and seen[0]["worker"]["device_id"] == "dev-unraid"
     assert seen[0]["caller_session_id"] == callers[role]
 
 
 def test_offline_default_falls_back_with_a_note(callers, network):
-    save("dev-serverworker")
+    save("dev-unraid")
     network["runners"] = [SELF, {**UNRAID, "online": False}]
     payload, calls = dispatch(callers["home"])
     assert payload["ok"] is True and len(calls) == 1
-    assert payload["worker_note"] == "Ran on this worker: Unraid is offline."
+    assert payload["worker_note"] == "Ran on this worker: ServerWorker is offline."
 
 
 def test_older_default_falls_back_with_a_note(callers, network):
-    save("dev-serverworker")
+    save("dev-unraid")
     network["runners"] = [SELF, {**UNRAID, "capabilities": {"os": "linux"}}]
     payload, _ = dispatch(callers["home"])
-    assert payload["worker_note"] == ("Ran on this worker: Unraid runs an older release that cannot "
+    assert payload["worker_note"] == ("Ran on this worker: ServerWorker runs an older release that cannot "
                                       "run remote subagents.")
 
 
 def test_ordinary_chats_ignore_the_choice(callers, network, monkeypatch):
-    save("dev-serverworker")
+    save("dev-unraid")
 
     def _never(*a, **k):
         raise AssertionError("an ordinary chat never resolves the default")
@@ -220,7 +220,7 @@ def test_ordinary_chats_ignore_the_choice(callers, network, monkeypatch):
 
 
 def test_explicit_worker_wins_and_never_falls_back(callers, network):
-    save("dev-serverworker")
+    save("dev-unraid")
     payload, calls = dispatch(callers["home"], worker="Laptop")
     assert payload == {"ok": False, "error": "Laptop is offline; nothing was dispatched. Ask the user to "
                                              "bring it online, or omit worker to run it here."}
@@ -231,7 +231,7 @@ def test_explicit_worker_wins_and_never_falls_back(callers, network):
 
 def test_a_reachable_default_is_dispatched_there(callers, network, monkeypatch):
     """Once remote dispatch exists, the default goes through it unchanged."""
-    save("dev-serverworker")
+    save("dev-unraid")
     monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
     seen = []
 
@@ -243,27 +243,27 @@ def test_a_reachable_default_is_dispatched_there(callers, network, monkeypatch):
     monkeypatch.setattr(td, "_dispatch_task_tool",
                         lambda args, **kw: remote(args, **kw) if args.get("worker") else real(args, **kw))
     payload, calls = dispatch(callers["home"])
-    assert payload == {"ok": True, "mode": "background", "task_id": "t1", "worker": "dev-serverworker"}
-    assert calls == [] and seen[0]["worker"] == "dev-serverworker"
+    assert payload == {"ok": True, "mode": "background", "task_id": "t1", "worker": "dev-unraid"}
+    assert calls == [] and seen[0]["worker"] == "dev-unraid"
 
 
 def test_a_late_refusal_that_ran_nothing_still_falls_back(callers, network, monkeypatch):
-    save("dev-serverworker")
+    save("dev-unraid")
     monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
     real = td._dispatch_task_tool
 
     async def remote_refuses(args, **kwargs):
-        return {"ok": False, "error": "Unraid has no checkout of this project; nothing was dispatched."}
+        return {"ok": False, "error": "ServerWorker has no checkout of this project; nothing was dispatched."}
 
     monkeypatch.setattr(td, "_dispatch_task_tool",
                         lambda args, **kw: remote_refuses(args) if args.get("worker") else real(args, **kw))
     payload, calls = dispatch(callers["home"])
     assert payload["ok"] is True and len(calls) == 1
-    assert payload["worker_note"] == "Ran on this worker: Unraid has no checkout of this project."
+    assert payload["worker_note"] == "Ran on this worker: ServerWorker has no checkout of this project."
 
 
 def test_a_remote_failure_after_dispatch_is_not_rerun_here(callers, network, monkeypatch):
-    save("dev-serverworker")
+    save("dev-unraid")
     monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
     real = td._dispatch_task_tool
 

@@ -1,6 +1,6 @@
 """Load and validate the smoke scenarios, and render the human-readable table.
 
-``.fluid/skills/live-test/scenarios.json`` is the one source of truth;
+``scripts/live_smoke/scenarios.json`` is the one source of truth;
 ``scenarios.md`` next to it is generated from it (``python -m
 scripts.live_smoke render``) and a unit test keeps the two in sync.
 """
@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCENARIOS_JSON = ROOT / ".fluid" / "skills" / "live-test" / "scenarios.json"
-SCENARIOS_MD = SCENARIOS_JSON.with_name("scenarios.md")
+SCENARIOS_JSON = Path(__file__).with_name("scenarios.json")
+SCENARIOS_MD = ROOT / "docs" / "internal" / "live-smoke-scenarios.md"
 
 KINDS = ("script", "browser", "owner")
 OPS = ("workers", "start", "message", "await", "compact")

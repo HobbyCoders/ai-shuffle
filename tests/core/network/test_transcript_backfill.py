@@ -46,7 +46,7 @@ def joining(workers, chats=(("old", 3, "2026-01-01T00:00:00+00:00"),
                             ("new", 4, "2026-10-01T00:00:00+00:00"))):
     a, b = workers("a"), workers("b")
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
         admission = engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
                                         encryption_public=b.identity.encryption_public, name="Pop")
     for session_id, count, updated_at in chats:
@@ -104,7 +104,7 @@ async def test_first_copy_leaves_transcripts_out_and_is_ready_at_once(workers):
         assert owner_pref(b, "copied") == "yes"
         assert transcripts.pending()
         status = hub.status()["transcripts"]
-        assert status["phase"] == "transcripts" and status["peer_name"] == "Unraid"
+        assert status["phase"] == "transcripts" and status["peer_name"] == "ServerWorker"
         assert (status["sessions_done"], status["sessions_total"]) == (0, 3)
         # Its watermarks claim A's events: those are owed by the backfill.
         assert store.local_watermarks()[a.device_id] == manifest["watermarks"][a.device_id]
@@ -558,7 +558,7 @@ async def test_a_peer_still_backfilling_does_not_stop_the_exchange(workers):
     from tests.core.network.harness import join
     a, b, c = workers("a"), workers("b"), workers("c")
     with a.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
     join(a, c, name="C")  # C copied A long ago; its frontier is older than B's will be
     with a.active():
         admission = engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,

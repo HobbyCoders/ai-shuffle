@@ -440,7 +440,7 @@ async def test_background_init_stamps_launched_model(mock_db):
     launched model to sessions.launched_model at init, like the other three
     spawn paths (execute_query / stream_query / stream_to_websocket) already do
     via #552. Before the fix this path never stamped launched_model, so every
-    background session read back NULL and the Unraid host-op guard could not
+    background session read back NULL and the ServerWorker host-op guard could not
     resolve its model authoritatively.
     """
     sid = "bg-launched-model"

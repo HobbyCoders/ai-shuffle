@@ -46,8 +46,8 @@ describe('pendingHandoff', () => {
 	});
 
 	it('a newer queued hand-off after a finished one is pending again', () => {
-		const other = JSON.stringify({ queued: true, worker: 'Unraid' });
-		expect(pendingHandoff([call(queued), note('moved'), call(other)])).toEqual({ worker: 'Unraid', phase: 'queued' });
+		const other = JSON.stringify({ queued: true, worker: 'ServerWorker' });
+		expect(pendingHandoff([call(queued), note('moved'), call(other)])).toEqual({ worker: 'ServerWorker', phase: 'queued' });
 	});
 });
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Generate THIRD_PARTY_NOTICES.md at the repo root.
 
-Python packages: the transitive closure of requirements.txt,
-requirements-dev.txt, requirements-native.txt and the fluid harness, read from
+Python packages: both checked-in Python locks, plus the transitive closure of
+requirements.txt, requirements-dev.txt, requirements-native.txt and fluid, read from
 the installed distributions of the interpreter that runs this script (the same
 metadata pip-licenses reads, without the extra tool). Run it with the Python
 environment the image or installer is built from, or packages that are not
-installed there are listed as unresolved.
+installed there are listed as unresolved. Locked versions take precedence over
+the interpreter version. After regeneration, run tests/scripts/test_third_party_notices.py
+and resolve missing platform metadata; never drop another platform's entries.
 
 npm packages: read from the package-lock.json files of frontend/,
 browser-mcp/, tools/ and desktop/. frontend/ lists every locked package
@@ -35,7 +37,20 @@ except ImportError:  # pip always vendors packaging
 ROOT = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parent / "third_party_notices"
 REQUIREMENT_FILES = ["requirements.txt", "requirements-dev.txt", "requirements-native.txt"]
+PYTHON_LOCK_FILES = ["requirements.lock", "requirements-native.lock"]
 NPM_PROJECTS = [("frontend", True), ("browser-mcp", False), ("tools", False), ("desktop", False)]
+# Android declarations are not npm dependencies; licenses come from their Maven POMs.
+ANDROID_LICENSES = {
+    "net.openid": "Apache-2.0",
+    "androidx": "Apache-2.0",
+    "com.google.android.material": "Apache-2.0",
+    "org.jetbrains.kotlinx": "Apache-2.0",
+    "com.squareup.okhttp3": "Apache-2.0",
+    "com.journeyapps": "Apache-2.0",
+    "junit": "EPL-1.0",
+    "org.robolectric": "MIT",
+    "org.json": "Public domain",
+}
 # Packages whose metadata names no license, checked by hand against their repositories.
 LICENSE_OVERRIDES = {"google-crc32c": "Apache-2.0"}
 
@@ -46,7 +61,7 @@ LICENSE_OVERRIDES = {"google-crc32c": "Apache-2.0"}
 def _requirement_lines(path: Path) -> list[str]:
     lines = []
     for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.split(" #", 1)[0].strip()
+        line = raw.split(" #", 1)[0].strip().rstrip("\\").rstrip()
         if line and not line.startswith(("#", "-")):
             lines.append(line)
     return lines
@@ -54,7 +69,7 @@ def _requirement_lines(path: Path) -> list[str]:
 
 def _root_requirements() -> list[Requirement]:
     roots: list[Requirement] = []
-    for name in REQUIREMENT_FILES:
+    for name in REQUIREMENT_FILES + PYTHON_LOCK_FILES:
         path = ROOT / name
         if path.exists():
             roots.extend(Requirement(line) for line in _requirement_lines(path))
@@ -107,8 +122,15 @@ def _url_of(dist: metadata.Distribution) -> str:
 
 
 def python_packages() -> tuple[list[tuple[str, str, str, str]], list[str]]:
+    locked_versions: dict[str, set[str]] = {}
+    for filename in PYTHON_LOCK_FILES:
+        for line in _requirement_lines(ROOT / filename):
+            req = Requirement(line)
+            locked_versions.setdefault(canonicalize_name(req.name), set()).add(
+                next(iter(req.specifier)).version
+            )
     seen: dict[str, set[str]] = {}
-    rows: dict[str, tuple[str, str, str, str]] = {}
+    rows: dict[tuple[str, str], tuple[str, str, str, str]] = {}
     missing: set[str] = set()
     queue: list[tuple[Requirement, set[str]]] = [(r, set(r.extras)) for r in _root_requirements()]
     while queue:
@@ -124,7 +146,8 @@ def python_packages() -> tuple[list[tuple[str, str, str, str]], list[str]]:
             continue
         name = dist.metadata["Name"]
         if key != "fluid":  # our own harness, covered by the AI Shuffle license
-            rows[key] = (name, dist.version, _license_of(dist), _url_of(dist))
+            for version in sorted(locked_versions.get(key, {dist.version})):
+                rows[(key, version)] = (name, version, _license_of(dist), _url_of(dist))
         for spec in dist.requires or []:
             try:
                 child = Requirement(spec)
@@ -154,6 +177,24 @@ def npm_packages(project: str, include_dev: bool) -> list[tuple[str, str, str, s
         url = f"https://www.npmjs.com/package/{name}/v/{version}"
         rows[(name, version)] = (name, version, str(license_), url)
     return sorted(rows.values(), key=lambda r: (r[0].lower(), r[1]))
+
+
+def android_packages() -> list[tuple[str, str, str, str]]:
+    """Declared app and test dependencies; fail closed on an unreviewed license."""
+    gradle = (ROOT / "android/app/build.gradle.kts").read_text(encoding="utf-8")
+    rows = []
+    for group, artifact, version in re.findall(
+        r'(?:implementation|testImplementation|androidTestImplementation)\("([^:"]+):([^:"]+):([^"]+)"\)',
+        gradle,
+    ):
+        family = "androidx" if group.startswith("androidx.") else group
+        license_ = ANDROID_LICENSES[family]
+        repository = "https://dl.google.com/dl/android/maven2" if family in {
+            "androidx", "com.google.android.material"
+        } else "https://repo.maven.apache.org/maven2"
+        url = f"{repository}/{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}.pom"
+        rows.append((f"{group}:{artifact}", version, license_, url))
+    return sorted(rows)
 
 
 # ── Output ────────────────────────────────────────────────────────────────
@@ -194,6 +235,19 @@ def render() -> str:
         scope = "all locked packages (the build bundles from them)" if include_dev else "production dependencies"
         parts.append(f"## npm packages: {project}/\n\nFrom `{project}/package-lock.json`, {scope}.\n\n"
                      + _table(npm_packages(project, include_dev)))
+
+    parts.append(
+        "## Mobile and Android packages\n\n"
+        "`mobile/package.json` shares frontend's installed dependencies via "
+        "`mobile/scripts/link-deps.mjs`; there is no separate mobile lockfile. "
+        "Its JavaScript and font packages are included in the frontend table above.\n\n"
+        "Direct app and test dependencies declared in `android/app/build.gradle.kts` "
+        "are listed below; test dependencies do not ship in the APK. License sources "
+        "are the linked Maven POMs. Gradle resolves additional transitive dependencies "
+        "at build time (there is no committed Gradle dependency lock); the release "
+        "build's resolved dependency report must be reviewed as well.\n\n"
+        + _table(android_packages())
+    )
 
     apache = (HERE / "Apache-2.0.txt").read_text(encoding="utf-8").strip("\n")
     parts.append("## Apache License 2.0\n\nApplies to cloudflared and tweakcn, among others above.\n\n```\n" + apache + "\n```")

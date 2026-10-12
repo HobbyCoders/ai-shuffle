@@ -1,6 +1,6 @@
 """Approvals of a Task child on another worker, over the real signed control endpoint.
 
-A ("Unraid") runs the child; B ("Windows") runs the parent chat "caller". Both
+A ("ServerWorker") runs the child; B ("Windows") runs the parent chat "caller". Both
 workers share this process, and which one is "current" is process-wide, so
 each side runs under its own ``with x.active()``:
 
@@ -192,10 +192,10 @@ def test_an_allow_on_the_parent_runs_the_childs_own_input(workers, monkeypatch, 
     assert ("POST", "/api/v1/network/peer/control/task-approval") in router.requests(WINDOWS_URL)
     payload = row["payload"]
     assert row["session_id"] == "caller"
-    assert payload["title"].startswith("Task · Default on Unraid")
+    assert payload["title"].startswith("Task · Default on ServerWorker")
     assert "a subagent on another worker" in payload["description"]
     tag = payload["provider_agent"]
-    assert tag["worker_session_id"] == child and tag["worker_name"] == "Unraid"
+    assert tag["worker_session_id"] == child and tag["worker_name"] == "ServerWorker"
     assert tag["remote_device_id"] == a.device_id
     # Only a bounded summary of the input travelled.
     assert payload["tool_input"]["command"] == TOOL_INPUT["command"]
@@ -250,7 +250,7 @@ def test_a_local_worker_under_the_remote_child_asks_the_parent_too(workers, monk
         approvals.register_route(worker_session_id="grandchild", parent_session_id=child, label="Researcher")
     row, result = round_trip(a, b, proxies, held, ask_kwargs("grandchild"), responder("allow"))
     assert isinstance(result, PermissionResultAllow)
-    assert row["payload"]["title"].startswith("Researcher under Task · Default on Unraid")
+    assert row["payload"]["title"].startswith("Researcher under Task · Default on ServerWorker")
     assert row["payload"]["provider_agent"]["worker_session_id"] == child
 
 
@@ -261,7 +261,7 @@ def test_the_assistant_home_answers_in_conversation(workers, monkeypatch, proxie
 
     async def say_yes(row):
         confirm = row["payload"]["assistant_confirm"]
-        assert "df -h /mnt/user" in confirm["question"] and "on Unraid" in confirm["question"]
+        assert "df -h /mnt/user" in confirm["question"] and "on ServerWorker" in confirm["question"]
         assert await assistant_confirm.on_owner_message("caller", "yes") == "approved"
     _, result = round_trip(a, b, proxies, held, ask_kwargs(child), say_yes)
     assert isinstance(result, PermissionResultAllow)

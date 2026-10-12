@@ -179,16 +179,16 @@ describe('isRemovedDeviceSession', () => {
 });
 
 describe('sessionDeviceId', () => {
-	const owner = 'dev_0bb34fe0a39d6fac01558ea5';
+	const owner = 'dev_example_worker';
 
 	it('keys a legacy install id by its owner device', () => {
 		expect(sessionDeviceId(session({ is_remote: true, instance_id: 'ai-shuffle-43cb45e0',
-			owner_device_id: owner, device_name: 'Unraid' }))).toBe(owner);
+			owner_device_id: owner, device_name: 'ServerWorker' }))).toBe(owner);
 	});
 
 	it('keys a remote session with no instance id by its owner device, not as local', () => {
 		expect(sessionDeviceId(session({ is_remote: true, instance_id: null,
-			owner_device_id: owner, device_name: 'Unraid' }))).toBe(owner);
+			owner_device_id: owner, device_name: 'ServerWorker' }))).toBe(owner);
 	});
 
 	it('puts every instance id shape of one worker in the same bucket', () => {

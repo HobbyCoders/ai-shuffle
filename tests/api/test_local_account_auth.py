@@ -72,7 +72,7 @@ def client(app, ingress='local', peer='192.168.1.50', origin='http://192.168.1.2
     return TestClient(Surface(app, ingress), base_url=origin, client=(peer, 43210), headers={'Origin': origin})
 
 
-@pytest.mark.parametrize("origin", ["http://10.0.0.200:8000", "http://10.0.0.200:18000", "http://[fd00::251]:18000"])
+@pytest.mark.parametrize("origin", ["http://10.0.0.20:8000", "http://10.0.0.20:18000", "http://[fd00::251]:18000"])
 def test_docker_learns_published_address_from_owner_status(app, mock_db, monkeypatch, origin):
     from app.core import cluster
     from app.network import engine, policy
@@ -93,19 +93,19 @@ def test_docker_learns_published_address_from_owner_status(app, mock_db, monkeyp
     publish.assert_called_once()
     # Native installs do not reuse a former container's observed address.
     monkeypatch.setattr(settings, "local_mode", True)
-    monkeypatch.setattr(cluster, "_guess_advertise_url", lambda: "http://10.0.0.135:8000")
-    assert cluster.advertise_url() == ("http://10.0.0.135:8000", "guess")
+    monkeypatch.setattr(cluster, "_guess_advertise_url", lambda: "http://10.0.0.30:8000")
+    assert cluster.advertise_url() == ("http://10.0.0.30:8000", "guess")
 
 
 @pytest.mark.parametrize("origin,peer,ingress,headers", [
     ("http://localhost:8000", "127.0.0.1", "local", {}),
     ("http://127.0.0.1:8000", "127.0.0.1", "local", {}),
-    ("http://10.0.0.200:8000", "192.168.1.50", "managed", {}),
-    ("http://10.0.0.200:8000", "8.8.8.8", "local", {}),
-    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"Authorization": "Bearer invalid"}),
-    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"X-Forwarded-Host": "10.0.0.200:8000"}),
-    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"Origin": "http://evil.example"}),
-    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"Sec-Fetch-Site": "cross-site"}),
+    ("http://10.0.0.20:8000", "192.168.1.50", "managed", {}),
+    ("http://10.0.0.20:8000", "8.8.8.8", "local", {}),
+    ("http://10.0.0.20:8000", "192.168.1.50", "local", {"Authorization": "Bearer invalid"}),
+    ("http://10.0.0.20:8000", "192.168.1.50", "local", {"X-Forwarded-Host": "10.0.0.20:8000"}),
+    ("http://10.0.0.20:8000", "192.168.1.50", "local", {"Origin": "http://evil.example"}),
+    ("http://10.0.0.20:8000", "192.168.1.50", "local", {"Sec-Fetch-Site": "cross-site"}),
 ])
 def test_docker_does_not_learn_untrusted_or_loopback_address(
     app, mock_db, monkeypatch, origin, peer, ingress, headers
@@ -198,10 +198,10 @@ def test_unlinked_local_owner_can_start_account_connection(app, monkeypatch):
     assert local.get('/api/v1/mobile/hub/connection').json()['status'] == 'disconnected'
 
     remote = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
-    assert remote.post('/api/v1/mobile/hub/connection', json={'name': 'Unraid'}).status_code == 403
+    assert remote.post('/api/v1/mobile/hub/connection', json={'name': 'ServerWorker'}).status_code == 403
     hub_call.assert_not_called()
 
-    response = local.post('/api/v1/mobile/hub/connection', json={'name': 'Unraid'})
+    response = local.post('/api/v1/mobile/hub/connection', json={'name': 'ServerWorker'})
     assert response.status_code == 200
     connection = response.json()
     assert connection['status'] == 'waiting' and not connection['signed_in']
@@ -209,7 +209,7 @@ def test_unlinked_local_owner_can_start_account_connection(app, monkeypatch):
         'https://hobbycoders.com/browser/claim?code=' + connection['code'])
     assert len(connection['code']) == 12 and connection['qr_svg']
     assert hub_call.call_count == 1 and hub_call.call_args.args[0] == 'start'
-    assert hub_call.call_args.args[1]['name'] == 'Unraid'
+    assert hub_call.call_args.args[1]['name'] == 'ServerWorker'
     assert mobile_hub.get_binding() is None
     assert local.get('/owner').status_code == 200
 

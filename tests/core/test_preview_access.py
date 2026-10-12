@@ -34,9 +34,9 @@ def _isolated_key(tmp_path, monkeypatch):
     monkeypatch.setattr(owner_auth, "trusted_lan", lambda: True)
 
 
-def _request(path="/", method="GET", *, peer="10.0.0.200", port=8000, ingress="local",
+def _request(path="/", method="GET", *, peer="10.0.0.20", port=8000, ingress="local",
              cookies=None, headers=None):
-    raw_headers = [(b"host", f"10.0.0.135:{port}".encode())]
+    raw_headers = [(b"host", f"10.0.0.30:{port}".encode())]
     for name, value in (headers or {}).items():
         raw_headers.append((name.lower().encode(), value.encode()))
     if cookies:
@@ -144,14 +144,14 @@ def test_preview_url_is_stable_across_renders(monkeypatch):
 
     clock = [1_800_000_000.0]
     monkeypatch.setattr(preview_access, "time", SimpleNamespace(time=lambda: clock[0]))
-    first = preview_access.preview_url(SESSION, "10.0.0.135", 8000)
+    first = preview_access.preview_url(SESSION, "10.0.0.30", 8000)
     clock[0] += 300
-    assert preview_access.preview_url(SESSION, "10.0.0.135", 8000) == first
+    assert preview_access.preview_url(SESSION, "10.0.0.30", 8000) == first
 
 
 def test_preview_url_carries_the_token_and_a_safe_next():
-    url = preview_access.preview_url(SESSION, "10.0.0.135", 8000, next_path="/chat/abc")
-    assert url.startswith("http://10.0.0.135:8000/api/v1/auth/preview-access?token=v1.")
+    url = preview_access.preview_url(SESSION, "10.0.0.30", 8000, next_path="/chat/abc")
+    assert url.startswith("http://10.0.0.30:8000/api/v1/auth/preview-access?token=v1.")
     assert url.endswith("&next=/chat/abc")
     assert preview_access.safe_next("//evil.example") == "/"
     assert preview_access.safe_next("https://evil.example/x") == "/"
@@ -231,15 +231,15 @@ def app():
 _VITE = {"X-Forwarded-Host": "localhost:5173"}
 
 
-def _client(app, peer="10.0.0.200", port=18090):
-    return TestClient(app, base_url=f"http://10.0.0.135:{port}", client=(peer, 54321), headers=_VITE)
+def _client(app, peer="10.0.0.20", port=18090):
+    return TestClient(app, base_url=f"http://10.0.0.30:{port}", client=(peer, 54321), headers=_VITE)
 
 
 def test_redirect_sets_the_cookie_and_the_ui_reads_as_owner(app):
     c = _client(app)
     # Through the dev proxy the browser is NOT the local owner (audited failure).
     assert c.get("/api/v1/sessions").status_code == 401
-    url = preview_access.preview_url(SESSION, "10.0.0.135", 18090, next_path="/chat/abc")
+    url = preview_access.preview_url(SESSION, "10.0.0.30", 18090, next_path="/chat/abc")
     landing = c.get(url.split("18090", 1)[1], follow_redirects=False)
     assert landing.status_code == 303
     assert landing.headers["location"] == "/chat/abc"
@@ -247,10 +247,10 @@ def test_redirect_sets_the_cookie_and_the_ui_reads_as_owner(app):
     assert preview_access.COOKIE_NAME in set_cookie and "HttpOnly" in set_cookie
     # Every later request rides the cookie.
     assert c.get("/api/v1/sessions").json() == {"ok": True}
-    posted = c.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.135:18090"})
+    posted = c.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.30:18090"})
     assert posted.status_code == 200
     # ... except the routes that change ownership or credentials.
-    assert c.post("/api/v1/auth/danger", headers={"Origin": "http://10.0.0.135:18090"}).status_code == 403
+    assert c.post("/api/v1/auth/danger", headers={"Origin": "http://10.0.0.30:18090"}).status_code == 403
 
 
 def test_redirect_refuses_bad_tokens_remote_ingress_and_public_peers(app):
@@ -258,7 +258,7 @@ def test_redirect_refuses_bad_tokens_remote_ingress_and_public_peers(app):
     assert _client(app).get(f"/api/v1/auth/preview-access?token={good}x", follow_redirects=False).status_code == 403
     assert _client(app, port=8001).get(f"/api/v1/auth/preview-access?token={good}", follow_redirects=False).status_code == 403
     assert _client(app, peer="203.0.113.4").get(f"/api/v1/auth/preview-access?token={good}", follow_redirects=False).status_code == 403
-    no_ingress = TestClient(app.app, base_url="http://10.0.0.135:18090", client=("10.0.0.200", 1))
+    no_ingress = TestClient(app.app, base_url="http://10.0.0.30:18090", client=("10.0.0.20", 1))
     assert no_ingress.get(f"/api/v1/auth/preview-access?token={good}", follow_redirects=False).status_code == 403
 
 
@@ -266,7 +266,7 @@ def test_cookie_is_useless_on_the_remote_listener(app):
     c = _client(app)
     c.get(f"/api/v1/auth/preview-access?token={preview_access.mint(SESSION)}", follow_redirects=False)
     assert c.get("/api/v1/sessions").status_code == 200
-    assert c.get("http://10.0.0.135:8001/api/v1/sessions").status_code == 401
+    assert c.get("http://10.0.0.30:8001/api/v1/sessions").status_code == 401
 
 
 def test_branch_preview_routes_accept_the_cookie(monkeypatch):
@@ -295,7 +295,7 @@ def test_transport_check_uses_the_shared_owner_auth_helpers():
     from app.core import owner_auth
 
     assert "x-forwarded-host" in owner_auth.PROXY_HEADERS
-    assert owner_auth.is_private_address(ipaddress.ip_address("10.0.0.200"))
+    assert owner_auth.is_private_address(ipaddress.ip_address("10.0.0.20"))
     assert owner_auth.is_private_address(ipaddress.ip_address("100.64.1.1"))
     assert not owner_auth.is_private_address(ipaddress.ip_address("203.0.113.4"))
     assert preview_access._private_peer(_request(peer="192.168.1.9"))
@@ -327,7 +327,7 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
         if cookie_state == "expired":
             now = time.time()
             monkeypatch.setattr(preview_access.time, "time", lambda: now + 120)
-    headers = {"Origin": "http://10.0.0.135:8000"}
+    headers = {"Origin": "http://10.0.0.30:8000"}
     if transport == "vite-proxy":
         headers.update(_VITE)
     if identity == "admin-cookie":
@@ -339,7 +339,7 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
     elif identity in ("paired-bearer", "api-key"):
         headers["Authorization"] = "Bearer " + ("paired-token" if identity == "paired-bearer" else "api-token")
     request = _request("/api/v1/settings/test-only", "POST", cookies=cookies, headers=headers,
-                       peer="127.0.0.1" if identity == "admin-cookie" else "10.0.0.200",
+                       peer="127.0.0.1" if identity == "admin-cookie" else "10.0.0.20",
                        ingress="remote" if transport == "remote" else "local")
     call = getattr(auth_api, dependency)
     if cookie_state == "valid":
@@ -386,8 +386,8 @@ def test_direct_owner_preview_cannot_reach_protected_handler(prefix, method, dep
         return handler()
 
     client = TestClient(IngressApplication(api, local_port=18090),
-                        base_url="http://10.0.0.135:18090", client=("10.0.0.200", 54321),
-                        headers={"Origin": "http://10.0.0.135:18090"})
+                        base_url="http://10.0.0.30:18090", client=("10.0.0.20", 54321),
+                        headers={"Origin": "http://10.0.0.30:18090"})
     client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
     assert client.request(method, prefix + "/test-only").status_code == 403
     handler.assert_not_called()
@@ -404,7 +404,7 @@ def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, p
         client.headers.pop("X-Forwarded-Host")
     client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
     assert client.get("/api/v1/sessions").status_code == 200
-    assert client.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.135:18090"}).status_code == 200
+    assert client.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.30:18090"}).status_code == 200
     cookies = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
     request = _request("/api/v1/settings/test-only", cookies=cookies, headers=_VITE if proxied else {})
     # Owner-only pages can be READ on the grant alone ("what the local owner
@@ -415,7 +415,7 @@ def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, p
     for path in ("/api/v1/settings/test-only", "/api/v1/assistant/limits"):
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             change = _request(path, method, cookies=cookies,
-                              headers={**(_VITE if proxied else {}), "Origin": "http://10.0.0.135:8000"})
+                              headers={**(_VITE if proxied else {}), "Origin": "http://10.0.0.30:8000"})
             if proxied or path.startswith(preview_access.MUTATION_DENY_PREFIXES):
                 with pytest.raises(HTTPException) as refused:
                     require_admin(change)
@@ -437,7 +437,7 @@ def test_preview_listener_reads_owner_pages_but_never_changes_them(method, admit
 
     cookies = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
     request = _request("/api/v1/assistant", method, port=8002, ingress="preview", peer="172.17.0.2",
-                       cookies=cookies, headers={"Origin": "http://10.0.0.135:8002"})
+                       cookies=cookies, headers={"Origin": "http://10.0.0.30:8002"})
     if admitted:
         assert require_admin(request) == "preview:" + SESSION
         assert request.state.is_admin is True and request.state.api_user is None

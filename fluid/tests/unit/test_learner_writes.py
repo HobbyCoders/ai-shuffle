@@ -290,7 +290,7 @@ async def test_reasoning_only_answer_is_a_logged_failure_not_a_verdict(tmp_path)
 async def test_full_unconsumed_journal_drops_oldest_and_keeps_learning(
     tmp_path, monkeypatch, caplog,
 ) -> None:
-    """The Unraid shape: every pass failed, the cursor never moved, the
+    """The ServerWorker shape: every pass failed, the cursor never moved, the
     journal reached its cap and refused every new entry from then on."""
     monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", 40_000)
     store = SkillStore(tmp_path)

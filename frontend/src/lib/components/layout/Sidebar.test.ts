@@ -1388,7 +1388,7 @@ describe('Sidebar rail prefetch', () => {
 describe('Sidebar rail customization', () => {
 	it('offers Terminal in More to the owner once the worker can run shells', async () => {
 		terminalTargets.mockResolvedValue({
-			worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+			worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
 			shells: [{ name: 'bash', default: true }], default_shell: 'bash',
 			default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0,
 		});

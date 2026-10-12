@@ -80,7 +80,7 @@ const info = (id: string, over: Partial<TerminalInfo> = {}): TerminalInfo => ({
 	state: 'live', exit_code: null, created_at: '', exited_at: null, busy: false, cols: 80, rows: 24, attached: 0, ...over,
 });
 const targets: TerminalTargets = {
-	worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+	worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
 	shells: [{ name: 'bash', default: true }, { name: 'sh', default: false }], default_shell: 'bash',
 	default_folder: { path: '/workspace/app', source: 'project' }, limit: 8, open: 0,
 };

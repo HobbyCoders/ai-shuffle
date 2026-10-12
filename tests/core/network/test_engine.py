@@ -462,28 +462,28 @@ def test_observed_docker_address_is_published_to_other_workers(workers, monkeypa
     monkeypatch.setattr(hub, "kick", lambda: None)
     request = Request({"type": "http", "scheme": "http", "path": "/api/v1/auth/status",
                        "root_path": "", "query_string": b"", "method": "GET",
-                       "headers": [(b"host", b"10.0.0.200:18000")],
-                       "client": ("10.0.0.135", 12345), "server": ("172.17.0.11", 8000),
+                       "headers": [(b"host", b"10.0.0.20:18000")],
+                       "client": ("10.0.0.30", 12345), "server": ("172.17.0.11", 8000),
                        "shuffle.ingress": "local"})
     with a.active():
         engine.create_network("LAN")
     join(a, b)
     with a.active():
         assert cluster.observe_local_advertise_url(request)
-        assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.200:18000"]
+        assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.20:18000"]
         engine.scan_all()
     exchange(a, b)
     with b.active():
         row = next(r for r in runners.directory()["runners"] if r["id"] == a.device_id)
-        assert row["base_url"] == "http://10.0.0.200:18000"
+        assert row["base_url"] == "http://10.0.0.20:18000"
         assert database.get_system_setting(cluster._observed_advertise_key()) is None
     # Re-loading the network does not lose the persisted host/port.
     with a.active():
         engine.load_context()
-        assert cluster.advertise_url() == ("http://10.0.0.200:18000", "observed")
+        assert cluster.advertise_url() == ("http://10.0.0.20:18000", "observed")
         assert not cluster.observe_local_advertise_url(request)
-        cluster.set_advertise_url_override("http://10.0.0.200:19000")
-        assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.200:19000"]
+        cluster.set_advertise_url_override("http://10.0.0.20:19000")
+        assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.20:19000"]
 
 
 @pytest.mark.asyncio

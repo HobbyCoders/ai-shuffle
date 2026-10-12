@@ -679,7 +679,7 @@ class TestDbPreToolUseHooks:
         The SDK's HookContext TypedDict only carries `signal` — it never has
         session_id. The real session id arrives via the first handler argument
         (hook_input["session_id"]). If the handler builds script_input from
-        context.get("session_id") only, DB bash hooks (e.g. the Unraid host-op
+        context.get("session_id") only, DB bash hooks (e.g. the ServerWorker host-op
         guard) receive session_id: null on stdin and fail closed.
 
         Regression guard: pass a hook_input WITH session_id and a context

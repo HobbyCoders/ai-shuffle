@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.serve import IngressApplication
 
 KEY = "sidebar_collapsed_groups"
-ORIGIN = "http://10.0.0.135:18090"
+ORIGIN = "http://10.0.0.30:18090"
 
 
 @pytest.fixture
@@ -40,8 +40,8 @@ def clients(tmp_path, monkeypatch):
     api = FastAPI()
     api.include_router(preferences.router)
     app = IngressApplication(api, local_port=18090)
-    owner = TestClient(app, base_url=ORIGIN, client=("10.0.0.200", 54321), headers={"Origin": ORIGIN})
-    preview = TestClient(app, base_url=ORIGIN, client=("10.0.0.200", 54322), headers={"Origin": ORIGIN})
+    owner = TestClient(app, base_url=ORIGIN, client=("10.0.0.20", 54321), headers={"Origin": ORIGIN})
+    preview = TestClient(app, base_url=ORIGIN, client=("10.0.0.20", 54322), headers={"Origin": ORIGIN})
     preview.cookies.set(preview_access.COOKIE_NAME, preview_access.mint("preview-session"))
     return owner, preview, writes, deletes
 

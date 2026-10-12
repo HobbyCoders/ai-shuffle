@@ -222,13 +222,13 @@ def lan_candidates(endpoints: Iterable[object] | None) -> List[str]:
 
 
 def normalize_owner_address(text: str, *, default_port: int) -> str:
-    """``10.0.0.200:8001`` or ``http://10.0.0.200:8001`` -> ``http://10.0.0.200:8001``.
+    """``10.0.0.20:8001`` or ``http://10.0.0.20:8001`` -> ``http://10.0.0.20:8001``.
 
     Raises ``ValueError`` for anything that is not a private literal IP.
     """
     raw = (text or "").strip().rstrip("/")
     if not raw:
-        raise ValueError("Enter an address such as 10.0.0.200:8001")
+        raise ValueError("Enter an address such as 10.0.0.20:8001")
     url = raw if "://" in raw else "http://" + raw
     try:
         parts = urlsplit(url)
@@ -259,7 +259,7 @@ def set_lan_direct_enabled(enabled: bool) -> None:
 
 
 def owner_addresses() -> List[str]:
-    """Addresses the owner added for this worker (``10.0.0.200:8001`` for a Docker host)."""
+    """Addresses the owner added for this worker (``10.0.0.20:8001`` for a Docker host)."""
     from app.db import database
     raw = database.get_system_setting(SETTING_ADDRESSES)
     if not raw:

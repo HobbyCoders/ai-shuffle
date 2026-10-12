@@ -169,13 +169,13 @@ def test_explicit_allow_from_process_env_passes_through(monkeypatch):
 
 
 def test_loopback_host_passes_an_explicit_value_through(monkeypatch):
-    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.135")
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.30")
     env = mcp_config._build_browser_server_env({}, session_id=None)
-    assert env["BROWSER_LOOPBACK_HOST"] == "10.0.0.135"
+    assert env["BROWSER_LOOPBACK_HOST"] == "10.0.0.30"
 
 
 def test_loopback_host_prefers_the_session_env_over_the_process_env(monkeypatch):
-    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.135")
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.30")
     env = mcp_config._build_browser_server_env(
         {"BROWSER_LOOPBACK_HOST": "172.17.0.5"}, session_id=None
     )

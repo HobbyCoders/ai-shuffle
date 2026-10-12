@@ -340,7 +340,7 @@ def test_install_adds_a_hook_without_touching_hooks_path(tmp_path, monkeypatch):
 
 
 def test_install_skips_a_python_without_pytest(tmp_path, monkeypatch):
-    # Unraid: python3 on PATH is the app venv (no pytest); /usr/local/bin/python3 has it.
+    # ServerWorker: python3 on PATH is the app venv (no pytest); /usr/local/bin/python3 has it.
     venv, system = tmp_path / "venv-python", tmp_path / "system-python"
     venv.write_text("")
     system.write_text("")

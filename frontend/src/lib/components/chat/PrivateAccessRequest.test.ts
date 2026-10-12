@@ -50,7 +50,7 @@ describe('PrivateAccessRequest', () => {
 	});
 
 	it.each([
-		{ suggested_host: '10.0.0.146', suggested_port: 22, suggested_username: 'x' },
+		{ suggested_host: '10.0.0.50', suggested_port: 22, suggested_username: 'x' },
 		{ suggested_host: '10.0.0.5', suggested_port: 2222, suggested_username: 'ops' },
 		{ suggested_host: '10.0.0.5', suggested_port: 22, suggested_username: 'root' },
 		{ suggested_host: '10.0.0.50' },
@@ -82,16 +82,16 @@ describe('PrivateAccessRequest', () => {
 	});
 
 	it('prefills editable new-machine fields and submits the reviewed values', async () => {
-		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect VM', expires_at: inAnHour(), suggested_host: '10.0.0.146', suggested_port: 2222, suggested_username: 'x' } });
-		expect(field('Server IP address').value).toBe('10.0.0.146');
+		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect VM', expires_at: inAnHour(), suggested_host: '10.0.0.50', suggested_port: 2222, suggested_username: 'x' } });
+		expect(field('Server IP address').value).toBe('10.0.0.50');
 		expect(field('Port').value).toBe('2222');
 		expect(field('Username').value).toBe('x');
-		await fireEvent.input(field('Server IP address'), { target: { value: '10.0.0.147' } });
+		await fireEvent.input(field('Server IP address'), { target: { value: '10.0.0.60' } });
 		await fireEvent.input(field('Port'), { target: { value: '22' } });
 		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
 		await fireEvent.input(field('Password'), { target: { value: 'card-only' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: '', connection: expect.objectContaining({ host: '10.0.0.147', port: 22, username: 'deploy' }) }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: '', connection: expect.objectContaining({ host: '10.0.0.60', port: 22, username: 'deploy' }) }));
 	});
 
 	it('keeps the full saved host key in an initially collapsed disclosure', async () => {
@@ -168,20 +168,20 @@ describe('PrivateAccessRequest', () => {
 
 	it('prefills a proposed folder but preserves edits across refreshes and a failed approval', async () => {
 		const request = { id: 'r/1', kind: 'folder', purpose: 'Test a folder', expires_at: inAnHour(), suggested_path: '/workspace/test' };
-		const { rerender, onComplete } = mount({ owner: 'Unraid', request });
-		expect(field('Folder on Unraid').value).toBe('/workspace/test');
+		const { rerender, onComplete } = mount({ owner: 'ServerWorker', request });
+		expect(field('Folder on ServerWorker').value).toBe('/workspace/test');
 		expect(m.post).not.toHaveBeenCalled();
 		expect(screen.getByText(/mounted container path/).textContent).toContain('For Docker,');
-		expect(screen.getByText(/mounted container path/).textContent).not.toContain('Docker or Unraid');
-		await fireEvent.input(field('Folder on Unraid'), { target: { value: '/workspace/private-choice' } });
+		expect(screen.getByText(/mounted container path/).textContent).not.toContain('Docker or ServerWorker');
+		await fireEvent.input(field('Folder on ServerWorker'), { target: { value: '/workspace/private-choice' } });
 		await rerender({ request: { ...request } });
-		expect(field('Folder on Unraid').value).toBe('/workspace/private-choice');
+		expect(field('Folder on ServerWorker').value).toBe('/workspace/private-choice');
 		m.post.mockRejectedValueOnce({ detail: 'Folder not found on the worker that runs this chat.' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(screen.getByText(/Folder not found/)).toBeTruthy());
 		expect(onComplete).not.toHaveBeenCalled();
-		expect(field('Folder on Unraid').value).toBe('/workspace/private-choice');
-		await fireEvent.input(field('Folder on Unraid'), { target: { value: '/workspace/corrected' } });
+		expect(field('Folder on ServerWorker').value).toBe('/workspace/private-choice');
+		await fireEvent.input(field('Folder on ServerWorker'), { target: { value: '/workspace/corrected' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[1][1].connection).toMatchObject({ path: '/workspace/corrected', writable: false });

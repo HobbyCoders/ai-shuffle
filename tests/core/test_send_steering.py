@@ -180,16 +180,16 @@ async def test_answer_after_a_mid_turn_setting_change_still_steers(mock_db, chan
         # Both arrive over the cross-worker control route, as they did.
         if change == "run-settings":
             await control.handle("run-settings", {"session_id": sid, "fast": True},
-                                 from_device="dev_gamingpc")
+                                 from_device="dev_desktopworker")
         else:
             await control.handle("permission-mode", {"session_id": sid, "permission_mode": "acceptEdits"},
-                                 from_device="dev_gamingpc")
+                                 from_device="dev_desktopworker")
         assert (await control.handle("question", {
-            "session_id": sid, "request_id": "q-switch", "answers": {"Route?": "Deploy from Unraid"},
-        }, from_device="dev_gamingpc"))["success"]
+            "session_id": sid, "request_id": "q-switch", "answers": {"Route?": "Deploy from ServerWorker"},
+        }, from_device="dev_desktopworker"))["success"]
 
     answer, = turns_db.get_queued_turns(sid)
-    assert "Deploy from Unraid" in answer["prompt"]
+    assert "Deploy from ServerWorker" in answer["prompt"]
     # Steered into the running turn once, not left for the end of the turn.
     assert adapter.calls == [(answer["prompt"], answer["id"])]
 

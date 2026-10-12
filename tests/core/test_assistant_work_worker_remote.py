@@ -30,7 +30,7 @@ def test_assistant_work_goes_to_the_default_worker_when_it_starts(callers, netwo
         "permission_mode": "default", "checkout": {"mode": "none", "branch": None}})
     payload, calls = dispatch(callers[role])
     assert payload["ok"] is True and payload["mode"] == "remote" and calls == []
-    assert payload["worker"] == {"device_id": "dev-serverworker", "name": "Unraid"}
+    assert payload["worker"] == {"device_id": "dev-serverworker", "name": "ServerWorker"}
     assert "worker_note" not in payload
     [(device_id, action, _)] = sent
     assert (device_id, action) == ("dev-serverworker", "task-start")
@@ -44,7 +44,7 @@ def test_a_pre_start_refusal_from_the_default_worker_runs_here(callers, network,
     _target_answers(monkeypatch, refuse)
     payload, calls = dispatch(callers["home"])
     assert payload["ok"] is True and len(calls) == 1
-    assert payload["worker_note"] == ("Ran on this worker: Unraid refused the subagent: The agent "
+    assert payload["worker_note"] == ("Ran on this worker: ServerWorker refused the subagent: The agent "
                                       "'helper' does not exist on this worker.")
 
 
@@ -52,7 +52,7 @@ def test_a_default_worker_that_may_have_started_it_is_not_rerun_here(callers, ne
     save("dev-serverworker")
 
     def timeout(body):
-        raise control.RunnerUnreachable("Unraid did not answer in time while handling a request from "
+        raise control.RunnerUnreachable("ServerWorker did not answer in time while handling a request from "
                                         "DesktopWorker. It may still have been applied; check before retrying.")
     _target_answers(monkeypatch, timeout)
     payload, calls = dispatch(callers["home"])

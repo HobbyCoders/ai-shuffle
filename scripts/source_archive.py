@@ -6,7 +6,7 @@ packages (including mobile/, the phone UI the frontend build emits at
 /mobile/), the desktop launcher, the container supervisor (docker/), the in-app
 docs and the dependency lists.
 Internal docs, reviews, mockups, videos, tests, the Android app, CI and owner
-tooling (scripts/, including scripts/unraid-lab) never leave the repository
+tooling (scripts/) never leave the repository
 through the update feed.
 
 The archive comes from `git archive`, so it is byte-for-byte reproducible for a

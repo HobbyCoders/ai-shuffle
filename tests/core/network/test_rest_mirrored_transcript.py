@@ -19,7 +19,7 @@ from tests.core.network.harness import converge, join
 def mirrored_chat(workers, request):
     viewer, owner = workers("unraid"), workers("remote")
     with viewer.active():
-        engine.create_network("Home", device_name="Unraid")
+        engine.create_network("Home", device_name="ServerWorker")
     join(viewer, owner)
     with owner.active():
         database.create_session(session_id="remote-chat", profile_id="default", title="Remote reply")

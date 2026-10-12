@@ -1,6 +1,6 @@
 """The parent tracks a Task child on another worker like a local background Task (S7).
 
-Two in-process workers over the real signed control endpoint: Unraid runs the
+Two in-process workers over the real signed control endpoint: ServerWorker runs the
 child, Windows runs the parent chat. No provider, no second machine.
 """
 import asyncio
@@ -76,7 +76,7 @@ def test_a_remote_child_is_listed_like_a_local_background_task(workers, monkeypa
         [task] = task_registry.get_all("caller")
         assert task["id"] == child and task["status"] == "running" and task["kind"] == "agent"
         assert task["subject"] == "Task · Default" and task["toolUseId"] == child
-        assert task["worker"] == {"deviceId": a.device_id, "name": "Unraid"}
+        assert task["worker"] == {"deviceId": a.device_id, "name": "ServerWorker"}
         # The park gate and the pool's busy signal count it, and its
         # completion is the caller's own background work (the wake lane).
         assert [t["id"] for t in task_registry.get_active_background_work("caller")] == [child]
@@ -85,7 +85,7 @@ def test_a_remote_child_is_listed_like_a_local_background_task(workers, monkeypa
         assert record.remote_device_id == a.device_id and record.background
         # ListAgents names the worker.
         [row] = agent_messaging.peer_rows("caller")
-        assert row["worker_session_id"] == child and row["worker"] == "Unraid"
+        assert row["worker_session_id"] == child and row["worker"] == "ServerWorker"
         assert row["status"] == "running"
         # The card exists, with a running chip, like a local worker's.
         assert len(caller_events("subagent.started")) == 1
@@ -129,7 +129,7 @@ def test_the_report_settles_the_record_card_and_supervisor_then_wakes_once(worke
         task = task_registry.get_task("caller", child)
         assert task["status"] == "completed" and task["summary"] == "Disk is 40% full."
         assert task["reportPath"] and task["reportChars"] == len("Disk is 40% full.\nDetails follow.")
-        assert task["worker"]["name"] == "Unraid"
+        assert task["worker"]["name"] == "ServerWorker"
         assert provider_agent_supervisor.get_worker("caller", child) is None
         assert task_registry.get_active_background_work("caller") == []
         assert not task_registry.has_unresolved_background_launches("caller")
@@ -262,7 +262,7 @@ def test_a_parent_restart_keeps_the_child_running_and_re_attaches_it(workers, mo
         assert asyncio.run(remote_task.reattach_all()) == 1
         assert asyncio.run(remote_task.reattach_all()) == 0  # idempotent
         task = task_registry.get_task("caller", child)
-        assert task["status"] == "running" and task["worker"]["name"] == "Unraid"
+        assert task["status"] == "running" and task["worker"]["name"] == "ServerWorker"
         assert task_registry.get_task("caller", "local-1")["status"] == "interrupted"
         assert [t["id"] for t in task_registry.get_active_background_work("caller")] == [child]
         assert provider_agent_supervisor.get_worker("caller", child).remote_device_id == a.device_id
@@ -287,7 +287,7 @@ def test_a_report_that_arrives_before_re_attach_still_settles_the_record(workers
     deliver(a, child, text="Arrived first.")
     with b.active():
         task = task_registry.get_task("caller", child)
-        assert task["status"] == "completed" and task["worker"]["name"] == "Unraid"
+        assert task["status"] == "completed" and task["worker"]["name"] == "ServerWorker"
         assert len(wakes()) == 1
         assert asyncio.run(remote_task.reattach_all()) == 0
 
@@ -436,8 +436,8 @@ async def start_swarm(monkeypatch, *, dependent=True, extra_tasks=()):
     ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher("caller")})
     outcome = await swarm.make_handler(lambda: "caller")({"action": "start", "max_parallel": 1,
         "tasks": [
-            {"id": "first", "agent": "helper", "worker": "Unraid", "prompt": "Check the disk."},
-            {"id": "second", "agent": "helper", "worker": "Unraid", "prompt": "Review findings.",
+            {"id": "first", "agent": "helper", "worker": "ServerWorker", "prompt": "Check the disk."},
+            {"id": "second", "agent": "helper", "worker": "ServerWorker", "prompt": "Review findings.",
              "depends_on": ["first"] if dependent else []},
         ] + list(extra_tasks)}, ctx)
     assert not outcome.is_error, outcome.text
@@ -483,7 +483,7 @@ def test_remote_swarm_holds_slot_routes_messages_and_uses_actual_report(workers,
             assert sum(path.endswith("/task-start") for _, path in router.requests(UNRAID_URL)) == 1
             peers = await agent_messaging.make_roster(lambda: "caller")({"running_only": True}, None)
             [peer] = [row for row in peers if row["worker_session_id"] == child]
-            assert peer["name"] == "first" and peer["worker"] == "Unraid" and peer["status"] == "running"
+            assert peer["name"] == "first" and peer["worker"] == "ServerWorker" and peer["status"] == "running"
             for address in ("first", child):
                 message = await agent_messaging.make_message(lambda: "caller")(
                     {"to": address, "message": "Also check the logs."}, None)
@@ -610,7 +610,7 @@ def test_remote_swarm_start_races_keep_report_and_routing_ownership(workers, mon
                     assert snapshot["tasks"][0]["status"] == "running"
                     assert snapshot["tasks"][1]["status"] == "queued"
                     child = snapshot["tasks"][0]["worker_session_id"]
-                    assert swarm.peer_rows("caller")[0]["worker"] == "Unraid"
+                    assert swarm.peer_rows("caller")[0]["worker"] == "ServerWorker"
                     assert task_registry.get_task("caller", child)["status"] == "running"
                     early_reports.append(await report_from_target(a, child, text="Report after uncertain start."))
                 snapshot = await admitted(published, 1)
@@ -658,7 +658,7 @@ def test_uncertain_swarm_start_unknown_grace_is_bounded(
 
     async def scenario():
         with b.active():
-            independent = [{"id": "independent", "agent": "helper", "worker": "Unraid",
+            independent = [{"id": "independent", "agent": "helper", "worker": "ServerWorker",
                             "prompt": "Unrelated work."}]
             coordinator, key, published = await start_swarm(monkeypatch, extra_tasks=independent)
             snapshot = await admitted(published, 0)

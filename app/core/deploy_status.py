@@ -1,6 +1,6 @@
 """Where a change is live: each paired worker's revision against origin/main.
 
-Read-only. Answers "is PR #N / commit X running on Unraid yet?" without the
+Read-only. Answers "is PR #N / commit X running on ServerWorker yet?" without the
 owner checking every worker by hand. Each worker reports the revision it runs,
 its app version and update channel; a local ai-shuffle git checkout turns that
 into commits behind origin/main and "contains the change". Nothing here

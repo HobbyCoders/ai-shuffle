@@ -144,7 +144,7 @@ def test_lan_candidates_keep_private_literal_addresses_only():
 
 
 def test_owner_addresses_are_normalized_and_must_be_private():
-    assert lan.normalize_owner_address("10.0.0.200:8001", default_port=8000) == "http://10.0.0.200:8001"
+    assert lan.normalize_owner_address("10.0.0.20:8001", default_port=8000) == "http://10.0.0.20:8001"
     assert lan.normalize_owner_address(" http://192.168.1.9 ", default_port=8000) == "http://192.168.1.9:8000"
     assert lan.normalize_owner_address("[fd00::7]:9000", default_port=8000) == "http://[fd00::7]:9000"
     for bad in ("8.8.8.8:8000", "https://10.0.0.1:8000", "nas.local:8000", "", "10.0.0.1:99999"):
@@ -160,13 +160,13 @@ def test_advertising_hides_public_and_bridge_addresses_behind_a_tunnel():
     assert lan.advertised_addresses(tunnel=True, advertise="http://172.17.0.2:8000", source="observed", **common) == []
     assert lan.advertised_addresses(tunnel=True, advertise="http://172.17.0.2:8000", source="config",
                                     **common) == ["http://172.17.0.2:8000"]
-    assert lan.advertised_addresses(tunnel=True, advertise="http://10.0.0.200:8001", source="observed",
-                                    **common) == ["http://10.0.0.200:8001"]
+    assert lan.advertised_addresses(tunnel=True, advertise="http://10.0.0.20:8001", source="observed",
+                                    **common) == ["http://10.0.0.20:8001"]
     # Without a tunnel the address is the only way in: kept as before.
     assert lan.advertised_addresses(tunnel=False, advertise="http://203.0.113.5:8000", source="guess",
                                     **common) == ["http://203.0.113.5:8000"]
     # The owner's host address is added only while LAN-direct is on.
-    extra = ["http://10.0.0.200:8001"]
+    extra = ["http://10.0.0.20:8001"]
     assert lan.advertised_addresses(tunnel=True, advertise=None, source="none", docker=True, enabled=True,
                                     extra=extra) == extra
     assert lan.advertised_addresses(tunnel=True, advertise=None, source="none", docker=True, enabled=False,
@@ -181,8 +181,8 @@ def test_own_endpoints_use_the_owner_setting(workers, monkeypatch):
     with w.active():
         monkeypatch.setattr("app.core.config.settings.local_mode", False)
         assert engine._own_endpoints() == [TUNNEL_A]
-        lan.set_owner_addresses(["10.0.0.200:8001"])
-        assert engine._own_endpoints() == [TUNNEL_A, "http://10.0.0.200:8001"]
+        lan.set_owner_addresses(["10.0.0.20:8001"])
+        assert engine._own_endpoints() == [TUNNEL_A, "http://10.0.0.20:8001"]
         lan.set_lan_direct_enabled(False)
         assert engine._own_endpoints() == [TUNNEL_A]
         with pytest.raises(ValueError):
@@ -482,11 +482,11 @@ def test_owner_lan_settings_api(workers, addresses):
         engine.create_network("Home")
         assert client.get("/api/v1/network/lan").json() == {"enabled": True, "addresses": [],
                                                             "advertised": [TUNNEL_A, LAN_A]}
-        saved = client.put("/api/v1/network/lan", json={"addresses": ["10.0.0.200:8001"]}, headers=ORIGIN)
-        assert saved.status_code == 200 and saved.json()["addresses"] == ["http://10.0.0.200:8001"]
+        saved = client.put("/api/v1/network/lan", json={"addresses": ["10.0.0.20:8001"]}, headers=ORIGIN)
+        assert saved.status_code == 200 and saved.json()["addresses"] == ["http://10.0.0.20:8001"]
         refused = client.put("/api/v1/network/lan", json={"addresses": ["203.0.113.9:8000"]}, headers=ORIGIN)
         assert refused.status_code == 400 and "private" in refused.json()["detail"]
-        assert lan.owner_addresses() == ["http://10.0.0.200:8001"]
+        assert lan.owner_addresses() == ["http://10.0.0.20:8001"]
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ SESSION = "s-away-remote"
 
 
 def _network(workers):
-    """DesktopWorker views a session that Unraid owns and runs."""
+    """DesktopWorker views a session that ServerWorker owns and runs."""
     viewer, owner = workers("desktopworker"), workers("unraid")
     with viewer.active():
         engine.create_network("Home", device_name="DesktopWorker")

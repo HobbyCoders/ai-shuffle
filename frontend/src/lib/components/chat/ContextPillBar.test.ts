@@ -258,7 +258,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		});
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff] });
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
-			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+			device_name: 'ServerWorker', device_online: true, is_remote: true, controllable: true }]);
 		const view = render(ContextPillBar, { sheetMode });
 		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
 		// The same pending state as a move the owner started: busy, labelled, locked.
@@ -278,7 +278,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await tick();
 		expect(chip.getAttribute('aria-busy')).toBeNull();
 		expect(chip.disabled).toBe(false);
-		expect(chip.textContent).toContain('Unraid');
+		expect(chip.textContent).toContain('ServerWorker');
 	});
 
 	it('clears a sending hand-off once the session row changes to the target (#2304)', async () => {
@@ -294,7 +294,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		};
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, started] });
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner', owner_device_id: 'dev_unraid',
-			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+			device_name: 'ServerWorker', device_online: true, is_remote: true, controllable: true }]);
 		const view = render(ContextPillBar, { sheetMode });
 		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
 		expect(chip.textContent).toContain('Sending to DesktopWorker…');
@@ -412,14 +412,14 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 			systemSubtype: 'handoff', systemData: { status, worker: 'DesktopWorker', by: 'owner' } });
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, row('queued')] });
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
-			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+			device_name: 'ServerWorker', device_online: true, is_remote: true, controllable: true }]);
 		const view = render(ContextPillBar, { sheetMode });
 		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
 		expect(chip.textContent).toContain('Moving to DesktopWorker after this turn');
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project',
 			messages: [...base.messages, row('queued'), row('cancelled')] });
 		await tick();
-		expect(chip.textContent).toContain('Unraid');
+		expect(chip.textContent).toContain('ServerWorker');
 		expect(chip.disabled).toBe(false);
 	});
 
@@ -518,14 +518,14 @@ describe('worker presence dots', () => {
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
 			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
-			{ id: 'serverworker', is_self: false, online: true, device_name: 'Unraid' },
+			{ id: 'unraid', is_self: false, online: true, device_name: 'ServerWorker' },
 			{ id: 'linux-worker', is_self: false, online: false, device_name: 'linux-worker' }
 		] });
 		const view = render(ContextPillBar);
 		const chip = view.getByRole('button', { name: 'Runner: Local' });
 		expect(dotOf(chip)).toBe('online');
 		await fireEvent.click(chip);
-		expect(dotOf(await view.findByRole('menuitemradio', { name: 'Unraid' }))).toBe('online');
+		expect(dotOf(await view.findByRole('menuitemradio', { name: 'ServerWorker' }))).toBe('online');
 		const popOs = view.getByRole('menuitemradio', { name: 'linux-worker offline' }) as HTMLButtonElement;
 		expect(dotOf(popOs)).toBe('offline');
 		// Offline workers stay blocked but focusable.
@@ -535,7 +535,7 @@ describe('worker presence dots', () => {
 	it.each([true, false])('reflects the owning worker\'s presence on a remote session (online=%s)', async (online) => {
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
-			device_name: 'Unraid', device_online: online, is_remote: true, controllable: true }]);
+			device_name: 'ServerWorker', device_online: online, is_remote: true, controllable: true }]);
 		const view = render(ContextPillBar);
 		const chip = view.container.querySelector('.ctx-chip.runner');
 		expect(dotOf(chip)).toBe(online ? 'online' : 'offline');
@@ -550,12 +550,12 @@ describe('worker presence dots', () => {
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		const registry = (online: boolean) => ({ installs: [
 			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
-			{ id: 'serverworker', is_self: false, online, device_name: 'Unraid' }
+			{ id: 'unraid', is_self: false, online, device_name: 'ServerWorker' }
 		] });
 		listInstallsMock.mockResolvedValue(registry(true));
 		const view = render(ContextPillBar);
 		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
-		const before = await view.findByRole('menuitemradio', { name: 'Unraid' }) as HTMLButtonElement;
+		const before = await view.findByRole('menuitemradio', { name: 'ServerWorker' }) as HTMLButtonElement;
 		expect(dotOf(before)).toBe('online');
 		expect(before.getAttribute('aria-disabled')).toBe('false');
 
@@ -563,7 +563,7 @@ describe('worker presence dots', () => {
 		listInstallsMock.mockResolvedValue(registry(false));
 		await refreshWorkerPresence();
 		await tick();
-		const after = view.getByRole('menuitemradio', { name: 'Unraid offline' }) as HTMLButtonElement;
+		const after = view.getByRole('menuitemradio', { name: 'ServerWorker offline' }) as HTMLButtonElement;
 		expect(dotOf(after)).toBe('offline');
 		expect(after.getAttribute('aria-disabled')).toBe('true');
 	});
@@ -576,13 +576,13 @@ describe('the active runner menu lists the current worker like the new-chat pick
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
 			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
-			{ id: 'serverworker', is_self: false, online: true, device_name: 'Unraid' }
+			{ id: 'unraid', is_self: false, online: true, device_name: 'ServerWorker' }
 		] });
 		const view = render(ContextPillBar);
 		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
-		await view.findByRole('menuitemradio', { name: 'Unraid' });
+		await view.findByRole('menuitemradio', { name: 'ServerWorker' });
 		const rows = view.getAllByRole('menuitemradio');
-		expect(rows.map((r) => r.querySelector('.worker-row-name')?.textContent)).toEqual(['Local', 'Unraid']);
+		expect(rows.map((r) => r.querySelector('.worker-row-name')?.textContent)).toEqual(['Local', 'ServerWorker']);
 		expect(rows.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false']);
 		await fireEvent.click(rows[0]);
 		expect(getQueuedMove).not.toHaveBeenCalled();
@@ -627,14 +627,14 @@ describe('the read-only runner chip of a subagent’s chat', () => {
 		subagentChats.mark(base.sessionId, true);
 		session.store.set({ ...base, projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'owner',
-			device_name: 'Unraid', device_online: false, is_remote: true, controllable: true }]);
+			device_name: 'ServerWorker', device_online: false, is_remote: true, controllable: true }]);
 		const view = render(ContextPillBar);
 		const el = chip(view.container);
 		expect(dotOf(el)).toBe('offline');
-		expect(el?.textContent).toContain('Unraid');
+		expect(el?.textContent).toContain('ServerWorker');
 		expect(el?.textContent).not.toContain('Local');
 		expect(el?.textContent).toContain('(offline)');
-		expect(el?.getAttribute('title')).toBe('Runs on Unraid, which is offline');
+		expect(el?.getAttribute('title')).toBe('Runs on ServerWorker, which is offline');
 	});
 
 	it('follows the owner\'s live presence while the chat is open', async () => {
@@ -642,12 +642,12 @@ describe('the read-only runner chip of a subagent’s chat', () => {
 		subagentChats.mark(base.sessionId, true);
 		session.store.set({ ...base, projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'owner',
-			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
-		listInstallsMock.mockResolvedValue({ installs: [{ id: 'owner', online: true, device_name: 'Unraid' }] });
+			device_name: 'ServerWorker', device_online: true, is_remote: true, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'owner', online: true, device_name: 'ServerWorker' }] });
 		const view = render(ContextPillBar);
 		await waitFor(() => expect(listInstallsMock).toHaveBeenCalled());
 		expect(dotOf(chip(view.container))).toBe('online');
-		listInstallsMock.mockResolvedValue({ installs: [{ id: 'owner', online: false, device_name: 'Unraid' }] });
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'owner', online: false, device_name: 'ServerWorker' }] });
 		await refreshWorkerPresence();
 		await tick();
 		expect(dotOf(chip(view.container))).toBe('offline');

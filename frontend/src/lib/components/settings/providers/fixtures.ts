@@ -62,7 +62,7 @@ export const gatewayRow = (partial: Partial<ModelProvider> = {}): ModelProvider 
 		id: 'gw-1',
 		name: 'Homelab vLLM',
 		provider_type: 'custom',
-		base_url: 'http://10.0.0.200:8000/v1',
+		base_url: 'http://10.0.0.20:8000/v1',
 		api_dialect: 'openai',
 		auth_token_masked: '…k3p9',
 		context_window: 131072,

@@ -708,7 +708,7 @@ class TestSettingsConfigClass:
 
 
 class TestBlankEnvironmentValues:
-    """Unraid passes blank template fields to the container as empty variables."""
+    """ServerWorker passes blank template fields to the container as empty variables."""
 
     def _settings(self):
         from app.core.config import Settings

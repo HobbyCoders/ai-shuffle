@@ -73,7 +73,7 @@ def test_a_container_triggers_the_note_without_a_placement(tmp_path, monkeypatch
 
 
 def test_the_line_moves_when_the_session_is_re_placed(tmp_path):
-    """4ce681e2 was moved from the Unraid runner onto the user's Windows box
+    """4ce681e2 was moved from the ServerWorker runner onto the user's Windows box
     mid-session. The adopting runner recompiles the block, so the line follows
     the session instead of naming the host it left."""
     before = _block(tmp_path, "runner:ai-shuffle-4aac1979")

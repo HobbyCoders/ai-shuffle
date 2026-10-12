@@ -127,12 +127,12 @@ def test_advertise_url_prefers_primary_lan_ip():
     # trap, so it wins over the host-name guess when available.
     with patch.object(cluster, "settings") as mock_settings, \
          patch.object(cluster.database, "get_system_setting", return_value=None), \
-         patch.object(cluster, "_primary_lan_ip", return_value="10.0.0.135"), \
+         patch.object(cluster, "_primary_lan_ip", return_value="10.0.0.30"), \
          patch.object(cluster.socket, "getfqdn", return_value="worker.lan"):
         mock_settings.cluster_advertise_url = ""
         mock_settings.port = 1455
         url, source = cluster.advertise_url()
-    assert url == "http://10.0.0.135:1455"
+    assert url == "http://10.0.0.30:1455"
     assert source == "guess"
 
 
@@ -188,14 +188,14 @@ def _patch_db(store, install_row=None):
 
 
 def test_override_is_scoped_per_install():
-    # DesktopWorker stored its override; Unraid (a different install) must not see it.
-    store = {"cluster_advertise_url:DESKTOPWORKER": "http://10.0.0.135:8000"}
+    # DesktopWorker stored its override; ServerWorker (a different install) must not see it.
+    store = {"cluster_advertise_url:DESKTOPWORKER": "http://10.0.0.30:8000"}
     with patch.object(cluster, "settings") as s, _patch_db(store):
         s.cluster_advertise_url = ""
         s.effective_instance_id = "UNRAID"
         assert cluster._get_advertise_override() is None
         s.effective_instance_id = "DESKTOPWORKER"
-        assert cluster._get_advertise_override() == "http://10.0.0.135:8000"
+        assert cluster._get_advertise_override() == "http://10.0.0.30:8000"
 
 
 def test_set_override_writes_per_install_key():
@@ -204,33 +204,33 @@ def test_set_override_writes_per_install_key():
          patch.object(cluster, "register_self"):
         s.cluster_advertise_url = ""
         s.effective_instance_id = "UNRAID"
-        cluster.set_advertise_url_override("http://10.0.0.200:8000/")  # slash stripped
-    assert store == {"cluster_advertise_url:UNRAID": "http://10.0.0.200:8000"}
+        cluster.set_advertise_url_override("http://10.0.0.20:8000/")  # slash stripped
+    assert store == {"cluster_advertise_url:UNRAID": "http://10.0.0.20:8000"}
 
 
 def test_legacy_global_override_claimed_only_by_publishing_owner():
     # The install whose registry base_url matches the legacy global value claims
     # it into its per-install key and removes the leaking global key.
-    store = {"cluster_advertise_url": "http://10.0.0.135:8000"}
-    owner_row = {"base_url": "http://10.0.0.135:8000"}
+    store = {"cluster_advertise_url": "http://10.0.0.30:8000"}
+    owner_row = {"base_url": "http://10.0.0.30:8000"}
     with patch.object(cluster, "settings") as s, _patch_db(store, owner_row):
         s.cluster_advertise_url = ""
         s.effective_instance_id = "DESKTOPWORKER"
-        assert cluster._get_advertise_override() == "http://10.0.0.135:8000"
-    assert store.get("cluster_advertise_url:DESKTOPWORKER") == "http://10.0.0.135:8000"
+        assert cluster._get_advertise_override() == "http://10.0.0.30:8000"
+    assert store.get("cluster_advertise_url:DESKTOPWORKER") == "http://10.0.0.30:8000"
     assert "cluster_advertise_url" not in store  # global key removed
 
 
 def test_legacy_global_override_ignored_by_non_owner():
     # A peer that did not publish the legacy value leaves it untouched (so the
     # real owner can still claim it) and reports no override of its own.
-    store = {"cluster_advertise_url": "http://10.0.0.135:8000"}
-    other_row = {"base_url": "http://10.0.0.200:8000"}
+    store = {"cluster_advertise_url": "http://10.0.0.30:8000"}
+    other_row = {"base_url": "http://10.0.0.20:8000"}
     with patch.object(cluster, "settings") as s, _patch_db(store, other_row):
         s.cluster_advertise_url = ""
         s.effective_instance_id = "UNRAID"
         assert cluster._get_advertise_override() is None
-    assert store == {"cluster_advertise_url": "http://10.0.0.135:8000"}
+    assert store == {"cluster_advertise_url": "http://10.0.0.30:8000"}
 
 
 def test_explicitly_cleared_override_does_not_fall_back_to_legacy():
@@ -238,10 +238,10 @@ def test_explicitly_cleared_override_does_not_fall_back_to_legacy():
     # the stale global value.
     store = {
         "cluster_advertise_url:UNRAID": "",
-        "cluster_advertise_url": "http://10.0.0.135:8000",
+        "cluster_advertise_url": "http://10.0.0.30:8000",
     }
-    with patch.object(cluster, "settings") as s, _patch_db(store, {"base_url": "http://10.0.0.135:8000"}):
+    with patch.object(cluster, "settings") as s, _patch_db(store, {"base_url": "http://10.0.0.30:8000"}):
         s.cluster_advertise_url = ""
         s.effective_instance_id = "UNRAID"
         assert cluster._get_advertise_override() is None
-    assert store.get("cluster_advertise_url") == "http://10.0.0.135:8000"
+    assert store.get("cluster_advertise_url") == "http://10.0.0.30:8000"

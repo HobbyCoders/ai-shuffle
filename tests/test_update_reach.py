@@ -72,7 +72,7 @@ def test_comment_only_edits_to_formerly_fingerprinted_files_pass():
 
 
 def test_supervisor_and_chrome_script_changes_are_reported_not_failed():
-    # #1754 changed start-chrome.sh and the Unraid worker needed a new image;
+    # #1754 changed start-chrome.sh and the ServerWorker worker needed a new image;
     # now the updated copy runs on images with the hand-over.
     groups = groups_for({"docker/start-chrome.sh": "#!/bin/sh\nexit 0\n", "docker/application_updates.py": "x = 1\n"})
     assert groups["image-supervisor"] == ["docker/application_updates.py", "docker/start-chrome.sh"]

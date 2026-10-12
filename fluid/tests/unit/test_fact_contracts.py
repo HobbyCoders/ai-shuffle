@@ -288,7 +288,7 @@ def test_legacy_explicit_facts_split_into_user_and_agent_tiers(tmp_path):
         ("m1", "The user prefers tabs over spaces.", None),
         ("m2", "User wants the Git panel inline.", None),
         ("m3", "Ships to Play through the internal track.", "career.goal"),
-        ("m4", "Tdarr on Unraid uses an AMD Ryzen AI MAX+ 395 for transcodes.", "unraid.tdarr-setup"),
+        ("m4", "Tdarr on ServerWorker uses an AMD Ryzen AI MAX+ 395 for transcodes.", "unraid.tdarr-setup"),
         ("m5", "pytest is installed at /usr/local/bin/pytest.", None),
     ]
     doc["entries"] = []

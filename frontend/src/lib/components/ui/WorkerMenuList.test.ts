@@ -6,7 +6,7 @@ afterEach(cleanup);
 
 const rows = [
 	{ id: 'local', label: 'Local', online: true, disabled: false, title: 'Run here', checked: true },
-	{ id: 'a', label: 'Unraid', online: true, disabled: false, title: 'Run on Unraid', note: null },
+	{ id: 'a', label: 'ServerWorker', online: true, disabled: false, title: 'Run on ServerWorker', note: null },
 	{ id: 'b', label: 'linux-worker', online: false, disabled: true, title: 'linux-worker is offline', note: 'offline' }
 ];
 
@@ -41,7 +41,7 @@ describe('WorkerMenuList', () => {
 		await fireEvent.keyDown(blocked, { key: ' ' });
 		expect(onSelect).not.toHaveBeenCalled();
 		// Rows that are not blocked carry no reason.
-		const unraid = screen.getByRole('menuitem', { name: 'Unraid' });
+		const unraid = screen.getByRole('menuitem', { name: 'ServerWorker' });
 		expect(unraid.hasAttribute('aria-describedby')).toBe(false);
 		await fireEvent.click(unraid);
 		expect(onSelect).toHaveBeenCalledExactlyOnceWith(rows[1]);

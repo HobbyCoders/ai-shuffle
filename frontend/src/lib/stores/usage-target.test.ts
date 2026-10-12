@@ -49,17 +49,17 @@ describe('resolveTargetInstance', () => {
 		// one can still name the install it came from; the owner device decides.
 		const rows: Rows = [
 			{ id: 'mirrored', instance_id: null, owner_device_id: 'dev_unraid' },
-			{ id: 'handed-off', instance_id: 'ai-shuffle-serverworker', owner_device_id: 'dev_desktopworker' },
+			{ id: 'handed-off', instance_id: 'ai-shuffle-unraid', owner_device_id: 'dev_desktopworker' },
 			{ id: 'legacy', instance_id: 'worker', owner_device_id: null },
 		];
 		expect(resolveTargetInstance(active({ sessionId: 'mirrored' }), rows)).toBe('dev_unraid');
-		expect(resolveTargetInstance(active({ sessionId: 'handed-off' }), rows)).toBe('dev_gamingpc');
+		expect(resolveTargetInstance(active({ sessionId: 'handed-off' }), rows)).toBe('dev_desktopworker');
 		expect(resolveTargetInstance(active({ sessionId: 'legacy' }), rows)).toBe('worker');
 	});
 
 	it('reads the owning device name for the unreported state', () => {
-		const rows = [{ id: 's1', device_name: 'Unraid' }];
-		expect(resolveTargetDeviceName(active({ sessionId: 's1' }), rows)).toBe('Unraid');
+		const rows = [{ id: 's1', device_name: 'ServerWorker' }];
+		expect(resolveTargetDeviceName(active({ sessionId: 's1' }), rows)).toBe('ServerWorker');
 		expect(resolveTargetDeviceName(active(), rows)).toBeNull();
 	});
 });
