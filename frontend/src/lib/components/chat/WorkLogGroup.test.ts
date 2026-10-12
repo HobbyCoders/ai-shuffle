@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { createRawSnippet, tick } from 'svelte';
 import type { ChatMessage } from '$lib/stores/types';
-import WorkLogGroup from './WorkLogGroup.svelte';
+import WorkLogGroup, { resetLiveRunMemory } from './WorkLogGroup.svelte';
 import TranscriptItems from './test-fixtures/TranscriptItems.svelte';
 import { buildTranscriptModel, type DisplayItem } from '$lib/utils/work-log';
 import { createFoldState } from '$lib/stores/session/fold-state';
@@ -79,7 +79,10 @@ const baseProps = {
 	row
 };
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	resetLiveRunMemory();
+});
 
 describe('WorkLogGroup', () => {
 	it('hides settled agent messages, then expands them in transcript order', async () => {
@@ -935,6 +938,35 @@ describe('WorkLogGroup', () => {
 			expect(shown('read-400')).toBe(true);
 			expect(writes - after).toBeLessThanOrEqual(2);
 			expect(folds.current).toEqual({ 'prompt:run-read-0': true });
+		});
+
+		// Re-review of #2297: a split that happens while the group is unmounted
+		// (a session switch mid-turn) must still open the later part on remount.
+		it('keeps both parts of an open run open when it splits while the group is unmounted', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const prompt = turn[0];
+			const readA = { ...message, id: 'read-a', content: 'Read A' };
+			const finding: ChatMessage = { id: 'finding-p', role: 'assistant', type: 'text', content: 'Found:\n- a shared token', streaming: true };
+			const readB = { ...message, id: 'read-b', content: 'Read B' };
+			const worker = { id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage;
+			const view = render(WorkLogGroup, { ...logOf(true, [prompt, readA, finding, readB, worker]), folds });
+			await fireEvent.click(screen.getByRole('button', { name: /^Show work details/ }));
+			expect(['read-a', 'read-b'].map(shown)).toEqual([true, true]);
+			view.unmount();
+
+			// The finding completes while the reader is elsewhere: the run splits.
+			const split = [prompt, readA, { ...finding, streaming: false }, readB, worker];
+			const again = render(WorkLogGroup, { ...logOf(true, split), folds });
+			expect(screen.getAllByRole('button', { name: /^Hide work details:/ })).toHaveLength(2);
+			expect(['read-a', 'read-b'].map(shown)).toEqual([true, true]);
+			expect(folds.current).toEqual({ 'prompt:run-read-a': true, 'prompt:run-read-b': true });
+			again.unmount();
+
+			// Settling drops the memory; the open runs become the open turn fold.
+			const settled = render(WorkLogGroup, { ...logOf(false, split), folds });
+			expect(folds.current).toEqual({ 'prompt:turn': true });
+			settled.unmount();
 		});
 
 		// A merge that happened while the group was unmounted: the stored key

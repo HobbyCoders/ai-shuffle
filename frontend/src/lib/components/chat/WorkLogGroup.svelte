@@ -1,3 +1,31 @@
+<script lang="ts" module>
+	/**
+	 * Which run each row of a live turn sat in at its last render, for the rows
+	 * of open runs only, by fold prefix (`<turn>:run-`). Module memory, so a
+	 * split or merge that happens while the group is unmounted (a session
+	 * switch, a windowed remount) still moves the reader's open state when the
+	 * group mounts again. Dropped when the turn settles; at most
+	 * LIVE_MEMORY_TURNS turns are kept, the least recently rendered go first.
+	 * Not persisted: after a page reload a split made while away is not
+	 * recovered (its first part stays open).
+	 */
+	const LIVE_MEMORY_TURNS = 32;
+	const liveRunMemory = new Map<string, Map<string, string>>();
+	function rememberLiveRuns(prefix: string, rows: Map<string, string>) {
+		liveRunMemory.delete(prefix);
+		if (rows.size === 0) return;
+		liveRunMemory.set(prefix, rows);
+		if (liveRunMemory.size > LIVE_MEMORY_TURNS) {
+			const oldest = liveRunMemory.keys().next().value;
+			if (oldest !== undefined) liveRunMemory.delete(oldest);
+		}
+	}
+	/** Tests: forget every turn's remembered runs. */
+	export function resetLiveRunMemory() {
+		liveRunMemory.clear();
+	}
+</script>
+
 <script lang="ts">
 	/**
 	 * WorkLogGroup — the fold that hides a turn's routine steps.
@@ -28,7 +56,7 @@
 	 * so this component owns the fold and nothing else; MessageArea keeps the one
 	 * dispatch table that decides which component a message becomes.
 	 */
-	import type { Snippet } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import type { Action } from 'svelte/action';
 	import { isNavigableUserTurn, turnAnchorId } from '$lib/utils/transcript-navigation';
 	import type { ChatMessage } from '$lib/stores/types';
@@ -84,12 +112,20 @@
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
 
 	// ── Fold state ─────────────────────────────────────────────────────────
-	let stored = $state<Readonly<Record<string, true>>>({});
+	// Seeded synchronously: the pre-effects below run before the subscription
+	// does, and must see what is already open on a remount.
+	let stored = $state<Readonly<Record<string, true>>>(untrack(() => folds.current));
 	$effect(() => folds.subscribe((value) => { stored = value; }));
 	// An optimistic send keeps its id as the row key (no remount); once the
 	// server id is known, folds recorded under the optimistic id move onto it.
 	$effect.pre(() => {
-		if (foldKey && foldAlias && foldAlias !== foldKey) folds.remap(foldAlias, foldKey);
+		if (!foldKey || !foldAlias || foldAlias === foldKey) return;
+		folds.remap(foldAlias, foldKey);
+		const remembered = liveRunMemory.get(`${foldAlias}:run-`);
+		if (remembered) {
+			liveRunMemory.delete(`${foldAlias}:run-`);
+			if (!liveRunMemory.has(`${foldKey}:run-`)) rememberLiveRuns(`${foldKey}:run-`, remembered);
+		}
 	});
 
 	let localOpen = $state(false);
@@ -130,8 +166,8 @@
 	 * part starts a run with a new key. The reader's open state moves with the
 	 * work in ONE transfer per change, never by storing a run under several
 	 * keys:
-	 *  - a run whose rows sat in an open run with another key (the previous
-	 *    build's runs), or that contains the row of a stored key no run has
+	 *  - a run whose rows sat in an open run with another key at the last
+	 *    render (remembered across an unmount, see `liveRunMemory`), or that contains the row of a stored key no run has
 	 *    any more (a merge while this group was unmounted), opens under its
 	 *    own key;
 	 *  - a stored key that is no run's key any more is dropped, so closing a
@@ -140,10 +176,11 @@
 	 * effect writes nothing on later renders.
 	 */
 	const rowId = (entry: WorkLogSequenceEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
-	let previousRunOfRow = new Map<string, string>();
+	let localPrevious = new Map<string, string>();
 	$effect.pre(() => {
 		if (mode !== 'live') {
-			previousRunOfRow = new Map();
+			localPrevious = new Map();
+			if (runPrefix) liveRunMemory.delete(runPrefix);
 			return;
 		}
 		const isOpen = (id: string) => (runPrefix ? stored[`${runPrefix}${id}`] === true : localRuns[id] === true);
@@ -157,9 +194,10 @@
 		const rows = new Set(sequence.map(rowId));
 		const opened = new Set<string>();
 		const retired = new Set<string>();
-		for (const [row, previous] of previousRunOfRow) {
+		const previous = runPrefix ? liveRunMemory.get(runPrefix) ?? new Map<string, string>() : localPrevious;
+		for (const [row, was] of previous) {
 			const now = runOfRow.get(row);
-			if (now && now !== previous && isOpen(previous)) opened.add(now);
+			if (now && now !== was && isOpen(was)) opened.add(now);
 		}
 		const storedIds = runPrefix
 			? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
@@ -171,8 +209,17 @@
 			const now = runOfRow.get(id);
 			if (now) opened.add(now);
 		}
-		previousRunOfRow = runOfRow;
 		const toOpen = [...opened].filter((id) => !isOpen(id));
+		// Remember only the rows of runs open after this pass: a closed run has
+		// nothing to carry, and opening one re-runs this effect to record it.
+		const openAfter = (id: string) => opened.has(id) || (isOpen(id) && !retired.has(id));
+		if (runPrefix) {
+			const remembered = new Map<string, string>();
+			for (const [row, key] of runOfRow) if (openAfter(key)) remembered.set(row, key);
+			rememberLiveRuns(runPrefix, remembered);
+		} else {
+			localPrevious = runOfRow;
+		}
 		if (toOpen.length === 0 && retired.size === 0) return;
 		if (runPrefix) {
 			for (const id of toOpen) folds.setOpen(`${runPrefix}${id}`, true);
