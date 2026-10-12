@@ -202,10 +202,34 @@ export const proseQuestionDismissals = {
 	subscribe: _dismissed.subscribe
 };
 
-/** A question position as a dismissal key; `?` for a question without one. */
-function positionKey(pos: Position | null | undefined): string {
-	return pos ? `${pos.epoch}:${pos.seq}` : '?';
+/** A positioned question's dismissal key. */
+function positionKey(pos: Position): string {
+	return `pos:${pos.epoch}:${pos.seq}`;
 }
+
+/** FNV-1a of a string, base 36: a cheap content fingerprint. */
+function fingerprint(text: string): string {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		h ^= text.charCodeAt(i);
+		h = Math.imul(h, 0x01000193);
+	}
+	return (h >>> 0).toString(36);
+}
+
+/**
+ * A transcript question's dismissal key: its log position when it has one,
+ * else its own message identity (id plus a content fingerprint). Never a
+ * shared sentinel, so a later positionless question is never mistaken for a
+ * dismissed one.
+ */
+function messageQuestionKey(message: ChatMessage): string {
+	const pos = toPosition(message.seq, message.epoch);
+	return pos ? positionKey(pos) : `msg:${message.id ?? ''}:${fingerprint(message.content ?? '')}`;
+}
+
+/** The dismissal key of the transcript-derived question per remembered session. */
+const _questionKeys = new Map<string, string>();
 
 function forgetDismissals(sessionId: string): void {
 	if (!_dismissed.current.has(sessionId)) return;
@@ -272,17 +296,25 @@ function rowMarked(sessionId: string): boolean | undefined {
 	return !user || user.epoch === question.epoch;
 }
 
-/** The question that marks the session, or undefined when nothing does. */
-function markingQuestion(sessionId: string): Position | null | undefined {
+/**
+ * The question that marks the session (undefined: none), with its dismissal
+ * key. A question without any identity (no key) is never dismissible.
+ */
+function markingQuestion(sessionId: string): { key: string | undefined } | undefined {
 	const row = rowMarked(sessionId);
-	if (row !== undefined) return row ? _rowQuestions.get(sessionId) ?? null : undefined;
-	return _questions.has(sessionId) ? _questions.get(sessionId) ?? null : undefined;
+	if (row !== undefined) {
+		const question = row ? _rowQuestions.get(sessionId) : null;
+		return question ? { key: positionKey(question) } : undefined;
+	}
+	if (!_questions.has(sessionId)) return undefined;
+	const pos = _questions.get(sessionId);
+	return { key: pos ? positionKey(pos) : _questionKeys.get(sessionId) };
 }
 
 /** Publish the session's mark: the row's when it has one, else the transcript's. */
 function refresh(sessionId: string): void {
 	const question = markingQuestion(sessionId);
-	const marked = question !== undefined && !_dismissed.current.get(sessionId)?.has(positionKey(question));
+	const marked = !!question && !(question.key && _dismissed.current.get(sessionId)?.has(question.key));
 	if (marked === _store.current.has(sessionId)) return;
 	const next = new Set(_store.current);
 	if (marked) next.add(sessionId);
@@ -292,16 +324,6 @@ function refresh(sessionId: string): void {
 
 function drop(sessionId: string): void {
 	_questions.delete(sessionId);
-	// A dismissed question without a position cannot be told from a later
-	// one, so its dismissal ends once the transcript shows it answered.
-	const dismissed = _dismissed.current.get(sessionId);
-	if (dismissed?.has('?')) {
-		const keys = new Set(dismissed);
-		keys.delete('?');
-		const next = new Map(_dismissed.current);
-		if (keys.size) next.set(sessionId, keys); else next.delete(sessionId);
-		_dismissed.set(next);
-	}
 	refresh(sessionId);
 }
 
@@ -315,11 +337,11 @@ export function proseQuestionKeys(
 	openMessages?: readonly ChatMessage[] | null
 ): string[] {
 	const keys: string[] = [];
-	const question = markingQuestion(sessionId);
-	if (question !== undefined) keys.push(positionKey(question));
+	const marking = markingQuestion(sessionId)?.key;
+	if (marking) keys.push(marking);
 	if (openMessages && lastProseAsksQuestion(openMessages)) {
 		const trailing = trailingProse(openMessages);
-		keys.push(positionKey(trailing ? toPosition(trailing.seq, trailing.epoch) : null));
+		if (trailing) keys.push(messageQuestionKey(trailing));
 	}
 	return keys;
 }
@@ -345,7 +367,7 @@ export function isTranscriptProseDismissed(
 	const keys = dismissals.get(sessionId);
 	if (!keys || !lastProseAsksQuestion(messages)) return false;
 	const trailing = trailingProse(messages);
-	return keys.has(positionKey(trailing ? toPosition(trailing.seq, trailing.epoch) : null));
+	return !!trailing && keys.has(messageQuestionKey(trailing));
 }
 
 /** Record the row-derived question pair of a revision that carries one. */
@@ -462,6 +484,8 @@ export function rememberLeavingProseQuestion(
 		return;
 	}
 	_questions.set(sessionId, pos);
+	if (question) _questionKeys.set(sessionId, messageQuestionKey(question));
+	else _questionKeys.delete(sessionId);
 	refresh(sessionId);
 }
 
@@ -561,6 +585,7 @@ export function forgetProseQuestion(sessionId: string, opts: { cleared?: boolean
 	_latest.delete(sessionId);
 	_rowRaw.delete(sessionId);
 	_claims.delete(sessionId);
+	_questionKeys.delete(sessionId);
 	forgetDismissals(sessionId);
 	refresh(sessionId);
 }
@@ -578,6 +603,7 @@ export function _resetProseQuestions(): void {
 	_lastUser.clear();
 	_retired.clear();
 	_dismissed.set(new Map());
+	_questionKeys.clear();
 	_store.set(new Set());
 }
 

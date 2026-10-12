@@ -158,4 +158,48 @@ describe('settle dismisses prose questions (#2324)', () => {
 		dismissSettledSessionPrompts('bg', h.deps, snap);
 		expect(proseQuestionSessions.current.has('bg')).toBe(true);
 	});
+
+	// Legacy transcripts carry no seq/epoch: each question still has its own
+	// identity, so dismissing one never hides a later one.
+	const legacy = (n: number, text = 'Staging too, or prod only?') => [
+		{ id: `u${n}`, role: 'user' as const, content: `reply ${n}` },
+		{ id: `a${n}`, role: 'assistant' as const, type: 'text' as const, content: text },
+	];
+
+	it('positionless open chat: settle A, unsettle, reply, question B shows', () => {
+		const h = harness('s1');
+		h.setMessages(legacy(1));
+		dismissSettledSessionPrompts('s1', h.deps);
+		expect(isTranscriptProseDismissed(proseQuestionDismissals.current, 's1', h.state.messages)).toBe(true);
+
+		// Unsettle clears nothing; the user replies and the agent asks again,
+		// with the same words, in a new message.
+		h.setMessages([...legacy(1), ...legacy(2)]);
+		expect(isTranscriptProseDismissed(proseQuestionDismissals.current, 's1', h.state.messages)).toBe(false);
+
+		// Leaving the chat remembers B, which stays marked.
+		rememberLeavingProseQuestion('s1', h.state.messages);
+		expect(proseQuestionSessions.current.has('s1')).toBe(true);
+	});
+
+	it('positionless: a delayed PATCH snapshot of A keeps question B', () => {
+		const h = harness('s1');
+		h.setMessages(legacy(1));
+		const snap = snapshotSessionPrompts('s1', h.attention, h.state);
+		dismissSettledSessionPrompts('s1', h.deps);
+
+		h.setMessages([...legacy(1), ...legacy(2)]);
+		dismissSettledSessionPrompts('s1', h.deps, snap);
+		expect(isTranscriptProseDismissed(proseQuestionDismissals.current, 's1', h.state.messages)).toBe(false);
+
+		// Same for a remembered positionless question of a background session.
+		const bg = harness('open');
+		rememberLeavingProseQuestion('bg', legacy(1));
+		const bgSnap = snapshotSessionPrompts('bg', bg.attention, bg.state);
+		dismissSettledSessionPrompts('bg', bg.deps);
+		expect(proseQuestionSessions.current.has('bg')).toBe(false);
+		rememberLeavingProseQuestion('bg', [...legacy(1), ...legacy(2)]);
+		dismissSettledSessionPrompts('bg', bg.deps, bgSnap);
+		expect(proseQuestionSessions.current.has('bg')).toBe(true);
+	});
 });
