@@ -1,6 +1,7 @@
 """Read tool image/binary/truncation paths + image plumbing through the stack."""
 
 import base64
+from io import BytesIO
 import sys
 
 import pytest
@@ -56,6 +57,36 @@ async def test_read_invalid_image_is_error(tmp_path, payload) -> None:
     assert str(f) in out.text
     assert f"{len(payload)} bytes" in out.text
     assert str(f) not in ctx.read_files
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_read_jpeg_requires_pixel_decode(tmp_path, truncated) -> None:
+    pil_image = pytest.importorskip("PIL.Image")
+    buffer = BytesIO()
+    with pil_image.new("RGB", (32, 32), "red") as image:
+        image.save(buffer, format="JPEG")
+    payload = buffer.getvalue()
+    if truncated:
+        payload = payload[:-10]
+        # Header verification alone does not catch this truncated JPEG.
+        with pil_image.open(BytesIO(payload)) as image:
+            image.verify()
+    f = tmp_path / "shot.jpg"
+    f.write_bytes(payload)
+    ctx = ToolCtx(cwd=str(tmp_path))
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ctx)
+
+    assert str(f) in out.text
+    assert f"{len(payload)} bytes" in out.text
+    if truncated:
+        assert out.is_error
+        assert not out.images
+        assert "not a readable image" in out.text
+        assert str(f) not in ctx.read_files
+    else:
+        assert not out.is_error
+        assert base64.b64decode(out.images[0].data) == payload
 
 
 @pytest.mark.parametrize("payload", [b"", b"not an image"])

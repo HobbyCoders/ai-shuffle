@@ -135,6 +135,10 @@ def _read_image(path: Path, media_type: str) -> ToolOutcome:
         try:
             with PILImage.open(BytesIO(raw)) as image:
                 image.verify()
+            # verify() may only inspect headers (notably for JPEG). Reopen
+            # after verification and decode pixels, but keep the original bytes.
+            with PILImage.open(BytesIO(raw)) as image:
+                image.load()
         except Exception:
             return ToolOutcome(
                 text=f"not a readable image: {path} is {size} bytes (cannot decode)",
