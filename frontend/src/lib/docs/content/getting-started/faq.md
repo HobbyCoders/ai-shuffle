@@ -37,8 +37,8 @@ Your install checks for free updates. Linking a paid Cloud plan sends your key, 
 Any of these:
 
 - **Docker** on a Linux computer, NAS or home server (64-bit Intel or AMD).
-- **Windows 10 or 11**, with the desktop app (in beta).
-- **Linux** (64-bit Intel or AMD), with the desktop app (in beta).
+- **Windows 10 or 11**, with the desktop app.
+- **Linux** (64-bit Intel or AMD), with the desktop app.
 - **macOS desktop app**: coming soon.
 
 The **Android app** is optional, for using your workspace away from your desk. An iPhone and iPad app is coming soon; use a browser for now. See [Requirements](/docs/getting-started/requirements).
@@ -69,7 +69,7 @@ Yes. If AI Shuffle isn't for you, email support@hobbycoders.com within 7 days of
 
 ## Can I buy it from anywhere?
 
-Not quite. At launch we can't sell to buyers in the European Union or the United Kingdom. We plan to add them later; join the waitlist on hobbycoders.com and we'll tell you when.
+Not quite. At launch we can't sell to buyers in the European Union or the United Kingdom. We plan to add them later. The app itself is free to download and use anywhere.
 
 ## Is there a team plan?
 

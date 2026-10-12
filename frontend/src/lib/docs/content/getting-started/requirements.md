@@ -26,8 +26,8 @@ Everything else is inside the image, including its database and a built-in brows
 
 The desktop app runs a worker on your computer without Docker.
 
-- **Windows 10 or 11 (64-bit):** available as a beta.
-- **Linux (64-bit Intel or AMD):** available as a beta, as an AppImage.
+- **Windows 10 or 11 (64-bit):** available now.
+- **Linux (64-bit Intel or AMD):** available now, as an AppImage.
 - **macOS:** coming soon.
 
 Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chrome is not installed.

@@ -12,9 +12,9 @@ AI Shuffle runs on Windows, macOS, Linux and Docker, and you can use it from And
 | --- | --- | --- |
 | Linux server, NAS or home server | Docker | Available. See [Install with Docker](/docs/getting-started/install-docker-compose). |
 | Any PC with Docker (Windows, macOS or Linux) | Docker | Available. See [Install with Docker](/docs/getting-started/install-docker-compose). |
-| Windows 10 or 11 | Desktop app | Beta. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
+| Windows 10 or 11 | Desktop app | Available. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
 | macOS | Desktop app | Coming soon. Use Docker for now. |
-| Linux desktop (64-bit) | Desktop app | Beta. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
+| Linux desktop (64-bit) | Desktop app | Available. Download it from [hobbycoders.com](https://hobbycoders.com/ai-shuffle/downloads). |
 | Android | App on Google Play | Connects to your workers. See [Remote access](/docs/getting-started/remote-access). |
 | iPhone and iPad | App | Coming soon. Use a browser for now. |
 
