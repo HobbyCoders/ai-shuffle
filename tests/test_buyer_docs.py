@@ -141,7 +141,7 @@ def test_cloud_docs_explain_free_local_use_and_optional_remote_capacity():
         assert not re.search(r"pull[ _-]tokens?", page, re.I), name
 
 
-def test_readme_is_for_buyers():
+def test_readme_is_for_users_not_building_from_source():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/content/getting-started/_index.md" in readme
     assert "https://hobbycoders.com/ai-shuffle" in readme
@@ -159,7 +159,12 @@ def test_contributor_material_lives_in_docs_internal_with_pointers():
     for pointer in ("CONTRIBUTING.md", "LOCAL_SETUP.md"):
         text = (ROOT / pointer).read_text(encoding="utf-8")
         assert f"docs/internal/{pointer}" in text
-        assert len(text.splitlines()) < 15, f"{pointer} should be a short pointer"
+        if pointer == "LOCAL_SETUP.md":
+            assert len(text.splitlines()) < 15, f"{pointer} should be a short pointer"
+        else:
+            assert "git commit -s" in text
+            assert "python scripts/local_ci.py" in text
+            assert "draft" in text
     assert not (BUYER / "architecture.md").exists()
 
 

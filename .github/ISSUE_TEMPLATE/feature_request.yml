@@ -1,71 +1,32 @@
-name: Feature Request
-description: Suggest an idea or enhancement
+name: Feature request
+description: Suggest a change to AI Shuffle
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
-      value: |
-        Thanks for suggesting a feature! Please describe your idea below.
-
+      value: Describe the work you want to do. Never include secrets or private data.
   - type: textarea
     id: problem
     attributes:
-      label: Problem or Motivation
-      description: Is your feature request related to a problem? Describe what you're trying to accomplish.
-      placeholder: I'm always frustrated when...
+      label: What problem would this solve?
+      description: Explain your workflow and where it falls short today.
     validations:
       required: true
-
   - type: textarea
     id: solution
     attributes:
-      label: Proposed Solution
-      description: Describe the solution you'd like to see.
-      placeholder: I would like AI Shuffle to...
+      label: Proposed change
+      description: Describe what you would like AI Shuffle to do.
     validations:
       required: true
-
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives Considered
-      description: Have you considered any alternative solutions or workarounds?
-      placeholder: I've tried...
-
-  - type: dropdown
-    id: area
-    attributes:
-      label: Area
-      description: Which part of AI Shuffle does this relate to?
-      options:
-        - Chat / Conversations
-        - The Deck (Card UI)
-        - File Browser
-        - Terminal
-        - Image / Video / 3D Tools
-        - Analytics
-        - Authentication / Security
-        - Docker / Deployment
-        - API / Backend
-        - Other
-    validations:
-      required: true
-
-  - type: dropdown
-    id: priority
-    attributes:
-      label: Priority (for you)
-      description: How important is this feature to your workflow?
-      options:
-        - Nice to have
-        - Would improve my workflow
-        - Critical for my use case
-    validations:
-      required: true
-
+      label: Alternatives
+      description: What have you tried, and why does it not meet your needs?
   - type: textarea
     id: additional
     attributes:
-      label: Additional Context
-      description: Add any other context, mockups, or examples here.
+      label: Additional context
+      description: Include examples or mockups if they help explain the request.

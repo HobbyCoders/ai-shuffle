@@ -1,5 +1,6 @@
 {
   "name": "ai-shuffle-mobile",
+  "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
   "description": "The AI Shuffle mobile UI: a SvelteKit static app the worker serves at /mobile/ to the Android and iOS apps. Shares $lib with ../frontend; talks to workers only through their HTTP/WebSocket APIs.",

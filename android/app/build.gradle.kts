@@ -1,7 +1,12 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 HobbyCoders.
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+extra["license"] = "AGPL-3.0-only"
 
 android {
     namespace = "com.hobbycoders.aishuffle"
