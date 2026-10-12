@@ -6,7 +6,9 @@
  * adopting its data model:
  *
  * - assistant prose is never withheld while a turn is live;
- * - every live work row stays visible until the turn settles;
+ * - a live turn folds its completed routine work run by run, between the prose
+ *   and protected rows that stay on screen; the work after the latest prose
+ *   stays flat until the turn settles;
  * - once a turn settles, non-final commentary, reasoning, and routine tools fold
  *   behind one compact work row while the final answer remains visible;
  * - failed tool calls fold with the rest of the run and are counted in the work
@@ -49,17 +51,21 @@ export interface WorkLogSequenceEntry extends WorkLogEntry {
 
 /**
  * One earlier run of a live turn (spec §2): the routine rows between two
- * protected rows. It renders as one live fold; the protected row that ended it
+ * boundaries (protected rows and the prose that stays on screen), keyed by
+ * the row it starts at. It renders as one live fold; the protected row that ended it
  * stays visible below. The current run (still receiving rows) has no entry.
  */
 export interface WorkLogRun {
 	/** Position among all runs of the turn, counting runs with nothing to fold. */
 	index: number;
 	/**
-	 * Stable fold-state key: the id of the protected row that ended the run.
-	 * The ordinal shifts when a new boundary appears earlier in the turn (a
-	 * running tool that later fails); the row that ended a run does not, so a
-	 * run the reader opened stays open on the same work.
+	 * Stable fold-state key: the id of the run's first row (the first row
+	 * after the boundary before it). The ordinal shifts when a new boundary
+	 * appears earlier in the turn, and the row that ENDS a run moves on when
+	 * newer prose finishes and replaces it as the latest word; the row a run
+	 * starts at does neither. WorkLogGroup stores an open run as the range
+	 * from this row to its last one, so it stays open on the same work while
+	 * runs merge and split (run-fold-ranges.ts).
 	 */
 	key: string;
 	/** Rows hidden while the run is folded. */
@@ -411,6 +417,8 @@ type ToolAction =
 	| 'code-search'
 	| 'web-search'
 	| 'delegate'
+	| 'message'
+	| 'task-check'
 	| 'image-gen'
 	| 'image-edit'
 	| 'video-gen'
@@ -435,7 +443,11 @@ function toolAction(message: ChatMessage): ToolAction {
 	if (AUDIO_GEN_TOOLS.includes(name)) return 'audio-gen';
 	if (THREED_GEN_TOOLS.includes(name)) return 'threed-gen';
 	if (name === 'Note') return 'note';
-	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(name)) return 'read';
+	// Agent-task plumbing a coordinator turn is full of: messages to peers and
+	// subagents, and checks on background tasks. Neither reads a file.
+	if (['SendMessage', 'MessageSession'].includes(name)) return 'message';
+	if (['TaskGet', 'TaskOutput'].includes(name)) return 'task-check';
+	if (['Read', 'BashOutput'].includes(name)) return 'read';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(name)) return 'edit';
 	if (['Bash', 'KillShell', 'SlashCommand', 'Monitor', 'TaskStop'].includes(name)) return 'command';
 	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(name)) return 'code-search';
@@ -459,6 +471,10 @@ function actionLabel(action: ToolAction, count: number): string {
 			return `Searched the web ${count} ${count === 1 ? 'time' : 'times'}`;
 		case 'delegate':
 			return `Delegated ${count} ${count === 1 ? 'task' : 'tasks'}`;
+		case 'message':
+			return `Sent ${count} ${count === 1 ? 'message' : 'messages'}`;
+		case 'task-check':
+			return `Checked ${count} ${count === 1 ? 'task' : 'tasks'}`;
 		case 'image-gen':
 			return `Generated ${count} ${count === 1 ? 'image' : 'images'}`;
 		case 'image-edit':
@@ -492,6 +508,8 @@ const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	'code-search': (n) => `Search ${n}`,
 	'web-search': (n) => `Web ${n}`,
 	delegate: (n) => `Delegated ${n}`,
+	message: (n) => `Sent ${n}`,
+	'task-check': (n) => `Checked ${n}`,
 	'image-gen': (n) => `Images ${n}`,
 	'image-edit': (n) => `ImgEdits ${n}`,
 	'video-gen': (n) => `Videos ${n}`,
@@ -515,7 +533,8 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	).length;
 	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
 	const deliveries = entries.filter((entry) => agentDelivery(entry.message)).length;
-	if (tools.length === 0 && thoughtCount === 0 && compactions === 0 && deliveries === 0) return null;
+	const taskResults = entries.filter((entry) => isTaskResult(entry.message)).length;
+	if (tools.length === 0 && thoughtCount === 0 && compactions === 0 && deliveries === 0 && taskResults === 0) return null;
 
 	const counts = new Map<ToolAction, number>();
 	let failed = 0;
@@ -530,6 +549,7 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	if (thoughtCount > 0) tokens.push(`Thought ${thoughtCount}`);
 	if (compactions > 0) tokens.push(`Compacted ${compactions}`);
 	if (deliveries > 0) tokens.push(`Msgs ${deliveries}`);
+	if (taskResults > 0) tokens.push(`Results ${taskResults}`);
 	if (failed > 0) tokens.push(`${failed} failed`);
 	return tokens.length > 0 ? tokens.join(' · ') : null;
 }
@@ -545,6 +565,15 @@ function isHiddenCodeModeCell(message: ChatMessage): boolean {
 	return message.toolStatus !== 'error';
 }
 
+/**
+ * A background task's completion notice ("Task COMPLETED"). It is the result
+ * of work launched earlier, so a fold counts it; the started/progress/updated
+ * notices around it are bookkeeping and only fold.
+ */
+function isTaskResult(message: ChatMessage): boolean {
+	return message.type === 'system' && message.systemSubtype === 'task_notification';
+}
+
 /** Provider-neutral, action-specific summary for a folded tool run. */
 export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const entries = rows.filter((entry) => !isHiddenCodeModeCell(entry.message));
@@ -554,7 +583,8 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
 	const compactionLabel = compactions === 1 ? 'compacted the context' : `compacted the context ${compactions} times`;
 	const deliveries = entries.filter((entry) => agentDelivery(entry.message)).length;
-	if (tools.length === 0 && deliveries === 0) {
+	const taskResults = entries.filter((entry) => isTaskResult(entry.message)).length;
+	if (tools.length === 0 && deliveries === 0 && taskResults === 0) {
 		const base = entries.some((entry) => entry.message.type === 'thinking')
 			? 'Reasoning and interim work'
 			: entries.length > compactions ? 'Interim work' : null;
@@ -583,6 +613,7 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	}
 	if (compactions > 0) labels.push(compactionLabel);
 	if (deliveries > 0) labels.push(`Got ${deliveries} agent ${deliveries === 1 ? 'message' : 'messages'}`);
+	if (taskResults > 0) labels.push(`Got ${taskResults} task ${taskResults === 1 ? 'result' : 'results'}`);
 	const sentence = sentenceJoin(labels);
 	if (!sentence) return null;
 	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
@@ -836,8 +867,9 @@ function askingLeadIns(response: Positioned[]): Set<Positioned> {
  * work log in live mode, keyed exactly as the settled group of the same turn
  * will be, so settling flips `mode` on the same component instead of mounting
  * a new one (spec §6). Inside it the turn is cut into runs at every protected
- * row: earlier runs fold behind the live label, the protected row that ended
- * each stays visible below it, and the current run shows every row.
+ * row and at the completed prose that stays on screen: earlier runs fold
+ * behind the live label, the row that ended each stays visible below it, and
+ * the current run shows every row.
  */
 /**
  * The last prose before each steer is the answer the steer replied to, the
@@ -865,7 +897,7 @@ function terminalProse(response: Positioned[]): Set<Positioned> {
 	return terminal;
 }
 
-/** Fold-state key of a run, from the protected row that ended it (see `WorkLogRun.key`). */
+/** Fold-state key of a run, from the row it starts at (see `WorkLogRun.key`). */
 function runKeyOf(entry: Positioned): string {
 	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
 }
@@ -896,15 +928,26 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	// The latest prose and the prose each steer replied to stay on screen
 	// whatever they say, exactly as the settled turn keeps them.
 	const terminal = terminalProse(response);
+	// The newest prose the agent has FINISHED writing. Prose still streaming
+	// has not replaced it yet, so the run it ends stays folded while the next
+	// paragraph arrives instead of opening up for a moment and folding again.
+	const latestDone = response.findLast((entry) => isAssistantText(entry.message) && !entry.message.streaming);
 	// Rows that end a run and stay visible. Streaming prose is still arriving,
-	// so it only becomes a finding once it is complete. A steer does NOT end a
-	// run: a turn never folds because the user sent something (spec §1.3). It
-	// stays a visible row in place inside whatever run is current.
+	// so it only ends a run once it is complete. A steer does NOT end a run: a
+	// turn never folds because the user sent something (spec §1.3); it stays a
+	// visible row in place inside whatever run is current. The agent's own
+	// completed prose does when the reader must keep seeing it: a finding, a
+	// question's lead-in, the latest word, or the prose a steer answered or
+	// that answers a steer. The routine work behind it folds, so a long live
+	// turn reads as prose between folds; only the work after the latest prose
+	// stays flat. A failed tool is routine work: it folds with its run and the
+	// run's summary counts it ("…, 1 failed").
 	const endsRun = (entry: Positioned) =>
 		isProtectedRow(entry.message) ||
 		asking.has(entry) ||
-		(isAssistantText(entry.message) && !entry.message.streaming && isProtectedProse(entry.message.content)) ||
-		(entry.message.type === 'tool_use' && entry.message.toolStatus === 'error');
+		(isAssistantText(entry.message) && !entry.message.streaming && (
+			isProtectedProse(entry.message.content) || entry === latestDone || terminal.has(entry)
+		));
 	// Rows a folded run hides; anything else (a tool still running, a
 	// screenshot, streaming thinking) keeps its place between the folds.
 	const foldsWithRun = (entry: Positioned) =>
@@ -930,7 +973,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 		for (const row of folded) hidden.add(row);
 		if (folded.length > 0) {
 			const rows = folded.map(({ message, index }) => ({ message, index }));
-			runs.push({ index: runIndex, key: runKeyOf(entry), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
 		}
 		runIndex++;
 		open = [];

@@ -28,7 +28,7 @@
 	 * so this component owns the fold and nothing else; MessageArea keeps the one
 	 * dispatch table that decides which component a message becomes.
 	 */
-	import type { Snippet } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import type { Action } from 'svelte/action';
 	import { isNavigableUserTurn, turnAnchorId } from '$lib/utils/transcript-navigation';
 	import type { ChatMessage } from '$lib/stores/types';
@@ -37,6 +37,7 @@
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
 	import type { WorkLogEntry, WorkLogRun, WorkLogSequenceEntry } from '$lib/utils/work-log';
 	import { foldState, type FoldState } from '$lib/stores/session/fold-state';
+	import { openRunKeys, parseRange, rangeId, rangesOver, reconcileRanges, type RunSpan } from './run-fold-ranges';
 
 	interface Props {
 		mode: 'live' | 'settled';
@@ -84,7 +85,9 @@
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
 
 	// ── Fold state ─────────────────────────────────────────────────────────
-	let stored = $state<Readonly<Record<string, true>>>({});
+	// Seeded synchronously: the pre-effects below run before the subscription
+	// does, and must see what is already open on a remount.
+	let stored = $state<Readonly<Record<string, true>>>(untrack(() => folds.current));
 	$effect(() => folds.subscribe((value) => { stored = value; }));
 	// An optimistic send keeps its id as the row key (no remount); once the
 	// server id is known, folds recorded under the optimistic id move onto it.
@@ -93,34 +96,120 @@
 	});
 
 	let localOpen = $state(false);
-	// Runs are keyed by the row that ended them (`WorkLogRun.key`), not by
-	// ordinal: a tool that fails later inserts a boundary and shifts ordinals.
+	// Runs are keyed by the row they start at (`WorkLogRun.key`), not by
+	// ordinal: prose that finishes later inserts a boundary and shifts
+	// ordinals. Without a fold key the open ranges are kept here.
 	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
 	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
+	const openIds = $derived(runPrefix
+		? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
+		: Object.keys(localRuns).filter((id) => localRuns[id]));
+	const rowId = (entry: WorkLogEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+	// A row is found by its `id` as well as its `serverId`: the reducer acks an
+	// optimistic row (a steer) by adding a `serverId` and keeping its `id`, so
+	// a range stored before the ack still names it, and the reconcile below
+	// moves the range onto the server id in one write.
+	const rowPositions = $derived.by(() => {
+		const position = new Map<string, number>();
+		sequence.forEach((entry, at) => {
+			const { id } = entry.message;
+			if (id && !position.has(id)) position.set(id, at);
+		});
+		sequence.forEach((entry, at) => position.set(rowId(entry), at));
+		return position;
+	});
 	// Settling merges the runs into the turn's one fold: an open run opens it,
 	// so the reader's open fold does not close under them (spec §6). Until the
 	// store records the promotion, read any open run as the turn being open.
 	const anyRunOpen = $derived(runPrefix
 		? Object.keys(stored).some((key) => key.startsWith(runPrefix))
 		: Object.values(localRuns).some(Boolean));
+	const runOpenHere = $derived(anyRunOpen && openIds.some((id) => parseRange(id, rowPositions) !== null));
 	const open = $derived(turnFold
-		? stored[turnFold] === true || (mode === 'settled' && anyRunOpen)
+		? stored[turnFold] === true || (mode === 'settled' && runOpenHere)
 		: localOpen);
+	// Only a run range that names a row of this turn opens the settled fold. A
+	// range none of whose rows exist any more (an optimistic id gone after a
+	// reload) is dropped instead, so it cannot reopen work the reader closed.
+	// Residual: a different session whose turn has the SAME turn key would
+	// lose its stored live runs here; turn keys are server ids, so this needs
+	// a server id collision.
 	$effect.pre(() => {
-		if (mode === 'settled' && foldKey && anyRunOpen) folds.promoteRuns(foldKey);
+		if (mode !== 'settled' || !foldKey || !runPrefix || !anyRunOpen) return;
+		if (runOpenHere) folds.promoteRuns(foldKey);
+		else folds.update(openIds.map((id) => `${runPrefix}${id}`), []);
 	});
 	function setOpen(next: boolean) {
 		if (turnFold) folds.setOpen(turnFold, next);
 		else localOpen = next;
 	}
+	/**
+	 * Open runs are stored as row ranges, one per open run: the run's first
+	 * row through its last (run-fold-ranges.ts). Runs merge and split as prose
+	 * finishes; a run is open when its rows overlap a stored range, so the
+	 * reader's open work stays open through a merge, a split, a remount or a
+	 * reload, decided from the store and the current runs alone.
+	 */
+	const runSpans = $derived.by(() => {
+		const spans = new Map<number, RunSpan>();
+		if (mode !== 'live' || runs.length === 0) return spans;
+		const keyOfRun = new Map(runs.map((run) => [run.index, run.key]));
+		sequence.forEach((entry, at) => {
+			const key = entry.run === undefined ? undefined : keyOfRun.get(entry.run);
+			if (key === undefined) return;
+			const span = spans.get(entry.run!);
+			if (span) { span.end = at; span.through = rowId(entry); }
+			else spans.set(entry.run!, { key, start: rowPositions.get(key) ?? at, end: at, through: rowId(entry) });
+		});
+		return spans;
+	});
+	const openRuns = $derived(openRunKeys(openIds, [...runSpans.values()], rowPositions));
 	function runOpen(run: WorkLogRun): boolean {
-		return runPrefix ? stored[`${runPrefix}${run.key}`] === true : localRuns[run.key] === true;
+		return openRuns.has(run.key);
 	}
-	function setRunOpen(run: WorkLogRun, next: boolean) {
-		if (runPrefix) folds.setOpen(`${runPrefix}${run.key}`, next);
-		else localRuns = { ...localRuns, [run.key]: next };
+	function writeRuns(close: string[], open: string[]) {
+		if (close.length === 0 && open.length === 0) return;
+		if (runPrefix) {
+			folds.update(close.map((id) => `${runPrefix}${id}`), open.map((id) => `${runPrefix}${id}`));
+			return;
+		}
+		const next = { ...localRuns };
+		for (const id of close) delete next[id];
+		for (const id of open) next[id] = true;
+		localRuns = next;
 	}
+	/**
+	 * A run's range as drawn. Fold rows carry it, and a click acts on the
+	 * range it reads back from the clicked row: a click that lands while a
+	 * split or merge is queued opens or closes the rows the reader saw, and
+	 * the next reconcile fits the range to the new runs.
+	 */
+	function drawnRange(run: WorkLogRun): string | undefined {
+		const span = runSpans.get(run.index);
+		return span && rangeId(span);
+	}
+	function setRunOpen(run: WorkLogRun, next: boolean, drawn?: string) {
+		const span = runSpans.get(run.index);
+		const seen = drawn === undefined ? null : parseRange(drawn, rowPositions);
+		if (next) {
+			const id = seen ? drawn! : span && rangeId(span);
+			if (id) writeRuns([], [id]);
+			return;
+		}
+		const close = new Set<string>();
+		for (const range of [seen, span]) if (range) for (const id of rangesOver(openIds, range, rowPositions)) close.add(id);
+		writeRuns([...close], []);
+	}
+	const drawnOf = (event: Event) => (event.currentTarget as HTMLElement | null)?.dataset.runRange;
+	// Keep one range per open run at its current extent. Idempotent: once the
+	// ranges match the runs there is nothing to write, so this writes only
+	// when a run's extent changes (prose finishing), never per row.
+	$effect.pre(() => {
+		if (mode !== 'live') return;
+		const { add, remove } = reconcileRanges(openIds, [...runSpans.values()], rowPositions);
+		writeRuns(remove, add);
+	});
 	// A settled turn with nothing to hide keeps its group (so settling does not
 	// remount its rows) but draws no disclosure.
 	const foldable = $derived(
@@ -232,10 +321,11 @@
 	 */
 	function collapseRunFromHeader(event: MouseEvent, run: WorkLogRun) {
 		const header = event.currentTarget as HTMLElement;
+		const drawn = header.dataset.runRange;
 		const stuckAt = header.getBoundingClientRect().top;
 		const line = scrollParent(header)?.getBoundingClientRect().top;
 		const stuck = line !== undefined && stuckAt - line < 1;
-		setRunOpen(run, false);
+		setRunOpen(run, false, drawn);
 		if (stuck) landAt(header, () => sectionEl?.querySelector<HTMLElement>(`[data-run-fold="${run.index}"]`), stuckAt);
 	}
 
@@ -403,6 +493,7 @@
 							type="button"
 							class="wlrow fold"
 							data-run-header={run.index}
+							data-run-range={drawnRange(run)}
 							use:stickWithinRun={run.index}
 							onclick={(event) => collapseRunFromHeader(event, run)}
 							aria-expanded="true"
@@ -425,7 +516,8 @@
 							type="button"
 							class="wlrow fold"
 							data-run-fold={run.index}
-							onclick={() => setRunOpen(run, true)}
+							data-run-range={drawnRange(run)}
+							onclick={(event) => setRunOpen(run, true, drawnOf(event))}
 							aria-expanded="false"
 							aria-label={`Show work details: ${runLabel(run)}`}
 						>
@@ -457,7 +549,7 @@
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
-					<button type="button" class="wlrow fold" data-run-end={run.index} onclick={() => setRunOpen(run, false)} aria-expanded="true" aria-label="Hide work details">
+					<button type="button" class="wlrow fold" data-run-end={run.index} data-run-range={drawnRange(run)} onclick={(event) => setRunOpen(run, false, drawnOf(event))} aria-expanded="true" aria-label="Hide work details">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 							<path d="m18 15-6-6-6 6" />
 						</svg>
