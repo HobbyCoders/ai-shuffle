@@ -13,8 +13,7 @@ REPO = "HobbyCoders/ai-shuffle"
 MAIN = "refs/heads/main"
 TAG = "refs/tags/v0.8.19"
 MAIN_SHA = "a" * 40
-DEPLOY = ["deploy-hub.yml", "deploy-license.yml", "deploy-site.yml", "deploy-uptime.yml"]
-JOBS = [(name, "deploy", "main") for name in DEPLOY] + [
+JOBS = [
     ("release.yml", "preflight", "tag"),
     ("release.yml", "create-release", "tag"),
     ("release.yml", "source-stable", "tag"),
@@ -27,7 +26,6 @@ JOBS = [(name, "deploy", "main") for name in DEPLOY] + [
     ("android-play.yml", "publish", "release"),
     ("android-play-enrollment.yml", "export", "main"),
     ("android.yml", "publish", "release"),
-    ("withdraw-release.yml", "withdraw", "main"),
 ]
 
 
@@ -76,7 +74,7 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
 @pytest.mark.parametrize("name,job,kind", JOBS)
 def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
     condition = workflow(name)["jobs"][job]["if"]
-    ref, event = (TAG, "push") if kind == "tag" else (MAIN, "workflow_dispatch")
+    ref, event = (TAG if kind == "tag" else MAIN), "workflow_dispatch"
     assert permits(condition, ref=ref, event=event)
     for changes in [
         {"actor_id": "7"},
@@ -99,13 +97,12 @@ def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
     elif kind == "tag":
         assert permits(condition, ref=TAG, event="workflow_dispatch")
         assert not permits(condition, ref=MAIN)
+        assert not permits(condition, ref=TAG, event="push")
     else:
         assert permits(condition, ref=TAG, event="push")
 
 
 @pytest.mark.parametrize("name,job,commands", [
-    ("ci-license.yml", "license-server", ["npm run typecheck", "npm test"]),
-    ("ci-uptime.yml", "uptime", ["npm run typecheck", "npm test"]),
     ("ci-browser-workspace.yml", "smoke",
      ["npm run build --prefix browser-mcp", "npm test --prefix browser-mcp -- test/editors.test.ts"]),
 ])
@@ -121,8 +118,7 @@ def test_manual_checks_stay_on_standard_runners_and_fail_loudly(name, job, comma
 
 
 def test_nothing_publishes_or_tests_automatically_except_release_and_edge():
-    for name in DEPLOY:
-        assert set(workflow(name)["on"]) == {"workflow_dispatch"}
+    assert set(workflow("release.yml")["on"]) == {"workflow_dispatch"}
     # Pull requests start no workflow: tests run locally (scripts/local_ci.py).
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
         assert "pull_request" not in workflow(path.name)["on"], path.name

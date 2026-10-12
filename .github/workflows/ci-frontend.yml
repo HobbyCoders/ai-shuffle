@@ -38,7 +38,6 @@ jobs:
             frontend/package-lock.json
             tools/package-lock.json
             browser-mcp/package-lock.json
-            android/site/package-lock.json
 
       # mobile/ has no lockfile of its own: it links ../frontend/node_modules.
       - name: Install dependencies
@@ -98,11 +97,3 @@ jobs:
       - name: Docs copies match
         working-directory: .
         run: diff -r docs/content frontend/src/lib/docs/content
-
-      # hobbycoders.com serves /docs and /changelog from the committed
-      # android/site/src/content/docs.json. A docs change without a fresh
-      # render (npm run render-docs in android/site) fails here, as does an em
-      # dash the renderer cannot turn into site style.
-      - name: Website docs render check
-        working-directory: android/site
-        run: npm ci && node scripts/render-docs.mjs --check

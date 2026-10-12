@@ -236,7 +236,7 @@ jobs:
           name: windows-stable-installer
           path: installer
       - run: npm ci --no-audit --no-fund
-        working-directory: android/hub
+        working-directory: scripts/source-publisher
       - name: Publish verified installer and anonymous download
         env:
           GH_TOKEN: ${{ github.token }}
@@ -249,7 +249,7 @@ jobs:
           node desktop/scripts/publish-installer.mjs installer/*.exe "$RELEASE_TAG"
       - name: Copy the installer to the R2 installer bucket
         # Skipped until the owner sets the repository variable
-        # R2_INSTALLER_BUCKET (android/hub/README.md, "Installer downloads from
+        # R2_INSTALLER_BUCKET (hobbycoders-cloud/hub/README.md, "Installer downloads from
         # R2"). Stored as AI-Shuffle-Setup.exe, the name /v1/desktop/installer
         # serves; the hub falls back to the GitHub asset for anything else.
         if: vars.R2_INSTALLER_BUCKET != ''

@@ -13,13 +13,8 @@ app/core/connectors/*.py text eol=lf
 docs/content/**/*.md text eol=lf
 docs/install/compose/compose.yaml text eol=lf
 docs/install/compose/env.example text eol=lf
-android/site/public/ai-shuffle/install/* text eol=lf
-android/site/scripts/render-docs.mjs text eol=lf
-android/site/public/_headers text eol=lf
-android/site/wrangler.toml text eol=lf
-# render-docs --check compares docs.json byte for byte, and local_ci compares the
-# two docs copies; keep both LF on Windows checkouts too.
-android/site/src/content/docs.json text eol=lf
+# Cloud site LF rules live in hobbycoders-cloud; local_ci compares these
+# app docs copies byte for byte, including on Windows checkouts.
 frontend/src/lib/docs/content/** text eol=lf
 # Tests import these scripts; Vitest on Windows fails on a CRLF after the #! line.
 frontend/scripts/*.mjs text eol=lf

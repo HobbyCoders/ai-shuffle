@@ -18,7 +18,7 @@ if(!asset || asset.state!=='uploaded' || asset.size!==size || asset.digest!==`sh
 const config=path.join(process.env.RUNNER_TEMP,'desktop-installer-d1.json');
 try{
  await writeFile(config,JSON.stringify({d1_databases:[{binding:'DB',database_name:'shuffle-account-hub',database_id:database}]}));
- const command=sql=>JSON.parse(execFileSync(process.execPath,['android/hub/node_modules/wrangler/bin/wrangler.js','d1','execute','DB','--remote','--config',config,'--command',sql,'--json'],{encoding:'utf8'}));
+ const command=sql=>JSON.parse(execFileSync(process.execPath,['scripts/source-publisher/node_modules/wrangler/bin/wrangler.js','d1','execute','DB','--remote','--config',config,'--command',sql,'--json'],{encoding:'utf8'}));
  const old=command('SELECT version FROM desktop_installers WHERE id=1;').flatMap(r=>r.results??[])[0];
  const version=tag.slice(1),rank=v=>v.split('.').map(Number);
  if(old){const a=rank(version),b=rank(old.version);const first=a.findIndex((n,i)=>n!==b[i]);if(first>=0&&a[first]<b[first])throw Error('Refusing to replace a newer stable installer');}

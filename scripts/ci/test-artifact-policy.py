@@ -158,7 +158,7 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertEqual(exported["android-download"]["with"]["retention-days"], "1")
         self.assertEqual(jobs["android-ui"]["needs"], "build")
         self.assertEqual(len(jobs["android-ui"]["strategy"]["matrix"]["include"]), 2)
-        self.assertEqual(jobs["publish"]["needs"], ["account-hub", "build", "android-ui"])
+        self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
 
     def test_manual_only_binary_upload_gates_execute(self):
         android = workflow("android.yml")["jobs"]["publish"]["if"]

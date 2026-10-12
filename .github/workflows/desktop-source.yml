@@ -78,10 +78,10 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: android/hub/package-lock.json
+          cache-dependency-path: scripts/source-publisher/package-lock.json
       - run: npm ci --no-audit --no-fund
         if: steps.settled.outputs.ready == 'true'
-        working-directory: android/hub
+        working-directory: scripts/source-publisher
       - name: Recheck the pass and main immediately before signing
         if: steps.settled.outputs.ready == 'true'
         id: ci

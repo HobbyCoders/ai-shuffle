@@ -34,8 +34,8 @@ depends on it.
 ## Purge
 
 The owner decided to purge what the backup left behind. The runbook is
-[hub-legacy-purge.md](hub-legacy-purge.md): inventory
-(`android/hub/scripts/legacy-inventory.sh`), back up D1, empty the
+[the cloud purge runbook](https://github.com/HobbyCoders/hobbycoders-cloud/blob/main/docs/network/hub-legacy-purge.md):
+[inventory](https://github.com/HobbyCoders/hobbycoders-cloud/blob/main/hub/scripts/legacy-inventory.sh), back up D1, empty the
 `shuffle-network-sync` bucket, then deploy migration
 `0017_drop_legacy_sync.sql`, which drops `network_feed`, `network_objects` and
 `network_object_streams`. The same change removed the `SYNC_BUCKET` binding,

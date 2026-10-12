@@ -173,6 +173,8 @@ def test_image_only_copies_fail_but_owner_tooling_is_reported():
 
 def test_android_native_and_packaging_are_notes_only():
     groups = groups_for({"android/app/build.gradle.kts": "x", "android/hub/src/index.ts": "x",
+                         "android/license/src/index.ts": "x", "android/uptime/src/index.ts": "x",
+                         "android/site/src/index.ts": "x", "android/ci/test-cloudflare-deploy.py": "x",
                          "desktop/electron-builder.yml": "x"})
     assert groups["android-native"] == ["android/app/build.gradle.kts"]
     assert groups["windows-packaging"] == ["desktop/electron-builder.yml"]

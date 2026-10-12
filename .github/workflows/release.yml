@@ -1,9 +1,6 @@
 name: Release Docker and Android
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
@@ -33,7 +30,7 @@ jobs:
   # No publication or signing credentials before source and PR gates pass.
   preflight:
     if: >-
-      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && startsWith(github.ref, 'refs/tags/v')
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -78,7 +75,7 @@ jobs:
 
   create-release:
     if: >-
-      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && startsWith(github.ref, 'refs/tags/v')
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     needs: preflight
     environment: release-signing
     timeout-minutes: 10
@@ -275,7 +272,7 @@ jobs:
     name: Sign the stable in-app update
     needs: [create-release, docker, buyer-install]
     if: >-
-      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && startsWith(github.ref, 'refs/tags/v') &&
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') &&
       (needs.create-release.outputs.promote_latest == 'true')
     runs-on: ubuntu-latest
     environment: release-signing
@@ -295,9 +292,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: android/hub/package-lock.json
+          cache-dependency-path: scripts/source-publisher/package-lock.json
       - run: npm ci --no-audit --no-fund
-        working-directory: android/hub
+        working-directory: scripts/source-publisher
       - name: Publish the signed stable source release
         env:
           SOURCE_CHANNEL: stable

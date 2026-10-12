@@ -32,6 +32,12 @@ def test_changes_reach_their_suites():
     assert suites_for(["README.md"]) == set()
 
 
+def test_cloud_split_keeps_android_bridge_and_app_docs_independent():
+    assert suites_for(["android/app/src/test/js/chat-downloads.test.cjs"]) >= {"android-bridge"}
+    assert not {"hub", "site", "license", "uptime"} & {s.name for s in local_ci.SUITES}
+    assert suites_for(["docs/content/getting-started/first-run.md"]) == {"docs"}
+
+
 def test_full_mode_reaches_every_suite():
     ctx = local_ci.Context(mode="full", base="base", files=None, python=sys.executable)
     assert all(ctx.changed(suite.paths) for suite in local_ci.SUITES)

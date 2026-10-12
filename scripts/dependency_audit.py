@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PIP_AUDIT_VERSION = "2.9.0"
-NPM_PACKAGES = ("frontend", "android/hub", "browser-mcp", "desktop", "tools")
+NPM_PACKAGES = ("frontend", "scripts/source-publisher", "browser-mcp", "desktop", "tools")
 
 
 def command(argv, cwd=ROOT, timeout=180):

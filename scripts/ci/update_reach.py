@@ -80,8 +80,10 @@ WINDOWS_PACKAGING = ("desktop/electron-builder.yml", "desktop/build/*")
 # Owner maintenance tools the image carries (python -m scripts.credential_keys).
 IMAGE_TOOLING = ("scripts/*",)
 ANDROID_NATIVE = ("android/*",)
-# Cloudflare Workers deployed by their own workflows, not part of the Play app.
-ANDROID_SERVER = ("android/hub/*", "android/site/*")
+# Cloud services moved to hobbycoders-cloud. Keep historical paths excluded:
+# update_reach_readiness classifies past main commits as well as this deletion.
+CLOUD_LEGACY_PATHS = ("android/hub/*", "android/site/*", "android/license/*",
+                      "android/uptime/*", "android/ci/test-cloudflare-deploy.py")
 
 # The supervisor, updater and Chromium scripts the image runs. In the update
 # archive (docker/), so images that hand over to the active update run the new
@@ -262,7 +264,7 @@ def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
     groups["windows-launcher"] = [p for p in changed if p in launcher]
     groups["update-trust-key"] = [p for p in changed if p == TRUST_KEY]
     groups["windows-packaging"] = [p for p in changed if matches(p, WINDOWS_PACKAGING) and p != TRUST_KEY]
-    groups["android-native"] = [p for p in changed if matches(p, ANDROID_NATIVE) and not matches(p, ANDROID_SERVER)]
+    groups["android-native"] = [p for p in changed if matches(p, ANDROID_NATIVE) and not matches(p, CLOUD_LEGACY_PATHS)]
     # docker/ rides in the archive for containers only; desktops never run it.
     groups["macos-linux-desktop"] = [p for p in changed if in_archive(p, archive.RUNTIME_PATHS, archive.EXCLUDED)
                                      and not matches(p, IMAGE_SUPERVISOR)]

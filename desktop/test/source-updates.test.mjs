@@ -25,12 +25,6 @@ class LegacyUpdates extends legacyModule.exports.SourceUpdates {
  application(revision){return SourceUpdates.prototype.application.call(this,revision);}
 }
 const A='a'.repeat(40), B='b'.repeat(40), C='c'.repeat(40), KEY='d'.repeat(64);
-test('browser download verification and launcher share one public trust key',async()=>{
- const pem=await fs.readFile(new URL('../build/application-update-key.pem',import.meta.url),'utf8');
- const source=await fs.readFile(new URL('../../android/hub/src/desktop-updates.ts',import.meta.url),'utf8');
- const key=pem.split(/\r?\n/).filter(line=>line&&!line.startsWith('---')).join('');
- assert(source.includes(`const signingPublicKey='${key}'`));
-});
 async function fixture(t) {
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-source-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});

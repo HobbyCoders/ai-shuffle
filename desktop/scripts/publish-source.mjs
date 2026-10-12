@@ -99,7 +99,7 @@ try {
  await writeFile(configFile, JSON.stringify({ d1_databases: [{ binding: 'DB', database_name: 'shuffle-account-hub', database_id: databaseId }] }));
  const quote = value => `'${value.replaceAll("'", "''")}'`;
  const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
- const wrangler = (...args) => execFileSync(process.execPath, ['android/hub/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
+ const wrangler = (...args) => execFileSync(process.execPath, ['scripts/source-publisher/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
  // Several CI completions can authorize the same revision. Preserve its original
  // signed sequence rather than turning each completion into another update.
  const existing = channel !== 'stable' ? JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json')) : [];

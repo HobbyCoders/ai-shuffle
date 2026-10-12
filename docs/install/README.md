@@ -8,13 +8,20 @@ website can link to them.
 | [`compose/compose.yaml`](compose/compose.yaml) | Docker Compose file for Linux servers, NAS boxes and desktops. |
 | [`compose/env.example`](compose/env.example) | The settings a buyer fills in, copied to `.env`. |
 | [`compose/README.md`](compose/README.md) | Install, update, back up and remove with Compose. |
-| [`registry.md`](registry.md) | How customers pull the private image (internal design and owner steps). |
 
 Every file pins the current release. Each release bumps `AI_SHUFFLE_VERSION`
 in `compose/env.example` and `compose/compose.yaml` together with
 `app/__init__.py`; `tests/core/test_install_files.py`
 fails when they disagree. Every release is installed from `compose/` on a clean
 runner before its in-app update is published.
+
+## Website copies
+
+The website is maintained in the private `HobbyCoders/hobbycoders-cloud`
+repository. After changing install files, refresh its committed source snapshots
+and served copies with `AI_SHUFFLE_CHECKOUT=/path/to/ai-shuffle npm run sync-install`
+from its `site/` directory (see that repository's README). This app checkout stays
+the source of truth; no private Cloud checkout is needed to run app tests.
 
 ## Release channels
 

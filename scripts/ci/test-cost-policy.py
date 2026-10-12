@@ -15,7 +15,6 @@ WORKFLOWS = ROOT / ".github/workflows"
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch"},
-    "release.yml": {"push", "workflow_dispatch"},
 }
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
              "check_run", "check_suite", "issue_comment", "pull_request_review"}
@@ -47,8 +46,8 @@ class CostPolicyTests(unittest.TestCase):
                     self.assertLessEqual(found, {"workflow_dispatch", "workflow_call"},
                                          f"{name} must be manual or called by a release")
 
-    def test_automatic_pushes_are_narrow(self):
-        self.assertEqual(workflow("release.yml")["on"]["push"], {"tags": ["v*.*.*"]})
+    def test_stable_release_requires_explicit_dispatch(self):
+        self.assertEqual(triggers(workflow("release.yml")), {"workflow_dispatch"})
         self.assertEqual(workflow("desktop-source.yml")["on"]["schedule"], [{"cron": "0 6 * * *"}])
 
     def test_no_pr_only_machinery_is_left(self):
@@ -155,7 +154,7 @@ class CostPolicyTests(unittest.TestCase):
         import local_ci  # pyright: ignore[reportMissingImports]
         suites = {suite.name for suite in local_ci.SUITES}
         for name in ("backend", "fluid", "frontend", "mobile", "tools", "browser-mcp", "docs", "desktop",
-                     "hub", "site", "license", "uptime", "android-play", "workflows", "update-reach"):
+                     "android-bridge", "android-play", "workflows", "update-reach"):
             self.assertIn(name, suites)
         self.assertNotIn("registry", suites, "the private registry has been retired")
         hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")

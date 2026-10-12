@@ -1,6 +1,6 @@
 name: Desktop source update checks
-# Manual only. Re-checks both halves of the source-update protocol (desktop
-# and hub); scripts/local_ci.py runs the same tests before a push.
+# Manual only. Checks the app side of the source-update protocol.
+# Hub tests run separately in HobbyCoders/hobbycoders-cloud.
 on:
   workflow_dispatch:
 permissions:
@@ -19,5 +19,3 @@ jobs:
           python-version: '3.12'
       - run: npm ci --ignore-scripts --no-audit --no-fund && npm test
         working-directory: desktop
-      - run: npm ci --no-audit --no-fund && npm run typecheck && npm test
-        working-directory: android/hub

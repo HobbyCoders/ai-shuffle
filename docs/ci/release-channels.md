@@ -4,10 +4,27 @@ How a release reaches customers, and the one-time repository settings that
 make the guarantees real. Security review finding SEC-06 and decisions D7, D8
 and D22 are the background.
 
+## Repository boundary
+
+Hub, license, website, uptime and deploy/withdraw workflows live in the private
+[cloud repository](https://github.com/HobbyCoders/hobbycoders-cloud), whose README
+lists the environments/secrets/variables the owner must recreate. Finish pending
+deploys from the old repository (hub → site → license) before merging the split.
+
+The source publishers remain here deliberately: archive bytes, app revision,
+current-main rechecks, release assets and the stable image/buyer-install gates
+belong to one app tree/run. Moving just signing or the D1 write would need a
+cross-repository artifact/attestation protocol, not a floating checkout. The
+exact-tree gate and `update_reach_readiness` remain intact. A pinned Wrangler
+CLI in `scripts/source-publisher` removes the dependency on cloud source. Retain
+this repository's `account-hub-production` and `release-signing` signing settings;
+they are not replaced by the cloud deployment environments. No secret-bearing
+source publication workflow runs on a pull request.
+
 ## The path of a release
 
-`release.yml`, on an existing `vX.Y.Z` tag push or a manual dispatch **from
-that same tag** (never `main`):
+`release.yml`, on an owner manual dispatch **from an existing `vX.Y.Z` tag**
+(never `main`; pushing the tag does not start this workflow):
 
 1. **preflight** runs read-only checks before any release, image or source is
    published. The tag must match the checkout, its commit must be on `main`,
@@ -46,8 +63,9 @@ be described as available on every platform.
 
 Write release notes in an annotated tag, under 4,000 characters. The tag
 must point to the merged release PR commit, not an unreviewed follow-up.
-Creating/pushing it starts publication and is an **owner-only action after
-all prerequisites below**, not part of source preparation. A retry/optional
+Creating/pushing the tag is an **owner-only action after all prerequisites
+below**, not part of source preparation. Publication requires a separate owner
+dispatch. A retry/optional
 installer dispatch must select that existing tag as its workflow ref and
 supply the same version; a dispatch from `main` fails preflight, because a
 checkout does not change GitHub's tags-only environment authorization.
@@ -120,10 +138,11 @@ PYTHONPATH="$PWD:$PWD/fluid" .venv/bin/python scripts/ci/release_preflight.py --
 PYTHONPATH="$PWD:$PWD/fluid" .venv/bin/python -m pytest -o addopts="" tests/core/test_install_files.py tests/core/test_version_source.py tests/test_connector_catalog.py tests/test_connector_packages.py tests/core/test_release_download_instructions.py tests/core/test_android_release_gate.py tests/core/test_source_archive.py tests/test_buyer_docs.py tests/scripts/test_release_preflight.py
 (cd frontend && npm ci && npm run check && npm run build)
 (cd desktop && npm ci --ignore-scripts && npm test)
-(cd android/site && npm ci && npm run sync-install && npm run render-docs && npm run typecheck && npm test)
 ```
 
-The site requires npm 11 or newer. Install dependencies inside this checkout;
+Website checks run separately in `HobbyCoders/hobbycoders-cloud` with npm 11
+or newer; its README explains refreshing docs/install snapshots from this app
+checkout via `AI_SHUFFLE_CHECKOUT`. Install dependencies inside each checkout;
 never copy `node_modules` or `.env`. Run app tests and `fluid/tests` separately.
 The source check without `--tag` cannot prove release ancestry, GitHub gates,
 signing credentials, deployment access or hardware behavior. A shallow clone
@@ -148,15 +167,16 @@ production workflows instead of upgrading billing. This is **not** a native
 reviewer gate: anyone trusted to change protected workflow code must be trusted
 with this policy. Secrets were not read, moved or changed.
 
-Production deployment jobs require repository `HobbyCoders/ai-shuffle`, immutable
-owner actor ID configured in the workflows, and the same triggering actor on reruns. The hub,
-license, registry and website accept only manual dispatch from `main`; a merge
-does not deploy those services. Edge source publication is the narrow exception:
-protected-main merges publish automatically after the exact-tree CI gate above.
+Cloud deployment jobs live in `HobbyCoders/hobbycoders-cloud`; app publication
+jobs remain in `HobbyCoders/ai-shuffle`. Both require the immutable owner actor
+ID configured in the workflows and the same triggering actor on reruns. Hub,
+license, website and uptime accept only manual dispatch from `main`; a merge
+never deploys them. Nightly source publication is the narrow scheduled
+exception, subject to the exact-tree CI gate above; pushes do not publish.
 Its manual retry remains owner-only. This exception does not grant automatic
 stable releases, Play uploads, worker installation, or restarts.
-Stable release jobs accept only the owner-created `v*` tag push or an explicit
-owner dispatch from that tag. Reusable signing/publishing workflows also enforce
+The stable release workflow accepts only an explicit owner dispatch from an
+existing `v*` tag. Reusable signing/publishing workflows also enforce
 the owner identity and protected ref; another maintainer cannot rerun an owner's
 old deployment to obtain its authority. Existing worker-readiness and publish
 opt-ins remain required. CI/unsigned builds stay automatic. Changes take effect
@@ -268,7 +288,8 @@ it, and then ship a **forward fix**, a new patch release.
 
 ### 1. Stop the spread: withdraw it
 
-Run **Actions → Withdraw stable release** on `main` with the version (`0.9.2`,
+In **HobbyCoders/hobbycoders-cloud**, run **Actions → Withdraw stable release**
+on `main` with the version (`0.9.2`,
 no `v`), action `withdraw` and a one-line reason. Owner only. The job summary
 says what the feed serves now. Without GitHub Actions, the same call:
 
@@ -290,8 +311,8 @@ npx wrangler d1 execute DB --remote --config <deploy config> --command \
   "UPDATE source_releases SET withdrawn_at=strftime('%s','now')*1000, withdrawn_reason='...' WHERE channel='stable' AND version='0.9.2'"
 ```
 
-What the hub does (`android/hub/src/release-admin.ts`, `servedRelease` in
-`android/hub/src/desktop-updates.ts`, migration 0027):
+What the hub does (`hobbycoders-cloud/hub/src/release-admin.ts`, `servedRelease` in
+`hobbycoders-cloud/hub/src/desktop-updates.ts`, migration 0027):
 
 - `/v1/desktop/manifest` stops serving the withdrawn release. Its source
   archive is no longer served, and installers of that version are hidden from
@@ -327,12 +348,20 @@ Nothing on the hub can recall that download. Tell users not to choose it
 1. Fix it on a branch and merge the PR the usual way, with CI green.
    Typically 30 to 90 minutes, depending on the fix and CI queue.
 2. Cut the next patch tag (`v0.9.3`) from that merge commit
-   ([Cutting a release](#cutting-a-release)). `release.yml` has taken 10 to
-   15 minutes, and the optional installer run another 10 to 15.
-3. The fix replaces the withdrawn release in the feed at once, because it is
-   the newest. Workers on the bad release and on older ones are both offered
-   it. Docker and desktop workers check about once a day, or at once from the
-   update button.
+   ([Cutting a release](#cutting-a-release)). Pushing the tag does not publish.
+3. The owner dispatches `release.yml` with that tag as **both** the workflow
+   ref and the `version` input, for example:
+   `gh workflow run release.yml --repo HobbyCoders/ai-shuffle --ref v0.9.3 -f version=v0.9.3`.
+   This is an owner publication action, not part of preparing the source fix.
+   The release run has taken 10 to 15 minutes, and the optional installer run
+   another 10 to 15.
+4. Verify the run's required jobs actually completed (not skipped), the public
+   image's clean-buyer install, and the signed stable manifest/feed for the
+   patched version. Check that an installed worker is offered the fix before
+   declaring it live; a tag or green workflow alone is not publication proof.
+   Once published, the newest fix replaces the withdrawn release in the feed.
+   Workers on the bad release and on older ones are both offered it. Docker
+   and desktop workers check about once a day, or at once from the update button.
 
 Realistically: withdraw within minutes of the report, and the fix is
 available one to two hours later. Leave the bad release withdrawn after that.
@@ -361,7 +390,7 @@ There is no reason to un-withdraw it.
 - **Telling users:** post in Discord and email the affected testers with what
   is wrong, "do not choose Update and restart for 0.9.2", and when the fix is
   expected. If the bug produces a support fingerprint, mark it with
-  `SUPPORT_ADMIN_TOKEN` (`android/hub/README.md`, "Support reports") so
+  `SUPPORT_ADMIN_TOKEN` (`hobbycoders-cloud/hub/README.md`, "Support reports") so
   everyone who hits it sees the note in the app. Name the withdrawn version in
   the fix's release notes.
 
@@ -393,7 +422,7 @@ a fix has shipped since, the fix stays served.
      today). Variable: `ACCOUNT_HUB_DATABASE_ID`. Optional, for installer
      copies in R2: `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` with the
      repository variable `R2_INSTALLER_BUCKET`
-     ([android/hub/README.md](../../android/hub/README.md#installer-downloads-from-r2)).
+     ([hobbycoders-cloud/hub/README.md](https://github.com/HobbyCoders/hobbycoders-cloud/blob/main/hub/README.md#installer-downloads-from-r2)).
 4. **Keep nightly signing separate from stable authorization.**
    `desktop-source.yml` uses the key in `account-hub-production` only after the
    exact-main local attestation gate. Stable publishing uses the protected
@@ -408,7 +437,7 @@ a fix has shipped since, the fix stays served.
 7. **Set up withdrawal** ([A bad stable release](#a-bad-stable-release))
    before you need it. Generate a token (`openssl rand -hex 32`) and set it
    as the Worker secret `RELEASE_ADMIN_TOKEN`
-   (`npx wrangler secret put RELEASE_ADMIN_TOKEN` in `android/hub`) and as an
+   (`npx wrangler secret put RELEASE_ADMIN_TOKEN` in `hobbycoders-cloud/hub`) and as an
    `account-hub-production` environment secret of the same name. Then deploy
    the hub so migration 0027 runs. Until then the endpoint answers 503 and the
    workflow fails.

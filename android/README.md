@@ -46,8 +46,11 @@ CI helpers are in `ci/`; run them from this directory. Instrumentation tests res
 - Chat attachments: select two files in one picker invocation and confirm both appear in the composer. Repeat with one file and cancellation. The native bridge reads multi-selection `ClipData`, preserves picker order, and accepts only 1–32 `content://` URIs while the originating document and worker remain authorized. `ChatFileChooserTest` covers parsing and limits; `ChatCapabilitiesSmokeTest` covers delivery through the activity callback and ownership rechecks.
 - Browser panel: choose **Fit panel**, tap a text field, type with the Android keyboard, then tap outside it. Remote viewport auto-fit pauses while a native editor is focused so the IME's local resize cannot remove the focused field. Auto-fit resumes on blur. Check both first-tap takeover and an already-controlled page, and confirm scrolling outside a field does not summon the keyboard. `BrowserPanel.test.ts` covers the fit timer/focus regression; desktop browser emulation alone cannot establish Android IME behavior.
 
-The Cloudflare account hub is in `hub/`. Its deployment workflow uses the `account-hub-production` environment in this repository.
+The Cloudflare account hub and its deployment workflow live in the private
+[HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud/tree/main/hub)
+repository. They are not an Android build dependency.
 
-The image registry Worker for `registry.hobbycoders.com` is in `registry/`; its deployment workflow (`deploy-registry.yml`) uses the `registry-production` environment. Owner steps: `registry/README.md`.
+The retired private image-registry Worker is removed; public app image downloads
+use GHCR as described in the app installation guide.
 
 Report problems in the [shared issue tracker](https://github.com/HobbyCoders/ai-shuffle/issues).

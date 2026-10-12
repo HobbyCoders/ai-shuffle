@@ -200,7 +200,7 @@ upgrade over a profile that has a signed-in hub session and never revert it.
 - **Preview builds** never check for updates.
 - **macOS and Linux**: the hub now lists a signed installer per platform at
   `https://hobbycoders.com/v1/desktop/installers` (see
-  `android/hub/README.md`, "Installers per platform") and serves the bytes at
+  `hobbycoders-cloud/hub/README.md`, "Installers per platform") and serves the bytes at
   `/v1/desktop/installer/mac` and `/v1/desktop/installer/linux`. The app does
   not read it yet: the desktop updater still has to check it on launch and
   every 24 hours (D22), verify `signature` over `payload` with

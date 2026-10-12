@@ -1,6 +1,6 @@
 name: Android CI
 
-# Android app (android/) and the Cloudflare account hub (android/hub). Manual
+# Android app (android/); cloud services live in hobbycoders-cloud. Manual
 # or called by a release; pull requests run no CI (scripts/local_ci.py). Chat loads the phone UI from the paired worker's
 # /mobile/ (app/mobile_ui.py), so mobile/ and frontend/ changes ship with a
 # worker update and are covered by frontend CI, not an emulator run. The APK
@@ -38,44 +38,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  account-hub:
-    name: Account hub Worker and D1 tests
-    timeout-minutes: 8
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android/hub
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: |
-            android/hub/package-lock.json
-            android/site/package-lock.json
-      - run: npm install --global npm@11
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - name: Cloudflare deploy guard and configuration tests
-        working-directory: .
-        run: python3 android/ci/test-cloudflare-deploy.py
-      # The website Worker shares the hostname, so it is checked in the same job.
-      - name: Website Worker tests
-        working-directory: android/site
-        run: npm ci && npm run typecheck && npm test
-      # The Vitest suite never lays a page out; this checks the docs pages in
-      # Chromium at phone and desktop widths (no page-wide horizontal scroll).
-      - name: Website rendered layout tests
-        working-directory: android/site
-        run: |
-          npx --no-install playwright-core install --with-deps --only-shell chromium
-          npm run test:rendered
-      - name: Chat download bridge tests
-        working-directory: android
-        run: node --test app/src/test/js/chat-downloads.test.cjs
-
   build:
     name: Build and test Android app
     timeout-minutes: 20
@@ -113,6 +75,9 @@ jobs:
       # The APK carries mobile/ (+ shared frontend/src/lib) only as the offline
       # demo; chat loads the UI from the worker. Gradle's checkOfflineDemo task
       # refuses to assemble without it, so this runs before any gradlew invocation.
+      - name: Chat download bridge tests
+        run: node --test app/src/test/js/chat-downloads.test.cjs
+
       - name: Build and bundle the offline demo
         working-directory: frontend
         run: |
@@ -281,7 +246,7 @@ jobs:
 
   publish:
     name: Publish verified Android download
-    needs: [account-hub, build, android-ui]
+    needs: [build, android-ui]
     if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -329,7 +329,6 @@ def docs(ctx: Context) -> None:
     mismatched = sorted(n for n in ours.keys() | theirs.keys() if ours.get(n) != theirs.get(n))
     if mismatched:
         raise Failure("docs/content and frontend/src/lib/docs/content differ: " + ", ".join(mismatched[:10]))
-    run(["node", "scripts/render-docs.mjs", "--check"], cwd=npm_ready("android/site"))
 
 
 def desktop(ctx: Context) -> None:
@@ -342,13 +341,7 @@ def desktop(ctx: Context) -> None:
     node_package("desktop", "typecheck", "test")(ctx)
 
 
-def hub(ctx: Context) -> None:
-    node_package("android/hub", "typecheck", "test")(ctx)
-    run([ctx.python, "android/ci/test-cloudflare-deploy.py"])
-
-
-def site(ctx: Context) -> None:
-    node_package("android/site", "typecheck", "test")(ctx)
+def android_bridge(ctx: Context) -> None:
     run(["node", "--test", "app/src/test/js/chat-downloads.test.cjs"], cwd=ROOT / "android")
 
 
@@ -360,7 +353,7 @@ def workflows(ctx: Context) -> None:
     run([ctx.python, "scripts/ci/test-cost-policy.py"])
     run([ctx.python, "-m", "pytest", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--confcutdir=tests/scripts",
          "tests/scripts/test_owner_publication_policy.py", "tests/scripts/test_edge_publication_gate.py",
-         "tests/scripts/test_local_ci.py", "tests/scripts/test_security_gate.py"])
+         "tests/scripts/test_local_ci.py", "tests/scripts/test_security_gate.py", "tests/scripts/test_cloud_split.py"])
 
 
 def android_play(ctx: Context) -> None:
@@ -427,14 +420,9 @@ SUITES = [
     Suite("mobile", ["mobile/*", "frontend/src/*", "frontend/package*.json"], mobile, "Mobile UI type check and tests"),
     Suite("tools", ["tools/*", "tests/core/network/vectors.json"], tools, "AI tools package and network vectors"),
     Suite("browser-mcp", ["browser-mcp/*"], browser_mcp, "Browser MCP build and tests"),
-    Suite("docs", ["docs/content/*", "frontend/src/lib/docs/content/*", "android/site/scripts/render-docs.mjs",
-                   "android/site/src/content/docs.json"], docs, "Docs copies match and the website docs render"),
+    Suite("docs", ["docs/content/*", "frontend/src/lib/docs/content/*"], docs, "App docs copies match"),
     Suite("desktop", ["desktop/*"], desktop, "Desktop typecheck and unit tests"),
-    Suite("hub", ["android/hub/*", "android/ci/test-cloudflare-deploy.py", ".github/workflows/deploy-*.yml"], hub,
-          "Account hub Worker tests and deploy guard"),
-    Suite("site", ["android/site/*", "android/app/src/test/js/*"], site, "Website Worker tests"),
-    Suite("license", ["android/license/*"], node_package("android/license", "typecheck", "test"), "License server tests"),
-    Suite("uptime", ["android/uptime/*"], node_package("android/uptime", "typecheck", "test"), "Uptime monitor tests"),
+    Suite("android-bridge", ["android/app/src/test/js/*"], android_bridge, "Android download bridge tests"),
     Suite("android-play", ["android/ci/*", ".github/workflows/android-play*.yml", ".github/workflows/release.yml"],
           android_play, "Play workflow safety checks"),
     Suite("android-app", ["android/app/*", "android/build.gradle*", "android/settings.gradle*", "android/gradle*"],

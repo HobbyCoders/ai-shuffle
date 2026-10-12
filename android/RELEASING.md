@@ -26,7 +26,7 @@ never publish to production.
 The downloads page (`hobbycoders.com/ai-shuffle/downloads`) links a sideload
 APK once the account hub lists one: the `android` entry of
 `GET /v1/desktop/installers`, served at `/v1/desktop/installer/android`
-(`android/hub/README.md`, "Installers per platform"). It is published per
+(`hobbycoders-cloud/hub/README.md`, "Installers per platform"). It is published per
 release tag, after `release.yml` has created the tag's GitHub release:
 
 1. Deploy the hub with migration 0024 (`deploy-hub.yml`) if it is not live yet.
@@ -87,7 +87,7 @@ both **inside the app** and from a **web page** that works without the app.
   `app/src/main/java/com/hobbycoders/aishuffle/account/AccountDeletion.kt` and
   `ui/AccountActivity.kt`.
 - **On the web:** <https://hobbycoders.com/delete-account>. It is served by
-  the account hub (`android/hub/src/account-deletion.ts`, `deletion-page.ts`)
+  the account hub (`hobbycoders-cloud/hub/src/account-deletion.ts`, `deletion-page.ts`)
   and must keep working at this URL when the marketing site moves to its own
   Worker (master plan W1 keeps `/delete-account` on the hub).
 
@@ -121,7 +121,7 @@ The page's support link is `support@hobbycoders.com` (report 03, SEC-20).
 The owner requires a dedicated mailbox, not forwarding. It is not ready:
 provider/plan selection, private mailbox creation, DNS approval/configuration
 and an actual delivery/receipt check are pending. No purchase, signup or DNS
-change is authorized. Tests in `android/hub` and `android/site` check the
+change is authorized. Tests in `hobbycoders-cloud/hub` and `hobbycoders-cloud/site` check the
 support address in source/responses, not mailbox delivery.
 
 ## Data safety form (factual draft; Console answers pending)

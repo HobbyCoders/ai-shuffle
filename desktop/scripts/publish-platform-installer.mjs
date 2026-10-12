@@ -87,7 +87,7 @@ const config = path.join(process.env.RUNNER_TEMP, `desktop-${platform}-installer
 try {
  await writeFile(config, JSON.stringify({ d1_databases: [{ binding: 'DB', database_name: 'shuffle-account-hub', database_id: database }] }));
  const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
- const command = sql => JSON.parse(execFileSync(process.execPath, ['android/hub/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', config, '--command', sql, '--json'], { env, encoding: 'utf8' }));
+ const command = sql => JSON.parse(execFileSync(process.execPath, ['scripts/source-publisher/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', config, '--command', sql, '--json'], { env, encoding: 'utf8' }));
  const quote = value => `'${String(value).replaceAll("'", "''")}'`;
  const old = command(`SELECT version FROM desktop_platform_installers WHERE platform=${quote(platform)};`).flatMap(r => r.results ?? [])[0];
  if (old) {

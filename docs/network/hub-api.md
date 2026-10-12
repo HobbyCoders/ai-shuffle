@@ -1,7 +1,7 @@
 # Account hub: network API contract
 
 The account hub is the Cloudflare Worker at `MOBILE_ACCOUNT_HUB_URL`. Its
-production source is `android/hub`: D1 stores accounts, linked servers, network
+production source is [hobbycoders-cloud/hub](https://github.com/HobbyCoders/hobbycoders-cloud/tree/main/hub): D1 stores accounts, linked servers, network
 admission state and opaque recovery wraps. Worker data never passes through the
 hub: workers sync directly with each other ([peer-first.md](peer-first.md)).
 Migration `0007_network_feed.sql` created the network tables. This file is the contract
@@ -144,7 +144,7 @@ other worker. An active device may explicitly clear stale recovery material with
 ## Limits
 
 The hub enforces these bounds so one account cannot fill the shared D1
-database (`android/hub/src/network.ts`):
+database (`hobbycoders-cloud/hub/src/network.ts`):
 
 | Bound | Value | Error |
 |---|---|---|
@@ -174,5 +174,5 @@ client IP. Over the limit the hub answers 429 with `Retry-After`.
 |---|---|
 | Hub unreachable | Retries on the loop cadence; LAN sync unaffected; `last_error` shown. |
 | 401/403 | Binding treated as revoked by the existing account code; loop idles. |
-| 429 or 503 with `Retry-After` | Backs off for at least that long; a running connector stays up (see `android/hub/README.md`, Cost controls). |
+| 429 or 503 with `Retry-After` | Backs off for at least that long; a running connector stays up (see `hobbycoders-cloud/hub/README.md`, Cost controls). |
 | Approval response for another device id | Rejected by `enroll_from_response` (the certificate must admit this device). |

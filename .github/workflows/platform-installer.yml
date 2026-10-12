@@ -106,9 +106,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: android/hub/package-lock.json
+          cache-dependency-path: scripts/source-publisher/package-lock.json
       - run: npm ci --no-audit --no-fund
-        working-directory: android/hub
+        working-directory: scripts/source-publisher
       - name: Upload packages to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,7 +142,7 @@ jobs:
         run: node desktop/scripts/publish-platform-installer.mjs "$PLATFORM" artifact "$RELEASE_TAG"
       - name: Copy the installer to the R2 installer bucket
         # Skipped until the owner sets the repository variable
-        # R2_INSTALLER_BUCKET (android/hub/README.md, "Installer downloads from
+        # R2_INSTALLER_BUCKET (hobbycoders-cloud/hub/README.md, "Installer downloads from
         # R2"). The hub serves the copy only when it matches the row the step
         # above published; until then it streams the GitHub release asset.
         if: vars.R2_INSTALLER_BUCKET != ''

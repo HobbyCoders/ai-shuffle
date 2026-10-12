@@ -31,7 +31,7 @@ Comparison checked against the linked products’ documentation on 2026-10-11. F
 
 ## Install
 
-For Docker Compose, use a 64-bit Intel or AMD machine with Docker installed; 8 GB of memory is recommended. After the repository is public, run these three commands in an empty directory. Until publication, the raw download URLs return 404:
+For Docker Compose, use a 64-bit Intel or AMD machine with Docker installed; 8 GB of memory is recommended. Run these three commands in an empty directory:
 
 ```sh
 curl -fsSLo compose.yaml https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/main/docs/install/compose/compose.yaml
@@ -41,13 +41,13 @@ docker compose up -d
 
 Compose pulls the public image `ghcr.io/hobbycoders/ai-shuffle-server`. No registry token or license key is needed. Open `http://localhost:8000` on that machine, then follow [first run](docs/content/getting-started/first-run.md). See the [Docker Compose guide](docs/content/getting-started/install-docker-compose.md) for network access and storage settings.
 
-Download the [Windows and Linux installers](https://github.com/HobbyCoders/ai-shuffle/releases/latest). Sideload the Android APK from the [release page](https://github.com/HobbyCoders/ai-shuffle/releases/latest). The [Google Play listing](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) is coming with the production rollout; it is not public yet. The phone app connects to a worker; it does not run agents itself.
+Download the [Windows and Linux installers](https://github.com/HobbyCoders/ai-shuffle/releases/latest). Sideload the Android APK from the [release page](https://github.com/HobbyCoders/ai-shuffle/releases/latest). [Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) availability depends on your access to the rollout track. The phone app connects to a worker; it does not run agents itself.
 
 If you choose Claude, setup can install Claude Code using Anthropic’s installer. You sign in yourself; no Claude Code binary is bundled.
 
 ## Free and Cloud
 
-The app is free and open source. Run it on your own hardware with your own AI accounts, on your LAN or your own VPN, with no HobbyCoders account or license key. Updates and same-LAN worker sync are free. AI Shuffle Cloud provides managed remote access, worker sync across networks, public endpoints for connectors, the OAuth relay for plugin sign-ins, and in-app support reports. A free Cloud account includes one remote worker with no card; a paid plan includes three workers and the other Cloud services. Ending a plan does not disable the local app; Cloud stops serving the extra tunnels. AI usage is paid to your provider, not included in Cloud. The [Cloud pricing page](https://hobbycoders.com/ai-shuffle/pricing) is coming with the public release.
+The app is free and open source. Run it on your own hardware with your own AI accounts, on your LAN or your own VPN, with no HobbyCoders account or license key. Updates and same-LAN worker sync are free. AI Shuffle Cloud provides managed remote access, worker sync across networks, public endpoints for connectors, the OAuth relay for plugin sign-ins, and in-app support reports. A free Cloud account includes one remote worker with no card; a paid plan includes three workers and the other Cloud services. Ending a plan does not disable the local app; Cloud stops serving the extra tunnels. AI usage is paid to your provider, not included in Cloud. See [Cloud pricing](https://hobbycoders.com/ai-shuffle/pricing).
 
 ## Contributing
 

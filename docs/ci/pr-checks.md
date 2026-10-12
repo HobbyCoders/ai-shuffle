@@ -17,6 +17,12 @@ The cloud-service workflows are being moved separately to the private
 repository; their runner migration is not part of this change. Cancelling the
 Blacksmith subscription is an owner action after that migration.
 
+Cloud service checks and deploy workflows live in the private
+[HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
+repository. App checks do not need that checkout. When app docs/install files
+change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
+and its README; the app still checks `docs/content` against the frontend copy.
+
 ## Before every push
 
 ```bash
@@ -28,7 +34,7 @@ python scripts/local_ci.py list      # what each suite runs, and when
 `local_ci.py` compares the branch with `origin/main` and runs each suite the
 change reaches: backend (the same function-level selection the backend test
 map gives), fluid, frontend, mobile, tools, browser-mcp, docs, desktop, the
-Cloudflare services, Android, the workflow policy tests and the in-app update
+Android app and download bridge, the workflow policy tests and the in-app update
 reach check. It runs at low CPU priority with at most two test workers
 (`LOCAL_CI_WORKERS`), because every worker host is shared with other sessions
 and, on Unraid, with everything else the server runs.
@@ -120,7 +126,7 @@ use. It audits `requirements.txt`, any Fluid requirements files, and Fluid's
 runtime dependencies from `fluid/pyproject.toml`. These are newly resolved
 requirements, not an inventory of an existing worker. It also runs
 `npm audit --audit-level=high --package-lock-only --ignore-scripts` for frontend,
-android/hub, browser-mcp, desktop and tools when their lockfiles exist, including
+scripts/source-publisher, browser-mcp, desktop and tools when their lockfiles exist, including
 dev dependencies, without installing node_modules or changing lockfiles. Each
 manifest prints one summary; PyPI advisory severity is reported as unknown
 because pip-audit does not provide it. No dependency is upgraded automatically.
