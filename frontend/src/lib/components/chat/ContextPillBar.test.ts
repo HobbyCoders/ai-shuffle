@@ -6,6 +6,7 @@ import ContextPillBar from './ContextPillBar.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
 import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
+import { resetOwnerTransitions } from '$lib/utils/handoff-episodes';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
@@ -52,6 +53,8 @@ vi.mock('$lib/api/sessions', () => ({
 const IDLE = { busy: { running: false, tasks: [] as string[] }, pending: null };
 
 afterEach(() => {
+	// Observed owner changes are module state shared by the chip, row and composer.
+	resetOwnerTransitions();
 	cleanup();
 	vi.mocked(adoptSession).mockClear();
 	vi.mocked(moveSession).mockReset();
@@ -268,7 +271,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, note('started')] });
 		await tick();
-		expect(chip.textContent).toContain('Moving to DesktopWorker…');
+		expect(chip.textContent).toContain('Sending to DesktopWorker…');
 		expect(chip.disabled).toBe(true);
 
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, note('started'), note('moved')] });
@@ -276,6 +279,33 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(chip.getAttribute('aria-busy')).toBeNull();
 		expect(chip.disabled).toBe(false);
 		expect(chip.textContent).toContain('Unraid');
+	});
+
+	it('clears a sending hand-off once the session row changes to the target (#2304)', async () => {
+		resetOwnerTransitions();
+		const handOff = {
+			id: 'tool-handoff', role: 'assistant', type: 'tool_use', content: '', toolStatus: 'complete',
+			toolName: 'mcp__builtins__HandOffSession', toolInput: { worker: 'DesktopWorker' },
+			toolResult: JSON.stringify({ queued: true, worker: 'DesktopWorker', message: 'Hand-off to DesktopWorker is queued.' })
+		};
+		const started = {
+			id: 'handoff-started', role: 'system', type: 'system', content: '',
+			systemSubtype: 'handoff', systemData: { status: 'started', worker: 'DesktopWorker' }
+		};
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, started] });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner', owner_device_id: 'dev_unraid',
+			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		expect(chip.textContent).toContain('Sending to DesktopWorker…');
+
+		await tick();
+		// The source worker never sees `moved`; the owner change is the signal.
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'gaming', owner_device_id: 'dev_gaming',
+			device_name: 'DesktopWorker', device_online: true, is_remote: true, controllable: true }]);
+		await tick();
+		expect(chip.getAttribute('aria-busy')).toBeNull();
+		expect(chip.textContent).not.toContain('Sending');
 	});
 
 	it('shows why Continue here failed and restores the chip', async () => {

@@ -21,6 +21,7 @@ import { isNavigableUserTurn } from './transcript-navigation';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
 import { displayToolName } from './tool-icons';
 import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
+import { handoffEpisodes, isHandoffTool, sameHandoffs, type HandoffEpisodes } from './handoff-episodes';
 
 export interface WorkLogEntry {
 	message: ChatMessage;
@@ -146,6 +147,11 @@ export interface TranscriptModel {
 	 * "· mid-turn".
 	 */
 	midTurnUserIds: ReadonlySet<string>;
+	/**
+	 * Hand-offs, one row each (see handoff-episodes.ts): the anchor row renders
+	 * the episode's current phase; the later records it absorbed are not rows.
+	 */
+	handoffs: HandoffEpisodes;
 }
 
 /**
@@ -218,6 +224,9 @@ function isTurnWork(msg: ChatMessage): boolean {
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
 		isSwarmTool(msg.toolName ?? '') ||
+		// A hand-off is one row that moves through its phases after the turn
+		// ends: folding it would hide the row the later records update.
+		isHandoffTool(msg) ||
 		msg.toolName === 'TodoWrite' ||
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||
@@ -1030,6 +1039,9 @@ export function createTranscriptModelBuilder() {
 			model = patchRow(old!.model, itemAt, changed, messages[changed]);
 		} else {
 			model = buildTranscriptModel(messages, options, turnCache);
+			// Unchanged hand-offs keep their identity, so rows that read them do
+			// not re-evaluate on a rebuild that changed something else.
+			if (old && sameHandoffs(old.model.handoffs, model.handoffs)) model = { ...model, handoffs: old.model.handoffs };
 		}
 		// The locator lives on `previous`, so it always describes the current
 		// model: any other path (a rebuild, a session switch, a streamed tail)
@@ -1189,6 +1201,7 @@ export function buildTranscriptModel(
 	const { isStreaming, groupingEnabled } = options;
 	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
 	const swarmOwned = swarmOwnedMessages(messages, options);
+	const handoffs = handoffEpisodes(messages);
 
 	// Duplicate ids crash Svelte's keyed each; drop repeats defensively.
 	const seen = new Set<string>();
@@ -1226,6 +1239,7 @@ export function buildTranscriptModel(
 		if (
 			isAssistantPhantom(message) ||
 			swarmOwned.has(message) ||
+			handoffs.absorbed.has(message) ||
 			isTransientProviderRetry(message)
 		) return;
 		if (message.id) {
@@ -1414,6 +1428,7 @@ export function buildTranscriptModel(
 		itemIndexByTurnId,
 		lastAssistantMetadata,
 		latestUserTurnId,
-		midTurnUserIds
+		midTurnUserIds,
+		handoffs
 	};
 }

@@ -170,6 +170,12 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'device_name',
 	'instance_id',
 	'is_remote',
+	// A hand-off committed (#2308): the source worker publishes the new owner on
+	// the global feed. The row is the hand-off row's owner (handoff-episodes.ts
+	// settleByOwner), so this patch is what settles it live; see
+	// STALE_COMPANION_FIELDS for the owner's name and remote flag.
+	'owner_device_id',
+	'placement',
 	'turn_count',
 	'total_cost_usd',
 	'pr_number',
@@ -206,7 +212,12 @@ const LIST_SHAPE_FIELDS: ReadonlySet<string> = new Set(['hidden', 'tags', 'proje
  * the rest. Recording a user message also bumps `updated_at`, which orders the
  * sidebar and drives the card's last activity (#2249).
  */
-const STALE_COMPANION_FIELDS: ReadonlySet<string> = new Set(['last_user_message_at']);
+const STALE_COMPANION_FIELDS: ReadonlySet<string> = new Set([
+	'last_user_message_at',
+	// The hand-off frame carries the new owner's id but not its `device_name`,
+	// `is_remote` or pin, which the reload brings.
+	'owner_device_id',
+]);
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 

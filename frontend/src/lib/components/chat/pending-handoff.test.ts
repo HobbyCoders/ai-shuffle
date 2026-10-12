@@ -71,7 +71,7 @@ describe('#1819 move waits', () => {
 		expect(handoffPlaceholder({ worker: 'DesktopWorker', phase: 'queued', afterQueued: true })).toBe(
 			'Moves to DesktopWorker after the queued messages'
 		);
-		expect(handoffPlaceholder({ worker: 'DesktopWorker', phase: 'moving' })).toBe('Moving to DesktopWorker…');
+		expect(handoffPlaceholder({ worker: 'DesktopWorker', phase: 'moving' })).toBe('Sending to DesktopWorker…');
 	});
 
 	it('ends the wait on a timeout, a refusal or a restart it could not resume', () => {

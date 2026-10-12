@@ -1994,3 +1994,53 @@ describe('live runs', () => {
 		expect(after).toEqual(buildTranscriptModel(next, LIVE));
 	});
 });
+
+describe('hand-off: one transcript row', () => {
+	const handOff = () => tool({
+		toolName: 'mcp__fluid_bundled__mcp__builtins__HandOffSession',
+		toolInput: { worker: 'DesktopWorker', note: 'Finish the review' },
+		toolResult: JSON.stringify({ queued: true, worker: 'DesktopWorker', message: 'Hand-off to DesktopWorker is queued.' })
+	});
+	const record = (status: string, content: string) => msg({
+		role: 'system', type: 'system', content, systemSubtype: 'handoff',
+		systemData: { status, worker: 'DesktopWorker', content }
+	});
+	/** Every row the transcript draws, in or out of a work log. */
+	const drawn = (items: DisplayItem[]) => items.flatMap((item) =>
+		item.kind === 'message' ? [item.message]
+		: item.kind === 'system_group' ? item.messages
+		: item.sequence.map((entry) => entry.message));
+
+	it('draws the call once and none of the later records, live or settled', () => {
+		const call = handOff();
+		const started = record('started', 'Handing off to DesktopWorker.');
+		const moved = record('moved', 'Handed off to DesktopWorker. This chat continues there on the same branch.');
+		const messages = [user('Hand this off'), tool(), call, text('Wrapping up here.'), started, moved];
+		for (const isStreaming of [true, false]) {
+			const model = buildTranscriptModel(messages, { isStreaming, groupingEnabled: true });
+			const rows = drawn(model.items);
+			expect(rows).toContain(call);
+			expect(rows).not.toContain(started);
+			expect(rows).not.toContain(moved);
+			expect(model.handoffs.byAnchor.get(call)?.phase).toBe('done');
+		}
+	});
+
+	it('the call never folds behind a settled work log', () => {
+		const call = handOff();
+		const model = buildTranscriptModel([user('go'), tool(), call, text('Done.')], { isStreaming: false, groupingEnabled: true });
+		const log = model.items.find((item) => item.kind === 'work_log');
+		const entry = log?.kind === 'work_log' ? log.sequence.find((e) => e.message === call) : undefined;
+		expect(entry?.hiddenWhenCollapsed).toBe(false);
+	});
+
+	it('keeps the hand-off map by identity across a rebuild that changed nothing in it', () => {
+		const build = createTranscriptModelBuilder();
+		const base = [user('go'), handOff(), text('Wrapping up.')];
+		const first = build(base, { isStreaming: false, groupingEnabled: true });
+		const second = build([...base, text('More.')], { isStreaming: false, groupingEnabled: true });
+		expect(second.handoffs).toBe(first.handoffs);
+		const third = build([...base, text('More.'), record('started', 'Handing off to DesktopWorker.')], { isStreaming: false, groupingEnabled: true });
+		expect(third.handoffs).not.toBe(first.handoffs);
+	});
+});

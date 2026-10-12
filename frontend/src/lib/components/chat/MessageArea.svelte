@@ -63,6 +63,9 @@
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
+	import HandoffCard from './HandoffCard.svelte';
+	import { EMPTY_HANDOFFS, settleByOwner } from '$lib/utils/handoff-episodes';
+	import { handoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
@@ -491,7 +494,8 @@
 				itemIndexByTurnId: new Map<string, number>(),
 				lastAssistantMetadata: null,
 				latestUserTurnId: null,
-				midTurnUserIds: new Set<string>()
+				midTurnUserIds: new Set<string>(),
+				handoffs: EMPTY_HANDOFFS
 			}
 		};
 
@@ -633,6 +637,30 @@
 	// the session's own queues and prose question.
 	const openSessionId = $derived($activeSession.sessionId);
 	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
+	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
+	// later records patch the episode, so only the anchor rows re-read this.
+	// The source worker never sees `moved`: the session row CHANGING to the
+	// target settles a move that is sending (settleByOwner keeps identity).
+	const handoffOwnerId = $derived(openRow?.owner_device_id ?? null);
+	const handoffOwnerName = $derived(openRow?.device_name ?? null);
+	const handoffPendingView = $derived(openSessionId ? $handoffPending[openSessionId] ?? null : null);
+	const handoffAnchors = $derived(
+		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }, openSessionId, handoffPendingView).byAnchor
+	);
+	// The owning worker's pending move: read again whenever the open identified
+	// move, its phase or the session's owner changes (a finished move then
+	// reads null from its new owner, also after a reload).
+	const openHandoff = $derived(transcript.handoffs.open);
+	const handoffWatchKey = $derived(
+		openSessionId && openHandoff?.id && openHandoff.phase === 'sending'
+			? `${openHandoff.id}\0${handoffOwnerId ?? ''}`
+			: null
+	);
+	$effect(() => {
+		const sid = openSessionId;
+		const key = handoffWatchKey;
+		if (sid && key) untrack(() => void refreshHandoffPending(sid, key));
+	});
 	const openIsRemote = $derived(!!$activeSession.isRemote);
 	const openNeeds = $derived(openSessionNeeds(
 		$activeSession,
@@ -2110,7 +2138,11 @@
      folded row renders exactly as it would inline. -->
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
-	{#if delivery}
+	{@const handoff = handoffAnchors.get(message)}
+	{#if handoff}
+		<!-- One hand-off, one row: starting → sending → settled (the later records update it). -->
+		<HandoffCard episode={handoff} />
+	{:else if delivery}
 		{@const sender = agentSender(delivery, agentNames)}
 		<ToolUseMessage
 			name="Agent message"
