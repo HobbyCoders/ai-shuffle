@@ -49,6 +49,16 @@ export const entries: SettingEntry[] = [
 		default: false
 	},
 	{
+		id: 'system.updateChannel',
+		category: 'system',
+		section: 'Updates',
+		label: 'Update channel',
+		hint: 'Tested releases',
+		help: 'Stable gets tested releases. Nightly has the newest changes and may break. Nightly changes how your data is stored, so you cannot switch back to stable without reinstalling. This applies to the connected worker only.',
+		keywords: ['stable', 'nightly', 'edge', 'beta', 'release channel', 'main'],
+		default: 'stable'
+	},
+	{
 		id: 'system.checkUpdates',
 		category: 'system',
 		section: 'Updates',

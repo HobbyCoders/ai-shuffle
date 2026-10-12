@@ -2,9 +2,9 @@
 	/**
 	 * System: Workspace (folder, import from Claude Code and Codex), Your data
 	 * (export everything as one ZIP), Updates
-	 * (policy, check for updates, version), Memory (read-only health)
-	 * and Help (report a problem to HobbyCoders support). The former License
-	 * rows live in Cloud (CloudPage.svelte).
+	 * (policy, stable or nightly channel, check for updates, version), Memory
+	 * (read-only health) and Help (report a problem to HobbyCoders support).
+	 * The former License rows live in Cloud (CloudPage.svelte).
 	 *
 	 * The workspace path saves when "Check path" finds it valid. A path edited
 	 * here is never replaced by a change made elsewhere; a banner offers the
@@ -29,7 +29,10 @@
 	import ImportWizard, { type ImportStep } from './editors/ImportWizard.svelte';
 	import UpdateCheckResults from './editors/UpdateCheckResults.svelte';
 	import MemoryHealthList from './editors/MemoryHealthList.svelte';
+	import Segmented from '../rows/Segmented.svelte';
+	import NightlyConfirm from './editors/NightlyConfirm.svelte';
 	import { UpdatesState } from './updates-state.svelte';
+	import { lockedReason, UpdateChannelState, type Channel } from './update-channel.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
 	import { fetchMemoryHealth, memoryRows, memorySummary, type MemoryHealth } from './memory-health';
 	import ReportProblemForm from './editors/ReportProblemForm.svelte';
@@ -118,20 +121,59 @@
 		void refreshDeploy();
 	}
 
+	/* ---------- update channel (this worker only) ---------- */
+
+	const channel = new UpdateChannelState();
+	const CHANNEL_OPTIONS = [
+		{ value: 'stable', label: 'Stable' },
+		{ value: 'nightly', label: 'Nightly' }
+	] as const;
+	let confirmingNightly = $state(false);
+	const channelLocked = $derived(lockedReason(channel.status));
+	const channelHint = $derived.by(() => {
+		if (channel.stalled) return 'Switch still pending';
+		if (channel.status?.restart_required) return 'Restart to apply';
+		return channel.shown === 'nightly' ? 'Newest changes, may break' : 'Tested releases';
+	});
+
+	/** Nightly asks first; stable goes straight to the server, which refuses a downgrade. */
+	function pickChannel(next: Channel): Promise<boolean> {
+		if (next === 'nightly') {
+			confirmingNightly = true;
+			return Promise.resolve(false);
+		}
+		confirmingNightly = false;
+		return channel.set(next);
+	}
+
+	function confirmNightly() {
+		confirmingNightly = false;
+		void channel.set('nightly');
+	}
+
+	function cancelNightly() {
+		confirmingNightly = false;
+		requestAnimationFrame(() =>
+			document.querySelector<HTMLElement>('[data-setting-anchor="system.updateChannel"] [aria-pressed="false"]')?.focus()
+		);
+	}
+
 	/* ---------- running revisions (deploy status) ---------- */
 
 	let deploy = $state<DeployReport | null>(null);
 	let deployError = $state('');
 	let deployOpen = $state(false);
 	let deployLoading = $state(false);
+	/** Workers not yet on the renamed channel still report its old name, edge. */
+	const isNightly = (name: string | null | undefined) => name === 'nightly' || name === 'edge';
 	// Being behind (even with an idle update check) does not prove a publication
 	// gap. Only structured current-main gate evidence proves a refusal; older
 	// backends safely omit it. Successful publication supersedes that evidence.
-	const unpublishedEdgeMain = $derived.by(() => {
+	const unpublishedNightlyMain = $derived.by(() => {
 		const report = deploy;
 		if (deployLoading || deployError || !report?.origin_main) return null;
 		return report.workers.find((worker) =>
-			worker.online && worker.channel === 'edge' && (worker.behind ?? 0) > 0 &&
+			worker.online && isNightly(worker.channel) && (worker.behind ?? 0) > 0 &&
 			worker.edge_publication_refusal?.revision === report.origin_main
 		)?.edge_publication_refusal ?? null;
 	});
@@ -194,10 +236,12 @@
 		void loadMemory();
 		void supportCaps.load();
 		updates.start();
+		void channel.refresh();
 	});
 	onDestroy(() => {
 		alive = false;
 		updates.destroy();
+		channel.destroy();
 	});
 	watchResources(['settings'], () => loadWorkspace(true));
 </script>
@@ -270,6 +314,28 @@
 			/>
 		</SettingRow>
 		<SettingRow
+			id="system.updateChannel"
+			hint={channel.load === 'ok' ? channelHint : undefined}
+			value={channel.status?.channel}
+			expanded={confirmingNightly ? nightlyConfirm : undefined}
+		>
+			{#if channel.load === 'forbidden'}
+				<ValueText value={FORBIDDEN_TEXT} />
+			{:else if channel.load === 'error'}
+				<ValueText value="Unavailable" />
+			{:else}
+				<span class="uc" data-testid="update-channel" aria-busy={channel.busy || channel.load === 'loading'}>
+					{#if channel.busy}<span class="st-spin" aria-hidden="true"></span>{/if}
+					<Segmented
+						options={CHANNEL_OPTIONS}
+						value={channel.shown}
+						disabled={channel.load !== 'ok' || channel.pending || !!channelLocked}
+						onchange={pickChannel}
+					/>
+				</span>
+			{/if}
+		</SettingRow>
+		<SettingRow
 			id="system.checkUpdates"
 			hint={updates.policy?.update_all_workers ? 'Checks every online worker' : 'Checks the connected worker'}
 			dim={!allow}
@@ -288,6 +354,43 @@
 	</RowGroup>
 	{#if updates.error}<p class="st-msg err" role="alert">{updates.error}</p>{/if}
 	{#if updates.status === 'forbidden'}<p class="st-msg">Update settings: {FORBIDDEN_TEXT.toLowerCase()}</p>{/if}
+	{#if channel.load === 'ok'}
+		{#if channel.busy}
+			<p class="st-msg" role="status">Switching to {channel.target}. The desktop app applies it within about 30 seconds.</p>
+		{:else if channel.stalled}
+			<!-- The request stays queued on the worker: say so instead of offering to undo it. -->
+			<p class="st-msg" class:err={!channel.dismissed} role={channel.dismissed ? 'status' : 'alert'} data-testid="channel-pending">
+				{#if channel.dismissed}
+					The switch to {channel.target} is still queued. It applies when the desktop app next checks in.
+				{:else}
+					The desktop app has not confirmed the switch to {channel.target}. It may be offline or busy. The request stays
+					queued, so it can still apply when the app is back.
+				{/if}
+				<span class="uc-acts">
+					<button type="button" class="st-btn sm" aria-busy={channel.checking} disabled={channel.checking} onclick={() => void channel.check()}>
+						{channel.checking ? 'Checking…' : 'Check status'}
+					</button>
+					{#if !channelLocked}
+						<button
+							type="button"
+							class="st-btn sm ghost"
+							aria-busy={channel.sending}
+							disabled={channel.sending}
+							onclick={() => channel.target && void channel.set(channel.target)}>{channel.sending ? 'Sending…' : 'Send again'}</button
+						>
+					{/if}
+					{#if !channel.dismissed}
+						<button type="button" class="st-btn sm ghost" onclick={() => channel.dismiss()}>OK</button>
+					{/if}
+				</span>
+			</p>
+		{:else if channelLocked}
+			<p class="st-msg" data-testid="channel-locked">Update channel: {channelLocked}</p>
+		{:else if channel.status?.restart_required}
+			<p class="st-msg" role="status">Saved. Restart this worker to apply the {channel.status.channel} channel.</p>
+		{/if}
+	{/if}
+	{#if channel.error}<p class="st-msg err" role="alert">{channel.error}</p>{/if}
 
 	<RowGroup title="Memory">
 		<SettingRow id="system.memoryHealth" expanded={memoryOpen && memory ? memoryList : undefined}>
@@ -315,21 +418,25 @@
 	<ReportProblemForm bind:description={problem} onContinue={reportProblem} onCancel={closeReport} />
 {/snippet}
 
+{#snippet nightlyConfirm()}
+	<NightlyConfirm onConfirm={confirmNightly} onCancel={cancelNightly} />
+{/snippet}
+
 {#snippet importWizard()}
 	<ImportWizard bind:step={importStep} onImported={(n) => (imported = n)} onClose={() => (importOpen = false)} />
 {/snippet}
 
 {#snippet results()}
 	<UpdateCheckResults rows={updates.rows ?? []} running={updates.checking} error={updates.checkError} />
-	{#if unpublishedEdgeMain}
-		<p class="st-msg" role="status">“Up to date” means the last published update. Main is at {unpublishedEdgeMain.revision}, not published to edge yet: {unpublishedEdgeMain.reason}</p>
+	{#if unpublishedNightlyMain}
+		<p class="st-msg" role="status">“Up to date” means the last published update. Main is at {unpublishedNightlyMain.revision}, not published to nightly yet: {unpublishedNightlyMain.reason}</p>
 	{/if}
 {/snippet}
 
 {#snippet deployList()}
 	<p class="st-msg">Running revisions compares workers with main. “Up to date” in Check for updates means the latest published worker update.</p>
-	{#if unpublishedEdgeMain}
-		<p class="st-msg" role="status">The newest main revision is not published as an edge worker update yet. See the publication refusal and next step below.</p>
+	{#if unpublishedNightlyMain}
+		<p class="st-msg" role="status">The newest main revision is not published as a nightly worker update yet. See the publication refusal and next step below.</p>
 	{/if}
 	<UpdateCheckResults rows={deploy ? deployRows(deploy) : []} running={deployLoading} error={deployError} />
 {/snippet}
@@ -337,3 +444,21 @@
 {#snippet memoryList()}
 	<MemoryHealthList rows={memory ? memoryRows(memory) : []} />
 {/snippet}
+
+<style>
+	.uc {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+	.uc-acts {
+		display: inline-flex;
+		gap: 6px;
+		margin-left: 6px;
+		vertical-align: middle;
+		flex-wrap: wrap;
+		/* Only the sentence takes the error colour, not the actions. */
+		color: var(--st-fg);
+	}
+</style>
