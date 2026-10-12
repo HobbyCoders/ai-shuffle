@@ -23,7 +23,7 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { Check, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
+	import { Check, CircleDashed, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
 	import { onDestroy, tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
@@ -43,6 +43,12 @@
 		isFavoriteModel,
 		toggleFavoriteModel
 	} from '$lib/stores/modelFavorites.svelte';
+	import {
+		MODEL_WINDOW_MAX,
+		MODEL_WINDOW_MIN,
+		getModelWindowInfo,
+		saveModelWindow
+	} from '$lib/stores/model-window';
 
 	interface ExtraRow {
 		value: string;
@@ -115,10 +121,23 @@
 			.filter((o): o is PickerOption => o != null)
 	);
 	const hasFavorites = $derived(favoriteOptions.length > 0);
-	const contextControl = $derived(
-		contextChoice && onContextChoiceSelect && options.some(option => option.value === value)
-			? getModelContextControl(value) : null
+	/** The host opted into the context section and the value is one of its models. */
+	const contextHosted = $derived(
+		onContextChoiceSelect != null && options.some(option => option.value === value)
 	);
+	const contextControl = $derived(
+		contextHosted && contextChoice ? getModelContextControl(value) : null
+	);
+	/**
+	 * Every other hosted model still gets the section: one known window, or an
+	 * unknown one (never guessed). Its window is the provider entry's own
+	 * `context_window`, which the owner can set from here.
+	 */
+	const modelWindow = $derived.by(() => {
+		if (!contextHosted || contextControl) return null;
+		const info = getModelWindowInfo(value);
+		return info && info.kind !== 'choice' ? info : null;
+	});
 
 	// ---- rail selection -------------------------------------------------------
 	// Initial rail pick: All (when requested), else favorites when any exist,
@@ -236,6 +255,8 @@
 		if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
 		e.preventDefault();
 		e.stopPropagation();
+		// A group of one: arrows keep focus on the only radio and change nothing.
+		if (!contextControl) return;
 		const next: ContextWindowChoice = e.key === 'Home' ? 'standard'
 			: e.key === 'End' ? '1m'
 			: contextChoice === 'standard' ? '1m' : 'standard';
@@ -429,6 +450,108 @@
 	function pickCapPreset(tokens: number) {
 		capError = null;
 		if (tokens !== shownCap) void commitCap(tokens);
+	}
+
+	// ---- Model limit editor (one known window, or none) ------------------------
+	// The window is the provider entry's own `context_window`: the turn runs and
+	// compacts against it, the usage meter divides by it. Saving writes that
+	// entry (as Settings → Providers does) and re-reads the registry.
+	let winEditorOpen = $state(false);
+	let winText = $state('');
+	let winTextFocused = $state(false);
+	let winError = $state<string | null>(null);
+	let winSaving = $state(false);
+	let winDraft = $state<number | null>(null);
+	const shownWindow = $derived(winDraft ?? modelWindow?.window ?? null);
+	/** Hosts that let Standard be adjusted let a single window be set too. */
+	const winEditable = $derived(!!modelWindow?.editable && onContextStandardChange != null);
+	const winPresets = $derived.by(() => {
+		const sizes = [64_000, 128_000, 200_000, 256_000, 400_000, 1_000_000, 2_000_000];
+		const current = modelWindow?.window;
+		if (!current) return [128_000, 200_000, 256_000, 1_000_000];
+		return [...sizes.filter((size) => size < current).slice(-3), current];
+	});
+
+	// A different model starts with the editor closed and no stale draft.
+	let winModel = '';
+	$effect(() => {
+		if (value === winModel) return;
+		winModel = value;
+		winEditorOpen = false;
+		winError = null;
+		winDraft = null;
+	});
+
+	$effect(() => {
+		const whole = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+		if (!winTextFocused) winText = whole;
+	});
+
+	function windowProblem(tokens: number | null): string | null {
+		if (tokens == null) return 'Enter a size in K tokens, like 128.';
+		if (tokens < MODEL_WINDOW_MIN) return `At least ${formatContextTokens(MODEL_WINDOW_MIN)}.`;
+		if (tokens > MODEL_WINDOW_MAX) return `Up to ${formatContextTokens(MODEL_WINDOW_MAX)}.`;
+		return null;
+	}
+
+	async function commitWindow(tokens: number) {
+		const info = modelWindow;
+		if (!winEditable || !info?.providerId) return;
+		const next = Math.round(tokens / CONTEXT_CAP_UNIT) * CONTEXT_CAP_UNIT;
+		if (next === info.window) return;
+		winDraft = next;
+		winError = null;
+		winSaving = true;
+		try {
+			await saveModelWindow(info.providerId, info.modelId, next);
+		} catch (error) {
+			winError = `Could not save: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			winSaving = false;
+			if (winDraft === next) winDraft = null;
+		}
+	}
+
+	function submitWinText(): boolean {
+		if (!winText.trim()) return false;
+		// The field shows whole K; an untouched value (1049 for 1,048,576) must
+		// not be saved back as a rounded, slightly different window.
+		if (shownWindow && winText.trim() === String(Math.round(shownWindow / CONTEXT_CAP_UNIT))) {
+			winError = null;
+			return true;
+		}
+		const tokens = parseCapText(winText);
+		const problem = windowProblem(tokens);
+		winError = problem;
+		if (problem || tokens == null) return false;
+		void commitWindow(tokens);
+		return true;
+	}
+
+	function onWinTextInput() {
+		winError = winText.trim() ? windowProblem(parseCapText(winText)) : null;
+	}
+
+	function onWinTextKeydown(e: KeyboardEvent) {
+		const whole = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			e.stopPropagation();
+			submitWinText();
+		} else if (e.key === 'Escape' && (winError || winText !== whole)) {
+			e.preventDefault();
+			e.stopPropagation();
+			winText = whole;
+			winError = null;
+		}
+	}
+
+	function onWinTextBlur() {
+		winTextFocused = false;
+		if (!submitWinText()) {
+			if (!winError?.startsWith('Could not save')) winError = null;
+			winText = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+		}
 	}
 
 </script>
@@ -714,6 +837,127 @@
 					</div>
 					{#if capError}
 						<p class="mpp-cap-error" id="{editorId}-cap-error" role="alert">{capError}</p>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	{:else if modelWindow}
+		{@const known = shownWindow != null}
+		{@const windowText = shownWindow != null ? formatContextTokens(shownWindow) : 'Unknown'}
+		<div class="mpp-context" data-model-context-control data-context-kind={modelWindow.kind}>
+			<div class="mpp-context-copy">
+				<span>Context window</span>
+				<small title={getModelLabel(value)}>{getModelLabel(value)}</small>
+			</div>
+			<div
+				class="mpp-context-toggle single"
+				role="radiogroup"
+				aria-label="Context window"
+				tabindex="-1"
+				onkeydown={onContextKeydown}
+			>
+				<button
+					type="button"
+					role="radio"
+					aria-checked="true"
+					aria-label={known ? `${windowText} · Model limit` : 'Unknown · Not advertised'}
+					title={known ? "This model's one window." : 'The provider does not advertise this model\'s window.'}
+					tabindex="0"
+					data-context-choice="model"
+					class="on"
+					class:unknown={!known}
+					class:saving={winSaving}
+				>
+					<span class="mpp-context-option-copy">
+						<span class="mpp-context-value">{windowText}</span>
+						<span class="mpp-context-caption">
+							{#if known}
+								<Lock size={9} class="mpp-context-lock" aria-hidden="true" />Model limit
+							{:else}
+								Not advertised
+							{/if}
+						</span>
+					</span>
+					{#if known}
+						<Check size={14} class="mpp-context-check" aria-hidden="true" />
+					{:else}
+						<CircleDashed size={14} class="mpp-context-check" aria-hidden="true" />
+					{/if}
+				</button>
+			</div>
+
+			<div class="mpp-cap-summary" data-context-summary>
+				<p aria-live="polite">
+					{#if known}
+						Compacts near <strong>~{windowText}</strong> tokens<span class="mpp-cap-default">{' · model limit'}</span>
+					{:else}
+						No known limit, so no usage percentage.{#if !winEditable}{' Set one in Settings → Providers.'}{/if}
+					{/if}
+				</p>
+				{#if winEditable}
+					<button
+						type="button"
+						class="mpp-cap-adjust"
+						class:open={winEditorOpen}
+						aria-expanded={winEditorOpen}
+						aria-controls="{editorId}-win"
+						onclick={() => (winEditorOpen = !winEditorOpen)}
+					>
+						{winEditorOpen ? 'Done' : known ? 'Adjust' : 'Set limit'}
+					</button>
+				{/if}
+			</div>
+
+			{#if winEditable && winEditorOpen}
+				<div
+					class="mpp-cap"
+					id="{editorId}-win"
+					role="group"
+					aria-label="Model context limit"
+					aria-busy={winSaving}
+					data-model-window-editor
+				>
+					<p class="mpp-win-note">
+						{known ? 'Lower it to compact sooner.' : 'Set the size this model accepts.'}
+						Saved on the model in Settings → Providers, so every chat on it uses this.
+					</p>
+					<div class="mpp-cap-row">
+						<div class="mpp-cap-presets" role="group" aria-label="Quick sizes">
+							{#each winPresets as preset (preset)}
+								<button
+									type="button"
+									class="mpp-cap-chip"
+									class:on={preset === shownWindow}
+									aria-pressed={preset === shownWindow}
+									disabled={winSaving}
+									onclick={() => { winError = null; void commitWindow(preset); }}
+								>
+									{formatContextTokens(preset)}
+								</button>
+							{/each}
+						</div>
+						<label class="mpp-cap-field" class:invalid={winError}>
+							<span class="sr-only">Model context limit in K tokens</span>
+							<input
+								type="text"
+								inputmode="decimal"
+								autocomplete="off"
+								spellcheck="false"
+								placeholder="—"
+								bind:value={winText}
+								disabled={winSaving}
+								aria-invalid={winError ? 'true' : undefined}
+								aria-describedby={winError ? `${editorId}-win-error` : undefined}
+								onfocus={() => (winTextFocused = true)}
+								oninput={onWinTextInput}
+								onkeydown={onWinTextKeydown}
+								onblur={onWinTextBlur}
+							/>
+							<span class="mpp-cap-unit" aria-hidden="true">K</span>
+						</label>
+					</div>
+					{#if winError}
+						<p class="mpp-cap-error" id="{editorId}-win-error" role="alert">{winError}</p>
 					{/if}
 				</div>
 			{/if}
@@ -1142,6 +1386,54 @@
 		opacity: 0.75;
 	}
 
+	/* A group of one: the model's only window, selected and not a toggle. */
+	.mpp-context-toggle.single {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	.mpp-context-toggle.single button,
+	.mpp-context-toggle.single button:hover {
+		cursor: default;
+		border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+		background: color-mix(in srgb, var(--primary) 8%, var(--popover));
+		color: var(--foreground);
+	}
+	.mpp-context-toggle.single button.unknown,
+	.mpp-context-toggle.single button.unknown:hover {
+		border-style: dashed;
+		border-color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+		background: repeating-linear-gradient(
+			-45deg,
+			transparent 0 4px,
+			color-mix(in srgb, var(--muted-foreground) 7%, transparent) 4px 6px
+		);
+		box-shadow: none;
+	}
+	.mpp-context-toggle.single button.unknown .mpp-context-value {
+		color: var(--muted-foreground);
+	}
+	.mpp-context-toggle.single button.unknown :global(.mpp-context-check) {
+		color: var(--muted-foreground);
+	}
+	.mpp-context-toggle.single button.saving .mpp-context-value {
+		animation: mpp-win-saving 0.9s ease-in-out infinite alternate;
+	}
+	@keyframes mpp-win-saving {
+		to {
+			opacity: 0.45;
+		}
+	}
+	.mpp-win-note {
+		margin: 0;
+		color: var(--muted-foreground);
+		font-size: 10.5px;
+		line-height: 1.4;
+	}
+	.mpp-cap-chip:disabled,
+	.mpp-cap-field input:disabled {
+		opacity: 0.55;
+		cursor: progress;
+	}
+
 	/* ---- Standard cap: summary line + inline editor ---------------------- */
 	.mpp-cap-summary {
 		display: flex;
@@ -1435,6 +1727,9 @@
 		}
 		.mpp-cap-slider::-webkit-slider-thumb {
 			transition: none;
+		}
+		.mpp-context-toggle.single button.saving .mpp-context-value {
+			animation: none;
 		}
 	}
 

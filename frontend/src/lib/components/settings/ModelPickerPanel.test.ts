@@ -5,8 +5,18 @@ import { reloadFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn() }));
-vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), registry: null as unknown }));
+vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, patch: mocks.patch } }));
+
+/** The stored OpenRouter row behind the registry's openrouter provider. */
+const openrouterRow = () => ({
+	id: 'or', name: 'OpenRouter', provider_type: 'openrouter',
+	models: [
+		{ id: 'moonshotai/kimi-k3', label: 'Kimi K3', context_window: 262_000,
+			pricing: { prompt: '0.000001' } },
+		{ id: 'mystery/model', label: 'Mystery' }
+	]
+});
 
 const groups = [
 	{ key: '__claude__', name: 'Claude', subtext: null, glyph: 'claude' as const, isApi: false }
@@ -33,7 +43,8 @@ const options = [
 beforeEach(async () => {
 	localStorage.clear();
 	reloadFavoriteModels();
-	mocks.get.mockResolvedValue({
+	mocks.patch.mockReset();
+	mocks.registry = {
 		models: [
 			{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
 			{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 },
@@ -48,8 +59,14 @@ beforeEach(async () => {
 					context_window_choices: [272_000, 1_000_000] },
 				{ id: 'gpt-7-nova', label: 'GPT-7 Nova', context_window: 2_000_000,
 					context_window_choices: [272_000, 2_000_000] }]
+		}, {
+			id: 'or', name: 'OpenRouter', provider_type: 'openrouter', default_model: 'moonshotai/kimi-k3',
+			models: [{ id: 'moonshotai/kimi-k3', label: 'Kimi K3', context_window: 262_000 },
+				{ id: 'mystery/model', label: 'Mystery' }]
 		}]
-	});
+	};
+	mocks.get.mockImplementation(async (path: string) =>
+		path === '/model-providers' ? { providers: [openrouterRow()] } : mocks.registry);
 	await hydrateModelRegistry();
 });
 afterEach(() => cleanup());
@@ -87,8 +104,23 @@ describe('ModelPickerPanel', () => {
 		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('1m');
 		expect(document.activeElement).toBe(extended);
 		expect(onSelect).not.toHaveBeenCalled();
-		await rerender({ value: 'claude-haiku-4-5' });
-		expect(screen.queryByRole('radiogroup', { name: 'Context window' })).toBeNull();
+		await rerender({
+			groups,
+			options: [...options, { value: 'claude-haiku-4-5', label: 'Haiku 4.5', description: '',
+				groupKey: '__claude__', group: 'Claude', groupSubtext: null }],
+			value: 'claude-haiku-4-5'
+		});
+		// One window: a group of one, selected, that never toggles.
+		const group = screen.getByRole('radiogroup', { name: 'Context window' });
+		const only = within(group).getByRole('radio');
+		expect(only.getAttribute('aria-label')).toBe('200K · Model limit');
+		expect(only.getAttribute('aria-checked')).toBe('true');
+		expect(only.tabIndex).toBe(0);
+		onContextChoiceSelect.mockClear();
+		await fireEvent.keyDown(only, { key: 'ArrowRight' });
+		await fireEvent.click(only);
+		expect(onContextChoiceSelect).not.toHaveBeenCalled();
+		expect(screen.getByText(/compacts near/i).textContent).toContain('~200K');
 	});
 
 	it('keeps Favorites first in the rail and persists functional row stars', async () => {
@@ -360,5 +392,103 @@ describe('ModelPickerPanel Standard cap editor', () => {
 		renderCap({ onContextStandardChange: undefined });
 		expect(screen.getByRole('radio', { name: '200K · Standard' })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: 'Adjust' })).toBeNull();
+	});
+});
+
+describe('ModelPickerPanel single and unknown windows', () => {
+	function renderModel(value: string, props: Record<string, unknown> = {}) {
+		return render(ModelPickerPanel, {
+			props: {
+				...buildModelPickerCatalog(), value, onSelect: vi.fn(),
+				contextChoice: '1m', onContextChoiceSelect: vi.fn(),
+				contextStandardTokens: null, onContextStandardChange: vi.fn(),
+				...props
+			}
+		});
+	}
+
+	it('shows a single known window with its compaction line and Adjust', () => {
+		renderModel('prov:or:moonshotai/kimi-k3');
+		const control = document.querySelector('[data-model-context-control]');
+		expect(control?.getAttribute('data-context-kind')).toBe('single');
+		const radios = within(screen.getByRole('radiogroup', { name: 'Context window' })).getAllByRole('radio');
+		expect(radios).toHaveLength(1);
+		expect(radios[0].getAttribute('aria-label')).toBe('262K · Model limit');
+		const summary = screen.getByText(/compacts near/i);
+		expect(summary.textContent).toContain('~262K');
+		expect(summary.textContent).toContain('model limit');
+		expect(screen.getByRole('button', { name: 'Adjust' })).toBeTruthy();
+	});
+
+	it('saves the window on the provider entry, keeping the other models as stored', async () => {
+		mocks.patch.mockImplementation(async () => {
+			const registry = mocks.registry as { providers: { id: string; models: { id: string; context_window?: number }[] }[] };
+			registry.providers[1].models[0].context_window = 200_000;
+			return {};
+		});
+		renderModel('prov:or:moonshotai/kimi-k3');
+		await fireEvent.click(screen.getByRole('button', { name: 'Adjust' }));
+		const editor = screen.getByRole('group', { name: 'Model context limit' });
+		await fireEvent.click(within(editor).getByRole('button', { name: '200K' }));
+		await vi.waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
+		expect(mocks.patch).toHaveBeenCalledWith('/model-providers/or', {
+			models: [
+				{ id: 'moonshotai/kimi-k3', label: 'Kimi K3', context_window: 200_000,
+					pricing: { prompt: '0.000001' } },
+				{ id: 'mystery/model', label: 'Mystery' }
+			]
+		});
+		await vi.waitFor(() =>
+			expect(screen.getByRole('radio', { name: '200K · Model limit' })).toBeTruthy());
+	});
+
+	it('reports a failed save and keeps the previous window', async () => {
+		mocks.patch.mockRejectedValue(new Error('offline'));
+		renderModel('prov:or:moonshotai/kimi-k3');
+		await fireEvent.click(screen.getByRole('button', { name: 'Adjust' }));
+		const field = within(screen.getByRole('group', { name: 'Model context limit' }))
+			.getByRole('textbox', { name: /model context limit/i }) as HTMLInputElement;
+		await fireEvent.focus(field);
+		// Leaving the field untouched saves nothing.
+		await fireEvent.blur(field);
+		expect(mocks.patch).not.toHaveBeenCalled();
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: '5' } });
+		expect(screen.getByRole('alert').textContent).toBe('At least 8K.');
+		await fireEvent.input(field, { target: { value: '128' } });
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Could not save: offline'));
+		expect(screen.getByRole('radio', { name: '262K · Model limit' })).toBeTruthy();
+	});
+
+	it('shows Unknown for a model with no advertised window and never guesses one', async () => {
+		renderModel('prov:or:mystery/model');
+		const control = document.querySelector('[data-model-context-control]');
+		expect(control?.getAttribute('data-context-kind')).toBe('unknown');
+		const only = screen.getByRole('radio', { name: 'Unknown · Not advertised' });
+		expect(only.getAttribute('aria-checked')).toBe('true');
+		expect(control?.textContent).not.toContain('200K');
+		expect(screen.getByText(/no known limit/i)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Set limit' }));
+		const editor = screen.getByRole('group', { name: 'Model context limit' });
+		const field = within(editor).getByRole('textbox') as HTMLInputElement;
+		expect(field.value).toBe('');
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: '131' } });
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		await vi.waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
+		const body = mocks.patch.mock.calls[0][1] as { models: { id: string; context_window?: number }[] };
+		expect(body.models.find((m) => m.id === 'mystery/model')?.context_window).toBe(131_000);
+	});
+
+	it('points to Settings when the host cannot adjust and offers no editor', () => {
+		renderModel('prov:or:mystery/model', { onContextStandardChange: undefined });
+		expect(screen.queryByRole('button', { name: /set limit|adjust/i })).toBeNull();
+		expect(screen.getByText(/settings → providers/i)).toBeTruthy();
+	});
+
+	it('hides the section on profile pickers that do not host context controls', () => {
+		renderModel('prov:or:moonshotai/kimi-k3', { contextChoice: undefined, onContextChoiceSelect: undefined });
+		expect(document.querySelector('[data-model-context-control]')).toBeNull();
 	});
 });
