@@ -590,25 +590,48 @@ describe('Sidebar Needs you lane', () => {
 		}
 	});
 
-	it('lifts rows waiting on a prompt out of Active and Settled, and back when answered', async () => {
-		mocks.backgroundPermissions.set(new Map([
-			['active', { count: 1, kind: 'permission' }],
-			['settled', { count: 1, kind: 'question' }],
-		]));
+	it('lifts an active row waiting on a prompt out of Active, and back when answered', async () => {
+		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind: 'permission' }]]));
 		render(Sidebar, { props: sidebarProps });
-		expect(labels()).toEqual(['Needs you 2', 'Active 0', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 		expect(lane()?.textContent).toContain('Active chat');
-		expect(lane()?.textContent).toContain('Settled chat');
-
-		mocks.backgroundPermissions.set(new Map([['settled', { count: 1, kind: 'question' }]]));
-		await tick();
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
-		expect(lane()?.textContent).not.toContain('Active chat');
 
 		mocks.backgroundPermissions.set(new Map());
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 		expect(lane()).toBeNull();
+	});
+
+	// #2324: settling is the user saying "not now" — a settled row never sits
+	// under Needs you, even while the server still reports a wait.
+	it('keeps a settled row that still reports a wait under Settled', () => {
+		mocks.backgroundPermissions.set(new Map([['settled', { count: 1, kind: 'question' }]]));
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(lane()).toBeNull();
+		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Settled chat');
+	});
+
+	it('moves a waiting row from Needs you to Settled the moment it is settled', async () => {
+		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind: 'permission' }]]));
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+
+		// The optimistic settle flips is_active before the attention entry clears.
+		mocks.sessions.set((mocks.sessions.current as { id: string }[]).map((r) => (r.id === 'active' ? { ...r, is_active: false } : r)));
+		await tick();
+		expect(labels()).toEqual(['Active 0', 'Settled 2']);
+		expect(lane()).toBeNull();
+		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Active chat');
+	});
+
+	it('keeps a settled mirror whose owner still reports a question under Settled', () => {
+		mocks.sessions.set([
+			session('remote', 'Remote chat', 'visible-project', false, false, { is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'question' }),
+		]);
+		render(Sidebar, { props: sidebarProps });
+		expect(lane()).toBeNull();
+		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Remote chat');
 	});
 
 	// Spec §5: the open session's own queues and a prose question count, and
@@ -646,21 +669,21 @@ describe('Sidebar Needs you lane', () => {
 			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
 			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
 		];
-		rememberLeavingProseQuestion('settled', asked);
+		rememberLeavingProseQuestion('active', asked);
 		onTestFinished(_resetProseQuestions);
 		render(Sidebar, { props: sidebarProps });
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
-		expect(cardFrame('Settled chat').textContent).toContain('Awaiting input');
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Awaiting input');
 
 		mocks.sessions.set([
-			session('active', 'Active chat', 'visible-project', true),
-			session('settled', 'Settled chat', 'visible-project', false, false, { work_started_at: '2026-10-11T00:00:00Z' }),
+			session('active', 'Active chat', 'visible-project', true, false, { work_started_at: '2026-10-11T00:00:00Z' }),
+			session('settled', 'Settled chat', 'visible-project', false),
 			session('worker', 'Hidden worker', 'hidden-project', true, true),
 		]);
 		await tick();
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 		// Reopened here with the answer loaded, then left: the switcher drops it.
-		rememberLeavingProseQuestion('settled', [...asked, { id: 'u2', role: 'user' as const, content: 'Prod only' }]);
+		rememberLeavingProseQuestion('active', [...asked, { id: 'u2', role: 'user' as const, content: 'Prod only' }]);
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});
@@ -673,16 +696,16 @@ describe('Sidebar Needs you lane', () => {
 			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?', seq: 5, epoch: 'evt-1' }
 		];
 		const rev = (seq: number) => ({ last_user_message_seq: seq, last_user_message_epoch: 'evt-1' });
-		rememberLeavingProseQuestion('settled', asked, rev(4));
+		rememberLeavingProseQuestion('active', asked, rev(4));
 		onTestFinished(_resetProseQuestions);
 		render(Sidebar, { props: sidebarProps });
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 
-		observeLastUserMessage('settled', rev(5));
+		observeLastUserMessage('active', rev(5));
 		await tick();
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 
-		observeLastUserMessage('settled', rev(6));
+		observeLastUserMessage('active', rev(6));
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});
@@ -693,18 +716,30 @@ describe('Sidebar Needs you lane', () => {
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 
 		const pair = { last_assistant_question_seq: 12, last_assistant_question_epoch: 'evt-1' };
-		observeLastUserMessage('settled', { ...pair, last_user_message_seq: 9, last_user_message_epoch: 'evt-1' });
+		observeLastUserMessage('active', { ...pair, last_user_message_seq: 9, last_user_message_epoch: 'evt-1' });
 		await tick();
-		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 
-		observeLastUserMessage('settled', { last_user_message_seq: 13, last_user_message_epoch: 'evt-1' });
+		observeLastUserMessage('active', { last_user_message_seq: 13, last_user_message_epoch: 'evt-1' });
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 
 		// A question position from another log is never compared: unmarked.
-		observeLastUserMessage('settled', { ...pair, last_assistant_question_epoch: 'evt-2' });
+		observeLastUserMessage('active', { ...pair, last_assistant_question_epoch: 'evt-2' });
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+	});
+
+	// #2324: a settled session's prose question keeps it in Settled.
+	it('keeps a settled session with a remembered prose question under Settled', () => {
+		rememberLeavingProseQuestion('settled', [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
+		]);
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(lane()).toBeNull();
 	});
 
 	it('takes a remote session from its owner state, not the local map', () => {

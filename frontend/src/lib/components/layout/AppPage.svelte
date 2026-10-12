@@ -22,7 +22,7 @@
 	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
-	import { observeSessionRows, proseQuestionSessions } from '$lib/stores/session/prose-questions';
+	import { isTranscriptProseDismissed, observeSessionRows, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -485,7 +485,8 @@
 	const openNeeds = $derived(openSessionNeeds(
 		$activeSession ?? {},
 		groupToolCalls,
-		!!openId && $proseQuestionSessions.has(openId)
+		!!openId && $proseQuestionSessions.has(openId),
+		isTranscriptProseDismissed($proseQuestionDismissals, openId, $activeSession?.messages)
 	));
 	const needsYouCount = $derived(
 		$sessions.reduce((total, s) => total + (s.hidden ? 0 : countNeedsYou(

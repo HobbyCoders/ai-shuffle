@@ -970,9 +970,18 @@ export const appData = {
 			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, is_active: isActive } : x)),
 		}));
 
+		// Only the waits that exist now are this settle's to dismiss: by the time
+		// the PATCH resolves another device may have unsettled the session and
+		// started a turn whose new prompt must survive.
+		const promptSnapshot = isActive ? null : activeSession.snapshotPrompts(sessionId);
+
 		try {
 			await apiSetSessionActive(sessionId, isActive);
 			confirmLocalEdits([sessionId]);
+			// Settling dismisses the session's pending permission/question on the
+			// server (#2324); drop the local copies now rather than waiting for the
+			// echoed frame. Unsettle starts fresh, so it clears nothing.
+			if (promptSnapshot) activeSession.dismissSettledPrompts(sessionId, promptSnapshot);
 			// Reconcile with an authoritative reload.
 			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {

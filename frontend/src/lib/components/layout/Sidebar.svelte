@@ -54,7 +54,7 @@
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
-	import { proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
+	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -82,7 +82,7 @@
 		projectKey,
 		isVisibleSidebarSession,
 		isArchived,
-		isAttentionStatus,
+		sidebarGroup,
 		openSessionNeeds,
 		sessionNeedsInput,
 		liveProjectKeys,
@@ -181,7 +181,8 @@
 	const openNeedsNow = $derived(openSessionNeeds(
 		$activeSession,
 		groupToolCalls,
-		!!activeId && $proseQuestionSessions.has(activeId)
+		!!activeId && $proseQuestionSessions.has(activeId),
+		isTranscriptProseDismissed($proseQuestionDismissals, activeId, $activeSession.messages)
 	));
 	// Null while the open session waits on nothing, so switching sessions does
 	// not re-derive every row.
@@ -392,12 +393,14 @@
 			.sort((a, b) => b.ts - a.ts)
 	);
 
-	// "Needs you" lifts every row parked on a prompt out of Active/Settled.
-	// Membership follows the attention state alone, so a row moves when it
-	// starts or stops waiting on the user — never on unrelated activity.
-	const needsYouRows = $derived(rows.filter((r) => isAttentionStatus(r.status)));
-	const activeRows = $derived(rows.filter((r) => r.session.is_active && !isAttentionStatus(r.status)));
-	const settledRows = $derived(rows.filter((r) => !r.session.is_active && !isAttentionStatus(r.status)));
+	// "Needs you" lifts every ACTIVE row parked on a prompt out of Active, so
+	// an active row moves when it starts or stops waiting on the user — never
+	// on unrelated activity. Settling is the user saying "not now" (#2324): a
+	// settled row always lands in Settled, keeping its amber badge if the
+	// server still reports a wait.
+	const needsYouRows = $derived(rows.filter((r) => sidebarGroup(r.status, !!r.session.is_active) === 'needs'));
+	const activeRows = $derived(rows.filter((r) => sidebarGroup(r.status, !!r.session.is_active) === 'active'));
+	const settledRows = $derived(rows.filter((r) => sidebarGroup(r.status, !!r.session.is_active) === 'settled'));
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
 	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));

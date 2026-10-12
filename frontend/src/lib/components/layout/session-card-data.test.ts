@@ -15,6 +15,7 @@ import {
 	deriveStatus,
 	diffCounts,
 	isAttentionStatus,
+	sidebarGroup,
 	isLiveStatus,
 	isTurnLiveStatus,
 	isRemovedDeviceSession,
@@ -519,6 +520,19 @@ describe('runtime status words', () => {
 		expect(isAttentionStatus('await')).toBe(true);
 		expect(isAttentionStatus('working')).toBe(false);
 		expect(isAttentionStatus('done')).toBe(false);
+	});
+
+	// #2324: a settled row never sits under Needs you, whatever it reports.
+	it('groups active waiting rows under Needs you and every settled row under Settled', () => {
+		expect(sidebarGroup('needs_permission', true)).toBe('needs');
+		expect(sidebarGroup('has_question', true)).toBe('needs');
+		expect(sidebarGroup('await', true)).toBe('needs');
+		expect(sidebarGroup('working', true)).toBe('active');
+		expect(sidebarGroup('done', true)).toBe('active');
+		expect(sidebarGroup('needs_permission', false)).toBe('settled');
+		expect(sidebarGroup('has_question', false)).toBe('settled');
+		expect(sidebarGroup('await', false)).toBe('settled');
+		expect(sidebarGroup('idle', false)).toBe('settled');
 	});
 });
 

@@ -34,7 +34,7 @@
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
 	import { createScrollTopPersist } from './scroll-top-persist';
 	import { privateAccessPending } from '$lib/stores/chat-access';
-	import { proseQuestionSessions } from '$lib/stores/session/prose-questions';
+	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 	import { swarms } from '$lib/stores/swarms';
 	import type { SwarmSnapshot } from '$lib/utils/swarm';
@@ -665,7 +665,8 @@
 	const openNeeds = $derived(openSessionNeeds(
 		$activeSession,
 		chatPrefs?.groupToolCalls !== false,
-		!!openSessionId && $proseQuestionSessions.has(openSessionId)
+		!!openSessionId && $proseQuestionSessions.has(openSessionId),
+		isTranscriptProseDismissed($proseQuestionDismissals, openSessionId, $activeSession.messages)
 	));
 	const openNeedsYou = $derived(
 		openSessionId
