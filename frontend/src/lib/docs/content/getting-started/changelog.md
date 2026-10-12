@@ -8,6 +8,54 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 0.9.4
+
+AI Shuffle is now open source under AGPL-3.0. Local use is free and needs no license; an AI Shuffle Cloud plan only controls remote workers.
+
+### Open source and accounts
+
+- The app, desktop launcher and docs are published under AGPL-3.0 with a public README and contributor files.
+- Run free without a license. Settings → Cloud replaces the License page and only manages remote-worker seats.
+- Public downloads on hobbycoders.com; no invite gate and no trial.
+- Deleting a HobbyCoders account also erases its licenses.
+
+### Updates
+
+- Settings → System → Updates lets you pick the stable or nightly channel.
+- Updates accept more than one signing key, so the signing key can be rotated without breaking installed apps. Windows launchers refresh themselves to version 3 on this release; source-bootstrap installs refresh their starter.
+- The edge publisher identifies itself to the update server (scheduled publication had silently stopped).
+
+### Sessions and transcript
+
+- Hand-offs between workers show as one row that moves through starting, sending and done, and settle only when the other worker actually takes the session.
+- Settling a chat dismisses its pending permissions, questions and private-access cards everywhere.
+- Needs-you marks follow the exact question revision you answered, including when you answer from another device.
+- The work log keeps one entry per live run across merges, splits and reloads; failed tools and agent rows fold into the run.
+- Run headers stick within their run; the open fold header stays at the top.
+- Mirrored chats reload only on first catch-up and show a sync pill while they catch up.
+- The context meter never invents a 200k window; it shows tokens used when the bound is unknown.
+- The assistant home chat cannot be renamed, forked or deleted, including during batch deletes.
+
+### Help and reporting
+
+- Report AI content from the Help form, with a reply flag and a local-only fallback when the cloud is unreachable.
+
+### Workers and tools
+
+- Terminals: Ctrl-C works again when the app itself was started with SIGINT ignored.
+- Git worktrees are created, removed and pruned one at a time per repository, so parallel agents no longer race.
+- Image attachments are validated pixel by pixel after the header check; empty or unreadable images are refused cleanly.
+- Model picker keeps stored provider models intact and shows the context window section for every model.
+
+### Android
+
+- Play production pack: signed APK attached to releases; production and internal tracks use the exact release tag.
+
+### Release and publishing
+
+- Public-repository cutover tooling: catalog repin, staged image promotion, verified digest promotion, DCO sign-off.
+- CI moved to GitHub-hosted runners; tests run on the worker before every push.
+
 ## 0.9.3
 
 ### Voice
