@@ -13,8 +13,12 @@ const openrouterRow = () => ({
 	id: 'or', name: 'OpenRouter', provider_type: 'openrouter',
 	models: [
 		{ id: 'moonshotai/kimi-k3', label: 'Kimi K3', context_window: 262_000,
-			pricing: { prompt: '0.000001' } },
-		{ id: 'mystery/model', label: 'Mystery' }
+			pricing: { prompt: '0.000001' }, aliases: ['kimi'], enabled: true,
+			supported_parameters: ['reasoning'], top_provider: { context_length: 262_144, moderated: false } },
+		{ id: 'mystery/model', label: 'Mystery', enabled: false, aliases: ['mys'],
+			extra: { nested: { keep: [1, 2] } } },
+		{ id: 'deepseek/v4', label: 'DeepSeek V4', context_window: 1_048_576,
+			default_reasoning_level: 'high', custom_flag: 'x' }
 	]
 });
 
@@ -62,7 +66,8 @@ beforeEach(async () => {
 		}, {
 			id: 'or', name: 'OpenRouter', provider_type: 'openrouter', default_model: 'moonshotai/kimi-k3',
 			models: [{ id: 'moonshotai/kimi-k3', label: 'Kimi K3', context_window: 262_000 },
-				{ id: 'mystery/model', label: 'Mystery' }]
+				{ id: 'mystery/model', label: 'Mystery' },
+				{ id: 'deepseek/v4', label: 'DeepSeek V4', context_window: 1_048_576 }]
 		}]
 	};
 	mocks.get.mockImplementation(async (path: string) =>
@@ -431,13 +436,14 @@ describe('ModelPickerPanel single and unknown windows', () => {
 		const editor = screen.getByRole('group', { name: 'Model context limit' });
 		await fireEvent.click(within(editor).getByRole('button', { name: '200K' }));
 		await vi.waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
-		expect(mocks.patch).toHaveBeenCalledWith('/model-providers/or', {
-			models: [
-				{ id: 'moonshotai/kimi-k3', label: 'Kimi K3', context_window: 200_000,
-					pricing: { prompt: '0.000001' } },
-				{ id: 'mystery/model', label: 'Mystery' }
-			]
-		});
+		// Every stored entry goes back exactly as stored; only the target's window changes.
+		const before = openrouterRow().models;
+		const sent = (mocks.patch.mock.calls[0][1] as { models: Record<string, unknown>[] }).models;
+		expect(mocks.patch.mock.calls[0][0]).toBe('/model-providers/or');
+		expect(sent).toHaveLength(before.length);
+		expect(sent[1]).toEqual(before[1]);
+		expect(sent[2]).toEqual(before[2]);
+		expect(sent[0]).toEqual({ ...before[0], context_window: 200_000 });
 		await vi.waitFor(() =>
 			expect(screen.getByRole('radio', { name: '200K · Model limit' })).toBeTruthy());
 	});
@@ -479,6 +485,49 @@ describe('ModelPickerPanel single and unknown windows', () => {
 		await vi.waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
 		const body = mocks.patch.mock.calls[0][1] as { models: { id: string; context_window?: number }[] };
 		expect(body.models.find((m) => m.id === 'mystery/model')?.context_window).toBe(131_000);
+	});
+
+	it('saves an explicit whole-K entry over a window that is not whole K', async () => {
+		renderModel('prov:or:deepseek/v4');
+		expect(screen.getByRole('radio', { name: '1.05M · Model limit' })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Adjust' }));
+		const field = within(screen.getByRole('group', { name: 'Model context limit' }))
+			.getByRole('textbox') as HTMLInputElement;
+		expect(field.value).toBe('1049');
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: '' } });
+		await fireEvent.input(field, { target: { value: '1049' } });
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		await vi.waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
+		const sent = (mocks.patch.mock.calls[0][1] as { models: { id: string; context_window?: number }[] }).models;
+		expect(sent.find((m) => m.id === 'deepseek/v4')?.context_window).toBe(1_049_000);
+	});
+
+	it('keeps quick sizes exact and treats the current one as a no-op', async () => {
+		renderModel('prov:or:deepseek/v4');
+		await fireEvent.click(screen.getByRole('button', { name: 'Adjust' }));
+		const editor = screen.getByRole('group', { name: 'Model context limit' });
+		const current = within(editor).getByRole('button', { name: '1.05M' });
+		expect(current.getAttribute('aria-pressed')).toBe('true');
+		await fireEvent.click(current);
+		const field = within(editor).getByRole('textbox') as HTMLInputElement;
+		await fireEvent.focus(field);
+		await fireEvent.blur(field);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(mocks.patch).not.toHaveBeenCalled();
+		await fireEvent.click(within(editor).getByRole('button', { name: '1M' }));
+		await vi.waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
+		const sent = (mocks.patch.mock.calls[0][1] as { models: { id: string; context_window?: number }[] }).models;
+		expect(sent.find((m) => m.id === 'deepseek/v4')?.context_window).toBe(1_000_000);
+	});
+
+	it('points a known single window to Settings when the host cannot adjust', () => {
+		renderModel('prov:or:moonshotai/kimi-k3', { onContextStandardChange: undefined });
+		expect(screen.getByRole('radio', { name: '262K · Model limit' })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /adjust|set limit/i })).toBeNull();
+		const summary = screen.getByText(/compacts near/i);
+		expect(summary.textContent).toContain('~262K');
+		expect(summary.textContent).toContain('Settings → Providers');
 	});
 
 	it('points to Settings when the host cannot adjust and offers no editor', () => {

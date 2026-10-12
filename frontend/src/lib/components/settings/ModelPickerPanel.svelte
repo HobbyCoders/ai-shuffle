@@ -459,6 +459,8 @@
 	let winEditorOpen = $state(false);
 	let winText = $state('');
 	let winTextFocused = $state(false);
+	/** True once the owner typed in the field since it last showed the saved window. */
+	let winDirty = $state(false);
 	let winError = $state<string | null>(null);
 	let winSaving = $state(false);
 	let winDraft = $state<number | null>(null);
@@ -480,6 +482,7 @@
 		winEditorOpen = false;
 		winError = null;
 		winDraft = null;
+		winDirty = false;
 	});
 
 	$effect(() => {
@@ -494,11 +497,16 @@
 		return null;
 	}
 
+	/**
+	 * Save `tokens` exactly as given: a quick size keeps its exact value and
+	 * the field's whole-K entry is already whole. The window in effect is a
+	 * no-op, so re-picking 1.05M never rewrites 1,048,576 as 1,049,000.
+	 */
 	async function commitWindow(tokens: number) {
 		const info = modelWindow;
 		if (!winEditable || !info?.providerId) return;
-		const next = Math.round(tokens / CONTEXT_CAP_UNIT) * CONTEXT_CAP_UNIT;
-		if (next === info.window) return;
+		const next = Math.round(tokens);
+		if (next === (winDraft ?? info.window)) return;
 		winDraft = next;
 		winError = null;
 		winSaving = true;
@@ -513,22 +521,24 @@
 	}
 
 	function submitWinText(): boolean {
-		if (!winText.trim()) return false;
-		// The field shows whole K; an untouched value (1049 for 1,048,576) must
-		// not be saved back as a rounded, slightly different window.
-		if (shownWindow && winText.trim() === String(Math.round(shownWindow / CONTEXT_CAP_UNIT))) {
+		// Only an edit is saved: an untouched field (1049 shown for 1,048,576)
+		// must never be written back as a rounded, slightly different window.
+		if (!winDirty) {
 			winError = null;
 			return true;
 		}
+		if (!winText.trim()) return false;
 		const tokens = parseCapText(winText);
 		const problem = windowProblem(tokens);
 		winError = problem;
 		if (problem || tokens == null) return false;
+		winDirty = false;
 		void commitWindow(tokens);
 		return true;
 	}
 
 	function onWinTextInput() {
+		winDirty = true;
 		winError = winText.trim() ? windowProblem(parseCapText(winText)) : null;
 	}
 
@@ -543,6 +553,7 @@
 			e.stopPropagation();
 			winText = whole;
 			winError = null;
+			winDirty = false;
 		}
 	}
 
@@ -551,6 +562,7 @@
 		if (!submitWinText()) {
 			if (!winError?.startsWith('Could not save')) winError = null;
 			winText = shownWindow ? String(Math.round(shownWindow / CONTEXT_CAP_UNIT)) : '';
+			winDirty = false;
 		}
 	}
 
@@ -889,7 +901,7 @@
 			<div class="mpp-cap-summary" data-context-summary>
 				<p aria-live="polite">
 					{#if known}
-						Compacts near <strong>~{windowText}</strong> tokens<span class="mpp-cap-default">{' · model limit'}</span>
+						Compacts near <strong>~{windowText}</strong> tokens<span class="mpp-cap-default">{' · model limit'}</span>{#if !winEditable}<span class="mpp-win-pointer">{' Change it in Settings → Providers.'}</span>{/if}
 					{:else}
 						No known limit, so no usage percentage.{#if !winEditable}{' Set one in Settings → Providers.'}{/if}
 					{/if}

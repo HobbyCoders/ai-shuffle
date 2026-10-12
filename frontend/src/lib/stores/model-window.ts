@@ -15,8 +15,8 @@
  * `context_window` in `models_json` — the value
  * `model_registry.resolve_provider_context_window` reads first, the registry
  * shows and the turn runs with. Saving it is the existing
- * `PUT /model-providers/{id}` with the row's models passed through unchanged
- * apart from that one entry, exactly what Settings → Providers stores.
+ * `PATCH /model-providers/{id}` with the row's stored models sent back as
+ * they are, apart from that one entry's window.
  */
 import { listModelProviders, updateModelProvider } from '$lib/api/model-providers';
 import { getContextMaxForModel } from '$lib/constants/chat';
@@ -28,7 +28,6 @@ import {
 	isPresetModel,
 	normalizeModel
 } from '$lib/constants/models';
-import { passthroughModels } from '$lib/components/settings/providers/curation';
 
 export type ModelWindowKind = 'choice' | 'single' | 'unknown';
 
@@ -81,10 +80,16 @@ export async function saveModelWindow(providerId: string, modelId: string, token
 	const { providers } = await listModelProviders();
 	const row = (providers ?? []).find((p) => p.id === providerId);
 	if (!row) throw new Error('This provider is no longer set up.');
-	const models = passthroughModels(row.models);
-	const index = models.findIndex((m) => m.id === modelId);
-	if (index < 0) throw new Error('This model is not saved on its provider. Add it in Settings → Providers first.');
-	models[index] = { ...models[index], context_window: Math.round(tokens) };
+	const stored = row.models ?? [];
+	if (!stored.some((m) => m?.id === modelId)) {
+		throw new Error('This model is not saved on its provider. Add it in Settings → Providers first.');
+	}
+	// The worker replaces `models_json` with this array: every stored entry
+	// goes back exactly as stored (aliases, flags, pricing, anything unknown),
+	// and only the target's `context_window` changes.
+	const models = stored.map((m) =>
+		m?.id === modelId ? { ...m, context_window: Math.round(tokens) } : m
+	);
 	await updateModelProvider(providerId, { models });
 	await hydrateModelRegistry();
 }
