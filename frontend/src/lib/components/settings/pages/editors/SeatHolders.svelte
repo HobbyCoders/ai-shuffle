@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * LicenseSeats: the workers holding this license's seats, opened under
-	 * System > License > Seats when activation found every seat taken. Freeing
+	 * SeatHolders: the workers holding a paid plan's seats, opened under
+	 * Cloud > Remote workers when activation found every seat taken. Freeing
 	 * a seat uses the key that was just tried, then you activate again.
 	 */
 	import type { SeatHolder } from '$lib/api/license';
@@ -23,14 +23,14 @@
 	}
 </script>
 
-<div class="st-xlist" aria-label="Workers using this license" role="group">
+<div class="st-xlist" aria-label="Workers using this plan" role="group">
 	{#each holders as holder (holder.install_id)}
 		<SettingRow
 			label={holder.name || holder.install_id}
 			hint={[seen(holder.last_seen), holder.app_version].filter(Boolean).join(', ')}
 		>
 			<InlineConfirm
-				label="Deactivate"
+				label="Free seat"
 				question="Free this seat?"
 				confirmLabel="Free seat"
 				size="sm"
@@ -40,4 +40,4 @@
 		</SettingRow>
 	{/each}
 </div>
-<p class="st-note">Free a seat you no longer use, then activate again. The freed worker stops starting agent runs at its next license check.</p>
+<p class="st-note">Free a seat you no longer use, then activate again. That worker keeps running locally; it only loses paid remote access.</p>

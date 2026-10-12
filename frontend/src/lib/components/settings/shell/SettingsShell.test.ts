@@ -70,6 +70,7 @@ describe('SettingsShell index', () => {
 			'MCP servers',
 			'Hooks',
 			'Devices',
+			'Cloud',
 			'Security',
 			'System',
 			'Logs'

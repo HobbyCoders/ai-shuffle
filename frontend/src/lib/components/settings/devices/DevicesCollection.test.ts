@@ -359,7 +359,7 @@ describe('Devices list', () => {
 		await vi.waitFor(() => expect(screen.getByRole('switch', { name: /Sync directly on the LAN/ }).getAttribute('aria-checked')).toBe('false'));
 	});
 
-	it('shows the tunnel limit refusal with a License link', async () => {
+	it('shows the tunnel limit refusal with a Cloud link', async () => {
 		const message = 'Remote access is off: this account already uses its one remote connection.';
 		connection = {
 			signed_in: true,
@@ -376,9 +376,8 @@ describe('Devices list', () => {
 		expect(alert).toBeTruthy();
 		expect(screen.getAllByText(new RegExp(message.replace(/[.:]/g, '.'))).length).toBe(1);
 		const banner = alert!.closest('.st-banner') as HTMLElement;
-		await fireEvent.click(within(banner).getByRole('button', { name: 'Open License' }));
-		expect(settingsNav.category).toBe('system');
-		expect(settingsNav.pendingAnchor).toBe('system.license');
+		await fireEvent.click(within(banner).getByRole('button', { name: 'Open Cloud' }));
+		expect(settingsNav.category).toBe('cloud');
 	});
 });
 

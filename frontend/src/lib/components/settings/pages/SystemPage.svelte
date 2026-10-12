@@ -2,34 +2,21 @@
 	/**
 	 * System: Workspace (folder, import from Claude Code and Codex), Your data
 	 * (export everything as one ZIP), Updates
-	 * (policy, check for updates, version), Memory (read-only health),
-	 * License and Help (report a problem to HobbyCoders support).
+	 * (policy, check for updates, version), Memory (read-only health)
+	 * and Help (report a problem to HobbyCoders support). The former License
+	 * rows live in Cloud (CloudPage.svelte).
 	 *
 	 * The workspace path saves when "Check path" finds it valid. A path edited
 	 * here is never replaced by a change made elsewhere; a banner offers the
-	 * newer one instead. The license key, like every secret, needs an explicit
-	 * Activate.
+	 * newer one instead.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import { getWorkspaceConfig, setWorkspaceConfig, validateWorkspacePath } from '$lib/api/auth';
 	import { exportAllData } from '$lib/api/sessions';
-	import {
-		activateLicense,
-		deactivateLicense,
-		getLicense,
-		LICENSE_CHANGED_EVENT,
-		planName,
-		refreshLicense,
-		releaseSeat,
-		type LicenseState,
-		type LicenseStatus,
-		type SeatHolder
-	} from '$lib/api/license';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { FORBIDDEN_TEXT, loadState } from '$lib/settings/access.svelte';
-	import type { StatusTone } from '$lib/settings/types';
 	import PreferencePage from '../shell/PreferencePage.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
@@ -38,19 +25,18 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
-	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ImportWizard, { type ImportStep } from './editors/ImportWizard.svelte';
 	import UpdateCheckResults from './editors/UpdateCheckResults.svelte';
 	import MemoryHealthList from './editors/MemoryHealthList.svelte';
-	import LicenseKeyForm from './editors/LicenseKeyForm.svelte';
-	import LicenseSeats from './editors/LicenseSeats.svelte';
 	import { UpdatesState } from './updates-state.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
 	import { fetchMemoryHealth, memoryRows, memorySummary, type MemoryHealth } from './memory-health';
 	import ReportProblemForm from './editors/ReportProblemForm.svelte';
 	import { canSendSupportReport, openSupportReport, supportCaps } from '$lib/stores/support-report.svelte';
 	import './editors/editors.css';
+
+	let alive = true;
 
 	/* ---------- workspace ---------- */
 
@@ -182,148 +168,6 @@
 		memoryLoad === 'error' ? 'Unavailable' : memoryLoad === 'forbidden' ? FORBIDDEN_TEXT : memorySummary(memory)
 	);
 
-	/* ---------- license ---------- */
-
-	const STATE: Record<LicenseState, { text: string; tone: StatusTone }> = {
-		beta: { text: 'Beta', tone: 'ok' },
-		active: { text: 'Active', tone: 'ok' },
-		trialing: { text: 'Trial', tone: 'ok' },
-		grace: { text: 'Payment grace period', tone: 'warn' },
-		expiring: { text: 'Renewal overdue', tone: 'warn' },
-		ending: { text: 'Ending', tone: 'warn' },
-		expired: { text: 'Expired', tone: 'err' },
-		unlicensed: { text: 'Not activated', tone: 'warn' },
-		invalid: { text: 'Needs attention', tone: 'err' }
-	};
-
-	let license = $state<LicenseStatus | null>(null);
-	let licenseLoad = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
-	let licenseKey = $state('');
-	let licenseBusy = $state(false);
-	let licenseError = $state('');
-	let licenseNotice = $state('');
-	let seatHolders = $state<SeatHolder[] | null>(null);
-	let keyOpen = $state(false);
-	let seatsOpen = $state(false);
-	let alive = true;
-
-	const licensed = $derived(license?.mode === 'licensed');
-	const hasLease = $derived(!!license && licensed && !['unlicensed', 'invalid'].includes(license.state));
-	const stateView = $derived(
-		license
-			? (STATE[license.state] ?? { text: license.state, tone: 'off' as StatusTone })
-			: {
-					text: licenseLoad === 'forbidden' ? FORBIDDEN_TEXT : licenseLoad === 'error' ? 'Unavailable' : 'Loading…',
-					tone: undefined
-				}
-	);
-
-	function shortDate(iso: string | null): string {
-		if (!iso) return '';
-		const date = new Date(iso);
-		return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-	}
-
-	function ago(iso: string | null): string {
-		if (!iso) return 'Never checked';
-		const t = new Date(iso).getTime();
-		if (Number.isNaN(t)) return 'Checked';
-		const minutes = Math.max(0, Math.round((Date.now() - t) / 60_000));
-		if (minutes < 1) return 'Checked just now';
-		if (minutes < 60) return `Checked ${minutes} min ago`;
-		const hours = Math.round(minutes / 60);
-		if (hours < 48) return `Checked ${hours} h ago`;
-		return `Checked ${shortDate(iso)}`;
-	}
-
-	const licenseHint = $derived.by(() => {
-		if (!license) return undefined;
-		if (license.mode === 'beta') return 'No key needed in beta';
-		if (!hasLease) return undefined;
-		if (license.state === 'grace' && license.grace_until) return `Grace until ${shortDate(license.grace_until)}`;
-		if (license.state === 'expired') return license.expires_at ? `Ended ${shortDate(license.expires_at)}` : undefined;
-		const plan = planName(license.plan);
-		return license.expires_at ? `${plan}, until ${shortDate(license.expires_at)}` : plan;
-	});
-
-	async function loadLicense() {
-		const result = await loadState(getLicense);
-		if (!alive) return;
-		if (result.status === 'ok') {
-			license = result.data;
-			licenseLoad = 'ok';
-		} else {
-			licenseLoad = result.status;
-			if (result.status === 'error') licenseError = result.message;
-		}
-	}
-
-	function licenseChanged(next: LicenseStatus) {
-		license = next;
-		window.dispatchEvent(new Event(LICENSE_CHANGED_EVENT));
-	}
-
-	async function runLicense(action: () => Promise<void>) {
-		if (licenseBusy) return;
-		licenseBusy = true;
-		licenseError = '';
-		licenseNotice = '';
-		try {
-			await action();
-		} catch (cause) {
-			licenseError = getErrorMessage(cause, 'The license server could not be reached');
-		} finally {
-			licenseBusy = false;
-		}
-	}
-
-	const activate = () =>
-		runLicense(async () => {
-			const result = await activateLicense(licenseKey.trim());
-			if (!result.activated) {
-				seatHolders = result.installs;
-				seatsOpen = true;
-				licenseError = result.detail;
-				return;
-			}
-			const { activated: _activated, ...next } = result;
-			seatHolders = null;
-			licenseKey = '';
-			keyOpen = false;
-			licenseNotice = 'This worker is licensed.';
-			flashSaved();
-			licenseChanged(next);
-		});
-
-	const freeSeat = (holder: SeatHolder) =>
-		runLicense(async () => {
-			await releaseSeat(licenseKey.trim(), holder.install_id);
-			seatHolders = seatHolders?.filter((h) => h.install_id !== holder.install_id) ?? null;
-			licenseNotice = `Freed the seat of ${holder.name || 'that worker'}. Activate again to use it here.`;
-		});
-
-	const checkLicense = () =>
-		runLicense(async () => {
-			licenseChanged(await refreshLicense());
-			licenseNotice = 'Checked with the license server.';
-		});
-
-	const deactivate = () =>
-		runLicense(async () => {
-			const result = await deactivateLicense();
-			licenseNotice = result.seat_released
-				? 'License deactivated and the seat freed.'
-				: 'License removed from this worker. The license server could not be reached, so the seat frees itself after 21 days.';
-			licenseChanged(result);
-		});
-
-	const showSeats = $derived(hasLease || !!seatHolders?.length);
-	const seatsValue = $derived(
-		seatHolders?.length && !hasLease
-			? `${seatHolders.length} in use`
-			: `${license?.seats_used ?? '?'} of ${license?.seats ?? 3}`
-	);
-
 	/* ---------- help: report a problem ---------- */
 
 	let reportOpen = $state(false);
@@ -346,7 +190,6 @@
 
 	onMount(() => {
 		void loadWorkspace();
-		void loadLicense();
 		void refreshDeploy();
 		void loadMemory();
 		void supportCaps.load();
@@ -459,48 +302,6 @@
 	</RowGroup>
 	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
 
-	{#if license?.mode === 'licensed' && (license.banner || (!license.allowed && license.reason))}
-		<InlineBanner tone="warn">
-			{license.banner?.message ?? license.reason}
-		</InlineBanner>
-	{/if}
-	<RowGroup title="License">
-		<SettingRow id="system.license" hint={licenseHint}>
-			<span data-testid="license-state"><ValueText value={stateView.text} status={stateView.tone} /></span>
-		</SettingRow>
-		{#if showSeats}
-			<SettingRow id="system.seats" expanded={seatsOpen && seatHolders?.length ? seatList : undefined}>
-				{#if seatHolders?.length}
-					<ExpandToggle value={seatsValue} bind:open={seatsOpen} />
-				{:else}
-					<span data-testid="license-seats"><ValueText value={seatsValue} tone="fg" /></span>
-				{/if}
-			</SettingRow>
-		{/if}
-		{#if licensed && license}
-			<SettingRow
-				id="system.licenseKey"
-				hint={hasLease ? ago(license.last_refresh_at) : 'Paste the key to activate'}
-				expanded={keyOpen ? keyForm : undefined}
-			>
-				<ExpandToggle value={license.key_hint ? `ASH-…${license.key_hint}` : 'Not set'} mono={!!license.key_hint} bind:open={keyOpen} />
-			</SettingRow>
-		{/if}
-		{#if hasLease}
-			<SettingRow id="system.deactivate">
-				<InlineConfirm
-					label="Deactivate"
-					question="Pause new runs here?"
-					confirmLabel="Deactivate"
-					disabled={licenseBusy}
-					onConfirm={deactivate}
-				/>
-			</SettingRow>
-		{/if}
-	</RowGroup>
-	{#if licenseNotice}<p class="st-msg" role="status">{licenseNotice}</p>{/if}
-	{#if licenseError}<p class="st-msg err" role="alert">{licenseError}</p>{/if}
-
 	{#if canSendSupportReport()}
 		<RowGroup title="Help">
 			<SettingRow id="system.reportProblem" expanded={reportOpen ? reportForm : undefined}>
@@ -535,21 +336,4 @@
 
 {#snippet memoryList()}
 	<MemoryHealthList rows={memory ? memoryRows(memory) : []} />
-{/snippet}
-
-{#snippet keyForm()}
-	{#if license}
-		<LicenseKeyForm
-			status={license}
-			{hasLease}
-			busy={licenseBusy}
-			bind:key={licenseKey}
-			onActivate={activate}
-			onCheck={checkLicense}
-		/>
-	{/if}
-{/snippet}
-
-{#snippet seatList()}
-	<LicenseSeats holders={seatHolders ?? []} busy={licenseBusy} onFree={freeSeat} />
 {/snippet}

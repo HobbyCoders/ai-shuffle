@@ -252,33 +252,32 @@ it('distinguishes an old hub from an account with no phone or browser registrati
 	expect(await screen.findByText('No phones or browsers registered to this account.')).toBeTruthy();
 });
 
-it('explains a tunnel_limit refusal and links to Settings > System > License', async () => {
-	const message = 'Remote access is off: this account already uses its one remote connection. Remote access for more workers needs an AI Shuffle license (Settings > License), or turn off remote access on another worker. Local use is not affected.';
+it('explains a tunnel_limit refusal and links to Settings > Cloud', async () => {
+	const message = 'Remote access is off: this account already uses its one remote connection. Remote access for more workers needs an AI Shuffle Cloud plan (Settings > Cloud), or turn off remote access on another worker. Local use is not affected.';
 	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
 		refusal: { code: 'tunnel_limit', limit: 1, used: 1, licensed: false, message } });
 	const { layout } = await import('$lib/stores/layout.svelte');
 	const opened = vi.spyOn(layout, 'openFeaturePage');
 	render(AccountPanel);
 	const alert = await screen.findByRole('alert');
-	expect(alert.textContent).toContain('needs an AI Shuffle license');
+	expect(alert.textContent).toContain('needs an AI Shuffle Cloud plan');
 	expect(alert.textContent).toContain('1 of 1 remote connection in use');
 	expect(screen.getByText('Signed in · remote access off')).toBeTruthy();
 	expect(screen.getByText('Remote access is off: connection limit reached')).toBeTruthy();
 	// The message shows once, not again as a plain error.
 	expect(screen.getAllByText(message)).toHaveLength(1);
-	await fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings > System > License' }));
-	// openSettingsTab('license') now opens Settings > System at the license row.
-	expect(opened).toHaveBeenCalledExactlyOnceWith('settings', 'category=system&anchor=system.license');
+	await fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings > Cloud' }));
+	expect(opened).toHaveBeenCalledExactlyOnceWith('settings', 'category=cloud');
 	opened.mockRestore();
 });
 
-it('points to Settings > System > License in words during setup, where there is no Settings card', async () => {
+it('points to Settings > Cloud in words during setup, where there is no Settings card', async () => {
 	const message = 'Remote access is off.';
 	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
 		refusal: { code: 'tunnel_limit', limit: 3, used: 3, licensed: true, message } });
 	render(AccountPanel, { variant: 'setup' });
 	const alert = await screen.findByRole('alert');
 	expect(alert.textContent).toContain('3 of 3 remote connections in use');
-	expect(alert.textContent).toContain('Settings > System > License once setup is done');
+	expect(alert.textContent).toContain('Settings > Cloud once setup is done');
 	expect(within(alert).queryByRole('button')).toBeNull();
 });

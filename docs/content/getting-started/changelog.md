@@ -147,7 +147,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### License
 
 - New **Settings → License** card and an app-wide license banner. During the beta it reads **Beta: no license needed**.
-- Licenses cover one account with up to 3 workers. Leases last 14 days offline, with 14 days of grace after a failed payment. An unlicensed worker only stops starting new agent runs; your data is never locked.
+- Licenses covered one account with up to 3 workers. Leases lasted 14 days offline, with 14 days of grace after a failed payment. Without a license, a worker kept your data available but did not start new agent runs. AI Shuffle is now free to run; see [AI Shuffle Cloud](/docs/getting-started/cloud).
 - You can free the seat of a worker you no longer use from any worker.
 
 ### Security

@@ -10,6 +10,7 @@ import {
 	decodeTarget,
 	encodeTarget,
 	openSettings,
+	redirectTarget,
 	settingsNav
 } from './navigation.svelte';
 import { openSettingsTab } from '$lib/api/account';
@@ -32,7 +33,8 @@ describe('settings targets', () => {
 
 	it('accepts bare category ids and legacy tab names, and rejects junk', () => {
 		expect(decodeTarget('voice')).toEqual({ category: 'voice' });
-		expect(decodeTarget('license')).toEqual({ category: 'system', anchor: 'system.license' });
+		expect(decodeTarget('license')).toEqual({ category: 'cloud' });
+		expect(decodeTarget('cloud')).toEqual({ category: 'cloud' });
 		expect(decodeTarget('not-a-tab')).toBeNull();
 		expect(decodeTarget('category=nope')).toBeNull();
 		expect(decodeTarget('')).toBeNull();
@@ -45,12 +47,31 @@ describe('settings targets', () => {
 			chat: { category: 'general' },
 			voice: { category: 'voice' },
 			providers: { category: 'providers' },
-			license: { category: 'system', anchor: 'system.license' },
+			license: { category: 'cloud' },
+			cloud: { category: 'cloud' },
 			api: { category: 'integrations' },
 			plugins: { category: 'plugins' },
 			system: { category: 'security' },
 			logs: { category: 'logs' }
 		});
+	});
+
+	it('sends old License anchors to the Cloud page', () => {
+		expect(decodeTarget('category=system&anchor=system.license')).toEqual({ category: 'cloud', anchor: 'cloud.account' });
+		expect(decodeTarget('category=system&anchor=system.licenseKey&open=system.licenseKey')).toEqual({
+			category: 'cloud',
+			anchor: 'cloud.key',
+			open: 'cloud.key'
+		});
+		expect(redirectTarget({ category: 'system', anchor: 'system.seats' })).toEqual({ category: 'cloud', anchor: 'cloud.remoteWorkers' });
+		expect(redirectTarget({ category: 'system', anchor: 'system.checkUpdates' })).toEqual({ category: 'system', anchor: 'system.checkUpdates' });
+	});
+
+	it('moves an in-app go() to an old anchor onto Cloud', () => {
+		const nav = new SettingsNavigation(false);
+		nav.go({ category: 'system', anchor: 'system.deactivate' });
+		expect(nav.category).toBe('cloud');
+		expect(nav.pendingAnchor).toBe('cloud.deactivate');
 	});
 });
 
@@ -77,7 +98,7 @@ describe('openSettings', () => {
 		openSettingsTab('not-a-tab');
 		expect(open).not.toHaveBeenCalled();
 		openSettingsTab('license');
-		expect(open).toHaveBeenCalledExactlyOnceWith('settings', 'category=system&anchor=system.license');
+		expect(open).toHaveBeenCalledExactlyOnceWith('settings', 'category=cloud');
 	});
 });
 
