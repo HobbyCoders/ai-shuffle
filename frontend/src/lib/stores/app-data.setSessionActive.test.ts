@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
 	get: vi.fn(),
 	patchSession: vi.fn(),
 	dismissSettledPrompts: vi.fn(),
+	snapshotPrompts: vi.fn((id: string) => ({ attention: undefined, requestIds: new Set([`req-${id}`]) })),
 }));
 
 vi.mock('$lib/api/client', () => ({
@@ -24,6 +25,7 @@ vi.mock('./active-session', () => ({
 		newChat: vi.fn(),
 		validateSelectedProfile: vi.fn(),
 		dismissSettledPrompts: mocks.dismissSettledPrompts,
+		snapshotPrompts: mocks.snapshotPrompts,
 	},
 }));
 
@@ -123,7 +125,13 @@ describe('appData.setSessionActive dismisses prompts on settle', () => {
 	it('dismisses the settled session\'s prompts once the PATCH succeeds', async () => {
 		await appData.loadSessions();
 		await appData.setSessionActive('session-b', false);
-		expect(mocks.dismissSettledPrompts).toHaveBeenCalledWith('session-b');
+		// Scoped to what existed when the settle was sent, not whatever is
+		// pending once the PATCH resolves.
+		expect(mocks.snapshotPrompts).toHaveBeenCalledWith('session-b');
+		expect(mocks.dismissSettledPrompts).toHaveBeenCalledWith('session-b', {
+			attention: undefined,
+			requestIds: new Set(['req-session-b']),
+		});
 	});
 
 	it('dismisses nothing on unsettle', async () => {

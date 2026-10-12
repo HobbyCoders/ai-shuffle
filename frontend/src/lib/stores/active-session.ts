@@ -20,7 +20,7 @@ import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, P
 import { api, recheckAuthOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
-import { dismissSettledSessionPrompts } from './session/settle-prompts';
+import { dismissSettledSessionPrompts, snapshotSessionPrompts, type SettlePromptSnapshot } from './session/settle-prompts';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { LiveCompaction } from './session/v2/reducer';
 
@@ -940,8 +940,13 @@ export const activeSession = {
 	/** A confirmed settle (#2324): the server dismissed this session's waits,
 	 *  so drop its sidebar attention entry and, when it is open, its prompt
 	 *  cards. Never called on unsettle. */
-	dismissSettledPrompts(sessionId: string) {
-		dismissSettledSessionPrompts(sessionId, { backgroundPermissions, getState: () => _state, update: _update });
+	dismissSettledPrompts(sessionId: string, only?: SettlePromptSnapshot) {
+		dismissSettledSessionPrompts(sessionId, { backgroundPermissions, getState: () => _state, update: _update }, only);
+	},
+
+	/** What a settle sent now may later dismiss (see SettlePromptSnapshot). */
+	snapshotPrompts(sessionId: string): SettlePromptSnapshot {
+		return snapshotSessionPrompts(sessionId, backgroundPermissions.current, _state);
 	},
 
 	resolveInteractionByRequestId(requestId: string) {
