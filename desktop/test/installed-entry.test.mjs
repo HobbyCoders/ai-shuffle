@@ -38,6 +38,16 @@ test('initial installed launch is offline and uses bundled code with the existin
  assert.equal(f.entry.installedContext().updates.hasSourceState,false);assert.equal(f.options.root,path.resolve('existing-profile','updates'));
  assert.equal(f.events.find(e=>e?.host)?.host.userData,path.resolve('existing-profile'));
 });
+test('the acceptance fake baseline does not turn a v3 archive into an old launcher or a source launch',async()=>{
+ const launcherJson=JSON.stringify({version:3,minimum:3});
+ const build={revision:'0'.repeat(40),sequence:1};
+ const bundled=fixture({build,launcherJson});await bundled.entry.startInstalled();
+ assert.equal(bundled.events.find(e=>e?.trial!==undefined).trial,3);
+ assert.equal(bundled.events.at(-1),'run-bundled');
+ assert(!bundled.events.includes('quit'));assert.equal(bundled.launched,undefined);
+ const updated=fixture({build,launcherJson,source:true});await updated.entry.startInstalled();
+ assert.equal(updated.launched[3],3,'the updated app receives the archive version, even without the stamp');
+});
 test('Linux baseline uses userData and bundled bin/node, retaining the AppImage relaunch target',async()=>{
  const appimage=path.resolve('Downloads/AI Shuffle.AppImage');
  const f=fixture({platform:'linux',env:{APPIMAGE:appimage}});await f.entry.startInstalled();

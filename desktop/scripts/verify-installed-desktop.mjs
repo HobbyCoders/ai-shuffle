@@ -7,6 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
+import { closeInstalledDesktop } from './installed-desktop-lifecycle.mjs';
 import { configurePersistenceFixture, verifyOfflineSetup, workerJson } from '../../tests/integration/container_ui_smoke.mjs';
 assert(process.platform==='win32'&&process.env.CI==='true','Fresh Windows CI only');
 // No person is here to acknowledge the first-launch agent access disclosure.
@@ -22,19 +23,22 @@ assert(!await exists(path.join(process.env.USERPROFILE,'.ai-shuffle')),'Fresh wo
 await fs.mkdir(output,{recursive:true});
 const report={success:false,checks:[]};
 const passed=message=>{report.checks.push(message);console.log('PASS: '+message);};
-const log=await fs.open(path.join(temporary,'installed-desktop.log'),'a');
+const electronLog=path.join(temporary,'installed-desktop.log');
+const log=await fs.open(electronLog,'a');
 let chromium,browser,page;
 // The installed app's own logs (desktop/README.md), so a failed start names its
 // cause. Only these files, never the database, descriptors, keys or browser state.
-const evidenceLogs=[['logs','worker.log'],['logs','worker.prev.log'],['logs','postgres.log'],['updates','build.log']];
+const evidenceLogs=[['logs','worker.log'],['logs','worker.prev.log'],['logs','postgres.log'],['updates','build.log'],['updates','launch.log']]
+ .map(([folder,name])=>({key:folder+'/'+name,file:path.join(profile,folder,name),name}));
+evidenceLogs.push({key:'installed-desktop.log',file:electronLog,name:'installed-desktop.log'});
 const LOG_TAIL_CHARS=8*1024*1024;
 const redact=line=>line.replace(/github_pat_[A-Za-z0-9_]+|\bgh[pousr]_[A-Za-z0-9]{20,}|\bsk-[A-Za-z0-9_-]{16,}/g,'[redacted]')
  .replace(/\bBearer\s+[^\s"',]+/gi,'Bearer [redacted]').replace(/:\/\/[^\/\s:@]+:[^@\s]+@/g,'://[redacted]@')
  .replace(/\b([\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',&]+/gi,'$1$2[redacted]');
 async function collectLogs(){
  const target=path.join(output,'logs');await fs.mkdir(target,{recursive:true});report.logs={};
- for(const [folder,name] of evidenceLogs){const key=folder+'/'+name;let text;
-  try{text=await fs.readFile(path.join(profile,folder,name),'utf8');}catch(error){report.logs[key]=error.code==='ENOENT'?'missing':String(error);continue;}
+ for(const {key,file,name} of evidenceLogs){let text;
+  try{text=await fs.readFile(file,'utf8');}catch(error){report.logs[key]=error.code==='ENOENT'?'missing':String(error);continue;}
   const truncated=text.length>LOG_TAIL_CHARS;const lines=(truncated?text.slice(-LOG_TAIL_CHARS):text).split(/\r?\n/).map(redact);
   await fs.writeFile(path.join(target,name),lines.join('\n'));report.logs[key]=truncated?'copied (tail)':'copied';
   if(!report.success&&name==='worker.log')console.error('--- worker.log (last 60 lines) ---\n'+lines.slice(-60).join('\n'));}
@@ -55,9 +59,12 @@ async function connect(){await until(async()=>{
 },'Installed desktop debugger and worker did not become ready',180000);}
 const launched=[];
 async function launch(){const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});launched.push(child);child.on('error',e=>console.error(e));await connect();}
-async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
- await until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
- if(browser)await browser.close().catch(()=>{});browser=null;page=null;}
+async function close(){
+ await closeInstalledDesktop(page,browser,()=>until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000));
+ // A bundled launch owns the lock in this child; source handoff children have
+ // already exited. Do not immediately relaunch against a still-held lock.
+ await until(()=>launched.every(child=>child.exitCode!==null||child.signalCode!==null),'Installed launcher did not exit',90000);
+ browser=null;page=null;}
 async function auth(){return page.evaluate(async()=>{const r=await fetch('/api/v1/auth/status');const s=await r.json();return {setup:s.setup_required,onboarding:s.onboarding_complete};});}
 async function screenshot(name){await page.screenshot({path:path.join(output,name+'.png'),mask:[page.locator('code, textarea, input')]});}
 async function requestUpdate(action){
