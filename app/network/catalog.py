@@ -1,0 +1,563 @@
+"""Owner-ordered collections: the session catalog and transcript mirrors.
+
+Only the device a session executes on publishes it. Each owned session's
+row, tags, events and pending prompts travel as ordinary envelopes; the
+event stream carries the owner's dense ``seq`` in ``order_seq`` so a mirror
+appends in order and holds holes. A mirror is read-only: sending a message,
+answering a prompt or interrupting goes to the owner through ``control``.
+
+``publish_owned()`` runs from the scanner. It is incremental: sessions by
+content hash, events by a per-session cursor (``network_catalog_cursors``).
+Given ``session_ids`` it reconciles only those sessions' rows (see its
+docstring); the scanner's periodic whole pass still covers every session.
+Transcripts older than ``HISTORY_DAYS`` are published on demand only
+(``hydrate``), so a large backlog never delays a sidebar width.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from app.db import network as store
+from app.db.base import get_db
+from app.network import engine, envelope as envelope_mod, policy
+
+logger = logging.getLogger(__name__)
+
+HISTORY_DAYS = 30
+EVENT_BATCH = 400
+# Events published per transaction. Publishing holds the network_state row
+# lock (sequence allocation) until commit, and inbound applies wait on it.
+EVENT_CHUNK = 200
+# A scanner pass keeps publishing full batches of a backlog for at most this
+# long (or this many batches) instead of one batch per scan interval.
+EVENT_PASS_SECONDS = 1.0
+EVENT_PASS_BATCHES = 8
+# Peers refuse an envelope field over 4 MiB (``envelope._text``); the sealed
+# payload is base64 of nonce + ciphertext + tag, so bound the plaintext at
+# three quarters of that with room for the AEAD overhead.
+MAX_EVENT_BYTES = (1 << 22) * 3 // 4 - 4096
+
+# Whether the last pass stopped with transcript events still unpublished. The
+# scanner reads it (``take_events_backlog``) to rest less between passes.
+_events_backlog = False
+
+
+def has_events_backlog(*, ctx: Optional[engine.NetworkContext] = None) -> bool:
+    """Events not yet in the outbox; op watermarks alone cannot describe these."""
+    ctx = ctx or engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return False
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM sessions s
+            LEFT JOIN network_catalog_cursors c ON c.session_id = s.id
+            WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s))
+                AND (s.updated_at >= %s OR s.updated_at IS NULL)
+                AND EXISTS (SELECT 1 FROM session_events e WHERE e.session_id = s.id
+                    AND e.seq > COALESCE(c.published_seq, 0))
+            LIMIT 1
+        """, (ctx.device_id, _my_instance_id(), cutoff))
+        return cursor.fetchone() is not None
+
+
+def transcript_watermarks(session_ids: List[str], *, ctx: engine.NetworkContext) -> dict:
+    """Authoritative heads for requested, locally owned logs (including unpublished events)."""
+    from app.db.session_events import get_watermark
+
+    if not session_ids:
+        return {}
+    with get_db() as conn:
+        owned = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False,
+                                   session_ids=session_ids)
+    return {session_id: head for session_id in owned
+            if (head := get_watermark(session_id)) is not None}
+
+
+def take_events_backlog() -> bool:
+    """Whether a backlog remained after the last pass; clears the flag."""
+    global _events_backlog
+    backlog, _events_backlog = _events_backlog, False
+    return backlog
+
+
+def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_held: bool = False,
+                       unpublished_only: bool = False, session_ids: Optional[List[str]] = None) -> List[str]:
+    """Sessions this device publishes.
+
+    Owned rows always. With ``include_held``, also rows this worker still
+    holds for a legacy install that migrated to its own device but has not
+    published the session itself yet (its origin never appears in
+    ``sync_records`` for that row): the source of a shared-database cluster
+    hands those over, and stops once the owner speaks.
+    """
+    sql = ("SELECT id, updated_at, is_worker FROM sessions "
+           "WHERE (owner_device_id = %s OR (owner_device_id IS NULL AND instance_id = %s))")
+    params: List[Any] = [device_id, _my_instance_id()]
+    if include_held:
+        sql = ("SELECT s.id, s.updated_at, s.is_worker FROM sessions s "
+               "LEFT JOIN sync_records r ON r.collection = 'sessions' AND r.record_id = s.id "
+               "WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s) "
+               "OR (s.owner_device_id IS NOT NULL AND s.owner_device_id <> %s AND s.instance_id IS NOT NULL "
+               "AND (r.origin_device_id IS NULL OR r.origin_device_id = %s)))")
+        params = [device_id, _my_instance_id(), device_id, device_id]
+    if session_ids is not None:
+        if not session_ids:
+            return []
+        sql += f" AND {'s.id' if include_held else 'id'} IN ({', '.join(['%s'] * len(session_ids))})"
+        params.extend(session_ids)
+    if recent_only:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).isoformat()
+        column = "s.updated_at" if include_held else "updated_at"
+        sql += f" AND ({column} >= %s OR {column} IS NULL)"
+        params.append(cutoff)
+    if unpublished_only:
+        # One indexed existence check per eligible session, rather than two
+        # client/server round trips for every already-published transcript.
+        # Missing/zero cursors still visit the publisher so a cleared stream
+        # can retract its old tail before publishing replacement events.
+        # Top-level chats first, then sub-agent transcripts (#1978); within
+        # each, recently active sessions first: the chat the owner has open
+        # must not wait behind an old or delegated backlog.
+        sql = (f"SELECT owned.id FROM ({sql}) owned "
+               "LEFT JOIN network_catalog_cursors c ON c.session_id = owned.id "
+               "WHERE c.published_seq IS NULL OR c.published_seq = 0 OR EXISTS ("
+               "SELECT 1 FROM session_events e WHERE e.session_id = owned.id AND e.seq > c.published_seq) "
+               "ORDER BY COALESCE(owned.is_worker, FALSE), owned.updated_at DESC, owned.id")
+    cursor.execute(sql, tuple(params))
+    return [r["id"] for r in cursor.fetchall()]
+
+
+def _my_instance_id() -> str:
+    from app.core.config import settings
+    return settings.effective_instance_id
+
+
+def owned_session_ids(session_ids: Iterable[str], *, ctx: Optional[engine.NetworkContext] = None) -> List[str]:
+    """Those of ``session_ids`` this device owns and publishes."""
+    ctx = ctx or engine.context()
+    ids = sorted({sid for sid in session_ids if isinstance(sid, str) and sid})
+    if ctx is None or not ids:
+        return []
+    with get_db() as conn:
+        return _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False, session_ids=ids)
+
+
+def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
+                  session_ids: Optional[Iterable[str]] = None) -> int:
+    """Publish this device's sessions, tags, prompts and recent transcript tail.
+
+    With ``session_ids``, the session rows, runtime summaries and child rows
+    are reconciled for those sessions only. If any of them is not currently
+    an owned session (deleted, handed off, or never ours), the whole catalog
+    is reconciled instead: a deletion can change other sessions' rows (their
+    ``parent_session_id``), and prompt record ids do not name their session.
+    Transcripts always use the incremental all-session probe: it is cheap
+    when nothing is new, and it drains other sessions' backlog too.
+    """
+    ctx = ctx or engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return 0
+    ids: Optional[List[str]] = None
+    if session_ids is not None:
+        ids = sorted(set(session_ids))
+        if ids:
+            with get_db() as conn:
+                owned = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False, session_ids=ids)
+            if len(owned) != len(ids):
+                ids = None
+    published = 0
+    # Held sessions have a foreign owner, so a narrow set (all owned) has none.
+    held = _held_session_ids(ctx) if ids is None else []
+    # The owner-only scan would retract a held session this device published,
+    # and the held pass would publish it straight back: a delete and an upsert
+    # on every scan, forever, while the owner stays silent.
+    published += engine.scan_collection("sessions", ctx=ctx, owner_only=True, record_ids=ids, retain=held)
+    if held:
+        published += _publish_held_sessions(ctx, held)
+    from app.network.session_runtime import publish_owned as publish_runtime
+    published += publish_runtime(ctx, session_ids=ids)
+    published += _publish_child_rows("session_tags", ctx, session_ids=ids)
+    published += _publish_child_rows("pending_interactions", ctx, session_ids=ids)
+    global _events_backlog
+    deadline = time.monotonic() + EVENT_PASS_SECONDS
+    backlog = False
+    for _ in range(EVENT_PASS_BATCHES):
+        count, backlog = _publish_events(ctx=ctx, recent_only=True, limit=EVENT_BATCH)
+        published += count
+        if not backlog or time.monotonic() >= deadline:
+            break
+    _events_backlog = backlog
+    if published:
+        engine.kick()
+    return published
+
+
+def _held_session_ids(ctx: engine.NetworkContext) -> List[str]:
+    """Sessions with a foreign owner that this worker still publishes for it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        held = _owned_session_ids(cursor, ctx.device_id, recent_only=False, include_held=True)
+        if not held:
+            return []
+        cursor.execute("SELECT id FROM sessions WHERE owner_device_id IS NOT NULL AND owner_device_id <> %s",
+                       (ctx.device_id,))
+        foreign = {r["id"] for r in cursor.fetchall()}
+    return [sid for sid in held if sid in foreign]
+
+
+def _publish_held_sessions(ctx: engine.NetworkContext, held: List[str]) -> int:
+    """Hand migrated sessions to their owner device (shared-database cluster migration)."""
+    coll = policy.collection("sessions")
+    count = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for session_id in held:
+            row = engine._read_row(cursor, coll, session_id)
+            if row is None:
+                continue
+            existing = store.get_record(cursor, "sessions", session_id)
+            if existing is not None and existing["origin_device_id"] != ctx.device_id:
+                continue  # the owner has spoken
+            if engine.record(cursor, "sessions", session_id, row, ctx=ctx) is not None:
+                count += 1
+    return count
+
+
+def _publish_child_rows(collection: str, ctx: engine.NetworkContext, *,
+                        session_ids: Optional[List[str]] = None) -> int:
+    """Rows keyed by session (tags, prompts) for the sessions we own.
+
+    ``session_ids`` (all currently owned, see ``publish_owned``) limits the
+    pass to those sessions' rows. Tag retractions then cover only records
+    whose id starts with one of those sessions. Prompt ids do not name their
+    session and prompt rows are deleted only with it, so a narrow pass
+    publishes prompt upserts only; a deleted session reconciles in full.
+    """
+    coll = policy.collection(collection)
+    count = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        owned = set(_owned_session_ids(cursor, ctx.device_id, recent_only=False, session_ids=session_ids))
+        # Even after the last owned session disappears, its previously
+        # published children need tombstones. Peer-origin records stay intact.
+        if session_ids is None:
+            known = store.records_for_collection(cursor, collection)
+        elif coll.keys[0] == "session_id":
+            known = store.records_with_prefixes(cursor, collection, [sid + "|" for sid in sorted(owned)])
+        else:
+            known = {}
+        rows = []
+        if owned:
+            # Filter at the database boundary instead of loading every mirrored
+            # tag/prompt payload. Keep the same ownership rule as `owned` above.
+            sql = (f"SELECT child.* FROM {coll.table} child JOIN sessions s ON s.id = child.session_id "
+                   "WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s))")
+            params: List[Any] = [ctx.device_id, _my_instance_id()]
+            if session_ids is not None:
+                sql += f" AND child.session_id IN ({', '.join(['%s'] * len(owned))})"
+                params.extend(sorted(owned))
+            cursor.execute(sql, tuple(params))
+            rows = [dict(r) for r in cursor.fetchall()]
+        candidates = []
+        for row in rows:
+            if row.get("session_id") not in owned:
+                continue
+            plaintext = engine.serialize_row(coll, row)
+            if plaintext is None:
+                continue
+            candidates.append((coll.record_id(plaintext), row, plaintext))
+        if session_ids is not None and coll.keys[0] != "session_id":
+            known = store.records_for_ids(cursor, collection, [record_id for record_id, _, _ in candidates])
+        seen = set()
+        for record_id, row, plaintext in candidates:
+            seen.add(record_id)
+            existing = known.get(record_id)
+            if existing is not None and not bool(existing["deleted"]) and \
+                    existing["content_hash"] == engine.content_hash(coll, plaintext):
+                continue
+            if engine.record(cursor, collection, record_id, row, ctx=ctx) is not None:
+                count += 1
+        for record_id, existing in known.items():
+            if record_id in seen or bool(existing["deleted"]) or existing["origin_device_id"] != ctx.device_id:
+                continue
+            if engine.record(cursor, collection, record_id, None, ctx=ctx) is not None:
+                count += 1
+    return count
+
+
+def publish_events(*, ctx: Optional[engine.NetworkContext] = None, recent_only: bool = True,
+                   session_ids: Optional[List[str]] = None, limit: int = EVENT_BATCH) -> int:
+    """Append new transcript events of owned sessions to the outbox, in seq order."""
+    return _publish_events(ctx=ctx, recent_only=recent_only, session_ids=session_ids, limit=limit)[0]
+
+
+def _publish_events(*, ctx: Optional[engine.NetworkContext], recent_only: bool,
+                    session_ids: Optional[List[str]] = None, limit: int = EVENT_BATCH) -> Tuple[int, bool]:
+    """Publish up to ``limit`` events; returns (records published, budget used up).
+
+    The budget goes to sessions in priority order (``_owned_session_ids``):
+    each one publishes everything it has before the next gets any, so after
+    a long hold the top-level chat the owner is looking at is current first
+    and sub-agent transcripts follow (#1978). Nothing starves: a session's
+    backlog is finite, and it gets only its new events on later passes.
+    """
+    ctx = ctx or engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY or engine.outbox_held():
+        # While the outbox is held (see ``engine.hold_outbox``) nothing may
+        # move the per-session cursor past events that were not published.
+        return 0, False
+    coll = policy.collection("session_events")
+    if session_ids is not None:
+        targets = list(dict.fromkeys(session_ids))
+    else:
+        with get_db() as conn:
+            targets = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=recent_only,
+                                         include_held=True, unpublished_only=True)
+    count = 0
+    remaining = max(0, limit)
+    for session_id in targets:
+        if remaining <= 0:
+            break
+        published, used, _ = _publish_session_events(ctx, coll, session_id, remaining)
+        count += published
+        remaining -= used
+    if count:
+        engine.kick()
+    return count, remaining <= 0
+
+
+def _publish_session_events(ctx: engine.NetworkContext, coll: policy.Collection, session_id: str,
+                            budget: int) -> Tuple[int, int, bool]:
+    """Publish up to ``budget`` of one session's events, ``EVENT_CHUNK`` per commit.
+
+    Each commit keeps a restarted stream's retraction, the events and the
+    cursor together. Returns (records published, budget used, maybe more).
+    """
+    published = used = 0
+    while used < budget:
+        if engine.outbox_held():
+            return published, used, False
+        take = min(EVENT_CHUNK, budget - used)
+        count = 0
+        with get_db() as conn:
+            cursor = conn.cursor()
+            published_seq = store.catalog_cursor(cursor, session_id)
+            if published_seq == 0:
+                # A cleared transcript restarts at seq 1 (its cursor row is
+                # gone): retract what the network still holds beyond the new
+                # end before the fresh events replace the low seqs.
+                count += _retract_stale_events(cursor, session_id, ctx)
+            cursor.execute(
+                "SELECT * FROM session_events WHERE session_id = %s AND seq > %s ORDER BY seq LIMIT %s",
+                (session_id, published_seq, take))
+            rows = [dict(r) for r in cursor.fetchall()]
+            skipped = 0
+            for row in rows:
+                record_id = coll.record_id(row)
+                # One event the envelope cannot carry (over the size cap)
+                # must not freeze this session or the ones after it.
+                try:
+                    plaintext = engine.serialize_row(coll, row)
+                    if plaintext is not None and len(envelope_mod.record_bytes(plaintext)) > MAX_EVENT_BYTES:
+                        raise envelope_mod.EnvelopeError("Event exceeds the envelope size cap")
+                    if engine.record(cursor, "session_events", record_id, row, ctx=ctx, order_seq=int(row["seq"])) is not None:
+                        count += 1
+                except (envelope_mod.EnvelopeError, engine.ApplyError, ValueError, TypeError):
+                    skipped += 1
+                published_seq = int(row["seq"])
+            if skipped:
+                logger.warning("Skipped %d unpublishable transcript event(s) of session %s", skipped, session_id)
+            if rows:
+                store.set_catalog_cursor(cursor, session_id, published_seq)
+        published += count
+        # Skipped events use budget too, so a run of them cannot stall a pass.
+        used += max(len(rows), count)
+        if len(rows) < take:
+            return published, used, False
+    return published, used, True
+
+
+def _retract_stale_events(cursor, session_id: str, ctx: engine.NetworkContext) -> int:
+    """Delete published events past the transcript's current end (a restarted stream)."""
+    cursor.execute("SELECT MAX(seq) AS s FROM session_events WHERE session_id = %s", (session_id,))
+    row = cursor.fetchone()
+    max_seq = int(row["s"]) if row and row["s"] is not None else 0
+    cursor.execute(
+        "SELECT record_id FROM sync_records WHERE collection = 'session_events' AND deleted = FALSE "
+        "AND order_seq > %s AND record_id LIKE %s", (max_seq, session_id + "|%"))
+    stale = [r["record_id"] for r in cursor.fetchall() if r["record_id"].split("|", 1)[0] == session_id]
+    count = 0
+    for record_id in stale:
+        if engine.record(cursor, "session_events", record_id, None, ctx=ctx) is not None:
+            count += 1
+    return count
+
+
+def hydrate(session_id: str) -> int:
+    """Publish a whole transcript on demand (a peer asked for an old session)."""
+    ctx = engine.context()
+    if ctx is None:
+        return 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if session_id not in _owned_session_ids(cursor, ctx.device_id, recent_only=False):
+            return 0
+    # Committed EVENT_CHUNK events at a time, like the scanner's passes.
+    return publish_events(ctx=ctx, session_ids=[session_id], limit=1_000_000)
+
+
+# ---------------------------------------------------------------------------
+# Mirror-side hooks (called by the engine after materializing a record)
+# ---------------------------------------------------------------------------
+
+#: Session columns only the worker that runs the chat may set through sync:
+#: its account label (#1849, #1873) and its permission binding (#1887). A
+#: device that does not run the chat changes the binding through the owner's
+#: control channel (``permission-mode``, ``run-settings``), never its copy.
+OWNER_ONLY_SESSION_FIELDS = ("provenance_owner", "permission_mode", "permission_ceiling")
+
+
+def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[str],
+                     device_id: Optional[str]) -> bool:
+    """True when this copy may set the chat's owner-only columns (#1849, #1887).
+
+    Only the worker that runs the chat knows whose it is, so only a copy that
+    worker signed carries the label. The worker that runs the chat keeps its
+    own column (written from its own record); a mirror takes the label from
+    the owner it already knows, or for a chat it has not seen yet, from the
+    worker the copy names as its owner. A copy from any other worker, or one
+    whose sender cannot be identified, never sets, clears or changes it. The
+    permission binding (:data:`OWNER_ONLY_SESSION_FIELDS`) follows the same rule.
+    """
+    if not origin_device_id or origin_device_id == device_id:
+        return False
+    cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (record["id"],))
+    local = cursor.fetchone()
+    owner = local["owner_device_id"] if local is not None else None
+    if local is not None and (owner == device_id or (
+            not owner and (local["instance_id"] or "") in ("", _my_instance_id()))):
+        return False  # This worker runs the chat: its own record is the only source.
+    if not owner:
+        owner = record.get("owner_device_id")
+    if not owner and local is not None:
+        # A legacy row with no owner: the worker whose stream wrote it here.
+        existing = store.get_record(cursor, "sessions", record["id"])
+        owner = existing["origin_device_id"] if existing is not None else None
+    return bool(owner) and owner == origin_device_id
+
+
+def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: Optional[str] = None,
+                           device_id: Optional[str] = None) -> Dict[str, Any]:
+    """A mirrored session must not reference local-only rows it cannot see.
+
+    ``origin_device_id`` is the worker that signed the copy and ``device_id``
+    this worker; without them the copy cannot set the chat's account label.
+    """
+    record = dict(record)
+    project_id = record.get("project_id")
+    if project_id:
+        cursor.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,))
+        if cursor.fetchone() is None:
+            record["project_id"] = None
+    profile_id = record.get("profile_id")
+    if profile_id:
+        cursor.execute("SELECT 1 FROM agents WHERE id = %s", (profile_id,))
+        if cursor.fetchone() is None:
+            record["profile_id"] = None
+    api_user_id = record.get("api_user_id")
+    if api_user_id:
+        cursor.execute("SELECT 1 FROM api_users WHERE id = %s", (api_user_id,))
+        if cursor.fetchone() is None:
+            record["api_user_id"] = None
+    if not record.get("api_user_id") and record.get("id"):
+        # A copy that names no API key never erases the key this worker holds
+        # for the session (a hub placing a key's session on a runner that did
+        # not keep it). Deleting the key clears the column locally (SET NULL).
+        cursor.execute("SELECT api_user_id FROM sessions WHERE id = %s", (record["id"],))
+        local = cursor.fetchone()
+        if local is not None and local["api_user_id"]:
+            record["api_user_id"] = local["api_user_id"]
+    if record.get("id") and not _provenance_from(cursor, record, origin_device_id, device_id):
+        # Only the owning worker labels the chat (#1849) and sets its
+        # permission binding (#1887): any other copy leaves those columns as
+        # this worker holds them (none for a new row). An owner on an older
+        # build omits the label, with the same effect.
+        for field in OWNER_ONLY_SESSION_FIELDS:
+            record.pop(field, None)
+    # A later owner catalog update must not undo an offline sidebar edit.
+    # Keep this independent of the owner's stream, including when membership
+    # arrives before the session catalog during bootstrap.
+    cursor.execute("SELECT is_active FROM network_session_active WHERE session_id = %s", (record["id"],))
+    active = cursor.fetchone()
+    if active is not None:
+        record["is_active"] = bool(active["is_active"])
+    parent = record.get("parent_session_id")
+    if parent:
+        cursor.execute("SELECT 1 FROM sessions WHERE id = %s", (parent,))
+        if cursor.fetchone() is None:
+            record["parent_session_id"] = None
+    return record
+
+
+def after_event_mirrored(cursor, record: Dict[str, Any]) -> None:
+    """Keep the mirror's seq counter honest and wake the event gateway."""
+    session_id = record.get("session_id")
+    seq = int(record.get("seq") or 0)
+    if not session_id or not seq:
+        return
+    cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id = %s", (session_id,))
+    row = cursor.fetchone()
+    if row is not None and int(row["next_seq"]) > seq:
+        # The owner restarted its stream (a cleared transcript): the row at
+        # this seq was replaced, and the counter must follow what is left.
+        cursor.execute("SELECT MAX(seq) AS s FROM session_events WHERE session_id = %s", (session_id,))
+        top = cursor.fetchone()
+        seq = max(seq, int(top["s"]) if top and top["s"] is not None else 0)
+        cursor.execute("UPDATE session_event_counters SET next_seq = %s WHERE session_id = %s", (seq, session_id))
+        store.set_catalog_cursor(cursor, session_id, seq)
+    else:
+        cursor.execute(
+            """INSERT INTO session_event_counters (session_id, next_seq) VALUES (%s, %s)
+               ON CONFLICT (session_id) DO UPDATE SET next_seq = CASE
+                   WHEN session_event_counters.next_seq > EXCLUDED.next_seq THEN session_event_counters.next_seq
+                   ELSE EXCLUDED.next_seq END""",
+            (session_id, seq))
+        # Should this device become the owner later (a migrated session), it
+        # publishes from here on instead of re-sending what the network has.
+        if store.catalog_cursor(cursor, session_id) < seq:
+            store.set_catalog_cursor(cursor, session_id, seq)
+    try:
+        from app.db.session_events import NOTIFY_CHANNEL
+        cursor.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({"session_id": session_id, "max_seq": seq})))
+    except Exception:  # noqa: BLE001 — absent on the SQLite shim; the gateway also polls
+        pass
+
+
+def transcript_text(session_id: str, *, limit: int = 400) -> str:
+    """Plain-text rendering of the last ``limit`` events of a mirrored transcript (for a fork's context)."""
+    from app.db.session_events import _parse_payload
+    lines: List[str] = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT event_type, payload FROM session_events WHERE session_id = %s ORDER BY seq DESC LIMIT %s",
+            (session_id, limit))
+        events = [dict(r) for r in cursor.fetchall()][::-1]
+    for event in events:
+        event["payload"] = _parse_payload(event.get("payload"))
+        payload = event.get("payload") or {}
+        kind = event.get("event_type") or payload.get("type")
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if kind == "message.user":
+            lines.append("User: " + content.strip())
+        elif kind == "message.assistant" and payload.get("kind", "text") == "text":
+            lines.append("Assistant: " + content.strip())
+    return "\n\n".join(lines)

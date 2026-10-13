@@ -1,0 +1,140 @@
+/**
+ * ChatView's per-lane empty state.
+ *
+ * Three things have to stay true and are all easy to break by accident:
+ *  1. For ordinary sessions, the cleared-session hero wins over the lane heroes.
+ *     The designated Assistant home has a personalized role-level welcome;
+ *     other cleared sessions show their own title in EVERY lane. Reordering would make
+ *     a cleared chat-lane session read as a brand-new one, the exact regression
+ *     #558 fixed for the code lane.
+ *  2. Every lane keeps the same mounted composer and its draft.
+ *  3. Only desktop balances the hero and input; mobile scrolls natural content.
+ *
+ * Mounting ChatView pulls in the whole session/store graph (see
+ * chatview-modal-stop-dock.test.ts, which makes the same call), so these pin the
+ * source rather than the rendered output.
+ */
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { compile } from 'svelte/compiler';
+
+// Vitest runs from `frontend/`, and `import.meta.url` is a Vite dev-server URL
+// inside a transformed module — so resolve off cwd.
+const src = (rel: string) =>
+	readFileSync(resolve(process.cwd(), 'src/lib/components/layout', rel), 'utf8');
+
+const chatView = src('ChatView.svelte');
+
+/** Comments legitimately name the lanes and the components; only code counts. */
+const stripComments = (source: string) =>
+	source
+		.replace(/<!--[\s\S]*?-->/g, '')
+		.replace(/\/\*[\s\S]*?\*\//g, '')
+		.replace(/^\s*\/\/.*$/gm, '');
+
+const codeOnly = stripComments(chatView);
+
+describe('ChatView — lane heroes', () => {
+	it('reads the lane off the active session, not a separate switcher store', () => {
+		expect(codeOnly).toMatch(/const surfaceMode = \$derived\(\$activeSession\.mode\)/);
+	});
+
+	it('mounts a hero per new-conversation lane', () => {
+		expect(codeOnly).toMatch(/<ChatModeHero\s*\/>/);
+		expect(codeOnly).toMatch(/<WorkspaceSelector/);
+	});
+
+	it('never offers a standalone new voice session', () => {
+		// Voice is a call on the current conversation; a voice surface reads as chat.
+		expect(codeOnly).not.toMatch(/VoiceModeHero|startNewVoiceSession/);
+		expect(codeOnly).toContain("{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}");
+	});
+
+	it('personalizes only the designated home before the ordinary cleared-session hero', () => {
+		// The home is identified once, in MainPanel, and arrives as a flag.
+		expect(codeOnly).toContain('const primaryAssistant = $derived(assistantMode ? $assistantState : null)');
+		expect(codeOnly).not.toContain('home_session_id');
+		const primary = codeOnly.indexOf('{#if primaryAssistant}');
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
+		expect(primary).toBeGreaterThan(-1);
+		expect(cleared).toBeGreaterThan(primary);
+	});
+
+	it('keeps the cleared-session hero ahead of the lane branches', () => {
+		const cleared = codeOnly.search(/\{(?:#if|:else if) isClearedSession\}/);
+		const chatLane = codeOnly.indexOf("{:else if surfaceMode === 'chat' || surfaceMode === 'voice'}");
+		expect(cleared).toBeGreaterThan(-1);
+		expect(chatLane).toBeGreaterThan(cleared);
+	});
+});
+
+describe('ChatView — the composer gate', () => {
+	it('keeps the composer for an unbound voice surface', () => {
+		expect(codeOnly).toMatch(
+			/const showComposer = true/
+		);
+	});
+
+	it('gates the input slot on it', () => {
+		expect(codeOnly).toMatch(/\{#if showComposer\}\s*<div class="input-slot"/);
+	});
+
+	it('drops the balancing spacer whenever the composer is absent', () => {
+		expect(codeOnly).toMatch(/\{#if showEmptyHero && showComposer\}/);
+		expect(codeOnly).toMatch(/class:hero-only=\{!showComposer\}/);
+	});
+
+	it('still hands the composer slot to the call dock during a live call', () => {
+		expect(codeOnly).toMatch(/<VoiceCallPanel sessionId=\{\$activeSession\.sessionId\} compact \/>/);
+	});
+});
+
+describe('ChatView — stable empty layout', () => {
+	// The mobile empty-surface rules (scrolling hero, sticky composer, the
+	// data-panel-flow fallback) are the mobile app's: mobile/src/mobile.css,
+	// covered by mobile/src/shell/chatview-mobile-empty-layout.test.ts. The web
+	// build carries none of them (frontend/scripts/check-no-mobile-ui.mjs).
+	it('carries no mobile-shell CSS', () => {
+		const { css } = compile(chatView, { filename: 'ChatView.svelte' });
+		expect(css?.code ?? '').not.toContain('data-platform');
+	});
+	it('never compacts or hides the hero based on height or controls', () => {
+		expect(codeOnly).not.toMatch(/short-surface|keyboard-surface|mobile-controls-open|controls-panel\.models|logo-mark/);
+		expect(codeOnly).toContain('bind:clientHeight={surfaceHeight}');
+		expect(codeOnly).toContain('style:--chat-surface-height=');
+	});
+	it('keeps the composer wiring the mobile layout relies on', () => {
+		expect(codeOnly).toContain("focused.scrollIntoView({ block: 'nearest' })");
+		expect(codeOnly.match(/<ChatInput\s/g)).toHaveLength(1);
+		expect(codeOnly).toContain('{onBrowserToggle} {onBrowserPreload} {browserOpen}');
+	});
+});
+
+describe('ChatView — chat.open timing', () => {
+	it('finishes the sample from a primitive settled id, not on every activeSession tick', () => {
+		// A raw $activeSession read inside the effect re-runs it (cancelling and
+		// rescheduling its frames) on each streaming update.
+		const effect = codeOnly.match(/\$effect\(\(\) => \{\s*if \(settledChatId\)[^}]*\}\);/);
+		expect(effect?.[0]).toContain("finishJourneyAfterPaint('chat.open', settledChatId)");
+		expect(effect?.[0]).not.toContain('$activeSession');
+		expect(codeOnly).toMatch(/const settledChatId = \$derived\.by\(/);
+	});
+});
+
+describe('ChatModeHero — projectless by construction', () => {
+	const hero = src('ChatModeHero.svelte');
+
+	it('offers no workspace picker', () => {
+		expect(stripComments(hero)).not.toMatch(/GroupedSelector|WorkspaceSelector|onSelectProject/);
+	});
+
+	it('describes web, attachments, and explicitly requested private access', () => {
+		const content = stripComments(hero).toLowerCase().replace(/\s+/g, ' ');
+		expect(content).toContain('search the web');
+		expect(content).toContain('attachments');
+		expect(content).toContain('ask for temporary access');
+		expect(content).toContain('folder or ssh machine through a private card');
+		expect(content).toContain('no repository or worktree is attached');
+	});
+});

@@ -1,0 +1,118 @@
+"""
+Audit logging service for security events
+"""
+
+import uuid
+import logging
+from typing import Optional, Dict, Any
+
+from app.core.request_identity import get_client_ip
+from fastapi import Request
+
+from app.db import database as db
+
+logger = logging.getLogger(__name__)
+
+
+# Event types for audit logging
+class AuditEventType:
+    # Authentication events
+    LOGIN_SUCCESS = "login_success"
+    LOGIN_FAILURE = "login_failure"
+    LOGOUT = "logout"
+    SESSION_EXPIRED = "session_expired"
+
+    # Account events
+    PASSWORD_CHANGED = "password_changed"
+    PASSWORD_CHANGE_FAILED = "password_change_failed"
+
+    # API key events
+    API_KEY_CREATED = "api_key_created"
+    API_KEY_DELETED = "api_key_deleted"
+    API_KEY_ROTATED = "api_key_rotated"
+    API_KEY_DISABLED = "api_key_disabled"
+    API_KEY_ENABLED = "api_key_enabled"
+
+    # Admin events
+    ADMIN_SETUP = "admin_setup"
+    INSTALLATION_SETUP = "installation_setup"
+    SETTINGS_CHANGED = "settings_changed"
+
+
+def get_user_agent(request: Request) -> str:
+    """
+    Get the User-Agent header from the request.
+
+    Args:
+        request: FastAPI Request object
+
+    Returns:
+        User-Agent string or "unknown"
+    """
+    return request.headers.get("User-Agent", "unknown")
+
+
+def log_event(
+    event_type: str,
+    request: Optional[Request] = None,
+    user_id: Optional[str] = None,
+    user_type: str = "admin",
+    details: Optional[Dict[str, Any]] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Log a security event to the audit log.
+
+    Args:
+        event_type: Type of event (use AuditEventType constants)
+        request: Optional FastAPI Request object (to extract IP/UA)
+        user_id: Optional user identifier
+        user_type: Type of user ("admin" or "api_user")
+        details: Optional dictionary of additional event details
+        ip_address: Optional IP address (overrides request extraction)
+        user_agent: Optional User-Agent (overrides request extraction)
+
+    Returns:
+        The created audit log entry
+    """
+    event_id = str(uuid.uuid4())
+
+    # Extract IP and UA from request if not provided
+    if request:
+        if not ip_address:
+            ip_address = get_client_ip(request)
+        if not user_agent:
+            user_agent = get_user_agent(request)
+
+    try:
+        entry = db.create_audit_log(
+            event_id=event_id,
+            event_type=event_type,
+            user_id=user_id,
+            user_type=user_type,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details
+        )
+        logger.debug(f"Audit log: {event_type} for user {user_id} from {ip_address}")
+        return entry
+    except Exception as e:
+        logger.error(f"Failed to create audit log entry: {e}")
+        # Return a partial entry even on failure
+        return {
+            "id": event_id,
+            "event_type": event_type,
+            "user_id": user_id,
+            "error": str(e)
+        }
+
+
+def log_logout(request: Request, user_id: str, user_type: str = "admin") -> Dict[str, Any]:
+    """Log a logout event."""
+    return log_event(
+        event_type=AuditEventType.LOGOUT,
+        request=request,
+        user_id=user_id,
+        user_type=user_type
+    )

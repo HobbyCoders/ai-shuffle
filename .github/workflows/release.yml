@@ -1,0 +1,424 @@
+name: Release Docker and Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing tag to release (select that same tag as the workflow ref, e.g. v0.8.19)'
+        required: true
+        type: string
+      image_digest:
+        description: 'Verified candidate sha256 digest to reuse without rebuilding'
+        required: false
+        type: string
+      build_desktop:
+        description: 'Also build a Windows installer (desktop normally updates in app)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+  packages: write
+
+# Serialize complete releases, not only individual source pointer writes.
+concurrency:
+  group: stable-release-publish
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  # No publication or signing credentials before source and PR gates pass.
+  preflight:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+    outputs:
+      release_tag: ${{ steps.version.outputs.tag }}
+      release_version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Normalise release version
+        id: version
+        # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
+        shell: bash
+        run: |
+          raw="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
+          raw="${raw#v}"; raw="${raw#V}"
+          normalised="v${raw}"
+          [[ "$normalised" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
+          echo "VERSION=$normalised" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$raw" >> "$GITHUB_ENV"
+          echo "tag=$normalised" >> "$GITHUB_OUTPUT"
+          echo "version=$raw" >> "$GITHUB_OUTPUT"
+          echo "Releasing $normalised"
+      - name: Require the workflow to run from the existing release tag
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          [[ "$WORKFLOW_REF" == "refs/tags/$RELEASE_TAG" ]] || { echo "::error::Select the existing release tag as the workflow ref; main dispatch cannot enter the tags-only release environment"; exit 1; }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check protected release source and connector bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: python scripts/ci/release_preflight.py --tag "$RELEASE_TAG" --github --remote-catalog
+
+  create-release:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+    needs: preflight
+    environment: release-signing
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.preflight.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
+    outputs:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      promote_latest: ${{ steps.promote.outputs.promote_latest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.preflight.outputs.release_tag }}
+          fetch-depth: 0
+      # latest, X.Y and X follow the newest final release only: a patch cut
+      # for an older line, or a prerelease, never moves them.
+      - name: Decide whether this release becomes latest
+        id: promote
+        shell: bash
+        run: |
+          highest="$( { git tag -l 'v[0-9]*'; echo "$VERSION"; } | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -n 1)"
+          if [[ "$VERSION" != *-* && "$highest" == "$VERSION" ]]; then promote=true; else promote=false; fi
+          echo "promote_latest=$promote" >> "$GITHUB_OUTPUT"
+          echo "$VERSION promotes latest: $promote (newest final release: $highest)"
+
+      - name: Check stable signing prerequisites before publication
+        if: steps.promote.outputs.promote_latest == 'true'
+        env:
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+          RELEASE_GITHUB_REPO: ${{ vars.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle' }}
+          RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+        run: node desktop/scripts/signing-preflight.mjs
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: AI Shuffle ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          make_latest: ${{ steps.promote.outputs.promote_latest }}
+          prerelease: ${{ contains(env.VERSION, '-') }}
+          generate_release_notes: true
+          body: |
+            ## AI Shuffle ${{ env.VERSION }}
+
+            ### Downloads
+
+            | Build | Platform | Download / install |
+            |-------|----------|--------------------|
+            | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://hobbycoders.com/desktop) |
+            | **Mobile** | Android 8.0+ | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle), or signed APK in this release's assets |
+            | **Docker** | Linux amd64 | [Container image](https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server) — `ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}` (private); buyers install from `docs/install` |
+
+            Docker becomes available after its build and verification finish. Pull it
+            from the container registry, not the release assets. Android installs and
+            updates are available through Google Play, subject to track access and review,
+            or the signed APK attached after the Android APK job succeeds.
+            In-app updates are offered to installs only after this release's image
+            passed verification and its signed source was published as the stable
+            release.
+
+            ### Desktop install
+
+            On Windows, run the installer. To upgrade an existing copy, keep the same
+            installation location, then use your usual AI Shuffle shortcut.
+            Downloads require your account and an active license. Updates use the
+            worker's license lease. The app runs its own worker and persistent
+            PostgreSQL database.
+            After that, use Download update and Update and restart inside AI Shuffle.
+            The app fetches the newest stable release and prepares updates in the
+            background. No command prompt or new installer is needed.
+            Desktop installers are opt-in for manually dispatched releases, not built
+            for every version. Existing desktop users should update inside the app.
+            Other workers are managed inside the app under Devices.
+
+            ### Mobile install
+
+            Install or update AI Shuffle through [Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle).
+            This workflow publishes to **internal testing**, not public production;
+            production promotion is a separate owner-approved Play Console step.
+            For internal testing, join through the tester opt-in invitation using
+            the same Google account you use in Play before opening the store link.
+
+            For sideloading, download the signed `AI-Shuffle-Android.apk`,
+            `AI-Shuffle-Android.apk.sha256` and `android-build.json` from this
+            release's assets after the Android APK job succeeds. In that download
+            directory, run `sha256sum --check AI-Shuffle-Android.apk.sha256`.
+            The checksum checks file integrity; verify the signing certificate with
+            `apksigner verify --print-certs AI-Shuffle-Android.apk` and compare it
+            with your existing install's certificate before updating. APK and Play
+            builds must retain the original signing identity and use compatible
+            workers. Do not uninstall your existing app when updating. APK and Play
+            builds can have different version codes: an older Play version cannot
+            replace a newer sideloaded APK; wait for a higher compatible version.
+
+            ### Docker install
+
+            The image is private. Customers pull it through their licensed registry
+            path and the files in `docs/install` (compose file and Unraid template).
+            For your own hosts, sign in once with `docker login ghcr.io` using a
+            token that can read the package.
+
+            For a **new install**, use Docker Engine on a Linux amd64 host, or Docker
+            Desktop with Linux containers on an x64 computer. Run these commands in
+            a Bash-compatible terminal:
+
+            ```bash
+            docker pull ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}
+            docker run -d --name ai-shuffle --restart unless-stopped \
+              --stop-timeout 90 --shm-size 1g \
+              -p 127.0.0.1:8000:8000 \
+              -v ai-shuffle-data:/data \
+              -v ai-shuffle-workspace:/workspace \
+              -v ai-shuffle-fluid:/home/appuser/.fluid \
+              -v ai-shuffle-claude:/home/appuser/.claude \
+              -v ai-shuffle-local:/home/appuser/.local \
+              -v ai-shuffle-gh:/home/appuser/.config/gh \
+              -v ai-shuffle-browser:/home/appuser/chrome-profile \
+              ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}
+            ```
+
+            Open [http://localhost:8000](http://localhost:8000) on the Docker host
+            after startup. Check readiness with `docker inspect --format '{{.State.Health.Status}}' ai-shuffle`
+            and startup logs with `docker logs ai-shuffle`.
+
+            The image includes a private PostgreSQL database. Named volumes retain
+            the database, projects, settings and sign-ins when the container is
+            replaced. Do not delete them. No external database or `.env` is needed.
+            The port is bound to loopback only; do not expose it to the internet.
+
+            **Updating an existing install:** back up first and keep your existing
+            mounts and configuration; do not substitute the new-install volume
+            names above. Change only the image tag to `${{ env.RELEASE_VERSION }}`
+            and recreate the container with a 90-second shutdown timeout. Existing
+            deployments using an external database must stay on their previous
+            release until a separately tested migration is approved.
+
+  docker:
+    name: Docker image
+    needs: create-release
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+      promote_latest: false
+      image_digest: ${{ inputs.image_digest }}
+    secrets: inherit
+
+  # The published image, pulled from the registry on a fresh GitHub-hosted
+  # runner (nothing from the build runner's cache) and installed with the
+  # buyer compose file. The stable in-app update waits for this.
+  buyer-install:
+    name: Buyer install on a clean runner
+    needs: [create-release, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ${{ needs.docker.outputs.image }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+      IMAGE_DIGEST: ${{ needs.docker.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+      - name: Pull the published release image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+          docker pull "$IMAGE@$IMAGE_DIGEST"
+          docker logout ghcr.io
+      # Also drives the first-session API checks; see the script's docstring.
+      - name: Install from docs/install/compose
+        run: python3 scripts/ci/verify_buyer_compose.py --image "$IMAGE@$IMAGE_DIGEST" --artifacts "$RUNNER_TEMP/buyer-install"
+      - name: Upload install evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 7
+          name: buyer-install-${{ needs.create-release.outputs.release_tag }}
+          path: ${{ runner.temp }}/buyer-install
+          if-no-files-found: ignore
+
+  # The only job that signs an update customers are offered. It runs in the
+  # release-signing environment (owner-triggered, deployments only from
+  # v* tags; see docs/ci/release-channels.md), after the release image passed
+  # container verification in docker-publish.yml and the clean-runner buyer
+  # install above. Prereleases are never offered as stable updates.
+  source-stable:
+    name: Sign the stable in-app update
+    needs: [create-release, docker, buyer-install]
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') &&
+      (needs.create-release.outputs.promote_latest == 'true')
+    runs-on: ubuntu-latest
+    environment: release-signing
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Shares desktop-source.yml's group so D1 pointer writes never interleave.
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: scripts/source-publisher/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: scripts/source-publisher
+      - name: Publish the signed stable source release
+        env:
+          SOURCE_CHANNEL: stable
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+          RELEASE_GITHUB_REPO: ${{ vars.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle' }}
+          RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+        run: node desktop/scripts/publish-source.mjs
+
+  promote-image:
+    name: Promote the verified immutable Docker image
+    needs: [create-release, docker, buyer-install, source-stable, android-apk, linux-release, desktop]
+    if: >-
+      always() && !failure() && !cancelled() &&
+      needs.create-release.outputs.promote_latest == 'true' &&
+      needs.create-release.result == 'success' &&
+      needs.docker.result == 'success' &&
+      needs.buyer-install.result == 'success' &&
+      needs.source-stable.result == 'success' &&
+      needs.android-apk.result == 'success' &&
+      needs.linux-release.result == 'success' &&
+      (needs.desktop.result == 'success' || (!inputs.build_desktop && needs.desktop.result == 'skipped'))
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
+      pull-requests: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.create-release.outputs.release_tag }}
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote by digest and read aliases back
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.docker.outputs.digest }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          python3 scripts/release/promote_image.py --digest "$IMAGE_DIGEST" --tags "latest,${version%%.*},${version%.*}"
+
+  android:
+    name: Android Play internal release
+    needs: [create-release, docker]
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/android-play.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+      publish_to_play: true
+      workers_ready: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
+    secrets: inherit
+
+  linux-build:
+    name: Linux desktop for the exact release tag
+    needs: preflight
+    uses: ./.github/workflows/desktop-linux-artifact.yml
+    with:
+      version: ${{ needs.preflight.outputs.release_version }}
+
+  linux-release:
+    name: Retain Linux packages and checksums on the release
+    needs: [preflight, create-release, linux-build]
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.preflight.outputs.release_tag }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-desktop-${{ needs.preflight.outputs.release_version }}-${{ github.sha }}
+          path: linux-artifact
+      - name: Verify, attach and read back Linux release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: python3 scripts/release/attach_linux.py --tag "$RELEASE_TAG" --directory linux-artifact
+
+  android-apk:
+    name: Signed Android APK for the GitHub release
+    # Internal publication checks signing enrollment and compatible workers first.
+    needs: [create-release, android]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/android.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+      publish_download: true
+    secrets: inherit
+
+  desktop:
+    name: Windows installer (opt-in)
+    if: github.event_name == 'workflow_dispatch' && inputs.build_desktop
+    needs: create-release
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/desktop-installer.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+    secrets: inherit

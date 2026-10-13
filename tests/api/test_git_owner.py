@@ -1,0 +1,514 @@
+"""Session Git actions execute on their owner, never a viewer's checkout."""
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+
+from app.api import git, git_operations, git_owner, github
+from app.api.auth import require_auth
+from app.network import control
+
+
+@pytest.fixture
+def remote(monkeypatch):
+    row = {"id": "session-b", "project_id": "project-b", "project_v2_id": "pv2-shared",
+           "owner_device_id": "worker-b", "worktree_id": "owner-worktree"}
+    monkeypatch.setattr(git_owner.database, "get_session", lambda sid: row if sid == row["id"] else None)
+    monkeypatch.setattr(control, "owner_of", lambda session: "worker-b")
+    app = FastAPI()
+    for router in (git.router, git_operations.router, github.router):
+        app.include_router(router)
+    app.dependency_overrides[require_auth] = lambda: "authorized-viewer"
+    return row, TestClient(app)
+
+
+@pytest.mark.parametrize("method,path,body,action", [
+    ("GET", "status", None, "get_git_status"),
+    ("GET", "pr-state", None, "get_pr_state"),
+    ("GET", "branches", None, "list_branches"),
+    ("GET", "changed-files", None, "get_changed_files"),
+    ("POST", "generate-commit-message", {}, "generate_commit_message"),
+    ("POST", "commit", {"message": "Saved commit", "include_unstaged": False}, "create_commit"),
+    ("POST", "push", {"set_upstream": True}, "push_commits"),
+    ("POST", "pull", {"strategy": "rebase", "auto_stash": True}, "pull_from_remote"),
+    ("POST", "finish", {"session_id": "session-b", "merge_method": "rebase", "cleanup": True}, "finish"),
+    ("POST", "ship", {"session_id": "session-b", "merge_method": "squash", "cleanup": False}, "ship"),
+    ("GET", "operations/op-b", None, "get_operation"),
+])
+def test_routes_before_touching_viewer_checkout(remote, monkeypatch, method, path, body, action):
+    _, client = remote
+    # An owner's structured error is returned unchanged, including 409 guards.
+    call = AsyncMock(return_value={"status": 409, "detail": "Owner guard"})
+    monkeypatch.setattr(control, "call", call)
+    local_git = AsyncMock(side_effect=AssertionError("Viewer must not resolve a checkout"))
+    monkeypatch.setattr(git, "get_working_dir_async", local_git)
+    response = client.request(method, f"/api/v1/projects/pv2-shared/git/{path}?session_id=session-b", json=body)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Owner guard"
+    target, kind, envelope = call.call_args.args
+    assert (target, kind, envelope["action"]) == ("worker-b", "session-git", action)
+    assert envelope["session_id"] == "session-b"
+    assert "token" not in envelope["params"] and "request" not in envelope["params"]
+    if body:
+        for key, value in body.items():
+            assert envelope["params"]["body"][key] == value
+    local_git.assert_not_called()
+
+
+def test_create_pr_routes_with_saved_session(remote, monkeypatch):
+    _, client = remote
+    call = AsyncMock(return_value={"status": 409, "detail": "Owner guard"})
+    monkeypatch.setattr(control, "call", call)
+    response = client.post("/api/v1/projects/pv2-shared/github/pulls", json={
+        "session_id": "session-b", "title": "PR", "head": "feature", "base": "main", "draft": True,
+    })
+    assert response.status_code == 409
+    assert call.call_args.args[2]["action"] == "create_pull_request"
+
+
+def test_offline_owner_never_falls_back_to_local(remote, monkeypatch):
+    _, client = remote
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=control.RunnerUnreachable("offline")))
+    response = client.post("/api/v1/projects/pv2-shared/git/push?session_id=session-b", json={})
+    assert response.status_code == 503
+    assert "Owning worker" in response.json()["detail"]
+
+
+def test_access_checked_before_forwarding(remote, monkeypatch):
+    _, client = remote
+    call = AsyncMock()
+    monkeypatch.setattr(control, "call", call)
+    response = client.get("/api/v1/projects/unrelated/git/status?session_id=session-b")
+    assert response.status_code == 403
+    call.assert_not_called()
+    client.app.dependency_overrides[require_auth] = lambda: (_ for _ in ()).throw(HTTPException(401))
+    assert client.get("/api/v1/projects/pv2-shared/git/status?session_id=session-b").status_code == 401
+    call.assert_not_called()
+
+
+@pytest.mark.parametrize("action,params", [
+    ("finish", {"body": {"session_id": "session-b", "worktree_id": "viewer-worktree", "merge_method": "rebase", "cleanup": True}}),
+    ("create_commit", {"session_id": "session-b", "worktree_id": "viewer-worktree", "body": {"message": "Saved", "include_unstaged": False}}),
+    ("get_operation", {"session_id": "session-b", "operation_id": "owner-op"}),
+])
+async def test_owner_uses_existing_flow_and_own_checkout(remote, monkeypatch, action, params):
+    row, _ = remote
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    _original, signature, hints = git_owner._actions[action]
+    execute = AsyncMock(return_value={"operation_id": "owner-op", "status": "running"})
+    guard = AsyncMock()
+    monkeypatch.setattr(git_owner, "_guard_mutation", guard)
+    monkeypatch.setitem(git_owner._actions, action, (execute, signature, hints))
+    result = await git_owner.handle_session_git({
+        "action": action, "session_id": row["id"], "params": {"project_id": "pv2-shared", **params},
+    }, "viewer")
+    assert result["status"] == 200
+    guard.assert_awaited_once()
+    assert guard.call_args.args[0] == action
+    args = execute.call_args.kwargs
+    assert args["project_id"] == "project-b"
+    if action == "finish":
+        assert args["body"].worktree_id == "owner-worktree"
+        assert args["body"].merge_method == "rebase" and args["body"].cleanup
+    elif action == "create_commit":
+        assert args["worktree_id"] == "owner-worktree"
+        assert args["body"].message == "Saved" and not args["body"].include_unstaged
+    else:
+        assert args["operation_id"] == "owner-op"
+
+
+async def test_owner_rejects_foreign_sessions_and_invalid_options(remote, monkeypatch):
+    body = {"action": "finish", "session_id": "session-b", "params": {
+        "project_id": "pv2-shared", "body": {"session_id": "session-b", "merge_method": "invalid"},
+    }}
+    with pytest.raises(PermissionError):
+        await git_owner.handle_session_git(body, "viewer")
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    assert (await git_owner.handle_session_git(body, "viewer"))["status"] == 422
+    body["params"]["body"] = {"session_id": "different-session"}
+    with pytest.raises(ValueError, match="session does not match"):
+        await git_owner.handle_session_git(body, "viewer")
+    body["action"] = "arbitrary-shell-command"
+    with pytest.raises(ValueError, match="Unsupported"):
+        await git_owner.handle_session_git(body, "viewer")
+
+
+async def test_owner_executes_real_commit_endpoint(remote, monkeypatch):
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    resolve = AsyncMock(return_value="/owner/feature")
+    commit = AsyncMock(return_value=(True, "abc123", None))
+    monkeypatch.setattr(git, "get_working_dir_async", resolve)
+    monkeypatch.setattr(git, "stage_and_commit", commit)
+    monkeypatch.setattr(git, "run_git", AsyncMock(side_effect=[True, {"is_clean": True}, {
+        "additions": 0, "deletions": 0, "files_changed": 0,
+    }]))
+    result = await control.handle("session-git", {
+        "action": "create_commit", "session_id": "session-b", "params": {
+            "project_id": "pv2-shared", "session_id": "session-b",
+            "worktree_id": "wrong-viewer-checkout", "body": {"message": "Saved", "include_unstaged": False},
+        },
+    }, from_device="viewer")
+    assert result["status"] == 200
+    assert result["result"]["commit_sha"] == "abc123"
+    assert resolve.await_count == 2  # guard and endpoint use the SAME owner scope
+    for entry in resolve.await_args_list:
+        assert entry.args == ("project-b", "owner-worktree", "session-b")
+    commit.assert_awaited_once_with("/owner/feature", "Saved", False)
+
+
+_SESSION_ROUTES = [
+    ("GET", "status", None),
+    ("GET", "pr-state", None),
+    ("GET", "branches", None),
+    ("GET", "changed-files", None),
+    ("POST", "generate-commit-message", {}),
+    ("POST", "commit", {"message": "Saved commit", "include_unstaged": False}),
+    ("POST", "push", {"set_upstream": True}),
+    ("POST", "pull", {"strategy": "rebase", "auto_stash": True}),
+    ("POST", "checkout", {"ref": "main", "auto_stash": True}),
+    ("POST", "branches", {"name": "feature-x"}),
+    ("POST", "finish", {"session_id": "session-b", "merge_method": "rebase", "cleanup": True}),
+    ("POST", "ship", {"session_id": "session-b", "merge_method": "squash", "cleanup": False}),
+]
+
+
+@pytest.mark.parametrize("local", [True, False], ids=["owned-here", "owned-elsewhere"])
+@pytest.mark.parametrize("method,path,body", _SESSION_ROUTES)
+def test_subagent_chat_refuses_owner_git(remote, monkeypatch, local, method, path, body):
+    """A Task/Swarm child's chat is read-and-message only: no owner Git, local or forwarded."""
+    row, client = remote
+    row["is_worker"] = True
+    row["parent_session_id"] = "main-chat"
+    if local:
+        monkeypatch.setattr(control, "owner_of", lambda session: None)
+    call = AsyncMock(side_effect=AssertionError("A subagent's Git action must not be forwarded"))
+    monkeypatch.setattr(control, "call", call)
+    local_git = AsyncMock(side_effect=AssertionError("A subagent's Git action must not touch a checkout"))
+    monkeypatch.setattr(git, "get_working_dir_async", local_git)
+    monkeypatch.setattr(git_owner, "_guard_mutation", AsyncMock(side_effect=AssertionError("guard reached")))
+    response = client.request(method, f"/api/v1/projects/pv2-shared/git/{path}?session_id=session-b", json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == git_owner.SUBAGENT_GIT_REFUSED
+    call.assert_not_called()
+    local_git.assert_not_called()
+
+
+def test_subagent_chat_refuses_pull_request(remote, monkeypatch):
+    row, client = remote
+    row["is_worker"] = True
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=AssertionError("forwarded")))
+    response = client.post("/api/v1/projects/pv2-shared/github/pulls", json={
+        "session_id": "session-b", "title": "PR", "head": "feature", "base": "main", "draft": True,
+    })
+    assert response.status_code == 403
+    assert response.json()["detail"] == git_owner.SUBAGENT_GIT_REFUSED
+
+
+@pytest.mark.parametrize("action,params", [
+    ("create_commit", {"session_id": "session-b", "body": {"message": "Saved", "include_unstaged": False}}),
+    ("get_git_status", {"session_id": "session-b"}),
+    ("finish", {"body": {"session_id": "session-b", "merge_method": "rebase", "cleanup": True}}),
+])
+async def test_owner_refuses_subagent_over_session_git_route(remote, monkeypatch, action, params):
+    """The owning worker checks its own row: a peer cannot drive Git in a subagent's chat."""
+    row, _ = remote
+    row["is_worker"] = True
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    _original, signature, hints = git_owner._actions[action]
+    execute = AsyncMock(side_effect=AssertionError("endpoint reached"))
+    monkeypatch.setitem(git_owner._actions, action, (execute, signature, hints))
+    monkeypatch.setattr(git_owner, "_guard_mutation", AsyncMock(side_effect=AssertionError("guard reached")))
+    result = await git_owner.handle_session_git({
+        "action": action, "session_id": row["id"], "params": {"project_id": "pv2-shared", **params},
+    }, "viewer")
+    assert result == {"status": 403, "detail": git_owner.SUBAGENT_GIT_REFUSED}
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize("extra", [{}, {"is_worker": False, "parent_session_id": "starting-chat"}],
+                         ids=["main-chat", "startsession-peer"])
+async def test_main_chat_and_peer_keep_owner_git(remote, monkeypatch, extra):
+    """Only a subagent is refused: a main chat and a StartSession peer still run Git."""
+    row, client = remote
+    row.update(extra)
+    call = AsyncMock(return_value={"status": 200, "result": {"success": True, "message": "Pushed"}})
+    monkeypatch.setattr(control, "call", call)
+    response = client.post("/api/v1/projects/pv2-shared/git/push?session_id=session-b", json={})
+    assert response.status_code == 200, response.text
+    assert call.call_args.args[2]["action"] == "push_commits"
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    _original, signature, hints = git_owner._actions["get_operation"]
+    execute = AsyncMock(return_value={"operation_id": "owner-op", "status": "running"})
+    monkeypatch.setitem(git_owner._actions, "get_operation", (execute, signature, hints))
+    monkeypatch.setattr(git_owner, "_guard_mutation", AsyncMock())
+    result = await git_owner.handle_session_git({
+        "action": "get_operation", "session_id": row["id"],
+        "params": {"project_id": "pv2-shared", "session_id": "session-b", "operation_id": "owner-op"},
+    }, "viewer")
+    assert result["status"] == 200
+
+
+@pytest.fixture
+def worker_repositories(tmp_path, monkeypatch):
+    import subprocess
+    from app.core.config import settings
+    from app.db import checkouts, projects_v2
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: "worker-b"))
+    def git_at(path, *args):
+        return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True).stdout.strip()
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
+    a, b = tmp_path / "a", tmp_path / "b"
+    subprocess.run(["git", "clone", str(origin), str(a)], check=True, capture_output=True)
+    for key, value in [("user.name", "Test"), ("user.email", "test@example.invalid")]:
+        git_at(a, "config", key, value)
+    (a / "tracked.txt").write_text("initial\n")
+    git_at(a, "add", ".")
+    git_at(a, "commit", "-m", "initial")
+    git_at(a, "push", "origin", "main")
+    subprocess.run(["git", "clone", str(origin), str(b)], check=True, capture_output=True)
+    project = projects_v2.upsert_project("local:worker-target", "Worker target")
+    checkouts.upsert_checkout(project["id"], "worker-a", str(a))
+    checkouts.upsert_checkout(project["id"], "worker-b", str(b))
+    (a / "tracked.txt").write_text("incoming\n")
+    git_at(a, "commit", "-am", "incoming")
+    git_at(a, "push", "origin", "main")
+    git_at(b, "fetch")
+    # Viewer-local dirty data must survive the selected worker's pull untouched.
+    (a / "viewer-only.txt").write_text("do not touch")
+    return project, a, b, git_at
+
+
+async def test_sessionless_worker_status_and_real_pull(worker_repositories):
+    project, a, b, git_at = worker_repositories
+    def payload(action, **params):
+        return {"action": action, "project_id": project["id"], "branch": "main",
+                "params": {"project_id": project["id"], **params}}
+    status = await control.handle("project-git", payload("get_git_status"), from_device="worker-a")
+    assert status["status"] == 200, status
+    assert status["result"]["behind"] == 1
+    assert status["result"]["untracked"] == []
+    before = git_at(a, "rev-parse", "HEAD")
+    pull = await control.handle("project-git", payload("pull_from_remote", body={"strategy": "merge", "auto_stash": False}), from_device="worker-a")
+    assert pull["status"] == 200, pull
+    assert (b / "tracked.txt").read_text() == "incoming\n"
+    assert git_at(b, "rev-parse", "HEAD") == before == git_at(a, "rev-parse", "HEAD")
+    assert (a / "viewer-only.txt").read_text() == "do not touch"
+    status = await control.handle("project-git", payload("get_git_status"), from_device="worker-a")
+    assert status["result"]["behind"] == 0
+    assert (await control.handle("project-git", {**payload("get_git_status"), "branch": "absent"}, from_device="worker-a"))["status"] == 409
+    with pytest.raises(ValueError, match="Mixed"):
+        await control.handle("project-git", payload("get_git_status", session_id="foreign"), from_device="worker-a")
+    with pytest.raises(ValueError, match="Unsupported"):
+        await control.handle("project-git", payload("ship"), from_device="worker-a")
+
+
+async def test_legacy_relative_row_for_same_folder_is_not_ambiguous(worker_repositories, monkeypatch):
+    """A v60-seeded workspace-relative row beside the absolute V2 row for the
+    SAME folder is one checkout. It used to 409 "missing or ambiguous", which
+    left the new-chat Git button stuck on "Git unavailable" and re-polling."""
+    from app.core.config import settings
+    from app.db import checkouts
+    from app.db.base import get_db
+    project, a, b, git_at = worker_repositories
+    monkeypatch.setattr(type(settings), "effective_workspace_dir", property(lambda self: b.parent))
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, branch, status) VALUES (%s, %s, %s, %s, %s, %s)",
+            (checkouts.checkout_id_for(project["id"], "worker-b", b.name), project["id"], "worker-b", b.name, None, "active"),
+        )
+    for branch in (None, "main"):
+        status = await control.handle("project-git", {
+            "action": "get_git_status", "project_id": project["id"], "branch": branch,
+            "params": {"project_id": project["id"]},
+        }, from_device="worker-a")
+        assert status["status"] == 200, status
+        assert status["result"]["behind"] == 1
+
+
+async def test_two_distinct_unbound_checkouts_stay_ambiguous(worker_repositories):
+    from app.db import checkouts
+    project, a, b, git_at = worker_repositories
+    other = b.parent / "b-second"
+    git_at(b.parent, "clone", str(b), str(other))
+    checkouts.upsert_checkout(project["id"], "worker-b", str(other))
+    status = await control.handle("project-git", {
+        "action": "get_git_status", "project_id": project["id"], "branch": None,
+        "params": {"project_id": project["id"]},
+    }, from_device="worker-a")
+    assert status["status"] == 409
+    assert "ambiguous" in status["detail"]
+
+
+def test_local_canonical_scope_does_not_call_a_peer(worker_repositories, monkeypatch):
+    project, a, b, git_at = worker_repositories
+    application = FastAPI()
+    application.include_router(git.router)
+    application.dependency_overrides[require_auth] = lambda: "authorized-viewer"
+    call = AsyncMock()
+    monkeypatch.setattr(control, "call", call)
+    with TestClient(application) as client:
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local&checkout_branch=main")
+    assert response.status_code == 200, response.text
+    assert response.json()["behind"] == 1
+    assert response.json()["untracked"] == []
+    call.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["pull", "generate-commit-message"])
+def test_sessionless_worker_forwarding_access_and_offline(worker_repositories, monkeypatch, action):
+    from app.api import common
+    from app.network import git as network_git
+    project, a, b, git_at = worker_repositories
+    application = FastAPI()
+    application.include_router(git.router)
+    application.dependency_overrides[require_auth] = lambda: "authorized-viewer"
+    client = TestClient(application)
+    monkeypatch.setattr(network_git, "device_id", lambda runner: "worker-other")
+    call = AsyncMock(side_effect=control.RunnerUnreachable("offline"))
+    monkeypatch.setattr(control, "call", call)
+    response = client.post(f"/api/v1/projects/{project['id']}/git/{action}?worker_id=worker-other&checkout_branch=main", json={})
+    assert response.status_code == 503, response.text
+    assert "No local Git action" in response.json()["detail"]
+    assert call.call_args.args[0:2] == ("worker-other", "project-git")
+    assert call.call_args.args[2]["branch"] == "main"
+    assert (b / "tracked.txt").read_text() == "initial\n"
+    call.reset_mock()
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=worker-other&session_id=bogus")
+    assert response.status_code == 400
+    call.assert_not_called()
+    monkeypatch.setattr(common, "get_api_user_from_request", lambda request: {"project_id": "foreign-project"})
+    response = client.post(f"/api/v1/projects/{project['id']}/git/{action}?worker_id=worker-other", json={})
+    assert response.status_code == 403
+    call.assert_not_called()
+    client.app.dependency_overrides[require_auth] = lambda: (_ for _ in ()).throw(HTTPException(401))
+    assert client.post(f"/api/v1/projects/{project['id']}/git/{action}?worker_id=worker-other", json={}).status_code == 401
+    call.assert_not_called()
+
+
+@pytest.mark.parametrize("worker", ["local", "worker-other"])
+def test_branch_bound_checkout_cannot_switch(worker_repositories, monkeypatch, worker):
+    from app.db import checkouts
+    from app.network import git as network_git
+    project, a, b, git_at = worker_repositories
+    feature = b.parent / "feature"
+    git_at(b, "worktree", "add", "-b", "feature/a", str(feature))
+    git_at(b, "branch", "another-available-branch")
+    checkouts.upsert_checkout(project["id"], "worker-b", str(feature), branch="feature/a")
+    before_rows = checkouts.list_checkouts(project["id"])
+    before_head = git_at(feature, "rev-parse", "HEAD")
+    application = FastAPI()
+    application.include_router(git.router)
+    application.dependency_overrides[require_auth] = lambda: "authorized-viewer"
+    monkeypatch.setattr(network_git, "device_id", lambda runner: "worker-other")
+    async def relay(target, action, payload, **kwargs):
+        return await control.handle(action, payload, from_device="worker-a")
+    monkeypatch.setattr(control, "call", relay)
+    with TestClient(application) as client:
+        response = client.post(
+            f"/api/v1/projects/{project['id']}/git/checkout?worker_id={worker}&checkout_branch=feature/a",
+            json={"ref": "another-available-branch"},
+        )
+    assert response.status_code == 400, response.text
+    assert "bound to their branch" in response.json()["detail"]
+    assert git_at(feature, "branch", "--show-current") == "feature/a"
+    assert git_at(feature, "rev-parse", "HEAD") == before_head
+    assert checkouts.list_checkouts(project["id"]) == before_rows
+    assert (a / "viewer-only.txt").read_text() == "do not touch"
+
+
+async def test_unbound_primary_checkout_can_switch(worker_repositories):
+    project, a, b, git_at = worker_repositories
+    git_at(b, "branch", "another-available-branch")
+    result = await control.handle("project-git", {
+        "action": "checkout_branch", "project_id": project["id"], "branch": "main",
+        "params": {"project_id": project["id"], "body": {"ref": "another-available-branch"}},
+    }, from_device="worker-a")
+    assert result["status"] == 200, result
+    assert git_at(b, "branch", "--show-current") == "another-available-branch"
+    assert git_at(a, "branch", "--show-current") == "main"
+
+
+@pytest.mark.parametrize("worker", ["local", "worker-other"])
+def test_worker_commit_generation_reads_owner_diff(worker_repositories, monkeypatch, worker):
+    from app.api import generation
+    from app.network import git as network_git
+    project, a, b, git_at = worker_repositories
+    (b / "tracked.txt").write_text("owner-only-change\n")
+    generate = AsyncMock(return_value="fix: save owner change")
+    monkeypatch.setattr(generation, "generate_with_claude", generate)
+    monkeypatch.setattr(network_git, "device_id", lambda runner: "worker-other")
+    envelopes = []
+    async def relay(target, action, payload, **kwargs):
+        envelopes.append(payload)
+        return await control.handle(action, payload, from_device="worker-a")
+    monkeypatch.setattr(control, "call", relay)
+    application = FastAPI()
+    application.include_router(git.router)
+    application.dependency_overrides[require_auth] = lambda: "authorized-viewer"
+    with TestClient(application) as client:
+        response = client.post(
+            f"/api/v1/projects/{project['id']}/git/generate-commit-message?worker_id={worker}&checkout_branch=main",
+            json={"include_unstaged": True},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["message"] == "fix: save owner change"
+    prompt = generate.call_args.args[0]
+    assert "owner-only-change" in prompt
+    assert "viewer-only" not in prompt and "do not touch" not in prompt
+    if envelopes:
+        assert set(envelopes[0]) == {"action", "project_id", "branch", "params"}
+        assert set(envelopes[0]["params"]) <= {"project_id", "body", "worktree_id", "session_id"}
+    assert (a / "viewer-only.txt").read_text() == "do not touch"
+
+
+async def test_commit_on_new_branch_moves_unbound_checkout(worker_repositories):
+    """#1659: "Commit on new branch" commits on a fresh branch, never on main."""
+    project, a, b, git_at = worker_repositories
+    # CI runners have no global git identity; the owner checkout needs one to commit.
+    for key, value in [("user.name", "Test"), ("user.email", "test@example.invalid")]:
+        git_at(b, "config", key, value)
+    main_before = git_at(b, "rev-parse", "main")
+    (b / "tracked.txt").write_text("feature work\n")
+    result = await control.handle("project-git", {
+        "action": "create_commit", "project_id": project["id"], "branch": "main",
+        "params": {"project_id": project["id"], "body": {
+            "message": "Feature work", "include_unstaged": True, "new_branch": "feature/new-work"}},
+    }, from_device="worker-a")
+    assert result["status"] == 200, result
+    assert git_at(b, "branch", "--show-current") == "feature/new-work"
+    assert git_at(b, "rev-parse", "main") == main_before
+    assert git_at(b, "log", "-1", "--format=%s") == "Feature work"
+
+
+@pytest.mark.parametrize("bad", ["-x", "has space", "a..b"])
+async def test_commit_on_new_branch_rejects_invalid_names(worker_repositories, bad):
+    project, a, b, git_at = worker_repositories
+    (b / "tracked.txt").write_text("feature work\n")
+    head = git_at(b, "rev-parse", "HEAD")
+    result = await control.handle("project-git", {
+        "action": "create_commit", "project_id": project["id"], "branch": "main",
+        "params": {"project_id": project["id"], "body": {
+            "message": "Feature work", "include_unstaged": True, "new_branch": bad}},
+    }, from_device="worker-a")
+    assert result["status"] == 400, result
+    assert git_at(b, "branch", "--show-current") == "main"
+    assert git_at(b, "rev-parse", "HEAD") == head
+
+
+async def test_commit_on_new_branch_refuses_branch_bound_checkout(worker_repositories):
+    from app.db import checkouts
+    project, a, b, git_at = worker_repositories
+    feature = b.parent / "feature"
+    git_at(b, "worktree", "add", "-b", "feature/a", str(feature))
+    checkouts.upsert_checkout(project["id"], "worker-b", str(feature), branch="feature/a")
+    (feature / "tracked.txt").write_text("feature work\n")
+    result = await control.handle("project-git", {
+        "action": "create_commit", "project_id": project["id"], "branch": "feature/a",
+        "params": {"project_id": project["id"], "body": {
+            "message": "Feature work", "include_unstaged": True, "new_branch": "feature/other"}},
+    }, from_device="worker-a")
+    assert result["status"] == 400, result
+    assert "bound to its branch" in result["detail"]
+    assert git_at(feature, "branch", "--show-current") == "feature/a"

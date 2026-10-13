@@ -1,0 +1,18 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Signing keys — never commit; the release keystore lives in GitHub Secrets.
+*.jks
+*.jks.b64
+*.keystore
+
+# Generated: the offline demo copied from mobile/build by scripts/sync-offline-demo.sh.
+/app/src/main/assets/offline-demo/

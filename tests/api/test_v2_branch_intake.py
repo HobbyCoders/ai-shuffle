@@ -1,0 +1,392 @@
+"""V2 Phase 3 branch-intake cutover (A4).
+
+A NEW branch session records ONLY its logical ``sessions.branch`` +
+origin-keyed ``project_v2_id``. It does NOT create a legacy ``worktrees`` row
+or md5-hash worktree dir; ``worktree_id``/``worktree_branch``/``worktree_path``
+stay NULL. The deterministic per-runner checkout
+(``{workspace}/checkouts/{project}/{branch}``) is materialized via
+``checkout_manager.ensure_checkout`` and re-materialized idempotently by the
+origin resolver at spawn.
+
+Legacy worktree sessions (existing rows, flag off) keep working through the
+unchanged ``worktree_manager.create_worktree_session`` path.
+
+Everything is mocked at the handler/DB boundary — no app, no DB, no git, no
+network.
+"""
+
+from tests.conftest import async_twin
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+import app.api.sessions_worktree as worktree_api
+from app.api.sessions_helpers import CreateWorktreeSessionRequest
+from fastapi import HTTPException
+
+
+async def _passthrough_run_sync(fn, *args, **kwargs):
+    return fn(*args, **kwargs)
+
+
+def _body(**over):
+    base = dict(
+        project_id="proj-A",
+        branch_name="feature/x",
+        base_branch="main",
+        profile_id=None,
+        create_new_branch=True,
+    )
+    base.update(over)
+    return CreateWorktreeSessionRequest(**base)
+
+
+def _wire_v2(monkeypatch, *, pv2=None, checkout_path="/ws/checkouts/proj-A/feature-x"):
+    """Wire the v2 branch-intake helper's collaborators. Returns a dict of the
+    key MagicMocks the tests assert on."""
+    pv2 = pv2 or {"id": "pv2-abc123", "origin": "git:example.com/repo"}
+
+    monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
+
+    import app.core.project_resolver as project_resolver
+    import app.core.checkout_manager as checkout_manager
+
+    resolve_pv2 = MagicMock(return_value=pv2)
+    ensure_checkout = MagicMock(return_value=checkout_path)
+    branch_exists = MagicMock(return_value=False)
+    monkeypatch.setattr(project_resolver, "resolve_project_v2", resolve_pv2)
+    monkeypatch.setattr(checkout_manager, "ensure_checkout", ensure_checkout)
+    monkeypatch.setattr(checkout_manager, "local_branch_exists", branch_exists)
+
+    create_session = MagicMock()
+    set_session_branch = MagicMock()
+    monkeypatch.setattr(worktree_api.database, "create_session", create_session)
+    monkeypatch.setattr(worktree_api.database, "set_session_branch", set_session_branch)
+    monkeypatch.setattr(
+        worktree_api.database, "get_all_profiles", lambda: [{"id": "default-ai"}]
+    )
+    monkeypatch.setattr(
+        worktree_api.database, "get_session", lambda sid: {"id": sid, "title": ""}
+    )
+    monkeypatch.setattr(worktree_api.database, "update_session", lambda **kw: None)
+    monkeypatch.setattr(worktree_api.database, "add_session_message", lambda **kw: None)
+
+    import app.core.sync_engine as se
+    monkeypatch.setattr(se.sync_engine, "broadcast_user_session_created", AsyncMock())
+    monkeypatch.setattr(se.sync_engine, "broadcast_message_added", AsyncMock())
+    monkeypatch.setattr(se.sync_engine, "broadcast_session_updated", AsyncMock())
+
+    import app.core.turn_manager as turn_manager
+    submit = MagicMock(return_value="turn-w")
+    monkeypatch.setattr(turn_manager, "submit", submit)
+    monkeypatch.setattr(turn_manager, "submit_async", async_twin(submit))
+
+    return {
+        "pv2": pv2,
+        "resolve_pv2": resolve_pv2,
+        "ensure_checkout": ensure_checkout,
+        "branch_exists": branch_exists,
+        "create_session": create_session,
+        "set_session_branch": set_session_branch,
+        "submit": submit,
+    }
+
+
+async def test_create_with_branch_persists_branch_and_no_worktree_row(monkeypatch):
+    """Create (no prompt) persists ``sessions.branch`` + project_v2_id via
+    ``set_session_branch`` and never touches the legacy worktree machinery. The
+    response carries a NULL ``worktree_id`` and the materialized checkout path."""
+    m = _wire_v2(monkeypatch)
+
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id="user-9",
+    )
+
+    # Origin project resolved, checkout materialized for (pv2, branch).
+    m["resolve_pv2"].assert_called_once()
+    m["ensure_checkout"].assert_called_once()
+    assert m["ensure_checkout"].call_args.args[0] == m["pv2"]
+    assert m["ensure_checkout"].call_args.args[1] == "feature/x"
+
+    # Session created WITHOUT a worktree_id, then branch+pv2 stamped.
+    m["create_session"].assert_called_once()
+    assert "worktree_id" not in m["create_session"].call_args.kwargs
+    m["set_session_branch"].assert_called_once()
+    sb_args = m["set_session_branch"].call_args.args
+    assert sb_args[1] == "feature/x"
+    assert sb_args[2] == "pv2-abc123"
+
+    # Response reports branch mode with a NULL worktree_id.
+    assert resp.worktree_id is None
+    assert resp.branch_name == "feature/x"
+    assert resp.worktree_path == "/ws/checkouts/proj-A/feature-x"
+    assert resp.query_started is False
+
+
+async def test_promptless_compose_migrates_pending_uploads(monkeypatch):
+    """A promptless compose (pending_upload_paths, NO prompt) still migrates the
+    uploads into the materialized checkout — the migration is hoisted out of the
+    prompt block, so attachments land even when no turn is submitted."""
+    m = _wire_v2(monkeypatch)
+    migrate = MagicMock(return_value=[])
+    monkeypatch.setattr(worktree_api, "_migrate_uploads_to_dir", migrate)
+
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(prompt=None, pending_upload_paths=["/ws/proj-A/a.png"]),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+
+    # Migration ran against the materialized checkout path with the pending files.
+    migrate.assert_called_once()
+    assert migrate.call_args.args[0] == "proj-A"
+    assert migrate.call_args.args[1] == Path("/ws/checkouts/proj-A/feature-x")
+    assert migrate.call_args.args[2] == ["/ws/proj-A/a.png"]
+
+    # No prompt → no turn submitted, but the session (and its uploads) still exist.
+    m["submit"].assert_not_called()
+    assert resp.query_started is False
+    assert resp.upload_migration_errors is None
+
+
+async def test_spawn_materializes_deterministic_checkout_and_submits_worktree_turn(
+    monkeypatch,
+):
+    """With a prompt, the checkout is materialized (stubbed ensure_checkout) and a
+    durable ``source=worktree`` turn is submitted with NO ``worktree_id`` — the
+    spawn path re-resolves cwd from the origin resolver off branch+project_v2."""
+    m = _wire_v2(monkeypatch)
+
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(prompt="build the feature"),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+
+    m["ensure_checkout"].assert_called_once()
+    assert m["ensure_checkout"].call_args.args[1] == "feature/x"
+
+    m["submit"].assert_called_once()
+    assert m["submit"].call_args.args[0] == resp.session_id
+    assert m["submit"].call_args.args[1] == "worktree"
+    kw = m["submit"].call_args.kwargs
+    assert kw["prompt"] == "build the feature"
+    assert kw["project_id"] == "proj-A"
+    assert "worktree_id" not in kw
+    assert resp.query_started is True
+
+
+async def test_promptless_create_stores_the_composer_picks_as_run_binding(monkeypatch):
+    """No prompt means no first turn to persist the composer's model and
+    permission mode, so the create stores them (the call button relies on it).
+    With a prompt the turn persists them and the create leaves them alone."""
+    m = _wire_v2(monkeypatch)
+    binding = MagicMock()
+    monkeypatch.setattr(worktree_api.database, "set_session_run_binding", binding)
+    overrides = {"model": "opus", "permission_mode": "acceptEdits", "fast": False}
+
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(overrides=overrides),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    binding.assert_called_once()
+    assert binding.call_args.args[0] == resp.session_id
+    assert binding.call_args.kwargs["model"] == "opus"
+    assert binding.call_args.kwargs["permission_mode"] == "acceptEdits"
+    assert binding.call_args.kwargs["fast"] is False
+    m["submit"].assert_not_called()
+
+    binding.reset_mock()
+    await worktree_api._create_v2_branch_session(
+        body=_body(branch_name="feature/y", prompt="go", overrides=overrides),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    binding.assert_not_called()
+
+
+async def test_default_profile_falls_back_to_project_then_first(monkeypatch):
+    """No explicit profile → project default → first profile."""
+    m = _wire_v2(monkeypatch)
+
+    await worktree_api._create_v2_branch_session(
+        body=_body(profile_id=None),
+        project={"id": "proj-A", "settings": {"default_profile_id": "proj-default"}},
+        api_user_id=None,
+    )
+    assert m["create_session"].call_args.kwargs["profile_id"] == "proj-default"
+
+
+async def test_unresolvable_project_raises_500(monkeypatch):
+    m = _wire_v2(monkeypatch)
+    m["resolve_pv2"].return_value = None
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 500
+    m["ensure_checkout"].assert_not_called()
+
+
+async def test_missing_base_checkout_raises_409(monkeypatch):
+    """ensure_checkout returns None (project not checked out on this runner —
+    Phase 3 never clones) → honest 409, no session created."""
+    m = _wire_v2(monkeypatch)
+    m["ensure_checkout"].return_value = None
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 409
+    m["create_session"].assert_not_called()
+    m["set_session_branch"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# R5.3: intake threads base_branch/create_new_branch into ensure_checkout, and
+# the response reports the ACTUAL base honestly.
+# ---------------------------------------------------------------------------
+
+
+async def test_ensure_checkout_receives_base_and_create_new_kwargs(monkeypatch):
+    m = _wire_v2(monkeypatch)
+    await worktree_api._create_v2_branch_session(
+        body=_body(base_branch="develop", create_new_branch=True),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    kw = m["ensure_checkout"].call_args.kwargs
+    assert kw["base_branch"] == "develop"
+    assert kw["create_new_branch"] is True
+
+
+async def test_new_branch_that_already_exists_is_refused_before_any_write(monkeypatch):
+    """#1528: "create new branch" for a branch that already exists must not
+    resolve to that branch's existing checkout (another session's working
+    tree). 409 with the stable phrase the composer keys on; nothing created."""
+    m = _wire_v2(monkeypatch)
+    m["branch_exists"].return_value = True
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(create_new_branch=True),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 409
+    assert ei.value.detail.startswith("Branch 'feature/x' already exists")
+    m["branch_exists"].assert_called_once_with(m["pv2"], "feature/x")
+    m["ensure_checkout"].assert_not_called()
+    m["create_session"].assert_not_called()
+    m["set_session_branch"].assert_not_called()
+
+
+async def test_existing_branch_intent_skips_the_new_branch_check(monkeypatch):
+    """Selecting an existing branch deliberately shares its checkout."""
+    m = _wire_v2(monkeypatch)
+    m["branch_exists"].return_value = True
+
+    await worktree_api._create_v2_branch_session(
+        body=_body(create_new_branch=False),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    m["branch_exists"].assert_not_called()
+    assert m["ensure_checkout"].call_args.kwargs["create_new_branch"] is False
+    m["create_session"].assert_called_once()
+
+
+async def test_response_base_branch_honest_for_new_branch(monkeypatch):
+    _wire_v2(monkeypatch)
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(base_branch="develop", create_new_branch=True),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    # A newly-minted branch is honestly forked from base_branch.
+    assert resp.base_branch == "develop"
+
+
+async def test_response_base_branch_honest_for_existing_branch(monkeypatch):
+    _wire_v2(monkeypatch)
+    resp = await worktree_api._create_v2_branch_session(
+        body=_body(base_branch="develop", create_new_branch=False),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+    # An existing / origin-recovered branch materialized from ITSELF — the
+    # response echoes its own name, never a false fork point.
+    assert resp.base_branch == "feature/x"
+
+
+async def test_missing_branch_non_new_raises_409_with_branch_message(monkeypatch):
+    """create_new_branch=False + not materializable → 409 pointing at the branch
+    (push it / create as new), distinct from the base-not-checked-out message."""
+    m = _wire_v2(monkeypatch)
+    m["ensure_checkout"].return_value = None
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(create_new_branch=False),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 409
+    assert "origin" in ei.value.detail.lower()
+    m["create_session"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Routing: the /with-worktree endpoint ALWAYS delegates to v2 branch-intake
+# (PR-B removed the ``v2_projects`` kill switch — no legacy worktree fork).
+# ---------------------------------------------------------------------------
+
+
+async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
+    """``create_session_with_worktree`` unconditionally routes to
+    ``_create_v2_branch_session`` (after XOR / origin-access checks)."""
+    monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
+    monkeypatch.setattr(worktree_api, "get_api_user_from_request", lambda req: None)
+    monkeypatch.setattr(
+        worktree_api,
+        "require_origin_access",
+        lambda **kw: {
+            "origin": "local:proj-A",
+            "project_v2": {"id": "pv2-abc123"},
+            "legacy": {"id": "proj-A", "settings": {}},
+        },
+    )
+
+    v2_helper = AsyncMock(return_value="v2-response")
+    monkeypatch.setattr(worktree_api, "_create_v2_branch_session", v2_helper)
+
+    resp = await worktree_api.create_session_with_worktree(
+        request=MagicMock(),
+        body=_body(prompt=""),
+        token="tok",
+    )
+
+    v2_helper.assert_awaited_once()
+    assert resp == "v2-response"
+
+
+async def test_no_project_dict_falls_back_to_first_profile(monkeypatch):
+    """Remote-only compose (no legacy project dict) uses the first profile."""
+    m = _wire_v2(monkeypatch)
+
+    await worktree_api._create_v2_branch_session(
+        body=_body(profile_id=None),
+        project=None,
+        api_user_id=None,
+    )
+    assert m["create_session"].call_args.kwargs["profile_id"] == "default-ai"

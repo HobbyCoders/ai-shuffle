@@ -1,0 +1,40 @@
+# Files and microphone in embedded chat
+
+Embedded chat is the phone UI the paired worker serves at `https://<worker>/mobile/` (`mobile/` at the repository root, served by `app/mobile_ui.py`), so UI changes ship with worker updates rather than APKs. `ChatActivity` loads it (`ui/MobileUi.kt`) and hands the page its worker origin, paired-session token and the native capabilities this APK offers in a document-start script (`window.__SHUFFLE_MOBILE__`, with `native: {platform, bridge, capabilities}`; contract in `frontend/src/lib/api/runtime.ts`); the page then calls the worker's HTTP/WebSocket APIs with `Authorization: Bearer`, never a cookie. The WebView may show only that worker's `/mobile/` pages and may connect only to the paired worker; any other worker document (the desktop UI, an API response) is refused. Every native bridge below (`shuffleFileSave`, microphone, file chooser) is scoped to the top-level `/mobile/` document (`MobileUi.isUiUrl`). When a bridge changes shape, bump `MobileUi.BRIDGE_VERSION`; when one is added, add its name to `CAPABILITIES` so a newer worker UI can tell an older APK apart. The `AIShuffleAndroid/<versionName>` user-agent token (`ui/WebUserAgent.kt`) remains for worker-side diagnostics only; the web UI a worker serves is desktop-only. See `docs/mobile-desktop-ui-split.md` at the repository root.
+
+Chat file and image downloads use Android's system Save dialog. Files are streamed to the selected document, with one active save per chat and a 128 MB limit. A save expires after five minutes, including time spent choosing a destination. Cancelling, navigating, closing chat, removing the worker or changing accounts stops the transfer and attempts to delete its incomplete destination. A process crash or a document provider that refuses deletion can leave an incomplete file; retry the download in that case.
+
+Ordinary HTTPS file requests use the current WebView session and optional Cloudflare Access headers. Initial URLs and every redirect must match the selected worker's exact HTTPS origin, including its port. Cross-origin and HTTP redirects fail without forwarding credentials. Same-origin redirects are limited to five. Authentication and network failures show an in-app error; they do not save the error response as a file.
+
+The web frontend also creates downloads as Blob URLs and inline image data URLs. On supported Android System WebView versions, AndroidX WebKit installs a download-only message listener and a document-start script restricted to the worker origin. The native listener additionally checks the main frame, current page and saved worker/account before accepting a request. Blob bytes cross the boundary in acknowledged chunks of at most 32 KB. The protocol cannot read native files, return credentials, choose a storage destination, invoke arbitrary Android methods or launch another app. There is no `JavascriptInterface` and the existing frame/content restrictions stay in place. The script retains a Blob before the frontend's immediate URL revocation, without loosening the page's content security policy.
+
+This integration requires WebView support for `WEB_MESSAGE_LISTENER` and `DOCUMENT_START_SCRIPT`. If those capabilities are missing, ordinary HTTPS file downloads remain available; Blob or data downloads ask the user to update Android System WebView and refresh chat.
+
+Embedded chat can request audio capture from the current worker's HTTPS document. Android microphone permission must also be granted. Camera, combined audio/video requests and requests from other origins are rejected. Permission and file-picker results are discarded after navigation, worker removal or account changes. The Android picker and permission dialog may temporarily pause chat without invalidating their own pending result. This does not permit microphone use over HTTP.
+
+Embedded chat requests `purpose=web` when obtaining its worker session token; the app mints no other kind of session (the native voice path that used `purpose=native` was removed, and voice calls are the page's own).
+
+If Android stops chat before its initial web session is ready, returning to chat retries that interrupted load. Late callbacks from the cancelled attempt cannot load an obsolete session. Returning to an already loaded chat keeps its cookie rather than rotating it unnecessarily.
+
+Account sync treats a changed HTTPS tunnel address from the authenticated hub as an endpoint update for the same worker. It reuses a saved device key only when hub, account, worker and device identity all match. Foreign identities must enroll normally. Optional Cloudflare Access service headers configured for the old origin are cleared when the origin changes; they are not carried to a new host. This avoids duplicate-enrollment conflicts while keeping unrelated credentials separate.
+
+The page's "Connected to" bar replaces the app's own worker bar and can switch which worker the app shows. A navigation to `/mobile/?connect=<origin>` (capability `worker-switch`) is never loaded: `ui/WorkerSwitch.kt` accepts only that exact URL on the current worker, with a bare HTTPS origin that equals, after normalisation, a worker this phone is already paired with. A known worker opens the way the Workers screen opens it; anything else shows a short message and chat stays. The page reports its bar over the `shuffleShell` web-message bridge (`{"type":"worker-bar","shown":true|false}`, and `{"type":"workers"}` to open the Workers screen), scoped and checked like `shuffleFileSave`. The native bar shows until the page says otherwise, and returns when the page fails to load or chat cannot open. Details: "Switching workers and the worker bar" in `docs/mobile-desktop-ui-split.md`.
+
+Voice calls are the page's own, the same as on the website: the shell installs no voice bridge and never holds a voice credential. Its only part is the microphone grant described above, so a call lasts as long as the chat document and ends when the WebView pauses.
+
+## Verification
+
+```sh
+node --test app/src/test/js/chat-downloads.test.cjs
+./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+adb -s emulator-5554 shell am instrument -w \
+  -e class com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest \
+  -e notClass 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \
+  com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The instrumentation fixture uses a real WebView, intercepted benign HTTP responses and a storage provider present only in the test APK. It does not connect to an account or a real worker, record microphone audio, or exercise a paid voice provider. Run it only on an isolated test device: like the existing native smoke tests, it resets the application's local account/worker state.
+
+CI runs the suite with the strict result parser, which rejects crashes, failures, unexpected skips, and incomplete results.
+
+`realSystemSaveDialogReturnsToChatAndCompletesTransfer` is a separate opt-in test requiring an external driver to complete the Android Save dialog. It is explicitly excluded from unattended CI rather than reported as a passing or skipped check there.

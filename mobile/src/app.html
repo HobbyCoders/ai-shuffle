@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-platform="mobile">
+	<head>
+		<meta charset="utf-8" />
+		<!-- The phone UI, served by the worker at /mobile/ and shown by the Android
+		     and iOS apps. Script and styles come only from this origin; the network
+		     is for the worker (HTTPS/WSS) and for media it serves. The apps
+		     additionally confine the WebView to the paired worker. -->
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https: wss:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+		/>
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+		<meta name="theme-color" content="#0f0f0f" />
+		<!-- Declared so the WebView never requests the worker's /favicon.ico: that
+		     request carries no session, and the Android app would proxy it as a
+		     worker file (and report it as a failed load). -->
+		<link rel="icon" href="data:," />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<title>AI Shuffle</title>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

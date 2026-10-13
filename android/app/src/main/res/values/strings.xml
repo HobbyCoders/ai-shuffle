@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI Shuffle</string>
+    <string name="cf_access_reauth">Cloudflare Access blocked this session. Pair the server again with a valid service token.</string>
+    <string name="accessibility_label">AI Shuffle app control</string>
+    <string name="accessibility_description">Optional app control for supported media and maps screens while Shuffle is open. Screen reading and actions need your approval. Password, payment, messaging and permission screens are excluded. Turn off access here at any time.</string>
+</resources>

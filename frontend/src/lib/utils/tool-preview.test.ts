@@ -1,0 +1,98 @@
+/**
+ * The work-log row has room for one short string, so these pin which argument
+ * each tool contributes — the identifying one, not merely the first present.
+ */
+import { describe, it, expect } from 'vitest';
+import { liveToolLabel, toolPreview, toolStateLabel } from './tool-preview';
+
+describe('toolPreview', () => {
+	it('shows the command for Bash', () => {
+		expect(toolPreview({ name: 'Bash', input: { command: 'npm run build', description: 'Build' } }))
+			.toBe('npm run build');
+	});
+
+	it('shows the path for file tools', () => {
+		expect(toolPreview({ name: 'Read', input: { file_path: 'src/app.css' } })).toBe('src/app.css');
+		expect(toolPreview({ name: 'Edit', input: { file_path: 'src/a.ts', old_string: 'x' } })).toBe('src/a.ts');
+		expect(toolPreview({ name: 'Write', input: { file_path: 'notes.md', content: 'hi' } })).toBe('notes.md');
+	});
+
+	it('shows the pattern for search tools, with a match count when the result states one', () => {
+		expect(toolPreview({ name: 'Grep', input: { pattern: 'TODO' }, result: 'Found 12 matches\n…' }))
+			.toBe('TODO — 12 matches');
+		expect(toolPreview({ name: 'Glob', input: { pattern: '**/*.ts' } })).toBe('**/*.ts');
+	});
+
+	it('does not append a count while the call is still streaming', () => {
+		expect(toolPreview({ name: 'Grep', input: { pattern: 'x' }, result: 'Found 3 matches', streaming: true }))
+			.toBe('x');
+	});
+
+	it('shows the url, description and skill name for their tools', () => {
+		expect(toolPreview({ name: 'WebFetch', input: { url: 'https://example.com', prompt: 'summarise' } }))
+			.toBe('https://example.com');
+		expect(toolPreview({ name: 'Task', input: { description: 'Audit rows', prompt: 'long…' } }))
+			.toBe('Audit rows');
+		expect(toolPreview({ name: 'Skill', input: { skill: 'code-review' } })).toBe('code-review');
+	});
+
+	it('falls back to the first stringy argument for an MCP tool', () => {
+		expect(toolPreview({ name: 'mcp__chrome__click', input: { ref: 'ref_4' } })).toBe('ref_4');
+	});
+
+	it('reads a field out of a still-streaming input buffer', () => {
+		expect(toolPreview({ name: 'Bash', partialInput: '{"command": "git status --por' }))
+			.toBe('git status --por');
+	});
+
+	it('returns an empty string when there is nothing worth showing', () => {
+		expect(toolPreview({ name: 'TodoWrite', input: { todos: [] } })).toBe('');
+		expect(toolPreview({ name: 'Bash' })).toBe('');
+	});
+
+	it('collapses whitespace and truncates very long values', () => {
+		const long = 'a'.repeat(400);
+		const out = toolPreview({ name: 'Bash', input: { command: `echo   ${long}` } });
+		expect(out.length).toBeLessThanOrEqual(160);
+		expect(out.endsWith('…')).toBe(true);
+	});
+});
+
+describe('live tool labels and state', () => {
+	it('names command programs without exposing the full command', () => {
+		expect(liveToolLabel('Bash', { command: 'pnpm test -- --run' })).toBe('Running pnpm');
+		expect(liveToolLabel('Bash', { command: 'sudo -u web env NODE_ENV=test npm run build' })).toBe('Running npm');
+		expect(liveToolLabel('Bash', undefined, '{"command":"git status --short"'))
+			.toBe('Running git');
+	});
+
+	it('uses concise verbs for common active tools', () => {
+		expect(liveToolLabel('Read')).toBe('Reading');
+		expect(liveToolLabel('Edit')).toBe('Editing');
+		expect(liveToolLabel('Grep')).toBe('Searching code');
+		expect(liveToolLabel('WebSearch')).toBe('Searching the web');
+		expect(liveToolLabel('WebFetch')).toBe('Fetching page');
+	});
+
+	it('names long-running media and capture work for the whole wait', () => {
+		expect(liveToolLabel('mcp__builtins__generateVideo')).toBe('Generating video');
+		expect(liveToolLabel('imageToVideo')).toBe('Generating video');
+		expect(liveToolLabel('generateImage')).toBe('Generating image');
+		expect(liveToolLabel('generateAudio')).toBe('Generating audio');
+		expect(liveToolLabel('textTo3D')).toBe('Building 3D model');
+		expect(liveToolLabel('browser_screenshot')).toBe('Taking screenshot');
+		expect(liveToolLabel('ScheduleWakeup')).toBe('Scheduling');
+	});
+
+	it('gives the streaming code-mode cell a verb, not a bare name', () => {
+		expect(liveToolLabel('Python')).toBe('Writing Python');
+		expect(liveToolLabel('run_python')).toBe('Writing Python');
+	});
+
+	it('maps completed, live, failure, and neutral dismissal text exactly', () => {
+		expect(toolStateLabel('running')).toBe('Running');
+		expect(toolStateLabel('complete')).toBe('Complete');
+		expect(toolStateLabel('error')).toBe('Failed');
+		expect(toolStateLabel('error', true)).toBe('Dismissed');
+	});
+});

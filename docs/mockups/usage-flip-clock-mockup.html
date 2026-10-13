@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage flip clock — animation mockup</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 72px;
+    background: #131417; color: #e8eaed;
+    font: 15px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1020px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .sub { color: #9aa0a6; margin: 0 0 24px; max-width: 70ch; }
+  .sub code { background: #232529; border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 780px) { .panels { grid-template-columns: 1fr; } }
+  .panel { background: #1b1d21; border: 1px solid #2a2d33; border-radius: 10px; padding: 16px; }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    margin: 0 0 12px; color: #9aa0a6; display: flex; justify-content: space-between;
+  }
+  .panel h2 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .stage {
+    background: #232529; border-radius: 8px; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 12px; justify-content: center;
+    min-height: 118px; cursor: pointer;
+  }
+  .stage:hover { outline: 1px solid #3a3e46; }
+  .prow { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .plabel { color: #c5c9cf; }
+  .psub { color: #7d838c; font-size: 12px; display: block; }
+  .pvalue { color: #e8eaed; }
+  .pvalue.warn { color: #fbbc4c; }
+  .pvalue.bad { color: #f28b82; }
+  .pvalue.good { color: #81c995; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0 8px; }
+  button {
+    background: #2d3037; color: #e8eaed; border: 1px solid #3a3e46;
+    border-radius: 7px; padding: 7px 14px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #363a42; }
+  button.primary { background: #1a73e8; border-color: #1a73e8; }
+  button.primary:hover { background: #2b7ff0; }
+  .toggle { display: flex; gap: 6px; align-items: center; color: #9aa0a6; font-size: 13px; user-select: none; cursor: pointer; }
+
+  .notes { margin-top: 28px; background: #1b1d21; border: 1px solid #2a2d33; border-radius: 10px; padding: 18px 20px; }
+  .notes h3 { margin: 0 0 10px; font-size: 14px; }
+  .notes ul { margin: 0; padding-left: 20px; color: #c5c9cf; }
+  .notes li { margin: 6px 0; }
+  .notes li b { color: #e8eaed; }
+
+  /* ── flip clock primitives (shared by both modes) ─────────────────── */
+  .clock {
+    position: relative; display: inline-block; white-space: pre;
+    font-variant-numeric: tabular-nums; line-height: 1.5;
+  }
+  /* vertical-align: top pins the 1.5em tile to the line's top edge, so an animating
+     digit keeps the same optical position as the plain-text glyphs around it
+     (a taller tile on the baseline would ride the number up out of the row). */
+  .tile {
+    position: relative; display: inline-block; width: .68em; height: 1.5em;
+    margin-inline: .03em; vertical-align: top;
+  }
+  .half { position: absolute; left: 0; width: 100%; height: 50%; overflow: hidden; backface-visibility: hidden; }
+  .half.top { top: 0; transform-origin: center bottom; border-radius: 2px 2px 0 0; }
+  .half.bottom { bottom: 0; transform-origin: center top; border-radius: 0 0 2px 2px; }
+  .half .face {
+    position: absolute; left: 0; width: 100%; height: 1.5em;
+    text-align: center; line-height: 1.5;
+  }
+  .half.top .face { top: 0; }
+  .half.bottom .face { bottom: 0; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+  /* old: flat card on EVERY digit, midline always on, tiny perspective */
+  .old .tile { perspective: 160px; }
+  .old .half { background: #202124; box-shadow: inset 0 0 0 1px rgba(232,234,237,.09); }
+  .old .tile::after {
+    content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px;
+    background: rgba(232,234,237,.18); z-index: 3;
+  }
+  .old .half.flap { z-index: 2; }
+
+  /* new: tiles only where the digit changes, real depth, midline only mid-flip */
+  .new .tile { perspective: 600px; }
+  .new .tile { margin-inline: .015em; }
+  .new .half {
+    background: linear-gradient(#2b2e34, #202329);
+    box-shadow: inset 0 0 0 1px rgba(232,234,237,.05);
+  }
+  .new .half.top { border-radius: 3px 3px 0 0; }
+  .new .half.bottom { border-radius: 0 0 3px 3px; }
+  .new .half.flap {
+    z-index: 2; will-change: transform;
+    box-shadow: 0 5px 12px rgba(0,0,0,.5), inset 0 0 0 1px rgba(232,234,237,.08);
+  }
+  .new .tile.flipping::after {
+    content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px;
+    background: rgba(0,0,0,.55); z-index: 3;
+  }
+  .new.done .half { background: none; box-shadow: none; }
+
+  /* A position that only exists in the OLD number (100 -> 4) flips down to 0,
+     holds a beat, then collapses its width so the digit visibly leaves. */
+  .tile.collapse {
+    width: 0 !important; margin-inline: 0 !important; overflow: hidden;
+    transition: width .13s ease-in, margin-inline .13s ease-in;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Usage flip clock — animation mockup</h1>
+  <p class="sub">
+    Left reproduces the current <code>usage-number-animation.ts</code> behaviour
+    (450&thinsp;ms hold, 1200&thinsp;ms linear flip, lockstep digits, 160&thinsp;px perspective,
+    tiles on every digit). Right is the proposal. Click a stage or use the buttons —
+    both sides run the same value change.
+  </p>
+
+  <div class="panels">
+    <section class="panel">
+      <h2>Current <span class="hint">click to replay</span></h2>
+      <div class="stage" id="stage-old"></div>
+    </section>
+    <section class="panel">
+      <h2>Proposed <span class="hint">click to replay</span></h2>
+      <div class="stage" id="stage-new"></div>
+    </section>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="btn-run">Run change on both</button>
+    <button id="btn-random">Random values</button>
+    <label class="toggle"><input type="checkbox" id="cb-reduced"> Simulate prefers-reduced-motion</label>
+    <span class="sub" id="pair-label" style="margin:0"></span>
+  </div>
+
+  <div class="notes">
+    <h3>What the proposal changes</h3>
+    <ul>
+      <li><b>Twice as fast, and it feels faster still:</b> 450&thinsp;ms hold + 1200&thinsp;ms linear
+        (1.65&thinsp;s total) becomes a 250&thinsp;ms hold + 520&thinsp;ms flip — under half a second of
+        perceived motion, so a popover that opens and closes quickly still reads.</li>
+      <li><b>Easing instead of linear rotation:</b> the leaving flap accelerates in
+        (cubic ease-in, like gravity), the arriving flap decelerates with a slight
+        overshoot-and-settle (ease-out-back), which is what makes a real split-flap read as mechanical.</li>
+      <li><b>Per-digit stagger (~70&thinsp;ms):</b> digits cascade left-to-right instead of snapping in
+        lockstep; "9 → 34" reads as a count, not a texture swap.</li>
+      <li><b>Tiles only where the digit changes:</b> unchanged digits stay plain text instead of getting
+        a boxed card and a midline through them, so most updates animate one or two glyphs
+        rather than the whole string.</li>
+      <li><b>Real depth:</b> perspective 160&thinsp;px → 600&thinsp;px, gradient tile faces, a drop shadow
+        under the moving flap, and the midline drawn only mid-flip so it reads as the card seam.</li>
+      <li><b>Unchanged behaviours kept:</b> direction-aware flip (up/down), persistence across panel
+        remounts, cross-key/cross-unit suppression, rAF cancellation, and
+        <code>prefers-reduced-motion</code> falls straight back to static text.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+'use strict';
+const NUM_RE = /-?\d+(?:\.\d+)?/g;
+const SPLIT_RE = /(-?\d+(?:\.\d+)?)/;
+
+const MODES = {
+  old: { delay: 450, dur: 1200, stagger: 0, tileAll: true,  easeIn: t => t, easeOut: t => t },
+  new: { delay: 250, dur: 520,  stagger: 70, tileAll: false,
+         easeIn: t => t * t * t,
+         easeOut: t => { const c1 = 1.70158, c3 = c1 + 1;
+                         return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); } },
+};
+
+function halfFace(text, side) {
+  const h = document.createElement('span');
+  h.className = 'half ' + side;
+  const face = document.createElement('span');
+  face.className = 'face';
+  face.textContent = text;
+  h.append(face);
+  return h;
+}
+
+/* Renders fromText → toText inside el (mode 'old'|'new'); returns cleanup. */
+function flip(el, from, to, mode) {
+  const cfg = MODES[mode];
+  const reduced = document.getElementById('cb-reduced').checked;
+  if (reduced || from === to) { el.textContent = to; return () => {}; }
+
+  const sameShape = from.replace(NUM_RE, '#') === to.replace(NUM_RE, '#');
+  if (!sameShape) { el.textContent = to; return () => {}; }
+
+  el.textContent = '';
+  el.classList.remove('done');
+  const sr = document.createElement('span');
+  sr.className = 'sr';
+  sr.textContent = from;
+  el.append(sr);
+
+  const oldNums = from.match(NUM_RE) || [];
+  let idx = 0;
+  const flaps = [];
+  const collapsing = [];   // positions that only exist in the OLD number
+  for (const part of to.split(SPLIT_RE)) {
+    if (!/^-?\d/.test(part)) { el.append(document.createTextNode(part)); continue; }
+    const oldN = oldNums[idx++] ?? '';
+    const w = Math.max(oldN.length, part.length);
+    // Pad with 0, not a blank: a position the final number has outgrown rolls
+    // down to a visible 0 and then collapses away (100 -> 004 -> 4), and a
+    // position the new number gains rolls up from 0 (09 -> 34). That is what
+    // makes the flip read as the actual number changing, not a texture swap.
+    const f = oldN.padStart(w, '0');
+    const t2 = part.padStart(w, '0');
+    const up = Number(part) > Number(oldN);
+    for (let d = 0; d < w; d++) {
+      const vanishes = d < w - part.length;   // pad only in the old number
+      if (!cfg.tileAll && f[d] === t2[d] && !vanishes) {
+        el.append(document.createTextNode(t2[d]));
+        continue;
+      }
+      const tile = document.createElement('span');
+      tile.className = 'tile';
+      if (f[d] === t2[d]) {
+        // Unchanged pad position: still a tile so it can collapse at the end.
+        tile.append(halfFace(t2[d], 'top'), halfFace(t2[d], 'bottom'));
+        if (vanishes) collapsing.push(tile);
+      } else {
+        tile.classList.add('flipping');
+        tile.append(halfFace(up ? t2[d] : f[d], up ? 'bottom' : 'top'),
+                    halfFace(up ? f[d] : t2[d], up ? 'top' : 'bottom'));
+        const oldFlap = halfFace(f[d], (up ? 'bottom' : 'top') + ' flap');
+        const newFlap = halfFace(t2[d], (up ? 'top' : 'bottom') + ' flap');
+        tile.append(oldFlap, newFlap);
+        flaps.push({ oldFlap, newFlap, up, tile });
+        if (vanishes) collapsing.push(tile);
+      }
+      el.append(tile);
+    }
+  }
+  if (!flaps.length && !collapsing.length) { el.textContent = to; return () => {}; }
+
+  let raf = 0, start = 0, collapseTimer = 0;
+  function frame(now) {
+    if (!start) start = now;
+    const elap = now - start;
+    let done = true;
+    for (let i = 0; i < flaps.length; i++) {
+      const fl = flaps[i];
+      const lp = Math.min(Math.max((elap - cfg.delay - i * cfg.stagger) / cfg.dur, 0), 1);
+      if (lp < 1) done = false;
+      const s = fl.up ? 1 : -1;
+      const p1 = Math.min(lp * 2, 1), p2 = Math.max(0, lp * 2 - 1);
+      fl.oldFlap.style.transform = 'rotateX(' + (s * 90 * cfg.easeIn(p1)) + 'deg)';
+      fl.newFlap.style.transform = 'rotateX(' + (-s * 90 * (1 - cfg.easeOut(p2))) + 'deg)';
+      fl.oldFlap.style.visibility = lp < 0.5 ? 'visible' : 'hidden';
+      fl.newFlap.style.visibility = lp >= 0.5 ? 'visible' : 'hidden';
+    }
+    if (!done) { raf = requestAnimationFrame(frame); return; }
+    // Flaps settled (vanishing digits now read 0): let the reading stick for a
+    // beat, then collapse the pad positions and hand back the final string.
+    if (collapsing.length) {
+      collapsing.forEach(t => t.classList.add('collapse'));
+      collapseTimer = setTimeout(() => { el.textContent = to; el.classList.add('done'); }, 150);
+    } else {
+      el.textContent = to;
+      el.classList.add('done');
+    }
+  }
+  raf = requestAnimationFrame(frame);
+  return () => {
+    if (raf) cancelAnimationFrame(raf);
+    if (collapseTimer) clearTimeout(collapseTimer);
+    el.textContent = to; el.classList.add('done');
+  };
+}
+
+/* ── demo driver ──────────────────────────────────────────────────── */
+const PAIRS = [
+  ['(9%)', '(34%)'],
+  ['24% left', '18% left'],
+  ['$22.91 left', '$20.44 left'],
+  ['(96%)', '(100%)'],
+  ['100% left', '4% left'],
+  ['$3.10 left', '$-2.00 left'],
+];
+const ROWS = [
+  { label: 'Context window', sub: '12.4k / 200k tokens', cls: '' },
+  { label: 'Claude · session', sub: 'resets in 2h 14m', cls: 'warn' },
+];
+
+const stages = { old: document.getElementById('stage-old'), new: document.getElementById('stage-new') };
+let pairIdx = 0;
+let cleanups = [];
+
+function buildStages() {
+  for (const mode of ['old', 'new']) {
+    const stage = stages[mode];
+    stage.replaceChildren();
+    for (const row of ROWS) {
+      const pr = document.createElement('div');
+      pr.className = 'prow';
+      const lab = document.createElement('span');
+      lab.className = 'plabel';
+      lab.innerHTML = row.label + '<span class="psub">' + row.sub + '</span>';
+      const val = document.createElement('span');
+      val.className = 'pvalue ' + row.cls;
+      const clock = document.createElement('span');
+      clock.className = 'clock ' + mode;
+      val.append(clock);
+      pr.append(lab, val);
+      stage.append(pr);
+    }
+  }
+}
+
+function setText(text) {
+  for (const mode of ['old', 'new'])
+    stages[mode].querySelectorAll('.clock').forEach(c => { c.textContent = text; c.classList.add('done'); });
+}
+
+function run() {
+  cleanups.splice(0).forEach(fn => fn());
+  const [from, to] = PAIRS[pairIdx];
+  document.getElementById('pair-label').textContent = from + '  →  ' + to;
+  for (const mode of ['old', 'new'])
+    stages[mode].querySelectorAll('.clock').forEach((c, i) => cleanups.push(flip(c, i ? to : from, to, mode)));
+  pairIdx = (pairIdx + 1) % PAIRS.length;
+}
+
+/* The demo replays exactly ONE pair at a time, tracked in `currentPair`.
+   run(from, to) seeds both sides with `from`, then flips each side to `to`
+   under its own mode; callers never index a shared cursor, so a random pair
+   or a per-stage replay can never mix up which value a side starts from. */
+let currentPair = PAIRS[0];
+
+function run(from, to) {
+  cleanups.splice(0).forEach(fn => fn());
+  currentPair = [from, to];
+  document.getElementById('pair-label').textContent = from + '  →  ' + to;
+  for (const mode of ['old', 'new'])
+    stages[mode].querySelectorAll('.clock').forEach(c => {
+      c.textContent = from;
+      cleanups.push(flip(c, from, to, mode));
+    });
+}
+
+function randomize() {
+  const pct = () => Math.floor(Math.random() * 100);
+  const a = pct(), b = pct();
+  run('(' + a + '%)', '(' + b + '%)');
+}
+
+document.getElementById('btn-run').addEventListener('click', () => run(...currentPair));
+document.getElementById('btn-random').addEventListener('click', () => {
+  let a, b;
+  do { a = Math.floor(Math.random() * 100); b = Math.floor(Math.random() * 100); } while (a === b);
+  run('(' + a + '%)', '(' + b + '%)');
+});
+for (const mode of ['old', 'new'])
+  stages[mode].addEventListener('click', () => run(...currentPair));
+document.getElementById('cb-reduced').addEventListener('change', () => setText(currentPair[1]));
+
+buildStages();
+setText(PAIRS[0][0]);
+document.getElementById('pair-label').textContent = PAIRS[0][0] + '  →  ' + PAIRS[0][1];
+</script>
+</body>
+</html>

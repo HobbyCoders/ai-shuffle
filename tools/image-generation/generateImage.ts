@@ -1,0 +1,296 @@
+/**
+ * Image Generation Tool — fal.ai Provider
+ *
+ * Generate images using fal.ai models:
+ * - Flux Pro 1.1 Ultra, FLUX.2 Flex, Flux Dev, Flux Schnell
+ * - Flux Kontext Pro (editing + reference images)
+ * - Recraft V4, Nano Banana 2, Nano Banana Pro, Qwen Image
+ *
+ * All models accessed through a single fal.ai API key (FAL_KEY env var).
+ * Images are saved to disk and a URL is returned for display.
+ */
+
+import { registry } from '../providers/registry.js';
+import { ImageResult, ProviderCredentials, GeneratedImage as ProviderGeneratedImage } from '../providers/types.js';
+import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
+import { catalogGenerateCheck } from '../providers/image/fal-ai.js';
+
+export interface GenerateImageInput {
+  /**
+   * The text prompt describing the image to generate.
+   * Be descriptive! Include style, mood, colors, composition details.
+   * Max 10,000 characters.
+   *
+   * @example "A majestic mountain landscape at golden hour, oil painting style"
+   * @example "Cute robot holding a flower, digital art, soft lighting"
+   */
+  prompt: string;
+
+  /**
+   * Override the default image provider.
+   * Always "fal-ai" in the current architecture.
+   */
+  provider?: string;
+
+  /**
+   * Override the default model.
+   * Available: "fal-ai/flux-pro/v1.1-ultra", "fal-ai/flux-2-flex", "fal-ai/flux/dev",
+   *   "fal-ai/flux/schnell", "fal-ai/flux-pro/kontext", "fal-ai/recraft/v4/text-to-image",
+   *   "fal-ai/nano-banana-2", "fal-ai/nano-banana-pro", "fal-ai/qwen-image"
+   * If not specified, uses IMAGE_MODEL env var or provider default
+   */
+  model?: string;
+
+  /**
+   * Aspect ratio of the generated image.
+   * @default "1:1"
+   */
+  aspect_ratio?: '1:1' | '16:9' | '9:16' | '4:3' | '3:4' | '2:3' | '3:2' | '4:5' | '5:4' | '21:9';
+
+  /**
+   * Output image size/resolution.
+   * - "1K" = ~1024px (default, fastest)
+   * - "2K" = ~2048px (higher quality)
+   * - "4K" = ~4096px (highest quality, slower)
+   * @default "1K"
+   */
+  image_size?: '1K' | '2K' | '4K';
+
+  /**
+   * Number of images to generate (1-4).
+   * When > 1, response will contain multiple images array.
+   * @default 1
+   */
+  number_of_images?: 1 | 2 | 3 | 4;
+
+  /**
+   * Control generation of people in the image.
+   * - "dont_allow": No people allowed
+   * - "allow_adult": Only adults allowed (default)
+   * - "allow_all": All people including children
+   * @default "allow_adult"
+   */
+  person_generation?: 'dont_allow' | 'allow_adult' | 'allow_all';
+}
+
+/** Single generated image result */
+export interface GeneratedImage {
+  /** URL to access the generated image (for display in chat) */
+  image_url: string;
+  /** Local file path where the image was saved */
+  file_path: string;
+  /** Filename of the generated image */
+  filename: string;
+  /** MIME type of the image (e.g., 'image/png') */
+  mime_type: string;
+}
+
+export interface GenerateImageResponse {
+  /** Whether the image was generated successfully */
+  success: boolean;
+
+  /** URL to access the generated image (for display in chat) - first image when multiple */
+  image_url?: string;
+
+  /** Local file path where the image was saved - first image when multiple */
+  file_path?: string;
+
+  /** Filename of the generated image - first image when multiple */
+  filename?: string;
+
+  /** MIME type of the image (e.g., 'image/png') - first image when multiple */
+  mime_type?: string;
+
+  /** All generated images when number_of_images > 1 */
+  images?: GeneratedImage[];
+
+  /** Provider that was used for generation (e.g., "google-gemini", "google-imagen") */
+  provider_used?: string;
+
+  /** Model that was used for generation (e.g., "gemini-2.5-flash-image") */
+  model_used?: string;
+
+  /** Capabilities of the provider used (e.g., ["text-to-image", "image-edit"]) */
+  capabilities?: string[];
+
+  /** Hint for editing: which providers can edit this image */
+  edit_with?: string;
+
+  /** Error message if generation failed */
+  error?: string;
+}
+
+/**
+ * Get the provider ID — always fal-ai
+ */
+function getProviderId(_inputProvider?: string): string {
+  return 'fal-ai';
+}
+
+/**
+ * Get fal.ai API key from environment
+ */
+function getApiKey(_providerId: string): string {
+  return process.env.FAL_KEY || '';
+}
+
+/**
+ * Get model ID from input or environment
+ */
+function getModelId(providerId: string, inputModel?: string): string {
+  if (inputModel) {
+    return inputModel;
+  }
+
+  if (process.env.IMAGE_MODEL) {
+    return process.env.IMAGE_MODEL;
+  }
+
+  // Provider defaults
+  const provider = registry.getImageProvider(providerId);
+  if (provider && provider.models.length > 0) {
+    return provider.models[0].id;
+  }
+
+  return 'fal-ai/flux-pro/v1.1-ultra';
+}
+
+/**
+ * Convert provider result to our response format, including provider metadata
+ */
+function toResponse(
+  result: ImageResult,
+  providerId: string,
+  modelId: string,
+  capabilities: string[]
+): GenerateImageResponse {
+  if (!result.success) {
+    return { success: false, error: result.error };
+  }
+
+  // Determine which providers can edit this image
+  const supportsEdit = capabilities.includes('image-edit');
+  // Point at the configured edit model, never a fixed list: naming Nano
+  // Banana here steered agents to pick it themselves (#1796).
+  const configuredEdit = process.env.IMAGE_EDIT_MODEL || process.env.IMAGE_MODEL;
+  const editWith = supportsEdit
+    ? providerId
+    : `editImage${configuredEdit ? ` (configured edit model ${configuredEdit})` : ''}`;
+
+  return {
+    success: true,
+    image_url: result.image_url,
+    file_path: result.file_path,
+    filename: result.filename,
+    mime_type: result.mime_type,
+    ...(result.images && { images: result.images as GeneratedImage[] }),
+    provider_used: providerId,
+    model_used: modelId,
+    capabilities: capabilities,
+    edit_with: editWith
+  };
+}
+
+/**
+ * Generate an image from a text prompt.
+ *
+ * Uses the configured provider (Google Gemini, etc.) or allows
+ * explicit override via the provider/model parameters.
+ *
+ * The image is saved to disk and a URL is returned for display in the chat UI.
+ * This avoids context window limitations with large base64 strings.
+ *
+ * @param input - The generation parameters
+ * @returns The generated image URL and file path, or error details
+ *
+ * @example
+ * ```typescript
+ * // Generate a single image with default provider
+ * const result = await generateImage({
+ *   prompt: 'A cozy coffee shop interior, watercolor style'
+ * });
+ *
+ * // Generate multiple images with specific provider
+ * const result = await generateImage({
+ *   prompt: 'A cute robot',
+ *   provider: 'google-gemini',
+ *   model: 'gemini-3-pro-image-preview',
+ *   number_of_images: 4,
+ *   image_size: '2K'
+ * });
+ *
+ * if (result.success) {
+ *   console.log('Image URL:', result.image_url);
+ *   if (result.images) {
+ *     result.images.forEach((img, i) => console.log(`Image ${i+1}:`, img.image_url));
+ *   }
+ * }
+ * ```
+ */
+export async function generateImage(input: GenerateImageInput): Promise<GenerateImageResponse> {
+  // Determine provider
+  const providerId = getProviderId(input.provider);
+  const provider = registry.getImageProvider(providerId);
+
+  if (!provider) {
+    const availableProviders = registry.listImageProviders().map(p => p.id);
+    return {
+      success: false,
+      error: `Image provider '${providerId}' not found. Available providers: ${availableProviders.join(', ')}`
+    };
+  }
+
+  // Get API key
+  const apiKey = getApiKey(providerId);
+  if (!apiKey) {
+    return {
+      success: false,
+      error: 'No fal.ai credential available to this worker. Configure fal_api_key in Settings > Integrations (injected as FAL_KEY).'
+    };
+  }
+
+  // Get model
+  const modelId = getModelId(providerId, input.model);
+  const modelInfo = provider.models.find(m => m.id === modelId);
+
+  // A model outside the built-in list must be a fal.ai text-to-image
+  // endpoint: another provider's id, or an edit endpoint that needs a source
+  // image, is refused here instead of failing at fal.ai (#1796).
+  if (!modelInfo) {
+    const refused = await catalogGenerateCheck(modelId);
+    if (refused) {
+      return { success: false, error: refused.error };
+    }
+  }
+
+  // Build credentials
+  const credentials: ProviderCredentials = { apiKey };
+
+  // Apply env var defaults when caller doesn't specify
+  const aspect_ratio = input.aspect_ratio || (process.env.IMAGE_ASPECT_RATIO as any) || undefined;
+  const image_size = input.image_size || (process.env.IMAGE_RESOLUTION as any) || undefined;
+
+  // Delegate to provider — works even with models not in the hardcoded list
+  // since fal.subscribe() accepts any valid endpoint_id
+  const result = await provider.generate(
+    {
+      prompt: input.prompt,
+      aspect_ratio,
+      image_size,
+      number_of_images: input.number_of_images,
+      person_generation: input.person_generation,
+      extra_params: parseModelParamsEnv('IMAGE_MODEL_PARAMS')
+    },
+    credentials,
+    modelId
+  );
+
+  // Get capabilities from the model info (use defaults for dynamic models)
+  const capabilities = modelInfo
+    ? modelInfo.capabilities.map(c => c.toString())
+    : ['text-to-image'];
+
+  return toResponse(result, providerId, modelId, capabilities);
+}
+
+export default generateImage;

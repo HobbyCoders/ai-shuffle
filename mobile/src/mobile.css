@@ -1,0 +1,660 @@
+/*
+   * Mobile shell styles — the rules that used to sit behind
+   * `html[data-platform='mobile']` inside the shared components' scoped
+   * <style> blocks. They are global here: the mobile app is the only build that
+   * stamps <html data-platform="mobile">, so the desktop web UI (frontend/) never
+   * carries them (see docs/mobile-desktop-ui-split.md and
+   * frontend/scripts/check-no-mobile-ui.mjs).
+   *
+   * Selector shape: `html:root[data-platform='mobile'] .foo` — `:root` adds the
+   * one class level that Svelte's scoping hash added when these rules lived
+   * inside the components, so every rule keeps exactly the specificity it had
+   * and still wins over the component's own (scoped) desktop declarations.
+   * Author class names are untouched by Svelte scoping, which is why the
+   * original selectors work unchanged from a global sheet.
+   *
+   * Extracted once from the sources named in the section headers; edit by
+   * hand from here on.
+   */
+
+/* ── frontend/src/lib/components/CommandAutocomplete.svelte ────────────────── */
+
+/* Mobile shell: break out of textarea-wrapper to span full chat island width */
+html:root[data-platform='mobile'] .command-autocomplete-panel {
+	left: -15px; /* -(island .input-area padding 14px + island border 1px) */
+	right: auto;
+	width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
+}
+
+/* ── frontend/src/lib/components/FileAutocomplete.svelte ───────────────────── */
+
+/* Mobile shell: break out of textarea-wrapper to span full chat island width */
+html:root[data-platform='mobile'] .file-autocomplete-panel {
+	left: -15px; /* -(island .input-area padding 14px + island border 1px) */
+	right: auto;
+	width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
+}
+
+/* ── frontend/src/lib/components/NotificationCenter.svelte ─────────────────── */
+
+/* Mobile shell: the header reflows and an absolutely-positioned panel anchored
+   to this button would clip. Pin it as a fixed near-full-width panel below the
+   header. */
+html:root[data-platform='mobile'] {
+	.notif-btn {
+		width: 36px;
+		height: 36px;
+	}
+
+	.notif-panel {
+		position: fixed;
+		top: 58px;
+		left: 8px;
+		right: 8px;
+		width: auto;
+		max-width: none;
+		max-height: calc(100vh - 120px);
+		z-index: 200;
+	}
+}
+
+/* ── frontend/src/lib/components/autocomplete/autocomplete-design-system.css ─── */
+
+/* ========================================
+   Responsive Adjustments
+   ======================================== */
+
+/* Composer pop-up sizing for the mobile shell (the Android WebView), stamped on
+   <html> before first paint by src/app.html. This file is imported by
+   CommandAutocomplete and FileAutocomplete, whose own panel breakout gates use
+   the same platform selector — keep the three in step. */
+html[data-platform='mobile'] .autocomplete-panel {
+	border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
+}
+
+html[data-platform='mobile'] .autocomplete-item {
+	padding: var(--space-2, 8px);
+	padding-left: calc(var(--space-2, 8px) - 3px);
+	gap: var(--space-2, 8px);
+}
+
+html[data-platform='mobile'] .autocomplete-header, html[data-platform='mobile'] .autocomplete-footer {
+	padding: var(--space-2, 8px);
+}
+
+html[data-platform='mobile'] .autocomplete-badge {
+	font-size: 0.5625rem;
+	padding: 1px 6px;
+}
+
+/* ── frontend/src/lib/components/browser/BrowserPanel.svelte ───────────────── */
+
+/* Mobile shell: fullscreen even before hydration sets .fullscreen. */
+html:root[data-platform='mobile'] .browser-panel {
+	position: absolute;
+	inset: 0;
+	z-index: 95;
+	width: 100% !important;
+	border-left: none;
+	padding-top: env(safe-area-inset-top, 0px);
+	padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* 16px stops mobile browsers zooming into the textarea on focus. Applies on
+   the mobile shell, and in any narrow window where the keyboard is touch. */
+html:root[data-platform='mobile'] .composer-input {
+	font-size: 16px;
+}
+
+/* Mobile shell: compact toolbar, with the forward button always shown. */
+html:root[data-platform='mobile'] .panel-header { gap: 2px; padding: 3px 4px; min-height: 34px;
+}
+
+html:root[data-platform='mobile'] .tool-btn { width: 26px; height: 30px;
+}
+
+html:root[data-platform='mobile'] .nav-forward { display: flex;
+}
+
+html:root[data-platform='mobile'] .address-bar { min-width: 32px;
+}
+
+html:root[data-platform='mobile'] .address-display, html:root[data-platform='mobile'] .address-input { height: 30px; font-size: 0.75rem;
+}
+
+html:root[data-platform='mobile'] .address-display { padding-inline: 5px;
+}
+
+/* ── frontend/src/lib/components/chat/BranchSelector.svelte ────────────────── */
+
+/* Mobile shell: keep the dropdown within the viewport. */
+html:root[data-platform='mobile'] .branch-name {
+	max-width: min(120px, 30vw);
+}
+
+html:root[data-platform='mobile'] .branch-selector {
+	position: static;
+}
+
+html:root[data-platform='mobile'] .branch-dropdown {
+	left: 12px;
+	right: 12px;
+	min-width: 0;
+	max-width: none;
+}
+
+/* ── frontend/src/lib/components/chat/ChatInput.svelte ─────────────────────── */
+
+/* T3-style mobile composer: an idle chat shrinks to a single input line with
+   the send glyph at its end. Focusing restores the controls row; a
+   successful send blurs it again. Mobile shell only — the desktop shell
+   keeps the full composer at every window width. */
+html:root[data-platform='mobile'] .chat-input-wrapper {
+	padding: 12px 0.5rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
+	background: linear-gradient(to top, var(--background) 68%, transparent);
+}
+
+/* The composer card (issue #1816): + | text | mic · send/stop, with the
+   quick bar (MobileComposerControlsSheet) as its bottom edge. */
+html:root[data-platform='mobile'] .chat-island {
+	border-radius: calc(var(--radius) * 1.6);
+	border-color: var(--border-strong);
+	background: var(--card);
+	box-shadow: var(--shadow-m);
+	transition:
+	border-radius 180ms ease,
+	border-color 180ms ease;
+}
+
+/* Profile, branch and worktree setup live in the mobile controls sheet. */
+html:root[data-platform='mobile'] .context-pill-row {
+	display: none;
+}
+
+/* A 52px field with a 24px line; the 44px buttons sit 4px off the bottom,
+   so they centre on the first line and stay pinned as the text grows. */
+html:root[data-platform='mobile'] .input-area {
+	min-height: 0;
+	align-items: flex-end;
+	gap: 4px;
+	padding: 6px;
+	background: transparent;
+	border-radius: calc(var(--radius) * 1.6) calc(var(--radius) * 1.6) 0 0;
+}
+
+html:root[data-platform='mobile'] .input-area .textarea-wrapper {
+	align-self: stretch;
+	padding: 14px 8px 14px 6px;
+}
+
+html:root[data-platform='mobile'] .composer-attach,
+html:root[data-platform='mobile'] .send-cluster .voice-btn {
+	display: grid;
+	place-items: center;
+	width: 44px;
+	height: 44px;
+	flex: none;
+	margin-bottom: 4px;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius);
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	-webkit-tap-highlight-color: transparent;
+}
+
+html:root[data-platform='mobile'] .composer-attach:hover:not(:disabled),
+html:root[data-platform='mobile'] .send-cluster .voice-btn:hover:not(:disabled) {
+	background: var(--hover-overlay);
+	color: var(--foreground);
+}
+
+html:root[data-platform='mobile'] .composer-attach:active:not(:disabled) { background: var(--active-overlay); }
+html:root[data-platform='mobile'] .composer-attach:disabled { opacity: 0.4; cursor: not-allowed; }
+html:root[data-platform='mobile'] .composer-attach:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+html:root[data-platform='mobile'] .composer-attach-spin { animation: composer-attach-spin 0.9s linear infinite; }
+@keyframes composer-attach-spin { to { transform: rotate(360deg); } }
+
+html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper { margin-bottom: 4px; border-radius: var(--radius); }
+html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper .voice-btn { margin-bottom: 0; }
+html:root[data-platform='mobile'] .send-cluster .voice-btn svg { width: 20px; height: 20px; }
+
+/* Drafts save and restore by themselves; the phone shows no stash control. */
+html:root[data-platform='mobile'] .send-cluster .stash {
+	display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:root[data-platform='mobile'] .composer-attach-spin { animation: none; }
+}
+
+/* Thumb-sized primary action: a full 44px touch target, the same size and
+   radius as + and the mic, pinned to the bottom with them. */
+html:root[data-platform='mobile'] .send-cluster {
+	align-self: flex-end;
+	gap: 4px;
+}
+
+html:root[data-platform='mobile'] .send-btn, html:root[data-platform='mobile'] .send-cluster .stop-btn {
+	width: 44px;
+	height: 44px;
+	margin-bottom: 4px;
+	border-radius: var(--radius);
+}
+
+html:root[data-platform='mobile'] .send-btn svg { width: 20px; height: 20px; }
+html:root[data-platform='mobile'] .send-cluster .stop-btn svg { width: 18px; height: 18px; }
+
+/* Composer text at 16px: readable on a phone, and mobile browsers do not zoom
+   into an editor whose text is at least 16px. The suggestion ghost text sits
+   on the same line, so it follows. A 24px line keeps one line inside the
+   editor's 24px minimum: a taller line would make the idle editor a scroll
+   owner, and the swipe-to-open gesture yields to scroll owners. */
+html:root[data-platform='mobile'] .chat-input-wrapper .tiptap-editor .ProseMirror,
+html:root[data-platform='mobile'] .chat-input-wrapper .inline-suggestion {
+	font-size: 16px;
+	line-height: 24px;
+}
+
+/* At 16px a long placeholder can wrap on a narrow phone, which also turns the
+   idle editor into a scroll owner. Keep it on one line, truncated, the way the
+   editor already lays it out beside a suggestion. */
+html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child::before {
+	position: absolute;
+	inset-inline: 0;
+	float: none;
+	height: auto;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* At 360px and narrower the code lane's placeholder no longer fits and would
+   end in an ellipsis, so it says the same thing in fewer words. It matches the
+   value ChatInput sets, which leaves chat's "Ask anything" and suggestion
+   ghost text alone. */
+@media (max-width: 360px) {
+	html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child[data-placeholder='Describe a task or ask a question']::before {
+		content: 'Ask or describe a task';
+	}
+
+	/* The mic stays beside send while there is a draft, so the cluster drops
+	   its gap here: each button keeps its full 44px target and the text field
+	   keeps the room. */
+	html:root[data-platform='mobile'] .send-cluster { gap: 0; }
+}
+
+/* The field's padding makes the target; the editor grows to five lines. */
+html:root[data-platform='mobile'] .chat-input-wrapper:not(.mobile-collapsed) .textarea-wrapper .tiptap-editor {
+	min-height: 24px;
+}
+
+html:root[data-platform='mobile'] .mobile-collapsed .chat-island {
+	min-height: 50px;
+	border-radius: 14px;
+}
+
+html:root[data-platform='mobile'] .mobile-collapsed .context-pill-row {
+	display: none;
+}
+
+/* Collapsed: the controls row goes away entirely. The send / stop
+   cluster lives in the input area, so the primary action stays on the
+   single remaining line. */
+html:root[data-platform='mobile'] .mobile-collapsed .controls-dock {
+	display: none;
+	pointer-events: none;
+}
+
+html:root[data-platform='mobile'] .mobile-collapsed .mobile-composer-controls {
+	display: none;
+}
+
+/* Expanding on pointerdown reflows this row under the still-down finger.
+   Keep it un-hittable until that pointer's click has been delivered. */
+html:root[data-platform='mobile'] .mobile-toolbar-blocked .controls-dock {
+	pointer-events: none;
+}
+
+html:root[data-platform='mobile'] .mobile-collapsed .input-area {
+	border-radius: 14px;
+	min-width: 0;
+	min-height: 52px;
+	align-items: center;
+	padding: 4px 4px 4px 16px;
+}
+
+/* ── frontend/src/lib/components/chat/ControlsDock.svelte ──────────────────── */
+
+/* Mobile shell only: the quick bar (MobileComposerControlsSheet) is the
+   composer's bottom edge. The dock stays mounted for its state (usage
+   polling, effort range, Away) but shows nothing: attach and the mic sit in
+   the input row, call and browser in Chat controls (issue #1816). */
+html:root[data-platform='mobile'] .controls-dock {
+	display: none;
+}
+
+html:root[data-platform='mobile'] .desktop-controls {
+	display: none;
+}
+
+html:root[data-platform='mobile'] .composer-mobile-only {
+	display: grid;
+}
+
+html:root[data-platform='mobile'] .mobile-controls {
+	display: flex;
+	margin-left: auto;
+}
+
+/* Settings · voice · call · attach on the left; usage on the right. */
+html:root[data-platform='mobile'] .dock-left {
+	gap: 0;
+}
+
+/* Every dock control is a 44px touch target. */
+html:root[data-platform='mobile'] .dock-ico, html:root[data-platform='mobile'] .dock-left .voice-btn, html:root[data-platform='mobile'] .dock-left .voice-call-btn {
+	width: 44px;
+	height: 44px;
+	border-radius: 12px;
+}
+
+html:root[data-platform='mobile'] .mobile-controls .usage-indicator {
+	width: 44px;
+	height: 44px;
+	margin-left: 0;
+}
+
+html:root[data-platform='mobile'] .dock-left .voice-btn-wrapper {
+	border-radius: 12px;
+}
+
+/* ── frontend/src/lib/components/chat/MessageActions.svelte ────────────────── */
+/* ── frontend/src/lib/components/chat/AssistantMessage.svelte ──────────────── */
+/* ── frontend/src/lib/components/chat/UserMessage.svelte ───────────────────── */
+
+/* The phone has no hover, so message actions (copy, read aloud, rewind) are
+   always visible, at every width — the components' own narrow-window media
+   query only covers phones in portrait. Each button is 32px with an invisible
+   44px hit area, on a 44px pitch so neighbouring targets never overlap.
+   `.action-btn` is scoped under `.message-actions`: the Git panel uses the
+   same class name. */
+html:root[data-platform='mobile'] .message-actions {
+	gap: 12px;
+}
+
+html:root[data-platform='mobile'] .message-actions .action-btn {
+	position: relative;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+}
+
+html:root[data-platform='mobile'] .message-actions .action-btn::after {
+	content: '';
+	position: absolute;
+	inset: -6px;
+}
+
+html:root[data-platform='mobile'] .useractions,
+html:root[data-platform='mobile'] .assistant-actions {
+	opacity: 1;
+	pointer-events: auto;
+	user-select: auto;
+}
+
+/* The assistant message container clips overflow: a full 44px row and a 6px
+   inset from the right edge leave room for the hit area. */
+html:root[data-platform='mobile'] .ameta {
+	min-height: 44px;
+	gap: 9px;
+}
+
+html:root[data-platform='mobile'] .assistant-actions {
+	margin-right: 6px;
+}
+
+/* ── frontend/src/lib/components/chat/ProfileSelector.svelte ───────────────── */
+
+/* Mobile shell layout adjustments */
+/* In the app the pill bar wraps onto multiple lines, so the profile pill is
+   free to grow — show the full profile name instead of truncating it.
+   Bound to the viewport (minus the bar's padding) so a pathologically long
+   name can't overflow horizontally; normal names show in full. */
+html:root[data-platform='mobile'] .selector-text {
+	font-size: 12px;
+	max-width: calc(100vw - 4rem);
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* In the pill bar the dropdown opens upward; keep it within the viewport
+   by anchoring to the bar's full width. */
+html:root[data-platform='mobile'] .selector-wrapper {
+	position: static;
+}
+
+html:root[data-platform='mobile'] .selector-dropdown {
+	left: 12px;
+	right: 12px;
+	min-width: 0;
+	max-width: none;
+}
+
+/* ── frontend/src/lib/components/chat/TiptapEditor.svelte ──────────────────── */
+
+/* Mobile shell: reduce max-height so the chat island stays within viewport
+   bounds. ChatInput applies the taller min-height to .tiptap-editor on the
+   desktop shell only, so this compact cap covers the mobile counterpart. */
+html:root[data-platform='mobile'] .tiptap-editor {
+	max-height: 120px;
+}
+
+/* ── frontend/src/lib/components/deck/cards/StatsCard.svelte ───────────────── */
+
+html:root[data-platform='mobile'] .top-row .top-arrow { opacity: 1;
+}
+
+/* ── frontend/src/lib/components/git/ChangedFilesPanel.svelte ──────────────── */
+
+/* Mobile shell (Android WebView): the panel is always fullscreen. Backstops
+   the JS-driven .panel-mobile class before hydration. */
+html:root[data-platform='mobile'] .panel {
+	width: 100% !important;
+	border-left: none;
+}
+
+html:root[data-platform='mobile'] .file-actions { display: flex;
+}
+
+/* ── frontend/src/lib/components/git/GitHeaderActions.svelte ───────────────── */
+
+/* Mobile shell (Android WebView): the git cluster is one button that opens a
+   bottom sheet (the component's own narrow-screen layout). Only the direct
+   header buttons (Init Repo, retry) need touch sizing here. */
+html:root[data-platform='mobile'] .git-actions {
+	flex-wrap: nowrap;
+	flex-shrink: 0;
+}
+
+html:root[data-platform='mobile'] .git-btn {
+	flex-shrink: 0;
+	height: 36px;
+	padding: 0 12px;
+	font-size: 0.75rem;
+}
+
+/* Private access keeps touch-sized fields on the unfolded screen too. */
+html:root[data-platform='mobile'] .pa-field .card-form-input {
+	min-height: 44px;
+	font-size: 1rem;
+}
+html:root[data-platform='mobile'] .pa-toggle,
+html:root[data-platform='mobile'] .pa-small-btn { min-height: 44px; }
+
+html:root[data-platform='mobile'] .project-name {
+	max-width: 80px;
+}
+
+/* ── frontend/src/lib/components/layout/ChatView.svelte ────────────────────── */
+
+/* The invitation stays at its natural size and a fixed top inset. The
+   whole empty surface scrolls; the workspace popup uses the top layer. */
+html:root[data-platform='mobile'] .chat-view.is-empty { overflow-y: auto;
+}
+
+html:root[data-platform='mobile'] .is-empty .empty-hero {
+	flex: 0 0 auto;
+	justify-content: flex-start;
+	padding-top: 1rem;
+}
+
+html:root[data-platform='mobile'] .is-empty .empty-hero-content { flex-shrink: 0;
+}
+
+html:root[data-platform='mobile'] .is-empty .empty-bottom-spacer { display: none;
+}
+
+html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-layout {
+	position: sticky;
+	bottom: 0;
+	z-index: 10;
+	background: var(--background);
+	margin-top: 0;
+}
+
+/* An oversized dock must scroll normally, not pin its editor offscreen.
+   Do not clip the slot: its anchored popovers extend outside the dock. */
+html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-layout.composer-overflow { position: static;
+}
+
+/* Short expanded panels must not permanently cover the invitation. */
+html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-layout[data-panel-flow] { position: static;
+}
+
+/* SessionCard, Sidebar, SidebarRail, SidebarSheet and WorkspaceCustomize size
+   their own touch targets (class:phone and @media (hover: none)). */
+
+/* ── frontend/src/lib/components/settings/shell (Settings) ───────────────── */
+
+/* Settings always stacks in the app (index, then page, then detail; see
+   settings.css). The app bar already says "Settings", so the index drops its
+   own title. Fields stay at 16px so focusing one never zooms the page, and
+   the stack's back buttons get thumb-sized targets. */
+html:root[data-platform='mobile'] .settings-shell .st-ix-title {
+	display: none;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-index {
+	padding-top: 12px;
+}
+
+html:root[data-platform='mobile'] .settings-shell input:not([type='checkbox']):not([type='radio']),
+html:root[data-platform='mobile'] .settings-shell select,
+html:root[data-platform='mobile'] .settings-shell textarea {
+	font-size: 16px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-back {
+	min-height: 44px;
+	min-width: 44px;
+}
+
+/* A chevron-only back button centres its icon in the 44px target and pulls
+   the title in, so the gap after it matches the labelled back button. */
+html:root[data-platform='mobile'] .settings-shell .st-back:not(:has(span)) {
+	justify-content: center;
+	padding: 0;
+	margin-right: -6px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm) {
+	width: 42px;
+	height: 25px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)::after {
+	width: 20px;
+	height: 20px;
+}
+
+html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)[aria-checked='true']::after {
+	transform: translateX(17px);
+}
+
+/* ── frontend/src/lib/components/ui/RowActionMenu.svelte ───────────────────── */
+
+/* Mobile shell (Android WebView). Mirrors the component's (hover: none) block
+   so the rail also collapses on a touch device with a fine pointer attached. */
+html:root[data-platform='mobile'] {
+	.ram-toggle { display: flex; }
+
+	/* The persistent slot is NOT part of the collapsing tray: it stays in normal
+	   flow just left of the ⋮ and is always shown. There's no row hover on touch,
+	   so the desktop `--ram-reveal` (0 at rest) would otherwise hide it — pin it. */
+	.ram-persistent > :global(*) {
+		opacity: 1;
+		transform: none;
+	}
+
+	/* Float the tray out to the LEFT of the ⋮ so opening never reflows the
+	   row. top/bottom:0 against the stretched .ram makes the tray match the
+	   row's content height — it reads as part of the row, not a loose pill. */
+	.ram-tray {
+		position: absolute;
+		right: calc(100% + 6px);
+		top: 0;
+		bottom: 0;
+		padding: 0 6px;
+		border-radius: 10px;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-l);
+		z-index: 6;
+
+		/* Closed: collapsed toward the toggle, anchored at its right edge. */
+		opacity: 0;
+		transform: translateX(6px) scale(0.98);
+		transform-origin: right center;
+		pointer-events: none;
+		transition: opacity 150ms ease, transform 210ms cubic-bezier(0.22, 1, 0.36, 1);
+	}
+	.ram.open .ram-tray {
+		opacity: 1;
+		transform: none;
+		pointer-events: auto;
+	}
+
+	/* Buttons peel out from behind the ⋮, staggered nearest-first, on one
+	   smooth ease (no overshoot bounce — that read as jittery before). */
+	.ram-tray > :global(*) {
+		opacity: 0;
+		transform: translateX(10px);
+		transition: opacity 170ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+	}
+	.ram.open .ram-tray > :global(*) {
+		opacity: 1;
+		transform: translateX(0);
+	}
+	.ram.open .ram-tray > :global(*:nth-last-child(1)) { transition-delay: 30ms; }
+	.ram.open .ram-tray > :global(*:nth-last-child(2)) { transition-delay: 62ms; }
+	.ram.open .ram-tray > :global(*:nth-last-child(3)) { transition-delay: 94ms; }
+	.ram.open .ram-tray > :global(*:nth-last-child(4)) { transition-delay: 126ms; }
+	.ram.open .ram-tray > :global(*:nth-last-child(5)) { transition-delay: 158ms; }
+
+	/* Toggle reads as pressed while its rail is open. */
+	.ram.open .ram-toggle {
+		color: var(--foreground);
+		background: color-mix(in oklch, var(--muted) 60%, transparent);
+	}
+}
+
+/* ── frontend/src/lib/components/Banner.svelte ─────────────────────────────── */
+
+/* The dismiss X is a full 44px touch target in the phone shell at any width
+   (a tablet in landscape included), not only below the 640px breakpoint. */
+html:root[data-platform='mobile'] .banner-close {
+	min-width: 44px;
+	min-height: 44px;
+}

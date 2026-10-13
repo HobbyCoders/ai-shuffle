@@ -1,0 +1,35 @@
+{
+  "name": "ai-shuffle-desktop",
+  "license": "AGPL-3.0-only",
+  "version": "0.9.6",
+  "private": true,
+  "description": "AI Shuffle desktop app: a native window around the web UI of any AI Shuffle worker",
+  "author": "HobbyCoders",
+  "homepage": "https://github.com/HobbyCoders/ai-shuffle",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HobbyCoders/ai-shuffle.git",
+    "directory": "desktop"
+  },
+  "main": "dist/main/managed-entry.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:worker": "node scripts/build-worker.mjs",
+    "build:worker:stub": "node scripts/build-worker.mjs --stub",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && electron .",
+    "test": "npm run build && node --test \"test/**/*.test.mjs\"",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:preview:win": "npm run build && electron-builder --config electron-builder.preview.yml --win nsis --x64 --publish never"
+  },
+  "dependencies": {
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.6.3"
+  }
+}

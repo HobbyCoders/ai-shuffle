@@ -1,0 +1,547 @@
+/**
+ * Tests for API client
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ApiClient, lastGetFailed, lastGetStartedAt, recheckAuthOn401 } from './client';
+import { auth } from '$lib/stores/auth.svelte';
+
+describe('ApiClient', () => {
+	let client: ApiClient;
+	let fetchMock: ReturnType<typeof vi.fn<(...args: Parameters<typeof fetch>) => Promise<any>>>;
+
+	beforeEach(() => {
+		client = new ApiClient();
+		fetchMock = vi.fn<(...args: Parameters<typeof fetch>) => Promise<any>>();
+		global.fetch = (async (...args: Parameters<typeof fetch>) => {
+			const response = await fetchMock(...args);
+			// Existing lightweight fixtures expose repeatable methods. Real
+			// Responses below exercise actual body-consumption semantics.
+			if (response instanceof Response) return response;
+			return { clone: () => response, ...response };
+		}) as typeof fetch;
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	describe('get', () => {
+		it('should make GET request with correct path', async () => {
+			const mockResponse = { data: 'test' };
+			fetchMock.mockResolvedValueOnce({
+				ok: true,
+				json: () => Promise.resolve(mockResponse)
+			});
+
+			const result = await client.get('/test');
+
+			expect(fetchMock).toHaveBeenCalledWith('/api/v1/test', {
+				method: 'GET',
+				headers: { 'Content-Type': 'application/json' },
+				redirect: 'error', credentials: 'include',
+				body: undefined
+			});
+			expect(result).toEqual(mockResponse);
+		});
+
+		it('should throw ApiError on failure', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 404,
+				json: () => Promise.resolve({ detail: 'Not found' })
+			});
+
+			await expect(client.get('/missing')).rejects.toEqual({
+				detail: 'Not found',
+				status: 404
+			});
+		});
+	});
+
+	describe('post', () => {
+		it('should make POST request with body', async () => {
+			const mockResponse = { id: 1 };
+			const requestBody = { name: 'test' };
+
+			fetchMock.mockResolvedValueOnce({
+				ok: true,
+				json: () => Promise.resolve(mockResponse)
+			});
+
+			const result = await client.post('/items', requestBody);
+
+			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				redirect: 'error', credentials: 'include',
+				body: JSON.stringify(requestBody)
+			});
+			expect(result).toEqual(mockResponse);
+		});
+	});
+
+	describe('put', () => {
+		it('should make PUT request with body', async () => {
+			const mockResponse = { updated: true };
+			const requestBody = { name: 'updated' };
+
+			fetchMock.mockResolvedValueOnce({
+				ok: true,
+				json: () => Promise.resolve(mockResponse)
+			});
+
+			const result = await client.put('/items/1', requestBody);
+
+			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				redirect: 'error', credentials: 'include',
+				body: JSON.stringify(requestBody)
+			});
+			expect(result).toEqual(mockResponse);
+		});
+	});
+
+	describe('patch', () => {
+		it('should make PATCH request with body', async () => {
+			const mockResponse = { patched: true };
+			const requestBody = { field: 'value' };
+
+			fetchMock.mockResolvedValueOnce({
+				ok: true,
+				json: () => Promise.resolve(mockResponse)
+			});
+
+			const result = await client.patch('/items/1', requestBody);
+
+			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				redirect: 'error', credentials: 'include',
+				body: JSON.stringify(requestBody)
+			});
+			expect(result).toEqual(mockResponse);
+		});
+	});
+
+	describe('delete', () => {
+		it('should make DELETE request', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				json: () => Promise.resolve({ deleted: true })
+			});
+
+			const result = await client.delete('/items/1');
+
+			expect(fetchMock).toHaveBeenCalledWith('/api/v1/items/1', {
+				method: 'DELETE',
+				headers: { 'Content-Type': 'application/json' },
+				redirect: 'error', credentials: 'include'
+			});
+			expect(result).toEqual({ deleted: true });
+		});
+
+		it('should handle 204 No Content', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: true,
+				status: 204
+			});
+
+			const result = await client.delete('/items/1');
+
+			expect(result).toBeUndefined();
+		});
+
+		it('should throw ApiError on failure', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 403,
+				json: () => Promise.resolve({ detail: 'Forbidden' })
+			});
+
+			await expect(client.delete('/items/1')).rejects.toEqual({
+				detail: 'Forbidden',
+				status: 403
+			});
+		});
+	});
+
+	describe('error handling', () => {
+		it('preserves a real plain-text response after JSON parsing fails', async () => {
+			fetchMock.mockResolvedValueOnce(new Response('upstream process unavailable', { status: 502 }));
+			await expect(client.get('/error')).rejects.toEqual({ detail: 'upstream process unavailable', status: 502 });
+		});
+		it('should fall back to text body when json parsing fails', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 500,
+				statusText: 'Internal Server Error',
+				json: () => Promise.reject(new Error('Invalid JSON')),
+				text: () => Promise.resolve('git worktree add failed')
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'git worktree add failed',
+				status: 500
+			});
+		});
+
+		it('should use status-based message when both json and text fail', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 500,
+				statusText: 'Internal Server Error',
+				json: () => Promise.reject(new Error('Invalid JSON')),
+				text: () => Promise.reject(new Error('Read failed'))
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Internal server error — something went wrong on the server',
+				status: 500
+			});
+		});
+
+		it('should provide descriptive error for common HTTP status codes', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 404,
+				statusText: 'Not Found',
+				json: () => Promise.reject(new Error('Invalid JSON')),
+				text: () => Promise.resolve('')
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Not found — the requested resource doesn\'t exist',
+				status: 404
+			});
+		});
+
+		it('should extract message field from json if detail is missing', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 400,
+				json: () => Promise.resolve({ message: 'Branch name is required' })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Branch name is required',
+				status: 400
+			});
+		});
+
+		it('should extract error field from json if detail and message are missing', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ error: 'Validation failed' })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Validation failed',
+				status: 422
+			});
+		});
+
+		it('should flatten a FastAPI validation list into a string detail', async () => {
+			// e.g. POST /projects/{id}/git/init with an option-like default_branch.
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ detail: [
+					{ type: 'string_pattern_mismatch', loc: ['body', 'default_branch'], msg: "String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'" },
+					{ type: 'missing', loc: ['query', 0], msg: 'Field required' }
+				] })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: "default_branch: String should match pattern '^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$'; Field required",
+				status: 422
+			});
+		});
+
+		it('should fall back to the status message for a validation list without messages', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ detail: [{ loc: ['body'] }] })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Validation error — the input data is invalid',
+				status: 422
+			});
+		});
+
+		it('should use status description for unknown status when body is empty', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 418,
+				statusText: 'I\'m a teapot',
+				json: () => Promise.reject(new Error('no json')),
+				text: () => Promise.resolve('')
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Server error (HTTP 418: I\'m a teapot)',
+				status: 418
+			});
+		});
+
+		// SDK structured `api_error` bodies name the real upstream status and
+		// retry hint; they beat the canned per-status strings.
+		it.each([
+			['explicit detail wins', 502, { type: 'api_error', status: 529, detail: 'Anthropic is overloaded' }, 'Anthropic is overloaded'],
+			['message when no detail', 500, { type: 'api_error', message: 'Upstream reset' }, 'Upstream reset'],
+			['429 with a retry hint', 500, { type: 'api_error', status: 429, retry_after_seconds: 42 }, 'Rate limited — retry in 42s'],
+			['429 without a hint', 429, { type: 'api_error' }, 'Rate limited — too many requests, try again shortly'],
+			['upstream status over the HTTP status', 500, { type: 'api_error', status: 503 }, 'API error: HTTP 503'],
+			['a malformed status falls back to HTTP', 502, { type: 'api_error', status: '503', retry_after_seconds: '9' }, 'API error: HTTP 502'],
+			['untyped 429 with a retry hint', 429, { retry_after_seconds: 7 }, 'Rate limited — retry in 7s'],
+			['a structured error object', 400, { error: { code: 'bad_branch' } }, '{"code":"bad_branch"}'],
+		])('api_error body: %s', async (_name, status, body, detail) => {
+			fetchMock.mockResolvedValueOnce(Response.json(body, { status }));
+			await expect(client.get('/error')).rejects.toEqual({ detail, status });
+		});
+
+		it('does not re-check worker auth on 403, only on 401', async () => {
+			// A 403 is an authorization answer from a signed-in worker session;
+			// re-checking the session would not change it.
+			const checkAuth = vi.spyOn(auth, 'checkAuth').mockResolvedValue(undefined as never);
+			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Owner only' }, { status: 403 }));
+			await expect(client.get('/sessions')).rejects.toEqual({ detail: 'Owner only', status: 403 });
+			await new Promise((r) => setTimeout(r, 0));
+			expect(checkAuth).not.toHaveBeenCalled();
+		});
+	});
+
+	// ── Phase 3.2: global 401 → fresh worker auth check ─────────────────────
+	// There is no login page. A 401 re-checks the worker session so the root
+	// layout can react to the refreshed auth store; nothing navigates.
+	describe('401 interceptor', () => {
+		function set401(): void {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 401,
+				json: () => Promise.resolve({ detail: 'Authentication required' })
+			});
+		}
+
+		function setPathname(path: string): void {
+			Object.defineProperty(window, 'location', {
+				configurable: true,
+				value: { pathname: path, assign: vi.fn() }
+			});
+		}
+
+		const statusCalls = () => fetchMock.mock.calls.filter(([url]) => url === '/api/v1/auth/status');
+
+		beforeEach(() => {
+			setPathname('/'); // default: an app page, not setup/pair
+		});
+
+		it('records a confirmed unauthenticated session after a fresh worker check', async () => {
+			set401();
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: false }));
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await recheckAuthOn401();
+			expect(auth.current.status?.authenticated).toBe(false);
+			expect(window.location.assign).not.toHaveBeenCalled();
+			expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/auth/status', expect.objectContaining({
+				redirect: 'error', credentials: 'include', cache: 'no-store'
+			}));
+		});
+
+		it('preserves worker auth on a provider-specific 401 without replaying the operation', async () => {
+			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'GitHub CLI not authenticated' }, { status: 401 }));
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			await expect(client.post('/github/create-pr', { title: 'test' })).rejects.toMatchObject({
+				status: 401, detail: 'GitHub CLI not authenticated'
+			});
+			await recheckAuthOn401();
+			expect(auth.current.status?.authenticated).toBe(true);
+			expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/v1/github/create-pr', '/api/v1/auth/status']);
+		});
+
+		it('ignores a delayed old-cookie 401 after the current cookie becomes authenticated', async () => {
+			let finishOld!: (response: Response) => void;
+			fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => { finishOld = resolve; }));
+			const oldRequest = client.get('/sessions');
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			await auth.checkAuth(); // A new cookie has already been accepted.
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			const rejected = expect(oldRequest).rejects.toMatchObject({ status: 401 });
+			finishOld(Response.json({ detail: 'Expired old session' }, { status: 401 }));
+			await rejected;
+			await recheckAuthOn401();
+			expect(auth.current.status?.authenticated).toBe(true);
+		});
+
+		it.each(['503', 'network'])('keeps the prior status and reports the failed fresh check (%s)', async (failure) => {
+			// An older anonymous status must not substitute for the failed check.
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: false }));
+			await auth.checkAuth();
+			set401();
+			if (failure === '503') fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Hub unavailable' }, { status: 503 }));
+			else fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await recheckAuthOn401();
+			expect(auth.current.error).toBe('Failed to check auth status');
+			expect(window.location.assign).not.toHaveBeenCalled();
+		});
+
+		it('deduplicates concurrent HTTP and socket failures into one current auth check', async () => {
+			let finishStatus!: (response: Response) => void;
+			fetchMock.mockImplementation((url) => url === '/api/v1/auth/status'
+				? new Promise<Response>((resolve) => { finishStatus = resolve; })
+				: Promise.resolve(Response.json({ detail: 'Expired' }, { status: 401 })));
+			await Promise.all([
+				expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 }),
+				expect(client.get('/projects')).rejects.toMatchObject({ status: 401 })
+			]);
+			const socketFailure = recheckAuthOn401();
+			await vi.waitFor(() => expect(finishStatus).toBeTypeOf('function'));
+			expect(statusCalls()).toHaveLength(1);
+			finishStatus(Response.json({ authenticated: false }));
+			await socketFailure;
+			expect(statusCalls()).toHaveLength(1);
+			expect(auth.current.status?.authenticated).toBe(false);
+		});
+
+		it('lets a newer successful auth check overtake an older anonymous result', async () => {
+			let finishStatus!: (response: Response) => void;
+			fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => { finishStatus = resolve; }));
+			const confirmation = recheckAuthOn401();
+			await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			await auth.checkAuth();
+			finishStatus(Response.json({ authenticated: false }));
+			await confirmation;
+			expect(auth.current.status?.authenticated).toBe(true);
+		});
+
+		// Give any (erroneously scheduled) dynamic-import re-check a real chance to
+		// run before asserting it did NOT fire — otherwise "not called" is trivial.
+		async function flush() {
+			await new Promise((r) => setTimeout(r, 0));
+			await new Promise((r) => setTimeout(r, 0));
+		}
+
+		it('does NOT re-check on a 401 from an auth endpoint (/auth/*)', async () => {
+			set401();
+			await expect(client.get('/auth/status')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('does NOT re-check on a 401 from a /workspace/* probe endpoint', async () => {
+			set401();
+			await expect(client.get('/workspace/validate')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('does NOT re-check when already on /setup (loop guard)', async () => {
+			setPathname('/setup');
+			set401();
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('does NOT re-check when already on /pair (loop guard)', async () => {
+			setPathname('/pair');
+			set401();
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('does NOT re-check on a non-401 error from a non-auth endpoint', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 403,
+				json: () => Promise.resolve({ detail: 'Forbidden' })
+			});
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 403 });
+			await flush();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+	});
+	describe('getShared (VITE_PERF_STARTUP_DEDUPE)', () => {
+		const json = (body: unknown, status = 200) =>
+			new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+		afterEach(() => vi.unstubAllEnvs());
+
+		it('lets concurrent callers await one request and gives each its own copy', async () => {
+			let release!: (r: Response) => void;
+			fetchMock.mockImplementationOnce(() => new Promise<Response>(r => { release = r; }));
+			const a = client.getShared<{ items: string[] }>('/shared/a');
+			const b = client.getShared<{ items: string[] }>('/shared/a');
+			release(json({ items: ['x'] }));
+			const [ra, rb] = await Promise.all([a, b]);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			ra.items.push('mutated');
+			expect(rb.items).toEqual(['x']);
+		});
+
+		it('fetches again once the shared read settled, unless maxAgeMs still covers it', async () => {
+			fetchMock.mockImplementation(async () => json({ n: 1 }));
+			await client.getShared('/shared/b');
+			await client.getShared('/shared/b');
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			fetchMock.mockClear();
+			await client.getShared('/shared/c', { maxAgeMs: 60_000 });
+			await client.getShared('/shared/c', { maxAgeMs: 60_000 });
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('never answers a caller that asks after a write with a read sent before it', async () => {
+			fetchMock.mockImplementation(async () => json({ ok: true }));
+			await client.getShared('/shared/d', { maxAgeMs: 60_000 });
+			await client.post('/elsewhere', {});
+			await client.getShared('/shared/d', { maxAgeMs: 60_000 });
+			expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/shared/d'))).toHaveLength(2);
+		});
+
+		it('does not share a failure with the next caller', async () => {
+			fetchMock.mockResolvedValueOnce(json({ detail: 'boom' }, 500)).mockResolvedValueOnce(json({ ok: true }));
+			await expect(client.getShared('/shared/e', { maxAgeMs: 60_000 })).rejects.toBeTruthy();
+			await expect(client.getShared('/shared/e', { maxAgeMs: 60_000 })).resolves.toEqual({ ok: true });
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+		});
+
+		it('aborting drops only that caller\'s wait', async () => {
+			let release!: (r: Response) => void;
+			fetchMock.mockImplementationOnce(() => new Promise<Response>(r => { release = r; }));
+			const controller = new AbortController();
+			const aborted = client.getShared('/shared/f', { signal: controller.signal });
+			const kept = client.getShared('/shared/f');
+			controller.abort();
+			await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+			release(json({ v: 2 }));
+			await expect(kept).resolves.toEqual({ v: 2 });
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('sends one request per caller with VITE_PERF_STARTUP_DEDUPE=0', async () => {
+			vi.stubEnv('VITE_PERF_STARTUP_DEDUPE', '0');
+			fetchMock.mockImplementation(async () => json({}));
+			await Promise.all([client.getShared('/shared/g', { maxAgeMs: 60_000 }), client.getShared('/shared/g', { maxAgeMs: 60_000 })]);
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+		});
+
+		it('records when a path was last read, and forgets a read that failed', async () => {
+			fetchMock.mockResolvedValueOnce(json({})).mockResolvedValueOnce(json({}, 500));
+			const before = performance.now();
+			await client.get('/read-log?x=1');
+			const at = lastGetStartedAt('/read-log');
+			expect(at).toBeGreaterThanOrEqual(before);
+			expect(lastGetFailed('/read-log')).toBe(false);
+			await expect(client.get('/read-log')).rejects.toBeTruthy();
+			expect(lastGetStartedAt('/read-log')).toBeUndefined();
+			expect(lastGetFailed('/read-log')).toBe(true);
+		});
+	});
+});

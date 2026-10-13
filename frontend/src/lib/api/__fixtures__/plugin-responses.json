@@ -1,0 +1,223 @@
+{
+	"available": [
+		{
+			"components": [
+				{
+					"detail": "",
+					"kind": "skill",
+					"name": "lint",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "command",
+					"name": "review",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "agent",
+					"name": "reviewer",
+					"reason": "model pin removed: the model is chosen per chat here",
+					"support": "loaded"
+				}
+			],
+			"connector_type": null,
+			"description": "Review helpers",
+			"enabled": true,
+			"format": "claude",
+			"has_agents": true,
+			"has_commands": true,
+			"has_hooks": true,
+			"has_mcp": false,
+			"has_skills": true,
+			"id": "toolkit@mp",
+			"installed": true,
+			"marketplace": "mp",
+			"marketplace_path": "/home/user/fluid/plugins/marketplaces/mp/plugins/toolkit",
+			"name": "toolkit"
+		},
+		{
+			"components": [
+				{
+					"detail": "",
+					"kind": "command",
+					"name": "hello",
+					"reason": "",
+					"support": "loaded"
+				}
+			],
+			"connector_type": null,
+			"description": "Not installed yet",
+			"enabled": false,
+			"format": "claude",
+			"has_agents": false,
+			"has_commands": true,
+			"has_hooks": false,
+			"has_mcp": false,
+			"has_skills": false,
+			"id": "extra@mp",
+			"installed": false,
+			"marketplace": "mp",
+			"marketplace_path": "/home/user/fluid/plugins/marketplaces/mp/plugins/extra",
+			"name": "extra"
+		}
+	],
+	"details_available": {
+		"agents": [],
+		"approval": null,
+		"commands": [
+			"hello"
+		],
+		"components": [
+			{
+				"detail": "",
+				"kind": "command",
+				"name": "hello",
+				"reason": "",
+				"support": "loaded"
+			}
+		],
+		"connector_type": null,
+		"content_hash": null,
+		"description": "Not installed yet",
+		"enabled": false,
+		"format": "claude",
+		"has_agents": false,
+		"has_commands": true,
+		"has_hooks": false,
+		"has_mcp": false,
+		"has_skills": false,
+		"id": "extra@mp",
+		"install_path": "/home/user/fluid/plugins/marketplaces/mp/plugins/extra",
+		"installed_at": null,
+		"marketplace": "mp",
+		"name": "extra",
+		"readme": null,
+		"scope": "marketplace",
+		"skills": [],
+		"trust": "marketplace",
+		"version": "available"
+	},
+	"details_installed": {
+		"agents": [
+			"reviewer"
+		],
+		"approval": null,
+		"commands": [
+			"review"
+		],
+		"components": [
+			{
+				"detail": "",
+				"kind": "skill",
+				"name": "lint",
+				"reason": "",
+				"support": "loaded"
+			},
+			{
+				"detail": "",
+				"kind": "command",
+				"name": "review",
+				"reason": "",
+				"support": "loaded"
+			},
+			{
+				"detail": "",
+				"kind": "agent",
+				"name": "reviewer",
+				"reason": "model pin removed: the model is chosen per chat here",
+				"support": "loaded"
+			}
+		],
+		"connector_type": null,
+		"content_hash": null,
+		"description": "Review helpers",
+		"enabled": true,
+		"format": "claude",
+		"has_agents": true,
+		"has_commands": true,
+		"has_hooks": true,
+		"has_mcp": false,
+		"has_skills": true,
+		"id": "toolkit@mp",
+		"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0",
+		"installed_at": "2026-01-02T03:04:05",
+		"marketplace": "mp",
+		"name": "toolkit",
+		"readme": "# Toolkit\n\nReview helpers for pull requests.\n",
+		"scope": "user",
+		"skills": [
+			"lint"
+		],
+		"trust": "marketplace",
+		"version": "1.2.0"
+	},
+	"file_based_agents": [
+		{
+			"description": "Reviews diffs",
+			"file_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0/agents/reviewer.md",
+			"id": "toolkit@mp:reviewer",
+			"model": null,
+			"name": "reviewer",
+			"prompt": "You review diffs.",
+			"source_plugin": "toolkit@mp",
+			"tools": [
+				"Read",
+				"Grep"
+			]
+		}
+	],
+	"installed": [
+		{
+			"approval": null,
+			"components": [
+				{
+					"detail": "",
+					"kind": "skill",
+					"name": "lint",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "command",
+					"name": "review",
+					"reason": "",
+					"support": "loaded"
+				},
+				{
+					"detail": "",
+					"kind": "agent",
+					"name": "reviewer",
+					"reason": "model pin removed: the model is chosen per chat here",
+					"support": "loaded"
+				}
+			],
+			"connector_type": null,
+			"content_hash": null,
+			"description": "Review helpers",
+			"enabled": true,
+			"format": "claude",
+			"has_agents": true,
+			"has_commands": true,
+			"has_hooks": true,
+			"has_mcp": false,
+			"has_skills": true,
+			"id": "toolkit@mp",
+			"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/1.2.0",
+			"installed_at": "2026-01-02T03:04:05",
+			"marketplace": "mp",
+			"name": "toolkit",
+			"scope": "user",
+			"trust": "marketplace",
+			"version": "1.2.0"
+		}
+	],
+	"marketplace_sync": {
+		"marketplace_id": "mp",
+		"status": "synced"
+	}
+}

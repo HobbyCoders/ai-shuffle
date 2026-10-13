@@ -1,0 +1,269 @@
+# ============================================================================
+# Stage 1: Frontend Builder — builds the SvelteKit static assets
+# ============================================================================
+FROM node:22-slim AS frontend-builder
+
+# frontend/ and mobile/ sit side by side as in the repo: the phone UI shares
+# ../frontend/src/lib and node_modules, and the frontend build emits it into
+# build/mobile, which the worker serves to the Android and iOS apps at /mobile/.
+WORKDIR /src/frontend
+
+# Install dependencies first (cached unless package-lock changes)
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+# Build frontend (desktop UI plus the phone UI)
+ARG CACHEBUST=0
+COPY frontend/ ./
+COPY mobile/ /src/mobile/
+ARG APP_VERSION=
+ENV APP_VERSION=$APP_VERSION
+RUN npm run build
+
+
+# ============================================================================
+# Stage 2: AI Tools — install Node.js deps for AI tools
+# ============================================================================
+FROM node:22-slim AS tools-builder
+
+WORKDIR /tools
+COPY tools/package.json tools/package-lock.json* ./
+RUN npm ci --ignore-scripts
+COPY tools/ ./
+RUN npm run build && npm prune --omit=dev --ignore-scripts
+
+
+# ============================================================================
+# Stage 3: Browser MCP — build the browser-automation MCP server (TypeScript)
+# ============================================================================
+FROM node:22-slim AS browser-mcp-builder
+
+WORKDIR /browser-mcp
+# Install deps first (cached unless the lockfile changes). --ignore-scripts skips
+# dependency lifecycle scripts; compilation is explicit below — the real build runs below. playwright-core pulls NO
+# bundled browsers (the server drives the supervised Chromium over CDP), which
+# saves ~300MB versus the full `playwright` package.
+COPY browser-mcp/package.json browser-mcp/package-lock.json* ./
+RUN npm ci --ignore-scripts
+COPY browser-mcp/ ./
+# Compile TS -> dist/ (entry point: dist/index.js), then drop devDeps
+# (typescript, vitest) from node_modules so only runtime deps ship in the image.
+RUN npm run build && npm prune --omit=dev
+
+
+# ============================================================================
+# Stage 4: Runtime — lean Python image with only what's needed
+# ============================================================================
+FROM cloudflare/cloudflared:2026.8.3@sha256:51c9cefcb4569df44e1ad403ab1d3d8065aa8e84339bcfc6aee75502e1140339 AS tunnel-client
+
+FROM python:3.12-slim-trixie
+
+# The account-approved connection runs inside Shuffle. No sidecar, credentials
+# entered on the phone, or manual tunnel configuration is required.
+COPY --from=tunnel-client /usr/local/bin/cloudflared /usr/local/bin/cloudflared
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ── System deps (git, curl for health check, gh CLI) ──
+# ripgrep is not optional comfort: the agent's Grep tool falls back to a pure
+# Python scan without it, which is slow enough to dominate a session (one
+# audited run logged 66 fallback notices).
+# bubblewrap sandboxes the code-mode kernel child (code_mode_os_sandbox); it
+# only takes effect when the container may create user namespaces, otherwise
+# the kernel logs why and runs without it.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    bubblewrap \
+    curl \
+    ca-certificates \
+    gnupg \
+    git \
+    ripgrep \
+    tini \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Private PostgreSQL 16, managed by our unprivileged lifecycle supervisor ──
+# Fix the major, but receive 16.x security updates on image rebuilds. Do not
+# create a distro-owned cluster in the image or install anything at runtime.
+RUN mkdir -p /etc/apt/keyrings /etc/postgresql-common \
+    && curl -fsSLo /etc/apt/keyrings/postgresql.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main' > /etc/apt/sources.list.d/postgresql.list \
+    && printf '%s\n' 'create_main_cluster = false' > /etc/postgresql-common/createcluster.conf \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-16 postgresql-client-16 \
+    && test -f /usr/share/postgresql/16/extension/pg_trgm.control \
+    && test -z "$(pg_lsclusters --no-header)" \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── GitHub CLI ──
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       | tee /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js runtime (delegated CLI providers and bundled MCP tools) ──
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+       | tee /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN node --version && npm --version && gh --version
+
+# ── Browser for the built-in browser-automation MCP server ──
+# The browser-mcp server (Stage 3) drives this browser over CDP; the
+# chrome-supervisor owns the process (see docker/start-chrome.sh). No browser
+# extension, no native-messaging host, and no --chrome CLI flag are involved.
+#
+# BOTH arches install Debian **Chromium** (the runtime is pinned to trixie,
+# package name `chromium`) and symlink it to /usr/bin/google-chrome-stable so
+# CHROME_EXECUTABLE and start-chrome.sh resolve unchanged. We switched amd64 off
+# full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
+# in this headless single-tab setup; Chromium is far leaner and behaves
+# identically for the CDP automation used here.
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        chromium; \
+    ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable; \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Create non-root user ──
+RUN groupadd -g 1000 appuser && \
+    useradd -m -u 1000 -g 1000 appuser && \
+    mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude && \
+    mkdir -p /data /workspace && \
+    chown -R appuser:appuser /home/appuser /data /workspace
+
+# ── Agent isolation service account (#1957) ──
+# Used only when the container setting AGENT_ISOLATION=on: it then owns the
+# install's keys, database descriptor and PostgreSQL files, and PostgreSQL runs
+# as it. No home, no login shell, no sudo; appuser is not in its group.
+RUN groupadd -g 64000 shuffle && \
+    useradd -M -d /nonexistent -s /usr/sbin/nologin -u 64000 -g 64000 shuffle
+
+# ── Python dependencies ──
+# requirements.lock is the hash-pinned closure of requirements.txt, fluid's own
+# dependencies and its build backend (scripts/lock_requirements.sh). A changed
+# or substituted package on the index fails the build instead of shipping.
+COPY requirements.lock .
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir --require-hashes -r requirements.lock
+
+# ── Dev / test dependencies ──
+# The runtime image is also the agent's workbench: it checks out this repo and
+# runs the suite. Without pytest baked in, a session spends its first turns
+# pip-installing one. Kept as its own layer so editing dev deps never
+# invalidates the runtime-deps layer above.
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+# ── fluid harness (REQUIRED — the only provider backend) ──
+# fluid is developed in this repo under fluid/ (its own pyproject; the package
+# is fluid/fluid). Installed from the tree so the image needs no registry or
+# cross-repo credentials. The build must fail if the harness cannot install.
+# Its dependencies and build backend already came from the locked install
+# above, so nothing unpinned is fetched here.
+COPY fluid/ /opt/fluid/
+RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/fluid && python -c "import fluid, importlib.util; assert importlib.util.find_spec('claude_agent_sdk') is None"
+
+# ── Backend code ──
+COPY --chown=appuser:appuser app/ ./app/
+
+# ── Maintenance / migration scripts (e.g. credential_keys, backup, usage backfills) ──
+COPY --chown=appuser:appuser scripts/ ./scripts/
+
+# ── Copy pre-built frontend assets from builder stage ──
+RUN mkdir -p /app/app/static
+COPY --from=frontend-builder --chown=appuser:appuser /src/frontend/build/ /app/app/static/
+
+# ── Copy pre-built AI tools from builder stage ──
+COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
+
+# ── Copy the built browser-automation MCP server from its builder stage ──
+# Fluid launches `node /opt/browser-mcp/dist/index.js` when the tool is used (see
+# app/core/builtin_mcp_servers.py DEFAULT_BROWSER_MCP_ENTRY). node_modules here
+# is the pruned prod-only set; package.json ships so its `"type": "module"`
+# resolves at runtime.
+COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/dist/ /opt/browser-mcp/dist/
+COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/node_modules/ /opt/browser-mcp/node_modules/
+COPY --from=browser-mcp-builder --chown=appuser:appuser /browser-mcp/package.json /opt/browser-mcp/package.json
+
+COPY --chown=appuser:appuser .env.example .
+COPY --chown=appuser:appuser THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+
+# Copy entrypoint + browser (Chromium supervisor) helper scripts
+COPY entrypoint.sh /entrypoint.sh
+COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
+COPY docker/agent_isolation.py ./docker/
+COPY Dockerfile entrypoint.sh ./
+COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh docker/install-claude-cli.sh ./docker/
+COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem
+COPY docker/start-chrome.sh /usr/local/bin/start-chrome
+COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
+COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
+RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-supervisor /usr/local/bin/chrome-doctor
+
+# Ensure /app is owned by appuser
+RUN chown appuser:appuser /app
+
+# ── Bake the git SHA into the image (deploy-restart detection) ──
+# scripts/unraid-lab/wake_detect.py compares this running-image SHA against a
+# pre-deploy marker to tell "new container landed" (matches target) apart from
+# "container restarted but old image is still running" (mismatch). Falls back
+# to boot-time-only detection (landed_unverified) if this file is absent.
+ARG GIT_SHA=unknown
+ARG APP_VERSION=
+ENV APP_VERSION=$APP_VERSION
+# Production publishing supplies a first-parent ordinal. Ad-hoc/lab images
+# without provenance remain pinned instead of silently following main.
+ARG APPLICATION_SEQUENCE=0
+ARG APPLICATION_SOURCE_TREE=
+RUN python docker/update_contract.py /app "$GIT_SHA" "$APPLICATION_SEQUENCE" > /app/docker/image.json
+ENV GIT_SHA=$GIT_SHA
+LABEL org.opencontainers.image.revision=$GIT_SHA
+RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA
+
+# ── PATH ──
+# Anything the agent installs for itself at runtime (`pip install --user`, an
+# npm prefix in its home) lands in ~/.local/bin. Off PATH those binaries are on
+# disk but "not found", which reads as a failed install.
+ENV PATH="/home/appuser/.local/bin:/usr/lib/postgresql/16/bin:${PATH}"
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+
+# ── Browser-automation defaults ──
+# START_CHROME=1 launches the supervised headless Chromium at container start so
+#   the built-in browser MCP server has a browser to drive (set 0 to disable).
+# CHROME_CDP=1 binds DevTools to a localhost-only port (CHROME_CDP_PORT, default
+#   9221) inside the container. Nothing is published to the network; the
+#   browser-mcp server attaches via connectOverCDP('http://127.0.0.1:9221').
+ENV START_CHROME=1 \
+    CHROME_CDP=1 \
+    CHROME_CDP_PORT=9221 \
+    CHROME_EXECUTABLE=/usr/bin/google-chrome-stable \
+    SETTINGS_IMPORT_SOURCE_HOME=/home/appuser \
+    SETTINGS_IMPORT_ALLOWED_HOMES=/imports/provider-settings
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=120s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health/ready || exit 1
+
+# tini runs as PID 1 so orphaned/zombie processes (e.g. the many short-lived
+# grandchildren of a crash-looping headless Chromium) are reaped by a real init.
+# Without this, the app process (PID 1) inherits every orphan but never wait()s
+# on them, so defunct chromium/chrome_crashpad corpses accumulate until the
+# container's pids cgroup fills and ALL forks fail (provider/MCP spawns, git worktree,
+# even `docker exec`). Forward only to the lifecycle supervisor: it must stop
+# the app before PostgreSQL so database-dependent app shutdown can finish.
+# Use --stop-timeout 90 (Compose already sets stop_grace_period: 90s).
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 HobbyCoders.
+# XcodeGen spec. Generate the project with `xcodegen generate` in ios/; the
+# .xcodeproj is not checked in. No Apple account or signing team is needed to
+# build for the iOS Simulator.
+name: AIShuffle
+options:
+  bundleIdPrefix: com.hobbycoders
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  AIShuffle:
+    type: application
+    platform: iOS
+    # No bundled UI: chat loads the paired worker's /mobile/ (docs/mobile-desktop-ui-split.md).
+    sources:
+      - path: AIShuffle
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: AI Shuffle
+        NSHumanReadableCopyright: "Copyright (c) 2026 HobbyCoders. Licensed under AGPL-3.0-only."
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSMicrophoneUsageDescription: Voice calls in chat use the microphone.
+        NSCameraUsageDescription: Take a photo to attach to a chat message.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hobbycoders.aishuffle
+        PRODUCT_NAME: AIShuffle
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+  AIShuffleTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AIShuffleTests
+    dependencies:
+      - target: AIShuffle
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: com.hobbycoders.aishuffle.tests
+schemes:
+  AIShuffle:
+    build:
+      targets:
+        AIShuffle: all
+        AIShuffleTests: [test]
+    test:
+      targets:
+        - AIShuffleTests

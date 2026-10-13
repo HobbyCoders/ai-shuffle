@@ -1,0 +1,1634 @@
+"""
+Pydantic models for API requests and responses
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Optional, List, Dict, Any, Union, Literal
+from pydantic import BaseModel, Field, field_validator, computed_field
+
+# Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
+# no app imports at all (the same discipline that lets the DB migrations use it).
+from app.core.session_modes import normalize_session_mode
+
+
+# ============================================================================
+# Profile Models
+# ============================================================================
+
+# AIToolsConfig is dynamically generated from the AI_TOOLS registry
+# This ensures the model always matches available tools - no manual sync needed
+from app.core.ai_tools import AIToolsConfig  # noqa: E402
+
+
+class SystemPromptConfig(BaseModel):
+    """System prompt configuration"""
+    type: str = "preset"  # "preset" or "custom"
+    preset: Optional[str] = "claude_code"
+    content: Optional[str] = None
+    append: Optional[str] = None
+    inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
+
+
+class ComputerUseConfig(BaseModel):
+    """Host desktop control (screenshots, mouse, keyboard). Native mode only.
+
+    Off by default; the server is also gated on host availability at runtime
+    (auto-disabled in Docker/headless). See app/mcp/computer_use_sdk.py.
+    """
+    enabled: bool = False
+    target_display: Optional[int] = None  # initial monitor (mss index); None = primary
+    virtual_width: Optional[int] = None   # screenshot downscale target width
+    virtual_height: Optional[int] = None  # screenshot downscale target height
+    require_confirmation: bool = False    # route each action through the approval UI
+
+
+class ProfileConfig(BaseModel):
+    """Agent configuration stored on a profile; query_options maps it onto ``AgentOptions``."""
+    # Core settings.
+    #
+    # An agent does NOT pin a model: the model, effort and
+    # permission mode are picked when a session is created and live on the
+    # session row. These fields stay for two consumers only — the built-in
+    # "Default AI" agent, whose model still drives internal generation (commit
+    # messages, branch names, agent generation), and sessions created before
+    # the move, which fall back to them. They default to None so an agent saved
+    # without them stores nothing rather than a phantom binding.
+    model: Optional[str] = None
+    # Model provider (multi-provider support). References ``model_providers.id``;
+    # None = native Anthropic. When set, the spawned session's env is overlaid
+    # with the provider's ANTHROPIC_BASE_URL / auth token and mitigation flags
+    # (see ``environment.apply_provider_env``) instead of native Anthropic auth.
+    provider: Optional[str] = None  # model_providers.id; None = native Anthropic
+    # Model used when this agent is invoked as a subagent from each provider.
+    # ``__native__`` is the native-Claude key; every other key is a
+    # ``model_providers.id``. Values are a Claude alias or a
+    # ``prov:<providerId>:<modelId>`` composite (any leg). Missing key = do
+    # not expose this agent as a subagent to callers on that provider. The
+    # legacy provider/model pair above remains the default top-level chat
+    # binding.
+    provider_models: Optional[Dict[str, str]] = None
+    permission_mode: Optional[str] = None  # default, auto, acceptEdits, bypassPermissions
+    thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
+    # Opus 4.6+ uses effort-based reasoning instead of token budgets
+    # effort: low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
+    effort: Optional[str] = None  # low, medium, high, max, xhigh - for Opus 4.6+ models
+    max_turns: Optional[int] = None
+
+    # Tool configuration. ``tools`` / ``tools_preset`` are SDK-shaped fields
+    # the harness adapter ignores; ``tool_selection_mode`` below decides access
+    # and reads allowed_tools / disallowed_tools.
+    tools: Optional[List[str]] = None
+    tools_preset: Optional[str] = None  # "claude_code" preset
+    allowed_tools: Optional[List[str]] = None
+    disallowed_tools: Optional[List[str]] = None
+    # The RUNTIME AUTHORITY for tool access: "all", "none", "allow" or
+    # "disallow". Both legs resolve through
+    # ``app.core.tool_access.resolve_tool_access``, which reads this and only
+    # then the lists, so "Disable all tools" is a real deny instead of an empty
+    # allow list read as unrestricted. Absent (an unmigrated config) falls back
+    # to inferring the mode from the lists.
+    tool_selection_mode: Optional[str] = None
+
+    # AI tools configuration - individual toggles for each AI tool
+    ai_tools: Optional[AIToolsConfig] = None
+
+    # Computer-use (host desktop control). Off by default; native mode only.
+    computer_use: Optional[ComputerUseConfig] = None
+
+    # System prompt
+    system_prompt: Optional[SystemPromptConfig] = None
+
+    # Streaming behavior
+    include_partial_messages: bool = False  # Enable streaming partial messages
+
+    # Session behavior
+    continue_conversation: bool = False  # Continue most recent conversation
+    fork_session: bool = False  # Fork instead of continuing when resuming
+
+    # Working directory and paths
+    cwd: Optional[str] = None  # Override working directory
+    add_dirs: Optional[List[str]] = None  # Additional directories Claude can access
+
+    # Settings loading
+    setting_sources: Optional[List[str]] = None  # user, project, local
+
+    # Environment and arguments
+    env: Optional[Dict[str, str]] = None  # Environment variables
+    extra_args: Optional[Dict[str, Any]] = None  # Additional CLI arguments
+
+    # Buffer settings
+    max_buffer_size: Optional[int] = None  # Maximum bytes when buffering CLI stdout
+
+    # User identification
+    user: Optional[str] = None  # User identifier
+
+    # Agent IDs DECLARED into this agent's context: they ride the compiled prompt's agents index as
+    # name+description so the model knows they exist. Never an allowlist —
+    # Task dispatch runs any agent that resolves, declared or not. Interpreted
+    # together with ``agent_invoke_mode`` below (see
+    # app.core.agent_provider_models.available_subagents).
+    enabled_agents: Optional[List[str]] = None
+
+    # Subagent roster mode — "all" = every agent, "custom" = exactly
+    # enabled_agents (empty = no listed agent), "none" = no subagents at all
+    # (Task and Swarm are taken off the agent's surface), None = legacy (a
+    # non-empty enabled_agents declares those ids, empty/absent = all).
+    agent_invoke_mode: Optional[str] = None
+
+    # Per-agent memory: durable text owned by THIS
+    # agent, injected into the compiled system prompt whenever the agent runs,
+    # in any session — "the same agent learning and growing with you". Written
+    # by the agent itself through the Memory builtin tool; edited in the
+    # agents UI. Size-capped at write time (see app/mcp/builtin_tools.py).
+    memory: Optional[str] = None
+
+    # Plugins - list of plugin paths to load
+    # Each entry should be a path to a plugin directory containing .claude-plugin/plugin.json
+    # Paths can be relative (resolved from workspace) or absolute
+    enabled_plugins: Optional[List[str]] = None
+
+    # SDK-shaped flag; the harness adapter ignores it.
+    enable_file_checkpointing: bool = False
+
+    # App configuration tools - allows the agent to manage hooks, automations,
+    # MCP servers, and profiles through conversation. Only effective for admin
+    # sessions (never exposed to API users regardless of this setting).
+    app_config_tools: bool = False
+
+    # SDK-shaped flag carried onto AgentOptions; the harness adapter does not
+    # read it (fluid's DelegatedLoop passes ``--strict-mcp-config`` itself).
+    strict_mcp_config: bool = False
+
+    @field_validator("agent_invoke_mode")
+    @classmethod
+    def _check_agent_invoke_mode(cls, value):
+        """Only the documented roster modes are storable.
+
+        None keeps legacy behavior (a non-empty ``enabled_agents`` declares
+        exactly those ids, an empty/absent one declares every agent).
+        """
+        from app.core.tool_access import AGENT_INVOKE_MODES
+
+        if value is not None and value not in AGENT_INVOKE_MODES:
+            raise ValueError("agent_invoke_mode must be one of: all, custom, none (or null)")
+        return value
+
+
+
+# The colours an agent may carry on the Agents page (#1827): the frontend's
+# accent token names (``frontend/src/app.css``: ``--primary`` plus the Studio
+# Noir accent set ``--emerald`` / ``--rose`` / ``--blue`` and ``--warning``),
+# stored by name so each theme renders its own value. None = the page picks.
+AGENT_AVATAR_COLORS = ("primary", "emerald", "rose", "blue", "warning")
+
+
+def _check_avatar_color(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() not in AGENT_AVATAR_COLORS:
+        raise ValueError(
+            "avatar_color must be one of: " + ", ".join(AGENT_AVATAR_COLORS) + " (or null)"
+        )
+    return value.strip()
+
+
+class ProfileBase(BaseModel):
+    """Base profile fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    config: ProfileConfig
+
+
+class ProfileCreate(ProfileBase):
+    """Profile creation request - id is optional; if omitted, derived from name"""
+    id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    avatar_color: Optional[str] = None
+
+    @field_validator("avatar_color")
+    @classmethod
+    def _valid_avatar_color(cls, value):
+        return _check_avatar_color(value)
+
+
+class ProfileUpdate(BaseModel):
+    """Profile update request. ``avatar_color`` null clears it; omitted keeps it."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    config: Optional[ProfileConfig] = None
+    avatar_color: Optional[str] = None
+
+    @field_validator("avatar_color")
+    @classmethod
+    def _valid_avatar_color(cls, value):
+        return _check_avatar_color(value)
+
+
+class Profile(ProfileBase):
+    """Full profile response"""
+    id: str
+    # Read side is lenient: a value outside the set (a newer peer's colour)
+    # reads as null instead of failing the whole agent list.
+    avatar_color: Optional[str] = None
+
+    @field_validator("avatar_color", mode="before")
+    @classmethod
+    def _known_avatar_color(cls, value):
+        return value if isinstance(value, str) and value in AGENT_AVATAR_COLORS else None
+    is_builtin: bool = False
+    is_modified: bool = False  # Whether built-in profile has been modified from defaults
+    session_count: Optional[int] = None  # Number of sessions using this profile
+    created_at: datetime
+    updated_at: datetime
+
+
+# ============================================================================
+# Project Models
+# ============================================================================
+
+class ProjectSettings(BaseModel):
+    """Project-specific settings"""
+    default_profile_id: Optional[str] = None
+    custom_instructions: Optional[str] = None
+
+
+class ProjectBase(BaseModel):
+    """Base project fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+
+
+class ProjectCreate(ProjectBase):
+    """Project creation request"""
+    id: str = Field(..., pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    path: Optional[str] = Field(
+        None,
+        description="Absolute filesystem path for 'add existing' projects (local mode only). "
+                    "When set, the project points to this directory instead of workspace_dir/<id>."
+    )
+    settings: Optional[ProjectSettings] = None
+
+
+class ProjectUpdate(BaseModel):
+    """Project update request"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    path: Optional[str] = None
+    settings: Optional[ProjectSettings] = None
+
+
+class Project(ProjectBase):
+    """Full project response"""
+    id: str
+    path: str
+    settings: ProjectSettings
+    session_count: Optional[int] = None  # Number of sessions in this project
+    link_group_id: Optional[str] = None  # Groups same-repo clones across installs
+    created_at: datetime
+    updated_at: datetime
+
+
+# ============================================================================
+# Session Models
+# ============================================================================
+
+class SubagentChildMessage(BaseModel):
+    """A child message within a subagent (tool call or text)"""
+    id: str
+    type: str  # 'text', 'tool_use', 'tool_result'
+    content: str
+    toolName: Optional[str] = None
+    toolId: Optional[str] = None
+    toolInput: Optional[Dict[str, Any]] = None
+    toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
+    toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
+    toolScreenshot: Optional[str] = None  # data: URI of an inline screenshot (Chrome/computer-use, Read of image)
+    timestamp: Optional[str] = None
+
+
+class SessionMessage(BaseModel):
+    """A message in a session"""
+    id: Union[int, str]  # int from DB, string from JSONL
+    seq: Optional[int] = None  # Last contributing event; absent for legacy transcripts
+    epoch: Optional[str] = None  # Event-log identity; compare seq only within this epoch
+    role: str  # user, assistant, system, tool
+    content: str
+    type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
+    thinkingSubtype: Optional[str] = None  # reasoning vs. provider summary in event transcripts
+    subtype: Optional[str] = None  # For system messages (e.g., local_command, compact_boundary)
+    # The frontend's system-message keys. Without them on the model the detail
+    # response stripped a compaction card's sizes and trigger (#1886).
+    systemSubtype: Optional[str] = None
+    systemData: Optional[Dict[str, Any]] = None
+    tool_name: Optional[str] = None  # snake_case for DB compatibility
+    tool_input: Optional[Dict[str, Any]] = None  # snake_case for DB compatibility
+    toolName: Optional[str] = None  # camelCase for frontend compatibility
+    toolInput: Optional[Dict[str, Any]] = None  # camelCase for frontend compatibility
+    toolId: Optional[str] = None  # Tool ID for matching tool_use to tool_result
+    toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
+    toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
+    toolScreenshot: Optional[str] = None  # data: URI of an inline screenshot (Chrome/computer-use, Read of image)
+    metadata: Optional[Dict[str, Any]] = None
+    # Profile that was active when this (user) message was created. Both keys are
+    # emitted: snake_case for API/DB parity, camelCase for the frontend message
+    # store (which reads `profileId`). Without these on the model, FastAPI's
+    # response_model strips the per-message profile and the chat UI falls back to
+    # the session's CURRENT profile for every bubble.
+    profile_id: Optional[str] = None
+    profileId: Optional[str] = None
+    created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
+    # Subagent-specific fields (for type='subagent')
+    agentId: Optional[str] = None  # The subagent's unique ID
+    agentType: Optional[str] = None  # The subagent type (e.g., 'general-purpose', 'frontend-designer')
+    agentDescription: Optional[str] = None  # Task description from the Task tool
+    agentPrompt: Optional[str] = None  # The initial prompt sent to the subagent
+    agentStatus: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
+    agentChildren: Optional[List[SubagentChildMessage]] = None  # Nested messages from subagent
+
+
+class SessionBase(BaseModel):
+    """Base session fields"""
+    profile_id: Optional[str] = None  # Nullable: sessions persist after profile deletion
+    project_id: Optional[str] = None
+    title: Optional[str] = None
+
+
+class SessionTag(BaseModel):
+    """Tag attached to a session (minimal tag info)"""
+    id: str
+    name: str
+    color: str
+
+
+class Session(SessionBase):
+    workspace_project_ids: List[str] = Field(default_factory=list)
+
+    @field_validator("workspace_project_ids", mode="before")
+    @classmethod
+    def decode_workspace_project_ids(cls, value):
+        from app.core.workspace_folders import normalize_workspace_project_ids
+        return normalize_workspace_project_ids(value)
+
+    """Full session response"""
+    id: str
+    sdk_session_id: Optional[str] = None
+    status: str = "active"
+    is_active: bool = False
+    parked_task_kind: Optional[str] = None
+    has_running_tasks: bool = False
+    remote_runtime_state: Optional[str] = None
+    api_user_id: Optional[str] = None
+    api_user_name: Optional[str] = None
+    total_cost_usd: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    cache_creation_tokens: int = 0  # Tokens used to create cache (counts toward context)
+    cache_read_tokens: int = 0  # Tokens read from cache (doesn't count toward context)
+    # Context window tokens = last_input + cache_creation + cache_read (current context size)
+    context_tokens: int = 0
+    turn_count: int = 0
+    tags: List[SessionTag] = Field(default_factory=list)  # Tags attached to this session
+    # Fork/branch fields
+    parent_session_id: Optional[str] = None  # ID of parent session if this is a fork
+    fork_point_message_index: Optional[int] = None  # Message index where fork occurred
+    has_forks: bool = False  # True if this session has forked children
+    # Worktree fields - for restoring worktree mode on session resume
+    worktree_id: Optional[str] = None  # ID of linked worktree (if any)
+    worktree_branch: Optional[str] = None  # Branch name of linked worktree
+    worktree_path: Optional[str] = None  # Path to worktree directory
+    worktree_deleted: bool = False  # True if worktree is not currently materialized; recreated on next send
+    # Branch intake: a NEW branch session records only its logical
+    # branch here (no legacy worktree row); the deterministic per-runner checkout
+    # is materialized lazily at spawn. Legacy worktree sessions leave this NULL and
+    # keep using worktree_branch. The UI badge falls back to this when
+    # worktree_branch is absent.
+    branch: Optional[str] = None
+    # Persisted pull-request lifecycle. NULL = unknown. The sidepanel
+    # renders PR Opened / PR Merged from these so a glance doesn't need GitHub.
+    pr_number: Optional[int] = None
+    pr_url: Optional[str] = None
+    pr_state: Optional[str] = None
+    # Every PR this chat and its sub-agent workers opened, newest last
+    # (``{number, url, state, title, branch, source}``). Empty on rows from
+    # before the list existed; clients then fall back to the pr_* fields.
+    pull_requests: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("pull_requests", mode="before")
+    @classmethod
+    def decode_pull_requests(cls, value):
+        from app.db.sessions import decode_pull_requests
+        return decode_pull_requests(value)
+    # Automation provenance — set when an automation run created this session.
+    # Automation sessions run headless (no live watch surface), so the sessions
+    # list badges them to differentiate from interactive chats.
+    automation_id: Optional[str] = None
+    # Multi-provider provenance — the provider this session is bound to (NULL =
+    # native Claude). Persisted on the row; surfaced on the response
+    # model so clients can tell a provider-bound session from a native one
+    # without a second round-trip.
+    provider_id: Optional[str] = None
+    # The run binding this session was created with: the model, effort
+    # and permission mode the user picked in the composer. Agents do not
+    # pin any of these, so the client hydrates its controls from here — that is
+    # what makes the pick survive a reload and show up the same on every
+    # device. NULL on rows written before the columns existed, where resolution
+    # falls back to launched_model and then the agent's legacy config.
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    permission_mode: Optional[str] = None
+    context_window: Optional[int] = None
+    # What this session actually RAN on, as opposed to what was picked.
+    # ``launched_model`` tracks the CURRENT one and is rewritten by every
+    # mid-session switch; ``first_model`` records the one it started with and is
+    # never overwritten, so a session that moved from grok-4.5 to grok-4.6
+    # halfway through can still account for its early turns. NULL on rows
+    # written before the column existed.
+    launched_model: Optional[str] = None
+    first_model: Optional[str] = None
+    # Per-session fast mode: True asks the leg for its expedited service.
+    # NULL (never picked) runs standard — left uncoalesced so the
+    # client can tell "never picked" from an explicit off.
+    fast: Optional[bool] = None
+    # Away mode (app/core/away_mode.py): questions get recommended defaults,
+    # approval prompts are deferred. NULL/False = the owner is present.
+    away_mode: Optional[bool] = None
+    # Sidepanel mode: 'code' (the full agentic surface), 'chat' (web-only chat)
+    # or 'voice' (an OpenAI Realtime call). The column is
+    # nullable and NULL means 'code', so the validator below coalesces — that
+    # covers every construction site at once (sessions are handed to FastAPI as
+    # raw row dicts through ``response_model``, never built field-by-field).
+    # See ``app.core.session_modes`` for why NULL is the code case.
+    mode: str = "code"
+    # List-visibility flag: True keeps the session out of the sessions
+    # list (wake-word "command" voice sessions are born hidden). The column is
+    # nullable and NULL means visible, so the validator below coalesces — same
+    # single-point coverage as ``mode`` above.
+    hidden: bool = False
+    # A Task/Swarm child's own chat (``sessions.is_worker``, see
+    # ``provider_agent.is_subagent_row``). The UI keeps such a chat to reading
+    # and messaging: no Git or private-access controls. NULL reads as False.
+    is_worker: bool = False
+    created_at: datetime
+    updated_at: datetime
+    # Cross-install (cluster) annotation — populated by the API enrichment layer
+    # when sessions are shared across installs on a shared database.
+    instance_id: Optional[str] = None  # Owning install (NULL = legacy/this install)
+    # Network device that executes the session. On a worker network a mirrored
+    # or handed-off session's ``instance_id`` can name another install or be
+    # NULL, so this is what names its owner (and whose usage applies).
+    owner_device_id: Optional[str] = None
+    device_name: Optional[str] = None  # Human-friendly owning-device name
+    device_online: bool = True  # Owning install seen recently (heartbeat)
+    is_remote: bool = False  # Owned by another install (not this one)
+    controllable: bool = True  # Live send/interrupt available (owner install online; DB-relayed, no base_url)
+    # Transient, derive-on-read (never persisted). True when a session has
+    # a queued turn but NO capable runner is online to execute it — i.e. it is
+    # waiting, read-only, until an owning device comes back. Derived by the API
+    # enrichment layer via ``placement.resolve_placement`` (the single oracle);
+    # the model default is False.
+    degraded: bool = False
+    # Explicit ``{"where":"runner:<id>"}`` pin. Computed at read from
+    # ``sessions.placement``; NULL / anywhere placements are not pins.
+    is_pinned: bool = False
+    project_name: Optional[str] = None  # Resolved server-side (frontend $projects is instance-filtered)
+    # Folds same-repo project clones across installs into ONE sessions-board card.
+    # Derived from the git remote so every install agrees; without it on the
+    # response model FastAPI strips it and the board falls back to project_id,
+    # rendering the same repo as a separate card per install.
+    link_group_id: Optional[str] = None
+    # The origin-keyed project this session belongs to (install-independent
+    # identity) and its origin token. Populated by the API enrichment layer. ``origin`` is 1:1 with
+    # ``link_group_id`` for grouped projects, so the board folds identically
+    # whether it groups by ``origin`` or ``link_group_id`` (no regroup flash).
+    project_v2_id: Optional[str] = None
+    origin: Optional[str] = None
+    # V2 streaming path marker. Forced TRUE on every session; the model default
+    # stays False for unset/legacy construction.
+    v2_stream: bool = False
+    # Working time for the sidepanel card. ``work_ms`` is the banked total of
+    # every finished turn's live interval (idle gaps between turns never count);
+    # ``work_started_at`` is the running turn's start, NULL when none is live.
+    # The card shows ``work_ms`` plus the live interval while a turn runs.
+    work_ms: int = 0
+    work_started_at: Optional[datetime] = None
+    last_user_message_at: Optional[datetime] = None
+    last_user_message_seq: Optional[int] = None
+    last_user_message_epoch: Optional[str] = None
+    last_assistant_question_seq: Optional[int] = None
+    last_assistant_question_epoch: Optional[str] = None
+
+    @field_validator("work_ms", mode="before")
+    @classmethod
+    def _coalesce_work_ms(cls, value):
+        """NULL ``sessions.work_ms`` (a row the default never reached) reads as 0."""
+        if value is None:
+            return 0
+        return value
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _coalesce_mode(cls, value):
+        """NULL/empty/unknown ``sessions.mode`` reads as 'code'.
+
+        Every session predating the column carries NULL, and code sessions keep
+        carrying NULL, so the coalesce lives here rather than at each of the
+        many places a row dict is fed to this response model. Routing through
+        ``normalize_session_mode`` also means a value the client has no branch
+        for can never leave the API.
+        """
+        return normalize_session_mode(value)
+
+    @field_validator("is_worker", mode="before")
+    @classmethod
+    def _coalesce_is_worker(cls, value):
+        """NULL ``sessions.is_worker`` (rows before the column) reads as False."""
+        return bool(value)
+
+    @field_validator("hidden", mode="before")
+    @classmethod
+    def _coalesce_hidden(cls, value):
+        """NULL ``sessions.hidden`` reads as False (visible).
+
+        Every session predating the column carries NULL, and normal sessions keep
+        carrying NULL/FALSE, so the coalesce lives here — the same
+        single-point coverage as ``_coalesce_mode`` above.
+        """
+        if value is None:
+            return False
+        return value
+
+
+class MessagePagination(BaseModel):
+    """The transcript window carried by a paginated session read.
+
+    ``GET /sessions/{id}`` returns the NEWEST window of a transcript, not the
+    whole thing, and walks BACKWARDS from there. The same six values already
+    ride the ``X-Message-*`` response headers; this is the body-visible copy,
+    because the frontend reads the JSON and not the headers — without it a
+    transcript longer than the page cap silently renders as its newest page
+    with no way to ask for the rest.
+
+    Fields mirror the headers 1:1:
+
+    ==================  =====================================================
+    ``total``           Size of the whole transcript (``X-Message-Total``).
+    ``returned``        How many came back in this page.
+    ``limit``           The page size actually applied (after clamping).
+    ``has_more``        OLDER items exist before this window.
+    ``first_seq``       0-based position of the first item of this page in the
+                        full transcript; ``None`` for an empty page.
+    ``next_before_seq`` Cursor for the next (older) page — pass it back as
+                        ``?before_seq=``. ``None`` at the start of history.
+    ==================  =====================================================
+
+    ``seq`` is a stable 0-based position: transcripts are append-only, so a
+    position never shifts under a client that is paging backwards.
+    """
+
+    total: int
+    returned: int
+    limit: int
+    has_more: bool
+    first_seq: Optional[int] = None
+    next_before_seq: Optional[int] = None
+
+
+class SessionWithMessages(Session):
+    """Session with message history"""
+    messages: List[SessionMessage] = []
+    # Transcript window state. Optional and defaulting to None so the shape is
+    # backward compatible: every existing caller (and every response built
+    # before the API layer was taught to fill this in) serializes exactly as it
+    # did before. The ``X-Message-*`` headers stay — this is additive, not a
+    # replacement. ``paginate_messages()`` returns a superset of these keys
+    # (``last_seq``, ``has_more_after``); the extras are ignored on validation,
+    # so the dict can be assigned straight through.
+    message_pagination: Optional[MessagePagination] = None
+
+
+class SessionSearchResult(Session):
+    """Session search result with match information"""
+    match_type: str  # 'title' or 'content'
+    match_snippet: Optional[str] = None  # Snippet showing where the match was found
+    match_time: Optional[datetime] = None  # When the matching content was created
+    match_count: int = 1  # How many places matched (title/legacy/store); 1 for back-compat
+
+
+class PaginatedSessions(BaseModel):
+    """Paginated sessions response with total count for infinite scroll"""
+    items: List[Session]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool
+
+
+class CursorPaginatedSessions(BaseModel):
+    """Cursor-based paginated sessions response for efficient infinite scroll"""
+    items: List[Session]
+    next_cursor: Optional[str] = None  # updated_at of last item
+    next_cursor_id: Optional[str] = None  # id of last item (tiebreaker)
+    has_more: bool
+
+
+class PaginatedSessionSearchResults(BaseModel):
+    """Paginated session search results with total count"""
+    items: List[SessionSearchResult]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool
+
+
+# ============================================================================
+# Query Models
+# ============================================================================
+
+class WorkspaceFoldersUpdate(BaseModel):
+    workspace_project_ids: List[str] = Field(max_length=50)
+
+
+class QueryOverrides(BaseModel):
+    """Optional overrides for a query"""
+    model: Optional[str] = None
+    workspace_project_ids: Optional[List[str]] = Field(None, max_length=50)
+    permission_mode: Optional[str] = None  # default, auto, acceptEdits, bypassPermissions
+    system_prompt_append: Optional[str] = None
+    max_turns: Optional[int] = None
+    thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
+    effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
+    context_window: Optional[int] = Field(None, gt=0)
+    # Fast mode for this turn. True asks the leg for its expedited
+    # service, False explicitly turns it off, None defers to the session row.
+    fast: Optional[bool] = None
+
+
+class QueryRequest(BaseModel):
+    """Query request"""
+    prompt: str = Field(..., min_length=1)
+    profile: Optional[str] = None
+    project: Optional[str] = None
+    overrides: Optional[QueryOverrides] = None
+
+
+class ConversationRequest(BaseModel):
+    """Continue or start a conversation"""
+    prompt: str = Field(..., min_length=1)
+    session_id: Optional[str] = None  # If provided, continues existing session
+    profile: Optional[str] = None  # Used only for new sessions
+    project: Optional[str] = None  # Used only for new sessions
+    overrides: Optional[QueryOverrides] = None
+    device_id: Optional[str] = None  # Device identifier for cross-device sync
+
+
+class QueryMetadata(BaseModel):
+    """Query execution metadata"""
+    model: Optional[str] = None
+    duration_ms: Optional[int] = None
+    total_cost_usd: Optional[float] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    num_turns: Optional[int] = None
+    terminal_reason: Optional[str] = None
+
+
+class QueryResponse(BaseModel):
+    """Query response (non-streaming)"""
+    response: str
+    session_id: str
+    metadata: QueryMetadata
+
+
+# ============================================================================
+# System Models
+# ============================================================================
+
+class HealthResponse(BaseModel):
+    """Health check response"""
+    status: str
+    service: str
+    version: str
+    authenticated: bool
+    setup_required: bool
+    claude_authenticated: bool
+    # SHA-256 hex of the desktop attach token; only present in a worker the
+    # desktop app started, so the app can tell its own worker from another.
+    attach: Optional[str] = None
+
+
+class VersionResponse(BaseModel):
+    """Version information"""
+    api_version: str
+    claude_version: Optional[str] = None
+
+
+class StatsResponse(BaseModel):
+    """Usage statistics"""
+    total_sessions: int
+    total_queries: int
+    total_cost_usd: float
+    total_tokens_in: int
+    total_tokens_out: int
+    # Turns whose token counts the harness estimated (provider reported no
+    # usage, or the reply was interrupted). Included in every total above.
+    estimated_queries: int = 0
+
+
+# ============================================================================
+# Rewind Models
+# ============================================================================
+
+class RewindCheckpoint(BaseModel):
+    """A checkpoint that can be rewound to"""
+    index: int
+    message: str  # Truncated message for display
+    full_message: Optional[str] = None
+    timestamp: Optional[str] = None
+    is_current: bool = False
+
+
+class RewindRequest(BaseModel):
+    """Request to execute a rewind operation"""
+    checkpoint_index: int = Field(..., ge=0, description="Index of checkpoint to rewind to")
+    restore_option: int = Field(..., ge=1, le=4, description="1=code+conversation, 2=conversation, 3=code, 4=cancel")
+    checkpoint_message: Optional[str] = None
+
+
+class RewindCheckpointsResponse(BaseModel):
+    """Response containing available checkpoints"""
+    success: bool
+    session_id: str
+    checkpoints: List[RewindCheckpoint] = []
+    error: Optional[str] = None
+
+
+class RewindExecuteResponse(BaseModel):
+    """Response from executing a rewind"""
+    success: bool
+    message: str
+    checkpoint_index: Optional[int] = None
+    restore_option: Optional[int] = None
+    error: Optional[str] = None
+
+
+# ============================================================================
+# Tag Models
+# ============================================================================
+
+class TagBase(BaseModel):
+    """Base tag fields"""
+    name: str = Field(..., min_length=1, max_length=50)
+    color: str = Field(default="#6366f1", pattern=r'^#[0-9a-fA-F]{6}$')
+
+
+class TagCreate(TagBase):
+    """Tag creation request"""
+    pass
+
+
+class TagUpdate(BaseModel):
+    """Tag update request"""
+    name: Optional[str] = Field(None, min_length=1, max_length=50)
+    color: Optional[str] = Field(None, pattern=r'^#[0-9a-fA-F]{6}$')
+
+
+class Tag(TagBase):
+    """Full tag response"""
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionTagsUpdate(BaseModel):
+    """Update tags for a session"""
+    tag_ids: List[str] = Field(default_factory=list)
+
+
+# ============================================================================
+# Analytics Models
+# ============================================================================
+
+class UsageStats(BaseModel):
+    """Aggregated usage statistics for a date range"""
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    total_cost_usd: float = 0.0
+    session_count: int = 0
+    query_count: int = 0
+    # How many of ``query_count`` booked harness-estimated token counts. Their
+    # amounts are inside the totals; a non-zero value means the totals are
+    # partly estimates and the panel shows the "estimated" marker.
+    estimated_query_count: int = 0
+
+
+class CostBreakdownItem(BaseModel):
+    """A single item in a cost breakdown"""
+    key: str  # profile_id, api_user_id, or date string
+    name: Optional[str] = None  # Display name (profile name, user name, etc.)
+    total_cost_usd: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    query_count: int = 0
+    estimated_query_count: int = 0
+
+
+class CostBreakdownResponse(BaseModel):
+    """Cost breakdown response with grouping"""
+    group_by: str  # 'profile', 'user', 'date'
+    start_date: str
+    end_date: str
+    items: List[CostBreakdownItem] = []
+    total_cost_usd: float = 0.0
+
+
+class UsageTrend(BaseModel):
+    """A single data point in a usage trend time series"""
+    date: str  # ISO date string (YYYY-MM-DD or YYYY-WNN for weeks)
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    query_count: int = 0
+    estimated_query_count: int = 0
+
+
+class UsageTrendsResponse(BaseModel):
+    """Usage trends response with time series data"""
+    interval: str  # 'day', 'week', 'month'
+    start_date: str
+    end_date: str
+    data_points: List[UsageTrend] = []
+
+
+class TopSession(BaseModel):
+    """A session with high usage/cost"""
+    session_id: str
+    title: Optional[str] = None
+    profile_id: Optional[str] = None
+    profile_name: Optional[str] = None
+    total_cost_usd: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    created_at: Optional[str] = None
+    # True when any booked turn of the session has estimated token counts.
+    usage_estimated: bool = False
+
+
+class ProviderUsageItem(BaseModel):
+    """Usage booked on one provider leg over a date range.
+
+    ``key`` is a ``model_providers`` id, ``"claude"`` for the native Claude
+    leg, or ``"unattributed"`` for session-less rows booked before provider
+    attribution existed.
+    """
+    key: str
+    name: str
+    provider_type: Optional[str] = None
+    # 'subscription' | 'api' | 'mixed' | 'unknown'. A subscription leg's cost
+    # is the app's API-price estimate, not money billed per token.
+    billing: str = "unknown"
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_cost_usd: float = 0.0
+    # 'estimated' (every turn priced) | 'partial' | 'unknown' (no turn priced:
+    # the model has no price, so the cost is missing, not zero).
+    cost_status: str = "estimated"
+    query_count: int = 0
+    estimated_query_count: int = 0
+    # Turns with tokens but no price.
+    unpriced_query_count: int = 0
+    subscription_query_count: int = 0
+    api_query_count: int = 0
+    # Turns booked before attribution existed, attributed from the session's
+    # current provider binding (and that provider's current billing).
+    inferred_query_count: int = 0
+
+
+class ProviderBreakdownResponse(BaseModel):
+    """Per-provider usage for a date range."""
+    start_date: str
+    end_date: str
+    items: List[ProviderUsageItem] = []
+
+
+class AnalyticsSummaryResponse(BaseModel):
+    """Combined analytics summary response"""
+    start_date: str
+    end_date: str
+    usage_stats: UsageStats
+    top_profiles: List[CostBreakdownItem] = []
+    recent_trend: List[UsageTrend] = []
+
+
+# ============================================================================
+# Template Models
+# ============================================================================
+
+class TemplateBase(BaseModel):
+    """Base template fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    prompt: str = Field(..., min_length=1)
+    profile_id: Optional[str] = None  # Link to specific profile, null for all
+    icon: Optional[str] = None  # Emoji or icon name
+    category: Optional[str] = None  # For grouping (e.g., "coding", "writing")
+
+
+class TemplateCreate(TemplateBase):
+    """Template creation request"""
+    pass
+
+
+class TemplateUpdate(BaseModel):
+    """Template update request - all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    prompt: Optional[str] = Field(None, min_length=1)
+    profile_id: Optional[str] = None
+    icon: Optional[str] = None
+    category: Optional[str] = None
+
+
+class Template(TemplateBase):
+    """Full template response"""
+    id: str
+    is_builtin: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+# ============================================================================
+# Agent Export/Import Models
+# ============================================================================
+
+class AgentExportData(BaseModel):
+    """Agent configuration data for export.
+
+    Carries only config the fluid harness honors: provider
+    models, max_turns, custom system-prompt content, tool allow/deny lists,
+    enabled_agents, ai_tools, memory, include_partial_messages,
+    app_config_tools, env. SDK-era fields (thinking_mode, preset prompts,
+    …) are no longer exported (setting_sources IS again — the fluid harness
+    honors it as its scope filter); legacy files are still
+    importable via AgentImportData.
+
+    ``model`` / ``permission_mode`` / ``effort`` are not part of an
+    agent's identity (a session carries its own). They round-trip only
+    so an export written by an older build imports without loss, and so the
+    built-in "Default AI" agent keeps its internal-generation model.
+    """
+    name: str
+    description: Optional[str] = None
+    model: Optional[str] = None
+    provider_models: Optional[Dict[str, str]] = None
+    permission_mode: Optional[str] = None  # default, acceptEdits, bypassPermissions
+    effort: Optional[str] = None  # low | medium | high | xhigh | max — harness-honored reasoning depth
+    max_turns: Optional[int] = None  # per-turn model-call cap (native legs)
+    system_prompt_content: Optional[str] = None
+    allowed_tools: Optional[List[str]] = None
+    disallowed_tools: Optional[List[str]] = None
+    # The tool-access mode. Exported so an agent round-trips its intent rather
+    # than having it re-inferred from list emptiness on import; an older file
+    # carries None and imports by inference.
+    tool_selection_mode: Optional[str] = None
+    enabled_agents: Optional[List[str]] = None
+    agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" | "none" (see ProfileConfig)
+    ai_tools: Optional[AIToolsConfig] = None
+    memory: Optional[str] = None
+    include_partial_messages: Optional[bool] = True
+    app_config_tools: Optional[bool] = False
+    # Environment variables (exported with profile)
+    env: Optional[Dict[str, str]] = None
+    # Setting sources (fluid scope filter: user/project/local). None = default
+    # (all scopes); an explicit list — [] included — is portable intent.
+    setting_sources: Optional[List[str]] = None
+
+
+class AgentImportData(AgentExportData):
+    """Legacy-tolerant agent data for the import path.
+
+    Older export files carry SDK-era fields the fluid harness ignores. They
+    are accepted here so old files still import: a preset-shaped prompt's
+    append text is mapped onto the custom prompt content; everything else is
+    silently dropped.
+    """
+    thinking_mode: Optional[str] = None
+    system_prompt_type: Optional[str] = None
+    system_prompt_preset: Optional[str] = None
+    system_prompt_append: Optional[str] = None
+    system_prompt_inject_env: Optional[bool] = False
+    max_buffer_size: Optional[int] = None
+    continue_conversation: Optional[bool] = False
+    fork_session: Optional[bool] = False
+    enable_file_checkpointing: Optional[bool] = False
+
+
+class AgentExport(BaseModel):
+    """Full agent export format"""
+    version: str = "1.0"
+    type: str = "ai-shuffle-agent"
+    exported_at: str
+    agent: AgentExportData
+
+
+class AgentImportRequest(BaseModel):
+    """Request to import an agent from JSON data"""
+    version: str = Field(..., description="Export format version")
+    type: str = Field(..., description="Must be 'ai-shuffle-agent'")
+    exported_at: Optional[str] = None
+    agent: AgentImportData
+
+    # Optional override for profile ID (otherwise generated from name)
+    new_id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    # Optional override for profile name
+    new_name: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
+# ============================================================================
+# AI Generation Models
+# ============================================================================
+
+class ClarificationQuestionModel(BaseModel):
+    """A clarification question for the user"""
+    id: str = Field(..., description="Question identifier")
+    question: str = Field(..., description="The question to ask")
+    options: Optional[List[str]] = Field(None, description="Optional predefined answer choices")
+    context: Optional[str] = Field(None, description="Additional context about why this is asked")
+
+
+class GenerationResponseModel(BaseModel):
+    """Response from AI generation endpoints"""
+    status: str = Field(..., description="'complete' or 'needs_clarification'")
+    result: Optional[Dict[str, Any]] = Field(None, description="Generated config when complete")
+    questions: Optional[List[ClarificationQuestionModel]] = Field(
+        None, description="Questions to ask when clarification needed"
+    )
+    generation_type: Optional[str] = Field(None, description="'profile' or 'subagent'")
+
+
+class AuditLogEntry(BaseModel):
+    """A single audit log entry"""
+    id: str
+    user_id: Optional[str] = None
+    user_type: str = "admin"
+    event_type: str
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    created_at: str
+
+
+class AuditLogResponse(BaseModel):
+    """Paginated audit log response"""
+    entries: List[AuditLogEntry]
+    total: int
+    limit: int
+    offset: int
+
+
+# ============================================================================
+# Notes Models
+# ============================================================================
+
+class NoteBase(BaseModel):
+    """Base note fields"""
+    title: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(default="")
+    tags: List[str] = Field(default_factory=list)  # User-defined tag names
+    is_pinned: bool = False
+
+
+class NoteCreate(NoteBase):
+    """Note creation request"""
+    pass
+
+
+class NoteUpdate(BaseModel):
+    """Note update request - all fields optional"""
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_pinned: Optional[bool] = None
+
+
+class Note(NoteBase):
+    """Full note response"""
+    id: str
+    file_path: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NoteTag(BaseModel):
+    """Aggregated tag information for notes"""
+    name: str
+    color: Optional[str] = None
+    count: int
+
+
+class NoteAutocomplete(BaseModel):
+    """Simplified note for chat autocomplete"""
+    id: str
+    title: str
+    preview: str  # First ~100 chars of content
+    tags: List[str]
+    file_path: Optional[str] = None
+    absolute_path: Optional[str] = None
+
+
+class NoteAttachment(BaseModel):
+    """A file attached to a note, referenceable via @ in the note body"""
+    id: str
+    note_id: str
+    filename: str
+    content_type: Optional[str] = None
+    size_bytes: int = 0
+    created_at: datetime
+
+
+# ============================================================================
+# Hook Models
+# ============================================================================
+
+# Valid hook event types matching Claude Code events
+VALID_HOOK_EVENTS = [
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreCompact",
+    "SubagentStop",
+    "Notification",
+]
+
+
+class HookBase(BaseModel):
+    """Base hook fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    event: str = Field(..., description="Hook event type")
+    hook_type: str = Field(..., pattern=r'^(bash|webhook)$', description="Type: 'bash' or 'webhook'")
+    # For bash hooks
+    command: Optional[str] = Field(None, description="Shell command to execute")
+    timeout: int = Field(default=30000, ge=1000, le=300000, description="Timeout in ms (1-300 seconds)")
+    # For webhook hooks
+    url: Optional[str] = Field(None, description="Webhook URL to POST to")
+    secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
+    # Common
+    enabled: bool = True
+    tool_matcher: Optional[str] = Field(None, description="Tool name pattern for PreToolUse/PostToolUse (e.g., 'Bash|Edit')")
+
+
+class HookCreate(HookBase):
+    """Hook creation request"""
+    pass
+
+
+class HookUpdate(BaseModel):
+    """Hook update request - all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    event: Optional[str] = None
+    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook)$')
+    command: Optional[str] = None
+    timeout: Optional[int] = Field(None, ge=1000, le=300000)
+    url: Optional[str] = None
+    secret: Optional[str] = None
+    enabled: Optional[bool] = None
+    tool_matcher: Optional[str] = None
+
+
+class Hook(HookBase):
+    """Full hook response"""
+    id: str
+    project_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    last_triggered_at: Optional[datetime] = None
+    failure_count: int = 0
+
+
+class HookTestResult(BaseModel):
+    """Result from testing a hook"""
+    success: bool
+    duration_ms: Optional[int] = None
+    output: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PluginHookInfo(BaseModel):
+    """Read-only hook info from an installed plugin"""
+    plugin_id: str
+    plugin_name: str
+    event: str
+    hook_type: str  # 'prompt' or 'command'
+    description: Optional[str] = None
+    tool_matcher: Optional[str] = None
+
+
+# ============================================================================
+# Mobile Device Models
+# ============================================================================
+
+class DeviceCapabilities(BaseModel):
+    """Mobile device capabilities"""
+    supports_biometric: bool = False
+    supports_push: bool = False
+    biometric_types: List[str] = Field(default_factory=list)  # face_id, touch_id, fingerprint
+
+
+class DeviceInfo(BaseModel):
+    """Device registration info"""
+    device_id: str = Field(..., min_length=1, max_length=255)
+    device_name: str = Field(..., min_length=1, max_length=100)
+    platform: str = Field(..., pattern=r'^(ios|android)$')
+    capabilities: DeviceCapabilities
+
+
+class MobileDeviceRegisterRequest(BaseModel):
+    """Request to register a mobile device"""
+    device_info: DeviceInfo
+    pairing_code: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    account_repair: Optional[Literal["scoped-v1"]] = None
+
+
+class MobileDeviceRegisterResponse(BaseModel):
+    """Response after registering a mobile device"""
+    api_key: str
+    device_id: str
+    expires_at: datetime
+    scopes: List[str] = Field(default_factory=list)
+
+
+class MobileDevice(BaseModel):
+    """Full mobile device response"""
+    id: str
+    device_id: str
+    device_name: str
+    platform: str
+    capabilities: DeviceCapabilities
+    fcm_token: Optional[str] = None
+    api_key_expires_at: Optional[datetime] = None
+    scopes: List[str] = Field(default_factory=list)
+    revoked_at: Optional[datetime] = None
+    created_at: datetime
+    last_seen: Optional[datetime] = None
+
+
+# ============================================================================
+# API User Models
+# ============================================================================
+
+class ApiUserCreate(BaseModel):
+    """API user creation request"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    web_login_allowed: Literal[False] = Field(default=False, deprecated=True)
+    # Preconfigured run selection every session created for this user binds
+    # (connectors resolve it at session creation and each turn). NULL falls
+    # back to the profile's legacy config, then the global default.
+    model: Optional[str] = None
+    effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max|ultra)$")
+
+
+class ApiUserUpdate(BaseModel):
+    """API user update request — all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+    web_login_allowed: Optional[Literal[False]] = Field(default=None, deprecated=True)
+    model: Optional[str] = None
+    effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max|ultra)$")
+
+
+class ApiUserResponse(BaseModel):
+    """Full API user response (never includes key or hash)"""
+    id: str
+    name: str
+    username: Optional[str] = None
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    is_active: bool = True
+    web_login_allowed: bool = True
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    last_used_at: Optional[datetime] = None
+    # Set when this key's runs would use the owner's subscription sign-in and
+    # are therefore refused (``api_user_scope.subscription_warning``).
+    subscription_warning: Optional[str] = None
+    # Runs a connector that knows the owner's own account
+    # (``api_user_scope.owner_sender_connector``): its model may be a
+    # subscription, used only for the owner's own messages.
+    owner_sender_connector: bool = False
+
+
+class ApiUserCreateResponse(ApiUserResponse):
+    """Response from create — includes plaintext API key shown ONCE"""
+    api_key: str
+
+
+class ApiUserRotateKeyResponse(BaseModel):
+    """Response from key rotation — includes new plaintext API key shown ONCE"""
+    id: str
+    api_key: str
+
+
+# ============================================================================
+# Connector Models
+# ============================================================================
+
+class ConnectorType(str, Enum):
+    TELEGRAM = "telegram"
+    DISCORD = "discord"
+    WHATSAPP = "whatsapp"
+    WEBHOOK = "webhook"
+    SLACK = "slack"
+    LINE = "line"
+    SIGNAL = "signal"
+    IMESSAGE = "imessage"
+    MSTEAMS = "msteams"
+    BLUEBUBBLES = "bluebubbles"
+    SPOTIFY = "spotify"
+    HUE = "hue"
+    HOMEASSISTANT = "homeassistant"
+    GMAIL = "gmail"
+    PLAID = "plaid"
+
+
+VALID_CONNECTOR_EVENTS = [
+    "session.complete",
+    "session.error",
+    "session.started",
+    "permission.requested",
+    "input.needed",
+]
+
+
+class ConnectorBase(BaseModel):
+    """Base connector fields for creation/update"""
+    name: str = Field(..., min_length=1, max_length=100)
+    type: ConnectorType
+    config: Dict[str, Any] = Field(default_factory=dict)
+    events: List[str] = Field(default_factory=list)
+
+
+class ConnectorCreate(ConnectorBase):
+    """Connector creation request"""
+    api_user_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    project_id: Optional[str] = None
+
+
+class ConnectorUpdate(BaseModel):
+    """Connector update request — all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    config: Optional[Dict[str, Any]] = None
+    events: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
+class DiscordDiscoverRequest(BaseModel):
+    """Request to discover a Discord bot's guilds/channels for guided setup.
+
+    Exactly one of ``bot_token`` or ``connector_id`` must be provided. Use
+    ``connector_id`` to reuse the token already stored on an existing connector
+    (e.g. from the edit view, where the token is masked).
+    """
+    bot_token: Optional[str] = None
+    connector_id: Optional[str] = None
+
+
+class Connector(ConnectorBase):
+    """Full connector response"""
+    @computed_field
+    @property
+    def plugin_id(self) -> str:
+        # Stable ownership for legacy rows without rewriting credentials or IDs.
+        return f"{self.type.value}@shuffle-connectors"
+
+    id: str
+    api_user_id: Optional[str] = None
+    is_active: bool = False
+    status: str = "disconnected"
+    status_message: Optional[str] = None
+    last_connected_at: Optional[datetime] = None
+    last_event_at: Optional[datetime] = None
+    failure_count: int = 0
+    # Install that owns/runs this connector's live client (multi-install
+    # affinity). NULL = unowned until claim-on-start assigns it.
+    runner_id: Optional[str] = None
+    # Set only on start/stop/toggle responses when this install is NOT the
+    # runner: the id of the install that will apply the change on its next
+    # restart. KNOWN LIMITATION: there is no cross-install watcher yet.
+    applies_on: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConnectorTestResponse(BaseModel):
+    """Response from testing a connector"""
+    success: bool
+    message: str
+    response_time_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
+class ConnectorEventLog(BaseModel):
+    """A single connector event log entry"""
+    id: str
+    connector_id: str
+    event_type: str
+    direction: str
+    payload: Optional[Dict[str, Any]] = None
+    status: str
+    error: Optional[str] = None
+    created_at: datetime
+
+
+# ============================================================================
+# Automation Models
+# ============================================================================
+
+class AutomationTriggerType(str, Enum):
+    CRON = "cron"
+    INTERVAL = "interval"
+    CONNECTOR_EVENT = "connector_event"
+    WEBHOOK = "webhook"
+    CONNECTOR_TRIGGER = "connector_trigger"
+
+
+VALID_AUTOMATION_TRIGGER_TYPES = [t.value for t in AutomationTriggerType]
+
+
+class TriggerItem(BaseModel):
+    """A single trigger within an automation's triggers array."""
+    type: AutomationTriggerType
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AutomationCreate(BaseModel):
+    """Automation creation request"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    # Legacy single-trigger fields (still accepted for backward compat)
+    trigger_type: Optional[AutomationTriggerType] = None
+    trigger_config: Dict[str, Any] = Field(default_factory=dict)
+    # Multi-trigger support
+    triggers: Optional[List[TriggerItem]] = None
+    prompt: Optional[str] = Field(default=None)
+    action_steps: Optional[List[Dict[str, Any]]] = None
+    profile_id: str
+    project_id: Optional[str] = None
+    output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
+    max_turns: Optional[int] = Field(default=1, ge=1)  # None = unlimited
+    timeout_seconds: Optional[int] = Field(default=300, ge=10)  # None = unlimited
+    max_cost_per_run: Optional[float] = Field(default=None, ge=0)
+    max_cost_per_day: Optional[float] = Field(default=None, ge=0)
+    max_cost_total: Optional[float] = Field(default=None, ge=0)
+    max_runs_per_day: Optional[int] = Field(default=None, ge=1)
+    requires_approval: bool = False
+    # Initial enabled state. Defaults to False to preserve the create-then-enable
+    # UI flow; the create response always carries the real ``is_enabled`` so the
+    # client can render truthfully.
+    enabled: bool = False
+    # The model its runs use: the model picker's value (a native Claude id such
+    # as ``sonnet``, or ``prov:<providerId>:<modelId>``), or a bare model id
+    # with ``provider_id``. Omitted = use the app default, the model a new chat
+    # uses when none is picked. Validated against the providers and their
+    # model lists.
+    model: Optional[str] = None
+    provider_id: Optional[str] = None
+
+
+class AutomationUpdate(BaseModel):
+    """Automation update request — all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    trigger_type: Optional[AutomationTriggerType] = None
+    trigger_config: Optional[Dict[str, Any]] = None
+    triggers: Optional[List[TriggerItem]] = None
+    prompt: Optional[str] = None
+    action_steps: Optional[List[Dict[str, Any]]] = None
+    profile_id: Optional[str] = None
+    project_id: Optional[str] = None
+    output_config: Optional[Dict[str, Any]] = None
+    max_turns: Optional[int] = Field(None, ge=1)  # explicit null = unlimited
+    timeout_seconds: Optional[int] = Field(None, ge=10)  # explicit null = unlimited
+    max_cost_per_run: Optional[float] = None
+    max_cost_per_day: Optional[float] = None
+    max_cost_total: Optional[float] = None
+    max_runs_per_day: Optional[int] = None
+    requires_approval: Optional[bool] = None
+    is_enabled: Optional[bool] = None
+    # Same shape as on create. Send ``model: null`` to clear the choice.
+    model: Optional[str] = None
+    provider_id: Optional[str] = None
+
+
+class Automation(BaseModel):
+    """Full automation response"""
+    id: str
+    name: str
+    description: Optional[str] = None
+    trigger_type: str
+    trigger_config: Dict[str, Any] = Field(default_factory=dict)
+    triggers: Optional[List[Dict[str, Any]]] = None
+    prompt: Optional[str] = None
+    action_steps: Optional[List[Dict[str, Any]]] = None
+    profile_id: Optional[str] = None  # Retired agents leave disabled, unlinked automations.
+    project_id: Optional[str] = None
+    output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
+    max_turns: Optional[int] = 1  # None = unlimited
+    timeout_seconds: Optional[int] = 300  # None = unlimited
+    max_cost_per_run: Optional[float] = None
+    max_cost_per_day: Optional[float] = None
+    max_cost_total: Optional[float] = None
+    max_runs_per_day: Optional[int] = None
+    total_cost_used: float = 0.0
+    is_enabled: bool = False
+    status: str = "idle"
+    last_run_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    run_count: int = 0
+    failure_count: int = 0
+    requires_approval: bool = False
+    created_at: datetime
+    updated_at: datetime
+    # The stored model choice (picker value) and the provider it binds; both
+    # null when the automation has no choice of its own.
+    model: Optional[str] = None
+    provider_id: Optional[str] = None
+    # What a run would use right now. ``model_source`` is ``automation`` for an
+    # explicit choice, ``default`` for the app default, or ``agent`` when the
+    # agent row still carries a legacy saved model, which runs keep using.
+    # ``effective_model`` may be null for an agent with a legacy provider and
+    # no model (the provider's default applies). ``model_error`` is set when the stored choice is no longer
+    # available; runs fail with it instead of switching models.
+    effective_model: Optional[str] = None
+    effective_provider_id: Optional[str] = None
+    model_source: Optional[str] = None
+    model_error: Optional[str] = None
+    # Advice returned by create/update, e.g. "use an API key for scheduled
+    # runs" while Claude Code runs on the user's subscription.
+    notices: List[str] = Field(default_factory=list)
+
+
+class AutomationRun(BaseModel):
+    """Automation run response"""
+    id: str
+    automation_id: str
+    status: str
+    trigger_data: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
+    prompt_rendered: Optional[str] = None
+    response: Optional[str] = None
+    error: Optional[str] = None
+    cost_usd: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    duration_ms: int = 0
+    output_status: str = "pending"
+    output_error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class AutomationApproval(BaseModel):
+    """Automation approval response"""
+    id: str
+    run_id: str
+    automation_id: str
+    automation_name: Optional[str] = None
+    status: str
+    prompt_preview: Optional[str] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class AutomationStats(BaseModel):
+    """Automation statistics"""
+    automation_id: str
+    total_runs: int = 0
+    successful_runs: int = 0
+    failed_runs: int = 0
+    total_cost_usd: float = 0.0
+    avg_duration_ms: float = 0.0
+    today_runs: int = 0
+    today_cost_usd: float = 0.0
+
+
+class AutomationTestResult(BaseModel):
+    """Result of a dry-run test"""
+    prompt_rendered: str
+    budget_ok: bool
+    message: str

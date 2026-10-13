@@ -1,0 +1,181 @@
+/*
+ * Shared look of the inline editors that open under a preference row
+ * (call prompts, owner password, chat instructions, import wizard,
+ * license key and seats, update results). Tokens are the --st-* aliases from
+ * shell/settings.css only.
+ */
+
+/* A nested list of rows inside an expansion. */
+.settings-shell .st-xlist {
+	background: var(--st-card);
+	border: 1px solid var(--st-border);
+	border-radius: var(--st-radius);
+	overflow: hidden;
+}
+.settings-shell .st-xlist > .st-row + .st-row,
+.settings-shell .st-xlist > .st-rowx + .st-row,
+.settings-shell .st-xlist > .st-xitem + .st-xitem {
+	border-top: 1px solid var(--st-border);
+}
+
+/* Small heading above an editor part ("Voice reply prompt  [Restore default]"). */
+.settings-shell .st-xh {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12.5px;
+	font-weight: 450;
+	color: var(--st-mfg);
+	margin: 14px 0 6px;
+}
+.settings-shell .st-xh:first-child {
+	margin-top: 2px;
+}
+.settings-shell .st-xh > .st-sp {
+	flex: 1;
+}
+
+/* Long text (prompts, instructions). */
+.settings-shell textarea.st-area {
+	width: 100%;
+	min-height: 160px;
+	border: 1px solid var(--st-input);
+	border-radius: var(--st-radius-md);
+	background: var(--st-muted);
+	color: var(--st-fg);
+	padding: 10px 12px;
+	font-family: var(--st-mono);
+	font-size: 12px;
+	line-height: 1.6;
+	resize: vertical;
+	display: block;
+}
+.settings-shell textarea.st-area:focus {
+	outline: none;
+	border-color: var(--st-primary);
+	box-shadow: 0 0 0 3px var(--st-primary-soft);
+}
+.settings-shell textarea.st-area:disabled {
+	opacity: 0.55;
+}
+
+/* Action line at the foot of an editor. */
+.settings-shell .st-acts {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+	align-items: center;
+	margin-top: 12px;
+	flex-wrap: wrap;
+}
+.settings-shell .st-acts > .st-left {
+	margin-right: auto;
+}
+
+.settings-shell .st-note {
+	font-size: 12.5px;
+	color: var(--st-mfg);
+	margin: 8px 2px 0;
+	line-height: 1.5;
+}
+
+/* Result and error lines under a group or inside an editor. */
+.settings-shell .st-msg {
+	font-size: 13px;
+	margin: 8px 2px 0;
+	line-height: 1.45;
+	color: var(--st-mfg);
+}
+.settings-shell .st-msg.err {
+	color: var(--st-destructive);
+}
+.settings-shell .st-grp + .st-msg,
+.settings-shell .st-msg:has(+ .st-grp) {
+	margin-bottom: 20px;
+}
+
+.settings-shell .st-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 11.5px;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: var(--st-muted);
+	color: var(--st-mfg);
+	white-space: nowrap;
+	font-weight: 500;
+}
+.settings-shell .st-badge.warn {
+	background: var(--st-warning-soft);
+	color: var(--st-warning);
+}
+
+/* Status with a dot ("● Up to date"). */
+.settings-shell .st-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 13px;
+	color: var(--st-mfg);
+	white-space: nowrap;
+	min-width: 0;
+}
+
+/* "Checking…" with a spinner. */
+.settings-shell .st-wait {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--st-mfg);
+	font-size: 13px;
+	padding: 4px 2px;
+}
+.settings-shell .st-spin {
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	border: 2px solid var(--st-border-strong);
+	border-top-color: var(--st-fg);
+	animation: st-spin 0.8s linear infinite;
+	flex: none;
+}
+@keyframes st-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* Checkbox rows (import wizard). */
+.settings-shell .st-check {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	gap: 12px;
+	align-items: center;
+	padding: 9px 16px;
+	min-height: 42px;
+	font-size: 13.5px;
+	cursor: pointer;
+}
+.settings-shell .st-check:has(input:disabled) {
+	cursor: default;
+	color: var(--st-mfg);
+}
+.settings-shell .st-check input[type='checkbox'] {
+	width: 16px;
+	height: 16px;
+	accent-color: var(--st-primary);
+	margin: 0;
+}
+.settings-shell .st-check .st-count {
+	font-size: 12px;
+	color: var(--st-mfg);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.settings-shell .st-spin {
+		animation-duration: 2.4s;
+	}
+}

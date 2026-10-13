@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "revision": "73d7c591f6e51c44960d0f6198513e7e5b22c25d",
+  "packages": {
+    "telegram": {
+      "module": "telegram",
+      "class": "TelegramConnector",
+      "files": {
+        "telegram.py": "7c425b29734c5bed2dc58fb6cc967f173d684c64e50d24f1ba7c3468d8ce74ad",
+        "telegram_actions.py": "6a14a672d0ae8a797b4d8874a7fe4fd0dbfbd2928088624a4dccf1758927ae72"
+      }
+    },
+    "discord": {
+      "module": "discord_connector",
+      "class": "DiscordConnector",
+      "files": {
+        "discord_connector.py": "a4767f37b1eebcf3d7be6e65a1e470280365f80753693ad764fdb624d40a4d4d",
+        "discord_actions.py": "8cac0e3d12fd760a6ba9ccce7229e44d8eacdb53c33c3ac00d40401db284f7aa"
+      }
+    },
+    "whatsapp": {
+      "module": "whatsapp",
+      "class": "WhatsAppConnector",
+      "files": {
+        "whatsapp.py": "0892c0344df8d18a4cdaaffe3f1b39f01850223491716d21ededf4b9644ce436",
+        "whatsapp_actions.py": "172afe2188cf34fb5d9dd44c71d57801f73b764fd11e0f438e955aa52c78abd2"
+      }
+    },
+    "webhook": {
+      "module": "webhook_connector",
+      "class": "WebhookConnector",
+      "files": {
+        "webhook_connector.py": "bac9faf139773d525f1cfa7a2f2a6405858bfbeb94581d2ef207f84d40fb093b"
+      }
+    },
+    "slack": {
+      "module": "slack",
+      "class": "SlackConnector",
+      "files": {
+        "slack.py": "47339c7ede2350b90bcfae1d49e2ff6743f10b3663b54b79fd6e7c168871b884",
+        "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb"
+      }
+    },
+    "line": {
+      "module": "line",
+      "class": "LINEConnector",
+      "files": {
+        "line.py": "16389b0ff4bb1fa6c8b4a00ccf48e2b2e9eed658bc7ba62e496464b77c82ebfe",
+        "line_actions.py": "0f309fffdaf75c954976285c6b03fe6833728319fc57f4ed2bb6d7966ca28078"
+      }
+    },
+    "signal": {
+      "module": "signal_connector",
+      "class": "SignalConnector",
+      "files": {
+        "signal_connector.py": "15ceb5558bdcbf2b95ff5f44c95cb3565e20eab1ab47cb890e3dd527ec57e5ff",
+        "signal_actions.py": "8f4139205355f19b18f0f8fbc29e5bb954ec4c420e14d566fe56085593ad7431"
+      }
+    },
+    "imessage": {
+      "module": "imessage",
+      "class": "IMessageConnector",
+      "files": {
+        "imessage.py": "84fc5ceea6f69dbad72f8b8543e21094aef57a1ae30de9f86b4ef4aabfaf694a",
+        "imessage_actions.py": "c0352b5b38d0cd7ece65c29889ddfd62d6dc997abc2f632b1e7490b8f56157f4"
+      }
+    },
+    "msteams": {
+      "module": "msteams",
+      "class": "MSTeamsConnector",
+      "files": {
+        "msteams.py": "7de56e59f68c935b67a9564a2610f604c2c6ec26240e0a0a5a4bbb35ddd6e859",
+        "msteams_actions.py": "9bdcabaa9092cddb414158607cd6f5d054d66331fa3ebd23469c7f6cde15d1fa"
+      }
+    },
+    "bluebubbles": {
+      "module": "bluebubbles",
+      "class": "BlueBubblesConnector",
+      "files": {
+        "bluebubbles.py": "6bdf2d94ab5c54998929a9f03c6724ac75e60628449529a7155a39bd05b5a22c",
+        "bluebubbles_actions.py": "26329d62a2a775f3710687202b7b1cea365822cc5e8131a8fca6fa18db57e68e"
+      }
+    },
+    "spotify": {
+      "module": "spotify",
+      "class": "SpotifyConnector",
+      "files": {
+        "spotify.py": "ccc379986606e06fe8891b68e951ed8957484a6cf64fc3f4bb84347705fe57b0",
+        "spotify_actions.py": "dc1fec93bf67e38669ff4ea4997a755332de148c7395fc0860ac9648721f0a3b"
+      }
+    },
+    "hue": {
+      "module": "hue",
+      "class": "HueConnector",
+      "files": {
+        "hue.py": "431d37275bcbd82dc2b7380db0e15898b9bc65e835cd2ac81bcde42d09e59395",
+        "hue_actions.py": "6717bb5132be4b61ff7b8616e9cddbcbed64db4e7155d939ce8ab7574f6c1c96"
+      }
+    },
+    "homeassistant": {
+      "module": "homeassistant",
+      "class": "HomeAssistantConnector",
+      "files": {
+        "homeassistant.py": "4b165b1f4283d0b82df720ca93979d18fc3f23945d41c4e3f873dbbf3fa6f047",
+        "homeassistant_actions.py": "f454dd24da591244bd87e8c869229f75fc394135df3376b1d342864b73bfd3e8"
+      }
+    },
+    "gmail": {
+      "module": "gmail",
+      "class": "GmailConnector",
+      "files": {
+        "gmail.py": "dde3938aab9193c9ccbe8872d5d6dae8ee6ea4fbad05cc19f8acc95e120f7275",
+        "gmail_actions.py": "5d822d18f57077ec12f1e3ac9db0fbd887c3e6be0c488d463b092812373195b2"
+      }
+    },
+    "plaid": {
+      "module": "plaid",
+      "class": "PlaidConnector",
+      "files": {
+        "plaid.py": "874aebed2ee1582cfb78e83ca44ef9fa2ac909d179356c4ee2c19b4a17d0ee09"
+      }
+    }
+  },
+  "dependencies": {
+    "default": [
+      "httpx==0.27.2"
+    ],
+    "telegram": [
+      "aiogram==3.31.0"
+    ],
+    "gmail": [
+      "google-api-python-client==2.200.0"
+    ],
+    "slack": [
+      "slack-sdk==3.44.1",
+      "aiohttp>=3.9,<4"
+    ],
+    "discord": [
+      "discord.py==2.7.1"
+    ]
+  },
+  "sdk": 1,
+  "release": "96a2d96b7be9337a"
+}

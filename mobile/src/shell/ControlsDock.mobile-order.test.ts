@@ -1,0 +1,147 @@
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { activeSession } from '$lib/stores/active-session';
+import { get } from 'svelte/store';
+import { getContextUsage } from '$lib/api/sessions';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import ControlsDock from '$lib/components/chat/ControlsDock.svelte';
+import { tick } from 'svelte';
+import '$lib/test-stubs/composer-dom';
+import { installMobileShell } from './register';
+
+// The dock renders the controls sheet only once the mobile shell is registered.
+installMobileShell();
+
+vi.hoisted(() => {
+	vi.stubGlobal('fetch', vi.fn((url: unknown) => String(url).includes('/events?')
+		? new Promise(() => {})
+		: Promise.resolve({ ok: false, status: 404, json: vi.fn().mockResolvedValue({}) })));
+});
+
+vi.mock('$lib/api/client', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return {
+		...actual,
+		getUsageLimits: vi.fn().mockResolvedValue({
+			available: false,
+			buckets: {},
+			provider_buckets: {}
+		})
+	};
+});
+
+afterEach(() => { cleanup(); document.querySelectorAll('.mcp-portal').forEach((n) => n.remove()); });
+afterAll(() => vi.unstubAllGlobals());
+
+vi.mock('$lib/api/sessions', async (original) => ({
+	...await original<Record<string, unknown>>(),
+	getContextUsage: vi.fn().mockResolvedValue({ available: false, reason: 'not_connected' })
+}));
+
+it.each(['code', 'chat', 'voice'] as const)('the phone quick bar is the sole context producer in %s mode', async mode => {
+	activeSession.newChat();
+	await activeSession.switchSession('phone-context-fixture');
+	activeSession.reconcileSessionMode([{ id: 'phone-context-fixture', mode }]);
+	expect(get(activeSession).mode).toBe(mode);
+	expect(get(activeSession).sessionId).toBe('phone-context-fixture');
+	vi.mocked(getContextUsage).mockClear();
+	const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	await waitFor(() => expect(getContextUsage).toHaveBeenCalledTimes(1));
+	expect(container.querySelector('.controls-dock .usage-context-wrapper')).toBeNull();
+	expect(container.querySelectorAll('.usage-context-wrapper')).toHaveLength(1);
+	cleanup();
+	activeSession.newChat();
+});
+
+describe('ControlsDock mobile control order', () => {
+	// #1816: the dock's open state drives the Chat controls panel, a dialog
+	// over the chat; it takes focus while open and hands it back to the quick
+	// bar's Controls cell when it closes.
+	it('opens the Chat controls panel through the exported setter and returns focus to Controls', async () => {
+		const onSheetOpenChange = vi.fn();
+		const { component } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const panel = document.querySelector<HTMLElement>('.mcp')!;
+		const controls = screen.getByRole('button', { name: /^All chat controls/ });
+		expect(panel.getAttribute('aria-hidden')).toBe('true');
+		component.setMobileSheetOpen(true);
+		await tick();
+		expect(panel.getAttribute('aria-hidden')).toBe('false');
+		expect(controls.getAttribute('aria-expanded')).toBe('true');
+		await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
+		component.setMobileSheetOpen(false);
+		await tick();
+		expect(controls.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(controls);
+		expect(onSheetOpenChange.mock.calls).toEqual([[true], [false]]);
+	});
+
+	it('toggles the panel from Controls and closes it with Escape', async () => {
+		const onSheetOpenChange = vi.fn();
+		render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const controls = screen.getByRole('button', { name: /^All chat controls/ });
+		await fireEvent.click(controls);
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
+		expect(controls.getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.click(controls);
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+		await fireEvent.click(controls);
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+		expect(controls.getAttribute('aria-expanded')).toBe('false');
+	});
+
+	it('places chat settings first, then browser immediately before attach, with usage on the right', () => {
+		const { container } = render(ControlsDock, {
+			props: {
+				isUploading: false,
+				onAttachClick: vi.fn(),
+				onBrowserToggle: vi.fn()
+			}
+		});
+		const dock = container.querySelector('.controls-dock');
+		expect(dock instanceof HTMLElement && !dock.inert).toBe(true);
+		const left = container.querySelector('.dock-left');
+		const mobile = container.querySelector('.mobile-controls');
+		const settings = left?.querySelector('.mobile-settings-trigger');
+		const attach = left?.querySelector('.attach-btn');
+		const contextUsage = container.querySelector('.qcell.usage .usage-context-wrapper');
+		// The phone quick bar owns the sole ring; the CSS-hidden dock owns none.
+		expect(mobile?.querySelector('.usage-context-wrapper')).toBeFalsy();
+		expect(container.querySelectorAll('.usage-context-wrapper')).toHaveLength(1);
+
+		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
+		expect(browser.nextElementSibling).toBe(attach);
+		expect(browser.classList.contains('dock-ico')).toBe(true);
+		expect(browser.classList.contains('desktop-only')).toBe(false);
+		expect(left?.contains(browser)).toBe(true);
+		expect(settings).toBeInstanceOf(Element);
+		expect(attach).toBeInstanceOf(Element);
+		expect(contextUsage).toBeInstanceOf(Element);
+		if (
+			!(settings instanceof Element) ||
+			!(attach instanceof Element) ||
+			!(contextUsage instanceof Element)
+		) {
+			return;
+		}
+		expect(settings.classList.contains('dock-ico')).toBe(true);
+		expect(settings.classList.contains('composer-mobile-only')).toBe(true);
+		expect(settings.classList.contains('mobile-only')).toBe(false);
+		expect(settings.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING)
+			.toBeTruthy();
+		expect(attach.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
+			.toBeTruthy();
+	});
+
+	it('marks the dock inert when ChatInput is guarding the expand tap', () => {
+		const { container } = render(ControlsDock, {
+			props: {
+				isUploading: false,
+				onAttachClick: vi.fn(),
+				inertToolbar: true
+			}
+		});
+		const dock = container.querySelector('.controls-dock');
+		expect(dock).toBeInstanceOf(HTMLElement);
+		expect(dock instanceof HTMLElement && dock.inert).toBe(true);
+	});
+});

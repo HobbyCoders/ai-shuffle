@@ -1,0 +1,94 @@
+name: CI Browser Workspace
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-browser-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Browser editor smoke checks
+    # Keep every smoke check on a standard GitHub-hosted runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: browser-mcp/package-lock.json
+      - run: npm ci --ignore-scripts --prefix browser-mcp
+      - run: npm run build --prefix browser-mcp
+      - run: npm test --prefix browser-mcp -- test/editors.test.ts
+
+  workspace:
+    name: Real browser workspace
+    needs: smoke
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TESTING: '1'
+      ALLOW_REAL_PG: '0'
+      RUN_BROWSER_WORKSPACE_INTEGRATION: '1'
+      RUN_BROWSER_WORKSPACE_UI: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            browser-mcp/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./fluid
+      - name: Install and build browser dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --ignore-scripts --prefix browser-mcp
+          npm run build --prefix browser-mcp
+      - name: Install isolated Chromium
+        working-directory: browser-mcp
+        run: |
+          npx --no-install playwright-core install --with-deps chromium
+          node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
+      - name: Verify shadow-root auth editor discovery and edits
+        working-directory: browser-mcp
+        run: npm test -- test/editors.test.ts -t 'nested shadow auth fields'
+      # Reuses this job's Chromium and playwright-core; about 15 seconds.
+      - name: Verify desktop breadcrumb strip layout
+        working-directory: frontend
+        run: |
+          npx vite dev --config tests/vite.crumb-strip.config.js --host 127.0.0.1 --port 5249 --strictPort > /tmp/crumb-strip-vite.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:5249/tests/crumb-strip.html && break; sleep 1; done
+          node tests/verify-crumb-strip.mjs || { cat /tmp/crumb-strip-vite.log; exit 1; }
+      - name: Verify shared browser and rendered desktop/mobile UI
+        run: python -m pytest tests/test_browser_workspace_integration.py -o addopts="" -q -s --timeout=240
+      - name: Upload browser verification screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-workspace-screenshots
+          path: |
+            /tmp/browser-workspace-live-*.png
+            /tmp/browser-workspace-*.png
+            /tmp/browser-cold-start-*.png
+            /tmp/provider-login-*.png
+          if-no-files-found: ignore
+          retention-days: 3
+

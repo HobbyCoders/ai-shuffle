@@ -1,0 +1,44 @@
+fastapi==0.141.1
+# Pin the security-reviewed ASGI layer too (Windows StaticFiles and Range/form DoS fixes).
+starlette==1.6.0
+uvicorn[standard]==0.32.1
+pydantic==2.11.7
+pydantic-settings==2.6.1
+python-dotenv==1.2.2
+qrcode>=8.0,<9
+httpx==0.27.2
+# Outbound WebSocket client for the Chrome DevTools (CDP) proxy in app/api/chrome_mcp.py.
+# Already present transitively via uvicorn[standard]; pinned here as a direct dep.
+websockets>=12,<17
+# Binary realtime frames for fal.ai PersonaPlex.
+msgpack>=1.1,<2
+bcrypt==4.2.1
+cryptography>=44.0.0  # 44 adds the Argon2id KDF used for the owner password
+asyncssh==2.24.0  # Pinned-host remote administration for explicitly granted Chat resources
+# MCP protocol client for external tool servers (independent of any agent SDK).
+mcp>=1.27.2,<2
+# fluid agent harness — REQUIRED: it is the only provider backend
+# (app/core/provider/factory.py). Not listed here as a pinned dep because it
+# lives in this repo under fluid/ (its own pyproject.toml); the Docker image
+# and dev installs install it from the tree (`pip install -e ./fluid`).
+# Requires Python >=3.12.
+# Native git reads (pygit2/libgit2) — falls back to CLI subprocess if unavailable
+pygit2>=1.19.0
+# Mobile support dependencies
+firebase-admin>=6.4.0  # FCM push notifications
+apscheduler>=3.10.4  # Proactive scheduling
+psycopg2-binary==2.9.9
+psutil>=5.9  # Process + child-process RSS for ResourceMonitor leak diagnostics (manylinux wheels; no build toolchain needed)
+# Computer-use dependencies (host desktop control) live in requirements-native.txt.
+# They are installed only for native/local runs — never in the Docker image, where
+# computer-use is auto-disabled and pynput's transitive `evdev` build fails (needs
+# kernel headers + a C toolchain). See requirements-native.txt.
+# Connector dependencies (messaging platform integrations)
+aiogram>=3.4.0  # Telegram bot framework (async)
+discord.py>=2.3.0  # Discord bot library
+# Gmail connector dependencies
+# google-api-python-client provides googleapiclient + pulls in google-auth
+# transitively (gmail.py imports google.oauth2.credentials). The OAuth token
+# exchange is handled by our own httpx PKCE flow in app/core/oauth.py, so the
+# google-auth-oauthlib / google-auth-httplib2 helper libs are not needed.
+google-api-python-client>=2.100.0  # Gmail API client (+ google-auth)

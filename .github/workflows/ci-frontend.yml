@@ -1,0 +1,99 @@
+name: CI JavaScript
+
+# Manual only. Pull requests run no CI: scripts/local_ci.py runs these checks
+# on the developer's machine before a push. Dispatch this only when a check
+# cannot run locally.
+#
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
+on:
+  workflow_dispatch:
+
+# Cancel superseded runs (force-pushes / rapid successive commits) instead of
+# letting stale runs finish and fail/email after a newer commit already ran.
+concurrency:
+  group: ci-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: JavaScript package checks
+    # Cap well below the 6-hour default.
+    timeout-minutes: 20
+    # Standard public Linux runner; no paid runner-size selection.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # Official setup actions use the GitHub Actions dependency cache.
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            frontend/package-lock.json
+            tools/package-lock.json
+            browser-mcp/package-lock.json
+
+      # mobile/ has no lockfile of its own: it links ../frontend/node_modules.
+      - name: Install dependencies
+        run: npm ci
+
+      # postbuild also builds mobile/ into build/mobile
+      # (scripts/build-mobile-ui.mjs), which runs mobile's own postbuild check.
+      - name: Build
+        run: npm run build
+
+      - name: Svelte type-check
+        run: npx svelte-check --tsconfig ./tsconfig.json
+
+      - name: Frontend tests and contract consistency
+        run: |
+          npm test
+          npm run contract:check
+          npm audit --audit-level=high
+
+      # mobile/ is the phone UI every worker serves at /mobile/; the Android
+      # and iOS apps load it from the paired worker (the APK keeps one copy
+      # only for its offline demo). It compiles the same frontend/src/lib with
+      # its own shell, so a frontend change can break its type check, tests or
+      # build `npm run deps` links mobile/node_modules to the
+      # frontend/node_modules installed above; it is a no-op when the frontend
+      # build already linked it.
+      - name: Link mobile dependencies
+        working-directory: mobile
+        run: npm run deps
+
+      - name: Mobile Svelte type-check
+        working-directory: mobile
+        run: npm run check
+
+      - name: Mobile tests
+        working-directory: mobile
+        run: npm test
+
+      - name: Build AI tools from source
+        working-directory: tools
+        run: npm ci --ignore-scripts && npm test && npm audit --audit-level=high
+
+      # The worker network's crypto vectors must verify with WebCrypto, the API
+      # the account hub and the mobile app use (tests/core/network/vectors.json
+      # is also checked by the Python suite).
+      - name: Verify worker-network crypto vectors with WebCrypto
+        working-directory: .
+        run: node tools/scripts/verify-network-vectors.mjs
+
+      - name: Browser MCP build and tests
+        working-directory: browser-mcp
+        run: npm ci --ignore-scripts && npm run build && npm test && npm audit --audit-level=high
+
+      # The in-app Docs panel bundles its own copy of docs/content; the backend
+      # serves docs/content itself. tests/test_buyer_docs.py checks the same
+      # thing.
+      - name: Docs copies match
+        working-directory: .
+        run: diff -r docs/content frontend/src/lib/docs/content

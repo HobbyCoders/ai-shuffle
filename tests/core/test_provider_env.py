@@ -1,0 +1,919 @@
+"""Chunk 3 (Core env overlay) tests — multi-provider model support.
+
+Covers:
+- ``environment.apply_provider_env``: full overlay contents, extra_env-can't-
+  clobber-the-guard ordering, context-window clamp, R4 small/fast-model fallback
+  chain, and the R5 error cases (missing / disabled provider, encryption not
+  ready, and the no-token-but-base_url allowance).
+- ``environment.inject_claude_code_auth``: provider gating (no Anthropic key when
+  a provider is set; injected on the native path).
+- ``query_options.build_options_from_profile`` and
+  ``generation_options.build_generation_options``: the provider overlay is
+  applied, the NATIVE path sets no context-window env at all (the ``[1m]``
+  opt-in mechanism is retired — Claude slugs are natively 1M), and a
+  query-level provider override wins over the profile config.
+"""
+
+from unittest.mock import patch
+
+import pytest
+
+import app.core.query_options as qo
+from app.core import encryption
+from app.core.environment import (
+    ProviderConfigError,
+    apply_provider_env,
+    inject_claude_code_auth,
+)
+from app.core.generation_options import build_generation_options
+
+BASE_URL_KEY = "ANTHROPIC_BASE_URL"
+AUTH_TOKEN_KEY = "ANTHROPIC_AUTH_TOKEN"
+API_KEY = "ANTHROPIC_API_KEY"
+SMALL_FAST_KEY = "ANTHROPIC_SMALL_FAST_MODEL"
+SUBAGENT_KEY = "CLAUDE_CODE_SUBAGENT_MODEL"
+DISABLE_1M_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT"
+AUTO_COMPACT_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+MAX_CONTEXT_TOKENS_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+MAX_OUTPUT_KEY = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+TRANSLATED_MAIN_KEY = "AIH_GATEWAY_TRANSLATED_MAIN"
+MITIGATION_KEYS = (
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK",
+)
+
+
+def _mk_provider(db, provider_id="op", *, token="gw-secret", encrypt=True, **kwargs):
+    """Create a provider row. ``token`` is stored encrypted (default) so the
+    overlay must decrypt it; pass ``encrypt=False`` for a plaintext blob or
+    ``token=None`` for a token-less provider."""
+    stored = None
+    if token is not None:
+        stored = encryption.encrypt_value(token) if encrypt else token
+    return db.create_model_provider(
+        provider_id=provider_id,
+        name=kwargs.pop("name", "OpenRouter"),
+        provider_type=kwargs.pop("provider_type", "openrouter"),
+        base_url=kwargs.pop("base_url", "https://openrouter.ai/api"),
+        auth_token=stored,
+        models=kwargs.pop("models", [{"id": "openai/gpt-5.6", "label": "GPT-5.6"}]),
+        default_model=kwargs.pop("default_model", None),
+        small_fast_model=kwargs.pop("small_fast_model", None),
+        extra_env=kwargs.pop("extra_env", None),
+        context_window=kwargs.pop("context_window", None),
+        max_output_tokens=kwargs.pop("max_output_tokens", None),
+        enabled=kwargs.pop("enabled", True),
+        api_dialect=kwargs.pop("api_dialect", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# apply_provider_env
+# ---------------------------------------------------------------------------
+
+class TestApplyProviderEnv:
+    def test_full_overlay_contents(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db, token="gw-secret",
+            max_output_tokens=8192, context_window=256000,
+            small_fast_model="openai/gpt-5.6-mini",
+        )
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+
+        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
+        assert env[AUTH_TOKEN_KEY] == "gw-secret"
+        assert env[API_KEY] == ""  # explicit empty → blocks Anthropic fallback
+        for k in MITIGATION_KEYS:
+            assert env[k] == "1"
+        assert env[MAX_OUTPUT_KEY] == "8192"
+        assert env[AUTO_COMPACT_KEY] == "256000"
+        assert env[SMALL_FAST_KEY] == "openai/gpt-5.6-mini"
+        # S3: CLAUDE_CODE_SUBAGENT_MODEL is no longer emitted (subagent model
+        # selection moved to per-agent frontmatter stamping).
+        assert SUBAGENT_KEY not in env
+
+    def test_extra_env_cannot_clobber_api_key_guard(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        # extra_env tries to set ANTHROPIC_API_KEY (and base URL) — the forced
+        # values applied LAST must win.
+        _mk_provider(
+            db, token="gw-secret",
+            extra_env={API_KEY: "leaked-key", "FOO": "bar", BASE_URL_KEY: "evil"},
+        )
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+
+        assert env[API_KEY] == ""              # guard survived
+        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"  # forced wins
+        assert env["FOO"] == "bar"             # non-conflicting extra_env kept
+
+    def test_small_context_window_pinned_exactly(self, mock_db):
+        """The auto-compact pin is the provider's EXACT window — no ≥100k floor
+        (inflating a small real window would delay compaction past the point
+        where requests already overflow upstream)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=50000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[AUTO_COMPACT_KEY] == "50000"
+
+    def test_large_context_window_pinned_exactly(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=400000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[AUTO_COMPACT_KEY] == "400000"
+
+    def test_max_context_tokens_pinned_to_true_window(self, mock_db):
+        """FIX: CLAUDE_CODE_MAX_CONTEXT_TOKENS is pinned to the provider's TRUE
+        context_window so the CLI's believed MAX window matches the provider —
+        otherwise it clamps CLAUDE_CODE_AUTO_COMPACT_WINDOW to its own 200k
+        default for any non-claude-* model id."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_max_context_tokens_not_clamped_to_100k_floor(self, mock_db):
+        """Both pins carry the provider's TRUE window — never clamped up to a
+        universal floor."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=64000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "64000"
+        assert env[AUTO_COMPACT_KEY] == "64000"
+
+    def test_blocking_limit_override_lifts_local_estimator_ceiling(self, mock_db):
+        """FIX: the CLI's local "Prompt is too long" guard estimates ~3
+        chars/token (vs o200k's ~4 for prose), so turns that really fit the
+        provider window get hard-blocked locally — and the same ceiling blocks
+        the reactive-compaction rescue request. CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
+        is pinned to 2x the true window so oversize protection defers to the
+        upstream's own limit check."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "544000"
+
+    def test_blocking_limit_override_absent_when_context_window_null(self, mock_db):
+        """No true window known → leave the CLI's own blocking behavior alone."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE" not in env
+
+    def test_blocking_limit_override_preset_wins(self, mock_db):
+        """setdefault semantics: extra_env/profile preset survives."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env(
+            {"CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE": "123456"}, "op", "openai/gpt-5.6"
+        )
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "123456"
+
+    def test_max_context_tokens_absent_when_context_window_null(self, mock_db):
+        """A NULL context_window row leaves CLAUDE_CODE_MAX_CONTEXT_TOKENS unset —
+        the CLI's own 200k default is correct in that case."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert MAX_CONTEXT_TOKENS_KEY not in env
+
+    def test_max_context_tokens_preset_wins(self, mock_db):
+        """setdefault semantics: a pre-existing value (extra_env/profile preset)
+        survives over the provider's context_window."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env(
+            {MAX_CONTEXT_TOKENS_KEY: "999999"}, "op", "openai/gpt-5.6"
+        )
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "999999"
+
+    def test_row_context_window_is_the_last_resort(self, mock_db):
+        """With no per-model value and no preset entry, the row column applies to
+        every model on the row."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=272000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[DISABLE_1M_KEY] == "1"
+        assert env[AUTO_COMPACT_KEY] == "272000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_per_model_window_overrides_the_row_column(self, mock_db):
+        """THE FIX: the selected model's own ``models_json`` window wins over the
+        row's single shared column, so a 1M model on a 272k row runs at 1M."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db,
+            context_window=272000,
+            models=[
+                {"id": "openai/gpt-5.6", "label": "GPT-5.6"},
+                {"id": "big/model", "label": "Big", "context_window": 1_000_000},
+            ],
+        )
+        env = apply_provider_env({}, "op", "big/model")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert env[AUTO_COMPACT_KEY] == "1000000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "1000000"
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "2000000"
+        # ... while a sibling model on the SAME row still gets the row value.
+        sibling = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert sibling[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_preset_window_overrides_the_row_column(self, mock_db):
+        """A Codex row whose column still says 272k must not clamp the 1M
+        ``gpt-5.6-sol`` \u2014 the preset roster supplies its real window."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="cx", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"}],
+            context_window=272000,
+        )
+        env = apply_provider_env({}, "cx", "gpt-5.6-sol")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert env[AUTO_COMPACT_KEY] == "1000000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "1000000"
+        # A model the roster says nothing about still falls back to the row.
+        other = apply_provider_env({}, "cx", "gpt-5.5")
+        assert other[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_row_1m_context_window_enables_wide_window(self, mock_db):
+        """A row advertising a ≥1M window gets the wide window, and all pins
+        carry the exact row value."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=1_000_000)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert env[DISABLE_1M_KEY] == "0"
+        assert env[AUTO_COMPACT_KEY] == "1000000"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "1000000"
+        assert env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] == "2000000"
+
+    def test_null_context_window_leaves_auto_compact_unset(self, mock_db):
+        """A provider row with context_window NULL leaves the auto-compact
+        window to the CLI — no hardcoded universal 200000 fallback (forcing one
+        compaction threshold across providers with different windows is wrong;
+        the CLI's own third-party-base-URL default applies)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert AUTO_COMPACT_KEY not in env
+
+    def test_null_context_window_auto_compact_preset_survives(self, mock_db):
+        """A pre-set value (profile preset / extra_env) passes through untouched
+        on a NULL context_window row."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env(
+            {AUTO_COMPACT_KEY: "654321"}, "op", "openai/gpt-5.6"
+        )
+        assert env[AUTO_COMPACT_KEY] == "654321"
+
+    def test_unknown_window_sets_no_window_vars_at_all(self, mock_db):
+        """No per-model value, no preset entry, NULL row column \u2014 every window
+        var is left to the CLI's own defaults. This used to fall back to the
+        retired ``[1m]`` gate and force DISABLE_1M="1"."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
+        assert DISABLE_1M_KEY not in env
+        assert AUTO_COMPACT_KEY not in env
+        assert MAX_CONTEXT_TOKENS_KEY not in env
+
+    def test_legacy_1m_suffix_no_longer_moves_the_window(self, mock_db):
+        """A persisted ``[1m]`` id is inert here: the row's window decides."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=None)
+        env = apply_provider_env({}, "op", "claude-sonnet-4-5[1m]")
+        assert DISABLE_1M_KEY not in env
+        assert AUTO_COMPACT_KEY not in env
+
+    def test_r4_fallback_default_model(self, mock_db):
+        """No small_fast_model → falls back to default_model."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, small_fast_model=None, default_model="openai/gpt-5.6")
+        env = apply_provider_env({}, "op", "session-model")
+        assert env[SMALL_FAST_KEY] == "openai/gpt-5.6"
+        assert SUBAGENT_KEY not in env
+
+    def test_r4_fallback_first_curated_model(self, mock_db):
+        """FIX 3: no small_fast_model and no default_model → FIRST CURATED model
+        id (a stable provider-scoped value), NEVER the per-turn session model."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db, small_fast_model=None, default_model=None,
+            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+        )
+        env = apply_provider_env({}, "op", "session-model")
+        assert env[SMALL_FAST_KEY] == "openai/gpt-5.6"
+        assert SUBAGENT_KEY not in env
+
+    def test_r4_fallback_stable_across_per_turn_model(self, mock_db):
+        """FIX 3: the small/fast overlay must be IDENTICAL across two calls that
+        differ ONLY in the per-turn model — otherwise a within-provider composer
+        switch would churn the key into a subagent-killing respawn."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db, small_fast_model=None, default_model=None,
+            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+        )
+        env_a = apply_provider_env({}, "op", "model-a")
+        env_b = apply_provider_env({}, "op", "model-b")
+        assert env_a[SMALL_FAST_KEY] == env_b[SMALL_FAST_KEY]
+        # S3: CLAUDE_CODE_SUBAGENT_MODEL is never emitted.
+        assert SUBAGENT_KEY not in env_a
+        assert SUBAGENT_KEY not in env_b
+
+    def test_r4_no_curated_models_leaves_keys_unset(self, mock_db):
+        """FIX 3: no small_fast_model, no default_model, and no curated models →
+        both overlay keys left unset."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, small_fast_model=None, default_model=None, models=[])
+        env = apply_provider_env({}, "op", "session-model")
+        assert SMALL_FAST_KEY not in env
+        assert SUBAGENT_KEY not in env
+
+    def test_auto_compact_window_preset_wins(self, mock_db):
+        """FIX 4: a pre-set CLAUDE_CODE_AUTO_COMPACT_WINDOW (profile preset) wins
+        over the provider context_window (setdefault semantics)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, context_window=400000)
+        env = apply_provider_env({AUTO_COMPACT_KEY: "123456"}, "op", "openai/gpt-5.6")
+        assert env[AUTO_COMPACT_KEY] == "123456"  # preset survived
+
+    def test_missing_provider_raises(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        with pytest.raises(ProviderConfigError):
+            apply_provider_env({}, "does-not-exist", "m")
+
+    def test_disabled_provider_raises(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, enabled=False)
+        with pytest.raises(ProviderConfigError):
+            apply_provider_env({}, "op", "m")
+
+    def test_encryption_not_ready_raises(self, mock_db):
+        from app.db import database as db
+        # Store an encrypted token WHILE the key is loaded...
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token="gw-secret")
+        # ...then clear the key so decrypt is impossible at spawn time.
+        encryption.clear_encryption_key()
+        with pytest.raises(ProviderConfigError):
+            apply_provider_env({}, "op", "m")
+
+    def test_no_token_with_base_url_allowed(self, mock_db):
+        """A token-less provider is allowed when base_url is set (unauthenticated
+        self-hosted gateway); the token becomes the empty string."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token=None, base_url="http://localhost:4000")
+        env = apply_provider_env({}, "op", "m")
+        assert env[BASE_URL_KEY] == "http://localhost:4000"
+        assert env[AUTH_TOKEN_KEY] == ""
+        assert env[API_KEY] == ""
+
+    def test_translated_main_marker_set_for_chatgpt(self, mock_db):
+        """S8-R1: a chatgpt-type (translated) main sets AIH_GATEWAY_TRANSLATED_MAIN
+        so attach_hooks_to_options wires the Agent-arg-strip PreToolUse hook."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
+        assert env[TRANSLATED_MAIN_KEY] == "1"
+
+    def test_translated_main_marker_set_for_xai_and_grok(self, mock_db):
+        """xAI API-key and SuperGrok rows do not speak Anthropic Messages."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="xai", name="Grok", provider_type="xai",
+            base_url="https://api.x.ai/v1",
+            auth_token=encryption.encrypt_value("xai-key"),
+            models=[{"id": "grok-4.6", "label": "Grok 4.6"}],
+        )
+        env = apply_provider_env({}, "xai", "grok-4.6")
+        assert env[TRANSLATED_MAIN_KEY] == "1"
+        assert env[API_KEY] == ""
+        assert env[AUTH_TOKEN_KEY] == ""
+
+        db.create_model_provider(
+            provider_id="grok", name="Grok", provider_type="grok",
+            base_url="https://api.x.ai/v1", auth_token=None,
+            models=[{"id": "grok-4.6", "label": "Grok 4.6"}],
+        )
+        env = apply_provider_env({}, "grok", "grok-4.6")
+        assert env[TRANSLATED_MAIN_KEY] == "1"
+        assert env[API_KEY] == ""
+        assert env[AUTH_TOKEN_KEY] == ""
+
+    def test_translated_main_marker_absent_for_openrouter(self, mock_db):
+        """A non-translated (openrouter) main does NOT set the marker."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_type="openrouter", token="gw-secret")
+        env = apply_provider_env({}, "op", "openai/gpt-5.6")
+        assert TRANSLATED_MAIN_KEY not in env
+
+    def test_translated_main_marker_absent_for_custom(self, mock_db):
+        """A custom-type main (Anthropic-compatible endpoint) is not translated →
+        no marker."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db, provider_type="custom", token="gw-secret",
+            base_url="https://custom.example/api",
+        )
+        env = apply_provider_env({}, "op", "custom/model")
+        assert TRANSLATED_MAIN_KEY not in env
+
+    def test_ProviderConfigError_is_value_error(self):
+        """R5 mechanism: ProviderConfigError subclasses ValueError so the query
+        engines' existing (WorktreeUnavailableError, ValueError) guards surface
+        it as a user-visible error."""
+        assert issubclass(ProviderConfigError, ValueError)
+
+    # ── translated (Codex/OpenAI) rows after the gateway retirement ─────────
+    #
+    # These rows used to be pointed at the loopback translator gateway with a
+    # per-session routing token. The gateway is gone and fluid serves them
+    # natively, so the CLI env carries NO upstream credential for them — but the
+    # overlay must still apply every guard/window/small-fast key, and must NOT
+    # raise for a row that has neither an auth_token nor a base_url (a ChatGPT
+    # subscription row legitimately has neither).
+
+    def test_translated_row_gets_blank_base_url_and_token(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex", session_id="sess-cg")
+        assert env[BASE_URL_KEY] == ""
+        assert env[AUTH_TOKEN_KEY] == ""
+        assert env[API_KEY] == ""
+        for k in MITIGATION_KEYS:
+            assert env[k] == "1"
+        assert env[SMALL_FAST_KEY] == "gpt-5-codex"   # first curated id
+        assert SUBAGENT_KEY not in env
+
+    def test_translated_row_without_token_or_base_url_does_not_raise(self, mock_db):
+        """Regression guard for the retirement: the direct path's "neither token
+        nor base URL" error must never fire for a translated row, or every Codex
+        session becomes unspawnable."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="gw", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None,
+            models=[{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+        )
+        env = apply_provider_env({}, "gw", "gpt-5-codex")
+        assert env[BASE_URL_KEY] == ""
+
+    def test_anthropic_row_keeps_the_direct_key_path(self, mock_db):
+        """An anthropic-type row is NOT translated: it keeps its real decrypted
+        key and its own base_url (this used to be diverted onto the gateway as
+        soon as a subagent leg was configured; legs are gone)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="an", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant-real"),
+            models=[{"id": "claude-sonnet-4", "label": "Sonnet"}],
+        )
+        env = apply_provider_env({}, "an", "claude-sonnet-4", session_id="sess-an")
+        assert env[BASE_URL_KEY] == "https://api.anthropic.com"
+        assert env[AUTH_TOKEN_KEY] == "sk-ant-real"
+        assert env[API_KEY] == ""
+        assert SUBAGENT_KEY not in env
+
+
+# ---------------------------------------------------------------------------
+# D4: cross-provider subagent legs are REMOVED
+# ---------------------------------------------------------------------------
+
+class TestSubagentLegsRemoved:
+    """The gateway-served cross-provider subagent leg is gone as a feature.
+
+    ``apply_provider_env`` no longer accepts a leg map, and ``query_options``
+    no longer assembles one — a profile that still carries
+    ``subagent_provider``/``subagent_model`` is inert config, not a route.
+    ProviderAgent workers are the replacement.
+    """
+
+    def test_apply_provider_env_rejects_a_leg_map(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token="gw-secret")
+        with pytest.raises(TypeError):
+            apply_provider_env(
+                {}, "op", "openai/gpt-5.6",
+                subagent_legs=[("sub/model", "sub", None)],  # type: ignore[call-arg]
+            )
+
+    def test_query_options_threads_no_leg_map(self, mock_db, tmp_path):
+        """Even with a fully-configured cross-provider leg on the profile, the
+        overlay call carries no leg argument."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="op", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "op/main", "label": "M"}],
+        )
+        db.create_model_provider(
+            provider_id="sub", name="Sub", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "sub/model", "label": "S"}],
+        )
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "op/main", "provider": "op", "cwd": str(tmp_path),
+                "subagent_provider": "sub", "subagent_model": "sub/model",
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            _build_options(profile)
+        assert "subagent_legs" not in m.call_args.kwargs
+
+    def test_native_session_with_a_configured_leg_stays_native(self, mock_db, tmp_path):
+        """A native (no-provider) profile that still names a subagent provider is
+        simply ignored — no overlay, native window guard intact."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "opus", "cwd": str(tmp_path),
+                "subagent_provider": "sub", "subagent_model": "sub/model",
+            },
+        }
+        with patch.object(qo, "apply_provider_env") as m:
+            env = _build_options(profile).env
+        m.assert_not_called()
+        # Native leg: no window env at all (the [1m] gate is retired).
+        assert DISABLE_1M_KEY not in env
+
+
+class TestInjectClaudeCodeAuth:
+    def test_provider_set_skips_anthropic_key(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-test"))
+        env = inject_claude_code_auth({}, provider_id="op")
+        assert API_KEY not in env
+
+    def test_native_injects_anthropic_key(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-test"))
+        env = inject_claude_code_auth({}, provider_id=None)
+        assert env[API_KEY] == "sk-test"
+
+    def test_native_no_key_injects_nothing(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        env = inject_claude_code_auth({})  # default provider_id=None, no stored key
+        assert API_KEY not in env
+
+
+# ---------------------------------------------------------------------------
+# build_options_from_profile (chat path)
+# ---------------------------------------------------------------------------
+
+def _build_options(profile, overrides=None):
+    with patch.object(qo, "get_security_instructions", return_value=""):
+        opts, _ = qo.build_options_from_profile(profile=profile, overrides=overrides)
+    return opts
+
+
+class TestBuildOptionsFromProfile:
+    def test_provider_profile_applies_overlay(self, mock_db, tmp_path):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token="gw-secret", context_window=272000)
+        profile = {
+            "id": "t",
+            "config": {
+                "model": "openai/gpt-5.6",
+                "provider": "op",
+                "cwd": str(tmp_path),
+            },
+        }
+        env = _build_options(profile).env
+        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
+        assert env[AUTH_TOKEN_KEY] == "gw-secret"
+        assert env[API_KEY] == ""
+        # Context-window safety pins apply on the provider path, resolved for
+        # the selected model, so the CLI can't self-derive an auto-compact
+        # window off a foreign model id.
+        assert env[DISABLE_1M_KEY] == "1"
+        assert env[MAX_CONTEXT_TOKENS_KEY] == "272000"
+
+    def test_native_profile_sets_no_window_env(self, mock_db, tmp_path):
+        """A native profile gets NO gateway overlay and NO window pinning — the
+        CLI applies each Claude model's own (natively 1M) window."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        profile = {
+            "id": "t",
+            "config": {"model": "opus", "cwd": str(tmp_path)},
+        }
+        env = _build_options(profile).env
+        assert DISABLE_1M_KEY not in env
+        assert AUTO_COMPACT_KEY not in env
+        assert MAX_CONTEXT_TOKENS_KEY not in env
+        assert BASE_URL_KEY not in env
+        assert AUTH_TOKEN_KEY not in env
+
+    def test_override_provider_wins_over_config(self, mock_db, tmp_path):
+        """A query-level provider override beats the profile config (mirrors the
+        model override precedence)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", token="gw-secret", context_window=272000)
+        profile = {  # profile config carries NO provider
+            "id": "t",
+            "config": {"model": "opus", "cwd": str(tmp_path)},
+        }
+        env = _build_options(
+            profile, overrides={"provider": "op", "model": "openai/gpt-5.6"}
+        ).env
+        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
+        assert env[API_KEY] == ""
+        assert env[DISABLE_1M_KEY] == "1"  # provider path pins the resolved window
+
+
+# ---------------------------------------------------------------------------
+# build_generation_options (one-shot path)
+# ---------------------------------------------------------------------------
+
+class TestBuildGenerationOptions:
+    def test_provider_config_applies_overlay(self, mock_db):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token="gw-secret", context_window=272000)
+        opts = build_generation_options(
+            {"model": "openai/gpt-5.6", "provider": "op"}
+        )
+        env = opts.env
+        assert env[BASE_URL_KEY] == "https://openrouter.ai/api"
+        assert env[AUTH_TOKEN_KEY] == "gw-secret"
+        assert env[API_KEY] == ""
+        assert env[DISABLE_1M_KEY] == "1"  # provider path pins the resolved window
+
+    def test_native_config_sets_no_window_env(self, mock_db):
+        """Regression: native generation has no gateway overlay and no window
+        pinning (Claude models carry their native window)."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        opts = build_generation_options({"model": "opus"})
+        env = opts.env
+        assert DISABLE_1M_KEY not in env
+        assert AUTO_COMPACT_KEY not in env
+        assert BASE_URL_KEY not in env
+
+    def test_provider_binding_is_stamped_onto_the_options(self, mock_db):
+        """The four ``aih_*`` attrs chat stamps must ride on generation options.
+
+        The HarnessAdapter reads them in ``connect_with_sdk_options`` and
+        projects them onto ``SessionOptions.extra``, which is how
+        ``_decide_provider_kind`` picks the leg from the provider ROW instead
+        of sniffing the model string. Without the stamp a generation call on a
+        non-Claude profile model still fell through to the delegated
+        ``claude.exe`` leg and hung.
+        """
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, token="gw-secret")
+        opts = build_generation_options(
+            {"model": "openai/gpt-5.6", "provider": "op"}
+        )
+        assert opts.aih_provider_id == "op"
+        assert opts.aih_provider_type == "openrouter"
+        # Not a subscription row → no auth_mode; no custom wire format either.
+        assert opts.aih_provider_auth_mode is None
+        assert opts.aih_provider_dialect is None
+
+    def test_provider_dialect_is_stamped_for_custom_rows(self, mock_db):
+        """A ``custom`` row's wire format decides which native client serves it."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(
+            db,
+            provider_id="cust",
+            token="gw-secret",
+            provider_type="custom",
+            api_dialect="openai",
+            base_url="https://api.x.ai",
+            models=[{"id": "grok-4.5", "label": "Grok"}],
+        )
+        opts = build_generation_options({"model": "grok-4.5", "provider": "cust"})
+        assert opts.aih_provider_id == "cust"
+        assert opts.aih_provider_type == "custom"
+        assert opts.aih_provider_dialect == "openai"
+
+    def test_native_config_stamps_all_four_as_none(self, mock_db):
+        """A profile with no provider stays native: all four attrs present and
+        None, exactly like ``query_options`` does — the attribute's PRESENCE is
+        never itself a signal."""
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        opts = build_generation_options({"model": "opus"})
+        assert opts.aih_provider_id is None
+        assert opts.aih_provider_type is None
+        assert opts.aih_provider_auth_mode is None
+        assert opts.aih_provider_dialect is None
+
+
+# ---------------------------------------------------------------------------
+# S3: per-agent frontmatter stamping via build_options_from_profile
+# ---------------------------------------------------------------------------
+
+class TestAgentContextDeclaration:
+    """(2026-08-17 ruling, superseding A10) SDK AgentDefinitions stay retired —
+    ``agents_dict`` is always None — but ``enabled_agents``/``agent_invoke_mode``
+    now resolve to the name+description list stamped as ``aih_declared_agents``,
+    which the fluid adapter merges into the compiled prompt's agents index."""
+
+    @staticmethod
+    def _build(config, profile_id="t"):
+        from unittest.mock import patch as _patch
+        import app.core.query_options as qo
+        from app.db import database as db
+
+        profile_config = {
+            "model": "opus",
+            "tools_preset": "claude_code",
+            **config,
+        }
+        if db.get_profile(profile_id):
+            db.update_profile(
+                profile_id,
+                config=profile_config,
+                allow_builtin=True,
+            )
+        else:
+            db.create_profile(profile_id, profile_id, None, profile_config)
+
+        with _patch.object(qo, "get_security_instructions", return_value=""):
+            return qo.build_options_from_profile(
+                profile={"id": profile_id, "config": profile_config},
+            )
+
+    @staticmethod
+    def _seed(db):
+        db.create_profile("helper", "Helper", "Helps out", {"model": "sonnet"})
+        db.create_profile("scout", "Scout", "Explores", {"model": "sonnet"})
+
+    def test_sdk_agent_definitions_stay_retired(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, agents_dict = self._build({"enabled_agents": ["helper"]})
+        assert agents_dict is None
+        assert opts.agents is None
+
+    def test_mode_custom_declares_only_the_listed_ids(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build(
+            {"agent_invoke_mode": "custom", "enabled_agents": ["helper"]}
+        )
+        assert opts.aih_declared_agents == [
+            {"name": "Helper", "description": "Helps out"}
+        ]
+
+    def test_mode_custom_empty_declares_nothing(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"agent_invoke_mode": "custom", "enabled_agents": []})
+        assert opts.aih_declared_agents is None
+
+    def test_mode_all_declares_every_agent(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build(
+            {"agent_invoke_mode": "all", "enabled_agents": ["helper"]}
+        )
+        names = [a["name"] for a in opts.aih_declared_agents]
+        # Every agent row, not just the one on the list.
+        assert {"Helper", "Scout"} <= set(names) and len(names) > 2
+        assert names == sorted(names, key=str.lower)
+
+    def test_legacy_empty_list_declares_every_agent(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"enabled_agents": []})
+        assert {"Helper", "Scout"} <= {a["name"] for a in opts.aih_declared_agents}
+
+    def test_legacy_non_empty_list_declares_the_subset(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"enabled_agents": ["scout"]})
+        assert [a["name"] for a in opts.aih_declared_agents] == ["Scout"]
+
+    def test_the_calling_agent_is_never_declared_to_itself(self, mock_db):
+        from app.db import database as db
+
+        self._seed(db)
+        opts, _ = self._build({"agent_invoke_mode": "all"}, profile_id="helper")
+        names = {a["name"] for a in opts.aih_declared_agents}
+        assert "Scout" in names and "Helper" not in names
+
+    def test_a_missing_description_degrades_to_empty_string(self, mock_db):
+        from app.db import database as db
+
+        db.create_profile("bare", "Bare", None, {"model": "sonnet"})
+        opts, _ = self._build({"agent_invoke_mode": "custom", "enabled_agents": ["bare"]})
+        assert opts.aih_declared_agents == [{"name": "Bare", "description": ""}]
+
+
+class TestClaudeApiSkillGuardSurvivesLegRemoval:
+    """The guard used to key off ``SubagentLegPlan.main_serves_claude_ids``.
+
+    That field was only ever ``provider_type == "anthropic"`` on the session's
+    bound provider row, so removing the leg assembler must not change ANY of
+    these outcomes.
+    """
+
+    def _opts(self, tmp_path, provider_id=None):
+        config = {"model": "m", "cwd": str(tmp_path)}
+        if provider_id:
+            config["provider"] = provider_id
+        with patch.object(qo, "apply_provider_env"):
+            return _build_options({"id": "t", "config": config})
+
+    def test_blocked_on_a_chatgpt_provider_session(self, mock_db, tmp_path):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="op", name="Codex", provider_type="chatgpt",
+            base_url="", auth_token=None, models=[{"id": "m", "label": "M"}],
+        )
+        opts = self._opts(tmp_path, "op")
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL in opts.disallowed_tools
+
+    def test_blocked_on_an_openrouter_provider_session(self, mock_db, tmp_path):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        _mk_provider(db, provider_id="op", token="gw-secret")
+        opts = self._opts(tmp_path, "op")
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL in opts.disallowed_tools
+
+    def test_allowed_on_an_anthropic_provider_session(self, mock_db, tmp_path):
+        from app.db import database as db
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="an", name="Claude API", provider_type="anthropic",
+            base_url="https://api.anthropic.com",
+            auth_token=encryption.encrypt_value("sk-ant"),
+            models=[{"id": "m", "label": "M"}],
+        )
+        opts = self._opts(tmp_path, "an")
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL not in opts.disallowed_tools
+
+    def test_allowed_on_a_native_session(self, mock_db, tmp_path):
+        opts = self._opts(tmp_path)
+        assert qo.NON_CLAUDE_DISALLOWED_SKILL not in opts.disallowed_tools

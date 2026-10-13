@@ -1,0 +1,524 @@
+"""API user, credential, and credential policy database operations."""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any, TypedDict
+
+from app.db.base import get_db, row_to_dict, rows_to_list
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TypedDict definitions
+# ============================================================================
+
+class ApiUserRow(TypedDict):
+    """Full API user row with enriched profile_ids."""
+    id: str
+    name: str
+    username: Optional[str]
+    password_hash: Optional[str]
+    api_key_hash: str
+    project_id: Optional[str]
+    profile_id: Optional[str]
+    is_active: bool
+    web_login_allowed: bool
+    description: Optional[str]
+    model: Optional[str]
+    effort: Optional[str]
+    created_at: str
+    updated_at: str
+    last_used_at: Optional[str]
+    profile_ids: Optional[List[str]]
+
+
+class CredentialPolicyRow(TypedDict):
+    """Credential policy row from SELECT * FROM credential_policies."""
+    id: str
+    policy: str
+    description: Optional[str]
+    updated_at: str
+
+
+class UserCredentialPolicyRow(TypedDict):
+    """User credential policy override row."""
+    id: str
+    api_user_id: str
+    credential_type: str
+    policy: str
+    created_at: str
+    updated_at: str
+
+
+class EffectiveCredentialPolicy(TypedDict):
+    """Effective credential policy result."""
+    policy: str
+    source: str
+    credential_type: str
+
+
+class UserCredentialRow(TypedDict):
+    """API user credential row."""
+    id: str
+    api_user_id: str
+    credential_type: str
+    encrypted_value: str
+    created_at: str
+    updated_at: str
+
+
+# ============================================================================
+# API User Operations
+# ============================================================================
+
+def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
+    """Get profile IDs for an API user from junction table"""
+    cursor.execute(
+        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s ORDER BY created_at",
+        (user_id,)
+    )
+    return [row["profile_id"] for row in cursor.fetchall()]
+
+
+def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Optional[ApiUserRow]:
+    """Add profile_ids to API user dict from junction table.
+
+    ``missing_profile_ids`` lists the assigned ids with no agent row:
+    assignments outlive a deleted agent, so the key stays restricted, but
+    those ids cannot run.
+    """
+    if not user:
+        return None
+    cursor.execute(
+        "SELECT p.profile_id, a.id AS agent_id FROM api_user_profiles p "
+        "LEFT JOIN agents a ON a.id = p.profile_id WHERE p.api_user_id = %s ORDER BY p.created_at",
+        (user["id"],),
+    )
+    rows = cursor.fetchall()
+    profile_ids = [row["profile_id"] for row in rows]
+    user["profile_ids"] = profile_ids if profile_ids else None
+    user["missing_profile_ids"] = [row["profile_id"] for row in rows if row["agent_id"] is None]
+    return user
+
+
+def release_grants_for_new_agent(cursor, agent_id: str) -> List[str]:
+    """Detach the assignments a deleted agent with this id left behind.
+
+    Call in the transaction that creates the agent row ``agent_id``, locally
+    or from a peer. Assignments outlive a deleted agent so that a key
+    restricted to it stays restricted; a NEW agent taking the id is a
+    different agent and must not inherit them. A key with other assignments
+    just loses this one (it only narrows). A key for which it was the last
+    one would become unrestricted, so it is switched off instead (fail
+    closed) until the owner picks its agents and turns it back on.
+
+    Returns the ids of the keys that were switched off.
+    """
+    cursor.execute("SELECT api_user_id FROM api_user_profiles WHERE profile_id = %s", (agent_id,))
+    user_ids = [row["api_user_id"] for row in cursor.fetchall()]
+    if not user_ids:
+        return []
+    now = datetime.now(timezone.utc).isoformat()
+    disabled = []
+    for user_id in user_ids:
+        cursor.execute("SELECT COUNT(*) AS n FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
+        if int(cursor.fetchone()["n"]) <= 1:
+            cursor.execute(
+                "UPDATE api_users SET is_active = FALSE, updated_at = %s WHERE id = %s AND is_active = TRUE",
+                (now, user_id),
+            )
+            disabled.append(user_id)
+    cursor.execute("DELETE FROM api_user_profiles WHERE profile_id = %s", (agent_id,))
+    logger.warning(
+        "A new agent took the id %r of a deleted agent: removed its assignment from %d API key(s); "
+        "switched off %s, whose only assigned agent it was",
+        agent_id, len(user_ids), disabled or "none",
+    )
+    return disabled
+
+
+def create_api_user(
+    user_id: str,
+    name: str,
+    api_key_hash: str,
+    project_id: Optional[str] = None,
+    profile_ids: Optional[List[str]] = None,
+    web_login_allowed: bool = False,
+    description: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> ApiUserRow:
+    """Create a new API user and optionally link profile IDs."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO api_users
+               (id, name, api_key_hash, project_id, is_active, web_login_allowed, description, model, effort, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s, %s, %s)""",
+            (user_id, name, api_key_hash, project_id, web_login_allowed, description, model, effort, now, now),
+        )
+        if profile_ids:
+            for pid in profile_ids:
+                cursor.execute(
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (%s, %s, %s)",
+                    (user_id, pid, now),
+                )
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
+
+
+def delete_api_user(user_id: str) -> bool:
+    """Delete an API user by ID. Cascade handles junction tables."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM api_users WHERE id = %s", (user_id,))
+        return cursor.rowcount > 0
+
+
+def get_api_user(user_id: str) -> Optional[ApiUserRow]:
+    """Get an API user by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
+
+
+def get_api_user_by_key_hash(key_hash: str) -> Optional[ApiUserRow]:
+    """Get an API user by API key hash"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_users WHERE api_key_hash = %s AND is_active = TRUE",
+            (key_hash,)
+        )
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
+
+
+def get_api_users_by_ids(user_ids: list[str]) -> dict[str, dict]:
+    """Get multiple API users by their IDs in a single query.
+
+    Returns {user_id: user_dict} for all found users.
+    Missing users are omitted from the result.
+    """
+    if not user_ids:
+        return {}
+    unique_ids = list(set(user_ids))
+    placeholders = ','.join(['%s'] * len(unique_ids))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM api_users WHERE id IN ({placeholders})",
+            unique_ids
+        )
+        users = rows_to_list(cursor.fetchall())
+        result: dict[str, dict] = {}
+        for user in users:
+            result[user['id']] = user
+        return result
+
+
+def update_api_user_last_used(user_id: str):
+    """Update the last_used_at timestamp for an API user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE api_users SET last_used_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc).isoformat(), user_id)
+        )
+
+
+def get_all_api_users(active_only: bool = False) -> List[ApiUserRow]:
+    """Get all API users, optionally filtered to active-only."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if active_only:
+            cursor.execute("SELECT * FROM api_users WHERE is_active = TRUE ORDER BY created_at DESC")
+        else:
+            cursor.execute("SELECT * FROM api_users ORDER BY created_at DESC")
+        users = rows_to_list(cursor.fetchall())
+        for user in users:
+            profile_ids = _get_api_user_profile_ids(cursor, user["id"])
+            user["profile_ids"] = profile_ids if profile_ids else None
+        return users
+
+
+def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
+    """Update an API user. Only provided fields are changed.
+
+    Supported kwargs: name, description, project_id, is_active,
+    web_login_allowed, api_key_hash, username, password_hash, model, effort,
+    profile_ids.
+
+    profile_ids replaces the full set in the junction table when provided.
+    """
+    existing = get_api_user(user_id)
+    if not existing:
+        return None
+
+    profile_ids = kwargs.pop("profile_ids", None)
+
+    now = datetime.now(timezone.utc).isoformat()
+    updates = ["updated_at = %s"]
+    values: list = [now]
+
+    allowed = {
+        "name", "description", "project_id", "is_active",
+        "web_login_allowed", "api_key_hash", "username", "password_hash",
+        "model", "effort",
+    }
+    for key, val in kwargs.items():
+        if key in allowed:
+            updates.append(f"{key} = %s")
+            values.append(val)
+
+    values.append(user_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE api_users SET {', '.join(updates)} WHERE id = %s",
+            tuple(values),
+        )
+
+        if profile_ids is not None:
+            cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
+            for pid in profile_ids:
+                cursor.execute(
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (%s, %s, %s)",
+                    (user_id, pid, now),
+                )
+
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
+
+
+# ============================================================================
+# Credential Policies Operations (admin controls which keys users must provide)
+# ============================================================================
+
+def get_all_credential_policies() -> List[CredentialPolicyRow]:
+    """Get all credential policies"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM credential_policies ORDER BY id")
+        return rows_to_list(cursor.fetchall())
+
+
+def get_credential_policy(policy_id: str) -> Optional[CredentialPolicyRow]:
+    """Get a specific credential policy"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM credential_policies WHERE id = %s", (policy_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def update_credential_policy(policy_id: str, policy: str, description: Optional[str] = None) -> Optional[CredentialPolicyRow]:
+    """
+    Update a credential policy.
+
+    policy: 'admin_provided', 'user_provided', or 'optional'
+    - admin_provided: All users use admin's key, users cannot set their own
+    - user_provided: Each user must provide their own key
+    - optional: Users can optionally provide their own key, falls back to admin's
+    """
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if policy not in valid_policies:
+        return None
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if description is not None:
+            cursor.execute(
+                "UPDATE credential_policies SET policy = %s, description = %s, updated_at = %s WHERE id = %s",
+                (policy, description, datetime.now(timezone.utc).isoformat(), policy_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE credential_policies SET policy = %s, updated_at = %s WHERE id = %s",
+                (policy, datetime.now(timezone.utc).isoformat(), policy_id)
+            )
+    return get_credential_policy(policy_id)
+
+
+# ============================================================================
+# User Credential Policy Overrides (per-user policy settings)
+# ============================================================================
+
+def get_user_credential_policy(api_user_id: str, credential_type: str) -> Optional[UserCredentialPolicyRow]:
+    """Get a user's policy override for a specific credential type"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_credential_policies WHERE api_user_id = %s AND credential_type = %s",
+            (api_user_id, credential_type)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_user_credential_policies(api_user_id: str) -> List[UserCredentialPolicyRow]:
+    """Get all policy overrides for a user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_credential_policies WHERE api_user_id = %s ORDER BY credential_type",
+            (api_user_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def set_user_credential_policy(api_user_id: str, credential_type: str, policy: str) -> Optional[UserCredentialPolicyRow]:
+    """
+    Set or update a user's policy override for a credential type.
+
+    policy: 'admin_provided', 'user_provided', or 'optional'
+    """
+    import uuid
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if policy not in valid_policies:
+        return None
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Try to update existing
+        cursor.execute(
+            """UPDATE user_credential_policies
+               SET policy = %s, updated_at = %s
+               WHERE api_user_id = %s AND credential_type = %s""",
+            (policy, now, api_user_id, credential_type)
+        )
+
+        if cursor.rowcount == 0:
+            # Insert new
+            policy_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (policy_id, api_user_id, credential_type, policy, now, now)
+            )
+
+    return get_user_credential_policy(api_user_id, credential_type)
+
+
+def delete_user_credential_policy(api_user_id: str, credential_type: str) -> bool:
+    """Delete a user's policy override (revert to global policy)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_credential_policies WHERE api_user_id = %s AND credential_type = %s",
+            (api_user_id, credential_type)
+        )
+        return cursor.rowcount > 0
+
+
+def get_effective_credential_policy(api_user_id: str, credential_type: str) -> EffectiveCredentialPolicy:
+    """
+    Get the effective policy for a user+credential.
+
+    Policies are per-user only, no global fallback.
+    If no policy exists (shouldn't happen for properly created users),
+    defaults to 'user_provided'.
+
+    Returns dict with:
+    - policy: the effective policy value
+    - source: 'user' or 'default'
+    - credential_type: the credential type
+    """
+    user_policy = get_user_credential_policy(api_user_id, credential_type)
+    if user_policy:
+        return {
+            "policy": user_policy["policy"],
+            "source": "user",
+            "credential_type": credential_type
+        }
+
+    # Default to user_provided if no policy exists
+    # This shouldn't happen for properly created users
+    return {
+        "policy": "user_provided",
+        "source": "default",
+        "credential_type": credential_type
+    }
+
+
+# ============================================================================
+# API User Credentials Operations (per-user encrypted API keys)
+# ============================================================================
+
+def get_user_credential(api_user_id: str, credential_type: str) -> Optional[UserCredentialRow]:
+    """Get a specific credential for a user (returns encrypted value)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
+            (api_user_id, credential_type)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_user_credentials(api_user_id: str) -> List[UserCredentialRow]:
+    """Get all credentials for a user (returns encrypted values)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_user_credentials WHERE api_user_id = %s ORDER BY credential_type",
+            (api_user_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def set_user_credential(api_user_id: str, credential_type: str, encrypted_value: str) -> UserCredentialRow:
+    """Set or update a credential for a user (value should be pre-encrypted)"""
+    import uuid
+    now = datetime.now(timezone.utc).isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Try to update existing
+        cursor.execute(
+            """UPDATE api_user_credentials
+               SET encrypted_value = %s, updated_at = %s
+               WHERE api_user_id = %s AND credential_type = %s""",
+            (encrypted_value, now, api_user_id, credential_type)
+        )
+
+        if cursor.rowcount == 0:
+            # Insert new
+            cred_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO api_user_credentials (id, api_user_id, credential_type, encrypted_value, created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (cred_id, api_user_id, credential_type, encrypted_value, now, now)
+            )
+
+    return get_user_credential(api_user_id, credential_type)
+
+
+def delete_user_credential(api_user_id: str, credential_type: str) -> bool:
+    """Delete a user's credential"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
+            (api_user_id, credential_type)
+        )
+        return cursor.rowcount > 0
+
+
+from app.core.resource_sync import install_database_mutations
+
+install_database_mutations(globals(), "api_users", """
+    create_api_user update_api_user delete_api_user update_credential_policy
+    set_user_credential_policy delete_user_credential_policy
+    set_user_credential delete_user_credential
+""")

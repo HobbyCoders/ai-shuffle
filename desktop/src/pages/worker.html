@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'"
+		/>
+		<title>AI Shuffle</title>
+		<link rel="stylesheet" href="worker.css" />
+	</head>
+	<body>
+		<header class="titlebar" aria-hidden="true">
+			<span class="titlebar-title">AI Shuffle</span>
+		</header>
+
+		<main class="stage">
+			<section id="status" class="splash" data-mode="starting" aria-labelledby="status-heading">
+				<div class="shuffle-mark" aria-hidden="true">
+					<span class="shuffle-card card-back"></span>
+					<span class="shuffle-card card-middle"></span>
+					<span class="shuffle-card card-front"><svg viewBox="0 0 32 32" fill="none"><path d="M7 10h3c5 0 7 12 12 12h3m-5-16 5 4-5 4M7 22h3c5 0 7-12 12-12h3m-5 8 5 4-5 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+				</div>
+				<p class="brand">AI Shuffle</p>
+				<div class="status-copy" role="status" aria-live="polite" aria-atomic="true">
+					<h1 id="status-heading">Getting things ready</h1>
+					<p id="status-detail" class="lede">Starting your local worker.</p>
+				</div>
+				<div class="activity" aria-hidden="true"><span></span><span></span><span></span></div>
+				<pre id="status-error" class="error-block" role="alert" tabindex="0" hidden></pre>
+				<div id="actions" class="actions" hidden>
+					<button id="restart" class="btn btn-primary" type="button" hidden>Try again</button>
+					<button id="open-ui" class="btn btn-primary" type="button" hidden>Open AI Shuffle</button>
+				</div>
+				<details id="diagnostics" class="diagnostics">
+					<summary>Startup diagnostics</summary>
+					<div class="diagnostic-content">
+						<p id="status-postgres" class="hint"></p>
+						<div class="log-head"><span>Recent activity</span><button id="open-logs" class="btn btn-ghost-text" type="button">Open log file</button></div>
+						<pre id="log" class="log" tabindex="0" aria-label="Startup log"></pre>
+					</div>
+				</details>
+			</section>
+		</main>
+
+		<footer class="foot">
+			<span id="version"></span>
+		</footer>
+
+		<script src="worker.js"></script>
+	</body>
+</html>

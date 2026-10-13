@@ -1,0 +1,88 @@
+name: Android Play signing enrollment
+
+# One-time export for the owner's approved Play App Signing enrollment.
+# The recipient is the PUBLIC encryption key fetched from this app's Play
+# Console (HobbyCoders / com.hobbycoders.aishuffle), never a workflow input.
+# The only artifact is a ZIP encrypted for Google. No raw key or keystore leaves
+# the runner. Import it in Play Console and compare APP signing fingerprints
+# before uploading any release. This workflow never uploads or publishes apps.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_existing_key_export:
+        description: Export the existing Android signing key encrypted ONLY for this app in Google Play
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-play-signing-enrollment
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Encrypted Play key export tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==50.0.1 PyYAML==6.0.3
+      - name: Fetch digest-pinned Google PEPK tool
+        run: |
+          curl --fail --location https://www.gstatic.com/play-apps-publisher-rapid/signing-tool/prod/pepk.jar --output "$RUNNER_TEMP/pepk.jar"
+          printf '%s  %s\n' aaccc0774b240aa5304bdad2a49865e92f229ca73209ecb6eaafe75dc858e24e "$RUNNER_TEMP/pepk.jar" | sha256sum --check --strict
+      - name: Test actual encryption with disposable keys (no repository secrets)
+        env:
+          PEPK_JAR: ${{ runner.temp }}/pepk.jar
+        run: python android/ci/test-play-key-export.py
+
+  export:
+    name: Export original signing key encrypted for Google
+    needs: checks
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.private && inputs.confirm_existing_key_export)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch digest-pinned Google PEPK tool
+        run: |
+          curl --fail --location https://www.gstatic.com/play-apps-publisher-rapid/signing-tool/prod/pepk.jar --output "$RUNNER_TEMP/pepk.jar"
+          printf '%s  %s\n' aaccc0774b240aa5304bdad2a49865e92f229ca73209ecb6eaafe75dc858e24e "$RUNNER_TEMP/pepk.jar" | sha256sum --check --strict
+      - name: Encrypt existing signing key for the pinned Google recipient
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: python android/ci/export-play-key.py --pepk "$RUNNER_TEMP/pepk.jar" --work "$RUNNER_TEMP/play-enrollment"
+      - name: Upload only Google-encrypted enrollment archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-play-encrypted-signing-key
+          path: ${{ runner.temp }}/play-enrollment/encrypted-key.zip
+          if-no-files-found: error
+          retention-days: 1
+      - name: Enrollment summary
+        run: |
+          printf '### Encrypted key prepared, NOT imported\nImport encrypted-key.zip in Play Console for com.hobbycoders.aishuffle. Verify the APP signing SHA-256 is 04:D5:C1:D6:0E:C4:9B:AB:A6:1E:02:01:A0:03:C6:A0:B5:F6:8D:9A:9E:14:6C:5E:E5:CD:DB:BB:34:37:57:C2.\nNo release was uploaded or published. Artifact expires after one day.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove temporary signing and export material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/play-enrollment/signing.jks" "$RUNNER_TEMP/play-enrollment/encrypted-key.zip" "$RUNNER_TEMP/pepk.jar"

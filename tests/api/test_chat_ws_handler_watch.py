@@ -1,0 +1,621 @@
+"""
+``watch_session`` port + deferred-permissions parity for ``ChatWebSocketHandler``
+— Phase 6.1 STEP 2 of docs/STREAMING_UNIFICATION_PLAN.md.
+
+Part A — watch_session (closure-canonical, ported verbatim):
+The frontend sends ``watch_session`` on EVERY session switch
+(session-switcher.ts), so the closure's exact contract is pinned here against
+the class, mirroring the oracle tests in
+tests/api/test_ws_closure_characterization.py (section H):
+
+* happy path: sync_engine registration + current_session_id binding,
+* queued-message restore frame (``sync``/``queue_updated``) only when nonempty,
+* sibling sockets sharing a device ID each register and restore their queue;
+  re-watching the same socket is idempotent in the sync engine.
+
+Part B — deferred-permissions shapes where the CLASS is the intended winner
+(plan section "Divergences where the class is the intended winner"). These pin
+the class contract the frontend already expects (permission-handler.ts /
+PermissionQueue.svelte / types/websocket.ts) so the flip commit can consciously
+replace the closure's ``requests``-shaped reply:
+
+* ``get_pending_permissions`` replies ``pending`` + ``deferred`` (closure: ``requests``),
+* ``permission_response`` supports decision="defer" (remember/pattern stripped),
+* ``requeue_deferred_permissions`` -> ``permission_queue_update`` frame.
+
+Harness mirrors tests/api/test_chat_ws_handler_relay.py: fake WebSocket,
+mocked collaborators, no Postgres / SDK required.
+"""
+
+import asyncio
+
+import pytest
+import json
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi.websockets import WebSocketState
+
+import app.api.chat_ws_handler as cwh
+
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+class _FakeWebSocket:
+    """Minimal Starlette-WebSocket stand-in: records outbound frames decoded."""
+
+    def __init__(self):
+        self.client_state = WebSocketState.CONNECTED
+        self.sent: list = []
+
+    async def send_text(self, text: str):
+        self.sent.append(json.loads(text))
+
+
+class _HandlerHarness:
+    """Patches every boundary the watch/permission handlers reach.
+
+    Surface mirrors the relay harness so assertions read 1:1 against the
+    closure oracle:
+      .sync  — sync_engine (is_device_watching_session / _connections /
+               register_device / unregister_device)
+      .db    — database (get_session)
+      .queue_view — the v2 queue view (_v2_queue_view: turns-table source)
+      .perm  — permission_handler (respond / get_pending_requests /
+               get_deferred_requests / requeue_deferred / get_queue_count)
+    """
+
+    def __enter__(self):
+        self._stack = ExitStack()
+        s = self._stack
+
+        # --- sync engine ------------------------------------------------------
+        self.sync = s.enter_context(patch.object(cwh, "sync_engine"))
+        self.sync.is_device_watching_session = MagicMock(return_value=False)
+        self.sync._connections = {}
+        for name in ("register_device", "unregister_device"):
+            setattr(self.sync, name, AsyncMock())
+
+        # --- database -----------------------------------------------------------
+        self.db = s.enter_context(patch.object(cwh, "database"))
+        # V2: the watch-restore queue is re-sourced from the durable turns table
+        # via the module-level _v2_queue_view (the legacy database.get_queued_messages
+        # path is deleted). Patch that seam instead.
+        self.queue_view = s.enter_context(
+            patch.object(cwh, "_v2_queue_view", MagicMock(return_value=[]))
+        )
+        self.peer_queue_view = s.enter_context(
+            patch.object(cwh, "_v2_peer_queue_view", MagicMock(return_value=[]))
+        )
+        # Permission handlers now consult the session row to decide whether to
+        # relay to a remote owner. These watch/permission tests exercise the
+        # LOCAL path, so return a legacy row (instance_id=None => local) keyed
+        # by the requested id — is_remote_session() then never relays.
+        self.db.get_session = MagicMock(
+            side_effect=lambda sid: {"id": sid, "instance_id": None}
+        )
+
+        async def _fake_run_sync(fn, *a, **k):
+            return fn(*a, **k)
+
+        s.enter_context(
+            patch.object(cwh, "run_sync", new=AsyncMock(side_effect=_fake_run_sync))
+        )
+
+        # --- permission handler ---------------------------------------------------
+        self.perm = s.enter_context(patch.object(cwh, "permission_handler"))
+        self.perm.respond = AsyncMock(return_value={"decision": "allow"})
+        self.perm.get_pending_requests = MagicMock(return_value=[])
+        self.perm.get_deferred_requests = MagicMock(return_value=[])
+        self.perm.requeue_deferred = AsyncMock(return_value=[])
+        self.perm.get_queue_count = MagicMock(return_value=0)
+
+        return self
+
+    def __exit__(self, *exc):
+        self._stack.close()
+        return False
+
+    def make_handler(self):
+        """Real handler on a fake CONNECTED websocket (frames recorded).
+
+        W2: ``send_json`` only ENQUEUES now — the frame reaches the socket on
+        the connection's writer task. These tests assert on frame SHAPE, not on
+        transport timing, so the handler's send is wrapped to drain the writer
+        before returning. The real writer still does the delivering (ordering
+        and coalescing included); the wrapper only removes the scheduling gap.
+        The transport semantics themselves are covered in
+        ``tests/api/test_ws_send_timeout.py``.
+        """
+        self.ws = _FakeWebSocket()
+        handler = cwh.ChatWebSocketHandler(
+            websocket=self.ws,  # type: ignore[arg-type]
+            device_id="dev-1",
+            user_id="admin",
+            api_user_id=None,
+        )
+        # Registration is what these tests pin; the account check is stubbed
+        # (its refusal is test_watch_session_refused_by_the_account_check).
+        handler._authorize_mobile_session = AsyncMock(return_value=True)
+        real_send = handler.send_json
+
+        async def _send_and_drain(data):
+            accepted = await real_send(data)
+            await _drain_writer(handler)
+            return accepted
+
+        handler.send_json = _send_and_drain  # type: ignore[method-assign]
+        self.handler = handler
+        return handler
+
+
+async def _drain_writer(handler, timeout: float = 1.0):
+    """Let the handler's writer task flush everything it has queued."""
+    writer = getattr(handler, "_writer", None)
+    if writer is None:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while writer.depth and loop.time() < deadline:
+        await asyncio.sleep(0.001)
+    await asyncio.sleep(0.001)
+
+
+def _shapes(ws):
+    """Outbound frames with the class's ``_seq`` diagnostic key stripped."""
+    out = []
+    for f in ws.sent:
+        f = dict(f)
+        f.pop("_seq", None)
+        out.append(f)
+    return out
+
+
+def _frames(ws, ftype):
+    return [f for f in _shapes(ws) if f.get("type") == ftype]
+
+
+def _errors(ws):
+    return _frames(ws, "error")
+
+
+def _queue_frames(ws):
+    return [
+        f for f in _shapes(ws)
+        if f.get("type") == "sync" and f.get("event_type") == "queue_updated"
+    ]
+
+
+WATCH = {"type": "watch_session", "session_id": "sess-1"}
+
+
+async def test_same_principal_and_device_session_sockets_both_receive_events():
+    """Exercise real registration through the chat handler, not only mocks."""
+    from app.core.sync_engine import SyncEngine, SyncEvent
+
+    engine = SyncEngine()
+    with _HandlerHarness() as h, patch.object(cwh, "sync_engine", engine):
+        first, second = h.make_handler(), h.make_handler()
+        try:
+            await first.handle_watch_session(dict(WATCH))
+            await second.handle_watch_session(dict(WATCH))
+            first.websocket.sent.clear()
+            second.websocket.sent.clear()
+            await engine.broadcast_event(SyncEvent(
+                event_type="session_updated", session_id="sess-1", data={"title": "shared"}))
+            async def delivered(ws, count):
+                async with asyncio.timeout(2):
+                    while len(ws.sent) < count:
+                        await asyncio.sleep(0.001)
+            await delivered(first.websocket, 1)
+            await delivered(second.websocket, 1)
+            assert first.websocket.sent == second.websocket.sent
+
+            # Switching the first tab only detaches its own old-session socket.
+            await first.handle_watch_session({"session_id": "sess-2"})
+            first.websocket.sent.pop()  # Complete empty hydration for the new recipient.
+            assert engine.get_device_count("sess-1") == 1
+            await engine.broadcast_event(SyncEvent(
+                event_type="session_updated", session_id="sess-1", data={"title": "remaining"}))
+            await delivered(second.websocket, 2)
+            assert len(first.websocket.sent) == 1
+        finally:
+            await engine.shutdown()
+
+
+
+# ═══ A1. watch_session — happy path ════════════════════════════════════════════
+
+
+async def test_watch_session_registers_and_binds_current_session():
+    """Oracle: watch_session registers the device for sync broadcasts and binds
+    current_session_id (proven both directly and via a follow-up
+    get_pending_permissions, exactly like the closure oracle)."""
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+        await handler.handle_watch_session(dict(WATCH))
+        await handler.handle_get_pending_permissions({})
+
+    # register_device awaited once with (device, session, THIS socket)
+    h.sync.register_device.assert_awaited_once()
+    assert h.sync.register_device.await_args.args == ("dev-1", "sess-1", h.ws)
+    assert handler.current_session_id == "sess-1"
+    pend = _frames(h.ws, "pending_permissions")
+    assert pend and pend[0]["session_id"] == "sess-1", (
+        "watch_session must bind current_session_id"
+    )
+
+
+async def test_watch_session_refused_by_the_account_check():
+    """Watching streams a chat's live frames and queued messages, so it is
+    refused exactly as ``load_session`` is (``bind_session``, #1877): nothing
+    is registered or bound and no queue snapshot is sent."""
+    with _HandlerHarness() as h, patch(
+        "app.core.mobile_tool_identity.bind_session",
+        side_effect=PermissionError("Session principal mismatch"),
+    ) as bind:
+        handler = h.make_handler()
+        # The real check, not the harness stub.
+        handler._authorize_mobile_session = cwh.ChatWebSocketHandler._authorize_mobile_session.__get__(handler)
+        h.queue_view.return_value = [{"id": "q1", "content": "secret queued text"}]
+        await handler.handle_watch_session(dict(WATCH))
+
+    assert bind.call_args.args[0] == "sess-1"
+    h.sync.register_device.assert_not_awaited()
+    assert handler.current_session_id is None
+    assert _queue_frames(h.ws) == []
+    assert [f["message"] for f in _errors(h.ws)] == ["Session authorization denied"]
+
+
+async def test_watch_session_is_in_dispatch_table():
+    """The run() loop dispatches via _handlers — the port is dead code unless
+    the message type is registered."""
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+
+    bound = handler._handlers.get("watch_session")
+    assert bound is not None and bound.__func__ is cwh.ChatWebSocketHandler.handle_watch_session
+
+
+async def test_watch_session_missing_session_id_is_noop():
+    """Closure guard: no session_id => nothing happens (no register, no frame)."""
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+        await handler.handle_watch_session({"type": "watch_session"})
+
+    h.sync.register_device.assert_not_awaited()
+    assert handler.current_session_id is None
+    assert h.ws.sent == []
+
+
+async def test_watch_session_restores_nonempty_queue():
+    """Oracle: nonempty server-side queue is mirrored back as the same
+    sync/queue_updated frame the queue_message handlers emit — and it goes
+    through the class send_json, so the raw frame carries _seq."""
+    with _HandlerHarness() as h:
+        h.queue_view.return_value = [{"id": "q1", "content": "later"}]
+        await h.make_handler().handle_watch_session(dict(WATCH))
+
+    assert _queue_frames(h.ws) == [{
+        "type": "sync",
+        "event_type": "queue_updated",
+        "session_id": "sess-1",
+        "data": {"queued_messages": [{"id": "q1", "content": "later"}], "pending_peer_messages": []},
+    }]
+    assert h.ws.sent[0]["_seq"] == 1
+
+
+async def test_watch_session_queue_hydrates_from_v2_turns_view():
+    """Change-1 regression: watch_session must source the restore queue from the
+    durable turns table via ``_v2_queue_view(session_id)`` — the legacy
+    ``database.get_queued_messages`` path is deleted and must never be consulted."""
+    with _HandlerHarness() as h:
+        h.queue_view.return_value = [{"id": "t-1", "content": "later"}]
+        await h.make_handler().handle_watch_session(dict(WATCH))
+
+    h.queue_view.assert_called_once_with("sess-1")
+    # The dead legacy queue source is never touched.
+    h.db.get_queued_messages.assert_not_called()
+    assert _queue_frames(h.ws) == [{
+        "type": "sync",
+        "event_type": "queue_updated",
+        "session_id": "sess-1",
+        "data": {"queued_messages": [{"id": "t-1", "content": "later"}], "pending_peer_messages": []},
+    }]
+
+
+async def test_watch_session_empty_queue_sends_complete_empty_snapshot():
+    with _HandlerHarness() as h:
+        await h.make_handler().handle_watch_session(dict(WATCH))
+
+    assert _queue_frames(h.ws) == [{
+        "type": "sync", "event_type": "queue_updated", "session_id": "sess-1",
+        "data": {"queued_messages": [], "pending_peer_messages": []},
+    }]
+
+
+@pytest.mark.parametrize("failed_view", ["queue_view", "peer_queue_view"])
+async def test_watch_session_queue_load_failure_still_registers_silently(failed_view):
+    """Closure parity: a DB failure loading the queue is swallowed — the watch
+    registration stands, and neither a queue frame nor an error frame is sent."""
+    with _HandlerHarness() as h:
+        getattr(h, failed_view).side_effect = RuntimeError("db down")
+        handler = h.make_handler()
+        await handler.handle_watch_session(dict(WATCH))
+
+    h.sync.register_device.assert_awaited_once()
+    assert handler.current_session_id == "sess-1"
+    assert _queue_frames(h.ws) == []
+    assert _errors(h.ws) == []
+
+
+async def test_watch_session_switch_unregisters_old_session():
+    """Switching sessions unregisters the device from the previous one first."""
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+        handler.current_session_id = "sess-old"
+        await handler.handle_watch_session(dict(WATCH))
+
+    h.sync.unregister_device.assert_awaited_once()
+    assert h.sync.unregister_device.await_args.args == ("dev-1", "sess-old", h.ws)
+    h.sync.register_device.assert_awaited_once()
+    assert handler.current_session_id == "sess-1"
+
+
+async def test_watch_session_rewatch_same_session_does_not_unregister():
+    """Re-watching the already-current session must NOT unregister it (the
+    closure only unregisters when current != new)."""
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+        handler.current_session_id = "sess-1"
+        await handler.handle_watch_session(dict(WATCH))
+
+    h.sync.unregister_device.assert_not_awaited()
+    h.sync.register_device.assert_awaited_once()
+
+
+# ═══ A2. watch_session — sibling sockets sharing a device ID ════════════════
+
+
+async def test_watch_session_duplicate_live_ws_registers_its_own_socket():
+    """A sibling tab registers its own socket without evicting the live one."""
+    with _HandlerHarness() as h:
+        h.sync.is_device_watching_session.return_value = True
+        other_ws = SimpleNamespace(client_state=WebSocketState.CONNECTED)
+        h.sync._connections = {
+            "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
+        }
+        handler = h.make_handler()
+        await handler.handle_watch_session(dict(WATCH))
+        await handler.handle_get_pending_permissions({})
+
+    h.sync.register_device.assert_awaited_once_with("dev-1", "sess-1", h.ws)
+    assert handler.current_session_id == "sess-1"
+    pend = _frames(h.ws, "pending_permissions")
+    assert pend and pend[0]["session_id"] == "sess-1"
+
+
+async def test_watch_session_duplicate_live_ws_restores_its_queue():
+    """Each sibling tab needs its own queue hydration."""
+    with _HandlerHarness() as h:
+        h.sync.is_device_watching_session.return_value = True
+        other_ws = SimpleNamespace(client_state=WebSocketState.CONNECTED)
+        h.sync._connections = {
+            "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
+        }
+        h.queue_view.return_value = [{"id": "q1", "content": "later"}]
+        await h.make_handler().handle_watch_session(dict(WATCH))
+
+    assert _queue_frames(h.ws)
+    h.queue_view.assert_called_once_with("sess-1")
+
+
+async def test_watch_session_dead_old_ws_is_replaced():
+    """Oracle: same device_id but the old socket is dead (page refresh): the
+    new socket takes over — registration proceeds."""
+    with _HandlerHarness() as h:
+        h.sync.is_device_watching_session.return_value = True
+        other_ws = SimpleNamespace(client_state=WebSocketState.DISCONNECTED)
+        h.sync._connections = {
+            "sess-1": {"dev-1": SimpleNamespace(websocket=other_ws)}
+        }
+        await h.make_handler().handle_watch_session(dict(WATCH))
+
+    h.sync.register_device.assert_awaited_once()
+
+
+async def test_watch_session_same_ws_rewatch_proceeds():
+    """Closure: when the existing registration IS this very websocket, the
+    re-watch proceeds normally (registration refresh, queue restore)."""
+    with _HandlerHarness() as h:
+        h.sync.is_device_watching_session.return_value = True
+        handler = h.make_handler()
+        h.sync._connections = {
+            "sess-1": {"dev-1": SimpleNamespace(websocket=h.ws)}
+        }
+        h.queue_view.return_value = [{"id": "q1", "content": "later"}]
+        await handler.handle_watch_session(dict(WATCH))
+
+    h.sync.register_device.assert_awaited_once()
+    assert _queue_frames(h.ws), "same-socket re-watch still restores the queue"
+
+
+# ═══ B1. get_pending_permissions — class shape is canonical ════════════════════
+#
+# Plan: the closure replies with key ``requests``; the CLASS replies with
+# ``pending`` + ``deferred`` and that is what the frontend expects
+# (types/websocket.ts PendingPermissionsMessage, PermissionQueue.svelte).
+# These pins let the flip commit consciously replace the closure shape.
+
+
+async def test_get_pending_permissions_replies_pending_plus_deferred():
+    with _HandlerHarness() as h:
+        h.perm.get_pending_requests.return_value = [{"request_id": "p1"}]
+        h.perm.get_deferred_requests.return_value = [{"request_id": "d1"}]
+        handler = h.make_handler()
+        handler.current_session_id = "sess-1"
+        await handler.handle_get_pending_permissions({})
+
+    h.perm.get_pending_requests.assert_called_once_with("sess-1")
+    h.perm.get_deferred_requests.assert_called_once_with("sess-1")
+    assert _frames(h.ws, "pending_permissions") == [{
+        "type": "pending_permissions",
+        "session_id": "sess-1",
+        "pending": [{"request_id": "p1"}],
+        "deferred": [{"request_id": "d1"}],
+    }], "class shape is pending+deferred — NOT the closure's `requests` key"
+
+
+async def test_get_pending_permissions_carries_deferred_even_when_empty():
+    """The ``deferred`` key is always present (frontend treats a missing key
+    as an older backend) — pin that an empty deferred queue still ships []."""
+    with _HandlerHarness() as h:
+        h.perm.get_pending_requests.return_value = [{"request_id": "p1"}]
+        handler = h.make_handler()
+        handler.current_session_id = "sess-1"
+        await handler.handle_get_pending_permissions({})
+
+    frame = _frames(h.ws, "pending_permissions")[0]
+    assert frame["deferred"] == []
+
+
+async def test_get_pending_permissions_without_session_replies_empty():
+    with _HandlerHarness() as h:
+        await h.make_handler().handle_get_pending_permissions({})
+
+    assert _frames(h.ws, "pending_permissions") == [{
+        "type": "pending_permissions", "session_id": None, "pending": [], "deferred": [],
+    }]
+    h.perm.get_pending_requests.assert_not_called()
+
+
+# ═══ B2. permission_response — decision="defer" (class only) ═══════════════════
+
+
+async def test_permission_response_defer_strips_remember_and_pattern():
+    """decision="defer" moves the request to the deferred queue; remember and
+    pattern are meaningless for a defer and the class strips them to None
+    before calling permission_handler.respond (closure has no defer at all)."""
+    with _HandlerHarness() as h:
+        h.perm.respond.return_value = {"decision": "defer"}
+        await h.make_handler().handle_permission_response({
+            "request_id": "r1",
+            "session_id": "sess-1",
+            "decision": "defer",
+            "remember": "profile",
+            "pattern": "Bash(*)",
+        })
+
+    kw = h.perm.respond.await_args.kwargs
+    assert kw["request_id"] == "r1"
+    assert kw["session_id"] == "sess-1"
+    assert kw["decision"] == "defer"
+    assert kw["remember"] is None, "remember must be stripped on defer"
+    assert kw["pattern"] is None, "pattern must be stripped on defer"
+    assert kw["broadcast_func"] is not None
+    assert _frames(h.ws, "permission_response_ack") == [{
+        "type": "permission_response_ack",
+        "session_id": "sess-1",
+        "request_id": "r1",
+        "result": {"decision": "defer"},
+    }]
+
+
+async def test_permission_response_allow_passes_remember_and_pattern():
+    """Non-defer decisions pass remember/pattern through untouched (parity
+    with the closure oracle's permission_response test)."""
+    with _HandlerHarness() as h:
+        h.perm.respond.return_value = {"decision": "allow"}
+        await h.make_handler().handle_permission_response({
+            "request_id": "r1",
+            "session_id": "sess-1",
+            "decision": "allow",
+            "remember": "session",
+            "pattern": "Bash(*)",
+        })
+
+    kw = h.perm.respond.await_args.kwargs
+    assert kw["decision"] == "allow"
+    assert kw["remember"] == "session"
+    assert kw["pattern"] == "Bash(*)"
+    assert _frames(h.ws, "permission_response_ack") == [{
+        "type": "permission_response_ack",
+        "session_id": "sess-1",
+        "request_id": "r1",
+        "result": {"decision": "allow"},
+    }]
+
+
+async def test_permission_response_invalid_errors():
+    """Missing decision => error frame, permission_handler never consulted."""
+    with _HandlerHarness() as h:
+        await h.make_handler().handle_permission_response({
+            "request_id": "r1",
+            "session_id": "sess-1",
+        })
+
+    h.perm.respond.assert_not_awaited()
+    assert _errors(h.ws) == [
+        {"type": "error", "message": "Invalid permission response"}
+    ]
+
+
+async def test_permission_response_falls_back_to_current_session():
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+        handler.current_session_id = "sess-cur"
+        await handler.handle_permission_response({
+            "request_id": "r1",
+            "decision": "deny",
+        })
+
+    kw = h.perm.respond.await_args.kwargs
+    assert kw["session_id"] == "sess-cur"
+
+
+# ═══ B3. requeue_deferred_permissions — class only, frontend sends it ══════════
+
+
+async def test_requeue_deferred_permissions_frame_shape():
+    """requeue moves deferred requests back to pending (re-broadcast via
+    broadcast_func) and confirms with a permission_queue_update frame carrying
+    the requeued ids + remaining queue count."""
+    with _HandlerHarness() as h:
+        h.perm.requeue_deferred.return_value = ["r1", "r2"]
+        h.perm.get_queue_count.return_value = 3
+        await h.make_handler().handle_requeue_deferred_permissions({
+            "session_id": "sess-1",
+        })
+
+    kw = h.perm.requeue_deferred.await_args.kwargs
+    assert kw["session_id"] == "sess-1"
+    assert kw["broadcast_func"] is not None
+    h.perm.get_queue_count.assert_called_once_with("sess-1")
+    assert _frames(h.ws, "permission_queue_update") == [{
+        "type": "permission_queue_update",
+        "session_id": "sess-1",
+        "requeued_ids": ["r1", "r2"],
+        "remaining_count": 3,
+    }]
+
+
+async def test_requeue_deferred_falls_back_to_current_session():
+    with _HandlerHarness() as h:
+        handler = h.make_handler()
+        handler.current_session_id = "sess-cur"
+        await handler.handle_requeue_deferred_permissions({})
+
+    kw = h.perm.requeue_deferred.await_args.kwargs
+    assert kw["session_id"] == "sess-cur"
+
+
+async def test_requeue_deferred_without_session_errors():
+    with _HandlerHarness() as h:
+        await h.make_handler().handle_requeue_deferred_permissions({})
+
+    h.perm.requeue_deferred.assert_not_awaited()
+    assert _errors(h.ws) == [
+        {"type": "error", "message": "No session_id for requeue"}
+    ]

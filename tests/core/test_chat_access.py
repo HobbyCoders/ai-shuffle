@@ -1,0 +1,1866 @@
+"""Resource authorization, real SSH transport, one-shot approval, and file fences."""
+import asyncio
+import json
+import os
+import re
+from unittest.mock import AsyncMock
+
+import asyncssh
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from app.core import chat_access, chat_files, chat_vault
+from app.core.chat_access import AccessDenied, Broker, GrantInput
+from tests.core.test_chat_vault import vault  # noqa: F401 - fixture
+
+_real_session_owner = chat_access.session_owner
+_REAL_CATALOG = chat_vault.catalog
+
+
+@pytest.fixture
+def broker(monkeypatch):
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("local", "worker")))
+    from app.core import chat_vault
+    monkeypatch.setattr(chat_vault, "catalog", lambda owner, **kwargs: [])
+    return Broker()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_user_id, owner_kind", [(None, "admin"), (None, "account"), ("alice", "api_user")])
+async def test_request_producer_invalidates_global_owner_without_private_payload(broker, monkeypatch, api_user_id, owner_kind):
+    import json
+    from app.core.global_events import global_events
+    from app.core import preference_identity
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", api_user_id)))
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "owner" if owner_kind == "account" else None)
+    monkeypatch.setattr(preference_identity, "account_identity", lambda identity: ("account", identity))
+    monkeypatch.setattr(preference_identity.owner_auth, "preference_identity", lambda: "owner")
+    class Socket:
+        def __init__(self):
+            self.sent = []
+        async def send_text(self, text):
+            self.sent.append(json.loads(text))
+    principals = [("admin", "owner"), ("api_user", "alice"), ("api_user", "bob"), ("paired", "device"), ("account", "owner"), ("account", "other")]
+    sockets = [Socket() for _ in principals]
+    ids = [global_events.register(ws, *principal) for ws, principal in zip(sockets, principals)]
+    request = asyncio.create_task(broker.request("private-session", "machine", "Private purpose never broadcast"))
+    try:
+        async with asyncio.timeout(3):
+            while not broker.requests:
+                await asyncio.sleep(0)
+            await asyncio.gather(*broker._notifications)
+            for _ in range(12):
+                await asyncio.sleep(0)
+        expected = {"type": "resources_changed", "resources": ["chat-access:private-session"]}
+        recipient = {"admin": 0, "api_user": 1, "account": 4}[owner_kind]
+        for index, ws in enumerate(sockets):
+            assert ws.sent == [{"type": "sync_ready"}] + ([expected] if index == recipient else [])
+        pending_request = next(iter(broker.requests.values()))
+        await broker.decline("private-session", pending_request.id)
+        with pytest.raises(AccessDenied):
+            await request
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await asyncio.gather(*broker._notifications)
+        for socket_id in ids:
+            await global_events.unregister(socket_id)
+
+
+@pytest_asyncio.fixture
+async def ssh_target():
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    commands = []
+    started = asyncio.Event()
+
+    class Server(asyncssh.SSHServer):
+        def begin_auth(self, username):
+            return True
+        def password_auth_supported(self):
+            return True
+        def validate_password(self, username, password):
+            return username == "operator" and password == "test-only-password"
+
+    async def process(proc):
+        commands.append(proc.command)
+        started.set()
+        if proc.command == "hold":
+            await proc.stdin.read()
+        elif proc.command == "large":
+            proc.stdout.write("x" * 100000)
+        else:
+            proc.stdout.write("remote:" + proc.command)
+        proc.exit(7 if proc.command == "fail" else 0)
+
+    server = await asyncssh.create_server(Server, "127.0.0.1", 0,
+        server_host_keys=[key], process_factory=process)
+    spec = GrantInput(kind="machine", label="Test SSH", host="127.0.0.1",
+        port=server.get_port(), username="operator", password="test-only-password",
+        fingerprint=key.get_fingerprint("sha256"))
+    try:
+        yield spec, commands, started
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delegated", [False, True])
+async def test_live_mode_change_releases_pending_private_action_and_rechecks_next_call(broker, ssh_target, monkeypatch, delegated):
+    from types import SimpleNamespace
+
+    from app.api.sessions_permissions import apply_permission_mode
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.core.session_pool import SessionState
+    from app.mcp import chat_access_sdk as sdk
+    from tests.core.test_permission_mode_reuse import _connected_adapter, _NativeEngine
+
+    adapter, options = await _connected_adapter(_NativeEngine(), "default")
+    adapter._is_delegated = delegated
+    state = SessionState(adapter=adapter, is_connected=True, connect_options=options)
+    row = {"id": "chat", "mode": "code", "permission_mode": "default"}
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: state))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    monkeypatch.setattr("app.network.control._require_owned", lambda sid: row)
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: row)
+    monkeypatch.setattr("app.db.database.set_session_run_binding", lambda sid, **kw: row.update(kw))
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    spec, commands, _ = ssh_target
+    grant = await broker.create("chat", spec)
+
+    async def command(value):
+        return await tools["ChatRunCommand"].handler({"grant_id": grant["id"], "command": value})
+
+    task = asyncio.create_task(command("pending"))
+    await pending(broker)
+    assert not commands
+    await apply_permission_mode("chat", "bypassPermissions")
+    assert adapter.permission_mode == row["permission_mode"] == "bypassPermissions"
+    assert "remote:pending" in str(await asyncio.wait_for(task, 3))
+    assert "remote:bypass" in str(await asyncio.wait_for(command("bypass"), 3))
+    assert not broker.actions
+
+    # Same handlers, no server rebuild. The effective adapter mode wins over a
+    # stale persisted Bypass selection (as on a live turn override).
+    await adapter.set_permission_mode("default")
+    assert row["permission_mode"] == "bypassPermissions"
+    task = asyncio.create_task(command("denied"))
+    action = await pending(broker)
+    await broker.decide("chat", action.id, False)
+    assert "denied" in str(await task)
+    for mode in ("acceptEdits", "auto", "default"):
+        await apply_permission_mode("chat", mode)
+        task = asyncio.create_task(command(mode))
+        action = await pending(broker)
+        assert commands == ["pending", "bypass"]
+        await broker.decide("chat", action.id, False)
+        assert "denied" in str(await task)
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_mode_change_during_persisted_lookup_does_not_strand_action(broker, ssh_target, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api.sessions_permissions import apply_permission_mode
+    from app.db import async_database, database
+
+    row = {"permission_mode": "default", "mode": "voice"}
+    monkeypatch.setattr(database, "get_session", lambda sid: dict(row))
+    monkeypatch.setattr(database, "set_session_run_binding", lambda sid, **kw: row.update(kw))
+    monkeypatch.setattr("app.network.control._require_owned", lambda sid: dict(row))
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(chat_access, "broker", broker)
+    grant = await broker.create("chat", ssh_target[0])
+    read, release = asyncio.Event(), asyncio.Event()
+    real_run_sync = async_database.run_sync
+
+    async def delayed_snapshot(fn, *args, **kwargs):
+        result = await real_run_sync(fn, *args, **kwargs)
+        if fn is database.get_session and not read.is_set():
+            read.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(async_database, "run_sync", delayed_snapshot)
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "raced"}))
+    try:
+        await asyncio.wait_for(read.wait(), 3)
+        await apply_permission_mode("chat", "bypassPermissions")
+        assert not broker.actions and not ssh_target[1]
+        release.set()
+        result = await asyncio.wait_for(task, 3)
+        assert result["stdout"] == "remote:raced"
+        assert not broker.actions
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chat_files.available(), reason="descriptor-relative Linux folder access required")
+@pytest.mark.parametrize("operation", ["command", "write"])
+@pytest.mark.parametrize("invalidated", ["expired", "revoked"])
+async def test_grant_rechecked_after_bypass_decision(broker, ssh_target, tmp_path, monkeypatch, operation, invalidated):
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": "bypassPermissions"})
+    spec = ssh_target[0] if operation == "command" else GrantInput(
+        kind="folder", label="Files", path=str(tmp_path), writable=True)
+    grant = await broker.create("chat", spec)
+    real_bypasses = chat_access.session_bypasses_confirmation
+
+    async def invalidate_after_decision(session_id):
+        bypasses = await real_bypasses(session_id)
+        assert bypasses
+        if invalidated == "expired":
+            broker.grants[grant["id"]].expires_at = 0
+        else:
+            broker.revoke(session_id, grant["id"])
+        return bypasses
+
+    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", invalidate_after_decision)
+    args = {"command": "never"} if operation == "command" else {"path": "never.txt", "content": "no"}
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant["id"], operation, args)
+    assert not ssh_target[1] and not (tmp_path / "never.txt").exists()
+    assert not broker.grants and not broker.actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidated", ["expired", "revoked", "owner"])
+async def test_bypass_still_enforces_grant_lifetime_and_owner(broker, ssh_target, monkeypatch, invalidated):
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": "bypassPermissions"})
+    grant = await broker.create("chat", ssh_target[0])
+    if invalidated == "expired":
+        broker.grants[grant["id"]].expires_at = 0
+    elif invalidated == "revoked":
+        broker.revoke("chat", grant["id"])
+    else:
+        monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("other", "worker")))
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant["id"], "command", {"command": "never"})
+    assert not ssh_target[1] and not broker.actions and not broker.grants
+
+
+@pytest.mark.asyncio
+async def test_bypass_revocation_terminates_running_command(broker, ssh_target, monkeypatch):
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": "bypassPermissions"})
+    grant = await broker.create("chat", ssh_target[0])
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "hold"}))
+    await asyncio.wait_for(ssh_target[2].wait(), 3)
+    assert not broker.actions
+    broker.revoke("chat", grant["id"])
+    with pytest.raises(AccessDenied):
+        await asyncio.wait_for(task, 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidated", ["expired", "revoked", "denied"])
+async def test_switch_to_bypass_never_revives_invalid_pending_action(broker, ssh_target, monkeypatch, invalidated):
+    row = {"permission_mode": "default"}
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: row)
+    grant = await broker.create("chat", ssh_target[0])
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "never"}))
+    action = await pending(broker)
+    if invalidated == "expired":
+        action.expires_at = 0
+    elif invalidated == "revoked":
+        broker.revoke("chat", grant["id"])
+    else:
+        await broker.decide("chat", action.id, False)
+    row["permission_mode"] = "bypassPermissions"
+    await broker.resolve_mode_actions("chat")
+    with pytest.raises(AccessDenied):
+        await asyncio.wait_for(task, 3)
+    assert not ssh_target[1] and not broker.actions
+    if grant["id"] in broker.grants:
+        broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not chat_files.available(), reason="descriptor-relative Linux folder access required")
+@pytest.mark.parametrize("permission_mode", ["default", "acceptEdits", "bypassPermissions"])
+async def test_folder_write_confirmation_mode_preserves_scope(broker, tmp_path, monkeypatch, permission_mode):
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"permission_mode": permission_mode})
+    grant = await broker.create("chat", GrantInput(kind="folder", label="Files", path=str(tmp_path), writable=True))
+    task = asyncio.create_task(broker.run("chat", grant["id"], "write", {"path": "ok.txt", "content": "written"}))
+    if permission_mode != "bypassPermissions":
+        action = await pending(broker)
+        assert not (tmp_path / "ok.txt").exists()
+        await broker.decide("chat", action.id, True)
+    await asyncio.wait_for(task, 3)
+    assert (tmp_path / "ok.txt").read_text() == "written"
+    assert not broker.actions
+    # Without the isolated shell a folder grant runs no commands at all.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
+    for operation, args in [("write", {"path": "../escape", "content": "no"}), ("command", {"command": "no"})]:
+        with pytest.raises(AccessDenied):
+            await broker.run("chat", grant["id"], operation, args)
+    broker.grants[grant["id"]].writable = False
+    with pytest.raises(AccessDenied, match="read-only"):
+        await broker.run("chat", grant["id"], "write", {"path": "ok.txt", "content": "no"})
+    assert (tmp_path / "ok.txt").read_text() == "written"
+    broker.revoke("chat", grant["id"])
+
+
+async def pending(broker):
+    # Event-loop scheduling, bounded: not a timing assumption about an SSH handshake.
+    async with asyncio.timeout(3):
+        while not broker.actions:
+            await asyncio.sleep(0.001)
+    return next(iter(broker.actions.values()))
+
+
+@pytest.mark.asyncio
+async def test_real_pinned_ssh_needs_exact_one_shot_approval(broker, ssh_target):
+    spec, commands, _ = ssh_target
+    grant = await broker.create("chat", spec)
+    assert commands == []  # Creating a grant authenticates but executes nothing.
+    assert "password" not in grant and "key" not in grant
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "fail"}))
+    action = await pending(broker)
+    assert action.arguments == {"command": "fail"}
+    assert commands == []
+    with pytest.raises(AccessDenied):
+        await broker.decide("other-chat", action.id, True)
+    await broker.decide("chat", action.id, True)
+    with pytest.raises(AccessDenied):
+        await broker.decide("chat", action.id, True)
+    result = await task
+    assert result == {"stdout": "remote:fail", "stderr": "", "exit_code": 7, "truncated": False}
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "fail"}))
+    action = await pending(broker)
+    await broker.decide("chat", action.id, False)
+    with pytest.raises(AccessDenied):
+        await task
+    assert commands == ["fail"]
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_wrong_host_key_or_password_never_creates_grant(broker, ssh_target):
+    spec, commands, _ = ssh_target
+    other = asyncssh.generate_private_key("ssh-ed25519").get_fingerprint("sha256")
+    bad = GrantInput.model_validate({**spec.model_dump(), "fingerprint": other})
+    with pytest.raises(AccessDenied, match=re.escape(f"offered: ED25519 {spec.fingerprint}")):
+        await broker.create("chat", bad)
+    bad = GrantInput.model_validate({**spec.model_dump(), "password": "wrong"})
+    with pytest.raises(asyncssh.Error):
+        await broker.create("chat", bad)
+    assert not broker.grants and not commands
+
+
+@pytest_asyncio.fixture
+async def multi_key_target():
+    """A server with ED25519 and RSA keys: a client without known_hosts negotiates RSA first."""
+    keys = {alg: asyncssh.generate_private_key(alg) for alg in ("ssh-ed25519", "ssh-rsa")}
+    auths = []
+
+    class Server(asyncssh.SSHServer):
+        def begin_auth(self, username):
+            auths.append(username)
+            return True
+        def password_auth_supported(self):
+            return True
+        def validate_password(self, username, password):
+            return username == "operator" and password == "test-only-password"
+
+    server = await asyncssh.create_server(Server, "127.0.0.1", 0, server_host_keys=list(keys.values()))
+    spec = GrantInput(kind="machine", label="Test SSH", host="127.0.0.1", port=server.get_port(),
+                      username="operator", password="test-only-password")
+    try:
+        yield spec, {alg: key.get_fingerprint("sha256") for alg, key in keys.items()}, auths
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supplied", ["ssh-ed25519", "ssh-rsa"])
+async def test_fingerprint_of_any_offered_key_type_is_accepted(broker, multi_key_target, supplied):
+    spec, fingerprints, auths = multi_key_target
+    grant = await broker.create("chat", spec.model_copy(update={"fingerprint": fingerprints[supplied]}))
+    pinned = broker.grants[grant["id"]]
+    assert grant["fingerprint"] == fingerprints[supplied]
+    assert pinned.host_key_alg == supplied if supplied == "ssh-ed25519" else pinned.host_key_alg.startswith("rsa-")
+    async with await broker.connection(pinned):
+        pass  # Later connections negotiate the same pinned key type.
+    # Only the credentialed connections reach authentication; key probes stop before it.
+    assert set(auths) == {"operator"}
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_blank_fingerprint_trusts_and_pins_the_presented_key(broker, multi_key_target):
+    spec, fingerprints, auths = multi_key_target
+    grant = await broker.create("chat", spec)
+    assert grant["fingerprint"] == fingerprints["ssh-ed25519"]
+    assert broker.grants[grant["id"]].host_key_alg == "ssh-ed25519"
+    assert set(auths) == {"operator"}
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_mismatched_fingerprint_lists_offered_keys_before_any_sign_in(broker, multi_key_target):
+    spec, fingerprints, auths = multi_key_target
+    other = asyncssh.generate_private_key("ssh-ed25519").get_fingerprint("sha256")
+    with pytest.raises(AccessDenied) as denied:
+        await broker.create("chat", spec.model_copy(update={"fingerprint": other}))
+    assert fingerprints["ssh-ed25519"] in str(denied.value) and fingerprints["ssh-rsa"] in str(denied.value)
+    assert not auths and not broker.grants
+
+
+@pytest.mark.asyncio
+async def test_malformed_fingerprint_is_refused_without_connecting(broker, multi_key_target):
+    spec, _, auths = multi_key_target
+    with pytest.raises(AccessDenied, match="Leave it blank"):
+        await broker.create("chat", spec.model_copy(update={"fingerprint": "ab:cd"}))
+    assert not auths
+
+
+@pytest.mark.asyncio
+async def test_revoke_cancels_pending_and_running_work(broker, ssh_target):
+    spec, commands, started = ssh_target
+    grant = await broker.create("chat", spec)
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "hold"}))
+    action = await pending(broker)
+    await broker.decide("chat", action.id, True)
+    await asyncio.wait_for(started.wait(), 3)
+    retained = broker.grants[grant["id"]]
+    broker.revoke("chat", grant["id"])
+    with pytest.raises(AccessDenied):
+        await asyncio.wait_for(task, 3)
+    assert retained.key is None and retained.password == ""
+    assert not broker.grants and not broker.actions
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant["id"], "command", {"command": "again"})
+
+
+@pytest.mark.asyncio
+async def test_pending_revoke_expiry_ownership_restart(broker, ssh_target, monkeypatch):
+    spec, commands, _ = ssh_target
+    grant = await broker.create("chat", spec)
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "never"}))
+    await pending(broker)
+    broker.revoke("chat", grant["id"])
+    with pytest.raises(AccessDenied):
+        await task
+    for change in ("expired", "moved"):
+        grant = await broker.create("chat", spec)
+        if change == "expired":
+            broker.grants[grant["id"]].expires_at = 0
+        else:
+            monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("new", "worker")))
+        with pytest.raises(AccessDenied):
+            await broker.get("chat", grant["id"])
+    assert not broker.grants and not commands
+    with pytest.raises(AccessDenied):
+        await Broker().get("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_output_is_bounded(broker, ssh_target):
+    spec, _, _ = ssh_target
+    grant = await broker.create("chat", spec)
+    task = asyncio.create_task(broker.run("chat", grant["id"], "command", {"command": "large"}))
+    action = await pending(broker)
+    await broker.decide("chat", action.id, True)
+    result = await task
+    assert result["truncated"] and len(result["stdout"]) == chat_files.LIMIT
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.asyncio
+async def test_api_approval_produces_execution_and_validation_hides_secrets(broker, ssh_target, monkeypatch):
+    from app.api import chat_access as api
+    spec, commands, _ = ssh_target
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock())
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        requested = asyncio.create_task(broker.request("chat", "machine", "Inspect the server privately"))
+        await asyncio.sleep(0)
+        request_id = next(iter(broker.requests))
+        endpoint = f"/api/v1/chat-access/chat/requests/{request_id}"
+        bad = await client.post(endpoint, json={"password": "MUST-NOT-ECHO"})
+        assert bad.status_code == 422 and "MUST-NOT-ECHO" not in bad.text
+        body = {**spec.model_dump(exclude=set(chat_access.SECRET_FIELDS)), "password": "test-only-password"}
+        response = await client.post(endpoint, json={"connection": body})
+        assert response.status_code == 200, response.text
+        handle = await requested
+        assert set(handle) == {"id", "kind", "expires_at", "writable"}
+        grant_id = handle["id"]
+        assert (await client.post(endpoint, json={"connection": body})).status_code == 409
+        task = asyncio.create_task(broker.run("chat", grant_id, "command", {"command": "inspect"}))
+        action = await pending(broker)
+        response = await client.post(f"/api/v1/chat-access/chat/actions/{action.id}", json={"allow": True})
+        assert response.status_code == 200
+        assert (await task)["stdout"] == "remote:inspect"
+        assert commands == ["inspect"]
+        response = await client.delete(f"/api/v1/chat-access/chat/grants/{grant_id}")
+        assert response.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["../secret", "/etc/passwd", "a/../b", "a//b", "a/./b", "a\\b", "x\x00y", ""])
+def test_paths_fail_closed(path):
+    with pytest.raises(AccessDenied):
+        chat_files.parts(path)
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+def test_folder_links_traversal_atomic_writes_and_bounds(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("secret")
+    (root / "link").symlink_to(outside)
+    os.link(outside, root / "hard")
+    (root / "dirlink").symlink_to(tmp_path, target_is_directory=True)
+    fd = chat_files.open_root(str(root))
+    try:
+        for path in ("link", "hard", "dirlink/outside", "../outside"):
+            with pytest.raises((AccessDenied, OSError)):
+                chat_files.read(fd, path)
+            with pytest.raises((AccessDenied, OSError)):
+                chat_files.write(fd, path, "bad")
+        chat_files.write(fd, "config.txt", "first")
+        chat_files.write(fd, "config.txt", "second")
+        assert chat_files.read(fd, "config.txt") == "second"
+        assert outside.read_text() == "secret"
+        assert "config.txt" in chat_files.listing(fd, ".")
+        with pytest.raises(AccessDenied):
+            chat_files.write(fd, "too-big", "x" * (chat_files.LIMIT + 1))
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.asyncio
+async def test_folder_cannot_run_shell_and_writes_need_grant_and_approval(broker, tmp_path, monkeypatch):
+    # Without the isolated shell (tests/core/test_chat_shell.py covers it) a
+    # folder command is refused; a host with bubblewrap would otherwise wait
+    # for approval here.
+    from app.core import chat_shell
+    monkeypatch.setattr(chat_shell, "self_test", lambda: (False, "test host"))
+    grant = await broker.create("chat", GrantInput(kind="folder", label="Folder", path=str(tmp_path)))
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant["id"], "command", {"command": "anything"})
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant["id"], "write", {"path": "x", "content": "no"})
+    broker.revoke("chat", grant["id"])
+    grant = await broker.create("chat", GrantInput(kind="folder", label="Folder", path=str(tmp_path), writable=True))
+    task = asyncio.create_task(broker.run("chat", grant["id"], "write", {"path": "x", "content": "yes"}))
+    action = await pending(broker)
+    assert not (tmp_path / "x").exists()
+    await broker.decide("chat", action.id, True)
+    assert await task == {"written": True}
+    assert (tmp_path / "x").read_text() == "yes"
+    broker.revoke("chat", grant["id"])
+
+
+def test_preview_cannot_grant_or_approve():
+    from app.core.preview_access import mutation_allowed
+    for path in ("/api/v1/chat-access/chat/grants", "/api/v1/chat-access/chat/actions/action"):
+        assert not mutation_allowed(path, "POST")
+        assert mutation_allowed(path, "GET")
+    # Nor edit or delete a saved connection.
+    for method in ("PATCH", "DELETE"):
+        assert not mutation_allowed(f"/api/v1/chat-access/chat/saved/{'c' * 32}", method)
+
+
+def test_tool_surface_has_scoped_tools_not_escape_routes():
+    from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS, narrow_tool_access_for_mode
+    from app.core.tool_access import ToolAccess, tool_permitted
+    from app.core.provider.harness_adapter import _delegated_allowed
+    from app.core.provider.types import SessionOptions
+    access = narrow_tool_access_for_mode(ToolAccess(), "chat")
+    for name in CHAT_MODE_RESOURCE_TOOLS:
+        assert tool_permitted(name, access.allowed, access.disallowed)
+        denied = narrow_tool_access_for_mode(ToolAccess(disallowed=[name]), "chat")
+        assert not tool_permitted(name, denied.allowed, denied.disallowed)
+    for name in ("Bash", "Monitor", "Task", "Write", "Edit", "run_python", "mcp__browser__browser_eval", "mcp__app-config__createHook"):
+        assert not tool_permitted(name, access.allowed, access.disallowed)
+    options = SessionOptions(model="sonnet", tool_allowlist=access.allowed, extra={"session_mode": "chat"})
+    granted = _delegated_allowed(options)
+    assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(granted)
+    assert "Read" not in granted
+
+
+def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    import app.core.query_options as qo
+    from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS
+    profile = {"id": "p", "config": {"model": "sonnet", "tools_preset": "claude_code", "tool_selection_mode": "all", "setting_sources": ["user", "project", "local"]}}
+    row = {"id": "chat", "mode": "chat", "project_v2_id": "stale", "branch": "wrong"}
+    monkeypatch.setattr(qo, "ensure_chat_uploads_dir", lambda: tmp_path)
+    with patch.object(qo.database, "get_session", return_value=row), patch.object(qo, "get_security_instructions", return_value=""), patch("app.core.project_resolver.resolve_cwd") as resolve, patch.object(qo, "_rescue_pending_checkout") as rescue:
+        options, _ = qo.build_options_from_profile(profile=profile, session_id="chat", project={"id": "stale", "path": "/never"}, overrides={"cwd": "/also-never"})
+    resolve.assert_not_called()
+    rescue.assert_not_called()
+    assert str(options.cwd) == str(tmp_path)
+    assert options.setting_sources == []
+    assert options.plugins == []
+    assert not isinstance(options.system_prompt, dict)
+    assert "general-purpose assistant" in options.system_prompt
+    assert set(options.mcp_servers) == {"builtins", "chat-access"}
+    assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
+    assert "Bash" not in options.allowed_tools
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [None, "code", "chat", "voice"])
+@pytest.mark.parametrize("permission_mode", ["default", "acceptEdits", "auto", "bypassPermissions"])
+async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_target, monkeypatch, mode, permission_mode):
+    from app.core.chat_access import GrantSubmission
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.db import database
+    from app.mcp import chat_access_sdk as sdk
+    from app.network import control
+    monkeypatch.setattr(sdk, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    monkeypatch.setattr(database, "get_session", lambda sid: {
+        "mode": mode, "instance_id": "worker", "permission_mode": permission_mode,
+    })
+    monkeypatch.setattr(control, "owner_of", lambda row: None)
+    spec, commands, _ = ssh_target
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    request_task = asyncio.create_task(tools["RequestChatAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
+    async with asyncio.timeout(3):
+        while not broker.requests:
+            await asyncio.sleep(0)
+    assert not request_task.done() and not broker.grants and not commands
+    await broker.fulfill("chat", next(iter(broker.requests)), GrantSubmission(connection=spec))
+    response = await request_task
+    assert "test-only-password" not in str(response)
+    grant_id = next(iter(broker.grants))
+    task = asyncio.create_task(tools["ChatRunCommand"].handler({"grant_id": grant_id, "command": "sdk"}))
+    if permission_mode != "bypassPermissions" or mode == "chat":
+        action = await pending(broker)
+        assert commands == []
+        await broker.decide("chat", action.id, True)
+    response = await asyncio.wait_for(task, 3)
+    assert "remote:sdk" in response["content"][0]["text"]
+    assert not broker.actions
+    other = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("other"))}
+    response = await other["ChatRunCommand"].handler({"grant_id": grant_id, "command": "escape"})
+    assert response["isError"] and commands == ["sdk"]
+    broker.revoke("chat", grant_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hints", [
+    {"suggested_host": "ssh://10.0.0.50"},
+    {"suggested_host": "user:password@host"},
+    {"suggested_host": "user@host"},
+    {"suggested_host": "host/path"},
+    {"suggested_host": "host?password=secret"},
+    {"suggested_host": "host#secret"},
+    {"suggested_host": " host"},
+    {"suggested_host": "host name"},
+    {"suggested_host": "host\n"},
+    {"suggested_host": "host\x00"},
+    {"suggested_host": "host\x7f"},
+    {"suggested_host": "999.999.1.1"},
+    {"suggested_host": "0.0.0.0"},
+    {"suggested_host": "::"},
+    {"suggested_host": "224.0.0.1"},
+    {"suggested_host": "ff02::1"},
+    {"suggested_host": "169.254.1.1"},
+    {"suggested_host": "fe80::1"},
+    {"suggested_host": "-host"},
+    {"suggested_host": "host..example"},
+    {"suggested_host": "[2001:db8::1]"},
+    {"suggested_host": "fe80::1%eth0"},
+    {"suggested_host": "a" * 65},
+    {"suggested_host": ".".join(["a" * 63] * 4)},
+    {"suggested_host": 123},
+    {"suggested_host": None},
+    {"suggested_port": 0},
+    {"suggested_port": 65536},
+    {"suggested_port": True},
+    {"suggested_port": 22.0},
+    {"suggested_port": "22"},
+    {"suggested_username": "user:password"},
+    {"suggested_username": "user@host"},
+    {"suggested_username": " user"},
+    {"suggested_username": "user name"},
+    {"suggested_username": "user\n"},
+    {"suggested_username": "user\x00"},
+    {"suggested_username": "-user"},
+    {"suggested_username": "a" * 129},
+    {"suggested_username": 123},
+    {"suggested_username": None},
+])
+async def test_machine_hints_reject_invalid_inputs_before_card(broker, hints):
+    with pytest.raises(AccessDenied):
+        await broker.request("chat", "machine", "Inspect VM", **hints)
+    assert not broker.requests and not broker.grants
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["folder", "service"])
+@pytest.mark.parametrize("hints", [
+    {"suggested_host": "10.0.0.50"}, {"suggested_port": 22}, {"suggested_username": "x"},
+])
+async def test_machine_hints_are_machine_only(broker, kind, hints):
+    with pytest.raises(AccessDenied, match="only available for machine"):
+        await broker.request("chat", kind, "Inspect resource", **hints)
+    assert not broker.requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host,port,username", [
+    ("10.0.0.50", 22, "x"), ("192.0.2.1", 1, "_build-user"),
+    ("2001:db8::1", 65535, "Build.user"), ("2001:db8::2", None, ""),
+])
+async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, host, port, username):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    args = {"kind": "machine", "purpose": "Inspect VM", "suggested_host": host,
+            "suggested_username": username}
+    if port is not None:
+        args["suggested_port"] = port
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
+    await asyncio.sleep(0)
+    try:
+        card = (await broker.snapshot("chat"))["requests"][0]
+        assert card["suggested_host"] == host
+        assert card.get("suggested_port") == port
+        assert card.get("suggested_username", "") == username
+        assert not broker.grants  # Prefilling never grants consent.
+        resources = await broker.resources("chat")
+        assert not resources["grants"]
+        assert not resources.get("pending_requests")  # Only services have resumable preparation.
+        await broker.decline("chat", card["id"])
+        response = await requested
+        assert response["isError"]
+    finally:
+        requested.cancel()
+        await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hostname", ["build", "build.example", "BUILD.example.", "a" * 63 + "." + "b" * 63])
+async def test_machine_hostname_hint_requires_ip_before_showing_card(broker, hostname):
+    with pytest.raises(AccessDenied, match="Pass the machine IP.*not a hostname"):
+        await broker.request("chat", "machine", "Inspect server", suggested_host=hostname)
+    assert not broker.requests and not broker.grants
+
+
+@pytest.mark.asyncio
+async def test_machine_card_hints_can_be_approved_unchanged(broker, ssh_target, monkeypatch):
+    from app.core.chat_access import GrantSubmission
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    spec, commands, _ = ssh_target
+    args = {"kind": "machine", "purpose": "Inspect server", "suggested_host": spec.host,
+            "suggested_port": spec.port, "suggested_username": spec.username}
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
+    await asyncio.sleep(0)
+    try:
+        card = (await broker.snapshot("chat"))["requests"][0]
+        # Submit the card's actual hints unchanged; only secrets/key verification
+        # come from the private owner input, not agent arguments.
+        connection = GrantInput(kind="machine", label="Reviewed server",
+            host=card["suggested_host"], port=card["suggested_port"],
+            username=card["suggested_username"], password=spec.password,
+            fingerprint=spec.fingerprint)
+        await broker.fulfill("chat", card["id"], GrantSubmission(connection=connection))
+        response = await requested
+        assert not response.get("isError")
+        grant = next(iter(broker.grants.values()))
+        assert (grant.host, grant.port, grant.username) == (spec.host, spec.port, spec.username)
+        running = asyncio.create_task(broker.run("chat", grant.id, "command", {"command": "inspect"}))
+        action = await pending(broker)
+        await broker.decide("chat", action.id, True)
+        output = await running
+        assert output["stdout"] == "remote:inspect" and commands == ["inspect"]
+        resources = await broker.resources("chat")
+        assert set(resources["grants"][0]) == {"id", "kind", "expires_at", "writable"}
+        broker.revoke("chat", grant.id)
+    finally:
+        requested.cancel()
+        await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_private_request_decline_cancel_and_cross_session(broker, ssh_target):
+    from app.core.chat_access import GrantSubmission
+    task = asyncio.create_task(broker.request("chat", "machine", "Need server access"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    with pytest.raises(AccessDenied):
+        await broker.request("chat", "machine", "Duplicate")
+    with pytest.raises(AccessDenied):
+        await broker.fulfill("other", request.id, GrantSubmission(connection=ssh_target[0]))
+    await broker.decline("chat", request.id)
+    with pytest.raises(AccessDenied, match="declined"):
+        await task
+    assert not broker.grants and not broker.requests
+    task = asyncio.create_task(broker.request("chat", "machine", "Need server access"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    with pytest.raises(AccessDenied):
+        await broker.fulfill("chat", request.id, GrantSubmission(connection=ssh_target[0]))
+    assert not broker.grants and not broker.requests
+
+
+@pytest.mark.asyncio
+async def test_saved_connection_requires_new_request_and_approval(broker, ssh_target, monkeypatch):
+    from app.core import chat_vault
+    from app.core.chat_access import GrantSubmission
+    spec, commands, _ = ssh_target
+    saved = {}
+    def save(owner, value):
+        saved["c" * 32] = value
+        return "c" * 32
+    monkeypatch.setattr(chat_vault, "save", save)
+    monkeypatch.setattr(chat_vault, "load", lambda owner, saved_id: saved[saved_id])
+    first = asyncio.create_task(broker.request("chat", "machine", "Initial access",
+                                              suggested_host=spec.host, suggested_port=spec.port,
+                                              suggested_username=spec.username))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    card = (await broker.snapshot("chat"))["requests"][0]
+    assert card["suggested_host"] == spec.host
+    assert card["suggested_port"] == spec.port
+    assert card["suggested_username"] == spec.username
+    blank = spec.model_copy(update={"fingerprint": ""})
+    await broker.fulfill("chat", request.id, GrantSubmission(connection=blank, save_connection=True))
+    handle = await first
+    # A blank fingerprint saves the key that was actually pinned.
+    assert saved["c" * 32].fingerprint == spec.fingerprint
+    assert set(handle) == {"id", "kind", "expires_at", "writable"}
+    broker.revoke("chat", handle["id"])
+    assert saved and not broker.grants
+    second = asyncio.create_task(broker.request("chat", "machine", "Reuse saved server"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    assert not broker.grants and commands == []
+    await broker.fulfill("chat", request.id, GrantSubmission(saved_id="c" * 32))
+    next_handle = await second
+    assert next_handle["id"] != handle["id"] and commands == []
+    broker.revoke("chat", next_handle["id"])
+
+
+@pytest.mark.asyncio
+async def test_saved_list_changes_invalidate_every_owner_session(broker, ssh_target, monkeypatch):
+    """Saving or deleting a saved connection refreshes the owner's panels on other sessions too."""
+    from app.api import chat_access as api
+    from app.core import chat_vault, preference_identity
+    from app.core.chat_access import GrantSubmission
+    from app.core.global_events import global_events
+    from app.core.sync_engine import sync_engine
+    owner = AsyncMock(return_value=(None, "worker", None))
+    monkeypatch.setattr(chat_access, "session_owner", owner)
+    published = []
+    monkeypatch.setattr(global_events, "resources_changed",
+                        lambda *names, user_type, user_id: published.append((names, user_type, user_id)))
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda principal: ("admin", "owner"))
+    monkeypatch.setattr(sync_engine, "_broadcast_user_message", AsyncMock())
+    monkeypatch.setattr(chat_vault, "save", lambda owner, value: "c" * 32)
+    monkeypatch.setattr(chat_vault, "load", lambda owner, saved_id: ssh_target[0])
+    monkeypatch.setattr(chat_vault, "delete", lambda owner, saved_id: None)
+
+    async def drain():
+        await asyncio.gather(*broker._notifications)
+
+    requested = asyncio.create_task(broker.request("chat", "machine", "Save this server"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    await broker.fulfill("chat", request.id, GrantSubmission(connection=ssh_target[0], save_connection=True))
+    handle = await requested
+    await drain()
+    assert (("chat-access:chat", "chat-access"), "admin", "owner") in published
+    broker.revoke("chat", handle["id"])
+    await drain()
+    # Grant-only changes stay scoped to their session.
+    assert published[-1] == (("chat-access:chat",), "admin", "owner")
+
+    published.clear()
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value={"id": "chat"}))
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        response = await client.delete(f"/api/v1/chat-access/chat/saved/{'c' * 32}")
+    assert response.status_code == 200
+    await drain()
+    assert published == [(("chat-access:chat", "chat-access"), "admin", "owner")]
+
+
+@pytest.mark.asyncio
+async def test_deleted_saved_connection_cannot_race_into_a_new_grant(broker, ssh_target, monkeypatch):
+    from app.core import chat_vault
+    from app.core.chat_access import GrantSubmission
+    calls = 0
+    def load(owner, saved_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ssh_target[0]
+        raise AccessDenied("Connection was deleted during the handshake")
+    monkeypatch.setattr(chat_vault, "load", load)
+    requested = asyncio.create_task(broker.request("chat", "machine", "Reuse a saved connection"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    with pytest.raises(AccessDenied, match="deleted"):
+        await broker.fulfill("chat", request.id, GrantSubmission(saved_id="a" * 32))
+    assert not broker.grants and not ssh_target[1]
+    await broker.decline("chat", request.id)
+    with pytest.raises(AccessDenied):
+        await requested
+
+
+# ---------------------------------------------------------------------------
+# Editing a saved connection
+# ---------------------------------------------------------------------------
+
+EDIT_OWNER = ("local", "worker")
+
+
+@pytest.fixture
+def saved_vault(broker, vault, monkeypatch):
+    """The broker over the real encrypted saved-connection store (in memory)."""
+    from app.core import chat_vault
+    monkeypatch.setattr(chat_vault, "catalog", _REAL_CATALOG)
+    return vault
+
+
+async def _grant_saved(broker, saved_id):
+    from app.core.chat_access import GrantSubmission
+    requested = asyncio.create_task(broker.request("chat", "machine", "Reuse a saved server"))
+    await asyncio.sleep(0)
+    request = next(r for r in broker.requests.values() if not r.result.done())
+    try:
+        await broker.fulfill("chat", request.id, GrantSubmission(saved_id=saved_id))
+    except BaseException:
+        await broker.decline("chat", request.id)
+        await asyncio.gather(requested, return_exceptions=True)
+        raise
+    return await requested
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_keeps_blank_secrets_replaces_typed_ones_and_never_returns_them(broker, saved_vault, ssh_target):
+    from app.core import chat_vault
+    from app.core.chat_access import SavedConnectionEdit
+    spec, commands, _ = ssh_target
+    saved_id = chat_vault.save(EDIT_OWNER, spec)
+    handle = await _grant_saved(broker, saved_id)
+
+    # A rename with blank secrets keeps the stored password, the pin and the grant.
+    renamed = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(label=" Renamed ", password=""))
+    assert renamed == {"updated": True, "revoked": 0, "host_key_cleared": False}
+    stored = chat_vault.load(EDIT_OWNER, saved_id)
+    assert stored.label == "Renamed" and stored.password.get_secret_value() == "test-only-password"
+    assert stored.fingerprint == spec.fingerprint and handle["id"] in broker.grants
+
+    # A typed password replaces the stored one, keeps the pin, and revokes
+    # grants that were built on the old details.
+    replaced = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(password="replacement-only-secret"))
+    assert replaced == {"updated": True, "revoked": 1, "host_key_cleared": False}
+    assert handle["id"] not in broker.grants
+    stored = chat_vault.load(EDIT_OWNER, saved_id)
+    assert stored.password.get_secret_value() == "replacement-only-secret"
+    assert stored.fingerprint == spec.fingerprint
+    shown = json.dumps([renamed, replaced, chat_vault.catalog(EDIT_OWNER), await broker.snapshot("chat")])
+    assert "replacement-only-secret" not in shown and "test-only-password" not in shown
+    listed = chat_vault.catalog(EDIT_OWNER)[0]
+    assert {k: listed[k] for k in ("label", "host", "port", "username", "uses_key")} == {
+        "label": "Renamed", "host": "127.0.0.1", "port": spec.port, "username": "operator", "uses_key": False}
+
+    # The replacement is what the next use signs in with.
+    with pytest.raises(asyncssh.PermissionDenied):
+        await _grant_saved(broker, saved_id)
+    await broker.edit_saved("chat", saved_id, SavedConnectionEdit(password="test-only-password"))
+    again = await _grant_saved(broker, saved_id)
+    assert again["id"] in broker.grants and not commands
+    broker.revoke("chat", again["id"])
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_of_address_clears_the_pin_and_next_use_pins_the_presented_key(broker, saved_vault, ssh_target):
+    from app.core import chat_vault
+    from app.core.chat_access import SavedConnectionEdit
+    spec, _, _ = ssh_target
+    saved_id = chat_vault.save(EDIT_OWNER, spec.model_copy(update={"port": 1, "username": "nobody"}))
+    # Username changes keep the pinned host key.
+    kept = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(username="operator"))
+    assert kept["host_key_cleared"] is False
+    assert chat_vault.load(EDIT_OWNER, saved_id).fingerprint == spec.fingerprint
+    # A key pinned for another port is never reused for this one.
+    moved = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(port=spec.port))
+    assert moved["host_key_cleared"] is True
+    assert chat_vault.load(EDIT_OWNER, saved_id).fingerprint == ""
+    assert chat_vault.catalog(EDIT_OWNER)[0]["fingerprint"] == ""
+    # Trust on first use, then remembered like a newly saved connection.
+    handle = await _grant_saved(broker, saved_id)
+    assert chat_vault.load(EDIT_OWNER, saved_id).fingerprint == spec.fingerprint
+    assert broker.grants[handle["id"]].fingerprint == spec.fingerprint
+    # The pin is bookkeeping, not a change of details: the grant stays.
+    assert handle["id"] in broker.grants
+    broker.revoke("chat", handle["id"])
+
+
+def test_apply_saved_edit_address_and_credential_rules():
+    from app.core.chat_access import SavedConnectionEdit, apply_saved_edit
+    pin = "SHA256:" + "a" * 43
+    machine = GrantInput(kind="machine", label="NAS", host="fd00::1", port=22, username="root",
+                         fingerprint=pin, password="stored-password")
+    def edit(current, **changes):
+        return apply_saved_edit(current, SavedConnectionEdit.model_validate(changes))
+    # The same address written differently is no change.
+    assert edit(machine, host="fd00:0:0::1").fingerprint == pin
+    assert edit(machine, host="fd00::2").fingerprint == ""
+    assert edit(machine, port=2222).fingerprint == ""
+    assert edit(machine, username="admin", password="new-password").fingerprint == pin
+    # The owner may supply the new server's key with the new address.
+    other = "SHA256:" + "b" * 43
+    assert edit(machine, host="10.0.0.9", fingerprint=other + "=").fingerprint == other
+    # A private key replaces the password; a passphrase alone re-checks the stored key.
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    locked = key.export_private_key("openssh", passphrase="key-passphrase").decode()
+    keyed = edit(machine, private_key=locked, passphrase="key-passphrase")
+    assert keyed.password.get_secret_value() == "" and keyed.private_key.get_secret_value() == locked
+    with pytest.raises(AccessDenied, match="could not be read"):
+        edit(keyed, passphrase="wrong-passphrase")
+    assert edit(keyed, password="back-to-password").private_key.get_secret_value() == ""
+    assert edit(keyed, label="Renamed").private_key.get_secret_value() == locked
+
+    service = GrantInput(kind="service", label="API", url="https://api.example.com/v1",
+                         fingerprint="a" * 64, secret="stored-token-value")
+    assert edit(service, writable=True).fingerprint == "a" * 64
+    assert edit(service, secret="replacement-token").secret.get_secret_value() == "replacement-token"
+    assert edit(service, secret="").secret.get_secret_value() == "stored-token-value"
+    moved = edit(service, url="https://API.example.com:8443/v2/")
+    assert (moved.url, moved.fingerprint) == ("https://api.example.com:8443/v2", "")
+    assert edit(service, auth_header="X-API-Key", auth_scheme="").auth_header == "X-API-Key"
+
+
+@pytest.mark.parametrize("kind, changes, message", [
+    ("machine", {"host": "nas-LEAKCHECK.local"}, "not a hostname"),
+    ("machine", {"host": "https://10.0.0.1/LEAKCHECK"}, "not a hostname"),
+    ("machine", {"host": "224.0.0.1"}, "unicast"),
+    ("machine", {"host": "0.0.0.0"}, "unicast"),
+    ("machine", {"host": "fd00::1%LEAKCHECK"}, "interface scope"),
+    ("machine", {"username": "root LEAKCHECK"}, "POSIX username"),
+    ("machine", {"username": "-LEAKCHECK"}, "POSIX username"),
+    ("machine", {"label": "   "}, "name"),
+    ("machine", {"fingerprint": "SHA256:LEAKCHECK"}, "fingerprint"),
+    ("machine", {"url": "https://LEAKCHECK.example"}, "do not apply"),
+    ("machine", {"password": "LEAKCHECK-password", "private_key": "LEAKCHECK-key"}, "not both"),
+    ("machine", {"private_key": "LEAKCHECK not a key"}, "could not be read"),
+    ("machine", {"passphrase": "LEAKCHECK"}, "signs in with a password"),
+    ("service", {"url": "http://LEAKCHECK.example"}, "HTTPS"),
+    ("service", {"url": "https://user:LEAKCHECK@api.example.com"}, "without credentials"),
+    ("service", {"url": "https://api.example.com/?LEAKCHECK=1"}, "without credentials"),
+    ("service", {"secret": "LEAK"}, "8 to 8,192"),
+    ("service", {"auth_header": "Host"}, "credential header"),
+    ("service", {"fingerprint": "LEAKCHECK"}, "SHA-256"),
+    ("service", {"host": "10.0.0.1"}, "do not apply"),
+])
+def test_apply_saved_edit_validates_like_the_card_without_echoing(kind, changes, message):
+    from app.core.chat_access import SavedConnectionEdit, apply_saved_edit
+    current = (GrantInput(kind="machine", label="NAS", host="10.0.0.5", username="root", password="stored-password")
+               if kind == "machine" else
+               GrantInput(kind="service", label="API", url="https://api.example.com", secret="stored-token-value"))
+    with pytest.raises(AccessDenied, match=message) as error:
+        apply_saved_edit(current, SavedConnectionEdit.model_validate(changes))
+    assert "LEAK" not in str(error.value) and "stored-" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_racing_the_handshake_refuses_the_grant(broker, ssh_target, monkeypatch):
+    from pydantic import SecretStr
+    from app.core import chat_vault
+    from app.core.chat_access import GrantSubmission
+    spec, commands, _ = ssh_target
+    loads = []
+    def load(owner, saved_id):
+        loads.append(saved_id)
+        # Edited between the first read and the post-handshake recheck.
+        return spec if len(loads) == 1 else spec.model_copy(update={"password": SecretStr("edited-meanwhile")})
+    monkeypatch.setattr(chat_vault, "load", load)
+    requested = asyncio.create_task(broker.request("chat", "machine", "Reuse a saved connection"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    with pytest.raises(AccessDenied, match="changed while connecting"):
+        await broker.fulfill("chat", request.id, GrantSubmission(saved_id="a" * 32))
+    assert not broker.grants and not commands
+    await broker.decline("chat", request.id)
+    with pytest.raises(AccessDenied):
+        await requested
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_api_is_owner_only_and_never_echoes_secrets(broker, saved_vault, ssh_target, monkeypatch):
+    from app.api import chat_access as api
+    from app.core import chat_vault
+    from app.api.auth import require_admin
+    spec, _, _ = ssh_target
+    saved_id = chat_vault.save(EDIT_OWNER, spec)
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value={"id": "chat"}))
+    monkeypatch.setattr(api, "owning_device", AsyncMock(return_value=None))
+    app = FastAPI()
+    app.include_router(api.router)
+    # Same owner guard as deleting a saved connection.
+    routes = {(tuple(r.methods), r.path): r for r in api.router.routes if r.path.endswith("/saved/{connection_id}")}
+    for route in routes.values():
+        assert any(dep.call is require_admin for dep in route.dependant.dependencies)
+    assert {methods for methods, _ in routes} == {("PATCH",), ("DELETE",)}
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    endpoint = f"/api/v1/chat-access/chat/saved/{saved_id}"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        for invalid in ({"password": "MUST-NOT-ECHO", "port": "22"},
+                        {"password": "MUST-NOT-ECHO", "port": 70000},
+                        {"password": "MUST-NOT-ECHO", "port": 0},
+                        {"password": "MUST-NOT-ECHO", "unknown": True}):
+            response = await client.patch(endpoint, json=invalid)
+            assert response.status_code == 422 and "MUST-NOT-ECHO" not in response.text
+        response = await client.patch(endpoint, json={"host": "nas.local", "password": "MUST-NOT-ECHO"})
+        assert response.status_code == 400 and "MUST-NOT-ECHO" not in response.text
+        response = await client.patch(f"/api/v1/chat-access/chat/saved/{'f' * 32}", json={"label": "Missing"})
+        assert response.status_code == 400
+        response = await client.patch(endpoint, json={"label": "Renamed", "password": "fresh-only-secret"})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"updated": True, "revoked": 0, "host_key_cleared": False}
+        assert "fresh-only-secret" not in response.text
+        listed = await client.get("/api/v1/chat-access/chat")
+        assert "fresh-only-secret" not in listed.text and "test-only-password" not in listed.text
+    stored = chat_vault.load(EDIT_OWNER, saved_id)
+    assert (stored.label, stored.password.get_secret_value()) == ("Renamed", "fresh-only-secret")
+
+
+@pytest.mark.asyncio
+async def test_private_inputs_require_secure_transport_and_real_owner(monkeypatch):
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    from app.api import chat_access as api
+    monkeypatch.setattr(api, "require_session", AsyncMock())
+    def request(scheme, peer, host, preview=False):
+        scope = {"type": "http", "scheme": scheme, "method": "GET", "path": "/",
+                 "headers": [(b"host", host.encode())], "server": (host, 443),
+                 "client": (peer, 1234), "shuffle.ingress": "local", "state": {}}
+        if preview:
+            scope["state"]["preview_grant"] = object()
+        return Request(scope)
+    with pytest.raises(HTTPException) as error:
+        await api.checked(request("http", "10.0.0.2", "10.0.0.1"), "chat")
+    assert error.value.status_code == 403
+    await api.checked(request("http", "127.0.0.1", "localhost"), "chat")
+    await api.checked(request("https", "10.0.0.2", "10.0.0.1"), "chat")
+    with pytest.raises(HTTPException):
+        await api.checked(request("https", "10.0.0.2", "10.0.0.1", preview=True), "chat")
+
+
+_DESKTOP_TOKEN = "ab" * 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,scheme,port,peer,host,headers,desktop,accepted", [
+    # The desktop app window carries its per-launch listener token.
+    ("desktop window", "http", 8000, "127.0.0.1", "127.0.0.1:8000",
+     [(b"x-shuffle-desktop-listener", _DESKTOP_TOKEN.encode())], True, True),
+    # A separate browser tab on localhost beside the desktop app has no token.
+    ("chrome on loopback", "http", 8000, "127.0.0.1", "localhost:8000", [], True, False),
+    ("wrong desktop token", "http", 8000, "127.0.0.1", "localhost:8000",
+     [(b"x-shuffle-desktop-listener", b"cd" * 32)], True, False),
+    ("loopback without desktop", "http", 8000, "127.0.0.1", "localhost:8000", [], False, True),
+    ("plaintext LAN", "http", 8000, "10.0.0.2", "10.0.0.1:8000", [], False, False),
+    ("LAN forged proto", "http", 8000, "10.0.0.2", "10.0.0.1:8000",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    ("loopback forged proto", "http", 8000, "127.0.0.1", "localhost:8000",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    # Managed tunnel: cloudflared reaches only the loopback remote listener.
+    ("managed tunnel", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"https")], False, True),
+    ("managed tunnel beside desktop", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"https")], True, True),
+    ("tunnel visitor on http", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com",
+     [(b"x-forwarded-proto", b"http")], False, False),
+    ("tunnel without proto", "http", 8001, "127.0.0.1", "shuffle-x.hobbycoders.com", [], False, False),
+    ("unknown socket", "http", 9999, "127.0.0.1", "localhost:9999",
+     [(b"x-forwarded-proto", b"https")], False, False),
+    ("TLS socket", "https", 8443, "10.0.0.2", "worker.example.com", [], False, True),
+])
+async def test_private_access_origins_through_real_ingress(monkeypatch, case, scheme, port, peer,
+                                                           host, headers, desktop, accepted):
+    """Transport trust comes from the accepting socket, never a client header."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from app.api import chat_access as api
+    from app.core import desktop_listener
+    from app.serve import IngressApplication
+
+    monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "chat"}))
+    monkeypatch.setattr(desktop_listener, "_configured", desktop)
+    monkeypatch.setattr(desktop_listener, "_token", _DESKTOP_TOKEN if desktop else None)
+    seen = []
+
+    async def capture(scope, receive, send):
+        seen.append(scope)
+
+    # A client cannot pre-set the flag: the wrapper recomputes it per socket.
+    await IngressApplication(capture, 8000, 8001)({
+        "type": "http", "scheme": scheme, "method": "GET", "path": "/api/v1/chat-access/chat",
+        "headers": [(b"host", host.encode()), *headers], "server": ("127.0.0.1", port),
+        "client": (peer, 1234), "shuffle.forwarded_https": True, "state": {}}, None, None)
+    request = Request(seen[0])
+    if accepted:
+        assert await api.checked(request, "chat") == {"id": "chat"}, case
+        return
+    with pytest.raises(HTTPException) as error:
+        await api.checked(request, "chat")
+    assert error.value.status_code == 403, case
+    # Actionable for the common case of a browser tab beside the desktop app.
+    assert "desktop app window" in error.value.detail
+    assert "HTTPS remote access address" in error.value.detail
+    api.require_session.assert_not_awaited()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row", [None, {"mode": "unexpected"}, {"mode": "voice", "owner_device_id": "peer"}])
+async def test_private_access_still_rejects_missing_unknown_or_mirrored_session(monkeypatch, row):
+    from app.db import database
+    from app.network import control
+    monkeypatch.setattr(database, "get_session", lambda sid: row)
+    monkeypatch.setattr(control, "owner_of", lambda r: r.get("owner_device_id"))
+    with pytest.raises(AccessDenied):
+        await _real_session_owner("s")
+
+
+@pytest.mark.parametrize("mode", [None, "code", "voice"])
+def test_code_and_voice_options_include_private_tools_without_chat_restrictions(tmp_path, monkeypatch, mode):
+    from unittest.mock import patch
+    import app.core.query_options as qo
+    from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS
+    profile = {"id": "p", "config": {"model": "sonnet", "tools_preset": "claude_code", "tool_selection_mode": "all", "cwd": str(tmp_path)}}
+    with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode}), patch.object(qo, "get_security_instructions", return_value=""):
+        options, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
+    assert "chat-access" in options.mcp_servers
+    assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
+    assert "private input card" in str(options.system_prompt)
+    assert "For repository development, ask the user to switch" not in str(options.system_prompt)
+    assert options.tools == {"type": "preset", "preset": "claude_code"}
+    profile["config"].update(tool_selection_mode="disallow", disallowed_tools=CHAT_MODE_RESOURCE_TOOLS)
+    with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode}), patch.object(qo, "get_security_instructions", return_value=""):
+        denied, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
+    assert "chat-access" not in denied.mcp_servers
+    assert not set(CHAT_MODE_RESOURCE_TOOLS).intersection(denied.allowed_tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission_mode", ["default", "bypassPermissions"])
+async def test_voice_bridge_private_grant_and_mode_confirmation(broker, ssh_target, monkeypatch, permission_mode):
+    from app.core.chat_access import GrantSubmission
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.core.voice_bridge import VoiceBridge
+    from app.mcp import chat_access_sdk as sdk
+    monkeypatch.setattr(sdk, "broker", broker)
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {
+        "mode": "voice", "permission_mode": permission_mode,
+    })
+    bridge = VoiceBridge("voice", "test", api_key="unused", model="gpt-realtime", max_call_minutes=1,
+                         app_tools=recorded_sdk_server_tools(sdk.create_chat_access_server("voice")))
+    task = asyncio.create_task(bridge._tool_app("RequestChatAccess", {"kind":"machine", "purpose":"Inspect server"}))
+    await asyncio.sleep(0)
+    assert not task.done() and not broker.grants
+    spec, commands, _ = ssh_target
+    request_id = next(iter(broker.requests))
+    await broker.fulfill("voice", request_id, GrantSubmission(connection=spec))
+    response = await task
+    assert "test-only-password" not in str(response)
+    grant_id = next(iter(broker.grants))
+    task = asyncio.create_task(bridge._tool_app("ChatRunCommand", {"grant_id":grant_id, "command":"voice"}))
+    if permission_mode == "default":
+        action = await pending(broker)
+        assert not task.done() and not commands
+        await broker.decide("voice", action.id, False)
+        assert "denied" in str(await task)
+        assert not commands
+    else:
+        assert "remote:voice" in str(await asyncio.wait_for(task, 3))
+        assert commands == ["voice"] and not broker.actions
+    broker.revoke("voice", grant_id)
+
+
+def _listing_tools(monkeypatch, broker):
+    """ChatResources over the real owner lookup, a stubbed session row and no UI."""
+    from app.core import chat_vault
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.db import database
+    from app.mcp import chat_access_sdk as sdk
+    from app.network import control
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    monkeypatch.setattr(database, "get_session", lambda sid: {"mode": "chat", "instance_id": "worker"})
+    monkeypatch.setattr(control, "owner_of", lambda row: None)
+    monkeypatch.setattr(broker, "_notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sdk, "broker", broker)
+
+    def no_catalog(*args, **kwargs):
+        raise AssertionError("ChatResources must not read the saved-connection catalogue")
+    monkeypatch.setattr(chat_vault, "catalog", no_catalog)
+    return {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_busy(broker, monkeypatch):
+    """#1605: the listing must not queue behind the shared default executor.
+
+    A pending RequestChatAccess waits up to 240 s, and every run_sync caller
+    in the process shares asyncio's default executor. With that executor
+    fully occupied, ChatResources still answers promptly, asks for nothing
+    and leaves the pending request untouched.
+    """
+    import concurrent.futures
+    import json
+    import threading
+
+    tools = _listing_tools(monkeypatch, broker)
+    request_task = asyncio.create_task(
+        tools["RequestChatAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
+    async with asyncio.timeout(3):
+        while not broker.requests:
+            await asyncio.sleep(0.001)
+
+    asyncio.get_running_loop().set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+    release = threading.Event()
+    blocker = asyncio.create_task(asyncio.to_thread(release.wait, 30))
+    try:
+        await asyncio.sleep(0.05)  # the blocker now holds the only shared worker
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+        assert not response.get("isError"), response
+        assert json.loads(response["content"][0]["text"]) == {
+            "grants": [], "folder_available": chat_files.available(),
+        }
+        assert not request_task.done() and len(broker.requests) == 1 and not broker.actions
+    finally:
+        release.set()
+        await blocker
+    await broker.decline("chat", next(iter(broker.requests)))
+    assert (await request_task)["isError"]
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_returns_bounded_error_when_owner_lookup_stalls(broker, monkeypatch):
+    import threading
+    from app.db import database
+
+    tools = _listing_tools(monkeypatch, broker)
+    release = threading.Event()
+    monkeypatch.setattr(database, "get_session", lambda sid: release.wait(30) and {"mode": "chat"})
+    monkeypatch.setattr(chat_access, "LISTING_TIMEOUT_SECONDS", 0.2)
+    try:
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 3)
+    finally:
+        release.set()
+    assert response["isError"]
+    text = response["content"][0]["text"]
+    assert "timed out after 0.2 seconds" in text and "No access was requested" in text
+    assert not broker.requests and not broker.actions
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_lists_only_live_grant_metadata(broker, monkeypatch, tmp_path):
+    import json
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    owner = (None, "worker", None)
+    live = chat_access.Grant("a" * 32, "chat", owner, "Private label", "folder",
+                             str(tmp_path), time.time() + 60, writable=True)
+    expired = chat_access.Grant("b" * 32, "chat", owner, "Old", "folder", str(tmp_path), time.time() - 1)
+    other = chat_access.Grant("c" * 32, "other", owner, "Other", "folder", str(tmp_path), time.time() + 60)
+    for grant in (live, expired, other):
+        broker.grants[grant.id] = grant
+    response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    text = response["content"][0]["text"]
+    assert json.loads(text)["grants"] == [
+        {"id": live.id, "kind": "folder", "expires_at": live.expires_at, "writable": True}]
+    assert expired.id not in broker.grants and other.id in broker.grants
+    assert "Private label" not in text and str(tmp_path) not in text
+
+
+@pytest.mark.asyncio
+async def test_chat_resources_logs_stage_timings_at_info_without_details(broker, monkeypatch, tmp_path, caplog):
+    """A prompt listing still leaves a timing line at the default INFO level, so
+    a stall outside the listing can be told apart from one inside it (#1605)."""
+    import logging
+    import time
+
+    tools = _listing_tools(monkeypatch, broker)
+    grant = chat_access.Grant("d" * 32, "chat", (None, "worker", None), "Private label", "folder",
+                              str(tmp_path), time.time() + 60)
+    broker.grants[grant.id] = grant
+    with caplog.at_level(logging.INFO, logger="app.core.chat_access"):
+        await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    lines = [r for r in caplog.records if r.getMessage().startswith("ChatResources listing:")]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    text = lines[0].getMessage()
+    assert "grants=1" in text and "owner_lookup=" in text and "total=" in text
+    assert "Private label" not in text and str(tmp_path) not in text
+    broker.revoke("chat", grant.id)
+
+
+# ── Subagents: access shows in the main chat, answers go to the subagent ──
+
+_OWNER = ("dev", "inst", None)
+
+
+def _rows(**extra):
+    base = {"owner_device_id": "dev", "instance_id": "inst", "api_user_id": None, "mode": "code"}
+    rows = {
+        "main": {**base, "id": "main", "title": "Ship the release"},
+        "child": {**base, "id": "child", "title": "Review PR #1837", "is_worker": True, "parent_session_id": "main"},
+        "nested": {**base, "id": "nested", "title": "Nested", "is_worker": True, "parent_session_id": "child"},
+        "peer": {**base, "id": "peer", "title": "Peer", "is_worker": False, "parent_session_id": "main"},
+        "remote-child": {**base, "id": "remote-child", "is_worker": True, "parent_session_id": "remote-root"},
+        "remote-root": {**base, "id": "remote-root", "owner_device_id": "dev-b"},
+        "orphan": {**base, "id": "orphan", "is_worker": True, "parent_session_id": "gone"},
+        "loop-a": {**base, "id": "loop-a", "is_worker": True, "parent_session_id": "loop-b"},
+        "loop-b": {**base, "id": "loop-b", "is_worker": True, "parent_session_id": "loop-a"},
+    }
+    rows.update(extra)
+    return rows
+
+
+@pytest.fixture
+def delegation(broker, monkeypatch, mock_db):
+    """A main chat with a subagent ('child') and a StartSession peer ('peer') on this worker."""
+    from app.db import database
+    from app.network import control
+    rows = _rows()
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(control, "owner_of", lambda row: row.get("owner_device_id") if row.get("owner_device_id") != "dev" else None)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=_OWNER))
+    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    monkeypatch.setattr(chat_access, "_defer_if_away", AsyncMock())
+    published = []
+
+    async def publish(session_id, api_user_id, *, saved=False, pending=None):
+        published.append((session_id, pending))
+    monkeypatch.setattr(chat_access, "publish_change", publish)
+    return broker, published
+
+
+def test_main_session_of_finds_the_root_main_chat_on_this_worker(delegation):
+    assert chat_access.main_session_of("child") == "main"
+    assert chat_access.main_session_of("nested") == "main"  # the root, not the intermediate parent
+    # A main chat and a StartSession peer show their own access.
+    assert chat_access.main_session_of("main") is None
+    assert chat_access.main_session_of("peer") is None
+    # No main chat here: another worker's root, a missing parent, a cycle.
+    assert chat_access.main_session_of("remote-child") is None
+    assert chat_access.main_session_of("orphan") is None
+    assert chat_access.main_session_of("loop-a") is None
+
+
+async def _until(predicate):
+    async with asyncio.timeout(3):
+        while not predicate():
+            await asyncio.sleep(0.001)
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.asyncio
+async def test_subagent_request_grant_and_approval_surface_in_main_chat(delegation, tmp_path):
+    from app.core.chat_access import GrantSubmission
+    broker, published = delegation
+    task = asyncio.create_task(broker.request("child", "folder", "Read the build logs", suggested_path=str(tmp_path)))
+    await _until(lambda: "child" in broker._main)
+    await asyncio.gather(*broker._notifications)
+    # The main chat's panel lists the request, labelled with who asks; the
+    # sidebar count for the main chat includes it.
+    main = await broker.snapshot("main")
+    [request] = main["requests"]
+    assert request["purpose"] == "Read the build logs"
+    assert request["session_id"] == "child" and request["subagent"] == "Review PR #1837"
+    assert broker.pending_count("main") == 1
+    assert ("main", 1) in published
+    # The subagent's own session still holds it (unlabelled): nothing moved.
+    assert [r["id"] for r in (await broker.snapshot("child"))["requests"]] == [request["id"]]
+    # Answers go to the subagent's session; the main chat cannot claim it.
+    spec = GrantInput(kind="folder", label="Logs", path=str(tmp_path), writable=True)
+    with pytest.raises(AccessDenied):
+        await broker.fulfill("main", request["id"], GrantSubmission(connection=spec))
+    await broker.fulfill("child", request["id"], GrantSubmission(connection=spec))
+    grant = await task
+    main = await broker.snapshot("main")
+    assert main["requests"] == []
+    assert [(g["id"], g["session_id"], g["subagent"]) for g in main["grants"]] == [(grant["id"], "child", "Review PR #1837")]
+    # Grants never move between sessions.
+    with pytest.raises(AccessDenied):
+        await broker.run("main", grant["id"], "list", {"path": "."})
+    # A one-shot approval also waits in the main chat, answered for the subagent.
+    write = asyncio.create_task(broker.run("child", grant["id"], "write", {"path": "x", "content": "yes"}))
+    action = await pending(broker)
+    [shown] = (await broker.snapshot("main"))["actions"]
+    assert (shown["id"], shown["session_id"], shown["subagent"]) == (action.id, "child", "Review PR #1837")
+    assert broker.pending_count("main") == 1
+    with pytest.raises(AccessDenied):
+        await broker.decide("main", action.id, True)
+    assert not (tmp_path / "x").exists()
+    await broker.decide("child", action.id, True)
+    assert await write == {"written": True}
+    broker.revoke("child", grant["id"])
+    assert (await broker.snapshot("main"))["grants"] == []
+    await asyncio.gather(*broker._notifications)
+    assert published[-1] == ("main", 0)
+
+
+@pytest.mark.asyncio
+async def test_peer_and_main_chat_keep_their_own_access(delegation):
+    broker, published = delegation
+    for session_id in ("peer", "main"):
+        pending_request = await broker.request(session_id, "service", "Manage DNS", service_provider="cloudflare")
+        assert pending_request["status"] == "awaiting_user"
+    await asyncio.gather(*broker._notifications)
+    assert broker._main == {}
+    main = await broker.snapshot("main")
+    assert [(r["purpose"], "session_id" in r) for r in main["requests"]] == [("Manage DNS", False)]
+    assert [r["purpose"] for r in (await broker.snapshot("peer"))["requests"]] == ["Manage DNS"]
+    assert broker.pending_count("main") == 1 and broker.pending_count("peer") == 1
+    assert {session for session, _ in published} == {"peer", "main"}
+
+
+@pytest.mark.asyncio
+async def test_nested_subagent_shows_in_root_main_chat_and_remote_child_stays_put(delegation):
+    broker, _ = delegation
+    await broker.request("nested", "service", "Read the status page", service_provider="cloudflare")
+    await broker.request("remote-child", "service", "Remote work", service_provider="cloudflare")
+    assert broker._main == {"nested": "main"}
+    [shown] = (await broker.snapshot("main"))["requests"]
+    assert (shown["session_id"], shown["subagent"]) == ("nested", "Nested")
+    assert (await broker.snapshot("child"))["requests"] == []
+    # Another worker's child has no main chat here; it keeps its own (Away refuses it there).
+    assert [r["purpose"] for r in (await broker.snapshot("remote-child"))["requests"]] == ["Remote work"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["running", "parked", "queued-wake", "parked-removed", "running-removed",
+                                   "parked-followup", "parked-pending-report"])
+async def test_subagent_live_access_survives_turn_and_queue_transitions(delegation, mock_db, state):
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    broker, _ = delegation
+    turn = turns.enqueue_turn("child", "user", prompt="Review")
+    turns.start_turn(turn["id"])
+    request = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    try:
+        if state.startswith("parked") or state == "queued-wake":
+            task_registry.mark_background_launch("child", "review-launch")
+            task_registry.start_task("child", "background-review", "agent", "Review", tool_use_id="review-launch")
+            turns.park_turn(turn["id"], ["background-review"])
+        if state not in ("running", "parked"):
+            # Explicit ordering: the shim's NOW() has only second precision.
+            mock_db.execute("UPDATE turns SET created_at = ? WHERE id = ?",
+                            ("2000-01-01T00:00:00", turn["id"]))
+            followup = turns.enqueue_turn("child", "unpark" if state == "queued-wake" else "user",
+                                          prompt="Continue")
+            if state.endswith("removed"):
+                turns.remove_queued_turn(followup["id"])
+            elif state in ("parked-followup", "parked-pending-report"):
+                turns.start_turn(followup["id"])
+                turns.settle_turn(followup["id"], "completed")
+                if state == "parked-pending-report":
+                    # The background job finished, but its completion has not
+                    # been delivered/queued as a wake yet.
+                    task_registry.complete_task("child", "background-review", "completed", notify=False)
+        # Drive the real request producer and durable lifecycle transitions,
+        # not a seeded request or a mocked terminal-state predicate.
+        snapshots = await asyncio.gather(broker.snapshot("main"), broker.snapshot("main"))
+        for snapshot in snapshots:
+            assert [r["id"] for r in snapshot["requests"]] == [request["request_id"]]
+        assert request["request_id"] in broker.requests
+    finally:
+        for pending_request in list(broker.requests.values()):
+            broker._finish_request(pending_request)
+        task_registry.clear_session("child")
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_subagent_access_survives_completed_turn_waiting_on_posted_question(delegation):
+    from app.core.user_question_handler import UserQuestionHandler
+    from app.db import interactions, turns
+    broker, _ = delegation
+    turn = turns.enqueue_turn("child", "user", prompt="Inspect the service")
+    turns.start_turn(turn["id"])
+    request = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    handler = UserQuestionHandler()
+    try:
+        assert (await handler.post_question(
+            request_id="access-ready", tool_use_id="question-tool", session_id="child",
+            questions=[{"question": "Are your service inputs ready?"}],
+            broadcast_func=AsyncMock(return_value=True)))["status"] == "posted"
+        turns.settle_turn(turn["id"], "completed")
+        assert handler.get_pending_questions("child")
+        assert (await broker.snapshot("main"))["requests"][0]["id"] == request["request_id"]
+        # Once the posted question is no longer answerable and no work remains,
+        # the completed child really is terminal.
+        for question in interactions.get_pending_interactions("child"):
+            interactions.cancel_interaction(question["id"])
+        assert (await broker.snapshot("main"))["requests"] == []
+    finally:
+        for pending_request in list(broker.requests.values()):
+            broker._finish_request(pending_request)
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_legacy_subagent_inherits_main_api_principal_for_access(delegation, monkeypatch):
+    from app.core import api_user_scope
+    from app.db import database
+    broker, _ = delegation
+    rows = _rows()
+    rows["main"]["api_user_id"] = "same-key"
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    # Old worker rows have NULL api_user_id, but ownership is inherited by the
+    # existing API-user scope rules, including through a nested worker.
+    assert api_user_scope.session_api_user_id(rows["nested"]) == "same-key"
+    request = await broker.request("nested", "service", "Read DNS", service_provider="cloudflare")
+    try:
+        assert chat_access.main_session_of("nested") == "main"
+        assert (await broker.snapshot("main", rows["main"]))["requests"][0]["id"] == request["request_id"]
+    finally:
+        broker._finish_request(broker.requests[request["request_id"]])
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_terminal_snapshot_cancels_inflight_grant_without_leaking_access(delegation, ssh_target, monkeypatch):
+    from app.core.chat_access import GrantSubmission
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    requested = asyncio.create_task(broker.request("child", "machine", "Read logs"))
+    await _until(lambda: "child" in broker._main)
+    request_id = next(iter(broker.requests))
+    pinned, release = asyncio.Event(), asyncio.Event()
+    original_pin = broker.pin_host_key
+
+    async def pin_and_wait(grant, fingerprint):
+        await original_pin(grant, fingerprint)
+        pinned.set()
+        await release.wait()
+
+    monkeypatch.setattr(broker, "pin_host_key", pin_and_wait)
+    approval = asyncio.create_task(broker.fulfill("child", request_id, GrantSubmission(connection=ssh_target[0])))
+    try:
+        await asyncio.wait_for(pinned.wait(), 2)
+        task_registry.mark_user_stopped("child")
+        snapshots = await asyncio.gather(broker.snapshot("main"), broker.snapshot("main"))
+        assert all(snapshot["requests"] == [] for snapshot in snapshots)
+        release.set()
+        with pytest.raises(AccessDenied, match="no longer available"):
+            await asyncio.wait_for(approval, 2)
+        with pytest.raises(AccessDenied, match="declined"):
+            await asyncio.wait_for(requested, 2)
+        assert not broker.requests and not broker.grants
+        assert ssh_target[1] == []
+    finally:
+        release.set()
+        task_registry.clear_user_stop("child")
+        requested.cancel()
+        approval.cancel()
+        await asyncio.gather(requested, approval, return_exceptions=True)
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.asyncio
+async def test_terminal_snapshot_releases_real_action_waiter_and_preserves_grant(delegation, tmp_path):
+    from app.core.chat_access import GrantSubmission
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    requested = asyncio.create_task(broker.request("child", "folder", "Read build logs"))
+    await _until(lambda: "child" in broker._main)
+    request_id = next(iter(broker.requests))
+    await broker.fulfill("child", request_id, GrantSubmission(
+        connection=GrantInput(kind="folder", label="Logs", path=str(tmp_path), writable=True)))
+    grant = await requested
+    write = asyncio.create_task(broker.run("child", grant["id"], "write", {"path": "x", "content": "yes"}))
+    try:
+        action = await pending(broker)
+        assert (await broker.snapshot("main"))["actions"][0]["id"] == action.id
+        task_registry.mark_user_stopped("child")
+        snapshots = await asyncio.gather(broker.snapshot("main"), broker.snapshot("main"))
+        assert all(snapshot["actions"] == [] for snapshot in snapshots)
+        assert all(snapshot["grants"][0]["id"] == grant["id"] for snapshot in snapshots)
+        with pytest.raises(AccessDenied, match="denied"):
+            await asyncio.wait_for(write, 1)
+        with pytest.raises(AccessDenied, match="no longer awaiting"):
+            await broker.decide("child", action.id, True)
+        assert not (tmp_path / "x").exists()
+    finally:
+        task_registry.clear_user_stop("child")
+        write.cancel()
+        await asyncio.gather(write, return_exceptions=True)
+        broker.revoke("child", grant["id"])
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "aborted", "stopped", "archived"])
+async def test_subagent_pending_access_withdrawn_on_terminal_state_and_can_request_on_resume(
+        delegation, monkeypatch, mock_db, terminal):
+    from app.db import database, turns
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    rows = _rows()
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    turn = turns.enqueue_turn("child", "user", prompt="Review")
+    turns.start_turn(turn["id"])
+    service = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    assert (await broker.snapshot("main"))["requests"][0]["id"] == service["request_id"]
+    grant = chat_access.Grant("existing", "child", _OWNER, "Logs", "folder", "Logs",
+                              chat_access.time.time() + 60)
+    broker.grants[grant.id] = grant
+    if terminal in ("completed", "aborted"):
+        turns.settle_turn(turn["id"], terminal)
+    elif terminal == "stopped":
+        task_registry.mark_user_stopped("child")
+    else:
+        rows["child"]["status"] = "archived"
+    try:
+        assert (await broker.snapshot("main"))["requests"] == []
+        assert service["request_id"] not in broker.requests
+        assert broker.pending_count("main") == 0
+        # Completed workers' existing grants stay visible so the owner can revoke them.
+        assert (await broker.snapshot("main"))["grants"][0]["id"] == grant.id
+        broker.revoke("child", grant.id)
+        assert (await broker.snapshot("main"))["grants"] == []
+    finally:
+        task_registry.clear_user_stop("child")
+        rows["child"]["status"] = "active"
+        turns.settle_turn(turn["id"], "aborted")
+    # The SQLite shim's NOW() has second precision: make sequential turn order
+    # explicit instead of letting random ids break a same-second timestamp tie.
+    mock_db.execute("UPDATE turns SET created_at = ? WHERE id = ?", ("2000-01-01T00:00:00", turn["id"]))
+    resumed = turns.enqueue_turn("child", "user", prompt="Continue")
+    turns.start_turn(resumed["id"])
+    fresh = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    assert fresh["request_id"] != service["request_id"]
+    assert (await broker.snapshot("main"))["requests"][0]["id"] == fresh["request_id"]
+    broker._finish_request(broker.requests[fresh["request_id"]])
+    await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_subagent_pending_blocking_request_and_action_cancel_on_stop(delegation):
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    task = asyncio.create_task(broker.request("child", "machine", "Read logs"))
+    await _until(lambda: "child" in broker._main)
+    action = chat_access.Action("approval", "grant", "child", "command", {"command": "probe"},
+                                chat_access.time.time() + 60, asyncio.get_running_loop().create_future())
+    broker.actions[action.id] = action
+    task_registry.mark_user_stopped("child")
+    try:
+        snapshot = await broker.snapshot("main")
+        assert snapshot["requests"] == snapshot["actions"] == []
+        assert action.decision.done() and action.decision.result() is False
+        with pytest.raises(AccessDenied, match="declined"):
+            await asyncio.wait_for(task, 1)
+    finally:
+        task_registry.clear_user_stop("child")
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["main-key", "child-key", "parent", "intermediate-key", "not-worker"])
+async def test_cached_subagent_link_revalidates_parent_chain_and_principal(delegation, monkeypatch, change):
+    from app.db import database
+    broker, _ = delegation
+    rows = _rows(other={**_rows()["main"], "id": "other"})
+    # Current workers persist their inherited key. NULL on a legacy worker
+    # instead means "inherit", not a different principal from its parent.
+    for row in rows.values():
+        row["api_user_id"] = "same-key"
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    pending_request = await broker.request("nested", "service", "Read DNS", service_provider="cloudflare")
+    assert (await broker.snapshot("main"))["requests"][0]["id"] == pending_request["request_id"]
+    if change == "main-key":
+        rows["main"]["api_user_id"] = "other-key"
+    elif change == "child-key":
+        rows["nested"]["api_user_id"] = "other-key"
+    elif change == "parent":
+        rows["child"]["parent_session_id"] = "other"
+    elif change == "intermediate-key":
+        rows["child"]["api_user_id"] = "other-key"
+    else:
+        rows["nested"]["is_worker"] = False
+    assert (await broker.snapshot("main", rows["main"]))["requests"] == []
+    assert "nested" not in broker._main
+    broker._finish_request(broker.requests[pending_request["request_id"]])
+    await asyncio.gather(*broker._notifications)
+
+
+def test_main_link_refuses_cross_principal_delegation(delegation, monkeypatch):
+    from app.db import database
+    rows = _rows()
+    rows["main"]["api_user_id"] = "other-key"
+    rows["child"]["api_user_id"] = "same-key"
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    assert chat_access.main_session_of("child") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_user_id", [None, "same-key"])
+async def test_same_principal_legacy_main_owner_stamp_keeps_subagent_access(delegation, monkeypatch, api_user_id):
+    from app.db import database
+    broker, _ = delegation
+    rows = _rows()
+    # Legacy owner chats may have no device stamp; owner_of still identifies
+    # both chats as local. A device stamp is not a different account principal.
+    rows["main"]["owner_device_id"] = None
+    rows["main"]["api_user_id"] = rows["child"]["api_user_id"] = api_user_id
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("dev", "inst", api_user_id)))
+    request = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    assert (await broker.snapshot("main", rows["main"]))["requests"][0]["id"] == request["request_id"]
+    broker._finish_request(broker.requests[request["request_id"]])
+    await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_pending", [False, True])
+async def test_service_access_in_away_mode_is_refused_and_recorded(broker, monkeypatch, already_pending):
+    from app.core import away_mode
+    monkeypatch.setattr(away_mode, "answers_questions_async", AsyncMock(return_value=False))
+    record = AsyncMock()
+    monkeypatch.setattr(away_mode, "record_decision", record)
+    monkeypatch.setattr(broker, "_show_in_main", AsyncMock())
+    if already_pending:
+        await broker.request("remote-child", "service", "Read DNS", service_provider="cloudflare")
+    monkeypatch.setattr(away_mode, "answers_questions_async", AsyncMock(return_value=True))
+    with pytest.raises(AccessDenied, match="Owner away; deferred"):
+        await broker.request("remote-child", "service", "Read DNS", service_provider="cloudflare")
+    assert not broker.requests and not broker.grants
+    record.assert_awaited_once_with("remote-child",
+                                   {"kind": "deferred", "action": "private service access request"},
+                                   "Deferred until you are back: private service access request")
+    await asyncio.gather(*broker._notifications)

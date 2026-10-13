@@ -1,0 +1,341 @@
+name: Publish Windows installer
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      candidate_run_id:
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable release to receive the verified Windows installer (vX.Y.Z)
+        required: true
+        type: string
+      candidate_run_id:
+        description: Reuse a private installer candidate after a verification-only fix (optional run ID)
+        required: false
+        type: string
+        default: ''
+      launcher_acceptance:
+        description: >-
+          Publish nothing: install the release_tag installer, stage this branch as a revision
+          that needs its newer launcher (ephemeral key), and check the launcher swap (#1821 D5)
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: desktop-installer-${{ inputs.launcher_acceptance && 'launcher-' || '' }}${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.launcher_acceptance != true &&
+      (inputs.candidate_run_id == '')
+    # Match desktop.yml: publisher fixtures include case-distinct paths that
+    # cannot coexist on Windows. The installed app is still verified on Windows.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test the tagged desktop source
+        working-directory: desktop
+        run: npm ci && npm test
+
+  build:
+    needs: check
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.launcher_acceptance != true &&
+      (inputs.candidate_run_id == '')
+    runs-on: windows-latest
+    timeout-minutes: 50
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            frontend/package-lock.json
+      - name: Validate release version
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Stable vX.Y.Z tag required' }
+          "DESKTOP_VERSION=$($env:RELEASE_TAG.Substring(1))" >> $env:GITHUB_ENV
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          APP_VERSION: ${{ inputs.release_tag }}
+        run: npm ci && npm run build
+      - name: Build bundled runtime
+        working-directory: desktop
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:worker -- --frontend-build ../frontend/build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/stamp-desktop-build.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Authenticode: Azure Trusted Signing or a PFX, from repository secrets
+      # (desktop/RELEASING.md). No secrets means an unsigned installer, as
+      # before; half-configured secrets fail here. Setting the repository
+      # variable DESKTOP_REQUIRE_SIGNING=true refuses unsigned releases.
+      - name: Choose code signing
+        id: signing
+        working-directory: desktop
+        env:
+          DESKTOP_REQUIRE_SIGNING: ${{ vars.DESKTOP_REQUIRE_SIGNING }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TRUSTED_SIGNING_PUBLISHER: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: node scripts/signing.mjs win --args-file "$env:RUNNER_TEMP/signing-args.txt" --github-env
+      - name: Build stable Windows installer
+        working-directory: desktop
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WIN_CSC_LINK: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signing = @(Get-Content "$env:RUNNER_TEMP/signing-args.txt" | Where-Object { $_ })
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Straight to the CLI so no shell re-splits the publisher name.
+          node node_modules/electron-builder/cli.js --publish never --win nsis --x64 "--config.extraMetadata.version=$env:DESKTOP_VERSION" @signing
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check Authenticode signatures
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          $installer = @(Get-ChildItem desktop/release -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
+          foreach ($file in @($installer[0].FullName, 'desktop/release/win-unpacked/AI Shuffle.exe')) {
+            $signature = Get-AuthenticodeSignature $file
+            if ($signature.Status -ne 'Valid') { throw "$file signature is $($signature.Status)" }
+            if (-not $signature.TimeStamperCertificate) { throw "$file has no timestamp" }
+            Write-Host "Signed: $(Split-Path $file -Leaf) by $($signature.SignerCertificate.Subject)"
+          }
+      - name: Collect private installer candidate
+        run: |
+          $installer = @(Get-ChildItem desktop/release -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
+          Copy-Item desktop/worker/desktop-build.json desktop/release/desktop-build.json
+          $hash = (Get-FileHash -Algorithm SHA256 $installer[0].FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer[0].Name)" | Set-Content -Encoding ascii desktop/release/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-candidate
+          path: |
+            desktop/release/*.exe
+            desktop/release/SHA256SUMS
+            desktop/release/desktop-build.json
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  verify:
+    needs: build
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.launcher_acceptance != true &&
+      (always() && (needs.build.result == 'success' || needs.build.result == 'skipped'))
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      EXPECT_SIGNED: ${{ needs.build.outputs.signed }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer-candidate
+          path: installer
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id || github.run_id }}
+      - name: Verify installed app, upgrade, and in-app update support
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Stable vX.Y.Z tag required' }
+          $installer = @(Get-ChildItem installer -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
+          if ($installer[0].Name -ne "AI-Shuffle-Desktop-$($env:RELEASE_TAG.Substring(1))-win-x64.exe") { throw 'Candidate release version mismatch' }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer[0].FullName).Hash.ToLowerInvariant()
+          if ((Get-Content installer/SHA256SUMS -Raw).Trim() -ne "$hash  $($installer[0].Name)") { throw 'Candidate checksum mismatch' }
+          $signature = Get-AuthenticodeSignature $installer[0].FullName
+          Write-Host "Installer signature: $($signature.Status)"
+          if ($env:EXPECT_SIGNED -eq 'true' -and $signature.Status -ne 'Valid') { throw 'The signed installer candidate lost its signature' }
+          node desktop/scripts/verify-installed-desktop.mjs $installer[0].FullName (Join-Path $env:RUNNER_TEMP 'installed-desktop-evidence')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-stable-installer
+          path: installer/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 7
+          name: installed-desktop-evidence
+          path: ${{ runner.temp }}/installed-desktop-evidence/
+          if-no-files-found: ignore
+
+  publish:
+    needs: verify
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.launcher_acceptance != true &&
+      (always() && needs.verify.result == 'success')
+    runs-on: ubuntu-latest
+    environment: account-hub-production
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-stable-installer
+          path: installer
+      - run: npm ci --no-audit --no-fund
+        working-directory: scripts/source-publisher
+      - name: Publish verified installer and anonymous download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+          RELEASE_GITHUB_REPO: ${{ vars.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle' }}
+          RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+        run: |
+          gh release upload "$RELEASE_TAG" installer/*.exe installer/SHA256SUMS installer/desktop-build.json
+          node desktop/scripts/publish-installer.mjs installer/*.exe "$RELEASE_TAG"
+      - name: Copy the installer to the R2 installer bucket
+        # Skipped until the owner sets the repository variable
+        # R2_INSTALLER_BUCKET (hobbycoders-cloud/hub/README.md, "Installer downloads from
+        # R2"). Stored as AI-Shuffle-Setup.exe, the name /v1/desktop/installer
+        # serves; the hub falls back to the GitHub asset for anything else.
+        if: vars.R2_INSTALLER_BUCKET != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          R2_INSTALLER_BUCKET: ${{ vars.R2_INSTALLER_BUCKET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          shopt -s nullglob
+          files=(installer/*.exe)
+          [ "${#files[@]}" -eq 1 ] || { echo "::error::Expected exactly one installer"; exit 1; }
+          bash desktop/scripts/upload-installer-r2.sh win "${RELEASE_TAG#v}" "${files[0]}" AI-Shuffle-Setup.exe
+      - name: Remove published build staging artifacts
+        # Publication is already complete; the one-day expiry backs up failed cleanup.
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const names = new Set(["windows-installer-candidate", "windows-stable-installer"]);
+            const params = {...context.repo, run_id: context.runId, per_page: 100};
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, params);
+            const selected = artifacts.filter(artifact => names.has(artifact.name));
+            for (const artifact of selected) {
+              await github.rest.actions.deleteArtifact({...context.repo, artifact_id: artifact.id});
+            }
+            const remaining = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, params);
+            if (remaining.some(artifact => selected.some(deleted => deleted.id === artifact.id))) {
+              throw new Error('Published build staging artifacts were not removed');
+            }
+            core.info(`Removed ${selected.length} published build staging artifacts`);
+
+  # The launcher replacement acceptance (desktop/LAUNCHER.md). Any branch, so a
+  # launcher change is proven before it merges. Publishes nothing, reads no
+  # secret and holds a read-only token: the release key is an ephemeral key made
+  # by the script and trusted only by the disposable install it creates.
+  launcher-acceptance:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor &&
+      github.event_name == 'workflow_dispatch' && inputs.launcher_acceptance == true
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download the older published installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'A published vX.Y.Z release is required' }
+          gh release download $env:RELEASE_TAG --pattern '*-win-x64.exe' --pattern SHA256SUMS --dir old-installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installer = @(Get-ChildItem old-installer -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer[0].FullName).Hash.ToLowerInvariant()
+          if ((Get-Content old-installer/SHA256SUMS -Raw).Trim() -ne "$hash  $($installer[0].Name)") { throw 'Installer checksum mismatch' }
+      - name: Build this branch's launcher code
+        working-directory: desktop
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Replace the older installed launcher, then restart twice
+        run: |
+          $installer = @(Get-ChildItem old-installer -Filter '*.exe' -File)
+          node desktop/scripts/verify-launcher-swap.mjs $installer[0].FullName (Join-Path $env:RUNNER_TEMP 'launcher-swap-evidence')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 7
+          name: launcher-swap-evidence
+          path: ${{ runner.temp }}/launcher-swap-evidence/
+          if-no-files-found: ignore

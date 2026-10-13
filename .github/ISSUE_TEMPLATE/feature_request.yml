@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a change to AI Shuffle
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Describe the work you want to do. Never include secrets or private data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Explain your workflow and where it falls short today.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed change
+      description: Describe what you would like AI Shuffle to do.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What have you tried, and why does it not meet your needs?
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Include examples or mockups if they help explain the request.

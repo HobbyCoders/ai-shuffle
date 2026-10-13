@@ -1,0 +1,35 @@
+/**
+ * Shared date/time formatting utilities.
+ *
+ * All backend timestamps are stored as UTC but may lack a trailing 'Z'.
+ * These helpers normalise the input and format it according to the user's
+ * chosen timezone (see timezonePreference store).
+ */
+
+import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
+
+/**
+ * Parse a backend UTC timestamp string into a proper Date.
+ * Appends 'Z' when the string has no timezone indicator so
+ * JavaScript treats it as UTC instead of local time.
+ */
+export function parseUTC(dateStr: string): Date {
+	// An explicit designator — `Z`/`z`, `+05:30`, `+0530` or an hour-only `+00`
+	// (Postgres text form) — is kept; appending a second one yields Invalid Date.
+	if (dateStr && !/(?:z|[+-]\d{2}(?::?\d{2})?)$/i.test(dateStr)) {
+		return new Date(dateStr + 'Z');
+	}
+	return new Date(dateStr);
+}
+
+/**
+ * Format a date string as full date + time respecting the timezone preference.
+ * Returns "Never" for null/empty inputs.
+ */
+export function formatDateTime(dateStr: string | null): string {
+	if (!dateStr) return 'Never';
+	const date = parseUTC(dateStr);
+	const tz = timezonePreference.resolveTimezone();
+	return date.toLocaleString(undefined, { timeZone: tz });
+}
+

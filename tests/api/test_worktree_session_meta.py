@@ -1,0 +1,455 @@
+"""
+Tests for ``enrich_session_worktree_meta`` — the shared helper that annotates a
+session poll with worktree metadata.
+
+Contract: ``worktree_deleted`` is True only when the owner's tree is not
+materialized — no active checkout among all rows for (project_v2, owner, branch),
+no in-flight ``ensure_worktree``, and (local only) no directory on this disk.
+Remote sessions never stat the viewing install. Resolver/DB errors fail open
+to False. The worktree row's ``status`` is never consulted.
+"""
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+import pytest
+
+import app.api.worktree_session_meta as wsm
+import app.core.project_utils as pu
+from app.api.worktree_session_meta import enrich_session_worktree_meta
+from app.core.config import settings
+from app.db import checkouts as checkouts_db
+from app.db import git_ops as git_ops_db
+from app.db import projects_v2
+from tests.fake_path import FakePath
+from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
+
+PEER = "peer-install-1"
+
+
+def _patch(monkeypatch, existing=None, resolver=None):
+    FakePath.existing = set(existing or [])
+    monkeypatch.setattr(
+        "app.core.checkout_manager._dir_is_worktree",
+        lambda path: str(path) in FakePath.existing,
+    )
+    # The TTL stat cache is module-level state — never let it leak across tests.
+    wsm._is_dir_cache.clear()
+    _resolver = resolver or (lambda wt: f"/abs/{wt['worktree_path']}")
+    # _is_dir_cached stats via the wsm Path binding; the shared rule
+    # (resolve_existing_worktree_cwd) resolves via the project_utils bindings.
+    # Patch both namespaces so the fake filesystem governs everything.
+    monkeypatch.setattr(wsm, "Path", FakePath)
+    monkeypatch.setattr(wsm, "get_worktree_working_dir", _resolver)
+    monkeypatch.setattr(pu, "Path", FakePath)
+    monkeypatch.setattr(pu, "get_worktree_working_dir", _resolver)
+
+
+def _wt(status="active", branch="feat/foo"):
+    return {
+        "id": "wt-1",
+        "status": status,
+        "branch_name": branch,
+        "worktree_path": f".worktrees/{branch}",
+    }
+
+
+def _session(**over):
+    base = {
+        "id": "ses-1",
+        "worktree_id": "wt-1",
+        "worktree_branch": "feat/foo",
+        "worktree_path": ".worktrees/feat/foo",
+    }
+    base.update(over)
+    return base
+
+
+# ---------------------------------------------------------------------------
+
+def test_non_worktree_session_returns_empty(monkeypatch):
+    _patch(monkeypatch)
+    session = {"id": "ses-1", "worktree_id": None, "worktree_branch": None, "worktree_path": None}
+    assert enrich_session_worktree_meta(session, None) == {}
+
+
+def test_dir_exists_is_not_deleted(monkeypatch):
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    meta = enrich_session_worktree_meta(_session(), _wt(status="active"))
+    assert meta["worktree_deleted"] is False
+    assert meta["execution_mode"] == "worktree"
+    assert meta["worktree_id"] == "wt-1"
+    assert meta["worktree_branch"] == "feat/foo"
+
+
+def test_dir_exists_but_stale_status_is_not_deleted(monkeypatch):
+    """Disk-based: a 'deleted' status with the dir present is NOT reported deleted."""
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    meta = enrich_session_worktree_meta(_session(), _wt(status="deleted"))
+    assert meta["worktree_deleted"] is False
+
+
+def test_dir_missing_is_deleted(monkeypatch):
+    """Disk-based: an 'active' status with the dir gone IS reported deleted."""
+    _patch(monkeypatch, existing=set())
+    meta = enrich_session_worktree_meta(_session(), _wt(status="active"))
+    assert meta["worktree_deleted"] is True
+
+
+def test_no_row_uses_session_backup_path(monkeypatch):
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    meta = enrich_session_worktree_meta(_session(), None)
+    assert meta["worktree_deleted"] is False
+    assert meta["worktree_path"] == ".worktrees/feat/foo"
+    # worktree_id is never nulled — the session stays reopenable.
+    assert meta["worktree_id"] == "wt-1"
+
+
+def test_resolution_error_falls_back_to_not_deleted(monkeypatch):
+    def _boom(_wt_dict):
+        raise ValueError("corrupt worktree_path")
+
+    _patch(monkeypatch, existing=set(), resolver=_boom)
+    meta = enrich_session_worktree_meta(_session(), _wt(status="active"))
+    # A transient/resolution error must not scare the UI.
+    assert meta["worktree_deleted"] is False
+
+
+def test_row_path_missing_but_backup_exists_is_not_deleted(monkeypatch):
+    """Same shared rule as the resume path: deleted only when NO candidate dir
+    exists — the session's backup path participates."""
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    wt = _wt(status="active")
+    wt["worktree_path"] = ".worktrees/feat/foo-recreated"  # rewritten row, gone
+    meta = enrich_session_worktree_meta(_session(), wt)
+    assert meta["worktree_deleted"] is False
+
+
+def test_is_dir_stat_is_ttl_cached(monkeypatch):
+    """/live polls every 150ms — the disk stat must be memoized, not per-poll."""
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    calls = {"n": 0}
+    real_is_dir = FakePath.is_dir
+
+    def counting_is_dir(self):
+        calls["n"] += 1
+        return real_is_dir(self)
+
+    monkeypatch.setattr(FakePath, "is_dir", counting_is_dir)
+    for _ in range(5):
+        meta = enrich_session_worktree_meta(_session(), _wt(status="active"))
+        assert meta["worktree_deleted"] is False
+    # One real stat for the path; the other four polls hit the TTL cache.
+    assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Cluster honesty: active checkouts + in-flight git_ops, not the viewer's disk.
+# ---------------------------------------------------------------------------
+
+def _pv2():
+    return projects_v2.upsert_project("git:test/worktree-meta", name="Repo")
+
+
+def _remote_session(pv2, **over):
+    base = {
+        "id": "ses-1",
+        "worktree_id": "wt-1",
+        "worktree_branch": "feat/foo",
+        "worktree_path": ".worktrees/feat/foo",
+        "branch": "feat/foo",
+        "project_v2_id": pv2["id"],
+        "instance_id": PEER,
+    }
+    base.update(over)
+    return base
+
+
+def _local_v2_session(pv2, **over):
+    base = {
+        "id": "ses-1",
+        "worktree_id": None,
+        "worktree_branch": None,
+        "worktree_path": None,
+        "branch": "feat/foo",
+        "project_v2_id": pv2["id"],
+        "instance_id": ME,
+    }
+    base.update(over)
+    return base
+
+
+def _queue(pv2, runner=PEER, branch="feat/foo"):
+    return git_ops_db.insert_op(
+        runner,
+        "ensure_worktree",
+        project_v2_id=pv2["id"],
+        params={"branch": branch, "base_branch": "main", "create_new_branch": True},
+    )
+
+
+def _backdate(op_id: str, minutes: int):
+    old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE git_ops SET updated_at = %s WHERE id = %s", (old, op_id)
+        )
+
+
+@pytest.mark.parametrize("instance_id", [PEER, None, ME])
+def test_network_remote_checkout_absence_is_unknown_not_deleted(monkeypatch, instance_id):
+    """Network manifests do not replicate checkouts into the viewer's DB."""
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    monkeypatch.setattr("app.network.runners.self_device_id", lambda: "viewer-device")
+    session = {**_remote_session(pv2), "instance_id": instance_id,
+               "owner_device_id": "owner-device"}
+    with patch.object(checkouts_db, "has_active_checkout", return_value=False) as has_checkout:
+        meta = enrich_session_worktree_meta(session, None)
+    assert meta["worktree_deleted"] is False
+    has_checkout.assert_not_called()
+
+
+def test_network_local_owner_ignores_previous_instance_id(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    monkeypatch.setattr("app.network.runners.self_device_id", lambda: "new-owner")
+    session = {**_remote_session(pv2), "owner_device_id": "new-owner"}
+    # A retained foreign instance_id must not hide a locally missing checkout.
+    assert enrich_session_worktree_meta(session, None)["worktree_deleted"] is True
+
+
+def test_remote_archived_oldest_plus_newer_active_is_not_deleted(monkeypatch):
+    """get_checkout is LIMIT 1 oldest — an archived row must not hide the live one."""
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    old = checkouts_db.upsert_checkout(
+        pv2["id"], PEER, "/old/feat/foo", branch="feat/foo"
+    )
+    checkouts_db.set_checkout_status(old["id"], "archived")
+    checkouts_db.upsert_checkout(
+        pv2["id"], PEER, "/new/feat/foo", branch="feat/foo"
+    )
+    meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is False
+
+
+def test_remote_no_active_checkout_is_deleted(monkeypatch):
+    """No active row on the owner, nothing in-flight → deleted. Viewer disk is irrelevant."""
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    pv2 = _pv2()
+    old = checkouts_db.upsert_checkout(
+        pv2["id"], PEER, "/old/feat/foo", branch="feat/foo"
+    )
+    checkouts_db.set_checkout_status(old["id"], "archived")
+    calls = {"n": 0}
+    real_is_dir = FakePath.is_dir
+
+    def counting_is_dir(self):
+        calls["n"] += 1
+        return real_is_dir(self)
+
+    monkeypatch.setattr(FakePath, "is_dir", counting_is_dir)
+    meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is True
+    assert calls["n"] == 0
+
+
+def test_remote_queued_ensure_worktree_is_not_deleted(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    _queue(pv2)
+    meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is False
+
+
+def test_remote_running_ensure_worktree_is_not_deleted(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    op = _queue(pv2)
+    claimed = git_ops_db.claim_op(op["id"], PEER)
+    assert claimed is not None
+    meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is False
+
+
+def test_zombie_running_plus_newer_queued_is_not_deleted(monkeypatch):
+    """find_matching skips stale running and returns the queued retry — inflight."""
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    zombie = _queue(pv2)
+    git_ops_db.claim_op(zombie["id"], PEER)
+    _backdate(zombie["id"], minutes=180)
+    _queue(pv2)
+    meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is False
+
+
+def test_metadata_path_never_calls_fail_op(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    zombie = _queue(pv2)
+    git_ops_db.claim_op(zombie["id"], PEER)
+    _backdate(zombie["id"], minutes=20)
+    with patch.object(git_ops_db, "fail_op") as fail:
+        meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+        fail.assert_not_called()
+    # Zombie only, no queued retry, no active checkout → deleted, still no write.
+    assert meta["worktree_deleted"] is True
+
+
+def test_local_checkout_disk_exists_is_not_deleted(monkeypatch):
+    """Local: TTL disk stat across active checkout paths, not row presence alone."""
+    _patch(monkeypatch, existing={"/work/feat/foo"})
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(
+        pv2["id"], ME, "/work/feat/foo", branch="feat/foo"
+    )
+    meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
+    assert meta["worktree_deleted"] is False
+
+
+def test_partial_cleanup_directory_is_not_a_checkout(monkeypatch, tmp_path):
+    from app.core import checkout_manager
+
+    wsm._is_dir_cache.clear()
+    pv2 = projects_v2.upsert_project("local:partial-cleanup", "Partial cleanup")
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(tmp_path), branch="feat/foo")
+    assert not checkout_manager._dir_is_worktree(str(tmp_path))
+    assert enrich_session_worktree_meta(_local_v2_session(pv2), None)["worktree_deleted"]
+    (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/feature")
+    wsm._is_dir_cache.clear()
+    assert not enrich_session_worktree_meta(_local_v2_session(pv2), None)["worktree_deleted"]
+
+
+def test_local_checkout_disk_missing_is_deleted(monkeypatch):
+    """v2 branch uses checkouts, not path None → False."""
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(
+        pv2["id"], ME, "/work/feat/foo", branch="feat/foo"
+    )
+    meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
+    assert meta["worktree_deleted"] is True
+
+
+@pytest.mark.parametrize("archive", [False, True])
+def test_local_v2_without_active_checkout_is_deleted(monkeypatch, archive):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    if archive:
+        checkouts_db.upsert_checkout(
+            pv2["id"], ME, "/work/feat/foo", branch="feat/foo"
+        )
+        # The same write used by Ship It's linked-checkout cleanup.
+        checkouts_db.archive_checkout_by_path(pv2["id"], "/work/feat/foo")
+    # The base repo still exists; it must not become this session's Git target.
+    checkouts_db.upsert_checkout(pv2["id"], ME, "/work/repo")
+    meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
+    assert meta["worktree_deleted"] is True
+    assert meta["worktree_branch"] == "feat/foo"
+    assert meta["execution_mode"] == "worktree"
+
+
+def test_local_v2_queued_recreation_is_not_deleted(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    _queue(pv2, runner=ME)
+    meta = enrich_session_worktree_meta(_local_v2_session(pv2), None)
+    assert meta["worktree_deleted"] is False
+
+
+def test_local_v2_archived_checkout_with_legacy_path_still_checks_disk(monkeypatch):
+    _patch(monkeypatch, existing={"/abs/.worktrees/feat/foo"})
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(
+        pv2["id"], ME, "/work/feat/foo", branch="feat/foo"
+    )
+    checkouts_db.archive_checkout_by_path(pv2["id"], "/work/feat/foo")
+    meta = enrich_session_worktree_meta(
+        _local_v2_session(pv2, worktree_path=".worktrees/feat/foo"), None
+    )
+    assert meta["worktree_deleted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_route", [False, True])
+@pytest.mark.parametrize("empty_remnant", [False, True])
+async def test_ship_cleanup_metadata_survives_history_reload(
+    monkeypatch, tmp_path, legacy_route, empty_remnant
+):
+    import subprocess
+    from app.api.git_operations import Operation, _do_cleanup
+    from app.core import checkout_manager, project_resolver
+
+    wsm._is_dir_cache.clear()
+    monkeypatch.setattr(settings, "instance_id", ME)
+    repo = tmp_path / "repo"
+    checkout = checkout_manager._branch_checkout_path(str(repo), "feat/foo")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], check=True, capture_output=True, text=True
+        )
+
+    git("init", "-b", "main", str(repo))
+    git(
+        "-C", str(repo), "-c", "user.name=Test", "-c",
+        "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial",
+    )
+    git("-C", str(repo), "worktree", "add", "-b", "feat/foo", str(checkout))
+    (checkout / "feature.txt").write_text("preserved tip", encoding="utf-8")
+    git("-C", str(checkout), "add", "feature.txt")
+    git(
+        "-C", str(checkout), "-c", "user.name=Test", "-c",
+        "user.email=test@example.invalid", "commit", "-m", "Feature",
+    )
+    tip = git("-C", str(checkout), "rev-parse", "HEAD").stdout.strip()
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(repo))
+    checkouts_db.upsert_checkout(pv2["id"], ME, str(checkout), branch="feat/foo")
+    session = _local_v2_session(pv2)
+    assert enrich_session_worktree_meta(session, None)["worktree_deleted"] is False
+
+    op = Operation(
+        project_id="legacy-project" if legacy_route else pv2["id"],
+        kind="ship", steps=[],
+    )
+    await _do_cleanup(op, str(checkout), None, "feat/foo", "main", None)
+
+    assert op.result["worktree_deleted"] is True
+    assert not checkout.exists()
+    assert (repo / ".git").is_dir()
+    assert not checkouts_db.list_active_checkouts(pv2["id"], ME, "feat/foo")
+    # History hydration recomputes metadata rather than using the operation result.
+    assert enrich_session_worktree_meta(dict(session), None)["worktree_deleted"] is True
+    recorded = checkouts_db.get_checkout(pv2["id"], ME, branch="feat/foo")
+    assert recorded["head_sha"] == tip
+    assert recorded["status"] == "archived"
+    git("-C", str(repo), "reflog", "expire", "--expire=now", "--all")
+    if empty_remnant:
+        checkout.mkdir()
+
+    # The same resolver used on the next send restores the exact feature tip.
+    resumed = project_resolver.resolve_cwd(dict(session))
+    assert resumed == str(checkout)
+    assert git("-C", resumed, "rev-parse", "HEAD").stdout.strip() == tip
+    assert (checkout / "feature.txt").read_text(encoding="utf-8") == "preserved tip"
+    assert git("-C", str(repo), "branch", "--show-current").stdout.strip() == "main"
+    wsm._is_dir_cache.clear()
+    assert enrich_session_worktree_meta(dict(session), None)["worktree_deleted"] is False
+
+
+def test_checkout_resolver_error_falls_back_to_not_deleted(monkeypatch):
+    _patch(monkeypatch, existing=set())
+    pv2 = _pv2()
+    checkouts_db.upsert_checkout(
+        pv2["id"], PEER, "/work/feat/foo", branch="feat/foo"
+    )
+    with patch.object(
+        checkouts_db, "has_active_checkout", side_effect=RuntimeError("db down")
+    ):
+        meta = enrich_session_worktree_meta(_remote_session(pv2), _wt())
+    assert meta["worktree_deleted"] is False

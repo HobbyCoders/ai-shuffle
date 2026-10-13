@@ -1,0 +1,597 @@
+/**
+ * Behavior tests for SystemMessage's background-task rows (task_updated /
+ * task_notification). These subtypes render a collapsed header matching the
+ * tool-card convention: three-way status icon -> bot icon -> "Task" label ->
+ * status chip -> description summary.
+ */
+import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
+import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
+import SystemMessage from './SystemMessage.svelte';
+import type { ChatMessage } from '$lib/stores/types';
+
+// The Retry button on a spent retry card posts to the resume route with the
+// session the chat is currently on.
+const resumeSession = vi.hoisted(() => vi.fn());
+const notifyError = vi.hoisted(() => vi.fn());
+
+vi.mock('$lib/api/sessions', () => ({ resumeSession }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { error: notifyError } }));
+vi.mock('$lib/stores/active-session', () => ({
+	activeSession: {
+		subscribe: (run: (v: { sessionId: string }) => void) => {
+			run({ sessionId: 'sess-active' });
+			return () => {};
+		}
+	}
+}));
+
+function makeMessage(over: Partial<ChatMessage> = {}): ChatMessage {
+	return {
+		id: 'sys-1',
+		role: 'system',
+		content: '',
+		...over
+	};
+}
+
+afterEach(() => {
+	cleanup();
+});
+
+it('labels peer receipts as automatically delivered, without an Interrupt action', () => {
+	render(SystemMessage, { message: makeMessage({ systemSubtype: 'agent_message', systemData: {
+		sender: 'child', content: 'The regression test passes.', delivery: 'delivered',
+	} }) });
+	expect(screen.getByText('Agent message')).toBeTruthy();
+	expect(screen.getByText('Delivered automatically')).toBeTruthy();
+	expect(screen.queryByRole('button', { name: /interrupt/i })).toBeNull();
+});
+
+
+describe('SystemMessage — compact_boundary', () => {
+	const sizes = { pre_tokens: 182_000, post_tokens: 41_000, context_window: 200_000 };
+	it.each([
+		[sizes, 'Context compacted automatically: 182k → 41k of 200k'],
+		[{ pre_tokens: 182_000, post_tokens: 41_000 }, 'Context compacted automatically: 182k → 41k'],
+		[{ pre_tokens: 182_000 }, 'Context compacted automatically: 182k before'],
+		[{}, 'Context compacted automatically.'],
+		[{ post_tokens: 41_000, context_window: 200_000 }, 'Context compacted automatically: 41k after of 200k'],
+		[{ context_window: 200_000 }, 'Context compacted automatically: Window: 200k'],
+		[{ pre_tokens: 0, post_tokens: 0, context_window: 0 }, 'Context compacted automatically.'],
+		[{ pre_tokens: NaN, post_tokens: Infinity, context_window: -1 }, 'Context compacted automatically.'],
+		[{ pre_tokens: '182000', post_tokens: null }, 'Context compacted automatically.'],
+		[{ pre_tokens: 1_500_000, post_tokens: 999 }, 'Context compacted automatically: 1.5M → 999'],
+		// #1907: a Claude CLI card's "after" is the meter's reading, overhead included.
+		[{ pre_tokens: 169_400, post_tokens: 19_600, context_post_tokens: 70_000, context_window: 200_000 },
+			'Context compacted automatically: 169.4k → 70k of 200k'],
+		// No overhead known: the summary-only count says so.
+		[{ pre_tokens: 169_400, post_tokens: 19_600, post_tokens_basis: 'history', context_window: 200_000 },
+			'Context compacted automatically: 169.4k → 19.6k of 200k (after: conversation only)']
+	])('renders known sizes once: %j', (metadata, expected) => {
+		render(SystemMessage, { message: makeMessage({ systemSubtype: 'compact_boundary',
+			systemData: { compact_metadata: { trigger: 'auto', ...metadata } } }) });
+		expect(screen.getAllByText(expected)).toHaveLength(1);
+		expect(screen.getByTestId('compaction-content').textContent).toBe(expected);
+		expect(screen.getByTestId('compaction-content').className).not.toContain('truncate');
+	});
+
+	it.each([
+		['manual', undefined, 'Context was compacted manually (/compact).'],
+		['manual', 'app', 'AI Shuffle asked the agent to compact the context because the session was idle near the limit.'],
+		[undefined, undefined, 'Context was compacted.']
+	])('preserves the explanation for %s / %s with and without sizes', (trigger, requested_by, explanation) => {
+		const message = (metadata: Record<string, unknown>) => makeMessage({ systemSubtype: 'compact_boundary',
+			systemData: { compact_metadata: { trigger, requested_by, ...metadata } } });
+		const { rerender } = render(SystemMessage, { message: message(sizes) });
+		expect(screen.getAllByText(`${explanation} 182k → 41k of 200k.`)).toHaveLength(1);
+		return rerender({ message: message({}) }).then(() => {
+			expect(screen.getAllByText(explanation!)).toHaveLength(1);
+		});
+	});
+
+	it('reads old CLI camelCase records, including partially normalized JSONL', async () => {
+		const legacy = { trigger: 'auto', preTokens: 182_000, postTokens: 41_000, contextWindow: 200_000 };
+		const { rerender } = render(SystemMessage, { message: makeMessage({ systemSubtype: 'compact_boundary',
+			systemData: { compactMetadata: legacy } }) });
+		expect(screen.getAllByText('Context compacted automatically: 182k → 41k of 200k')).toHaveLength(1);
+		await rerender({ message: makeMessage({ systemSubtype: 'compact_boundary', systemData: {
+			compactMetadata: legacy, compact_metadata: { trigger: 'auto', pre_tokens: 182_000 }
+		} }) });
+		expect(screen.getAllByText('Context compacted automatically: 182k → 41k of 200k')).toHaveLength(1);
+	});
+});
+
+describe('SystemMessage — task_updated / task_notification', () => {
+	it('shows the "Task" label, a status chip, and the description summary', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: {
+						task_id: 'abcd1234ef',
+						patch: { status: 'completed', description: 'Refactor the widget' }
+					}
+				})
+			}
+		});
+
+		// Header name label is the literal 'Task'
+		expect(screen.getByText('Task')).toBeTruthy();
+		// Status chip carries the status string
+		expect(screen.getByText('completed')).toBeTruthy();
+		// Summary is the task description, not the old "task <id> · <status> · ..." string
+		expect(screen.getByText('Refactor the widget')).toBeTruthy();
+		// The collapsed summary row must not carry the old noisy concatenation.
+		const summary = container.querySelector('summary');
+		expect(summary?.textContent).not.toContain('abcd1234');
+	});
+
+	it('falls back to the 8-char task id when there is no description', () => {
+		render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_notification',
+					systemData: { task_id: 'abcd1234ef', patch: { status: 'stopped' } }
+				})
+			}
+		});
+
+		expect(screen.getByText('Task')).toBeTruthy();
+		expect(screen.getByText('stopped')).toBeTruthy();
+		// 8-char slice of the task id
+		expect(screen.getByText('abcd1234')).toBeTruthy();
+	});
+
+	it('renders a spinner (not a check) while a task is running', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: { task_id: 'run00001', patch: { status: 'running', description: 'Building' } }
+				})
+			}
+		});
+
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		// The green-check status icon must not be present for a running task
+		expect(container.querySelector('.text-green-500')).toBeNull();
+	});
+
+	// Audit item 4: `task_started` used to render `hidden: true` — the ONE row
+	// that says a background task is running never reached the transcript, so a
+	// dev server launched through Monitor had no visible affordance at all until
+	// it died. It now renders as the running twin of the task_updated chip.
+	it('renders task_started as a running Task chip instead of hiding it', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_started',
+					systemData: { task_id: 'srv00001', description: 'npm run dev' }
+				})
+			}
+		});
+
+		expect(screen.getByText('Task')).toBeTruthy();
+		expect(screen.getByText('running')).toBeTruthy();
+		expect(screen.getByText('npm run dev')).toBeTruthy();
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+	});
+
+	it('falls back to the 8-char task id on a description-less task_started', () => {
+		render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_started',
+					systemData: { task_id: 'abcd1234ef' }
+				})
+			}
+		});
+
+		expect(screen.getByText('abcd1234')).toBeTruthy();
+	});
+
+	it('renders a red X for a failed task', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: { task_id: 'fail0001', patch: { status: 'failed', description: 'Boom' } }
+				})
+			}
+		});
+
+		expect(container.querySelector('.text-red-500')).not.toBeNull();
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
+	// A task somebody stopped on purpose — the user's Stop, or an agent's own
+	// TaskStop of a service it no longer needs — is neither a failure nor a
+	// success. It used to render the green tick (or, as `killed`, the red cross),
+	// so a deliberate stop of a healthy dev server read as a crash.
+	it.each(['cancelled', 'stopped'])('renders a stop square for a %s task', (status) => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: { task_id: 'stop0001', patch: { status, description: 'npm run dev' } }
+				})
+			}
+		});
+
+		expect(container.querySelector('.text-amber-500')).not.toBeNull();
+		expect(container.querySelector('.text-red-500')).toBeNull();
+		expect(container.querySelector('.text-green-500')).toBeNull();
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
+	it('renders a green check for a completed task', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: { task_id: 'done0001', patch: { status: 'completed', description: 'Done' } }
+				})
+			}
+		});
+
+		expect(container.querySelector('.text-green-500')).not.toBeNull();
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+});
+
+describe('SystemMessage — provider_retry', () => {
+	it.each([
+		undefined,
+		{},
+		{ attempt: 3, max_attempts: 10, reason: 'empty response from provider', model: 'ox-alpha' },
+		{ attempt: 1, max_attempts: 10, settled: true },
+		{ attempt: 3, max_attempts: 10, model: 'ox-alpha', settled: true }
+	])('renders no row for a transient retry: %j', (systemData) => {
+		const { container } = render(SystemMessage, {
+			props: { message: makeMessage({ systemSubtype: 'provider_retry', systemData }) }
+		});
+
+		expect(container.textContent).toBe('');
+		expect(container.children).toHaveLength(0);
+	});
+
+	it('shows a live reconnect after a dropped connection', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 2,
+						model: 'gpt-6.1-sol',
+						cause: 'connection_dropped'
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Reconnecting')).toBeTruthy();
+		expect(container.textContent).toContain('attempt 1 of 2');
+		expect(container.textContent).toContain('gpt-6.1-sol');
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('says when the reconnect lowered the effort', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 2,
+						max_attempts: 2,
+						cause: 'connection_dropped',
+						lowered_effort: 'high'
+					}
+				})
+			}
+		});
+
+		expect(container.textContent).toContain(
+			'Reconnecting with lower effort after the provider cut a long response'
+		);
+		expect(container.textContent).toContain('high');
+	});
+
+	it('collapses the dropped attempt once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 2,
+						cause: 'connection_dropped',
+						settled: true,
+						superseded: { text: 'Partial answer', tools: ['Bash'] }
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Response interrupted — retried')).toBeTruthy();
+		const details = container.querySelector('details');
+		expect(details).not.toBeNull();
+		expect(details?.open).toBe(false);
+		expect(container.textContent).toContain('Partial answer');
+		expect(container.textContent).toContain('Not run: Bash');
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
+	it('hides a reconnect once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 1, max_attempts: 2, cause: 'connection_dropped', settled: true }
+				})
+			}
+		});
+
+		expect(container.textContent).toBe('');
+	});
+
+	it.each([
+		['provider_error', 'in-stream server_error before content after 183s'],
+		['no_content', 'no content for 91s']
+	])('shows a live retry when the provider failed before replying (%s)', (cause, reason) => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 1, max_attempts: 3, model: 'gpt-6.1-sol', cause, reason }
+				})
+			}
+		});
+
+		expect(screen.getByText('Retrying')).toBeTruthy();
+		expect(container.textContent).toContain(reason);
+		expect(container.textContent).toContain('attempt 1 of 3');
+		expect(container.textContent).toContain('gpt-6.1-sol');
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('keeps a pre-content retry as a finished row once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 3,
+						cause: 'provider_error',
+						reason: 'in-stream server_error before content after 183s',
+						settled: true
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Retried')).toBeTruthy();
+		expect(container.textContent).toContain('after 183s');
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+});
+
+describe('SystemMessage — provider_retry exhausted', () => {
+	beforeEach(() => {
+		resumeSession.mockReset();
+		notifyError.mockReset();
+	});
+
+	function exhausted(over: Record<string, unknown> = {}) {
+		return makeMessage({
+			systemSubtype: 'provider_retry',
+			systemData: {
+				attempt: 10,
+				max_attempts: 10,
+				model: 'ox-alpha',
+				exhausted: true,
+				error: 'empty response, giving up',
+				...over
+			}
+		});
+	}
+
+	it('reads as a settled failure with a Retry button', () => {
+		const { container } = render(SystemMessage, { props: { message: exhausted() } });
+
+		expect(screen.getByText('Retry failed')).toBeTruthy();
+		expect(container.textContent).toContain('10 times in a row');
+		expect(container.textContent).toContain('ox-alpha');
+		// Settled, not in flight: the cross replaces the spinner.
+		expect(container.querySelector('.animate-spin')).toBeNull();
+		expect(container.querySelector('.text-red-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).not.toBeNull();
+	});
+
+	it('keeps the button — disabled and spinning — while a resume runs', () => {
+		const { container } = render(SystemMessage, {
+			props: { message: exhausted({ resuming: true }) }
+		});
+
+		const button = container.querySelector(
+			'[data-testid="provider-retry-button"]'
+		) as HTMLButtonElement;
+		expect(button).not.toBeNull();
+		expect(button.disabled).toBe(true);
+		expect(button.textContent?.trim()).toBe('Retrying…');
+		// The wait is visible: the row spins instead of showing the settled cross.
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+	});
+
+	it('drops the button once the session actually recovers', () => {
+		const { container } = render(SystemMessage, {
+			props: { message: exhausted({ recovered: true }) }
+		});
+
+		expect(screen.getByText('Retry failed')).toBeTruthy();
+		expect(container.textContent).toContain('· recovered');
+		expect(container.querySelector('.text-green-500')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('drops the button once the user has moved on', () => {
+		const { container } = render(SystemMessage, {
+			props: { message: exhausted({ superseded: true }) }
+		});
+
+		expect(container.textContent).toContain('· superseded');
+		expect(container.querySelector('.animate-spin')).toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('resumes the active session and shows progress while the call is in flight', async () => {
+		let release: (v: unknown) => void = () => {};
+		resumeSession.mockReturnValue(new Promise((r) => { release = r; }));
+
+		render(SystemMessage, { props: { message: exhausted() } });
+		const button = screen.getByTestId('provider-retry-button') as HTMLButtonElement;
+
+		await fireEvent.click(button);
+
+		expect(resumeSession).toHaveBeenCalledWith('sess-active');
+		expect(button.textContent?.trim()).toBe('Retrying…');
+		expect(button.disabled).toBe(true);
+
+		release({ turn_id: 't1', session_id: 'sess-active' });
+	});
+
+	it('re-enables and reports when the resume is refused', async () => {
+		resumeSession.mockRejectedValue(new Error('a turn is already running'));
+
+		render(SystemMessage, { props: { message: exhausted() } });
+		const button = screen.getByTestId('provider-retry-button') as HTMLButtonElement;
+
+		await fireEvent.click(button);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(notifyError).toHaveBeenCalled();
+		expect(notifyError.mock.calls[0][0]).toContain('a turn is already running');
+	});
+});
+
+describe('SystemMessage — generic system rows', () => {
+	it('renders as a flat row with a collapsed details body', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'informational',
+					content: 'Something worth noting',
+					systemData: { content: 'Something worth noting' }
+				})
+			}
+		});
+
+		// Flat-row idiom, not the old boxed card.
+		expect(container.querySelector('.sys-card')).toBeNull();
+		expect(container.querySelector('.sys-flat')).not.toBeNull();
+		const details = container.querySelector('details');
+		expect(details).not.toBeNull();
+		// Collapsed by default; the body lives behind the summary row.
+		expect((details as HTMLDetailsElement).open).toBe(false);
+		expect(container.querySelector('summary.sys-row')).not.toBeNull();
+		expect(container.querySelector('.sys-body')).not.toBeNull();
+	});
+});
+
+describe('SystemMessage — agent compaction', () => {
+	it('shows the Context Compacted card with the trigger and the size', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: {
+						compact_metadata: { trigger: 'auto', pre_tokens: 166397, post_tokens: 34856 }
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context Compacted');
+		expect(text).toContain('Context compacted automatically: 166.4k → 34.9k');
+	});
+
+	it('names a typed /compact as manual', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: { compact_metadata: { trigger: 'manual' } }
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context Compacted');
+		expect(text).toContain('Context was compacted manually (/compact).');
+		expect(text).toContain('manual');
+	});
+
+	it('still says manual alongside the known before and after sizes (#1794)', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: {
+						compact_metadata: { trigger: 'manual', pre_tokens: 62365, post_tokens: 4119 }
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context was compacted manually (/compact). 62.4k → 4.1k.');
+	});
+
+	it('does not call a compaction with no trigger manual', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: { compact_metadata: { pre_tokens: 50000 } }
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context was compacted. 50k before.');
+		expect(text).not.toContain('manual');
+	});
+
+	it('says the app asked for a /compact it sent itself (#1820)', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: {
+						compact_metadata: { trigger: 'manual', requested_by: 'app', pre_tokens: 870000 }
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context Compacted');
+		expect(text).toContain('AI Shuffle asked the agent to compact the context');
+		expect(text).not.toContain('compacted manually (/compact)');
+	});
+
+	it('shows a failed /compact as failed with its reason, not as compacted (#1820)', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_failed',
+					systemData: { reason: 'Not enough messages to compact.', requested_by: 'user' }
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Compaction Failed');
+		expect(text).toContain('The agent did not compact the context. Reason: Not enough messages to compact.');
+		expect(text).not.toContain('Context Compacted');
+	});
+});

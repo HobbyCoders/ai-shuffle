@@ -1,0 +1,204 @@
+name: Desktop CI
+
+# Desktop app (desktop/). Manual only: pull requests run no CI, and
+# scripts/local_ci.py runs the desktop typecheck and tests before a push. The
+# release build that publishes installers lives in release.yml.
+#
+# Default packaging is Windows-only. Cheap typechecks/unit tests run on Linux;
+# full Linux desktop-runtime assembly requires an explicit manual opt-in.
+# Windows installs an isolated preview and exercises its real worker/PostgreSQL
+# before publishing a CI artifact, never a stable release/update.
+#
+# Dispatch it when a Windows install must be verified on a clean machine
+# and no Windows worker is available.
+#
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
+#
+# Nothing here is code signed: this workflow never sees the signing secrets. Release builds come from desktop-installer.yml (Windows,
+# signed), desktop-macos-artifact.yml (signed and notarized) and
+# desktop-linux-artifact.yml (unsigned, with checksums); see desktop/RELEASING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_preview:
+        description: 'Keep the verified preview installer for download (one day)'
+        type: boolean
+        default: false
+      build_linux_runtime:
+        description: 'Explicitly assemble the Linux desktop runtime (additional build cost)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and unit tests
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  package:
+    name: Package Windows shell
+    timeout-minutes: 15
+    needs: check
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - name: Write a stub worker manifest
+        run: npm run build:worker:stub
+      - name: Build unpacked app
+        run: npm run pack
+
+  runtime:
+    name: Assemble worker runtime (linux-x64)
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - run: npm ci
+      - name: Assemble the runtime
+        run: npm run build:worker -- --frontend-build ../frontend/build
+      - name: Runtime is complete and imports the server
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("worker/manifest.json", "utf8"));
+            if (m.stub) throw new Error("stub manifest");
+            if (!m.cloudflared?.path || !m.cloudflared?.sha256) throw new Error("cloudflared manifest missing");
+            const client = "worker/" + m.cloudflared.path;
+            const digest = require("crypto").createHash("sha256").update(fs.readFileSync(client)).digest("hex");
+            if (digest !== m.cloudflared.sha256) throw new Error("cloudflared checksum mismatch");
+            for (const f of ["worker/python/bin/python3", "worker/node/bin/node", "worker/server/app/main.py", "worker/server/app/static/index.html", "worker/server/tools/dist/worker.js", "worker/server/browser-mcp/dist/index.js"]) {
+              if (!fs.existsSync(f)) throw new Error("missing " + f);
+            }
+            console.log("runtime ok", m.python.version, m.node.version);
+          '
+          cd worker/server && ../python/bin/python3 -c "import app.core.config; print('server imports ok')"
+          ../node/bin/node --version
+          ./downloads/cloudflared/$(../python/bin/python3 -c "from app.core.cloudflared import VERSION; print(VERSION)")/cloudflared --version
+
+
+  windows-preview:
+    name: Windows preview installer and fresh database
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PREVIEW_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            frontend/package-lock.json
+      - name: Build real frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Install desktop build tools
+        run: npm ci
+      - name: Assemble full Windows worker and PostgreSQL
+        run: npm run build:worker -- --frontend-build ../frontend/build
+      - name: Record exact candidate in packaged resources
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($head -ne $env:PREVIEW_SOURCE_COMMIT) { throw 'Unexpected source revision' }
+          @{
+            sourceCommit = $head
+            channel = 'preview'
+            platform = 'win32-x64'
+            workflowRun = $env:GITHUB_RUN_ID
+          } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM worker/preview-build.json
+      - name: Build isolated NSIS installer (never publish)
+        run: |
+          $base = (Get-Content package.json | ConvertFrom-Json).version
+          $version = "$base-preview.$env:GITHUB_RUN_NUMBER"
+          npm run dist:preview:win -- "--config.extraMetadata.version=$version"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install and exercise actual Windows app
+        run: |
+          $installers = @(Get-ChildItem release-preview -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one Windows preview installer' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'windows-preview-evidence'
+          node scripts/verify-windows-preview.mjs $installers[0].FullName $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $delivery = Join-Path $env:RUNNER_TEMP 'windows-preview-delivery'
+          New-Item -ItemType Directory -Path $delivery -Force | Out-Null
+          Copy-Item $installers[0].FullName $delivery
+          Copy-Item worker/preview-build.json $delivery
+          Copy-Item (Join-Path $evidence 'acceptance.json') $delivery
+          $hash = (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($installers[0].Name)" | Set-Content -Encoding ascii (Join-Path $delivery 'SHA256SUMS')
+          $signature = Get-AuthenticodeSignature $installers[0].FullName
+          @{ status = [string]$signature.Status } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM (Join-Path $delivery 'signature.json')
+      - name: Upload verified installer
+        if: github.event_name == 'workflow_dispatch' && inputs.upload_preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-installer
+          path: ${{ runner.temp }}/windows-preview-delivery/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sanitized native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-acceptance
+          path: ${{ runner.temp }}/windows-preview-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
+

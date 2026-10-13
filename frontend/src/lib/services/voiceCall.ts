@@ -1,0 +1,1173 @@
+/**
+ * WebRTC voice-call controller (wave VW2).
+ *
+ * One singleton per active call. Transport is ruling VM2: the browser talks
+ * DIRECTLY to OpenAI over WebRTC (audio never transits our backend) and the
+ * backend joins the same call out-of-band with a "sideband" WebSocket keyed on
+ * the `call_id` we hand it. So this module owns exactly:
+ *
+ *   mic capture → RTCPeerConnection → SDP offer POSTed to OpenAI →
+ *   answer applied → `call_id` read off the `Location` header → POSTed to our
+ *   backend → remote audio played → data-channel events parsed for captions.
+ *
+ * Two deliberate non-responsibilities:
+ *
+ * * **No transcript persistence.** Captions here are ephemeral UI. The durable
+ *   transcript is written backend-side from the sideband (VW3 / ruling VM9).
+ * * **No tool handling.** Tools are declared and serviced on the sideband so
+ *   they are invisible to (and untamperable by) the client.
+ *
+ * The 60-minute OpenAI session wall is bridged at the 50-minute mark by a
+ * silent re-handshake (ruling VM15, FE half): mint a fresh secret, build a
+ * SECOND peer connection, swap playback + mic onto it once it is connected,
+ * register the new `call_id`, then close the old one. The mic MediaStream is
+ * owned by the controller, not by a connection, so the swap needs no second
+ * `getUserMedia` prompt.
+ *
+ * That re-handshake is exactly why the backend's call-length cap answers **409**
+ * (VW5): the cap is measured from the call's start, not from the current
+ * attachment, so a 409 from `/secret` or `/call` means "this call is over". It
+ * is terminal by design — the call ends with the server's message shown and the
+ * reconnect loop stops. A 409 is never retried.
+ *
+ * Everything that talks to a VW3-owned endpoint degrades gracefully — see
+ * `$lib/api/voice`. With the bridge unmerged the call still connects and
+ * speaks; it just has no backend brain and cannot re-handshake.
+ */
+
+import { get, writable } from 'svelte/store';
+import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
+import { usesAudioStream } from '$lib/constants/voice-engines';
+import { createVoiceOutput } from './voiceVolume';
+import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
+let audioStream: VoiceAudioStream | null = null;
+let audioAbort: AbortController | null = null;
+
+// ============================================================================
+// Public state
+// ============================================================================
+
+export type VoiceCallStatus =
+	| 'idle'
+	| 'connecting'
+	| 'live'
+	| 'reconnecting'
+	| 'ended'
+	| 'error';
+
+/**
+ * What ended the call (#1671). Shown nowhere, but logged and sent with the
+ * hangup so an unexpected end can be told apart from the End button.
+ */
+export type VoiceEndReason =
+	| VoiceStreamEndReason
+	| 'user'
+	| 'replaced'
+	| 'call-cap'
+	| 'webrtc-failed'
+	| 'server-ended';
+
+export interface VoiceCaption {
+	/** OpenAI item id when known, else a synthetic key. */
+	id: string;
+	role: 'user' | 'assistant';
+	text: string;
+	/** False while deltas are still streaming in. */
+	final: boolean;
+}
+
+export interface VoiceCallStoreState {
+	/** The ai-shuffle session this call belongs to (null when idle). */
+	sessionId: string | null;
+	status: VoiceCallStatus;
+	micMuted: boolean;
+	agentMuted: boolean;
+	/** Smoothed mic RMS, 0–1. */
+	level: number;
+	captions: VoiceCaption[];
+	error: string | null;
+	/** Epoch ms the call went live. */
+	startedAt: number | null;
+	/** Non-fatal advisory rendered in the caption area (e.g. reconnect skipped). */
+	notice: string | null;
+	model: string | null;
+	options?: VoiceOptions;
+	/** True while the agent's audio is playing (WebRTC output-buffer events). */
+	agentSpeaking: boolean;
+	/** True while server VAD hears the user talking. */
+	userSpeaking: boolean;
+	/** Why the last call ended; null while a call is up or none has ended. */
+	endReason: VoiceEndReason | null;
+	/** True while the unmuted microphone is not reaching a streamed call (#1824). */
+	micProblem: boolean;
+}
+
+const INITIAL: VoiceCallStoreState = {
+	sessionId: null,
+	status: 'idle',
+	micMuted: false,
+	agentMuted: false,
+	level: 0,
+	captions: [],
+	error: null,
+	startedAt: null,
+	notice: null,
+	model: null,
+	agentSpeaking: false,
+	userSpeaking: false,
+	endReason: null,
+	micProblem: false,
+};
+
+export const voiceCallState = writable<VoiceCallStoreState>({ ...INITIAL });
+
+/** Shown instead of a healthy call state while `micProblem` is set (#1824). */
+export const MIC_PROBLEM_LABEL = 'Microphone not reaching the call';
+
+function patch(next: Partial<VoiceCallStoreState>): void {
+	voiceCallState.update((s) => ({ ...s, ...next }));
+}
+
+// ============================================================================
+// Tunables
+// ============================================================================
+
+const OPENAI_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
+
+/**
+ * OpenAI hard-caps a realtime session at 60 minutes. Re-handshake 10 minutes
+ * early so a slow mint still lands well inside the wall (ruling VM15).
+ */
+const RECONNECT_AFTER_MS = 50 * 60 * 1000;
+
+/** How long to wait for the new peer connection during a re-handshake. */
+const CONNECT_TIMEOUT_MS = 20_000;
+
+/**
+ * Reopening a streamed call's audio socket after it drops without a close
+ * (a phone moving between Wi-Fi and mobile data, a server restart). Attempts
+ * wait with backoff (the last pause repeats) and none starts after the
+ * window, so a phone switching networks has about 30 seconds to come back.
+ * Each attempt has its own limit. The call ends with STREAM_DROPPED_MESSAGE
+ * when no attempt succeeds.
+ */
+export const STREAM_RECONNECT_BACKOFF_MS: readonly number[] = [500, 1000, 2000, 4000];
+export const STREAM_RECONNECT_WINDOW_MS = 30_000;
+export const STREAM_ATTEMPT_TIMEOUT_MS = 10_000;
+/** Upper bound on restored audio connections in one call. */
+export const STREAM_MAX_RESTORES = 5;
+export const STREAM_DROPPED_MESSAGE =
+	'The connection to the voice server dropped and could not be restored. Your conversation is saved; start the call again to keep talking.';
+
+/** Captions are ephemeral UI — keep the tail only. */
+const MAX_CAPTIONS = 60;
+
+const MIC_CONSTRAINTS: MediaTrackConstraints = {
+	echoCancellation: true,
+	noiseSuppression: true,
+	autoGainControl: true,
+};
+
+// ============================================================================
+// Private state
+// ============================================================================
+
+/** One peer connection + its data channel. A re-handshake creates a second. */
+interface Connection {
+	pc: RTCPeerConnection;
+	dc: RTCDataChannel;
+	callId: string | null;
+}
+
+let sessionId: string | null = null;
+let connection: Connection | null = null;
+
+/** Owned by the controller (survives re-handshakes), stopped only on hangup. */
+let micStream: MediaStream | null = null;
+let audioEl: HTMLAudioElement | null = null;
+let playbackContext: AudioContext | null = null;
+let playbackOutput: ReturnType<typeof createVoiceOutput> | null = null;
+let removeDeviceListeners: (() => void) | null = null;
+let playbackSource: MediaStreamAudioSourceNode | null = null;
+let pendingMicStream: MediaStream | null = null;
+let micHandover: Promise<void> = Promise.resolve();
+
+/** A refresh cannot retire tracks while a replacement peer is attaching them. */
+function withMicHandover<T>(action: () => Promise<T>): Promise<T> {
+	const next = micHandover.then(action, action);
+	micHandover = next.then(() => {}, () => {});
+	return next;
+}
+
+let audioContext: AudioContext | null = null;
+let analyser: AnalyserNode | null = null;
+let levelFrame: number | null = null;
+
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let responseInProgress = false;
+let typedResponsePending = false;
+
+/** Bumped on every start/hangup so a stale async continuation can bail out. */
+let generation = 0;
+
+// ============================================================================
+// Microphone
+// ============================================================================
+
+/** Human-readable reason a `getUserMedia` attempt failed. */
+function micErrorMessage(error: unknown): string {
+	const err = error as { name?: string; message?: string };
+	if (err?.name === 'NotAllowedError') {
+		return 'Microphone access denied. Please allow microphone access in your browser settings.';
+	}
+	if (err?.name === 'NotFoundError') {
+		return 'No microphone found. Please connect a microphone and try again.';
+	}
+	return `Could not start the microphone: ${err?.message || 'Unknown error'}`;
+}
+
+async function acquireMic(): Promise<MediaStream> {
+	// Same secure-context precheck (and the same chrome://flags hint) the STT
+	// recorder documents — mic capture needs HTTPS or localhost.
+	if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
+		throw new Error(
+			'Microphone requires a secure context (HTTPS or localhost). In Chrome, you can allow this origin at chrome://flags/#unsafely-treat-insecure-origin-as-secure'
+		);
+	}
+	return navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+}
+
+/** New APKs own Bluetooth communication routing; old apps and browsers ignore it. */
+function nativeVoiceRouting(active: boolean): void {
+	if (typeof window === 'undefined' || !window.__SHUFFLE_MOBILE__?.native?.capabilities.includes('voice-routing')) return;
+	const shell = (window as unknown as { shuffleShell?: { postMessage(message: string): void } }).shuffleShell;
+	try { shell?.postMessage(JSON.stringify({ type: 'voice-call', active })); }
+	catch (e) { console.warn('[voice] native audio routing unavailable:', e); }
+}
+
+/** Swap the default input on the existing peer, never renegotiate or end the call. */
+function listenForRealtimeDevices(epoch: number): void {
+	removeDeviceListeners?.();
+	let busy = false, again = false;
+	const refresh = async () => {
+		if (busy) { again = true; return; }
+		busy = true;
+		try {
+			do {
+				again = false;
+				await withMicHandover(async () => {
+					if (epoch !== generation) return;
+					const next = await acquireMic();
+					if (epoch !== generation) { next.getTracks().forEach(t => t.stop()); return; }
+					pendingMicStream = next;
+					try {
+						const sender = connection?.pc.getSenders().find(s => s.track?.kind === 'audio');
+						if (!sender) throw new Error('No active microphone sender.');
+						applyMicMuted(get(voiceCallState).micMuted);
+						await sender.replaceTrack(next.getAudioTracks()[0]);
+						if (epoch !== generation) { next.getTracks().forEach(t => t.stop()); return; }
+						const old = micStream; micStream = next;
+						old?.getTracks().forEach(t => t.stop()); startLevelMonitor(next);
+					} catch (e) { next.getTracks().forEach(t => t.stop()); throw e; }
+					finally { if (pendingMicStream === next) pendingMicStream = null; }
+				});
+			} while (again && epoch === generation);
+		} catch (e) { console.warn('[voice] could not follow the microphone device change:', e); }
+		finally { busy = false; }
+	};
+	const onChange = () => { void refresh(); };
+	const onResume = () => {
+		if (document.visibilityState === 'visible' && playbackContext?.state === 'suspended') void playbackContext.resume().catch(() => {});
+	};
+	document.addEventListener('visibilitychange', onResume);
+	window.addEventListener('pageshow', onResume);
+	navigator.mediaDevices?.addEventListener?.('devicechange', onChange);
+	window.addEventListener('voiceaudiochange', onChange);
+	removeDeviceListeners = () => {
+		navigator.mediaDevices?.removeEventListener?.('devicechange', onChange);
+		window.removeEventListener('voiceaudiochange', onChange);
+		document.removeEventListener('visibilitychange', onResume);
+		window.removeEventListener('pageshow', onResume);
+	};
+}
+
+/** AudioContext + analyser RMS loop feeding `level` (orb animation). */
+function startLevelMonitor(stream: MediaStream): void {
+	stopLevelMonitor();
+	try {
+		audioContext = new AudioContext();
+		analyser = audioContext.createAnalyser();
+		analyser.fftSize = 256;
+		analyser.smoothingTimeConstant = 0.8;
+		audioContext.createMediaStreamSource(stream).connect(analyser);
+	} catch (e) {
+		console.warn('[voice] mic level monitoring unavailable:', e);
+		analyser = null;
+		return;
+	}
+
+	const data = new Uint8Array(analyser.frequencyBinCount);
+	const tick = () => {
+		if (!analyser) return;
+		analyser.getByteFrequencyData(data);
+		let sum = 0;
+		for (let i = 0; i < data.length; i++) {
+			const n = data[i] / 255;
+			sum += n * n;
+		}
+		const rms = Math.sqrt(sum / data.length);
+		voiceCallState.update((s) => {
+			const smoothed = s.level * 0.7 + rms * 0.3;
+			// Skip imperceptible updates so the orb doesn't re-render every frame.
+			return Math.abs(smoothed - s.level) < 0.004 ? s : { ...s, level: smoothed };
+		});
+		levelFrame = requestAnimationFrame(tick);
+	};
+	levelFrame = requestAnimationFrame(tick);
+}
+
+function stopLevelMonitor(): void {
+	if (levelFrame !== null) {
+		cancelAnimationFrame(levelFrame);
+		levelFrame = null;
+	}
+	analyser = null;
+	if (audioContext) {
+		audioContext.close().catch(() => {});
+		audioContext = null;
+	}
+	patch({ level: 0 });
+}
+
+// ============================================================================
+// Playback
+// ============================================================================
+
+/**
+ * Keep a muted media element for browser playback lifecycle/autoplay. Only the
+ * MediaStream source → gain → compressor graph is audible, across handovers.
+ */
+function ensureAudioElement(): HTMLAudioElement {
+	if (audioEl) return audioEl;
+	const el = document.createElement('audio');
+	el.autoplay = true;
+	el.muted = true;
+	// Keeps iOS Safari from taking the element fullscreen.
+	el.setAttribute('playsinline', '');
+	el.style.display = 'none';
+	document.body.appendChild(el);
+	playbackContext = new AudioContext();
+	playbackOutput = createVoiceOutput(playbackContext);
+	// MediaElementAudioSource does not carry srcObject MediaStream audio in Chrome.
+	void playbackContext.resume().catch(err => console.warn('[voice] playback blocked:', err));
+	audioEl = el;
+	return el;
+}
+
+function teardownAudioElement(): void {
+	if (!audioEl) return;
+	playbackSource?.disconnect(); playbackSource = null;
+	audioEl.srcObject = null;
+	audioEl.remove();
+	audioEl = null;
+	playbackOutput?.close(); playbackOutput = null;
+	void playbackContext?.close(); playbackContext = null;
+}
+
+// ============================================================================
+// Captions (ephemeral — the durable transcript is backend-owned, VM9)
+// ============================================================================
+
+function appendCaption(
+	id: string,
+	role: 'user' | 'assistant',
+	chunk: string,
+	final: boolean
+): void {
+	if (!chunk && !final) return;
+	voiceCallState.update((s) => {
+		const captions = [...s.captions];
+		const idx = captions.findIndex((c) => c.id === id && c.role === role);
+		if (idx >= 0) {
+			const prev = captions[idx];
+			captions[idx] = {
+				...prev,
+				// A `.done`/`.completed` event carries the WHOLE transcript, so it
+				// replaces the accumulated deltas rather than appending to them.
+				text: final ? chunk || prev.text : prev.text + chunk,
+				final,
+			};
+		} else {
+			captions.push({ id, role, text: chunk, final });
+		}
+		return { ...s, captions: captions.slice(-MAX_CAPTIONS) };
+	});
+}
+
+/**
+ * Parse one realtime data-channel event into caption state.
+ *
+ * User side comes from input-audio transcription, assistant side from the
+ * output-audio transcript. Everything else (tool calls, session lifecycle) is
+ * the sideband's business and is ignored here.
+ */
+function handleRealtimeEvent(raw: string): void {
+	let event: any;
+	try {
+		event = JSON.parse(raw);
+	} catch {
+		return;
+	}
+	const type: string = event?.type ?? '';
+	const itemId: string = event?.item_id || event?.response_id || 'pending';
+
+	switch (type) {
+		case 'response.created':
+			responseInProgress = true;
+			break;
+		case 'response.done':
+			responseInProgress = false;
+			scheduleTypedResponse();
+			break;
+		case 'error':
+			// VAD or the sideband may have started a response between our item
+			// and response.create. Keep the typed turn pending until it finishes.
+			if (event.error?.code === 'conversation_already_has_active_response') {
+				responseInProgress = true;
+				typedResponsePending = true;
+			} else {
+				patch({ notice: event.error?.message || 'The voice service could not process an event.' });
+			}
+			break;
+		case 'conversation.item.input_audio_transcription.delta':
+			appendCaption(`u:${itemId}`, 'user', event.delta ?? '', false);
+			break;
+		case 'conversation.item.input_audio_transcription.completed':
+			appendCaption(`u:${itemId}`, 'user', event.transcript ?? '', true);
+			break;
+		case 'response.output_audio_transcript.delta':
+			appendCaption(`a:${itemId}`, 'assistant', event.delta ?? '', false);
+			break;
+		case 'response.output_audio_transcript.done':
+			appendCaption(`a:${itemId}`, 'assistant', event.transcript ?? '', true);
+			break;
+		// Turn-taking signals — the WebRTC transport reports when the agent's
+		// audio actually starts/stops playing, and server VAD reports the user's
+		// speech. Both drive the dock's status line ("Speaking…" / "Listening").
+		case 'output_audio_buffer.started':
+			patch({ agentSpeaking: true });
+			break;
+		case 'output_audio_buffer.stopped':
+		case 'output_audio_buffer.cleared':
+			patch({ agentSpeaking: false });
+			break;
+		case 'input_audio_buffer.speech_started':
+			patch({ userSpeaking: true, agentSpeaking: false });
+			break;
+		case 'input_audio_buffer.speech_stopped':
+			patch({ userSpeaking: false });
+			break;
+		default:
+			break;
+	}
+}
+
+// ============================================================================
+// Handshake
+// ============================================================================
+
+/** Read the call id off the `Location` header (`/v1/realtime/calls/<id>`). */
+function callIdFromLocation(location: string | null): string | null {
+	if (!location) return null;
+	const trimmed = location.split('?')[0].replace(/\/+$/, '');
+	const last = trimmed.split('/').pop();
+	return last || null;
+}
+
+/** Resolve once the peer connection reaches `connected`, or reject on failure. */
+function waitForConnected(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
+	if (pc.connectionState === 'connected') return Promise.resolve();
+	return new Promise((resolve, reject) => {
+		const done = (fn: () => void) => {
+			clearTimeout(timer);
+			pc.removeEventListener('connectionstatechange', onChange);
+			fn();
+		};
+		const onChange = () => {
+			if (pc.connectionState === 'connected') done(resolve);
+			else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+				done(() => reject(new Error('The voice connection failed to establish.')));
+			}
+		};
+		const timer = setTimeout(
+			() => done(() => reject(new Error('Timed out connecting to the voice service.'))),
+			timeoutMs
+		);
+		pc.addEventListener('connectionstatechange', onChange);
+	});
+}
+
+/**
+ * Build a peer connection, complete the SDP exchange with OpenAI and register
+ * the resulting `call_id` with our backend. Does NOT touch global call state —
+ * the caller decides whether this becomes the live connection.
+ */
+async function openConnection(
+	clientSecret: string,
+	model: string,
+	stream: MediaStream
+): Promise<Connection> {
+	const epoch = generation;
+	const pc = new RTCPeerConnection();
+
+	// The events channel must exist BEFORE the offer so it is negotiated in the
+	// same exchange (there is no second round trip to add it later).
+	const dc = pc.createDataChannel('oai-events');
+	dc.addEventListener('message', (e) => {
+		// A retired or not-yet-promoted reconnect channel cannot schedule replies
+		// on the current conversation. Both peers briefly share the generation.
+		if (epoch === generation && connection?.dc === dc && pc.connectionState !== 'closed') handleRealtimeEvent(String(e.data));
+	});
+
+	pc.addEventListener('track', (e) => {
+		if (epoch !== generation || pc.connectionState === 'closed') return;
+		const el = ensureAudioElement();
+		const remote = e.streams[0] ?? new MediaStream([e.track]);
+		el.srcObject = remote;
+		playbackSource?.disconnect();
+		playbackSource = playbackContext!.createMediaStreamSource(remote);
+		playbackSource.connect(playbackOutput!.input);
+		playbackOutput?.mute(get(voiceCallState).agentMuted);
+		el.play().catch((err) => console.warn('[voice] playback blocked:', err));
+	});
+
+	const [track] = stream.getAudioTracks();
+	if (!track) throw new Error('No microphone track available.');
+	pc.addTrack(track, stream);
+
+	const offer = await pc.createOffer();
+	await pc.setLocalDescription(offer);
+
+	let response: Response;
+	try {
+		response = await fetch(`${OPENAI_CALLS_URL}?model=${encodeURIComponent(model)}`, {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${clientSecret}`,
+				'Content-Type': 'application/sdp',
+			},
+			body: offer.sdp ?? '',
+		});
+	} catch (e) {
+		pc.close();
+		throw new Error(
+			`Could not reach OpenAI to start the call: ${e instanceof Error ? e.message : String(e)}`
+		);
+	}
+
+	if (!response.ok) {
+		const body = (await response.text().catch(() => '')).slice(0, 300);
+		pc.close();
+		throw new Error(`OpenAI rejected the call (HTTP ${response.status}): ${body}`);
+	}
+
+	const answer = await response.text();
+	await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+
+	// The call id lives in the Location header; without it the backend cannot
+	// join its sideband, but the audio leg still works — warn, don't fail.
+	const callId = callIdFromLocation(response.headers.get('Location'));
+	if (!callId) {
+		console.warn(
+			'[voice] no call id in the OpenAI Location header — the backend cannot attach its sideband.'
+		);
+	}
+
+	return { pc, dc, callId };
+}
+
+/**
+ * End the call with an error when the LIVE connection fails mid-call. Armed on
+ * the first connection and again on each re-handshake's replacement.
+ */
+function watchForDrop(conn: Connection, owner: string, epoch: number): void {
+	conn.pc.addEventListener('connectionstatechange', () => {
+		if (epoch !== generation || connection !== conn) return;
+		if (conn.pc.connectionState !== 'failed') return;
+		// teardown() resets the store once its awaits settle; the reason is
+		// written after that, or it would be wiped.
+		const ending = teardown({ notifyBackend: true, status: 'error', reason: 'webrtc-failed' });
+		const endedGeneration = generation;
+		void ending.then(() => {
+			if (endedGeneration === generation) patch({ sessionId: owner, error: 'The voice connection dropped.' });
+		});
+	});
+}
+
+function closeConnection(conn: Connection | null): void {
+	if (!conn) return;
+	try {
+		conn.dc.close();
+	} catch {
+		/* already closed */
+	}
+	try {
+		conn.pc.close();
+	} catch {
+		/* already closed */
+	}
+}
+
+// ============================================================================
+// Call-length cap (VW5) — a 409 ends the call, it is never retried
+// ============================================================================
+
+/**
+ * The server's message when a request was refused by the call-length cap, or
+ * `null` for any other failure.
+ */
+function callCapMessage(e: unknown): string | null {
+	const err = e as { status?: number; detail?: string } | null;
+	if (!err || typeof err !== 'object' || err.status !== 409) return null;
+	return err.detail || 'This call reached its length cap. Hang up and start a new call.';
+}
+
+/**
+ * End the call because the cap fired, leaving the reason on screen.
+ *
+ * The hangup notification matters: it is what clears the server's grace window,
+ * so the "start a new call" the message asks for actually works.
+ */
+async function endForCap(sessionIdIn: string | null, message: string): Promise<void> {
+	const ending = teardown({ notifyBackend: true, status: 'ended', reason: 'call-cap' });
+	const epoch = generation;
+	await ending;
+	if (epoch === generation) patch({ sessionId: sessionIdIn, notice: message });
+}
+
+// ============================================================================
+// Reconnect at the 60-minute wall (ruling VM15, FE half)
+// ============================================================================
+
+function armReconnectTimer(): void {
+	clearReconnectTimer();
+	reconnectTimer = setTimeout(() => {
+		void reconnect();
+	}, RECONNECT_AFTER_MS);
+}
+
+function clearReconnectTimer(): void {
+	if (reconnectTimer !== null) {
+		clearTimeout(reconnectTimer);
+		reconnectTimer = null;
+	}
+}
+
+/**
+ * Silently re-handshake onto a fresh realtime session.
+ *
+ * Order matters: the NEW connection must be established (and its call id
+ * registered) before the old one is torn down, so there is no audio gap beyond
+ * the swap itself.
+ */
+function reconnect(): Promise<void> {
+	const epoch = generation;
+	return withMicHandover(async () => {
+		if (epoch === generation) await reconnectWithMic();
+	});
+}
+
+async function reconnectWithMic(): Promise<void> {
+	const myGeneration = generation;
+	const current = get(voiceCallState);
+	if (current.status !== 'live' || !sessionId || !micStream) return;
+
+	patch({ status: 'reconnecting' });
+	const previous = connection;
+
+	try {
+		const cred = await mintVoiceSecret(sessionId);
+		if (myGeneration !== generation) return;
+		if (!cred) {
+			// VW3 not merged: no re-mint route. Surface it near the captions and
+			// let the call run out its wall rather than dropping it silently.
+			patch({
+				status: 'live',
+				notice:
+					'Approaching the 60-minute limit for this call — automatic reconnect is not available yet, so the call may end shortly.',
+			});
+			return;
+		}
+
+		const next = await openConnection(cred.client_secret, cred.model, micStream);
+		if (myGeneration !== generation) {
+			closeConnection(next);
+			return;
+		}
+		await waitForConnected(next.pc, CONNECT_TIMEOUT_MS);
+		if (myGeneration !== generation) {
+			closeConnection(next);
+			return;
+		}
+
+		connection = next;
+		watchForDrop(next, sessionId, myGeneration);
+		applyMicMuted(get(voiceCallState).micMuted);
+		if (next.callId) await attachVoiceCall(sessionId, next.callId);
+		if (myGeneration !== generation) {
+			closeConnection(previous);
+			closeConnection(next);
+			return;
+		}
+
+		closeConnection(previous);
+		patch({
+			status: 'live',
+			model: cred.model,
+			notice: null,
+			agentSpeaking: false,
+			userSpeaking: false,
+		});
+		armReconnectTimer();
+	} catch (e) {
+		if (myGeneration !== generation) return;
+		// The call-length cap is terminal: reconnecting is precisely what must
+		// NOT happen (it would restart the clock), so end the call instead.
+		const capped = callCapMessage(e);
+		if (capped) {
+			await endForCap(sessionId, capped);
+			return;
+		}
+		console.warn('[voice] reconnect failed:', e);
+		// The old connection is still up until the wall actually hits — stay live
+		// and tell the user what to expect.
+		patch({
+			status: 'live',
+			notice: `Could not refresh the call before the 60-minute limit (${
+				e instanceof Error ? e.message : String(e)
+			}). It may end shortly.`,
+		});
+	}
+}
+
+// ============================================================================
+// Controls
+// ============================================================================
+
+function applyMicMuted(muted: boolean): void {
+	audioStream?.muteInput(muted);
+	for (const stream of [micStream, pendingMicStream]) {
+		stream?.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+	}
+}
+
+/** Mute/unmute the microphone (the track stays attached; it is just disabled). */
+function setMicMuted(muted: boolean): void {
+	applyMicMuted(muted);
+	patch({ micMuted: muted });
+}
+
+export function toggleMic(): void {
+	setMicMuted(!get(voiceCallState).micMuted);
+}
+
+/** Mute/unmute the agent's voice (playback only — the model keeps talking). */
+function setAgentMuted(muted: boolean): void {
+	playbackOutput?.mute(muted);
+	audioStream?.muteOutput(muted);
+	patch({ agentMuted: muted });
+}
+
+export function toggleAgent(): void {
+	setAgentMuted(!get(voiceCallState).agentMuted);
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+/**
+ * Start a call on `sessionIdIn` using an already-minted credential (the one
+ * `POST /voice/sessions` returned).
+ */
+export async function startCall(
+	sessionIdIn: string,
+	cred: { client_secret: string; model: string; options?: VoiceOptions }
+): Promise<void> {
+	const current = get(voiceCallState);
+	if (isCallSurfaceActive(current, current.sessionId)) {
+		if (current.sessionId === sessionIdIn && sessionId) return;
+		if (current.sessionId !== sessionIdIn) {
+			throw new Error('End the current voice call before starting another.');
+		}
+	}
+	await teardown({ notifyBackend: false, status: 'idle' });
+	const myGeneration = ++generation;
+
+	sessionId = sessionIdIn;
+	voiceCallState.set({
+		...INITIAL,
+		sessionId: sessionIdIn,
+		status: 'connecting',
+		model: cred.model,
+		options: cred.options,
+	});
+
+	try {
+		nativeVoiceRouting(true);
+		const acquired = await acquireMic();
+		if (myGeneration !== generation) {
+			acquired.getTracks().forEach(track => track.stop());
+			return;
+		}
+		micStream = acquired;
+		applyMicMuted(get(voiceCallState).micMuted);
+		if (usesAudioStream(cred.model)) {
+			const { openVoiceAudioStream } = await import('./voiceAudioStream');
+			if (myGeneration !== generation) return;
+			const abort = new AbortController();
+			audioAbort = abort;
+			const endStream = (message: string | null, reason: VoiceStreamEndReason) => {
+				// The far end hanging up is an ending, not a failure; it
+				// still says so, so it never looks like the End button.
+				const quiet = reason === 'provider-closed' || reason === 'server-closed';
+				const ending = teardown({ notifyBackend: true, status: quiet ? 'ended' : 'error', reason });
+				const endedGeneration = generation;
+				void ending.then(() => {
+					if (endedGeneration !== generation) return;
+					patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
+				});
+			};
+			// A fresh microphone when the call's track ended or went silent
+			// (#1824); the call keeps its socket and provider session.
+			const reacquireMic = async (refreshSignal?: AbortSignal): Promise<MediaStream> => {
+				const next = await acquireMic();
+				if (myGeneration !== generation || refreshSignal?.aborted) {
+					next.getTracks().forEach(track => track.stop());
+					throw new Error('The call has ended.');
+				}
+				const previous = micStream;
+				micStream = next;
+				applyMicMuted(get(voiceCallState).micMuted);
+				previous?.getTracks().forEach(track => track.stop());
+				startLevelMonitor(next);
+				return next;
+			};
+			const open = (resume: boolean, signal: AbortSignal) => openVoiceAudioStream(sessionIdIn, micStream ?? acquired, {
+				caption: (id, role, delta) => { if (myGeneration === generation) appendCaption(id, role, delta, false); },
+				speaking: active => { if (myGeneration === generation) patch({ agentSpeaking: active }); },
+				// The server is restoring its provider connection; the caller
+				// sees "reconnecting" until it reports the call live again.
+				reconnecting: active => {
+					if (myGeneration !== generation || !audioStream) return;
+					patch(active ? { status: 'reconnecting', agentSpeaking: false } : { status: 'live' });
+				},
+				micHealth: ok => { if (myGeneration === generation) patch({ micProblem: !ok }); },
+				reacquireMic,
+				closed: (message, reason) => {
+					if (myGeneration !== generation) return;
+					// Only the socket to this server dropped; the server ends the
+					// call explicitly (an error or ended message) otherwise.
+					// GPT Live resumes from the saved conversation; PersonaPlex
+					// would start over, so its call ends as before.
+					if (reason === 'connection-dropped' && cred.model === 'gpt-live-1') void restoreStream();
+					else endStream(message, reason);
+				},
+			}, signal, cred.options?.mic_threshold_db, resume);
+			// One reconnect attempt: hang-up (the call's abort) cancels it at
+			// once, and an attempt that hangs is given up after its limit.
+			const openAttempt = async () => {
+				const attempt = new AbortController();
+				const relay = () => attempt.abort();
+				abort.signal.addEventListener('abort', relay, { once: true });
+				const timer = setTimeout(relay, STREAM_ATTEMPT_TIMEOUT_MS);
+				try {
+					return await open(true, attempt.signal);
+				} catch (e) {
+					abort.signal.removeEventListener('abort', relay);
+					throw e;
+				} finally {
+					clearTimeout(timer);
+				}
+			};
+			// Reopen the audio socket on the same session. The server replaces
+			// any leftover connection and seeds the new provider session with
+			// the saved conversation; chat work started by the call carries on.
+			let restores = 0;
+			const restoreStream = async () => {
+				if (++restores > STREAM_MAX_RESTORES) {
+					endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
+					return;
+				}
+				const dropped = audioStream;
+				audioStream = null;
+				patch({ status: 'reconnecting', agentSpeaking: false, micProblem: false });
+				console.info('[voice] audio connection dropped; reconnecting');
+				// The dropped stream's microphone audio is discarded with it; the
+				// new socket starts with live audio, never a replayed backlog.
+				await dropped?.close();
+				const droppedAt = Date.now();
+				for (let attempt = 1; ; attempt++) {
+					const delay = STREAM_RECONNECT_BACKOFF_MS[Math.min(attempt, STREAM_RECONNECT_BACKOFF_MS.length) - 1];
+					if (attempt > 1 && Date.now() - droppedAt + delay > STREAM_RECONNECT_WINDOW_MS) break;
+					await new Promise(resolve => setTimeout(resolve, delay));
+					if (myGeneration !== generation) return;
+					try {
+						const stream = await openAttempt();
+						if (myGeneration !== generation) { await stream.close(); return; }
+						audioStream = stream;
+						applyMicMuted(get(voiceCallState).micMuted);
+						stream.muteOutput(get(voiceCallState).agentMuted);
+						patch({ status: 'live' });
+						console.info('[voice] audio connection restored on attempt', attempt, 'after', Date.now() - droppedAt, 'ms');
+						return;
+					} catch (e) {
+						if (myGeneration !== generation) return;
+						console.warn('[voice] audio reconnect attempt', attempt, 'failed:', e);
+					}
+				}
+				endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
+			};
+			const stream = await open(false, abort.signal);
+			if (myGeneration !== generation) { await stream.close(); return; }
+			audioStream = stream;
+			applyMicMuted(get(voiceCallState).micMuted);
+			startLevelMonitor(acquired);
+			patch({ status: 'live', startedAt: Date.now() });
+			return;
+		}
+
+		const conn = await openConnection(cred.client_secret, cred.model, micStream);
+		if (myGeneration !== generation) {
+			closeConnection(conn);
+			return;
+		}
+		connection = conn;
+
+		await waitForConnected(conn.pc, CONNECT_TIMEOUT_MS);
+		if (myGeneration !== generation) return;
+
+		startLevelMonitor(micStream);
+		listenForRealtimeDevices(myGeneration);
+		if (conn.callId) await attachVoiceCall(sessionIdIn, conn.callId);
+		if (myGeneration !== generation) return;
+
+		watchForDrop(conn, sessionIdIn, myGeneration);
+
+		patch({ status: 'live', startedAt: Date.now() });
+		armReconnectTimer();
+	} catch (e) {
+		if (myGeneration !== generation) return;
+		const capped = callCapMessage(e);
+		if (capped) {
+			await endForCap(sessionIdIn, capped);
+			return;
+		}
+		const message =
+			e instanceof Error && e.name ? micErrorOrMessage(e) : String(e ?? 'Unknown error');
+		console.error('[voice] failed to start call:', e);
+		await teardown({ notifyBackend: false, status: 'error' });
+		patch({ sessionId: sessionIdIn, status: 'error', error: message });
+	}
+}
+
+/** getUserMedia rejections get the friendly mapping; everything else is verbatim. */
+function micErrorOrMessage(e: Error): string {
+	if (e.name === 'NotAllowedError' || e.name === 'NotFoundError') return micErrorMessage(e);
+	return e.message;
+}
+
+/**
+ * Start a call on an existing voice session by re-minting its credential.
+ *
+ * This is the "Start call" button on a voice session that has no live call.
+ * The re-mint route is VW3's, so a missing route is reported as a plain,
+ * non-fatal message rather than an error state the user cannot clear.
+ */
+export async function startCallForSession(sessionIdIn: string, options: { attach?: boolean } = {}): Promise<void> {
+	if (isCallActiveFor(sessionIdIn)) return;
+	if (!(await confirmCallReplacement(sessionIdIn))) return;
+	// Another start may have won while confirmation/hangup was pending.
+	const settled = get(voiceCallState);
+	if (isCallSurfaceActive(settled, settled.sessionId)) return;
+	const attempt = ++generation;
+	patch({ sessionId: sessionIdIn, status: 'connecting', error: null, notice: null });
+	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
+	try {
+		// Only an explicit call action creates a normal conversation's audio binding.
+		// Historical voice sessions and timed reconnects retain the secret endpoint.
+		cred = options.attach ? await prepareConversationCall(sessionIdIn) : await mintVoiceSecret(sessionIdIn);
+		if (attempt !== generation) return;
+	} catch (e) {
+		if (attempt !== generation) return;
+		const capped = callCapMessage(e);
+		if (capped) {
+			// Nothing is up yet, so there is nothing to tear down — just say why.
+			patch({ status: 'ended', notice: capped, error: null });
+			return;
+		}
+		const detail = (e as { detail?: string })?.detail;
+		patch({
+			status: 'error',
+			error: detail || (e instanceof Error ? e.message : 'Could not start the call.'),
+		});
+		return;
+	}
+	if (!cred) {
+		patch({
+			status: 'idle',
+			error: 'Call backend not available yet — the voice bridge (VW3) is not deployed.',
+		});
+		return;
+	}
+	await startCall(sessionIdIn, cred);
+}
+
+/**
+ * End the call. The session row stays — only the realtime call is torn down
+ * (ruling VM12: dispatched agents survive a hangup).
+ */
+export async function hangup(reason: VoiceEndReason = 'user'): Promise<void> {
+	await teardown({ notifyBackend: true, status: 'ended', reason });
+}
+
+async function teardown(opts: {
+	notifyBackend: boolean;
+	status: VoiceCallStatus;
+	/** Set whenever a live call ends; omitted only when nothing was up. */
+	reason?: VoiceEndReason;
+}): Promise<void> {
+	generation++;
+	micHandover = Promise.resolve();
+	pendingMicStream?.getTracks().forEach(t => t.stop()); pendingMicStream = null;
+	removeDeviceListeners?.(); removeDeviceListeners = null;
+	nativeVoiceRouting(false);
+	responseInProgress = false;
+	typedResponsePending = false;
+	clearReconnectTimer();
+	stopLevelMonitor();
+	audioAbort?.abort();
+	audioAbort = null;
+	await audioStream?.close();
+	audioStream = null;
+
+	const endedSession = sessionId ?? get(voiceCallState).sessionId;
+	closeConnection(connection);
+	connection = null;
+
+	micStream?.getTracks().forEach((t) => t.stop());
+	micStream = null;
+	teardownAudioElement();
+	sessionId = null;
+
+	voiceCallState.set({ ...INITIAL, sessionId: endedSession, status: opts.status, endReason: opts.reason ?? null });
+	if (opts.reason) console.info('[voice] call ended:', opts.reason);
+
+	if (opts.notifyBackend && endedSession) {
+		try {
+			await hangupVoiceCall(endedSession, opts.reason);
+		} catch (e) {
+			console.warn('[voice] hangup notification failed:', e);
+		}
+	}
+}
+
+/**
+ * The statuses that own the composer slot (ruling VM18).
+ *
+ * `connecting`/`live`/`reconnecting` are "a call is up on this session" — the
+ * chat composer is replaced by the call controls for exactly these. Every
+ * terminal status (`idle`/`ended`/`error`) gives the composer straight back.
+ */
+const ACTIVE_CALL_STATUSES: readonly VoiceCallStatus[] = ['connecting', 'live', 'reconnecting'];
+
+/**
+ * Pure predicate: does `state` describe an in-flight call belonging to
+ * `sessionId`?
+ *
+ * The controller is a singleton, so the session check is what stops a call on
+ * one session from swallowing another session's composer when the user switches
+ * chats mid-call.
+ */
+export function isCallSurfaceActive(
+	state: VoiceCallStoreState,
+	sessionId: string | null | undefined
+): boolean {
+	if (!sessionId) return false;
+	return state.sessionId === sessionId && ACTIVE_CALL_STATUSES.includes(state.status);
+}
+
+
+/** Replacing a call is an explicit action, never a side effect of navigation. */
+export async function confirmCallReplacement(nextSessionId: string | null): Promise<boolean> {
+	const current = get(voiceCallState);
+	if (!isCallSurfaceActive(current, current.sessionId) || current.sessionId === nextSessionId) return true;
+	if (typeof window === 'undefined' || !window.confirm('End the current voice call and start another?')) return false;
+	await hangup('replaced');
+	return true;
+}
+
+/** Send into the owner's Realtime conversation, never the normal query lane.
+ * Transcript persistence belongs to the sideband input_text item handler. */
+function scheduleTypedResponse(): void {
+	if (!typedResponsePending || responseInProgress) return;
+	if (connection?.dc.readyState !== 'open') {
+		patch({ notice: 'Your text was sent, but the voice connection closed before a reply could start.' });
+		return;
+	}
+	try {
+		connection.dc.send(JSON.stringify({ type: 'response.create' }));
+		responseInProgress = true;
+		typedResponsePending = false;
+	} catch {
+		// The conversation item was already accepted by the local transport.
+		// Returning false here would restore the draft and invite duplicate sends.
+		patch({ notice: 'Your text was sent, but a voice reply could not start. Try speaking when the connection is ready.' });
+	}
+}
+
+export function sendVoiceText(owner: string, text: string): boolean | Promise<boolean> {
+	const state = get(voiceCallState);
+	if (state.sessionId !== owner || state.status !== 'live' || !text.trim()) return false;
+	if (audioStream) {
+		if (state.model !== 'gpt-live-1') throw new Error('This voice engine does not support text or attachments. End the call to send your draft in chat.');
+		return audioStream.sendText(text);
+	}
+	if (connection?.dc.readyState !== 'open') return false;
+	try {
+		connection.dc.send(JSON.stringify({
+			type: 'conversation.item.create',
+			item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }
+		}));
+	} catch {
+		return false;
+	}
+	// Mark in flight synchronously, before response.created, so rapid sends
+	// cannot create competing responses. A later item gets the next turn.
+	typedResponsePending = true;
+	scheduleTypedResponse();
+	return true;
+}
+
+/** Visibility return only reconciles a live owner. It never mints or restarts. */
+export async function reconcileVoiceCall(): Promise<void> {
+	const state = get(voiceCallState);
+	if (!state.sessionId || !['live', 'reconnecting'].includes(state.status)) return;
+	const owner = state.sessionId;
+	const epoch = generation;
+	try {
+		const remote = await getVoiceCallState(owner);
+		if (epoch !== generation || get(voiceCallState).sessionId !== owner) return;
+		if (remote && !remote.active) {
+			await teardown({ notifyBackend: false, status: 'ended', reason: 'server-ended' });
+			patch({ sessionId: owner, notice: 'This voice call has ended.' });
+		}
+	} catch (error) {
+		console.warn('[voice] could not reconcile call state:', error);
+	}
+}
+
+/** Is a call live (or coming up) for this session? Snapshot read of the store. */
+export function isCallActiveFor(id: string | null | undefined): boolean {
+	return isCallSurfaceActive(get(voiceCallState), id);
+}

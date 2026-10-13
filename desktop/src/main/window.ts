@@ -1,0 +1,235 @@
+/**
+ * The one application window.
+ *
+ * The window is frameless with the OS window controls overlaid, so the web
+ * UI's own top strip doubles as the title bar. Chromium exposes the controls'
+ * geometry to the page through the Window Controls Overlay API
+ * (`navigator.windowControlsOverlay`, `env(titlebar-area-*)`), and the page
+ * marks the strip draggable with `-webkit-app-region: drag`.
+ *
+ * Only two kinds of document ever load here: the bundled status page
+ * (file://) and the local worker's web UI at http://127.0.0.1:<port>.
+ * Loading the worker's origin directly keeps every request same-origin, so
+ * the server's CSRF and WebSocket origin checks behave exactly as they do
+ * in a browser.
+ */
+import { app, BrowserWindow, nativeTheme, shell } from 'electron';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { attachNavigationPolicy } from './navigation';
+import { WindowStateStore } from './state';
+import { managedContext } from './managed-context';
+
+export const PARTITION = 'persist:shuffle';
+const TITLE_BAR_HEIGHT = 52;
+
+export interface TitleBarTheme {
+	background: string;
+	symbol: string;
+}
+
+const DARK_TITLE_BAR: TitleBarTheme = { background: '#000000', symbol: '#e9e9ec' };
+const LIGHT_TITLE_BAR: TitleBarTheme = { background: '#ffffff', symbol: '#1d1d1f' };
+
+export type PageMode = 'status';
+
+export class MainWindow {
+	onClose?: (event: { preventDefault(): void }) => void;
+	private win: BrowserWindow | null = null;
+	private workerUrl: string | null = null;
+	private page: PageMode | null = null;
+	private readonly stateStore: WindowStateStore;
+
+	constructor(private readonly userData: string, private readonly title = 'AI Shuffle', private readonly activateOnShow = true) {
+		this.stateStore = new WindowStateStore(path.join(userData, 'window-state.json'));
+	}
+
+	get browserWindow(): BrowserWindow | null {
+		return this.win && !this.win.isDestroyed() ? this.win : null;
+	}
+
+	/** The worker origin the window is showing, or null on a bundled page. */
+	get currentWorkerUrl(): string | null {
+		return this.page === null ? this.workerUrl : null;
+	}
+
+	/** Which bundled page is showing, or null when the worker UI is. */
+	get currentPage(): PageMode | null {
+		return this.page;
+	}
+
+	/** The bundled status page, the only file the main window may show. */
+	get bundledPagePath(): string {
+		return path.join(app.getAppPath(), 'src/pages/worker.html');
+	}
+
+	/** The same page as a file URL, for comparing against frame and navigation URLs. */
+	get bundledPageUrl(): string {
+		return pathToFileURL(this.bundledPagePath).href;
+	}
+
+	isOwnSender(webContentsId: number): boolean {
+		return this.browserWindow?.webContents.id === webContentsId;
+	}
+
+	private creating: Promise<BrowserWindow> | null = null;
+
+	ensure(): Promise<BrowserWindow> {
+		const existing = this.browserWindow;
+		if (existing) return Promise.resolve(existing);
+		// A second caller while the saved bounds load (a dock click during the
+		// first open) shares this window instead of creating an untracked one.
+		this.creating ??= this.create().finally(() => { this.creating = null; });
+		return this.creating;
+	}
+
+	private async create(): Promise<BrowserWindow> {
+		const state = await this.stateStore.load();
+		const initialTheme = nativeTheme.shouldUseDarkColors ? DARK_TITLE_BAR : LIGHT_TITLE_BAR;
+		const isMac = process.platform === 'darwin';
+
+		const win = new BrowserWindow({
+			width: state.bounds?.width ?? 1440,
+			height: state.bounds?.height ?? 900,
+			x: state.bounds?.x,
+			y: state.bounds?.y,
+			minWidth: 900,
+			minHeight: 560,
+			show: false,
+			backgroundColor: initialTheme.background,
+			title: this.title,
+			titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+			trafficLightPosition: isMac ? { x: 18, y: 18 } : undefined,
+			titleBarOverlay: {
+				color: initialTheme.background,
+				symbolColor: initialTheme.symbol,
+				height: TITLE_BAR_HEIGHT
+			},
+			autoHideMenuBar: true,
+			webPreferences: {
+				preload: path.join(__dirname, '../preload/index.js'),
+				partition: PARTITION,
+				contextIsolation: true,
+				sandbox: true,
+				nodeIntegration: false,
+				spellcheck: true
+			}
+		});
+		this.win = win;
+		const installedHost = managedContext()?.host;
+		if (process.platform === 'win32' && installedHost) win.setAppDetails({
+			appId: 'com.hobbycoders.aishuffle.desktop', relaunchCommand: `"${installedHost.executable}"`,
+			relaunchDisplayName: 'AI Shuffle', appIconPath: installedHost.executable,
+		});
+		this.stateStore.track(win);
+		attachNavigationPolicy(
+			win,
+			() => this.currentWorkerUrl,
+			(message) => this.onLoadFailure(message),
+			this.bundledPageUrl
+		);
+
+		win.once('ready-to-show', () => {
+			if (state.maximized) win.maximize();
+			if (this.activateOnShow) this.focus();
+			else win.showInactive();
+		});
+		win.on('close', (event) => this.onClose?.(event));
+		win.on('closed', () => {
+			this.win = null;
+		});
+		const broadcast = () => this.send('desktop:window-state', this.windowState());
+		win.on('maximize', broadcast);
+		win.on('unmaximize', broadcast);
+		win.on('enter-full-screen', broadcast);
+		win.on('leave-full-screen', broadcast);
+		win.on('focus', broadcast);
+		win.on('blur', broadcast);
+		win.webContents.on('page-title-updated', (event) => {
+			// The document title is the session title; keep the OS title short.
+			event.preventDefault();
+			win.setTitle(this.title);
+		});
+		return win;
+	}
+
+	private loadFailureHandler: ((message: string) => void) | null = null;
+
+	onLoadFailed(handler: (message: string) => void): void {
+		this.loadFailureHandler = handler;
+	}
+
+	private onLoadFailure(message: string): void {
+		this.loadFailureHandler?.(message);
+	}
+
+	windowState(): { maximized: boolean; fullscreen: boolean; focused: boolean } {
+		const win = this.browserWindow;
+		return {
+			maximized: win?.isMaximized() ?? false,
+			fullscreen: win?.isFullScreen() ?? false,
+			focused: win?.isFocused() ?? false
+		};
+	}
+
+	async loadWorker(url: string): Promise<void> {
+		const win = await this.ensure();
+		this.workerUrl = new URL(url).origin;
+		this.page = null;
+		// The URL is stable across worker updates; revalidate any HTML cached by an older build.
+		await win.loadURL(url, { extraHeaders: 'Cache-Control: no-cache\r\nPragma: no-cache\r\n' }).catch(() => {
+			/* did-fail-load reports through onLoadFailed. */
+		});
+	}
+
+	async showPage(mode: PageMode, query: Record<string, string> = {}): Promise<void> {
+		const win = await this.ensure();
+		this.page = mode;
+		await win.loadFile(this.bundledPagePath, { query: { mode, ...query } }).catch(() => {
+			/* The window is closing, or a newer navigation replaced this one. */
+		});
+	}
+
+	setTitleBarTheme(theme: TitleBarTheme): void {
+		const win = this.browserWindow;
+		if (!win) return;
+		win.setBackgroundColor(theme.background);
+		if (process.platform !== 'darwin') {
+			try {
+				win.setTitleBarOverlay({ color: theme.background, symbolColor: theme.symbol, height: TITLE_BAR_HEIGHT });
+			} catch {
+				/* Not every Linux window manager honours the overlay. */
+			}
+		}
+	}
+
+	send(channel: string, payload?: unknown): void {
+		const win = this.browserWindow;
+		if (win) win.webContents.send(channel, payload);
+	}
+
+	focus(): void {
+		const win = this.browserWindow;
+		if (!win) return;
+		if (win.isMinimized()) win.restore();
+		win.show();
+		// Older installed launchers pass SW_HIDE. Windows can suppress the first
+		// show even though Chromium marks it shown; reset that state and retry.
+		if (process.platform === 'win32' && !win.isVisible()) {
+			win.hide();
+			win.show();
+		}
+		win.focus();
+	}
+
+	openExternal(url: string): void {
+		try {
+			const parsed = new URL(url);
+			if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+				void shell.openExternal(parsed.href);
+			}
+		} catch {
+			/* Ignore malformed links. */
+		}
+	}
+}

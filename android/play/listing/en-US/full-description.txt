@@ -1,0 +1,28 @@
+Run AI coding and automation agents on your own machines from your phone.
+
+AI Shuffle connects to the AI Shuffle worker you run on a computer, server or NAS. Start work, follow replies and approve requests without sitting at that machine. Agents run on the worker, not on the phone.
+
+What you can do
+- Start coding and automation sessions and continue existing conversations.
+- Follow streaming replies, review tool requests and download files.
+- Switch between your workers.
+- Use voice with a speech provider configured on your worker.
+- Enable optional phone tools, such as timers and maps. Location requests and each optional screen-control action require local approval.
+
+Free local use
+AI Shuffle is free and open source. Run it on your own hardware with your own supported AI accounts. Local use does not require a HobbyCoders account or a paid plan. Connect directly using a secure worker address on your network or VPN.
+
+Optional remote access
+A free HobbyCoders account includes one remote worker. An optional AI Shuffle Cloud plan provides three remote-worker seats and additional hosted services. Local use stays free if a plan ends. AI usage is separate and is billed by your chosen provider; this app does not include AI credits or models.
+
+Your data
+Conversations and files are stored on your worker. Prompts, attachments and tool results can be sent to the AI providers you configure. Managed remote access carries traffic through our tunnel provider. Account services store the identity and device records needed to connect your workers. Support reports are sent to HobbyCoders only when you choose to send them.
+
+Requirements
+- Android 8.0 or newer.
+- A running AI Shuffle worker with a secure connection, and a supported AI provider or local model configured there.
+
+You can try the offline demo from Settings without a worker or an account. The demo does not run live agents.
+
+Account deletion: Settings > Account > Delete account, or https://hobbycoders.com/delete-account.
+Privacy policy: https://hobbycoders.com/privacy.

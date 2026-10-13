@@ -1,0 +1,2164 @@
+"""
+PostgreSQL bootstrap schema, indexes, and full-text search infrastructure.
+
+This defines the PostgreSQL schema (all tables, indexes, and FTS
+infrastructure) corresponding to ``database.py._create_schema()``
+plus all column migrations from ``_run_column_migrations()``.
+
+Usage::
+
+    from app.db.schema_postgres import create_postgres_schema
+    with get_db() as conn:
+        cursor = conn.cursor()
+        create_postgres_schema(cursor)
+"""
+
+import logging
+
+from app.db.base import column_exists
+
+logger = logging.getLogger("app.db.schema_postgres")
+
+# Must match database.py SCHEMA_VERSION
+SCHEMA_VERSION = 92
+
+
+def create_session_events_recall_index(cursor) -> None:
+    """Index the mirrored-event arm of agent SessionSearch, if pg_trgm is usable.
+
+    Called by both bootstrap and the fingerprint-gated upgrade pass. Keep the
+    raw JSON expression and text-event predicate aligned with PgFluidStore's
+    prefilter; token FTS would drop short/punctuation/substring matches.
+    """
+    if session_recall_cache_ready(cursor):
+        return
+    cursor.execute("SAVEPOINT recall_trgm_events")
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_events_recall_trgm "
+            "ON session_events USING gin ((payload::text) gin_trgm_ops) "
+            "WHERE event_type IN ('message.user', 'message.assistant', 'assistant.text_delta')"
+        )
+    except Exception:  # noqa: BLE001 — unavailable extension must not prevent boot
+        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_events")
+        logger.warning("Mirrored SessionSearch trigram index unavailable; recall remains unindexed")
+    finally:
+        cursor.execute("RELEASE SAVEPOINT recall_trgm_events")
+
+
+def session_recall_cache_ready(cursor) -> bool:
+    """Use the optional cache only after all three indexes are valid."""
+    cursor.execute(
+        "SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = current_schema() AND i.indisvalid AND i.indisready "
+        "AND c.relname IN ('idx_fluid_recall_text_trgm', 'idx_sse_recall_text_trgm', 'idx_events_recall_text_trgm')"
+    )
+    return {r["relname"] for r in cursor.fetchall()} == {
+        "idx_fluid_recall_text_trgm", "idx_sse_recall_text_trgm", "idx_events_recall_text_trgm",
+    }
+
+
+def create_session_recall_text(cursor) -> None:
+    """Explicit maintenance only: atomically backfill the optional recall cache.
+
+    Never call this from bootstrap or startup migrations: stored columns rewrite
+    the tables. The maintenance entry point checks capacity and sets lock and
+    statement timeouts before calling. Failures roll the whole transaction back.
+    """
+    cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    shapes = (
+        ("fluid_session_nodes", "message::text", "TRUE", "idx_fluid_recall_text_trgm"),
+        ("session_store_entries", "entry::text", "subpath IS NULL", "idx_sse_recall_text_trgm"),
+        ("session_events", "payload::text",
+         "event_type IN ('message.user', 'message.assistant', 'assistant.text_delta')",
+         "idx_events_recall_text_trgm"),
+    )
+    for table, expression, predicate, index in shapes:
+        if not column_exists(cursor, table, "recall_text"):
+            cursor.execute(
+                f"ALTER TABLE {table} ADD COLUMN recall_text TEXT GENERATED ALWAYS AS "
+                f"(CASE WHEN {predicate} THEN {expression} END) STORED"
+            )
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {index} ON {table} "
+            f"USING gin (recall_text gin_trgm_ops) WHERE {predicate}"
+        )
+    if not session_recall_cache_ready(cursor):
+        raise RuntimeError("Recall cache indexes are not valid; retain legacy indexes and retry maintenance")
+    # The native expression index still serves the separate session-list API.
+    # The other two expressions are only read by SessionSearch and are now redundant.
+    cursor.execute("DROP INDEX IF EXISTS idx_sse_entry_trgm")
+    cursor.execute("DROP INDEX IF EXISTS idx_session_events_recall_trgm")
+
+
+def create_postgres_schema(cursor) -> None:
+    """Create all PostgreSQL tables, indexes, triggers, and seed data.
+
+    Parameters
+    ----------
+    cursor : psycopg2 cursor
+        An open cursor on a PostgreSQL connection.  The caller is
+        responsible for committing the transaction.
+    """
+
+    # ------------------------------------------------------------------
+    # Account hub tables have no ordering dependencies.
+    from app.db.mobile_hub import create_schema as create_mobile_hub_schema
+    create_mobile_hub_schema(cursor)
+    # Worker-network tables (device membership, sync log, conflicts). Local
+    # to this worker's database; nothing in them depends on other tables.
+    from app.db.network import create_schema as create_network_schema
+    create_network_schema(cursor)
+
+    # 1. Schema version
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY
+        )
+    """)
+    cursor.execute("DELETE FROM schema_version")
+    cursor.execute(
+        "INSERT INTO schema_version (version) VALUES (%s)",
+        (SCHEMA_VERSION,),
+    )
+
+    # ------------------------------------------------------------------
+    # 2. System settings (key-value store for global configuration)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            revision TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 3. Admin user (single user system)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            username TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            CHECK (id = 1)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 4. Agents (unified agent entity — was `profiles`)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            config JSONB NOT NULL,
+            mcp_tools JSONB DEFAULT '[]',
+            avatar_color TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 5. Projects (workspaces)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            path TEXT NOT NULL,
+            settings JSONB DEFAULT '{}',
+            instance_id TEXT,
+            link_group_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
+    # Boot's orphaned-instance adoption scans DISTINCT instance_id here.
+    # Guarded like idx_sessions_active below: on a database old enough to
+    # predate projects.instance_id the CREATE TABLE above is a no-op and the
+    # column only arrives in _run_column_migrations, which runs AFTER this pass.
+    if column_exists(cursor, "projects", "instance_id"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_instance ON projects(instance_id)")
+
+    # ------------------------------------------------------------------
+    # 6. API users (for programmatic access with isolated workspaces)
+    #    Placed before sessions because sessions has FK to api_users.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            username TEXT,
+            password_hash TEXT,
+            api_key_hash TEXT NOT NULL,
+            project_id TEXT,
+            profile_id TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            web_login_allowed BOOLEAN DEFAULT TRUE,
+            description TEXT,
+            model TEXT,
+            effort TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_used_at TIMESTAMP WITH TIME ZONE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 7. Git repositories (tracks git state per project)
+    #    Placed before worktrees because worktrees has FK to git_repositories.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS git_repositories (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL UNIQUE,
+            remote_url TEXT,
+            default_branch TEXT DEFAULT 'main',
+            github_repo_name TEXT,
+            last_synced_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 8. Worktrees (for parallel session work on branches)
+    #    Placed before sessions because sessions has FK to worktrees.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS worktrees (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            session_id TEXT,
+            branch_name TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            base_branch TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 9. Sessions (conversations)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            profile_id TEXT,
+            api_user_id TEXT,
+            sdk_session_id TEXT,
+            worktree_id TEXT,
+            worktree_branch TEXT,
+            worktree_path TEXT,
+            cloud_branch TEXT,
+            automation_id TEXT,
+            parked_task_kind TEXT,
+            title TEXT,
+            status TEXT DEFAULT 'active',
+            is_active BOOLEAN DEFAULT FALSE,
+            total_cost_usd DOUBLE PRECISION DEFAULT 0,
+            -- Cumulative usage. total_tokens_in counts FRESH input only (the
+            -- provider normalizes Anthropic-style, so cache reads are excluded);
+            -- the two total_cache_* columns carry the rest. True prompt tokens
+            -- for a session = total_tokens_in + total_cache_read_tokens +
+            -- total_cache_creation_tokens. BIGINT because a cache-heavy session
+            -- blows past INTEGER's 2.1B ceiling.
+            total_tokens_in BIGINT DEFAULT 0,
+            total_tokens_out BIGINT DEFAULT 0,
+            total_cache_read_tokens BIGINT DEFAULT 0,
+            total_cache_creation_tokens BIGINT DEFAULT 0,
+            -- Snapshot (NOT cumulative) of the LAST API call's usage — this is
+            -- what the context bar renders on reload.
+            last_input_tokens INTEGER DEFAULT 0,
+            cache_creation_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
+            -- turn_count counts USER-VISIBLE turns (one per completed turn);
+            -- total_model_calls counts the API hops inside them.
+            turn_count INTEGER DEFAULT 0,
+            total_model_calls INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            parent_session_id TEXT,
+            fork_point_message_index INTEGER,
+            instance_id TEXT,
+            launched_model TEXT,
+            voice_config JSONB,
+            -- The FIRST model this session ever ran on. launched_model is
+            -- overwritten by every mid-session switch, so a session that ran
+            -- turns 1-6 on grok-4.5 and 7-16 on grok-4.6 was recorded as
+            -- grok-4.6 only and its early history was unattributable. Written
+            -- once (COALESCE, never overwritten — see sessions.update_session).
+            first_model TEXT,
+            v2_stream BOOLEAN NOT NULL DEFAULT TRUE,
+            project_v2_id TEXT,
+            branch TEXT,
+            placement JSONB,
+            working_set_ref TEXT,
+            context_usage_json JSONB,
+            provider_id TEXT,
+            model TEXT,
+            effort TEXT,
+            permission_mode TEXT,
+            context_window INTEGER,
+            workspace_project_ids JSONB,
+            fast BOOLEAN,
+            mode TEXT,
+            hidden BOOLEAN,
+            -- v84: materialized "this session is a delegated ProviderAgent
+            -- worker" flag. Replaces the per-row correlated
+            -- ``NOT EXISTS (SELECT 1 FROM turns ...)`` probe the sessions-list
+            -- queries used to carry (one index probe into ``turns`` per listed
+            -- row AND per COUNT(*) row). NULL/FALSE = a normal session.
+            is_worker BOOLEAN,
+            -- v85: persisted pull-request lifecycle for the sidepanel. NULL on
+            -- every pre-existing row (no PR known). pr_state is 'open' /
+            -- 'merged' / 'closed'.
+            pr_number INTEGER,
+            pr_url TEXT,
+            pr_state TEXT,
+            -- Every pull request this chat (or one of its sub-agent workers)
+            -- opened: a JSON list of {number, url, state, title, branch,
+            -- source}. NULL on older rows; pr_* above stays the primary PR.
+            pull_requests JSONB,
+            -- Working time for the sidepanel. work_ms is the banked sum of
+            -- the session's finished turn intervals (start -> settle/park), so
+            -- idle gaps never count; work_started_at is the live turn's start
+            -- (NULL when no turn holds the live slot). See app/db/turns.py.
+            work_ms BIGINT DEFAULT 0,
+            work_started_at TIMESTAMP WITH TIME ZONE,
+            last_user_message_at TIMESTAMP WITH TIME ZONE,
+            last_user_message_seq BIGINT,
+            last_user_message_epoch TEXT,
+            last_assistant_question_seq BIGINT,
+            last_assistant_question_epoch TEXT,
+            -- Worker network: the device this session executes on. Replaces
+            -- instance_id as the owner; NULL means "this worker" until the
+            -- startup backfill stamps it.
+            owner_device_id TEXT,
+            -- The native leg's "# Workspace facts" card as rendered on the
+            -- session's first connect: {"v", "card", "cwd",
+            -- "preview_expires_at", "captured_at"}. Every later connect
+            -- (cold-evicted park, worker restart, a worker on the same
+            -- database) reuses these exact bytes so the cached system prefix
+            -- does not move. NULL until the first native connect.
+            workspace_facts JSONB,
+            -- Away mode: TRUE while the owner is away. Questions are answered
+            -- with their recommended option instead of parking, and approval
+            -- prompts are deferred (never granted). NULL/FALSE = present.
+            away_mode BOOLEAN,
+            -- A delegated worker whose fast mode the owner set in its own
+            -- chat; a parent's fast-mode toggle skips it. NULL/FALSE =
+            -- follows its parent.
+            fast_pinned BOOLEAN,
+            -- Who the chat belongs to (``mobile_tool_identity.owner``:
+            -- 'install-admin', 'account:<id>', 'paired:<id>' or
+            -- 'api_user:<id>'). Written with that record on the worker that
+            -- runs the chat and synced with the catalog, so another worker
+            -- applies the same account rule to a mirror. NULL = no record.
+            provenance_owner TEXT,
+            -- The most permissive mode a delegated worker may ever run in:
+            -- its dispatch mode, fixed at creation. Caps every later turn
+            -- (wakes, resumes, messages) whatever the binding is changed to.
+            -- NULL = no dispatch ceiling (every non-worker session).
+            permission_ceiling TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
+            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 10. Session messages (with sync support)
+    #     Includes content_tsv tsvector column for FTS.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_messages (
+            id BIGSERIAL PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_name TEXT,
+            tool_input JSONB,
+            metadata JSONB,
+            profile_id TEXT,
+            jsonl_uuid TEXT,
+            version INTEGER DEFAULT 1,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            content_tsv tsvector,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 11. FTS infrastructure (tsvector column + GIN index + triggers)
+    # ------------------------------------------------------------------
+
+    # GIN index on the tsvector column
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_session_messages_fts
+        ON session_messages USING gin(content_tsv)
+    """)
+
+    # Trigger function: populate content_tsv on INSERT / UPDATE
+    cursor.execute("""
+        DO $$ BEGIN
+            CREATE OR REPLACE FUNCTION session_messages_fts_update()
+            RETURNS trigger AS $fn$
+            BEGIN
+                IF NEW.role IN ('user', 'assistant') AND NEW.content != '' THEN
+                    NEW.content_tsv := to_tsvector('english', NEW.content);
+                ELSE
+                    NEW.content_tsv := NULL;
+                END IF;
+                RETURN NEW;
+            END;
+            $fn$ LANGUAGE plpgsql;
+        END $$
+    """)
+
+    # Trigger on session_messages (BEFORE INSERT OR UPDATE)
+    cursor.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'trg_session_messages_fts'
+            ) THEN
+                CREATE TRIGGER trg_session_messages_fts
+                BEFORE INSERT OR UPDATE OF content ON session_messages
+                FOR EACH ROW
+                EXECUTE FUNCTION session_messages_fts_update();
+            END IF;
+        END $$
+    """)
+
+    # ------------------------------------------------------------------
+    # 12. Sync log for tracking changes (polling fallback)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_log (
+            id BIGSERIAL PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT,
+            data JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 13. Auth sessions (login tokens)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            token TEXT PRIMARY KEY,
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 14. Usage tracking
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_log (
+            id BIGSERIAL PRIMARY KEY,
+            settlement_key TEXT UNIQUE,
+            session_id TEXT,
+            profile_id TEXT,
+            model TEXT,
+            -- tokens_in is FRESH input only; the cache columns carry the rest of
+            -- the prompt, so a row's true prompt size is the sum of all three.
+            tokens_in INTEGER,
+            tokens_out INTEGER,
+            cache_read_tokens BIGINT DEFAULT 0,
+            cache_creation_tokens BIGINT DEFAULT 0,
+            cost_usd DOUBLE PRECISION,
+            duration_ms INTEGER,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            -- v90 (usage estimates): TRUE when any token count in this turn
+            -- was estimated by the harness (chars/4) because the provider
+            -- reported no usage or the reply was interrupted. The amounts
+            -- still count toward budgets; the flag only marks them as
+            -- estimates in the usage displays. Same guarded ADD COLUMN in
+            -- database._run_column_migrations for existing installs.
+            usage_estimated BOOLEAN DEFAULT FALSE,
+            -- Which provider leg served the turn, captured when it is booked
+            -- (app/core/usage_attribution.py). ``provider_type`` is 'claude'
+            -- for the native/delegated Claude leg (``provider_id`` NULL),
+            -- otherwise the model_providers row's type; ``billing`` is
+            -- 'subscription' or 'api'. NULL on rows booked before this
+            -- existed: the Stats provider breakdown attributes those from the
+            -- session's binding instead. Same guarded ADD COLUMN in
+            -- database._run_column_migrations for existing installs.
+            provider_id TEXT,
+            provider_type TEXT,
+            billing TEXT
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 15. API user profiles junction table (many-to-many)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_user_profiles (
+            api_user_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (api_user_id, profile_id),
+            -- Permission IDs must outlive agents: an empty set means unrestricted.
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 16. Login attempts tracking for brute force protection
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id BIGSERIAL PRIMARY KEY,
+            ip_address TEXT NOT NULL,
+            username TEXT,
+            success BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 17. Account lockout tracking
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS account_lockouts (
+            id BIGSERIAL PRIMARY KEY,
+            ip_address TEXT,
+            username TEXT,
+            locked_until TIMESTAMP WITH TIME ZONE NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 18. API key web sessions
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_key_sessions (
+            token TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 19. User preferences
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id BIGSERIAL PRIMARY KEY,
+            user_type TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value JSONB,
+            revision TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE(user_type, user_id, key)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 20. (RETIRED) Global subagents — folded into `agents`.
+    # Existing rows are migrated by database._migrate_profiles_to_agents();
+    # fresh installs never create the table.
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 21. Permission rules for tool access control
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS permission_rules (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT,
+            tool_name TEXT NOT NULL,
+            tool_pattern TEXT,
+            decision TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 22. Tags for organizing sessions
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tags (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#6366f1',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 23. Session-tag junction table
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_tags (
+            session_id TEXT NOT NULL,
+            tag_id TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (session_id, tag_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 24. Session templates for starter prompts
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            prompt TEXT NOT NULL,
+            profile_id TEXT,
+            icon TEXT,
+            category TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 25. (RETIRED) Standalone outbound webhooks — dropped by
+    # database._retire_webhooks_and_legacy_push (v90); fresh installs never
+    # create the table.
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 26. Audit log for security events
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            user_type TEXT DEFAULT 'admin',
+            event_type TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            details JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 29. Notes (global, not project-scoped)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notes (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            tags JSONB DEFAULT '[]',
+            is_pinned BOOLEAN DEFAULT FALSE,
+            file_path TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            api_user_id TEXT
+        )
+    """)
+
+    # Note attachments — files uploaded to a note and referenceable via @ in the
+    # note body. Deleting the note cascades to its attachments.
+    # ``data`` holds the file bytes so attachments live in the shared database
+    # rather than only on the uploading machine's local disk. ``file_path`` is a
+    # machine-local cache path; the bytes in ``data`` are the source of truth and
+    # let other installs sharing this database serve the attachment.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS note_attachments (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            content_type TEXT,
+            size_bytes INTEGER DEFAULT 0,
+            data BYTEA,
+            -- Worker network: content hash of ``data`` so peers fetch bytes on demand.
+            blob_hash TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_note_attachments_note ON note_attachments(note_id)"
+    )
+
+    # ------------------------------------------------------------------
+    # 30. Queued messages (server-side message queue for streaming)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS queued_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            profile_id TEXT,
+            project_id TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 31. Project hooks (Claude Code event handling)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS project_hooks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            event TEXT NOT NULL,
+            hook_type TEXT NOT NULL,
+            command TEXT,
+            timeout INTEGER DEFAULT 30000,
+            url TEXT,
+            secret TEXT,
+            enabled BOOLEAN DEFAULT TRUE,
+            tool_matcher TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_triggered_at TIMESTAMP WITH TIME ZONE,
+            failure_count INTEGER DEFAULT 0,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 32. Credential policies
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS credential_policies (
+            id TEXT PRIMARY KEY,
+            policy TEXT NOT NULL DEFAULT 'admin_provided',
+            description TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 33. Per-user credentials (encrypted API keys, GitHub PAT)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_user_credentials (
+            id TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            credential_type TEXT NOT NULL,
+            encrypted_value TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
+            UNIQUE(api_user_id, credential_type)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 34. Per-user GitHub configuration
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_user_github_config (
+            id TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL UNIQUE,
+            github_username TEXT,
+            github_avatar_url TEXT,
+            default_repo TEXT,
+            default_branch TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 35. Per-user credential policy overrides
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_credential_policies (
+            id TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            credential_type TEXT NOT NULL,
+            policy TEXT NOT NULL DEFAULT 'optional',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
+            UNIQUE(api_user_id, credential_type)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36. Paired controller devices and one-time enrollment grants
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS paired_clients (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL UNIQUE,
+            device_name TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            client_type TEXT NOT NULL DEFAULT 'browser',
+            scopes JSONB NOT NULL DEFAULT '["controller"]',
+            session_token_hash TEXT UNIQUE,
+            session_expires_at TIMESTAMP WITH TIME ZONE,
+            paired_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_seen TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pairing_grants (
+            id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            purpose TEXT NOT NULL DEFAULT 'controller',
+            scopes JSONB NOT NULL DEFAULT '["controller"]',
+            target_install_id TEXT,
+            endpoint_url TEXT,
+            device_label TEXT,
+            created_by TEXT NOT NULL DEFAULT 'admin',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            consumed_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 10
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36a. Mobile devices
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mobile_devices (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL UNIQUE,
+            device_name TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            api_key_hash TEXT NOT NULL,
+            fcm_token TEXT,
+            capabilities JSONB DEFAULT '{}',
+            paired_client_id TEXT,
+            api_key_expires_at TIMESTAMP WITH TIME ZONE,
+            scopes JSONB NOT NULL DEFAULT '["controller", "mobile:notifications", "mobile:actions", "web:session"]',
+            paired_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_seen TIMESTAMP WITH TIME ZONE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36b. Installs (cross-install registry for a shared database)
+    #      Each AI Shuffle install self-registers a row keyed by its
+    #      instance_id so peers can list every install, show which device
+    #      owns a session, and relay live control to the owning install.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS installs (
+            id TEXT PRIMARY KEY,
+            device_name TEXT NOT NULL,
+            base_url TEXT,
+            platform TEXT,
+            version TEXT,
+            capabilities JSONB DEFAULT '{}',
+            approved_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            last_seen TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_installs_last_seen ON installs(last_seen DESC)"
+    )
+
+    # 36b. (retired) Claude accounts. The in-app Claude sign-in and its
+    #      ``claude_accounts`` table were removed; the Claude Code CLI
+    #      owns its own login and AI Shuffle stores no Claude credentials.
+
+    # ------------------------------------------------------------------
+    # 36c. Usage snapshots. Per-install Claude usage-limits snapshot,
+    #      keyed by instance_id: the windows that install's Claude Code CLI
+    #      reported in its rate-limit events, so the usage endpoint can serve
+    #      every install's snapshot (joined to the installs registry for
+    #      device_name/online). ``account_key`` is an opaque hash naming the
+    #      Claude account the CLI is signed in to, so devices on one account
+    #      share a reading; never an email, org id or token.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_snapshots (
+            instance_id TEXT PRIMARY KEY,
+            windows JSONB NOT NULL DEFAULT '[]',
+            available BOOLEAN DEFAULT FALSE,
+            generation BIGINT,
+            fetched_at BIGINT,
+            account_key TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 36c-bis. Per-provider usage snapshots. Single row per non-Claude
+    #      provider (ChatGPT/Codex via the loopback gateway, OpenRouter on the
+    #      direct base-URL path) capturing plan-usage/limit windows, credits and
+    #      the allowlisted raw source payload. Distinct from usage_snapshots
+    #      (which is per-install/per-account for the Claude path); readers land
+    #      in later chunks. ``raw`` holds only allowlisted header/JSON keys —
+    #      never an auth token.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS provider_usage_snapshots (
+            provider_id TEXT PRIMARY KEY,
+            provider_type TEXT,
+            plan_type TEXT,
+            windows JSONB NOT NULL DEFAULT '[]',
+            credits JSONB,
+            raw JSONB,
+            fetched_at BIGINT,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_poll_state (
+            identity TEXT PRIMARY KEY,
+            next_attempt DOUBLE PRECISION NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0,
+            paused BOOLEAN NOT NULL DEFAULT FALSE,
+            lease_token TEXT
+        )
+    """)
+
+    # 36e. Pending wakeups. Durable per-session wakeups so an app
+    #      restart rehydrates and re-arms them instead of dropping the bare
+    #      in-process asyncio timer. ScheduleWakeup and the idle-at-edge watchdog
+    #      both persist here; ``fire_at`` is a unix epoch (DOUBLE PRECISION) so
+    #      the rehydrate math is timezone/shim-agnostic.
+    #      ``model`` is the scheduling turn's effective model, replayed as
+    #      the wake query's model override so a wake never fires on the profile
+    #      default (which re-primes the prompt cache on the wrong model).
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_wakeups (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            profile_id TEXT,
+            project_id TEXT,
+            prompt TEXT NOT NULL,
+            reason TEXT,
+            model TEXT,
+            source TEXT NOT NULL DEFAULT 'schedule_wakeup',
+            instance_id TEXT,
+            fire_at DOUBLE PRECISION NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance
+        ON pending_wakeups(instance_id, fire_at)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pending_wakeups_session
+        ON pending_wakeups(session_id)
+    """)
+
+    # fluid harness session store: branching node-tree sessions + durable
+    # event log, mirroring fluid.store.base.SessionStore / JsonlStore semantics.
+    # Used whenever the app has a database (the fluid pg store is derived, not flagged).
+    # cli_session_id: the delegated engine's ``claude --resume`` handle —
+    # a CLI uuid, NOT the fluid session id — so a restart can reconnect to the
+    # same CLI conversation instead of resuming a handle the CLI never issued.
+    # project_root: the project the session ran in, derived from its cwd
+    # (fluid.store.base.project_root_for) — SessionSearch scopes cross-session
+    # recall on it. NULL = unknown (legacy session), never "another project".
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fluid_sessions (
+            session_id TEXT PRIMARY KEY,
+            head_node_id TEXT,
+            created_at DOUBLE PRECISION NOT NULL,
+            cli_session_id TEXT,
+            project_root TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fluid_session_nodes (
+            session_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            parent_id TEXT,
+            ts DOUBLE PRECISION NOT NULL,
+            message JSONB NOT NULL,
+            PRIMARY KEY (session_id, node_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fluid_session_events (
+            session_id TEXT NOT NULL,
+            seq BIGINT NOT NULL,
+            event JSONB NOT NULL,
+            PRIMARY KEY (session_id, seq)
+        )
+    """)
+
+    # Cross-session recall trigram index (the session_store_entries twin is
+    # created after that table, below). Serves SessionSearch's substring-ILIKE
+    # prefilter; savepoint-fenced because CREATE EXTENSION needs privileges
+    # some managed databases refuse — recall then stays unindexed (correct,
+    # just slower) instead of aborting the bootstrap transaction.
+    cursor.execute("SAVEPOINT recall_trgm")
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fluid_nodes_trgm "
+            "ON fluid_session_nodes USING gin ((message::text) gin_trgm_ops)"
+        )
+        cursor.execute("RELEASE SAVEPOINT recall_trgm")
+    except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
+        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")
+
+    # ------------------------------------------------------------------
+    # 36d. Background tasks. Durable per-task lifecycle snapshots.
+    #      task_registry mirrors start/update/complete/unpark transitions here
+    #      through app.core.task_persistence (coalescing async writer, kill
+    #      switch settings.durable_task_state). Two recovery readers depend on
+    #      these rows now (both keyed off the post-restart empty registry): boot
+    #      reconcile marks stale non-terminal rows killed, and the stop-task
+    #      durable force-settle fallback reads a single row to settle a task the
+    #      UI still shows "running". General hot-path read cutover is later.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS background_tasks (
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            instance_id TEXT,
+            kind TEXT,
+            is_sdk_background BOOLEAN DEFAULT FALSE,
+            tool_use_id TEXT,
+            title TEXT,
+            status TEXT,
+            terminal_notified BOOLEAN DEFAULT FALSE,
+            summary TEXT,
+            reason TEXT,
+            report_path TEXT,
+            report_chars BIGINT,
+            agent TEXT,
+            roster_name TEXT,
+            model TEXT,
+            remote_device_id TEXT,
+            started_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE,
+            PRIMARY KEY (task_id, session_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_background_tasks_instance_status
+        ON background_tasks(instance_id, status)
+    """)
+
+    # ------------------------------------------------------------------
+    # 37. Pending actions (waiting for mobile confirmation)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_actions (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            params JSONB DEFAULT '{}',
+            security_level TEXT DEFAULT 'normal',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            status TEXT DEFAULT 'pending',
+            FOREIGN KEY (device_id) REFERENCES mobile_devices(device_id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 38. Trusted actions (auto-approve patterns)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trusted_actions (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            action_pattern TEXT NOT NULL,
+            auto_approve BOOLEAN DEFAULT TRUE,
+            require_preview BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (device_id) REFERENCES mobile_devices(device_id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 39. Mobile schedules (proactive notifications)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mobile_schedules (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            schedule_type TEXT NOT NULL,
+            trigger_time TIMESTAMP WITH TIME ZONE,
+            hour INTEGER,
+            minute INTEGER,
+            params JSONB DEFAULT '{}',
+            enabled BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_triggered_at TIMESTAMP WITH TIME ZONE,
+            FOREIGN KEY (device_id) REFERENCES mobile_devices(device_id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 40. Connectors (external messaging platform integrations)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connectors (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            api_user_id TEXT,
+            config JSONB NOT NULL DEFAULT '{}',
+            events JSONB NOT NULL DEFAULT '[]',
+            is_active BOOLEAN DEFAULT FALSE,
+            status TEXT DEFAULT 'disconnected',
+            status_message TEXT,
+            last_connected_at TIMESTAMP WITH TIME ZONE,
+            last_error TEXT,
+            last_event_at TIMESTAMP WITH TIME ZONE,
+            failure_count INTEGER DEFAULT 0,
+            runner_id TEXT,
+            -- Worker network: the device that runs this connector's session.
+            owner_device_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 41. Connector event log
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connector_event_log (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'outbound',
+            payload JSONB,
+            status TEXT DEFAULT 'pending',
+            error TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 42. Connector sessions (maps platform chats to AI sessions)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connector_sessions (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            platform_chat_id TEXT NOT NULL,
+            platform_user_id TEXT,
+            platform_user_name TEXT,
+            session_id TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+            UNIQUE(connector_id, platform_chat_id)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 43. Automations (scheduled and event-driven AI tasks)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            trigger_type TEXT NOT NULL,
+            trigger_config JSONB NOT NULL DEFAULT '{}',
+            prompt TEXT NOT NULL,
+            profile_id TEXT,
+            project_id TEXT,
+            output_config JSONB NOT NULL DEFAULT '{"type": "session"}',
+            max_turns INTEGER DEFAULT 1,
+            timeout_seconds INTEGER DEFAULT 300,
+            max_cost_per_run DOUBLE PRECISION,
+            max_cost_per_day DOUBLE PRECISION,
+            max_cost_total DOUBLE PRECISION,
+            max_runs_per_day INTEGER,
+            total_cost_used DOUBLE PRECISION DEFAULT 0.0,
+            is_enabled BOOLEAN DEFAULT FALSE,
+            status TEXT DEFAULT 'idle',
+            last_run_at TIMESTAMP WITH TIME ZONE,
+            last_error TEXT,
+            run_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            requires_approval BOOLEAN DEFAULT FALSE,
+            action_steps TEXT DEFAULT NULL,
+            triggers TEXT DEFAULT NULL,
+            -- Worker network: the device that fires this automation. A synced
+            -- definition with no local owner stays inactive until assigned.
+            owner_device_id TEXT,
+            -- Run model choice (v92): the picker value and the provider it
+            -- binds. NULL = no choice; runs use the agent's saved model.
+            -- No FK on provider_id: a removed provider must fail the run
+            -- with a clear error, not silently clear the choice.
+            model TEXT,
+            provider_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE RESTRICT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 44. Automation runs
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id TEXT PRIMARY KEY,
+            automation_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            trigger_data JSONB,
+            session_id TEXT,
+            prompt_rendered TEXT,
+            response TEXT,
+            error TEXT,
+            cost_usd DOUBLE PRECISION DEFAULT 0.0,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            output_status TEXT DEFAULT 'pending',
+            output_error TEXT,
+            started_at TIMESTAMP WITH TIME ZONE,
+            completed_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 45. Automation approvals
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_approvals (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL UNIQUE,
+            automation_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            prompt_preview TEXT,
+            decided_by TEXT,
+            decided_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 45b. Automation fire claims — cross-install double-fire guard
+    # ------------------------------------------------------------------
+    # Every install schedules every enabled automation and the runner
+    # election deliberately fails open, so one scheduled tick can be
+    # attempted on more than one install. The primary key makes claiming a
+    # tick atomic: exactly one INSERT ... ON CONFLICT DO NOTHING wins per
+    # (automation_id, fire_bucket). No FK on automation_id — claims are
+    # short-lived bookkeeping (pruned after ~7 days) and must not block
+    # automation deletion on another install mid-claim.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_fires (
+            automation_id TEXT NOT NULL,
+            fire_bucket TEXT NOT NULL,
+            claimed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (automation_id, fire_bucket)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 46. fal.ai Model Catalog (dynamic model discovery cache)
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fal_model_catalog (
+            endpoint_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            thumbnail_url TEXT,
+            tags_json TEXT DEFAULT '[]',
+            group_key TEXT,
+            group_label TEXT,
+            tool_type TEXT,
+            output_type TEXT,
+            updated_at TEXT,
+            fetched_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 47. Agent memory files (cross-install sync of the Claude Code CLI
+    #     per-project memory directory: MEMORY.md + per-fact .md files).
+    #     Keyed by `memory_key` = a project's link_group_id (stable across
+    #     installs sharing a git remote) or its project_id when unlinked.
+    #     `deleted` rows are tombstones so a delete on one install propagates.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_memory_files (
+            id TEXT PRIMARY KEY,
+            memory_key TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            content TEXT,
+            content_hash TEXT,
+            deleted BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_by TEXT,
+            UNIQUE (memory_key, relative_path)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_key ON agent_memory_files(memory_key)"
+    )
+
+    # ------------------------------------------------------------------
+    # 48. Model providers. Admin-configured non-Anthropic model
+    #     gateways (OpenRouter / custom Anthropic-compatible endpoints)
+    #     injected per spawned session as the officially supported Claude
+    #     Code LLM-gateway env vars. Self-contained block WITH its index
+    #     inline so it is immune to the schema-pass-before-column-migrations
+    #     ordering trap (see the idx_sessions_active note below and the
+    #     idx_agent_memory_key pattern above). ``auth_token`` holds an
+    #     ``enc:``-prefixed Fernet blob (never exposed on public reads);
+    #     ``models_json`` is a TEXT-encoded [{id,label}] curated list and
+    #     ``extra_env_json`` a TEXT-encoded extra-env map. ``small_fast_model``
+    #     is nullable (falls back to default_model / session model in the
+    #     env overlay).
+    # ------------------------------------------------------------------
+    #     The Codex/ChatGPT-subscription OAuth credential columns live on this
+    #     SAME single-credential row (one account per provider — no separate
+    #     pool table): ``auth_mode``
+    #     ('apikey' | 'chatgpt'; NULL == legacy 'apikey'), the encrypted
+    #     write-only ``codex_access_token`` / ``codex_refresh_token`` blobs
+    #     (``enc:``-prefixed Fernet, never exposed on public reads — same
+    #     treatment as ``auth_token``), ``codex_account_id`` (from the
+    #     ``chatgpt_account_id`` id_token claim), the ``codex_id_token_expires_at``
+    #     / ``codex_last_refresh`` timestamps (same TZ convention as
+    #     created_at/updated_at), and ``needs_reauth`` (permanent-refresh-failure
+    #     flag). All nullable/defaulted so the fresh CREATE and the additive
+    #     _run_column_migrations bootstrap agree.
+    #
+    #     Cross-instance refresh lease columns
+    #     (``codex_refresh_lease_owner`` / ``codex_refresh_lease_expires_at``).
+    #     The periodic refresh worker claims the row via a conditional UPDATE on
+    #     the database clock before POSTing, because the Codex refresh token
+    #     rotates and a double refresh across installs sharing this database
+    #     kills the credential. Nullable, no index — added additively in
+    #     _run_column_migrations too.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS model_providers (
+            id TEXT PRIMARY KEY,
+            revision TEXT,
+            name TEXT NOT NULL,
+            provider_type TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            api_dialect TEXT,
+            auth_token TEXT,
+            models_json TEXT DEFAULT '[]',
+            default_model TEXT,
+            small_fast_model TEXT,
+            extra_env_json TEXT DEFAULT '{}',
+            context_window INTEGER,
+            max_output_tokens INTEGER,
+            enabled BOOLEAN DEFAULT TRUE,
+            auth_mode TEXT,
+            codex_access_token TEXT,
+            codex_refresh_token TEXT,
+            codex_account_id TEXT,
+            codex_id_token_expires_at TIMESTAMP WITH TIME ZONE,
+            codex_last_refresh TIMESTAMP WITH TIME ZONE,
+            needs_reauth BOOLEAN DEFAULT FALSE,
+            codex_refresh_lease_owner TEXT,
+            codex_refresh_lease_expires_at TIMESTAMP WITH TIME ZONE,
+            openai_admin_key TEXT,
+            manual_balance_usd DOUBLE PRECISION,
+            manual_balance_set_at BIGINT,
+            openai_billing_org_id TEXT,
+            openai_billing_instance_id TEXT,
+            -- Last result of the provider's own model-catalog fetch: 'ok',
+            -- 'rejected' (401/403) or NULL (not checked since the key or
+            -- endpoint was set). Read by list_usable_model_providers. Same
+            -- guarded ADD COLUMN in database._run_column_migrations.
+            credential_status TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_providers_enabled ON model_providers(enabled)"
+    )
+
+    # ==================================================================
+    # INDEXES
+    # ==================================================================
+
+    # -- templates
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
+
+    # -- sessions
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
+    # idx_sessions_active references is_active, which v63 renames from
+    # is_favorite in _run_column_migrations — and that pass runs AFTER this
+    # schema pass. On a pre-v63 database the sessions table already exists
+    # with is_favorite, so indexing is_active here would raise
+    # undefined-column and abort startup. Skip it; the v63 migration block
+    # creates this index immediately after renaming the column.
+    if column_exists(cursor, "sessions", "is_active"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
+    # Composite indexes for session list queries (most common access pattern)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project_id, updated_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_apiuser_updated ON sessions(project_id, api_user_id, updated_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
+    # Note: idx_sessions_instance is created by _run_column_migrations after the
+    # instance_id column is added (idempotent for both fresh installs and upgrades).
+
+    # -- session_messages
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
+    # Rewind DB<->JSONL sync: fast lookup of a message by its SDK JSONL uuid
+    # within a session (used by delete_session_messages_after_jsonl_uuid).
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_messages_session_uuid "
+        "ON session_messages(session_id, jsonl_uuid)"
+    )
+
+    # -- usage_log
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
+    # Per-session lookups (``get_all_session_usage`` on every session open, and
+    # the ``UPDATE usage_log SET session_id = NULL`` unlink in delete_session)
+    # would sequentially scan the whole ledger without this.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_session ON usage_log(session_id)")
+    # One booking per execution attempt. The startup migration adds the
+    # same index to existing installs (app.db.database._run_column_migrations);
+    # settle_turn_usage's ON CONFLICT claim needs it on both paths. Guarded:
+    # on an upgrade usage_log predates the column, which only arrives in
+    # _run_column_migrations AFTER this pass (unguarded, boot aborted).
+    if column_exists(cursor, "usage_log", "settlement_key"):
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_log_settlement_key "
+            "ON usage_log(settlement_key)"
+        )
+
+    # -- auth_sessions
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
+
+    # -- api_users
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username) WHERE username IS NOT NULL")
+
+    # -- api_user_profiles
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_profiles_user ON api_user_profiles(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_profiles_profile ON api_user_profiles(profile_id)")
+
+    # -- sync_log
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
+
+    # -- login_attempts
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip_address)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_created ON login_attempts(created_at)")
+
+    # -- account_lockouts
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_ip ON account_lockouts(ip_address)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_username ON account_lockouts(username)")
+
+    # -- api_key_sessions
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_key_sessions_user ON api_key_sessions(api_user_id)")
+
+    # -- pairing grants / paired controller clients
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_grants_token ON pairing_grants(token_hash)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pairing_grants_active ON pairing_grants(expires_at) WHERE consumed_at IS NULL AND revoked_at IS NULL")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_clients_session ON paired_clients(session_token_hash) WHERE session_token_hash IS NOT NULL")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_paired_clients_active ON paired_clients(revoked_at, paired_at DESC)")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS paired_client_native_sessions (
+        client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS paired_client_web_reservations (
+        client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+        mobile_record_id TEXT NOT NULL, api_key_hash TEXT NOT NULL,
+        reservation_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )""")
+
+    # -- user_preferences
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
+
+
+    # -- permission_rules
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_tool ON permission_rules(tool_name)")
+
+    # -- tags
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)")
+
+    # -- session_tags
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
+
+    # -- audit_log
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)")
+
+    # -- git_repositories
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_git_repositories_project ON git_repositories(project_id)")
+
+    # -- worktrees
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repository ON worktrees(repository_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repo_status ON worktrees(repository_id, status)")
+
+    # -- notes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
+
+    # -- queued_messages
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id, position ASC)")
+
+    # -- project_hooks
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
+
+    # -- api_user_credentials
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_user ON api_user_credentials(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_type ON api_user_credentials(credential_type)")
+
+    # -- api_user_github_config
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_github_config_user ON api_user_github_config(api_user_id)")
+
+    # -- user_credential_policies
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_credential_policies_user ON user_credential_policies(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_credential_policies_type ON user_credential_policies(credential_type)")
+
+    # -- mobile_devices
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_devices_device_id ON mobile_devices(device_id)")
+
+    # -- pending_actions
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_device ON pending_actions(device_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
+
+    # -- trusted_actions
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trusted_actions_device ON trusted_actions(device_id)")
+
+    # -- mobile_schedules
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_schedules_device ON mobile_schedules(device_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_schedules_enabled ON mobile_schedules(enabled)")
+
+    # -- connector_event_log
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_event_log_connector ON connector_event_log(connector_id, created_at DESC)")
+
+    # -- connector_sessions
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_sessions_connector ON connector_sessions(connector_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_sessions_session ON connector_sessions(session_id)")
+
+    # -- connectors
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connectors_active ON connectors(is_active)")
+
+    # -- automation_runs
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status)")
+
+    # -- automation_approvals
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_approvals_status ON automation_approvals(status, created_at DESC)")
+
+    # -- automations
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations(is_enabled)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_trigger ON automations(trigger_type)")
+
+    # -- fal_model_catalog
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_category ON fal_model_catalog(category)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_tool_type ON fal_model_catalog(tool_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")
+
+    # ------------------------------------------------------------------
+    # 49. Session store — Postgres copy of Claude-format transcripts
+    # ------------------------------------------------------------------
+    # Transcript entries (written as JSONL by the Claude Code CLI) kept in
+    # Postgres for the history/rewind/list/summary reads. Rows are written by
+    # the lazy JSONL backfill (pg_session_store.lazy_backfill_session_from_jsonl).
+    #
+    # ``subpath`` is NULL for main transcripts, populated for subagent
+    # transcripts (e.g. "subagents/agent-{id}"). Per-entry ordering is by
+    # auto-incrementing ``id`` which preserves append-call order. See
+    # app/core/pg_session_store.py for the adapter.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_store_entries (
+            id BIGSERIAL PRIMARY KEY,
+            project_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            subpath TEXT,
+            entry JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    # Lookups by (project_key, session_id, subpath) ordered by id for load().
+    # Partial indexes distinguish main (NULL subpath) from subagent rows.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_main "
+        "ON session_store_entries(project_key, session_id, id) "
+        "WHERE subpath IS NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_sub "
+        "ON session_store_entries(project_key, session_id, subpath, id) "
+        "WHERE subpath IS NOT NULL"
+    )
+    # For list_sessions() scoped by project_key.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_project "
+        "ON session_store_entries(project_key) "
+        "WHERE subpath IS NULL"
+    )
+    # PR C.1 read cutover: the app's detail/resume reads match on session_id
+    # ALONE (the SDK-derived project_key diverges from the stored folder name —
+    # see app/core/pg_session_store.py). These project_key-free partial indexes
+    # serve that hot path (main transcript ordered by id; subagent subpaths).
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_session "
+        "ON session_store_entries (session_id, id) "
+        "WHERE subpath IS NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_session_sub "
+        "ON session_store_entries (session_id, subpath, id) "
+        "WHERE subpath IS NOT NULL"
+    )
+
+    # Store-backed FTS: under postgres_only the assistant/tool history lives in
+    # the JSONB ``entry`` (not session_messages). sse_entry_text() extracts the
+    # searchable text of a user/assistant entry (skipping meta/sidechain rows)
+    # and MUST be IMMUTABLE so it can back the expression GIN index below, which
+    # makes full conversation history searchable (see search_sessions).
+    cursor.execute("""
+        CREATE OR REPLACE FUNCTION sse_entry_text(entry jsonb)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $fn$
+            SELECT CASE
+                WHEN COALESCE(entry->>'type', '') NOT IN ('user', 'assistant') THEN NULL
+                WHEN COALESCE((entry->>'isMeta')::boolean, false) THEN NULL
+                WHEN COALESCE((entry->>'isSidechain')::boolean, false) THEN NULL
+                WHEN jsonb_typeof(entry #> '{message,content}') = 'string'
+                    THEN entry #>> '{message,content}'
+                WHEN jsonb_typeof(entry #> '{message,content}') = 'array'
+                    THEN (
+                        SELECT string_agg(block ->> 'text', ' ')
+                        FROM jsonb_array_elements(entry #> '{message,content}') AS block
+                        WHERE block ->> 'type' = 'text'
+                    )
+                ELSE NULL
+            END
+        $fn$
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_fts "
+        "ON session_store_entries USING gin (to_tsvector('english', sse_entry_text(entry))) "
+        "WHERE subpath IS NULL"
+    )
+    # The session_store_entries twin of idx_fluid_nodes_trgm (see the fluid
+    # tables above) — SessionSearch's substring-ILIKE prefilter over the SDK
+    # transcript mirror. Same savepoint fence, same graceful degradation.
+    cursor.execute("SAVEPOINT recall_trgm_sse")
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        if not session_recall_cache_ready(cursor):
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
+                "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
+                "WHERE subpath IS NULL"
+            )
+        cursor.execute("RELEASE SAVEPOINT recall_trgm_sse")
+    except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
+        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_sse")
+
+    # Summary sidecar written inside append() via fold_session_summary().
+    # Scoped to main transcripts only (subagent appends must not mutate).
+    # ``mtime_ms`` is storage write time (epoch ms) stamped by the adapter;
+    # must share a clock with list_sessions().mtime for the same session.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_store_summaries (
+            project_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            data JSONB NOT NULL,
+            mtime_ms BIGINT NOT NULL,
+            -- v84: highest ``session_store_entries.id`` already folded into
+            -- ``data``. The fold is COALESCED (every few seconds / on read)
+            -- instead of running on every ~100ms streaming append, so the
+            -- summary has to know where it left off. Crash-safe: the fold is a
+            -- pure function of the entries, so whatever was not folded before a
+            -- crash is folded by the next append/read from this watermark.
+            folded_through_id BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (project_key, session_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sss_project "
+        "ON session_store_summaries(project_key)"
+    )
+
+    # ------------------------------------------------------------------
+    # 50. Application error log
+    # ------------------------------------------------------------------
+    # Durable, queryable record of every error in the app — backend
+    # unhandled exceptions / ERROR-level logs (captured via the root-logger
+    # ErrorLogDBHandler) and frontend runtime / API / WebSocket errors
+    # (POSTed to /api/v1/logs/client-error). Read by the admin UI and, more
+    # importantly, by the GetAppErrors MCP tool so an agent can debug what
+    # the user just hit ("check the logs and fix it"). Repeated errors with
+    # the same ``fingerprint`` collapse onto one row (occurrence_count++,
+    # updated_at bumped) so a render loop or crash storm can't flood it.
+    # See app/db/error_logs.py and app/core/error_log_handler.py.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS error_log (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            level TEXT DEFAULT 'ERROR',
+            message TEXT NOT NULL,
+            detail TEXT,
+            logger_name TEXT,
+            url TEXT,
+            status_code INTEGER,
+            session_id TEXT,
+            user_id TEXT,
+            context JSONB,
+            fingerprint TEXT,
+            occurrence_count INTEGER DEFAULT 1,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_source ON error_log(source)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_session ON error_log(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_fingerprint ON error_log(fingerprint)")
+
+    # ------------------------------------------------------------------
+    # 49. Notifications — unified user-facing notification history (the bell).
+    #
+    # The single source of truth for every bell notification and explicitly
+    # persisted banner. Distinct from ``error_log`` (debug/observability): this is the
+    # user-facing history surfaced by the NotificationCenter, with read /
+    # dismissed state per row. Server-originated notifications are written by
+    # app/services/notification_service.py; client-originated ones are POSTed
+    # by the frontend notification store. See app/db/notifications.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            severity TEXT NOT NULL DEFAULT 'info',
+            surface TEXT NOT NULL DEFAULT 'notification',
+            category TEXT,
+            source TEXT NOT NULL DEFAULT 'server',
+            title TEXT,
+            message TEXT NOT NULL,
+            action_kind TEXT,
+            action_payload JSONB,
+            session_id TEXT,
+            read BOOLEAN DEFAULT FALSE,
+            dismissed BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)")
+
+    # ------------------------------------------------------------------
+    # 50. session_events — append-only per-session event log (v2 core).
+    #
+    # The durable ordered record of everything that happens in a session.
+    # Seqs are dense and monotonic per session, allocated atomically via the
+    # session_event_counters companion table so a batch append reserves a
+    # contiguous [first_seq, last_seq] range. Writes are fenced by the owning
+    # run's fence_token (see app/db/session_events.py); readers tail by
+    # ``seq > from_seq``. pg_notify on the ``session_events`` channel wakes the
+    # gateway, with a poll fallback. See app/db/session_events.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            seq BIGINT NOT NULL,
+            run_id TEXT,
+            turn_id TEXT,
+            event_type TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            command_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE (session_id, seq)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(session_id, seq)")
+    create_session_events_recall_index(cursor)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_event_counters (
+            session_id TEXT PRIMARY KEY,
+            next_seq BIGINT NOT NULL DEFAULT 0
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 51. runs — fenced, leased ownership of a session by a runner (v2 core).
+    #
+    # At most one active run per session (enforced by the partial unique
+    # index), each carrying a monotonic ``fence_token`` that stamps every
+    # event append so a stale/lost runner cannot write after being superseded.
+    # Runs carry a heartbeat-renewed lease; expired leases are reaped. See
+    # app/db/runs.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            runner_id TEXT NOT NULL,
+            fence_token BIGINT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'active',
+            lease_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            heartbeat_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_session ON runs(session_id) WHERE state = 'active'")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id)")
+
+    # ------------------------------------------------------------------
+    # 52. pending_interactions — durable prompt/answer state machine (v2 core).
+    #
+    # Records interactions (permission prompts, tool approvals, …) awaiting a
+    # user answer, with a TTL. Pure CRUD state machine here. See
+    # app/db/interactions.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_interactions (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            run_id TEXT,
+            kind TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT 'pending',
+            answer JSONB,
+            answered_by_device TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE,
+            answered_at TIMESTAMP WITH TIME ZONE
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_interactions_session_state ON pending_interactions(session_id, state)")
+
+    # ------------------------------------------------------------------
+    # 53. artifacts — content-addressed blob registry (v2 core).
+    #
+    # Deduplicated by content ``hash``; upserts are idempotent. See
+    # app/db/artifacts.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS artifacts (
+            hash TEXT PRIMARY KEY,
+            size BIGINT NOT NULL,
+            mime TEXT,
+            filename TEXT,
+            created_by_session TEXT,
+            runner_id TEXT,
+            -- Worker network: the device that first stored the bytes.
+            owner_device_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 54. projects_v2 — v2 project registry keyed by unique origin.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS projects_v2 (
+            id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            settings JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 55. checkouts — per-runner working-tree checkouts of a v2 project.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS checkouts (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects_v2(id) ON DELETE CASCADE,
+            runner_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            branch TEXT,
+            head_sha TEXT,
+            dirty BOOLEAN DEFAULT FALSE,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE (project_id, runner_id, path)
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # 56. turns — the durable per-session turn queue + live-turn state
+    #     machine (v2 core).
+    #
+    # A *turn* is one unit of work for a session (a user prompt, a queued
+    # follow-up, an unpark wake, a failover retry, …). The table is the state
+    # machine; the session_events log is the record. At most one turn per
+    # session may be in a live state (running|interrupting|draining), enforced
+    # by the partial unique index below — the same DB-raced ownership discipline
+    # as ``runs``. Every transition is a single guarded UPDATE (see
+    # app/db/turns.py); there are no in-memory locks. Event mirroring
+    # (turn.* into session_events) is wired at the runtime layer, not here.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS turns (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued',
+            source TEXT NOT NULL,
+            prompt TEXT,
+            profile_id TEXT,
+            project_id TEXT,
+            worktree_id TEXT,
+            overrides JSONB NOT NULL DEFAULT '{}',
+            payload JSONB NOT NULL DEFAULT '{}',
+            command_id TEXT,
+            parent_turn_id TEXT,
+            run_id TEXT,
+            interrupt_mode TEXT,
+            stop_background BOOLEAN NOT NULL DEFAULT FALSE,
+            position DOUBLE PRECISION,
+            instance_id TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            started_at TIMESTAMP WITH TIME ZONE,
+            ended_at TIMESTAMP WITH TIME ZONE,
+            stop_reason TEXT,
+            error TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_live_per_session "
+        "ON turns(session_id) WHERE state IN ('running','interrupting','draining')"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_position ON turns(session_id, position DESC)"
+    )
+
+    # Latest generated composer hint; retained even with no watching browser.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            suggestion TEXT NOT NULL,
+            activity_revision BIGINT NOT NULL DEFAULT -1
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestion_revisions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            activity_revision BIGINT NOT NULL DEFAULT 0,
+            completed_revision BIGINT
+        )
+    """)
+
+
+    # ------------------------------------------------------------------
+    # 57. git_ops — the durable cross-install git-operation queue.
+    #
+    # An *op* is one unit of git work targeted at ONE install (``runner_id`` =
+    # that install's ``effective_instance_id``). The serving install writes a
+    # ``queued`` row; the target's git-ops claim loop flips it to ``running``
+    # with a single conditional UPDATE (losers get nothing), executes it, and
+    # records ``done``/``error`` + ``result``. First op: ``ensure_worktree``
+    # with ``params {branch, base_branch, create_new_branch}`` — the durable
+    # carrier of the caller's create-new-branch intent, which is why the spawn
+    # path claims a matching queued op INLINE before failing a branch session.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS git_ops (
+            id TEXT PRIMARY KEY,
+            runner_id TEXT NOT NULL,
+            project_v2_id TEXT,
+            op TEXT NOT NULL,
+            params JSONB NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'queued',
+            result JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_git_ops_runner_status "
+        "ON git_ops(runner_id, status)"
+    )
+
+    # ------------------------------------------------------------------
+    # 58. upload_blobs — cross-install upload delivery.
+    #
+    # Modeled on ``note_attachments``: the bytes in shared Postgres are the
+    # source of truth, local disk is a cache. At SEND time a turn placed on
+    # another install lifts the staged upload files referenced by the prompt
+    # into these rows; the executing install materializes them into the session
+    # working dir, rewrites the prompt (``source_path`` -> local path), and
+    # NULLs ``data``. ``source_path`` is the UPLOADER-absolute path exactly as
+    # embedded in the prompt, which is what makes the rewrite an exact-string
+    # replacement. A sweeper drops rows older than 7 days.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS upload_blobs (
+            id TEXT PRIMARY KEY,
+            project_v2_id TEXT,
+            session_id TEXT,
+            source_path TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size BIGINT NOT NULL DEFAULT 0,
+            data BYTEA,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            materialized_at TIMESTAMP WITH TIME ZONE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_blobs_session "
+        "ON upload_blobs(session_id)"
+    )
+
+    # ------------------------------------------------------------------
+    # 59. session_moves — a move to another worker queued until the chat is
+    #     idle (#1819), kept here so a restart of the owning worker resumes
+    #     it. ``held`` lists the owner's messages sent while it waits, in
+    #     order; they are delivered after the move, or here when it is
+    #     cancelled, fails or expires. Times are unix epochs, as in
+    #     pending_wakeups. See app/db/session_moves.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_moves (
+            session_id TEXT PRIMARY KEY,
+            target_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            requested_by TEXT NOT NULL DEFAULT 'agent',
+            requested_at DOUBLE PRECISION NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL,
+            held JSONB NOT NULL DEFAULT '[]',
+            handoff_id TEXT,
+            wake_token TEXT,
+            wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS handoff_wakes (
+            token TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            branch TEXT,
+            wakes JSONB NOT NULL,
+            superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
+            finalized BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+            offline_since DOUBLE PRECISION,
+            recovery_reason TEXT
+        )
+    """)
+
+    from app.db.assistant import create_schema as create_assistant_schema
+    create_assistant_schema(cursor)
+    from app.db.assistant_limits import create_schema as create_assistant_limits_schema
+    create_assistant_limits_schema(cursor)
+
+    # ==================================================================
+    # SEED DATA
+    # ==================================================================
+
+    # Default credential policies
+    cursor.execute("""
+        INSERT INTO credential_policies (id, policy, description)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+    """, ('openai_api_key', 'optional', 'OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)'))
+
+    cursor.execute("""
+        INSERT INTO credential_policies (id, policy, description)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+    """, ('gemini_api_key', 'optional', 'Google Gemini API key for Nano Banana, Imagen, Veo'))
+
+    cursor.execute("""
+        INSERT INTO credential_policies (id, policy, description)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+    """, ('meshy_api_key', 'optional', 'Meshy API key for 3D model generation'))
+
+    cursor.execute("""
+        INSERT INTO credential_policies (id, policy, description)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+    """, ('github_pat', 'user_provided', 'GitHub Personal Access Token for repository access'))
+
+    logger.info("PostgreSQL schema created successfully (version %d)", SCHEMA_VERSION)

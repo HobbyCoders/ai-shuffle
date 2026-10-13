@@ -1,0 +1,332 @@
+"""Shared user-memory routing for native, delegated and network consumers."""
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+
+def skills_root() -> Path:
+    from app.core.config import settings
+    return Path(settings.fluid_skills_dir) if settings.fluid_skills_dir else settings.effective_data_dir / "fluid" / "skills"
+
+
+def prose_skills_root() -> Path:
+    """User-level prose skills (``<name>/SKILL.md``): the directory fluid's
+    discovery reads as its global skill scope, which is ``~/.fluid/skills``.
+
+    This is the source of truth the network replicates. It is deliberately
+    not under the data dir: native sessions and the delegated leg's
+    "# More skills" list read only this path, so a copy anywhere else would
+    have to be mirrored back here to be seen. Docker keeps it on the
+    ``fluid-settings`` volume.
+    """
+    from fluid.context.instructions import skill_search_roots
+    return next(root for root, scope in skill_search_roots(".", include_project=False) if scope == "global")
+
+
+def owner_root(owner: str) -> Path:
+    if owner == "local":
+        return skills_root()  # existing installation-owner store; never an API user's store
+    if not owner.startswith("api:") or not owner[4:]:
+        raise ValueError("Unknown memory owner")
+    return skills_root() / ".users" / hashlib.sha256(owner.encode()).hexdigest()
+
+
+def store_for_owner(owner: str):
+    from fluid.codemode.skills import SkillStore
+    return SkillStore(owner_root(owner), owner=owner)
+
+
+def session_memory(session_id: str | None, cwd: str | None = None):
+    from app.core.config import settings
+    from fluid.codemode.skills import project_key_for
+    if not settings.managed_database_available():
+        # Standalone/isolated tests have no authenticated multi-user database.
+        return store_for_owner("local"), project_key_for(cwd)
+    from app.db.sessions import get_session, get_session_by_sdk_id
+    if not session_id:
+        raise ValueError("Cannot resolve memory ownership without a session")
+    session = get_session(session_id) or get_session_by_sdk_id(session_id)
+    if not session:
+        raise ValueError("Memory session does not exist")
+    owner = f"api:{session['api_user_id']}" if session.get("api_user_id") else "local"
+    project = session.get("project_v2_id") or session.get("project_id")
+    return store_for_owner(owner), f"project:{project}" if project else project_key_for(cwd)
+
+
+def stores():
+    """Existing stores only; no user-controlled path is accepted."""
+    from fluid.codemode.skills import SkillStore
+    import json
+    root = skills_root()
+    if (root / "memories.json").exists():
+        yield store_for_owner("local")
+    for path in (root / ".users").glob("*/memories.json"):
+        try:
+            owner = json.loads(path.read_text(encoding="utf-8"))["owner"]
+            if owner_root(owner) == path.parent:
+                yield SkillStore(path.parent, owner=owner)
+        except (OSError, ValueError, KeyError):
+            continue
+
+
+# Diagnostics are opt-in and bounded independently of journal retention. Do not
+# instantiate SkillStore here: observing a missing store must not create it.
+JOURNAL_DIAGNOSTIC_STORES = 32
+JOURNAL_DIAGNOSTIC_BYTES = 8 * 1024 * 1024
+JOURNAL_DIAGNOSTIC_META_BYTES = 256 * 1024
+
+
+def journal_diagnostics() -> dict:
+    """Content-free, best-effort coverage of this worker's configured stores.
+
+    Count newline bytes, never parse journal entries or return paths/identities.
+    Concurrent rewrites, caps and unreadable files are explicit, not zero loss.
+    Process counters are separate from retained filesystem coverage.
+    """
+    import json
+    import os
+    import stat
+    import time
+    from fluid.codemode.skills import (
+        JOURNAL_LOSS_EVENTS, JOURNAL_LOSS_FILE, JOURNAL_MAX_BYTES, LEARNER_SILENCE_ALARM_SECONDS,
+        journal_metrics, learner_silence_seconds, read_journal_loss,
+    )
+
+    started = time.perf_counter()
+    root = skills_root()
+    candidates = [root]
+    discovery_incomplete = False
+    users = root / ".users"
+    try:
+        if users.is_symlink():
+            discovery_incomplete = True
+        elif users.exists():
+            with os.scandir(users) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= JOURNAL_DIAGNOSTIC_STORES - 1:
+                        discovery_incomplete = True
+                        break
+                    if (len(entry.name) == 64 and all(c in "0123456789abcdef" for c in entry.name)
+                            and entry.is_dir(follow_symlinks=False)):
+                        candidates.append(Path(entry.path))
+                    else:
+                        discovery_incomplete = True
+    except OSError:
+        discovery_incomplete = True
+
+    result = {
+        "scope": "configured_worker_stores", "snapshot_atomic": False,
+        "stores_examined": 0, "journals_found": 0, "journals_incomplete": 0,
+        "discovery_incomplete": discovery_incomplete, "retained_bytes": 0,
+        "retained_entries_known": 0, "consumed_entries_known": 0,
+        "pending_entries_known": 0, "journals_at_byte_cap": 0,
+        "bytes_scanned": 0, "scan_budget_bytes": JOURNAL_DIAGNOSTIC_BYTES,
+        "per_journal_byte_cap": JOURNAL_MAX_BYTES,
+        # Stores whose learner has run passes for the alarm window without
+        # writing a fact (meta.json "learner_yield"; see Synthesizer._track_yield).
+        "learner_silent_stores": 0,
+        "learner_silence_alarm_seconds": LEARNER_SILENCE_ALARM_SECONDS,
+    }
+    # Persisted per-store loss records (journal_loss.json): counts and times
+    # only, surviving restarts and shared by every worker over the store.
+    history = {
+        "scope": "persisted_per_store", "stores_with_history": 0,
+        **{name: 0 for name in JOURNAL_LOSS_EVENTS},
+        "first_at": None, "last_at": None, "last_quota_at": None,
+    }
+    result["loss_history"] = history
+
+    def fold_history(directory):
+        record = read_journal_loss(directory / JOURNAL_LOSS_FILE)
+        if not record:
+            return
+        history["stores_with_history"] += 1
+        for name in JOURNAL_LOSS_EVENTS:
+            history[name] += record[name]
+        for name, pick in (("first_at", min), ("last_at", max), ("last_quota_at", max)):
+            if name in record:
+                current = history[name]
+                history[name] = record[name] if current is None else pick(current, record[name])
+
+    def read_regular(path, limit):
+        # Never follow links or block on FIFOs/devices placed in a store. The
+        # fstat check also covers a replacement between lstat and open.
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("Not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError("Not a regular file")
+            data = stream.read(limit)
+        after = path.stat()
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+        return data, opened.st_size, identity(before) == identity(opened) == identity(after)
+
+    for directory in candidates:
+        result["stores_examined"] += 1
+        try:
+            if directory.is_symlink():
+                raise ValueError("Linked store")
+            fold_history(directory)
+            budget = max(0, JOURNAL_DIAGNOSTIC_BYTES - result["bytes_scanned"])
+            data, size, stable = read_regular(directory / "journal.jsonl", min(JOURNAL_MAX_BYTES, budget))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            result["journals_incomplete"] += 1
+            continue
+        result["journals_found"] += 1
+        result["retained_bytes"] += size
+        result["bytes_scanned"] += len(data)
+        result["journals_at_byte_cap"] += int(size >= JOURNAL_MAX_BYTES)
+        if not stable or len(data) != size:
+            result["journals_incomplete"] += 1
+            continue
+        entries = data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+        result["retained_entries_known"] += entries
+        try:
+            meta, meta_size, meta_stable = read_regular(directory / "meta.json", JOURNAL_DIAGNOSTIC_META_BYTES)
+            if not meta_stable or len(meta) != meta_size:
+                raise ValueError("Incomplete metadata")
+            meta_doc = json.loads(meta)
+            cursor = meta_doc.get("synth_cursor", 0)
+            if type(cursor) is not int or cursor < 0:
+                raise ValueError("Invalid cursor")
+            silence = learner_silence_seconds(meta_doc.get("learner_yield"), time.time())
+            result["learner_silent_stores"] += int(silence >= LEARNER_SILENCE_ALARM_SECONDS)
+        except FileNotFoundError:
+            cursor = 0
+        except (OSError, ValueError, AttributeError):
+            result["journals_incomplete"] += 1
+            continue
+        consumed = min(entries, cursor)
+        result["consumed_entries_known"] += consumed
+        result["pending_entries_known"] += entries - consumed
+    result["coverage_complete"] = not result["discovery_incomplete"] and result["journals_incomplete"] == 0
+    result["process_events"] = journal_metrics()
+    now = time.time()
+    last_quota = history["last_quota_at"]
+    history["last_quota_age_seconds"] = None if last_quota is None else max(0.0, now - last_quota)
+    # Records are written at most once per warning window, so they can trail
+    # the newest loss; "recent" therefore uses an hour, not the 60s window.
+    history["saturation_observed_last_hour"] = last_quota is not None and now - last_quota < 3600
+    result["collection_ms"] = (time.perf_counter() - started) * 1000
+    return result
+
+
+# The health check (fluid.codemode.memory_health) runs at most this often per
+# store, and sooner when a curation pass has run since the last check.
+HEALTH_INTERVAL_SECONDS = 3600
+
+
+def _learning_enabled() -> bool:
+    from app.core.config import settings
+    return bool(settings.fluid_continual)
+
+
+def health_due(store, now: float) -> bool:
+    from fluid.codemode import memory_health
+    checked = float(memory_health.load_state(store).get("checked_at") or 0)
+    if now - checked >= HEALTH_INTERVAL_SECONDS:
+        return True
+    meta = store._load_meta()
+    curated = max(float(meta.get("last_consolidated_at") or 0), float(meta.get("last_curated_at") or 0))
+    return curated > checked
+
+
+def check_health(store, now: float | None = None) -> dict:
+    """Repair, check and record one store (no model calls)."""
+    from fluid.codemode import memory_health
+    return memory_health.run(store, now=now, learning_enabled=_learning_enabled())
+
+
+def owner_health() -> dict:
+    """The installation owner's memory health in its owner-facing shape.
+
+    Read-only: the last recorded run, or a fresh check without repairs when
+    none was recorded within two intervals. Observing a missing store does
+    not create it.
+    """
+    import time
+    from fluid.codemode import memory_health
+    root = skills_root()
+    if not (root / "memories.json").exists():
+        return {"state": "healthy", "checked_at": None, "signals": [], "repairs": []}
+    store = store_for_owner("local")
+    state = memory_health.load_state(store)
+    if time.time() - float(state.get("checked_at") or 0) > 2 * HEALTH_INTERVAL_SECONDS:
+        fresh = memory_health.check(store, learning_enabled=_learning_enabled(), previous=state)
+        state = {**state, **fresh}
+    return memory_health.summary(state)
+
+
+def _health_notification(state: dict) -> str:
+    reasons = [s["reason"] for s in state.get("signals", []) if s.get("state") == "attention"]
+    text = " ".join(reasons[:2])
+    if len(reasons) > 2:
+        text += f" ({len(reasons) - 2} more.)"
+    return text + " Details are in Settings, System."
+
+
+async def _announce_health(owner: str, store, state: dict) -> None:
+    """One bell notification per stretch of attention; never raises."""
+    import logging
+    try:
+        from app.services.notification_service import emit_notification
+        from fluid.codemode import memory_health
+        user_id = "admin" if owner == "local" else owner.removeprefix("api:")
+        sent = await emit_notification(
+            user_id,
+            severity="warning",
+            title="Memory needs attention",
+            message=_health_notification(state),
+            category="memory_health",
+            surface="notification",
+            persist=True,
+        )
+        if sent is not None:
+            import asyncio
+            await asyncio.to_thread(memory_health.mark_notified, store)
+    except Exception:  # noqa: BLE001 — a notification never stops maintenance
+        logging.getLogger(__name__).warning("Memory health notification failed", exc_info=True)
+
+
+def sweep_memories(now: float | None = None) -> list[tuple[str, object, dict]]:
+    """One maintenance batch over every store: reap, purge, and the health
+    check when due. Returns ``(owner, store, state)`` for each store whose
+    health should be announced now."""
+    import logging
+    import time
+    now = time.time() if now is None else now
+    log = logging.getLogger(__name__)
+    announce = []
+    for store in stores():
+        try:
+            store.reap()
+            store.purge_forgotten_evidence()
+        except Exception:
+            log.exception("One memory store could not be maintained")
+        try:
+            if health_due(store, now):
+                state = check_health(store, now=now)
+                if state.get("notify"):
+                    announce.append((store._facts.owner, store, state))
+        except Exception:
+            log.exception("One memory store's health check failed")
+    return announce
+
+
+async def maintain_memories():
+    """Finite maintenance batches, independent of chat or a learning model."""
+    import asyncio
+    import logging
+    while True:
+        try:
+            for owner, store, state in await asyncio.to_thread(sweep_memories):
+                await _announce_health(owner, store, state)
+        except Exception:
+            logging.getLogger(__name__).exception("Memory maintenance failed")
+        await asyncio.sleep(300)

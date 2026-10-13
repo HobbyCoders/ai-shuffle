@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon background: the AI Shuffle brand gradient (indigo -> blue),
+  sampled from the chosen icon concept. Authored as a vector so it stays crisp
+  at every launcher size and mask shape.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0 h108 v108 h-108 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54" android:startY="0"
+                android:endX="54" android:endY="108">
+                <item android:offset="0" android:color="#FF3E34E2" />
+                <item android:offset="1" android:color="#FF0289F9" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

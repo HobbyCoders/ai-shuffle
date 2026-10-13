@@ -1,0 +1,20 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider android:name="com.hobbycoders.aishuffle.DownloadFixtureProvider"
+            android:authorities="com.hobbycoders.aishuffle.test.downloads" android:exported="true" />
+        <!-- A discoverable browser for AppAuth intent tests on AOSP images without Chrome.
+             The tests intercept AuthorizationManagementActivity before this can be launched. -->
+        <activity android:name="com.hobbycoders.aishuffle.OAuthBrowserFixtureActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+        </activity>
+        <activity android:name="com.hobbycoders.aishuffle.ControlTargetActivity" android:exported="true" android:label="Local media test">
+            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,205 @@
+# One container, including private managed PostgreSQL 16.
+# Existing non-managed deployments must stay on their previous release until
+# a separately tested migration is approved. Preserve all existing volumes.
+# Requires Docker Compose >= 2.24 for the optional env_file.
+services:
+  ai-shuffle:
+    # This file builds from source for development. Buyers use the compose file
+    # in docs/content/getting-started/install-docker-compose.md, which pulls the
+    # published image.
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: ai-shuffle
+    restart: unless-stopped
+
+    # Environment variables (override with .env file or Unraid template)
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      # The supervisor supplies the private managed database; no DB env settings.
+      - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
+      # Every worker owns its own database and joins other workers as a
+      # network device (Settings > Devices). INSTANCE_ID is only the legacy
+      # install id kept for migrating a shared-database cluster; leave it unset
+      # on a new install. See docs/network/migration.md.
+      - INSTANCE_ID=${INSTANCE_ID:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - PUID=${PUID:-99}
+      - PGID=${PGID:-100}
+      # Git identity used for commits made inside the container. Seeded into
+      # appuser's global gitconfig at startup ONLY when it is unset, so an
+      # identity you set yourself in the mounted config always wins.
+      - GIT_USER_NAME=${GIT_USER_NAME:-AI Shuffle Worker}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-worker@ai-shuffle.local}
+      # Import defaults are container paths, never hardcoded host homes. The first
+      # path preserves existing installs; /imports/provider-settings is an optional read-only
+      # bind mount configured below (or entered explicitly in the preview dialog).
+      - SETTINGS_IMPORT_SOURCE_HOME=${SETTINGS_IMPORT_SOURCE_HOME:-/home/appuser}
+      - SETTINGS_IMPORT_ALLOWED_HOMES=${SETTINGS_IMPORT_ALLOWED_HOMES:-/imports/provider-settings}
+
+    # Allow ordered application drain, then PostgreSQL shutdown and checkpoint.
+    stop_grace_period: 90s
+
+    # Fresh installs need no .env; existing connection/provider settings survive.
+    env_file:
+      - path: .env
+        required: false
+
+    # Volume mounts for persistent data
+    volumes:
+      # Active Fluid settings. Kept separate from every provider import source so
+      # preview/apply can remain copy-only and destination conflicts stay visible.
+      - fluid-settings:/home/appuser/.fluid
+      # Provider CLI sign-in (Claude Code, for a Claude subscription). Historical
+      # volume name. If you use a Claude subscription, run `claude auth login` in
+      # the AI Shuffle terminal (or
+      # `docker exec -it -u appuser <container> claude auth login`); the CLI keeps
+      # its login here. AI Shuffle never stores or refreshes your Claude credentials.
+      - claude-auth:/home/appuser/.claude
+      # Optional external Claude/Codex home (Linux/macOS): mount it read-only with a
+      # small override file, then enter /imports/provider-settings in the import dialog:
+      #   volumes:
+      #     - ${PROVIDER_IMPORT_HOME:?set PROVIDER_IMPORT_HOME}:/imports/provider-settings:ro
+      # Never mount an external provider home over /home/appuser/.fluid.
+      # Persist GitHub CLI authentication
+      - gh-auth:/home/appuser/.config/gh
+      # Persist Claude Code, downloaded on demand from Settings or setup with
+      # Anthropic's installer. Startup reinstalls only with Keep Claude Code
+      # installed on. (~/.local/bin/claude and ~/.local/share/claude) keeps
+      # its self-updates across container recreation.
+      - local-home:/home/appuser/.local
+      # Persist the browser-automation Chrome profile (logged-in sessions the
+      # browser-mcp server drives). Non-default dir on purpose — Chrome 136+
+      # disables the DevTools debug port on the default ~/.config/google-chrome
+      # profile (see docker/start-chrome.sh).
+      - browser-profile:/home/appuser/chrome-profile
+      # Persist app identity/keys and PostgreSQL (/data/postgres/data, with
+      # private lifecycle credentials alongside it in /data/postgres).
+      - ai-shuffle-data:/data
+      # Mount workspace directory for projects
+      - ${WORKSPACE_DIR:-./workspace}:/workspace
+
+    # The browser-automation Chromium needs more than Docker's default 64MB
+    # /dev/shm.
+    shm_size: '1gb'
+
+    # The code-mode sandbox (bubblewrap) around agents' Python code needs user
+    # namespaces and a fresh /proc mount, which Docker's default seccomp and
+    # AppArmor profiles and its /proc masking refuse. Same lines as the buyer
+    # compose file (docs/install/compose/compose.yaml); remove them to opt out.
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - apparmor=unconfined
+
+    # Port mapping. The browser's CDP port stays loopback-only inside the
+    # container (the browser-mcp server attaches to it in-process) — it is never
+    # published to the network, so only the app port is mapped.
+    #
+    # The app port is published on the host's loopback interface only. The
+    # listener grants owner authority to local (loopback) peers, and a port
+    # Docker publishes on 0.0.0.0 bypasses host firewall rules (Docker inserts
+    # its own iptables/nftables rules ahead of ufw/firewalld), so a plain
+    # "8000:8000" exposes the worker to every network the host is on.
+    # To reach it from the LAN deliberately, set BIND_HOST=0.0.0.0 (or one
+    # LAN address) in .env and put it behind a reverse proxy / VPN; see the
+    # README for the trade-offs.
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-8000}:8000"
+
+    # Health check — readiness probe (DB SELECT 1). A busy worker running many
+    # agents stays healthy; /health/ready returns 503 only until the DB is
+    # reachable, so give a generous start_period for first-boot migrations/DB
+    # connect before failures count.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Resource limits (adjust based on your Unraid server)
+    # Note: The container runs Python + Node.js (provider CLIs) + MCP servers
+    # concurrently. 4 CPUs is recommended; reduce to 2 for constrained hosts.
+    #
+    # IMPORTANT — memory & the OOM crash:
+    #   * This `deploy.resources.limits` block is IGNORED by plain
+    #     `docker compose up` (it only applies under `docker stack deploy` /
+    #     swarm, or `docker compose --compatibility up`). So the memory value
+    #     below is NOT enforced by default and the container can use all host RAM.
+    #   * The crash that stops live sessions is the GLOBAL host kernel OOM-killer
+    #     SIGKILLing our node subprocesses when the WHOLE host runs out of memory
+    #     during a subagent fan-out across many sessions — NOT a container limit.
+    #     With little/no host swap there is ZERO cushion for a transient spike.
+    #   * Strongly recommended on the host (Unraid): provision real swap or zram
+    #     (e.g. 8-16G). Swap turns a fan-out spike into a brief slowdown instead
+    #     of an instant kill — it is the single biggest cushion and cannot be set
+    #     from inside the container.
+    #   * The app also mitigates in software: admission backpressure refuses NEW
+    #     sessions only when host MemAvailable nears the cliff (does NOT cap how
+    #     many you can run), and node subprocesses are marked preferred OOM
+    #     victims so a kill reaps one recoverable session, not the orchestrator.
+    #     See sdk_admission_min_available_mb / sdk_subprocess_oom_score_adj.
+    #   * The memory value below is a GENEROUS hint sized for ~5-10 concurrent
+    #     sessions with subagents. To actually ENFORCE a ceiling (contains the
+    #     blast radius to this container's own cgroup instead of risking a global
+    #     OOM that can reap other containers), move it to a top-level
+    #     `mem_limit:` AND pair it with host swap — never enforce a tight cap
+    #     without swap or sessions will be killed constantly.
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 24G
+        reservations:
+          cpus: '1.0'
+          memory: 512M
+
+    # Relative CPU weight (Docker's default is 1024). 512 halves this
+    # container's share only while the host CPU is contended; an idle host
+    # still lets it use every core. Unraid: add `--cpu-shares=512` to the
+    # container template's Extra Parameters.
+    cpu_shares: 512
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Network
+    networks:
+      - ai-shuffle
+
+    # Enable TTY for interactive commands (like login)
+    tty: true
+    stdin_open: true
+
+volumes:
+  # Named volume for active Fluid settings and imported copies.
+  fluid-settings:
+    driver: local
+  # Provider CLI sign-in: the Claude Code CLI's config directory (its own login
+  # and settings).
+  # Do not rename: existing Docker/Unraid installs depend on this volume identity.
+  claude-auth:
+    driver: local
+  # Named volume for GitHub CLI authentication persistence
+  gh-auth:
+    driver: local
+  # Named volume for ~/.local (provider CLI programs: the Claude Code CLI and its updates)
+  local-home:
+    driver: local
+  # Named volume for the browser-automation Chrome profile (persisted logins)
+  browser-profile:
+    driver: local
+  # Named volume for AI Shuffle data (database, sessions)
+  ai-shuffle-data:
+    driver: local
+
+networks:
+  ai-shuffle:
+    driver: bridge

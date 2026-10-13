@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a problem with AI Shuffle
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use the in-app Report a problem action first, if available. Review the report before sending it, then include its ID below.
+        Never post secrets or private logs in issues. Report suspected vulnerabilities privately to support@hobbycoders.com.
+  - type: input
+    id: support-report
+    attributes:
+      label: Support report ID
+      description: Enter the ID from Report a problem, or explain why you could not submit a report.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and update channel
+      description: Include the app version and the channel shown in Settings. Include the worker version if it differs from the phone or desktop app.
+    validations:
+      required: true
+  - type: input
+    id: installation
+    attributes:
+      label: Installation and device
+      description: Docker, Windows, Linux or Android; include the operating system and browser if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic data. Say how often the problem occurs.
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Include only relevant screenshots or log excerpts you have reviewed and stripped of secrets and private data.

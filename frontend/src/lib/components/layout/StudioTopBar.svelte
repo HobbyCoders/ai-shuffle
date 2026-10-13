@@ -1,0 +1,112 @@
+<script lang="ts">
+	/**
+	 * StudioTopBar - desktop top bar for the main panel (Studio Noir shell).
+	 *
+	 * Sidebar toggle + breadcrumbs (`project › session title`) on the left; the
+	 * caller's action snippet (git actions, chat utilities) on the right.
+	 * It replaces the old AppTopBar tab row: page navigation
+	 * now lives in the sidebar's workspace nav.
+	 *
+	 * The notification bell used to sit here too. It now lives only in the
+	 * sidebar header, so there is exactly one bell on screen at any width
+	 * instead of one per header that happens to be mounted.
+	 *
+	 * The bar renders inside MainPanel so the git action buttons it hosts are the
+	 * existing GitHeaderActions instance with its existing handlers — nothing
+	 * about those actions is reimplemented here.
+	 */
+	import type { Snippet } from 'svelte';
+	import { PanelLeft } from 'lucide-svelte';
+	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
+
+	interface Props {
+		/** Left crumb — the project (or section) the current view belongs to. */
+		projectLabel?: string | null;
+		/** Right crumb — the open session / page title. */
+		title?: string | null;
+		/** Bound chat session id. Null on New Chat and non-chat pages (inert title). */
+		sessionId?: string | null;
+		sidebarCollapsed?: boolean;
+		onToggleSidebar?: () => void;
+		/** Project crumb activation (returns to the sessions board). */
+		onOpenProject?: () => void;
+		/** Right cluster contents supplied by MainPanel. */
+		actions?: Snippet;
+	}
+
+	let {
+		projectLabel = null,
+		title = null,
+		sessionId = null,
+		sidebarCollapsed = false,
+		onToggleSidebar,
+		onOpenProject,
+		actions
+	}: Props = $props();
+</script>
+
+<header class="topbar">
+	{#if onToggleSidebar}
+		<button
+			class="tb-icon"
+			onclick={onToggleSidebar}
+			aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+			title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+			aria-pressed={!sidebarCollapsed}
+		>
+			<PanelLeft size={17} strokeWidth={1.85} />
+		</button>
+	{/if}
+
+	<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
+
+	<div class="tb-right">
+		{#if actions}
+			{@render actions()}
+		{/if}
+	</div>
+</header>
+
+<style>
+	.topbar {
+		position: relative;
+		z-index: 40;
+		flex: none;
+		height: 52px;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 0 14px 0 10px;
+		border-bottom: 1px solid var(--border);
+		background: var(--background);
+	}
+
+	.tb-icon {
+		width: 30px;
+		height: 30px;
+		flex: none;
+		border: none;
+		background: transparent;
+		border-radius: 8px;
+		display: grid;
+		place-items: center;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background-color 0.13s ease, color 0.13s ease;
+	}
+	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
+
+	.tb-right {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
+	}
+
+	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+	@media (prefers-reduced-motion: reduce) {
+		.tb-icon { transition: none; }
+	}
+</style>

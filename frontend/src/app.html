@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-platform="desktop">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+		<title>AI Shuffle</title>
+
+		<!-- The worker-served web UI is desktop-only; the mobile shell ships as
+		     its own bundle inside the Android app (see mobile/ and
+		     docs/mobile-desktop-ui-split.md). No user-agent or query sniffing. -->
+
+		<!-- PWA Configuration -->
+		<link rel="manifest" href="/manifest.json" />
+		<meta name="theme-color" content="#0f0f0f" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+		<meta name="apple-mobile-web-app-title" content="AI Shuffle" />
+		<link rel="apple-touch-icon" href="/icons/icon.svg" />
+
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

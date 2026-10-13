@@ -1,0 +1,587 @@
+"""
+Cluster API — device registry + cluster-secret management on a shared database.
+
+These endpoints power the **Devices UI** (``require_auth`` — the normal admin/API
+user): list installs, rename/delete a device, inspect/rotate the cluster secret,
+and manage the address this install advertises to peers.
+
+History and live session state live in the shared DB; cross-runner execution
+is the ``runs`` lease claim loop and durable ``pending_interactions``, not an
+HTTP relay.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel
+
+from app.db import database
+from app.db.async_database import run_sync
+from app.api.auth import get_api_user_from_request, require_admin, require_auth
+from app.api.common import assigned_origin, require_origin_access
+from app.core import cluster
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/cluster", tags=["Cluster"])
+
+
+# ============================================================================
+# Admin endpoints (normal auth) — power the Devices UI
+# ============================================================================
+
+def _require_legacy_install_target(install_id: str) -> None:
+    """A network directory id is not authority to mutate the old registry."""
+    from app.network import engine, runners
+
+    ctx = engine.context()
+    if ctx is not None:
+        device_id = runners.resolve_runner_id(install_id)
+        if ctx.member(device_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Use network membership controls to manage enrolled workers.",
+            )
+
+
+class InstallRenameRequest(BaseModel):
+    device_name: str
+
+
+class InstallBaseUrlRequest(BaseModel):
+    base_url: Optional[str] = None
+
+
+class InstallApprovalRequest(BaseModel):
+    approved: bool
+
+
+def _self_install_id() -> str:
+    """The id of this worker's own row in the install listing.
+
+    Enrolled in a network, the listing is the runner directory and its rows
+    are keyed by device id; outside one, the legacy registry keys rows by
+    instance id. ``is_self`` and ``self_instance_id`` must use whichever id
+    the rows actually carry, or the composer's runner picker offers this
+    worker as "another worker" and Settings > Devices loses its badge.
+    """
+    from app.core.config import settings
+
+    try:
+        from app.network import runners
+
+        device_id = runners.self_device_id()
+    except Exception:  # noqa: BLE001 — the network layer must never break a listing
+        device_id = None
+    return device_id or settings.effective_instance_id
+
+
+@router.get("/installs")
+async def list_installs(token: str = Depends(require_auth)) -> Dict[str, Any]:
+    """List every registered install, annotating which row is this one."""
+
+    installs = await run_sync(database.get_installs)
+    me = _self_install_id()
+    for row in installs:
+        row["is_self"] = row.get("id") == me
+    return {"installs": installs, "self_instance_id": me}
+
+
+def _iso(value: Any) -> Optional[str]:
+    """Timestamps arrive as ``str`` from the SQLite shim but ``datetime`` from
+    real Postgres — coerce to an ISO string either way."""
+    if value is None or isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def _catalog_scoped_origin(user: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Origin filter for the cluster catalog, or None if unscoped.
+
+    Do **not** call :func:`require_origin_access` here (both ids absent
+    would 400). A scoped user whose assigned project is gone is an empty
+    catalog, not unscoped — :func:`assigned_origin` 403s that case; we
+    turn it into ``""`` so the caller returns ``[]`` instead of listing
+    every origin.
+    """
+    try:
+        return assigned_origin(user)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return ""
+        raise
+
+
+def _local_project_id_for_origin(
+    origin: str,
+    local_by_origin: Dict[str, Dict[str, Any]],
+) -> Optional[str]:
+    """Legacy ``projects`` id on THIS install for ``origin``, else None.
+
+    Foreign ``projects.path`` is another machine's path — never pick a
+    row whose ``instance_id`` is a peer. ``instance_id`` NULL is a
+    legacy local row (same filter as ``GET /projects``).
+    """
+    row = local_by_origin.get(origin)
+    return row["id"] if row else None
+
+
+def _build_cluster_catalog(
+    *,
+    bases: list,
+    pv2s: list,
+    installs: list,
+    local_projects: list,
+    me: str,
+) -> list:
+    """Join one checkout SELECT + pv2 + installs in Python. Drop pv2
+    rows with no active base checkout on an approved online install. Never
+    expose foreign ``path``."""
+    from app.core.project_resolver import origin_for_legacy_project
+
+    by_pv2: Dict[str, list] = {}
+    for row in bases:
+        by_pv2.setdefault(row.get("project_id") or "", []).append(row)
+
+    # Prefer instance_id = me over a NULL-instance legacy row.
+    local_by_origin: Dict[str, Dict[str, Any]] = {}
+    for project in local_projects:
+        origin = origin_for_legacy_project(project)
+        existing = local_by_origin.get(origin)
+        if existing is None or project.get("instance_id") == me:
+            local_by_origin[origin] = project
+
+    install_map = {row.get("id"): row for row in installs if row.get("id")}
+
+    catalog = []
+    for pv2 in pv2s:
+        pv2_id = pv2.get("id")
+        rows = by_pv2.get(pv2_id, [])
+        if not rows:
+            continue
+        origin = pv2.get("origin") or ""
+        local_id = _local_project_id_for_origin(origin, local_by_origin)
+        seen: set[str] = set()
+        eligible = []
+        for ck in rows:
+            runner_id = ck.get("runner_id") or ""
+            if not runner_id or runner_id in seen:
+                continue
+            install = install_map.get(runner_id)
+            if (
+                not install
+                or not install.get("approved", True)
+                or not install.get("online")
+            ):
+                continue
+            seen.add(runner_id)
+            eligible.append({
+                "install_id": runner_id,
+                "device_name": install.get("device_name"),
+                "online": bool(install.get("online")),
+                "is_self": runner_id == me,
+            })
+        if not eligible:
+            continue
+        catalog.append({
+            "project_v2_id": pv2_id,
+            "origin": origin,
+            "name": pv2.get("name") or origin,
+            "local_project_id": local_id,
+            "remote_only": local_id is None,
+            "eligible": eligible,
+        })
+    return catalog
+
+
+@router.get("/projects")
+async def list_cluster_projects(
+    request: Request,
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Origin-keyed catalog of ``projects_v2`` available on an online install.
+
+    Compose accepts ``project_v2_id`` so a viewer can start a remote
+    session without a local clone. Scoped users are filtered by
+    :func:`assigned_origin` — this endpoint does **not** call
+    :func:`require_origin_access` (XOR 400 when both ids are absent).
+    A scoped user whose assigned project is gone gets an empty list,
+    not every origin.
+    """
+    from app.db import checkouts as checkouts_db
+    from app.db import projects_v2 as projects_v2_db
+
+    user = get_api_user_from_request(request)
+    scoped_origin = await run_sync(_catalog_scoped_origin, user)
+    if scoped_origin == "":
+        return {"projects": []}
+
+    pv2s = await run_sync(projects_v2_db.list_projects_v2)
+    installs = await run_sync(database.get_installs)
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        # One bounded request per owner, not per project. Checkouts themselves
+        # stay private to that owner; a failed/old peer is never called eligible.
+        semaphore = asyncio.Semaphore(4)
+
+        async def owned_bases(install):
+            if not install.get("online") or not install.get("approved", True):
+                return []
+            async with semaphore:
+                try:
+                    ids = await network_git.catalog(install["id"])
+                    return [{"project_id": pid, "runner_id": install["id"]} for pid in ids]
+                except Exception:
+                    logger.warning("Cannot read project catalog from worker %s", install["id"], exc_info=True)
+                    return []
+
+        bases = [row for rows in await asyncio.gather(*(owned_bases(i) for i in installs)) for row in rows]
+    else:
+        bases = await run_sync(checkouts_db.list_active_base_checkouts)
+    local_projects = await run_sync(database.get_all_projects)
+    me = _self_install_id()
+
+    catalog = _build_cluster_catalog(
+        bases=bases,
+        pv2s=pv2s,
+        installs=installs,
+        local_projects=local_projects,
+        me=me,
+    )
+    if scoped_origin:
+        catalog = [row for row in catalog if row.get("origin") == scoped_origin]
+    return {"projects": catalog}
+
+
+@router.get("/git-state")
+async def git_state(
+    request: Request,
+    project_id: Optional[str] = Query(None, description="Legacy project id"),
+    project_v2_id: Optional[str] = Query(None, description="Origin-keyed project_v2 id"),
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Per-device git state for one project.
+
+    Answers, for every registered install, "can this device run a worktree
+    session for this project, and what does it already have checked out?".
+    ``eligible`` is ``checkouts.has_active_base_checkout`` — the SAME predicate
+    the with-worktree remote preflight enforces, so a device the composer shows
+    as eligible is exactly a device whose send will not 409.
+
+    Pass exactly one of ``project_id`` or ``project_v2_id`` (400 if both or
+    neither). ``project_v2_id`` does not 404 just because this install has no
+    legacy ``projects`` row — remote-only compose reads git-state by v2 id.
+
+    A legacy project with no ``projects_v2`` row (a non-git project) is not an
+    error: it answers 200 with ``project_v2_id: null`` and every device ineligible.
+    """
+    from app.db import checkouts as checkouts_db
+    from app.db import git_ops as git_ops_db
+
+    access = await run_sync(
+        require_origin_access,
+        request=request,
+        project_id=project_id,
+        project_v2_id=project_v2_id,
+    )
+    pv2 = access["project_v2"]
+    pv2_id = pv2["id"] if pv2 else None
+
+    installs = await run_sync(database.get_installs)
+    me = _self_install_id()
+
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        out, recent = [], []
+        for install in installs:
+            entry = {**install, "is_self": install.get("id") == me,
+                     "eligible": False, "checkouts": []}
+            if not entry["is_self"] and not install.get("online"):
+                entry["availability_error"] = "Worker is offline"
+            if pv2_id and (entry["is_self"] or install.get("online")):
+                try:
+                    owned = await network_git.state(install["id"], pv2_id)
+                    entry.update(eligible=owned["eligible"], checkouts=owned["checkouts"])
+                    recent.extend(owned.get("recent_ops", []))
+                except Exception:
+                    logger.warning("Cannot read Git state from worker %s", install["id"], exc_info=True)
+                    entry["availability_error"] = "Worker Git state is unavailable"
+            out.append(entry)
+        return {"project_v2_id": pv2_id, "installs": out, "recent_ops": recent}
+
+    if pv2_id:
+        rows = await run_sync(checkouts_db.list_checkouts, pv2_id)
+        recent = await run_sync(git_ops_db.list_recent_for_project, pv2_id, 20)
+    else:
+        rows, recent = [], []
+
+    # ONE list_checkouts read, grouped in Python — no per-install query fan-out.
+    by_runner: Dict[str, list] = {}
+    for row in rows:
+        by_runner.setdefault(row.get("runner_id") or "", []).append({
+            "branch": row.get("branch"),
+            "path": row.get("path"),
+            "head_sha": row.get("head_sha"),
+            "dirty": row.get("dirty"),
+            "status": row.get("status"),
+            "updated_at": _iso(row.get("updated_at")),
+        })
+
+    out = []
+    for install in installs:
+        install_id = install.get("id")
+        entry = dict(install)
+        entry["is_self"] = install_id == me
+        entry["eligible"] = bool(
+            pv2_id
+            and await run_sync(
+                checkouts_db.has_active_base_checkout, pv2_id, install_id
+            )
+        )
+        entry["checkouts"] = by_runner.get(install_id or "", [])
+        out.append(entry)
+
+    return {
+        "project_v2_id": pv2_id,
+        "installs": out,
+        "recent_ops": [
+            {
+                "id": op.get("id"),
+                "runner_id": op.get("runner_id"),
+                "op": op.get("op"),
+                "status": op.get("status"),
+                "params": op.get("params"),
+                "result": op.get("result"),
+                "created_at": _iso(op.get("created_at")),
+                "updated_at": _iso(op.get("updated_at")),
+            }
+            for op in recent
+        ],
+    }
+
+
+class GitStateRefreshRequest(BaseModel):
+    project_id: Optional[str] = None
+    project_v2_id: Optional[str] = None
+    runner_id: Optional[str] = None
+
+
+@router.post("/git-state/refresh", status_code=status.HTTP_202_ACCEPTED)
+async def refresh_git_state(
+    request: Request,
+    body: GitStateRefreshRequest,
+    token: str = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Queue a ``refresh_status`` git op for ONE runner (never fan-out).
+
+    ``runner_id`` is required. XOR ``project_id`` / ``project_v2_id`` via
+    ``require_origin_access``. The executor caps at 3 checkouts / 20s so this
+    cannot starve ``ensure_worktree``. 202 ``{ops: [{id, runner_id}]}``.
+    """
+    from app.db import git_ops as git_ops_db
+
+    runner_id = (body.runner_id or "").strip()
+    if not runner_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="runner_id is required",
+        )
+
+    access = await run_sync(
+        require_origin_access,
+        request=request,
+        project_id=body.project_id,
+        project_v2_id=body.project_v2_id,
+    )
+    pv2 = access["project_v2"]
+    if not pv2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="not a git project",
+        )
+
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        try:
+            op = await network_git.enqueue(runner_id, "refresh_status", project_v2_id=pv2["id"])
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail="Selected worker is unavailable or has no base checkout") from exc
+        return {"ops": [op]}
+
+    op = await run_sync(
+        git_ops_db.insert_op,
+        runner_id,
+        "refresh_status",
+        project_v2_id=pv2["id"],
+        params={},
+    )
+    # Latency only: if the op targets this install, run the claim pass now
+    # instead of waiting for the next scheduled sweep (up to 60s when this is
+    # a single install). A peer-targeted row is left to that peer's runner.
+    from app.core import git_ops_runner
+    from app.core.config import settings
+
+    if runner_id == settings.effective_instance_id:
+        git_ops_runner.kick()
+    return {"ops": [{"id": op["id"], "runner_id": op["runner_id"]}]}
+
+
+@router.patch("/installs/{install_id}")
+async def update_install(
+    install_id: str,
+    rename: Optional[InstallRenameRequest] = None,
+    token: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Rename a device (the user-friendly name shown on its sessions)."""
+    if not rename or not (rename.device_name or "").strip():
+        raise HTTPException(status_code=400, detail="device_name is required")
+    _require_legacy_install_target(install_id)
+    updated = await run_sync(database.set_install_name, install_id, rename.device_name.strip())
+    if not updated:
+        raise HTTPException(status_code=404, detail="Install not found")
+    return updated
+
+
+@router.put("/installs/{install_id}/approval")
+async def update_install_approval(
+    install_id: str,
+    body: InstallApprovalRequest,
+    token: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Approve a quarantined runner or revoke an existing runner.
+
+    A newly approved runner must restart before its background workers start.
+    Revocation removes it from placement immediately; stopping an already
+    running process remains the operator's responsibility.
+    """
+    from app.core.config import settings
+
+    if install_id == settings.effective_instance_id and not body.approved:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot revoke the install serving this admin session",
+        )
+    _require_legacy_install_target(install_id)
+    updated = await run_sync(database.set_install_approval, install_id, body.approved)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Install not found")
+    updated["restart_required"] = bool(body.approved and updated.get("online"))
+    return updated
+
+
+@router.delete("/installs/{install_id}")
+async def delete_install(install_id: str, token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Remove a stale install from the registry.
+
+    Deleting this install's own row is allowed but pointless — it re-registers
+    on its next heartbeat. Mainly for pruning devices that are gone for good.
+    """
+    _require_legacy_install_target(install_id)
+    ok = await run_sync(database.delete_install, install_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Install not found")
+    # Prune the departed install's usage-snapshot row too — otherwise it lingers
+    # in the shared table forever (read-time filtered only). Best-effort.
+    try:
+        await run_sync(database.delete_usage_snapshot, install_id)
+    except Exception as e:  # noqa: BLE001 — cleanup must not fail the delete
+        logger.debug("Usage-snapshot prune skipped for %s: %s", install_id, e)
+    return {"ok": True, "deleted": install_id}
+
+
+@router.get("/advertise")
+async def get_advertise_url(token: str = Depends(require_auth)) -> Dict[str, Any]:
+    """Report this install's advertised peer address (and override status)."""
+    return await run_sync(cluster.advertise_status)
+
+
+@router.put("/advertise")
+async def set_advertise_url(
+    body: InstallBaseUrlRequest,
+    token: str = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Override the URL this install advertises to peers (blank = auto-detect).
+
+    Useful when the auto-detected host name isn't reachable from other devices
+    (reverse proxy, custom domain). Takes effect immediately (re-registers).
+    """
+    url = (body.base_url or "").strip()
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+    return await run_sync(cluster.set_advertise_url_override, url)
+
+
+@router.post("/advertise/test")
+async def test_advertise_reachability(token: str = Depends(require_auth)) -> Dict[str, Any]:
+    """Self-test the currently advertised address by fetching its health route.
+
+    Catches the most common misconfigurations — an unresolvable host name
+    (``[Errno -2]``), a wrong port, or a down listener — before peers hit them as
+    relay failures. This runs from *this* server's network namespace, so it can't
+    prove cross-host reachability through NAT/firewalls, only that the URL itself
+    resolves and answers. The response says as much.
+    """
+    import httpx
+
+    url, source = await run_sync(cluster.advertise_url)
+    if not url:
+        return {
+            "ok": False,
+            "url": None,
+            "source": source,
+            "detail": "No address is advertised — this install is view-only to peers.",
+        }
+
+    health = f"{url.rstrip('/')}/api/v1/health"
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            resp = await client.get(health)
+        if resp.status_code < 400:
+            return {
+                "ok": True,
+                "url": url,
+                "source": source,
+                "detail": "Address resolves and responds. Peers on the same network should be able to reach it.",
+            }
+        return {
+            "ok": False,
+            "url": url,
+            "source": source,
+            "detail": f"Address responded with HTTP {resp.status_code} — check the URL points at this install.",
+        }
+    except httpx.HTTPError as e:
+        return {
+            "ok": False,
+            "url": url,
+            "source": source,
+            "detail": f"Could not reach the advertised address: {e}",
+        }
+
+
+@router.get("/secret/status")
+async def cluster_secret_status(token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Report how the cluster secret is sourced — never returns the secret itself."""
+    from app.core.config import settings
+
+    env_pinned = bool(settings.cluster_secret and settings.cluster_secret.strip())
+    # Touch the secret so a fresh install reports "configured" (auto-seeds on read).
+    configured = bool(await run_sync(cluster.get_cluster_secret))
+    return {"configured": configured, "env_pinned": env_pinned}
+
+
+@router.post("/secret/regenerate")
+async def regenerate_cluster_secret(token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Rotate the auto-generated cluster secret (no-op when env-pinned).
+
+    Rotating invalidates the old secret cluster-wide: every other install must be
+    restarted (or re-read the setting) before it can relay again.
+    """
+    from app.core.config import settings
+
+    env_pinned = bool(settings.cluster_secret and settings.cluster_secret.strip())
+    await run_sync(cluster.regenerate_cluster_secret)
+    return {"ok": True, "env_pinned": env_pinned}

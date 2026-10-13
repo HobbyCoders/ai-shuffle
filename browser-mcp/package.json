@@ -1,0 +1,32 @@
+{
+  "name": "@ai-shuffle/browser-mcp",
+  "license": "AGPL-3.0-only",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Provider-agnostic, token-conservative browser-control MCP server (Playwright over CDP)",
+  "main": "dist/index.js",
+  "bin": {
+    "browser-mcp": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc && node scripts/write-catalog.mjs",
+    "clean": "node scripts/clean.mjs",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "playwright-core": "^1.61.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
+  }
+}

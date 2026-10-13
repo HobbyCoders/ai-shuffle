@@ -1,0 +1,72 @@
+name: iOS CI
+
+# iOS app (ios/). Generates the Xcode project with XcodeGen, builds for the
+# iOS Simulator without signing and runs the unit and WebKit tests. Chat loads
+# the phone UI from the paired worker's /mobile/, so the app bundles no UI and
+# mobile/ or frontend/ changes never need an app build; frontend CI covers
+# them. Manual only: no Mac is
+# available locally, so the owner dispatches it before an iOS release.
+#
+# Standard GitHub-hosted macOS runners are free in public repositories. This
+# workflow never signs, uploads or publishes; TestFlight stays a manual,
+# owner-gated step (ios/RELEASING.md).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  simulator:
+    name: Build and test iOS app (Simulator)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -version
+
+      - name: Build for the Simulator and run tests (unsigned)
+        working-directory: ios
+        run: |
+          udid="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devices, reverse=True):
+              if ".iOS-" in runtime:
+                  for device in devices[runtime]:
+                      if device["name"].startswith("iPhone"):
+                          print(device["udid"]); sys.exit(0)
+          ')"
+          if [ -z "$udid" ]; then echo '::error::No available iPhone simulator'; exit 1; fi
+          # Diagnostics collection after a failure waits up to 10 minutes
+          # for the simulator; the failure messages printed below are enough.
+          status=0
+          xcodebuild test -quiet \
+            -project AIShuffle.xcodeproj -scheme AIShuffle \
+            -destination "id=$udid" \
+            -derivedDataPath build/DerivedData \
+            -resultBundlePath build/Tests.xcresult \
+            -collect-test-diagnostics never \
+            CODE_SIGNING_ALLOWED=NO || status=$?
+          # -quiet hides per-test lines; print the counts and failures, and fail if too few ran.
+          xcrun xcresulttool get test-results summary --path build/Tests.xcresult > build/summary.json || exit 1
+          python3 - <<'PY'
+          import json
+          summary = json.load(open("build/summary.json"))
+          print({key: summary.get(key) for key in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests")})
+          for failure in summary.get("testFailures", []):
+              print("FAILED", failure.get("testIdentifierString"), "-", failure.get("failureText"))
+          assert summary.get("result") == "Passed" and summary.get("failedTests") == 0, "iOS tests did not pass"
+          assert summary.get("passedTests", 0) >= 20, "Fewer iOS tests ran than expected"
+          PY
+          exit "$status"

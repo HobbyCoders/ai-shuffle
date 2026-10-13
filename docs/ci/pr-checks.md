@@ -1,0 +1,259 @@
+# Where tests run
+
+Tests run on the machine where the change was made, before it is pushed.
+GitHub Actions does not test pull requests: no workflow starts on a pull
+request or a push to a branch. The daily schedule only publishes an attested
+nightly; it never runs tests. CI minutes go only to work no local machine can do: release builds, signing, publishing, deploys, and the
+macOS and iOS checks we have no Mac for. See the
+[October paid CI audit](paid-ci-audit-2026-10.md) for the historical rationale.
+
+Public-app workflows use standard GitHub-hosted `ubuntu-latest`,
+`windows-latest` and `macos-latest` runners (some existing jobs pin an OS
+version). These runners are free when the repository is public; larger paid
+runners are not required. Docker jobs use the official Buildx/build-push
+actions with the GitHub Actions layer cache (`type=gha`, scope `Dockerfile`).
+Cache access follows GitHub branch isolation: a branch can restore the default
+branch cache, not another branch's private cache. No sticky disk is required.
+The cloud-service workflows are being moved separately to the private
+repository; their runner migration is not part of this change. Cancelling the
+Blacksmith subscription is an owner action after that migration.
+
+Cloud service checks and deploy workflows live in the private
+[HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
+repository. App checks do not need that checkout. When app docs/install files
+change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
+and its README; the app still checks `docs/content` against the frontend copy.
+
+## Before every push
+
+```bash
+python scripts/local_ci.py install   # once per clone: turns on the pre-push hook
+python scripts/local_ci.py           # the suites this branch's changes reach
+python scripts/local_ci.py list      # what each suite runs, and when
+```
+
+`local_ci.py` compares the branch with `origin/main` and runs each suite the
+change reaches: backend (the same function-level selection the backend test
+map gives), fluid, frontend, mobile, tools, browser-mcp, docs, desktop, the
+Android app and download bridge, the workflow policy tests and the in-app update
+reach check. It runs at low CPU priority with at most two test workers
+(`LOCAL_CI_WORKERS`), because every worker host is shared with other sessions
+and, on Unraid, with everything else the server runs.
+
+A pass on a clean checkout is recorded against the commit's tree in
+`.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`, which
+`install` copies into the directory git runs hooks from, next to AI Shuffle's
+managed hooks; an older `pre-push` there is kept as `pre-push.user` and still
+runs afterwards; `install` also saves a Python that has pytest and PyYAML
+in git config `local-ci.python`, which the hook and later runs use) lets a
+recorded commit through after the offline outgoing-commit secret scan. For an unrecorded commit that is the clean
+`HEAD`, it runs the checks and pushes only if they pass. Anything else (a
+commit other than `HEAD`, or uncommitted changes) is refused, because the
+checks would not test what is being pushed. Never skip the hook with
+`--no-verify`.
+
+Agents run `local_ci.py` through the Monitor tool before pushing, so the hook
+finds a recorded pass instead of running a long check inside a shell call.
+
+The last lines of each run list what this machine did not cover:
+
+- Windows, when the run is not on a Windows worker. Edge publication does not
+  wait for Windows; a stable release does (below). When DesktopWorker is off,
+  Windows-only changes still merge and reach edge, and the gap shows in the
+  pass record and in the ship-release preflight.
+- On Windows, the tests in `scripts/ci/windows_known_failures.txt`. They fail
+  there for reasons unrelated to the change (fake `gh` shell scripts,
+  symlinks, POSIX modules), so a Windows run skips them and names
+  [#2215](https://github.com/HobbyCoders/ai-shuffle/issues/2215). Linux
+  workers still run them, and a Windows failure that is not on the list
+  still fails the run. Remove lines as the tests are fixed; never add one to
+  get a push through. The desktop unit tests do not run on Windows yet
+  ([#2214](https://github.com/HobbyCoders/ai-shuffle/issues/2214)); Windows
+  typechecks and builds desktop, and a Linux worker runs its tests.
+- macOS folder confinement and the iOS app: no Mac. The owner dispatches
+  `ci-folder-confinement.yml` or `ios.yml` when a change needs them, usually
+  before a release.
+- The container image: the release workflow builds and verifies it, or run
+  `python scripts/verify_container_postgres.py` where Docker is available.
+
+An update-reach failure is acknowledged as before, with a pull request label
+`update-reach:GROUP` (`local_ci.py` reads the PR's labels) or
+`--allow GROUP` when running `scripts/ci/update_reach.py` directly.
+
+
+## Local security checks
+
+Every `check` (including `--only`) and `full` first scans the whole working tree
+(tracked files plus non-ignored untracked files) for leaked credentials. The
+pre-push hook also scans the changed blobs in **every outgoing commit**, before
+consulting its cached test pass. A token added and removed in separate commits
+still blocks the push. Existing refs use the remote tip through the pushed tip;
+new branches/tags exclude commits already on local `origin/main` (or scan all
+reachable history if it is unavailable). Tags are scanned; deletions need no scan.
+The hook uses local Git objects only: it never downloads a scanner or contacts a
+provider. Fetch `origin/main` before starting a branch so that baseline is current.
+The installed hook refuses a checkout missing the scanner/config or the required
+security-gate version, including branches that predate these checks: update that
+branch before pushing. Re-run `python scripts/local_ci.py install` to upgrade an
+older installed hook. Each scanner invocation has a 120-second deadline and its
+Git subprocesses have 15-second deadlines; timeouts block rather than pass.
+
+The vendored stdlib fallback, `scripts/secret_scan.py`, reads the deliberately
+small gitleaks-compatible `.gitleaks.toml` ruleset. Gitleaks is not bundled or
+available offline on all workers, so the gate needs no binary installation. It
+matches AWS, GitHub, OpenAI/Anthropic/OpenRouter, Google, Cloudflare scoped-token
+assignments, Telegram/Discord bot tokens, Slack bot/app tokens, Stripe live keys
+and webhook signing secrets, password-bearing PostgreSQL URLs and PEM key
+material. It is **not** gitleaks' full default/entropy ruleset or a proof that no
+secret exists. Diagnostics show only rule, file, line and revision, never the
+matching value: metadata is redacted too and control characters are escaped. Ignored local credential files are not whole-tree scan
+inputs, but force-adding one makes it tracked and scanned.
+
+For a false positive, add a `[[rules.allowlists]]` entry to the relevant rule in
+`.gitleaks.toml`, with a reason, `condition = "AND"`, `regexTarget = "match"`, an
+anchored `paths` regex for the specific fixture file and anchored `regexes` for
+only the known fake value. Do not exclude entire test/docs directories or use a
+real token as an allowlist. Spell the first character as a character class (for
+example `[s]k-...`) so the config does not itself contain the matching token.
+Short `sk-test`, malformed AWS placeholders and documentation preview tokens
+(`v1.<uuid>.<ts>.<hex>`) do not match provider patterns. Add a regression test and
+run `python scripts/secret_scan.py`; `--revision origin/main` scans the baseline.
+If it is a real credential, revoke/rotate it and remove it from **all outgoing
+commits**, not just the latest tree; do not print it in an issue or PR.
+
+The dependency step is the networked part: `scripts/dependency_audit.py` installs
+pinned `pip-audit==2.9.0` in checkout-local, ignored `venv/local-audit/` on first
+use. It audits `requirements.txt`, any Fluid requirements files, and Fluid's
+runtime dependencies from `fluid/pyproject.toml`. These are newly resolved
+requirements, not an inventory of an existing worker. It also runs
+`npm audit --audit-level=high --package-lock-only --ignore-scripts` for frontend,
+scripts/source-publisher, browser-mcp, desktop and tools when their lockfiles exist, including
+dev dependencies, without installing node_modules or changing lockfiles. Each
+manifest prints one summary; PyPI advisory severity is reported as unknown
+because pip-audit does not provide it. No dependency is upgraded automatically.
+
+Findings and unavailable/timed-out audits **warn by default** until triaged.
+`python scripts/local_ci.py check --strict-audit` fails on any Python advisory,
+any npm high/critical finding, skipped Python packages or an unavailable audit.
+Every explicit `check`/`full` refreshes the audit. Automatic pre-push checks never
+run dependency audits, even without a cached test pass or when manifests changed:
+they print a reminder to run `python scripts/local_ci.py check` for a fresh audit.
+This prevents advisory-service/resolver stalls during an otherwise offline push;
+the existing test suites may still need their own tools/dependencies. Secret
+scanning is never skipped. Pass records record whether an audit was refreshed;
+records from older security-gate versions are invalidated. This is local
+protection, not GitHub push protection; the hook must be installed on each clone.
+
+## Out-of-reach changes: draft first, owner acceptance before readiness
+
+The pre-push update-reach check reads `gh pr view --json isDraft,labels`.
+When the branch has no PR yet or its PR is a draft, an unreachable change is a
+prominent **NOTE — OUT OF REACH**, not a push failure. The note names each group
+and its required `update-reach:<group>` label. If `gh` is missing, unauthenticated
+or cannot read the PR, the check says so and treats it as no PR for this local
+push only. Other check failures still fail the push.
+
+1. Push with the hook enabled and open a **draft** PR (`gh pr create --draft`).
+2. Move the change into updated source/add a migration path, or ask the owner
+   to accept each reported group by adding its `update-reach:<group>` label.
+   An agent must not add the acceptance label on the owner's behalf.
+3. Re-run `python scripts/local_ci.py check` and, only after acceptance and
+   review, have the owner/release agent mark it ready. A ready PR without the
+   required labels fails update-reach on subsequent checks/pushes. Cached test
+   passes do not cache PR state or labels: pre-push reads them again.
+
+**`gh pr ready` and `gh pr merge` themselves are not blocked; edge publication
+is.** There is no GitHub-required PR check (PR CI remains off). The strict
+backstop is `scripts/ci/edge_publication_gate.py::update_reach_readiness`, called
+by `local_ci.py full --attest` before starting and again before posting success.
+It verifies the signed published edge pointer, checks each first-parent main
+change since that revision, and requires the matching labels on **that change's
+merged main PR**, not a label on an unrelated PR. An unlabeled out-of-reach merge
+cannot obtain a new `local/full-suite` success through this path; the error names
+the PR and missing labels. In-reach commits need no PR API lookup. Missing,
+incomplete or unavailable evidence for an out-of-reach commit refuses the
+attestation. Every successful read stores the signed envelope atomically at
+`~/.cache/ai-shuffle/verified-edge-manifest.json`. Both fresh and cached envelopes
+use the updater's complete `verify_manifest` contract and the existing public
+key; a bare cached revision is never trusted. If the feed is unavailable, the
+cached envelope is reverified and used with a warning, so already-published
+out-of-reach changes do not need GitHub again during an outage. Local release
+tags are never publication evidence and cannot advance this baseline.
+
+With neither live nor cached publication evidence, the check warns and examines
+all first-parent changes since repository bootstrap, rather than guessing an
+unpublished range. This fallback requires complete Git history: a shallow clone
+refuses with `git fetch --unshallow origin` as the recovery instruction, because
+its oldest visible commit is not proof of repository bootstrap. Partial clones
+also need readable historical content: a failed lazy blob fetch refuses
+classification, rather than treating a file as absent. Restore access to the
+promisor remote or use a complete clone before retrying.
+An entirely in-reach history passes without PR API calls;
+out-of-reach changes still need their own acceptance labels. This cold-cache
+case can conservatively recheck older history, but never skips an unpublished
+out-of-reach merge. A pointer outside the candidate's first-parent history
+refuses attestation.
+This does not revoke an already-posted status
+if labels are removed later; the existing publisher consumes the owner's status.
+
+## Full suite on main, and nightly publication
+
+Nightly publication waits for a full local pass on the exact `main` revision.
+On a clean checkout of the current `origin/main`, on any worker:
+
+```bash
+python scripts/local_ci.py full --attest
+```
+
+This runs every suite, rebuilds the backend test map that later selections
+use, and posts the commit status `local/full-suite` (pending while it runs,
+then success or failure) through `gh`. "Publish desktop source update"
+runs at 06:00 UTC or on owner dispatch, and skips main revisions already
+published. It publishes only when the status comes from the owner's
+account, says success, and names the current head of protected `main`
+(`scripts/ci/edge_publication_gate.py`). One pass covers every PR merged up
+to that revision. Until then the gate adds an "Edge publication refused"
+warning naming the command, and DeployStatus repeats it.
+
+Run it before a nightly update is wanted, not after every merge. A status
+change does not start publication; the next schedule or owner dispatch reads it.
+
+## Before a stable release
+
+- A full pass on Linux (`local/full-suite`, above) and on Windows: the same
+  command on DesktopWorker also posts `local/windows-suite`. The ship-release
+  skill checks both statuses on the release commit. If DesktopWorker is off, the
+  release waits, or the owner ships it with
+  `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
+  the release notes. Edge never waits for Windows.
+- Mac-only checks, when the release changes them: `ios.yml` and
+  `ci-folder-confinement.yml`.
+- The real-PostgreSQL and container contracts that only run in the hosted
+  backend job: `gh workflow run ci-backend.yml --ref main`, when the release
+  touches the container runtime, the network database or agent isolation.
+- The release workflow itself builds and verifies the container image, the
+  buyer install and the Windows installer on a clean Windows runner (see
+  [release-channels.md](release-channels.md)).
+
+## Manual workflows
+
+Every workflow other than the release and edge publication is
+`workflow_dispatch` (or called by a release). They exist for the cases above
+and for platform checks a local machine cannot run, for example
+`android.yml` for emulator verification, `desktop.yml` for the packaged
+Windows preview, `ci-browser-workspace.yml` and `container-postgres.yml`.
+Dispatch one only when a local run cannot answer the question, never to find
+out whether tests pass.
+
+## Visual regression screenshots (local, not a CI job)
+
+`cd frontend && npm run test:visual` renders the standalone fixtures (Git
+panel, turn navigator, side panel, composer, usage rows) at desktop
+(1440×900), phone (412×915) and the Galaxy Z Fold 6 inner (884×1104) and
+cover (360×882) screens, opens the panel or popover under test, and compares
+each with `frontend/tests/visual-baselines/`. Run it before and after chat UI
+work; accept intended changes with `node tests/visual-regression.mjs --update`
+and commit the new baselines. Pass a fixture name to run one
+(`node tests/visual-regression.mjs usage-rows`). It uses the browser runtime's
+playwright-core and Chromium, freezes the page clock, and is deliberately not a
+CI job to keep runner minutes down.

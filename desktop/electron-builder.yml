@@ -1,0 +1,99 @@
+# electron-builder configuration for the AI Shuffle desktop app.
+#
+# Installers land in desktop/release/. The update metadata files
+# (latest.yml, latest-mac.yml, latest-linux.yml) are generated next to them
+# because a publish provider is configured, even when `--publish never` is
+# used. Stable Windows installers ship on v* releases; the installed app
+# independently consumes signed stable-channel source updates from the hub.
+appId: com.hobbycoders.aishuffle.desktop
+productName: AI Shuffle
+copyright: Copyright © 2026 HobbyCoders
+artifactName: AI-Shuffle-Desktop-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - src/pages/**/*
+  - package.json
+  - build/icon.png
+  - build/application-update-key.pem
+  - scripts/source-profile.cjs
+  # The launcher version this archive holds (desktop/LAUNCHER.md).
+  - launcher.json
+
+# The worker runtime assembled by scripts/build-worker.mjs: Python with the
+# server's dependencies, Node, and the server itself, plus the PostgreSQL
+# distribution the app runs for its database. Kept outside the asar so the
+# interpreters and the server can run from disk. A build made with --stub or
+# --skip-postgres has no postgres/ directory; electron-builder skips it.
+extraResources:
+  - from: worker
+    to: worker
+  - from: postgres
+    to: postgres
+
+asar: true
+afterPack: scripts/verify-packaged-runtime.cjs
+compression: normal
+
+publish:
+  provider: github
+  owner: HobbyCoders
+  repo: ai-shuffle
+  releaseType: release
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.png
+
+nsis:
+  # Keep per-architecture installer naming for updater compatibility.
+  buildUniversalInstaller: false
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  shortcutName: AI Shuffle
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  icon: build/icon.png
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: AI Shuffle uses the microphone for voice input and voice sessions.
+    NSCameraUsageDescription: AI Shuffle uses the camera only when a page you open asks for it.
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+linux:
+  category: Development
+  maintainer: HobbyCoders
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  desktop:
+    entry:
+      StartupWMClass: ai-shuffle-desktop

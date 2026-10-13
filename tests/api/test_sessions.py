@@ -1,0 +1,2927 @@
+"""
+Unit tests for sessions API endpoints.
+
+Tests cover:
+- Session CRUD operations (list, get, update, delete)
+- Batch operations (batch delete)
+- Session actions (archive, favorite)
+- Sync endpoints (get changes, get state)
+- Export/import functionality
+- Fork session
+- Worktree session creation
+- Authentication and authorization
+- Access control for API users
+- Error handling and edge cases
+"""
+
+import pytest
+import asyncio
+import json
+from unittest.mock import patch, MagicMock, AsyncMock
+
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from app.api.sessions import check_session_access, enrich_sessions_with_tags
+from tests.api.helpers import app  # noqa: F401  (fixture)
+from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+@pytest.fixture
+def mock_database():
+    """Mock database module.
+
+    The sessions router is split across several modules (`sessions`,
+    `sessions_helpers`, `sessions_export`, `sessions_fork`,
+    `sessions_worktree`), each with its own `database`
+    import. Patch all of them to the same mock so helpers like
+    `require_session` and the fork/worktree endpoints resolve through the
+    mock instead of a real pool.
+    """
+    with patch("app.api.sessions.database") as mock_db, \
+            patch("app.api.sessions_helpers.database", mock_db), \
+            patch("app.api.sessions_export.database", mock_db), \
+            patch("app.api.sessions_fork.database", mock_db), \
+            patch("app.api.sessions_worktree.database", mock_db), \
+            patch("app.network.session_active.database", mock_db), \
+            patch("app.api.common.database", mock_db):
+        # Set up default returns
+        mock_db.get_session_tags.return_value = []
+        mock_db.session_has_forks.return_value = False
+        # Cross-install enrichment (sessions_helpers._annotate_*): return real
+        # containers so the endpoint's ``.get(...)`` chains resolve to plain
+        # values instead of MagicMocks, which would fail response validation
+        # (e.g. device_name must be a string or None, not a MagicMock).
+        mock_db.get_installs_map.return_value = {}
+        mock_db.get_project.return_value = None
+        # Context-usage persisted-snapshot fallback: default to no snapshot so
+        # the not-connected/failed-live paths keep returning available=False
+        # unless a test explicitly populates the column.
+        mock_db.get_session_context_usage_snapshot.return_value = None
+        yield mock_db
+
+
+@pytest.fixture
+def mock_api_user():
+    """Mock for get_api_user_from_request.
+
+    Each sessions sub-module imports its own copy of the name, and
+    check_session_access reads it from sessions_helpers. Patch every module
+    to the same mock so one fixture governs access across all endpoints.
+    """
+    with patch("app.api.sessions.get_api_user_from_request") as mock, \
+            patch("app.api.sessions_helpers.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_fork.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_worktree.get_api_user_from_request", new=mock), \
+            patch("app.api.sessions_export.get_api_user_from_request", new=mock), \
+            patch("app.api.common.get_api_user_from_request", new=mock):
+        mock.return_value = None  # Default to admin (no api user)
+        yield mock
+
+
+@pytest.fixture
+def client(app):
+    """Create a test client with mocked dependencies."""
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def sample_session():
+    """Sample session data."""
+    return {
+        "id": "test-session-id",
+        "title": "Test Session",
+        "profile_id": "default",
+        "project_id": None,
+        "status": "active",
+        "is_active": False,
+        "sdk_session_id": "sdk-123",
+        "total_cost_usd": 0.01,
+        "total_tokens_in": 100,
+        "total_tokens_out": 200,
+        "turn_count": 5,
+        "created_at": "2024-01-15T10:30:00",
+        "updated_at": "2024-01-15T10:30:00"
+    }
+
+
+@pytest.fixture
+def sample_project():
+    """Sample project data."""
+    return {
+        "id": "test-project",
+        "name": "Test Project",
+        "description": "A test project",
+        "path": "test-project",
+        "created_at": "2024-01-15T10:30:00",
+        "updated_at": "2024-01-15T10:30:00"
+    }
+
+
+@pytest.fixture
+def sample_profile():
+    """Sample profile data."""
+    return {
+        "id": "default",
+        "name": "Default Profile",
+        "description": "Default profile",
+        "config": {},
+        "created_at": "2024-01-15T10:30:00"
+    }
+
+
+# =============================================================================
+# Test Module Imports
+# =============================================================================
+
+class TestSessionModuleImports:
+    """Verify sessions module can be imported correctly."""
+
+    def test_sessions_module_imports(self):
+        """Sessions module should import without errors."""
+        from app.api import sessions
+        assert sessions is not None
+
+    def test_sessions_router_exists(self):
+        """Sessions router should exist."""
+        from app.api.sessions import router
+        assert router is not None
+
+    def test_router_has_correct_prefix(self):
+        """Router should have /api/v1/sessions prefix."""
+        from app.api.sessions import router
+        assert router.prefix == "/api/v1/sessions"
+
+
+# =============================================================================
+# Test Utility Functions
+# =============================================================================
+
+class TestCheckSessionAccess:
+    """Test session access control utility."""
+
+    def test_admin_has_full_access(self):
+        """Admin user should have access to any session."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = None  # Admin has no api_user
+            # Should not raise
+            check_session_access(request, {"id": "any-session", "project_id": "any-project"})
+
+    def test_api_user_with_matching_project(self):
+        """API user should access sessions in their assigned project."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {
+                "id": "user-1",
+                "project_id": "test-project"
+            }
+            # Should not raise
+            check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "project_id": "test-project"})
+
+    def test_api_user_denied_other_project(self):
+        """API user should be denied access to sessions in other projects."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {
+                "id": "user-1",
+                "project_id": "project-a"
+            }
+            with pytest.raises(HTTPException) as exc_info:
+                check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "project_id": "project-b"})
+            assert exc_info.value.status_code == 403
+            assert "Access denied" in exc_info.value.detail
+
+    def test_api_user_with_matching_profile(self):
+        """API user should access sessions with their assigned profile."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {
+                "id": "user-1",
+                "profile_ids": ["test-profile"]
+            }
+            # Should not raise
+            check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "profile_id": "test-profile"})
+
+    def test_api_user_denied_other_profile(self):
+        """API user should be denied access to sessions with other profiles."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {
+                "id": "user-1",
+                "profile_ids": ["profile-a"]
+            }
+            with pytest.raises(HTTPException) as exc_info:
+                check_session_access(request, {"id": "session-1", "api_user_id": "user-1", "profile_id": "profile-b"})
+            assert exc_info.value.status_code == 403
+            assert "Access denied" in exc_info.value.detail
+
+    def test_api_user_with_several_agents_reaches_each(self):
+        """Every assigned agent's sessions are reachable; others are not."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {"id": "user-1", "profile_ids": ["a", "b"]}
+            check_session_access(request, {"id": "s1", "api_user_id": "user-1", "profile_id": "a"})
+            check_session_access(request, {"id": "s2", "api_user_id": "user-1", "profile_id": "b"})
+            with pytest.raises(HTTPException) as exc_info:
+                check_session_access(request, {"id": "s3", "api_user_id": "user-1", "profile_id": "c"})
+            assert exc_info.value.status_code == 403
+
+    def test_legacy_profile_id_column_is_ignored(self):
+        """The never-written ``api_users.profile_id`` column is not the
+        restriction: ``profile_ids`` is."""
+        request = MagicMock()
+        with patch("app.api.sessions_helpers.get_api_user_from_request") as mock_api_user:
+            mock_api_user.return_value = {
+                "id": "user-1", "profile_id": "b", "profile_ids": ["a"],
+            }
+            with pytest.raises(HTTPException):
+                check_session_access(request, {"id": "s1", "api_user_id": "user-1", "profile_id": "b"})
+
+
+class TestEnrichSessionsWithTags:
+    """Test session enrichment utility."""
+
+    def test_enriches_sessions_with_tags(self, mock_database):
+        """Should add tags and has_forks to sessions via batch lookups.
+
+        Enrichment now uses batch queries (get_tags_for_sessions /
+        get_fork_info_for_sessions — 2 queries total) instead of per-session
+        round-trips, so mock those helpers rather than the old per-session
+        database.get_session_tags / session_has_forks calls.
+        """
+        tags_by_session = {
+            "session-1": [{"id": "tag-1", "name": "Bug"}],
+            "session-2": [{"id": "tag-1", "name": "Bug"}],
+        }
+        fork_by_session = {
+            "session-1": {"has_forks": True},
+            "session-2": {"has_forks": True},
+        }
+        with patch("app.api.sessions_helpers.get_tags_for_sessions",
+                   return_value=tags_by_session) as mock_tags, \
+                patch("app.api.sessions_helpers.get_fork_info_for_sessions",
+                      return_value=fork_by_session) as mock_forks:
+            sessions = [{"id": "session-1"}, {"id": "session-2"}]
+            result = enrich_sessions_with_tags(sessions)
+
+        assert len(result) == 2
+        assert result[0]["tags"] == [{"id": "tag-1", "name": "Bug"}]
+        assert result[0]["has_forks"] is True
+        # One batched query for all sessions, not one per session.
+        mock_tags.assert_called_once_with(["session-1", "session-2"])
+        mock_forks.assert_called_once_with(["session-1", "session-2"])
+
+    def test_handles_empty_list(self, mock_database):
+        """Should handle empty session list."""
+        with patch("app.api.sessions_helpers.get_tags_for_sessions") as mock_tags:
+            result = enrich_sessions_with_tags([])
+        assert result == []
+        mock_tags.assert_not_called()
+
+
+def test_session_response_names_the_owner_device():
+    """The usage panel resolves whose Claude usage applies by the owning device.
+
+    On a worker network a mirrored row's ``instance_id`` is NULL and a
+    handed-off one can still name the install it came from.
+    """
+    from app.core.models import Session
+
+    row = {"id": "s1", "created_at": "2026-10-03T00:00:00", "updated_at": "2026-10-03T00:00:00",
+           "instance_id": None, "owner_device_id": "dev_unraid"}
+    assert Session.model_validate(row).model_dump()["owner_device_id"] == "dev_unraid"
+
+
+class TestControllableAnnotation:
+    """Truth table for the cross-install ``controllable`` flag.
+
+    Control (send/interrupt) rides the shared DB (runs lease +
+    pending_interactions), so it depends ONLY on the owning install being
+    online — never on its ``base_url`` (which is now used solely for artifact
+    redirects). See ``_annotate_cluster_fields``.
+    """
+
+    def _annotate(self, sessions, installs_map, me="me-install"):
+        from app.api import sessions_helpers
+        from app.core.config import settings
+
+        # Keep the settings singleton: placement is imported lazily here and
+        # would retain a replacement mock after this fixture exits.
+        with patch("app.api.sessions_helpers.database") as mock_db, \
+                patch.object(type(settings), "effective_instance_id", property(lambda _: me)), \
+                patch("app.db.projects_v2.list_projects_v2", return_value=[]):
+            mock_db.get_installs_map.return_value = installs_map
+            mock_db.get_project.return_value = None
+            sessions_helpers._annotate_cluster_fields(sessions)
+        return sessions
+
+    def test_remote_online_no_base_url_is_controllable(self):
+        """Online owner without an advertised URL is STILL controllable (new)."""
+        installs = {"B": {"online": True, "device_name": "Worker", "base_url": None}}
+        sessions = [{"id": "s1", "instance_id": "B"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is True
+        assert sessions[0]["device_online"] is True
+        assert sessions[0]["controllable"] is True
+
+    def test_remote_online_with_base_url_is_controllable(self):
+        """Online owner with a URL remains controllable."""
+        installs = {"B": {"online": True, "device_name": "Worker",
+                          "base_url": "http://10.0.0.20:8000"}}
+        sessions = [{"id": "s1", "instance_id": "B"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["controllable"] is True
+
+    def test_remote_offline_is_not_controllable(self):
+        """Offline owner → history stays readable but read-only."""
+        installs = {"B": {"online": False, "device_name": "Worker",
+                          "base_url": "http://10.0.0.20:8000"}}
+        sessions = [{"id": "s1", "instance_id": "B"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["device_online"] is False
+        assert sessions[0]["controllable"] is False
+
+    def test_remote_missing_install_is_not_controllable(self):
+        """Owner absent from the registry → not controllable."""
+        sessions = [{"id": "s1", "instance_id": "C"}]
+        self._annotate(sessions, {})
+        assert sessions[0]["controllable"] is False
+
+    def test_local_session_is_controllable(self):
+        """A session owned by this install is always controllable."""
+        installs = {"me-install": {"online": True, "device_name": "Primary",
+                                   "base_url": None}}
+        sessions = [{"id": "s1", "instance_id": "me-install"}]
+        self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is False
+        assert sessions[0]["controllable"] is True
+
+    def test_session_handed_back_here_is_local_despite_stale_instance(self):
+        """A session handed back to this device can still carry the other
+        worker's instance_id; owning it here must not read as remote."""
+        installs = {"B": {"online": True, "device_name": "Worker", "base_url": None}}
+        sessions = [
+            {"id": "s-back", "instance_id": "B", "owner_device_id": "dev-me"},
+            {"id": "s-there", "instance_id": "B", "owner_device_id": "dev-b"},
+        ]
+        with patch("app.network.runners.self_device_id", return_value="dev-me"),                 patch("app.network.session_runtime.for_sessions", return_value={}):
+            self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is False
+        assert sessions[0]["controllable"] is True
+        assert "remote_runtime_state" not in sessions[0]
+        assert sessions[1]["is_remote"] is True
+
+    def test_is_pinned_from_runner_placement(self):
+        """``is_pinned`` is true only for an explicit runner:<id> placement."""
+        installs = {"me-install": {"online": True, "device_name": "Primary"}}
+        pinned = [{"id": "s1", "instance_id": "me-install",
+                   "placement": {"where": "runner:me-install"}}]
+        self._annotate(pinned, installs)
+        assert pinned[0]["is_pinned"] is True
+
+        follow = [{"id": "s2", "instance_id": "me-install", "placement": None}]
+        self._annotate(follow, installs)
+        assert follow[0]["is_pinned"] is False
+
+
+# =============================================================================
+# Test List Sessions Endpoint
+# =============================================================================
+
+class TestListSessions:
+    """Test GET /api/v1/sessions endpoint."""
+
+    def test_list_sessions_success(self, client, mock_database, sample_session):
+        """Should return list of sessions."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "test-session-id"
+
+    def test_list_sessions_with_project_filter(self, client, mock_database, sample_session):
+        """Should filter sessions by project_id."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?project_id=test-project")
+
+        assert response.status_code == 200
+        mock_database.get_sessions.assert_called_once()
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["project_id"] == "test-project"
+
+    def test_list_sessions_with_profile_filter(self, client, mock_database, sample_session):
+        """Should filter sessions by profile_id."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?profile_id=default")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["profile_id"] == "default"
+
+    def test_list_sessions_with_status_filter(self, client, mock_database, sample_session):
+        """Should filter sessions by status."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?status=active")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["status"] == "active"
+
+    def test_list_sessions_active_only(self, client, mock_database, sample_session):
+        """Should filter to active sessions only."""
+        sample_session["is_active"] = True
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?active_only=true")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["active_only"] is True
+
+    def test_list_sessions_admin_only(self, client, mock_database, sample_session):
+        """Should filter to admin sessions only."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?admin_only=true")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["api_user_id"] == ""  # Empty string signals NULL filter
+
+    def test_list_sessions_api_users_only(self, client, mock_database, sample_session):
+        """Should filter to API user sessions only."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?api_users_only=true")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["api_users_only"] is True
+
+    def test_list_sessions_with_tag_filter(self, client, mock_database, sample_session):
+        """Should filter sessions by tag."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?tag_id=tag-1")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["tag_id"] == "tag-1"
+
+    def test_list_sessions_pagination(self, client, mock_database, sample_session):
+        """Should support pagination."""
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions?limit=10&offset=20")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["limit"] == 10
+        assert call_kwargs["offset"] == 20
+
+    def test_list_sessions_api_user_restrictions(self, client, mock_database, mock_api_user, sample_session):
+        """API user should only see their own sessions."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "restricted-project",
+            "profile_ids": ["restricted-profile"]
+        }
+        mock_database.get_sessions.return_value = [sample_session]
+
+        response = client.get("/api/v1/sessions")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.get_sessions.call_args[1]
+        assert call_kwargs["project_id"] == "restricted-project"
+        assert call_kwargs["profile_id"] == "restricted-profile"
+        assert call_kwargs["api_user_id"] == "api-user-1"
+
+    def test_list_sessions_api_user_foreign_agent_filter_is_403(
+        self, client, mock_database, mock_api_user
+    ):
+        """A restricted API user cannot list another agent's sessions."""
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": ["a", "b"]}
+
+        response = client.get("/api/v1/sessions?profile_id=c")
+
+        assert response.status_code == 403
+        mock_database.get_sessions.assert_not_called()
+
+    def test_list_sessions_api_user_several_agents_keeps_requested(
+        self, client, mock_database, mock_api_user
+    ):
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": ["a", "b"]}
+        mock_database.get_sessions.return_value = []
+
+        assert client.get("/api/v1/sessions?profile_id=b").status_code == 200
+        assert mock_database.get_sessions.call_args[1]["profile_id"] == "b"
+
+    def test_list_sessions_empty(self, client, mock_database):
+        """Should return empty list when no sessions."""
+        mock_database.get_sessions.return_value = []
+
+        response = client.get("/api/v1/sessions")
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+
+# =============================================================================
+# Test Search Sessions Endpoint
+# =============================================================================
+
+class TestSearchSessions:
+    """Test GET /api/v1/sessions/search/query endpoint."""
+
+    def test_search_sessions_success(self, client, mock_database):
+        """Should search sessions by query."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "session-1",
+                "title": "Test",
+                "snippet": "...matching text...",
+                "profile_id": "default",
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "title"
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=test")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        mock_database.search_sessions.assert_called_once()
+
+    def test_search_sessions_returns_is_active(self, client, mock_database):
+        """Regression: an active session must surface is_active=True through
+        the search endpoint. The DB layer's search_sessions CTEs must keep
+        is_active in their SELECT lists (previously is_favorite), otherwise the
+        API response model defaults it to False and active sessions render
+        inactive in search results (cross-install bug). This guards the
+        response-model contract; the SQL-column fix is exercised by the DB
+        layer against Postgres (no reachable PG in this sandbox — see report)."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "active-session",
+                "title": "Active chat",
+                "profile_id": "default",
+                "status": "active",
+                "is_active": True,
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "title",
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=active")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["is_active"] is True
+
+    def test_search_sessions_passes_match_count(self, client, mock_database):
+        """match_count from the DB layer must surface in the search response so
+        the UI can show how many places a session matched (title/legacy/store)."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "s1",
+                "title": "T",
+                "profile_id": "default",
+                "status": "active",
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "content",
+                "match_count": 3,
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=test")
+
+        assert response.status_code == 200
+        assert response.json()[0]["match_count"] == 3
+
+    def test_search_sessions_match_count_defaults_to_one(self, client, mock_database):
+        """A result without match_count defaults to 1 (back-compat for callers
+        that predate the field)."""
+        mock_database.search_sessions.return_value = [
+            {
+                "id": "s1",
+                "title": "T",
+                "profile_id": "default",
+                "status": "active",
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "match_type": "title",
+            }
+        ]
+
+        response = client.get("/api/v1/sessions/search/query?q=test")
+
+        assert response.status_code == 200
+        assert response.json()[0]["match_count"] == 1
+
+    def test_search_paginated_passes_match_count(self, client, mock_database):
+        """The paginated search endpoint must pass match_count through each item."""
+        result = {
+            "id": "s1",
+            "title": "T",
+            "profile_id": "default",
+            "status": "active",
+            "created_at": "2024-01-15T10:30:00",
+            "updated_at": "2024-01-15T10:30:00",
+            "match_type": "content",
+            "match_count": 5,
+        }
+        mock_database.search_sessions_paginated.return_value = ([result], 1)
+
+        with patch("app.api.sessions_helpers.get_tags_for_sessions", return_value={}), \
+                patch("app.api.sessions_helpers.get_fork_info_for_sessions", return_value={}):
+            response = client.get("/api/v1/sessions/search/paginated?q=test")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["items"][0]["match_count"] == 5
+
+    def test_search_sessions_with_filters(self, client, mock_database):
+        """Should search with project and profile filters."""
+        mock_database.search_sessions.return_value = []
+
+        response = client.get("/api/v1/sessions/search/query?q=test&project_id=proj-1&profile_id=prof-1")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.search_sessions.call_args[1]
+        assert call_kwargs["project_id"] == "proj-1"
+        assert call_kwargs["profile_id"] == "prof-1"
+
+    def test_search_sessions_admin_only(self, client, mock_database):
+        """Should search admin sessions only when flag is set."""
+        mock_database.search_sessions.return_value = []
+
+        response = client.get("/api/v1/sessions/search/query?q=test&admin_only=true")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.search_sessions.call_args[1]
+        assert call_kwargs["admin_only"] is True
+
+    def test_search_sessions_with_limit(self, client, mock_database):
+        """Should respect search limit."""
+        mock_database.search_sessions.return_value = []
+
+        response = client.get("/api/v1/sessions/search/query?q=test&limit=5")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.search_sessions.call_args[1]
+        assert call_kwargs["limit"] == 5
+
+    def test_search_sessions_api_user_restrictions(self, client, mock_database, mock_api_user):
+        """API user search should be restricted to their sessions."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "restricted-project",
+            "profile_ids": ["restricted-profile"]
+        }
+        mock_database.search_sessions.return_value = []
+
+        response = client.get("/api/v1/sessions/search/query?q=test")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.search_sessions.call_args[1]
+        assert call_kwargs["project_id"] == "restricted-project"
+        assert call_kwargs["profile_id"] == "restricted-profile"
+        assert call_kwargs["api_user_id"] == "api-user-1"
+
+    @pytest.mark.parametrize("path", ["/api/v1/sessions/search/query",
+                                      "/api/v1/sessions/search/paginated"])
+    def test_search_sessions_api_user_foreign_agent_is_403(
+        self, client, mock_database, mock_api_user, path
+    ):
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": ["a"]}
+
+        response = client.get(f"{path}?q=test&profile_id=other")
+
+        assert response.status_code == 403
+        mock_database.search_sessions.assert_not_called()
+        mock_database.search_sessions_paginated.assert_not_called()
+
+    def test_search_sessions_empty_query_rejected(self, client, mock_database):
+        """Should reject empty search query."""
+        response = client.get("/api/v1/sessions/search/query?q=")
+
+        # FastAPI will reject empty string with min_length=1
+        assert response.status_code == 422
+
+
+# =============================================================================
+# Test Get Session Endpoint
+# =============================================================================
+
+class TestGetSession:
+    """Test GET /api/v1/sessions/{session_id} endpoint."""
+
+    def test_get_session_success(self, client, mock_database, sample_session):
+        """Should return session with messages."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = []
+
+        response = client.get("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "test-session-id"
+        assert "messages" in data
+
+    def test_get_session_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+        mock_database.get_session_by_sdk_id.return_value = None  # Also mock fallback lookup
+
+        response = client.get("/api/v1/sessions/non-existent")
+
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_get_session_by_sdk_session_id_fallback(self, client, mock_database, sample_session):
+        """Should find session by SDK session ID if direct lookup fails."""
+        # Direct lookup fails
+        mock_database.get_session.return_value = None
+        # But fallback lookup by SDK session ID succeeds
+        mock_database.get_session_by_sdk_id.return_value = sample_session
+        mock_database.get_session_messages.return_value = []
+        mock_database.get_all_session_usage.return_value = []
+        mock_database.get_session_tags.return_value = []
+        mock_database.session_has_forks.return_value = False
+
+        # Request using a UUID (which looks like an SDK session ID)
+        response = client.get("/api/v1/sessions/417f9ae9-5012-47f9-b4a4-713c7f8e3cd5")
+
+        # Should succeed because fallback lookup found the session
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "test-session-id"
+
+    def test_get_session_with_store_messages(self, client, mock_database, sample_session):
+        """Should load messages from the Postgres session store parser.
+
+        Pool-touching helpers (resolve_working_dir, cost_utils) are patched to
+        stay off Postgres.
+        """
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "Hello", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "Hi there!", "type": "text", "metadata": {}}
+        ]
+
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_parse:
+            mock_parse.return_value = (jsonl_messages, {
+                "cache_creation_tokens": 100,
+                "cache_read_tokens": 50,
+                "last_input_tokens": 200,
+                "total_tokens_in": 500,
+                "total_tokens_out": 300
+            })
+
+            response = client.get("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["messages"]) == 2
+
+    def test_get_session_falls_back_to_database(self, client, mock_database, sample_session):
+        """Should fall back to legacy database messages when there is no sdk id
+        (pre-cutover session whose transcript lives only in session_messages).
+        """
+        sample_session["sdk_session_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 1, "role": "user", "content": "Hello", "tool_name": None}
+        ]
+
+        with patch("app.core.cost_utils.attach_cost_metadata"):
+            response = client.get("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["messages"]) == 1
+        mock_database.get_session_messages.assert_called_once()
+
+    def test_get_session_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny access for unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.get("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 403
+        assert "Access denied" in response.json()["detail"]
+
+
+# =============================================================================
+# Test per-message profile_id is persisted end-to-end through the read paths
+# =============================================================================
+
+class TestSessionMessageProfileId:
+    """The chat UI labels each user bubble with the profile that produced it.
+
+    That requires the GET /{session_id} response to carry a per-message profile
+    id. Before the fix the SessionMessage response model omitted the field, so
+    FastAPI stripped it from every message and the frontend fell back to the
+    session's CURRENT profile for the whole transcript. These tests pin the
+    per-message value on both response paths, including a mid-session profile
+    switch (distinct prompts) and a repeated identical prompt under two
+    profiles (ordered resolution).
+    """
+
+    USAGE = {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "last_input_tokens": 0,
+        "total_tokens_in": 0,
+        "total_tokens_out": 0,
+    }
+
+    def _get_jsonl(self, client, mock_database, sample_session, jsonl_messages, profile_map):
+        """Drive the store-parser read path with a fixed profile map."""
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value=profile_map), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_parse:
+            mock_parse.return_value = (jsonl_messages, dict(self.USAGE))
+            resp = client.get("/api/v1/sessions/test-session-id")
+        return resp
+
+    def test_jsonl_path_carries_per_message_profile_id(
+        self, client, mock_database, sample_session
+    ):
+        """Both the user row AND its turn's assistant row carry the profile.
+
+        The JSONL transcript stores no profile on assistant rows, so the turn's
+        assistant/thinking bubbles inherit the profile resolved for the turn's
+        user message. Without this the assistant bubble reaches the frontend with
+        no profileId and falls back to the session's CURRENT selection — the
+        "assistant messages re-label when you switch profile" bug.
+        """
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "Hello", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "Hi!", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages, {"Hello": ["profile-x"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-x"
+        assert msgs[0]["profile_id"] == "profile-x"
+        # The assistant reply belongs to the same turn → same profile.
+        assert msgs[1]["profileId"] == "profile-x"
+        assert msgs[1]["profile_id"] == "profile-x"
+
+    def test_jsonl_path_mid_session_profile_change(
+        self, client, mock_database, sample_session
+    ):
+        """Each turn's user AND assistant rows keep that turn's own profile.
+
+        This is the screenshot bug: after a mid-session switch to profile-b, the
+        first turn's assistant reply ("a") must stay attributed to profile-a, not
+        re-label to the now-current profile-b.
+        """
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "First", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "a", "type": "text", "metadata": {}},
+            {"id": 3, "role": "user", "content": "Second", "type": "text", "metadata": {}},
+            {"id": 4, "role": "assistant", "content": "b", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages,
+            {"First": ["profile-a"], "Second": ["profile-b"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-a"  # user, turn 1
+        assert msgs[1]["profileId"] == "profile-a"  # assistant, turn 1 (stays a)
+        assert msgs[2]["profileId"] == "profile-b"  # user, turn 2
+        assert msgs[3]["profileId"] == "profile-b"  # assistant, turn 2
+
+    def test_jsonl_path_thinking_and_tools_inherit_turn_profile(
+        self, client, mock_database, sample_session
+    ):
+        """Thinking blocks and interleaved tool rows inherit the turn's profile.
+
+        Assistant output for a turn is not just the final text — thinking blocks
+        and tool cards render between the user prompt and the reply. All belong to
+        the turn's profile so none fall back to the current selection.
+        """
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "Do it", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "hmm", "type": "thinking", "metadata": {}},
+            {"id": 3, "role": "assistant", "content": "", "type": "tool_use",
+             "toolName": "Read", "metadata": {}},
+            {"id": 4, "role": "assistant", "content": "done", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages, {"Do it": ["profile-z"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert [m["profileId"] for m in msgs] == ["profile-z"] * 4
+
+    def test_jsonl_path_repeated_prompt_resolves_in_order(
+        self, client, mock_database, sample_session
+    ):
+        """Same prompt text twice under two profiles → ordered, not collapsed.
+
+        A content-keyed single-value lookup (the old code) would give BOTH
+        occurrences the last profile. The ordered queue pairs each occurrence to
+        its own row.
+        """
+        jsonl_messages = [
+            {"id": 1, "role": "user", "content": "repeat", "type": "text", "metadata": {}},
+            {"id": 2, "role": "assistant", "content": "a", "type": "text", "metadata": {}},
+            {"id": 3, "role": "user", "content": "repeat", "type": "text", "metadata": {}},
+        ]
+        resp = self._get_jsonl(
+            client, mock_database, sample_session,
+            jsonl_messages,
+            {"repeat": ["profile-1", "profile-2"]},
+        )
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-1"
+        assert msgs[2]["profileId"] == "profile-2"
+
+    def test_legacy_db_path_carries_per_message_profile_id(
+        self, client, mock_database, sample_session
+    ):
+        """Legacy session_messages rows expose each row's own profile_id.
+
+        The legacy fallback runs when there is no sdk id (pre-cutover session).
+        Each row already stores profile_id; the response must surface it (camel
+        + snake), including a mid-session profile change across rows.
+        """
+        sample_session["sdk_session_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 1, "role": "user", "content": "First", "tool_name": None, "profile_id": "profile-a"},
+            {"id": 2, "role": "assistant", "content": "ok", "tool_name": None, "profile_id": None},
+            {"id": 3, "role": "user", "content": "Second", "tool_name": None, "profile_id": "profile-b"},
+        ]
+
+        with patch("app.core.cost_utils.attach_cost_metadata"):
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert msgs[0]["profileId"] == "profile-a"
+        assert msgs[0]["profile_id"] == "profile-a"
+        assert msgs[2]["profileId"] == "profile-b"
+        assert msgs[2]["profile_id"] == "profile-b"
+
+    def test_legacy_db_path_carries_per_message_timestamp(
+        self, client, mock_database, sample_session
+    ):
+        """Legacy ``session_messages`` rows surface each row's own created_at.
+
+        Regression guard for the "every message shows the same wall-clock time
+        after a reload" bug: the legacy fallback (used for pre-cutover
+        sessions) must expose each row's ``created_at`` as
+        ``metadata.timestamp`` so the frontend renders the original send time
+        instead of falling back to ``now``. Datetime columns must be normalized
+        to ISO strings (mirroring db_message_loader) so the value survives JSON
+        serialization identically to the /live path.
+        """
+        from datetime import datetime
+
+        ts1 = datetime(2024, 1, 15, 19, 50, 0)
+        ts2 = datetime(2024, 1, 15, 20, 30, 0)
+        ts3 = datetime(2024, 1, 15, 20, 57, 0)
+
+        sample_session["sdk_session_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 1, "role": "user", "content": "First", "tool_name": None,
+             "profile_id": None, "created_at": ts1},
+            {"id": 2, "role": "assistant", "content": "ok", "tool_name": None,
+             "profile_id": None, "created_at": ts2},
+            {"id": 3, "role": "user", "content": "Second", "tool_name": None,
+             "profile_id": None, "created_at": ts3},
+        ]
+
+        with patch("app.core.cost_utils.attach_cost_metadata"):
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        # Each message must carry its OWN original timestamp (not a shared "now").
+        assert msgs[0]["metadata"]["timestamp"] == ts1.isoformat()
+        assert msgs[1]["metadata"]["timestamp"] == ts2.isoformat()
+        assert msgs[2]["metadata"]["timestamp"] == ts3.isoformat()
+        # And they must all be distinct — the exact symptom was uniform stamps.
+        stamps = {m["metadata"]["timestamp"] for m in msgs}
+        assert len(stamps) == 3
+
+
+# =============================================================================
+# Test session-store read isolation (postgres_only cutover, PR C.1)
+# =============================================================================
+
+class TestSessionStoreReadIsolation:
+    """The read path uses the store-backed parser and never falls through to
+    the legacy DB table on a populated or raised store result (the legacy
+    rescue fires only on a genuinely EMPTY store).
+    """
+
+    STORE_MSGS = [
+        {"id": 9, "role": "assistant", "content": "From store", "type": "text", "metadata": {}},
+    ]
+    USAGE = {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "last_input_tokens": 0,
+        "total_tokens_in": 0,
+        "total_tokens_out": 0,
+    }
+
+    def _run(self, client):
+        """Patch the store parser, GET the session, return (resp, mock).
+
+        ``resolve_working_dir`` is patched to avoid the DB pool (this sandbox has
+        no Postgres).
+        """
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_store:
+            mock_store.return_value = (list(self.STORE_MSGS), dict(self.USAGE))
+            resp = client.get("/api/v1/sessions/test-session-id")
+        return resp, mock_store
+
+    def test_uses_store_parser(
+        self, client, mock_database, sample_session
+    ):
+        """The store parser serves the transcript."""
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+
+        resp, mock_store = self._run(client)
+
+        assert resp.status_code == 200
+        mock_store.assert_called_once()
+        data = resp.json()
+        assert data["messages"][0]["content"] == "From store"
+
+    def test_postgres_only_empty_store_falls_back_to_legacy_db(
+        self, client, mock_database, sample_session
+    ):
+        """Bug C regression: postgres_only + empty store must serve the legacy
+        session_messages transcript. Pre-cutover sessions (created before the
+        store existed, never bulk-backfilled, JSONL possibly on another
+        install) hold their FULL transcript only in the legacy table — the
+        original hard-cut rendered them as empty chats in production."""
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 99, "role": "user", "content": "legacy transcript", "tool_name": None}
+        ]
+
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_store:
+            mock_store.return_value = ([], {})
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["content"] == "legacy transcript"
+        mock_database.get_session_messages.assert_called_once()
+
+    def test_postgres_only_populated_store_never_touches_legacy_db(
+        self, client, mock_database, sample_session
+    ):
+        """The legacy fallback fires ONLY on an empty store result. A populated
+        store (every post-cutover session) must never consult session_messages —
+        that table holds user-rows-only for post-cutover sessions and serving it
+        was the 'assistant replies vanish' bug."""
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
+        ]
+
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.get_cached_profile_map", return_value={}), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_store:
+            mock_store.return_value = (list(self.STORE_MSGS), dict(self.USAGE))
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["messages"][0]["content"] == "From store"
+        mock_database.get_session_messages.assert_not_called()
+
+    def test_postgres_only_raised_store_parse_serves_empty_not_legacy(
+        self, client, mock_database, sample_session
+    ):
+        """A RAISED store parse (transient DB error) is not an EMPTY store.
+        Falling through to the legacy table would render a post-cutover session
+        as the user-rows-only legacy view (the 'vanishing replies' trap) —
+        serve 200 + empty messages instead."""
+        sample_session["sdk_session_id"] = "sdk-session-123"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"id": 99, "role": "user", "content": "LEGACY TRAP", "tool_name": None}
+        ]
+
+        with patch("app.core.message_resolver.resolve_working_dir", return_value="/workspace"), \
+                patch("app.core.cost_utils.attach_cost_metadata"), \
+                patch("app.api.sessions.parse_session_history_via_store") as mock_store:
+            mock_store.side_effect = RuntimeError("db pool exhausted")
+            resp = client.get("/api/v1/sessions/test-session-id")
+
+        assert resp.status_code == 200
+        assert resp.json()["messages"] == []
+        mock_database.get_session_messages.assert_not_called()
+
+# =============================================================================
+# Test Update Session Endpoint
+# =============================================================================
+
+@pytest.fixture
+def stored_sessions_client():
+    """Exercise the router against persisted sessions and assistant bindings."""
+    from fastapi import FastAPI
+    from app.api.auth import require_auth
+    from app.api.sessions import router
+
+    application = FastAPI()
+    application.include_router(router)
+    application.dependency_overrides[require_auth] = lambda: "test-token"
+    with TestClient(application) as value:
+        yield value
+
+
+class TestAssistantHomeMutations:
+    @pytest.mark.parametrize("params", [
+        {"title": "Renamed"},
+        {"title": ""},
+        {"title": "Renamed", "status": "completed"},
+    ])
+    def test_rename_refused_before_any_write(
+        self, stored_sessions_client, assistant_fixture, params, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        rename = MagicMock()
+        monkeypatch.setattr("app.api.sessions.sdk_rename_session", rename)
+        response = stored_sessions_client.patch(f"/api/v1/sessions/{sid}", params=params)
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "Your personal assistant is a persistent conversation and cannot be renamed"
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        rename.assert_not_called()
+
+    def test_delete_refused_preserves_home(self, stored_sessions_client, assistant_fixture, monkeypatch):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        cleanup = AsyncMock()
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
+        response = stored_sessions_client.delete(f"/api/v1/sessions/{sid}")
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "Your personal assistant is a persistent conversation and cannot be deleted"
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        cleanup.assert_not_called()
+
+    def test_batch_delete_skips_home_and_deletes_ordinary_sessions(
+        self, stored_sessions_client, assistant_fixture, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        ordinary_ids = ["ordinary-before-home", "ordinary-after-home"]
+        for ordinary_id in ordinary_ids:
+            database.create_session(ordinary_id, "default", title="Ordinary")
+        cleanup = AsyncMock()
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
+        response = stored_sessions_client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": [ordinary_ids[0], sid, ordinary_ids[1]]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "deleted_count": 2,
+            "total_requested": 3,
+            "errors": [f"Access denied for session {sid}: Your personal assistant is a persistent conversation and cannot be deleted"],
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        assert all(database.get_session(ordinary_id) is None for ordinary_id in ordinary_ids)
+        assert [call.args[0] for call in cleanup.await_args_list] == ordinary_ids
+
+    def test_status_only_patch_still_allowed(self, stored_sessions_client, assistant_fixture):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        response = stored_sessions_client.patch(f"/api/v1/sessions/{sid}", params={"status": "completed"})
+        assert response.status_code == 200
+        row = database.get_session(sid)
+        assert row["status"] == "completed"
+        assert row["title"] == assistant_fixture["title"]
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+
+    def test_ordinary_rename_and_delete_still_allowed(
+        self, stored_sessions_client, assistant_fixture, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        database.create_session("ordinary-mutation", "default", title="Ordinary")
+        url = "/api/v1/sessions/ordinary-mutation"
+        response = stored_sessions_client.patch(url, params={"title": "Renamed"})
+        assert response.status_code == 200
+        assert database.get_session("ordinary-mutation")["title"] == "Renamed"
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", AsyncMock())
+        assert stored_sessions_client.delete(url).status_code == 204
+        assert database.get_session("ordinary-mutation") is None
+        assert store.get_state(service.assistant_id())["home_session_id"] == assistant_fixture["id"]
+
+
+class TestUpdateSession:
+    """Test PATCH /api/v1/sessions/{session_id} endpoint."""
+
+    def test_update_session_title(self, client, mock_database, sample_session):
+        """Should update session title."""
+        mock_database.get_session.return_value = sample_session
+        updated = {**sample_session, "title": "New Title"}
+        mock_database.update_session.return_value = updated
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        mock_database.update_session.assert_called_once()
+        call_kwargs = mock_database.update_session.call_args[1]
+        assert call_kwargs["title"] == "New Title"
+
+    def test_update_session_status(self, client, mock_database, sample_session):
+        """Should update session status."""
+        mock_database.get_session.return_value = sample_session
+        updated = {**sample_session, "status": "completed"}
+        mock_database.update_session.return_value = updated
+
+        response = client.patch("/api/v1/sessions/test-session-id?status=completed")
+
+        assert response.status_code == 200
+        call_kwargs = mock_database.update_session.call_args[1]
+        assert call_kwargs["status"] == "completed"
+
+    def test_rename_reaches_every_open_tab(self, client, mock_database, sample_session, monkeypatch):
+        """A rename is pushed to the owner's devices, so open tabs update."""
+        from unittest.mock import AsyncMock
+        from app.core.sync_engine import sync_engine
+
+        broadcast = AsyncMock()
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+        mock_database.get_session.return_value = sample_session
+        mock_database.update_session.return_value = {**sample_session, "title": "New Title"}
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        broadcast.assert_awaited_once()
+        kwargs = broadcast.await_args.kwargs
+        assert kwargs["session_id"] == "test-session-id"
+        assert kwargs["updates"] == {"title": "New Title"}
+        assert kwargs["source_device_id"] is None
+
+    def test_rename_of_a_fluid_session_skips_the_cli_rename_quietly(
+        self, client, mock_database, sample_session, monkeypatch, caplog
+    ):
+        """A ``ses_...`` id names no Claude CLI transcript: no CLI rename, no warning."""
+        import logging
+        from unittest.mock import MagicMock
+        import app.api.sessions as sessions_api
+
+        cli_rename = MagicMock()
+        monkeypatch.setattr(sessions_api, "sdk_rename_session", cli_rename)
+        session = {**sample_session, "sdk_session_id": "ses_6991f569d95f"}
+        mock_database.get_session.return_value = session
+        mock_database.update_session.return_value = {**session, "title": "New Title"}
+
+        with caplog.at_level(logging.WARNING, logger="app.api.sessions"):
+            response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        assert mock_database.update_session.call_args[1]["title"] == "New Title"
+        cli_rename.assert_not_called()
+        assert not [r for r in caplog.records if "rename SDK session" in r.getMessage()]
+
+    def test_rename_of_a_cli_session_renames_its_transcript(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+        import app.api.sessions as sessions_api
+
+        cli_rename = MagicMock()
+        monkeypatch.setattr(sessions_api, "sdk_rename_session", cli_rename)
+        cli_id = "912334ed-08c2-4645-85bc-3f6240265a09"
+        session = {**sample_session, "sdk_session_id": cli_id}
+        mock_database.get_session.return_value = session
+        mock_database.update_session.return_value = {**session, "title": "New Title"}
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        cli_rename.assert_called_once_with(session_id=cli_id, title="New Title")
+
+    def test_rename_survives_a_failed_broadcast(self, client, mock_database, sample_session, monkeypatch):
+        from unittest.mock import AsyncMock
+        from app.core.sync_engine import sync_engine
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", AsyncMock(side_effect=RuntimeError("down")))
+        mock_database.get_session.return_value = sample_session
+        mock_database.update_session.return_value = {**sample_session, "title": "New Title"}
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+
+    def test_update_session_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.patch("/api/v1/sessions/non-existent?title=New")
+
+        assert response.status_code == 404
+
+    def test_update_session_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny update for unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New")
+
+        assert response.status_code == 403
+
+
+# =============================================================================
+# Test Delete Session Endpoint
+# =============================================================================
+
+class TestDeleteSession:
+    """Test DELETE /api/v1/sessions/{session_id} endpoint."""
+
+    def test_delete_session_success(self, client, mock_database, sample_session):
+        """Should delete session."""
+        mock_database.get_session.return_value = sample_session
+
+        response = client.delete("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 204
+        mock_database.delete_session.assert_called_once_with("test-session-id")
+
+    def test_delete_session_broadcasts_user_session_deleted(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """Deletion must fan out user-wide: without the broadcast, another
+        device/tab keeps the row in its sidebar and — if it has the session
+        open — keeps rendering the deleted transcript (nothing is ever
+        appended to a deleted session's log, so no feed event arrives)."""
+        mock_database.get_session.return_value = sample_session
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, source_device_id=None):
+            broadcasts.append((user_id, session_id))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_deleted", _record)
+
+        response = client.delete("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 204
+        assert broadcasts == [("admin", "test-session-id")]
+
+    def test_delete_session_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.delete("/api/v1/sessions/non-existent")
+
+        assert response.status_code == 404
+
+    def test_delete_session_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny delete for unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.delete("/api/v1/sessions/test-session-id")
+
+        assert response.status_code == 403
+
+
+class TestClearSession:
+    """Test POST /api/v1/sessions/{session_id}/clear endpoint.
+
+    Clears a session's conversation IN PLACE — the row survives; only its
+    transcript/messages are reset (contrast with DELETE, which removes the row).
+    """
+
+    def test_clear_session_success(self, client, mock_database, sample_session):
+        """Should clear the conversation and KEEP the row (no delete_session)."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = None
+
+        response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        assert response.json()["session_id"] == "test-session-id"
+        mock_database.clear_session_conversation.assert_called_once_with("test-session-id")
+        # In-place clear must NEVER delete the session row.
+        mock_database.delete_session.assert_not_called()
+
+    def test_clear_session_not_found(self, client, mock_database):
+        """Should return 404 for a non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.post("/api/v1/sessions/non-existent/clear")
+
+        assert response.status_code == 404
+
+    def test_clear_session_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny clear for an unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 403
+        mock_database.clear_session_conversation.assert_not_called()
+
+    # DELETED (V2 Phase-1 deletion): test_clear_session_purges_live_overlay and
+    # test_clear_session_skips_overlay_purge_when_absent. Their entire subject —
+    # the in-memory live_session_store overlay purge + the sync_engine
+    # clear_streaming_state remnant — is deleted with the live store: the chat
+    # is served from the persisted transcript (nothing can shadow the cleared
+    # DB), and busy truth is the durable runs table (has_active_run gates the
+    # clear — see test_clear_session_blocked_while_streaming below).
+    def test_clear_session_succeeds_without_live_state(self, client, mock_database, sample_session):
+        """V2 success path: with no active run, the clear resets the DB and
+        returns 200 — no live overlay exists to purge."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = "sdk-123"
+
+        with patch("app.core.streaming_status.has_active_run", return_value=False):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        mock_database.clear_session_conversation.assert_called_once_with("test-session-id")
+
+    def test_clear_session_blocked_while_streaming(self, client, mock_database, sample_session):
+        """Never wipe a session mid-stream: an in-flight turn is live.
+
+        Returns 409 and does NOT touch the DB — clearing under an in-flight turn
+        corrupts the transcript (the streaming buffer keeps appending and
+        re-persists the old conversation on end_streaming). Busy truth is a
+        lease-valid active run in the durable ``runs`` table; because that
+        table lives in the SHARED database, the same read also blocks a turn
+        live on another install.
+        """
+        mock_database.get_session.return_value = sample_session
+
+        with patch(
+            "app.core.streaming_status.has_active_run", return_value=True
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 409
+        mock_database.clear_session_conversation.assert_not_called()
+
+    def test_clear_session_broadcasts_user_session_cleared(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """The wipe must reach OTHER devices/tabs. A clear rewrites the event
+        log without appending anything a connected feed's resume cursor could
+        see, so without this user-level broadcast a tab with the session open
+        keeps rendering the deleted transcript — and its cached copy survives
+        even switching away and back."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = None
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, source_device_id=None):
+            broadcasts.append((user_id, session_id))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_cleared", _record)
+
+        with patch("app.core.streaming_status.has_active_run", return_value=False):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        assert broadcasts == [("admin", "test-session-id")]
+
+    def test_clear_session_no_broadcast_when_blocked(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """A 409 (turn in flight) wipes nothing, so nothing may be announced —
+        a broadcast here would make every device drop a transcript that is
+        still fully intact."""
+        mock_database.get_session.return_value = sample_session
+
+        from app.core.sync_engine import sync_engine
+        broadcasts = []
+
+        async def _record(user_id, session_id, source_device_id=None):
+            broadcasts.append((user_id, session_id))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_cleared", _record)
+
+        with patch("app.core.streaming_status.has_active_run", return_value=True):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 409
+        assert broadcasts == []
+
+
+# =============================================================================
+# Test Batch Delete Sessions Endpoint
+# =============================================================================
+
+class TestBatchDeleteSessions:
+    """Test POST /api/v1/sessions/batch-delete endpoint."""
+
+    def test_batch_delete_success(self, client, mock_database, sample_session):
+        """Should delete multiple sessions."""
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": ["session-1", "session-2", "session-3"]}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["deleted_count"] == 3
+        assert data["total_requested"] == 3
+        assert data["errors"] is None
+
+    def test_batch_delete_partial_success(self, client, mock_database, sample_session):
+        """Should handle partial failures."""
+        # First call succeeds, second returns None (not found)
+        mock_database.get_session.side_effect = [sample_session, None, sample_session]
+
+        response = client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": ["session-1", "session-2", "session-3"]}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["deleted_count"] == 2
+        assert data["total_requested"] == 3
+        assert len(data["errors"]) == 1
+        assert "not found" in data["errors"][0].lower()
+
+    def test_batch_delete_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should skip sessions without access."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "restricted-project"
+        }
+        sample_session["project_id"] = "other-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": ["session-1"]}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["deleted_count"] == 0
+        assert len(data["errors"]) == 1
+        assert "Access denied" in data["errors"][0]
+
+    def test_batch_delete_empty_list(self, client, mock_database):
+        """Should handle empty session list."""
+        response = client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": []}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["deleted_count"] == 0
+        assert data["total_requested"] == 0
+
+
+# =============================================================================
+# Test Archive Session Endpoint
+# =============================================================================
+
+class TestArchiveSession:
+    """Test POST /api/v1/sessions/{session_id}/archive endpoint."""
+
+    def test_archive_session_success(self, client, mock_database, sample_session):
+        """Should archive the session through the Active path (it also leaves Active)."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.set_session_active.return_value = {**sample_session, "status": "archived", "is_active": False}
+
+        response = client.post("/api/v1/sessions/test-session-id/archive")
+
+        assert response.status_code == 200
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, True)
+
+    def test_archive_session_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.post("/api/v1/sessions/non-existent/archive")
+
+        assert response.status_code == 404
+
+    def test_archive_session_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny archive for unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post("/api/v1/sessions/test-session-id/archive")
+
+        assert response.status_code == 403
+
+
+# =============================================================================
+# Test Set Session Active Endpoint
+# =============================================================================
+
+class TestSetSessionActive:
+    """Test PATCH /api/v1/sessions/{session_id}/active endpoint."""
+
+    def test_set_active_false_success(self, client, mock_database, sample_session):
+        """Should mark a session complete (is_active=False)."""
+        mock_database.get_session.return_value = sample_session
+        completed = {**sample_session, "is_active": False}
+        mock_database.set_session_active.return_value = completed
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": False},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["is_active"] is False
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
+
+    def test_set_active_true_success(self, client, mock_database, sample_session):
+        """Should re-activate a session (is_active=True)."""
+        mock_database.get_session.return_value = sample_session
+        activated = {**sample_session, "is_active": True}
+        mock_database.set_session_active.return_value = activated
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": True},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["is_active"] is True
+        mock_database.set_session_active.assert_called_once_with("test-session-id", True, None)
+
+    @pytest.mark.parametrize("archived", [True, False])
+    def test_set_active_passes_archive_state(self, client, mock_database, sample_session, archived):
+        """Archive and restore ride the Active PATCH."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.set_session_active.return_value = {
+            **sample_session, "is_active": False, "status": "archived" if archived else "active"}
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": False, "archived": archived},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == ("archived" if archived else "active")
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, archived)
+
+    def test_set_active_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.patch(
+            "/api/v1/sessions/non-existent/active",
+            json={"is_active": True},
+        )
+
+        assert response.status_code == 404
+
+    def test_set_active_failure(self, client, mock_database, sample_session):
+        """Should return 500 if the DB update returns None."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.set_session_active.return_value = None
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": True},
+        )
+
+        assert response.status_code == 500
+        assert "Failed to update active status" in response.json()["detail"]
+
+    def test_set_active_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny setting active status for an unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.patch(
+            "/api/v1/sessions/test-session-id/active",
+            json={"is_active": False},
+        )
+
+        assert response.status_code == 403
+
+
+# =============================================================================
+# Test Sync Endpoints
+# =============================================================================
+
+class TestGetSyncChanges:
+    """Test GET /api/v1/sessions/{session_id}/sync endpoint."""
+
+    def test_get_sync_changes_success(self, client, mock_database, sample_session):
+        """Should return sync changes."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_sync_logs.return_value = [
+            {"id": 1, "event_type": "message_added", "data": {}}
+        ]
+        mock_database.get_latest_sync_id.return_value = 5
+
+        with patch("app.core.sync_engine.sync_engine") as mock_sync, \
+                patch(
+                    "app.core.streaming_status.has_active_run",
+                    return_value=True,
+                ):
+            mock_sync.get_device_count.return_value = 2
+
+            response = client.get("/api/v1/sessions/test-session-id/sync?since_id=0")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["changes"]) == 1
+        assert data["latest_id"] == 5
+        assert data["is_streaming"] is True
+        assert data["connected_devices"] == 2
+
+    def test_get_sync_changes_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.get("/api/v1/sessions/non-existent/sync")
+
+        assert response.status_code == 404
+
+    def test_get_sync_changes_access_denied(self, client, mock_database, mock_api_user, sample_session):
+        """Should deny access for unauthorized API user."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+
+        response = client.get("/api/v1/sessions/test-session-id/sync")
+
+        assert response.status_code == 403
+
+
+class TestGetSessionSyncStatus:
+    def test_returns_session_freshness(self, client, mock_database, sample_session):
+        sample_session["owner_device_id"] = "peer-owner"
+        mock_database.get_session.return_value = sample_session
+        status = {"state": "syncing", "pending_updates": 12, "scope": "session",
+                  "seq": 3, "epoch": "log-id", "owner_seq": 15, "owner_epoch": "log-id"}
+        with patch("app.network.transport.session_sync_status", return_value=status) as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 200
+        assert response.json() == status
+        freshness.assert_called_once_with("test-session-id", "peer-owner")
+
+    def test_initial_transcript_download_stays_syncing(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        with patch("app.network.transcripts.prioritise", return_value=True), patch(
+            "app.network.transport.session_sync_status"
+        ) as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 200
+        assert response.json() == {
+            "state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner",
+        }
+        freshness.assert_not_called()
+
+    def test_missing_session(self, client, mock_database):
+        mock_database.get_session.return_value = None
+        response = client.get("/api/v1/sessions/missing/sync-status")
+        assert response.status_code == 404
+
+    def test_denies_unreadable_session(self, client, mock_database, mock_api_user, sample_session):
+        mock_api_user.return_value = {"id": "api-user-1", "project_id": "other-project"}
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+        response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 403
+
+
+class TestGetSessionState:
+    """Test GET /api/v1/sessions/{session_id}/state endpoint."""
+
+    def test_get_session_state_success(self, client, mock_database, sample_session):
+        """Should return session state."""
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.sync_engine.sync_engine") as mock_sync:
+            mock_sync.get_session_state = AsyncMock(return_value={
+                "is_streaming": False,
+                "connected_devices": 1,
+            })
+
+            response = client.get("/api/v1/sessions/test-session-id/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == "test-session-id"
+        assert data["title"] == "Test Session"
+        assert "is_streaming" in data
+        assert "connected_devices" in data
+
+    def test_get_session_state_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.get("/api/v1/sessions/non-existent/state")
+
+        assert response.status_code == 404
+
+
+# =============================================================================
+# Test Export Session Endpoint
+# =============================================================================
+
+class TestExportSession:
+    """Test GET /api/v1/sessions/{session_id}/export endpoint."""
+
+    def test_export_session_json(self, client, mock_database, sample_session):
+        """Should export session as JSON."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"role": "user", "content": "Hello"}
+        ]
+
+        with patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=json")
+
+        assert response.status_code == 200
+        assert "application/json" in response.headers["content-type"]
+        assert "attachment" in response.headers["content-disposition"]
+        data = response.json()
+        assert "session" in data
+        assert "messages" in data
+        assert data["format_version"] == "1.0"
+
+    def test_export_session_markdown(self, client, mock_database, sample_session):
+        """Should export session as Markdown."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"}
+        ]
+
+        with patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=markdown")
+
+        assert response.status_code == 200
+        assert "text/markdown" in response.headers["content-type"]
+        content = response.text
+        assert "# Test Session" in content
+        assert "### Human" in content
+        assert "### Assistant" in content
+
+    def test_export_session_invalid_format(self, client, mock_database, sample_session):
+        """Should reject invalid export format."""
+        mock_database.get_session.return_value = sample_session
+
+        response = client.get("/api/v1/sessions/test-session-id/export?format=pdf")
+
+        assert response.status_code == 400
+        assert "Invalid format" in response.json()["detail"]
+
+    def test_export_session_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.get("/api/v1/sessions/non-existent/export")
+
+        assert response.status_code == 404
+
+    def test_export_session_with_tool_use(self, client, mock_database, sample_session):
+        """Should export tool use messages in markdown."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/test.py"}
+            }
+        ]
+
+        with patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=markdown")
+
+        assert response.status_code == 200
+        content = response.text
+        assert "Tool: Read" in content or "### Tool" in content
+
+    def test_export_session_jsonl(self, client, mock_database, sample_session, tmp_path):
+        """Should export the raw Claude session history (.jsonl) file verbatim."""
+        mock_database.get_session.return_value = sample_session
+
+        raw = (
+            '{"type":"user","message":{"role":"user","content":"Hello"},"uuid":"u1"}\n'
+            '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hi"}]},"uuid":"a1"}\n'
+        )
+        jsonl_file = tmp_path / "sdk-123.jsonl"
+        jsonl_file.write_text(raw, encoding="utf-8")
+
+        with patch("app.core.jsonl_parser.get_session_jsonl_path", return_value=jsonl_file):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
+
+        assert response.status_code == 200
+        assert "application/x-ndjson" in response.headers["content-type"]
+        cd = response.headers["content-disposition"]
+        assert "attachment" in cd
+        assert cd.endswith('.jsonl"')
+        # Content must be the file bytes verbatim, not re-serialized.
+        assert response.text == raw
+
+    def test_export_session_jsonl_from_fluid_transcript(
+        self, client, mock_database, sample_session
+    ):
+        """Should serialize Fluid transcript entries when no Claude file exists."""
+        fluid_session = {**sample_session, "sdk_session_id": "ses_deadbeefcafe"}
+        mock_database.get_session.return_value = fluid_session
+        entries = [
+            {
+                "type": "user",
+                "uuid": "n1",
+                "sessionId": "ses_deadbeefcafe",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+            },
+            {
+                "type": "assistant",
+                "uuid": "n2",
+                "sessionId": "ses_deadbeefcafe",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hi"}],
+                },
+            },
+        ]
+
+        with patch(
+            "app.core.provider.fluid_transcript.is_fluid_session", return_value=True
+        ), patch(
+            "app.core.provider.fluid_transcript.fluid_transcript_entries",
+            return_value=entries,
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
+
+        assert response.status_code == 200
+        assert [json.loads(line) for line in response.text.splitlines()] == entries
+
+    def test_export_session_json_uses_fluid_messages(
+        self, client, mock_database, sample_session
+    ):
+        """JSON export should include assistant and tool history from Fluid."""
+        fluid_session = {**sample_session, "sdk_session_id": "ses_deadbeefcafe"}
+        mock_database.get_session.return_value = fluid_session
+        messages = [
+            {"role": "user", "type": "text", "content": "Hello"},
+            {"role": "assistant", "type": "text", "content": "Hi from Fluid"},
+        ]
+
+        with patch(
+            "app.core.provider.fluid_transcript.is_fluid_session", return_value=True
+        ), patch(
+            "app.core.provider.fluid_transcript.fluid_live_messages",
+            return_value=(messages, {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=json")
+
+        assert response.status_code == 200
+        assert response.json()["messages"] == messages
+        mock_database.get_session_messages.assert_not_called()
+
+    def test_export_session_jsonl_no_history(self, client, mock_database, sample_session):
+        """Should return 404 only when no transcript source has any history."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_messages.return_value = []
+
+        with patch(
+            "app.core.provider.fluid_transcript.is_fluid_session", return_value=False
+        ), patch(
+            "app.core.jsonl_parser.get_session_jsonl_path", return_value=None
+        ), patch(
+            "app.core.pg_session_store._load_entries_by_session_id_sync",
+            return_value=[],
+        ), patch(
+            "app.api.sessions_helpers.parse_session_history_via_store",
+            return_value=([], {}),
+        ):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
+
+        assert response.status_code == 404
+        assert "history" in response.json()["detail"].lower()
+
+
+# =============================================================================
+# Test Import Session Endpoint
+# =============================================================================
+
+class TestImportSession:
+    """Test POST /api/v1/sessions/import endpoint."""
+
+    def test_import_session_success(self, client, mock_database, sample_profile, temp_dir):
+        """Should import session from JSON file."""
+        mock_database.get_profile.return_value = sample_profile
+        mock_database.create_session.return_value = {"id": "new-session-id"}
+
+        import_data = {
+            "session": {
+                "title": "Imported Session",
+                "profile_id": "default",
+                "total_cost_usd": 0.05,
+                "turn_count": 10
+            },
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "format_version": "1.0"
+        }
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
+            mock_settings.workspace_dir = temp_dir
+
+            # Create the claude projects directory
+            (temp_dir / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
+
+            files = {"file": ("export.json", json.dumps(import_data).encode(), "application/json")}
+            response = client.post("/api/v1/sessions/import", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["message_count"] == 1
+
+    def test_import_session_invalid_file_type(self, client, mock_database):
+        """Should reject non-JSON files."""
+        files = {"file": ("export.txt", b"plain text", "text/plain")}
+        response = client.post("/api/v1/sessions/import", files=files)
+
+        assert response.status_code == 400
+        assert "Invalid file type" in response.json()["detail"]
+
+    def test_import_session_invalid_json(self, client, mock_database):
+        """Should reject invalid JSON content."""
+        files = {"file": ("export.json", b"not valid json", "application/json")}
+        response = client.post("/api/v1/sessions/import", files=files)
+
+        assert response.status_code == 400
+        assert "Invalid JSON" in response.json()["detail"]
+
+    def test_import_session_missing_fields(self, client, mock_database):
+        """Should reject JSON missing required fields."""
+        import_data = {"only_messages": []}
+        files = {"file": ("export.json", json.dumps(import_data).encode(), "application/json")}
+        response = client.post("/api/v1/sessions/import", files=files)
+
+        assert response.status_code == 400
+        assert "Missing" in response.json()["detail"]
+
+    def test_import_session_no_profile_available(self, client, mock_database):
+        """An install with no agents refuses the import instead of inventing an
+        id — sessions.profile_id has a FK, so a made-up fallback is a 500."""
+        mock_database.get_profile.return_value = None
+        mock_database.get_all_profiles.return_value = []
+
+        import_data = {
+            "session": {"title": "Test"},
+            "messages": []
+        }
+        files = {"file": ("export.json", json.dumps(import_data).encode(), "application/json")}
+        response = client.post("/api/v1/sessions/import", files=files)
+
+        assert response.status_code == 409
+        assert "No agents are configured" in response.json()["detail"]
+
+
+# =============================================================================
+# Test Fork Session Endpoint
+# =============================================================================
+
+class TestForkSession:
+    """Test POST /api/v1/sessions/{session_id}/fork endpoint."""
+
+    def test_fork_session_success(self, client, mock_database, sample_session, temp_dir):
+        """Should fork session at specified message index."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        sample_session["project_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.create_session.return_value = {"id": "forked-session-id"}
+
+        # Create mock JSONL file
+        jsonl_entries = [
+            {"type": "user", "message": {"role": "user", "content": "Hello"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "Hi!"}}
+        ]
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
+            mock_settings.workspace_dir = temp_dir
+
+            with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+                jsonl_file = temp_dir / "test.jsonl"
+                jsonl_file.write_text("\n".join(json.dumps(e) for e in jsonl_entries))
+                mock_jsonl_path.return_value = jsonl_file
+
+                with patch("app.core.jsonl_parser.parse_jsonl_file") as mock_parse:
+                    mock_parse.return_value = iter(jsonl_entries)
+
+                    # Create the claude projects directory
+                    (temp_dir / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
+
+                    response = client.post(
+                        "/api/v1/sessions/test-session-id/fork",
+                        json={"message_index": 0}
+                    )
+
+                    written = list(
+                        (temp_dir / ".claude" / "projects").rglob("*.jsonl")
+                    )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["parent_session_id"] == "test-session-id"
+        assert data["fork_point_message_index"] == 0
+        # CLI resume keys on the filename and cross-checks sessionId; leaving
+        # the parent's id would make --resume reject the copied transcript.
+        assert len(written) == 1
+        new_sdk = written[0].stem
+        copied = [
+            json.loads(line)
+            for line in written[0].read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert copied
+        assert {row.get("sessionId") for row in copied} == {new_sdk}
+
+    def test_fork_session_not_found(self, client, mock_database):
+        """Should return 404 for non-existent session."""
+        mock_database.get_session.return_value = None
+
+        response = client.post(
+            "/api/v1/sessions/non-existent/fork",
+            json={"message_index": 0}
+        )
+
+        assert response.status_code == 404
+
+    def test_fork_session_no_sdk_id(self, client, mock_database, sample_session):
+        """Should reject fork for session without SDK session ID."""
+        sample_session["sdk_session_id"] = None
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post(
+            "/api/v1/sessions/test-session-id/fork",
+            json={"message_index": 0}
+        )
+
+        assert response.status_code == 400
+        assert "SDK session ID" in response.json()["detail"]
+
+    def test_fork_session_no_jsonl_file(self, client, mock_database, sample_session):
+        """Should reject fork when JSONL file not found."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+            mock_jsonl_path.return_value = None
+
+            response = client.post(
+                "/api/v1/sessions/test-session-id/fork",
+                json={"message_index": 0}
+            )
+
+        assert response.status_code == 400
+        assert "JSONL file not found" in response.json()["detail"]
+
+    def test_fork_session_invalid_message_index(self, client, mock_database, sample_session, temp_dir):
+        """Should reject invalid message index."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        mock_database.get_session.return_value = sample_session
+
+        jsonl_entries = [
+            {"type": "user", "message": {"role": "user", "content": "Hello"}}
+        ]
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.workspace_dir = temp_dir
+
+            with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+                jsonl_file = temp_dir / "test.jsonl"
+                jsonl_file.write_text(json.dumps(jsonl_entries[0]))
+                mock_jsonl_path.return_value = jsonl_file
+
+                with patch("app.core.jsonl_parser.parse_jsonl_file") as mock_parse:
+                    mock_parse.return_value = iter(jsonl_entries)
+
+                    response = client.post(
+                        "/api/v1/sessions/test-session-id/fork",
+                        json={"message_index": 10}  # Invalid index
+                    )
+
+        assert response.status_code == 400
+        assert "Invalid message_index" in response.json()["detail"]
+
+    def test_fork_whole_session_when_index_omitted(self, client, mock_database, sample_session, temp_dir):
+        """Omitting message_index forks the entire session (board 'Fork' action)."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        sample_session["project_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.create_session.return_value = {"id": "forked-session-id"}
+
+        jsonl_entries = [
+            {"type": "user", "message": {"role": "user", "content": "Hello"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "Hi!"}},
+            {"type": "user", "message": {"role": "user", "content": "More"}},
+        ]
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
+            mock_settings.workspace_dir = temp_dir
+
+            with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+                jsonl_file = temp_dir / "test.jsonl"
+                jsonl_file.write_text("\n".join(json.dumps(e) for e in jsonl_entries))
+                mock_jsonl_path.return_value = jsonl_file
+
+                with patch("app.core.jsonl_parser.parse_jsonl_file") as mock_parse:
+                    mock_parse.return_value = iter(jsonl_entries)
+                    (temp_dir / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
+
+                    # No body at all → message_index defaults to None → whole session.
+                    response = client.post("/api/v1/sessions/test-session-id/fork")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        # Fork point is the LAST display message (index 2 of 3).
+        assert data["fork_point_message_index"] == 2
+        assert data["message_count"] == 3
+
+    def test_fork_whole_empty_session_rejected(self, client, mock_database, sample_session, temp_dir):
+        """Forking a session with no display messages (no index) is a 400."""
+        sample_session["sdk_session_id"] = "sdk-123"
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.config.settings") as mock_settings:
+            mock_settings.workspace_dir = temp_dir
+
+            with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
+                jsonl_file = temp_dir / "test.jsonl"
+                jsonl_file.write_text("")
+                mock_jsonl_path.return_value = jsonl_file
+
+                with patch("app.core.jsonl_parser.parse_jsonl_file") as mock_parse:
+                    mock_parse.return_value = iter([])
+                    response = client.post("/api/v1/sessions/test-session-id/fork", json={})
+
+        assert response.status_code == 400
+        assert "empty session" in response.json()["detail"].lower()
+
+
+# =============================================================================
+# Test Adopt Session Endpoint ("Resume here" cross-device)
+# =============================================================================
+
+class TestAdoptSession:
+    """Test POST /api/v1/sessions/{session_id}/adopt endpoint."""
+
+    def test_adopt_local_session_is_noop(self, client, mock_database, sample_session):
+        """A session already owned locally (NULL instance_id) → adopted=False, no write."""
+        sample_session["instance_id"] = None
+        mock_database.get_session.return_value = sample_session
+
+        response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is False
+        assert data["status"] == "already_local"
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_foreign_offline_session_keeps_owner(self, client, mock_database, sample_session):
+        """An idle session still needs its online owner to transfer working state."""
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {
+            "device_name": "Studio Mac",
+            "online": False,
+        }
+
+        sample_session["project_v2_id"] = "pv2-project"
+        with patch("app.network.engine.context", return_value=None), patch(
+            "app.core.project_resolver.has_local_base_checkout", return_value=True
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        assert "owning worker must be online" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
+
+    @pytest.mark.parametrize("body", [{}, {"follow": True}])
+    def test_adopt_projectless_session_transfers_history(self, client, mock_database, sample_session, body):
+        """Pin and follow move a project-less session by history alone."""
+        from app.core.config import settings
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = None
+        sample_session["project_v2_id"] = None
+        mock_database.get_session.return_value = sample_session
+        mock_database.adopt_session.return_value = {**sample_session, "instance_id": settings.effective_instance_id}
+        mock_database.unpin_session.return_value = {**sample_session, "instance_id": settings.effective_instance_id}
+        with patch("app.network.handoff.receive", new=AsyncMock(return_value="/workspace")) as receive, patch(
+            "app.core.project_resolver.has_local_base_checkout"
+        ) as base:
+            response = client.post("/api/v1/sessions/test-session-id/adopt", json=body)
+        assert response.status_code == 200, response.text
+        receive.assert_awaited_once()
+        base.assert_not_called()
+
+    def test_adopt_foreign_streaming_session_conflicts(self, client, mock_database, sample_session):
+        """Refuse to adopt while the session is actively streaming on its owner."""
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {
+            "device_name": "Studio Mac",
+            "online": True,
+        }
+
+        with patch(
+            "app.core.streaming_status.has_active_run",
+            return_value=True,
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        assert "Studio Mac" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_streaming_session_missing_install_conflicts(self, client, mock_database, sample_session):
+        """Streaming + no install row → still 409, message falls back to 'another device'."""
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = None
+
+        with patch(
+            "app.core.streaming_status.has_active_run",
+            return_value=True,
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        assert "another device" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_session_not_found(self, client, mock_database):
+        """Unknown session → 404."""
+        mock_database.get_session.return_value = None
+
+        response = client.post("/api/v1/sessions/non-existent/adopt")
+
+        assert response.status_code == 404
+
+    def test_adopt_blocks_when_project_not_checked_out_here(self, client, mock_database, sample_session):
+        """Preflight (resolver-only): the session's project has no BASE checkout on
+        this runner -> 409, no adopt write or branch preparation."""
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+
+        with patch(
+            "app.core.project_resolver.has_local_base_checkout", return_value=False
+        ) as gate:
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 409
+        assert "checked out on this device" in response.json()["detail"]
+        gate.assert_called_once()
+        mock_database.adopt_session.assert_not_called()
+
+    def test_adopt_succeeds_when_checkout_present(self, client, mock_database, sample_session):
+        """Base present and branch prepared -> ownership flips without project rewrite."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        sample_session["branch"] = "feature-x"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": True}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        async def transfer(session):
+            mock_database.adopt_session.assert_not_called()
+            return "/local/feature-x"
+
+        with patch(
+            "app.core.project_resolver.has_local_base_checkout", return_value=True
+        ), patch(
+            "app.network.handoff.receive", side_effect=transfer
+        ) as receive, patch("app.core.project_resolver.resolve_cwd") as prepare:
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+        receive.assert_awaited_once_with(sample_session)
+        prepare.assert_not_called()
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["adopted"] is True
+        assert data["instance_id"] == settings.effective_instance_id
+        # No cross-install project rebind under the resolver-only path.
+        mock_database.set_session_project.assert_not_called()
+        mock_database.adopt_session.assert_called_once_with(
+            "test-session-id", settings.effective_instance_id
+        )
+
+    def test_adopt_preflight_error_keeps_owner(self, client, mock_database, sample_session):
+        """A resolver error must not transfer ownership without a local checkout."""
+        from app.core.config import settings
+
+        sample_session["instance_id"] = "other-install-xyz"
+        sample_session["project_id"] = "proj-1"
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
+        mock_database.adopt_session.return_value = {
+            **sample_session, "instance_id": settings.effective_instance_id
+        }
+
+        with patch(
+            "app.core.project_resolver.has_local_base_checkout",
+            side_effect=RuntimeError("preflight boom"),
+        ):
+            response = client.post("/api/v1/sessions/test-session-id/adopt")
+
+        assert response.status_code == 503
+        assert "Ownership has not changed" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
+
+
+# =============================================================================
+# Test Create Worktree Session Endpoint
+# =============================================================================
+
+class TestCreateWorktreeSession:
+    """Test POST /api/v1/sessions/with-worktree endpoint."""
+
+    def test_create_worktree_session_success(self, client, mock_database, sample_project):
+        """The endpoint delegates to the v2 branch-intake helper (PR-B removed the
+        legacy worktree fork); the helper's response is returned verbatim with a
+        NULL worktree_id. The helper's internals are covered by
+        tests/api/test_v2_branch_intake.py."""
+        from app.api.sessions_helpers import WorktreeSessionResponse
+
+        mock_database.get_project.return_value = sample_project
+
+        v2_response = WorktreeSessionResponse(
+            session_id="session-123",
+            worktree_id=None,
+            branch_name="feature/test",
+            base_branch="main",
+            worktree_path="/workspace/checkouts/test-project/feature-test",
+            status="active",
+            query_started=False,
+        )
+        with patch(
+            "app.api.sessions_worktree._create_v2_branch_session",
+            new_callable=AsyncMock,
+            return_value=v2_response,
+        ) as v2_helper:
+            response = client.post(
+                "/api/v1/sessions/with-worktree",
+                json={
+                    "project_id": "test-project",
+                    "branch_name": "feature/test",
+                    "base_branch": "main"
+                }
+            )
+
+        v2_helper.assert_awaited_once()
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == "session-123"
+        assert data["worktree_id"] is None
+        assert data["branch_name"] == "feature/test"
+        assert data["status"] == "active"
+
+    def test_create_worktree_session_project_not_found(self, client, mock_database):
+        """Should return 404 for non-existent project."""
+        mock_database.get_project.return_value = None
+
+        response = client.post(
+            "/api/v1/sessions/with-worktree",
+            json={
+                "project_id": "non-existent",
+                "branch_name": "feature/test"
+            }
+        )
+
+        assert response.status_code == 404
+        assert "Project not found" in response.json()["detail"]
+
+    def test_create_worktree_session_api_user_denied(self, client, mock_database, mock_api_user, sample_project):
+        """Should deny API user access to other origins."""
+        mock_api_user.return_value = {
+            "id": "api-user-1",
+            "project_id": "other-project"
+        }
+
+        def _get_project(pid):
+            if pid == "test-project":
+                return sample_project
+            if pid == "other-project":
+                return {"id": "other-project", "link_group_id": "git:other"}
+            return None
+
+        mock_database.get_project.side_effect = _get_project
+
+        response = client.post(
+            "/api/v1/sessions/with-worktree",
+            json={
+                "project_id": "test-project",
+                "branch_name": "feature/test"
+            }
+        )
+
+        assert response.status_code == 403
+        assert "Access denied" in response.json()["detail"]
+
+    @pytest.mark.parametrize("profile_ids,requested,status,expected", [
+        (["a"], "b", 403, None),            # named agent outside the key's set
+        (["a"], None, 200, "a"),            # omitted: the only agent, never the project default
+        (["a", "b"], None, 400, None),      # omitted with several: must choose
+        (["a", "b"], "b", 200, "b"),        # named allowed agent
+        (None, None, 200, None),            # unrestricted: unchanged (project default downstream)
+    ])
+    def test_create_worktree_session_applies_assigned_agents(
+        self, client, mock_database, mock_api_user, sample_project,
+        profile_ids, requested, status, expected,
+    ):
+        """A restricted key cannot run another agent through /with-worktree,
+        and an omitted agent never falls back to the project default."""
+        from app.api.sessions_helpers import WorktreeSessionResponse
+
+        mock_api_user.return_value = {"id": "api-user-1", "profile_ids": profile_ids}
+        mock_database.get_project.return_value = {
+            **sample_project, "settings": {"default_profile_id": "project-default"}}
+        body = {"project_id": "test-project", "branch_name": "feature/test", "prompt": "go"}
+        if requested:
+            body["profile_id"] = requested
+        with patch(
+            "app.api.sessions_worktree._create_v2_branch_session",
+            new_callable=AsyncMock,
+            return_value=WorktreeSessionResponse(
+                session_id="s", worktree_id=None, branch_name="feature/test",
+                base_branch="main", worktree_path="/w", status="active",
+                query_started=True,
+            ),
+        ) as v2_helper:
+            response = client.post("/api/v1/sessions/with-worktree", json=body)
+
+        assert response.status_code == status
+        if status == 200:
+            assert v2_helper.await_args.args[0].profile_id == expected
+        else:
+            v2_helper.assert_not_awaited()
+
+
+# =============================================================================
+# Test Session ID Utilities
+# =============================================================================
+
+class TestSessionId:
+    """Test session ID generation."""
+
+    def test_uuid_format(self):
+        """Session IDs should be valid UUIDs."""
+        import uuid
+        session_id = str(uuid.uuid4())
+        # Should be a valid UUID format
+        parsed = uuid.UUID(session_id)
+        assert str(parsed) == session_id
+
+    def test_uuid_uniqueness(self):
+        """Multiple session IDs should be unique."""
+        import uuid
+        ids = [str(uuid.uuid4()) for _ in range(100)]
+        assert len(set(ids)) == 100
+
+
+# =============================================================================
+# Test GET /{session_id}/context-usage
+# =============================================================================
+
+class TestStopSessionBackgroundTask:
+    def test_unknown_parent_is_rejected(self, client, mock_database):
+        mock_database.get_session.return_value = None
+        with patch("app.core.query_engine.stop_session_task", new=AsyncMock()) as stop:
+            response = client.post("/api/v1/sessions/missing/tasks/child/stop")
+        assert response.status_code == 404
+        stop.assert_not_awaited()
+
+    def test_foreign_parent_is_rejected(self, client, mock_database, mock_api_user, sample_session):
+        mock_database.get_session.return_value = {**sample_session, "api_user_id": "another-user"}
+        mock_api_user.return_value = {"id": "caller"}
+        with patch("app.core.query_engine.stop_session_task", new=AsyncMock()) as stop:
+            response = client.post("/api/v1/sessions/test-session-id/tasks/child/stop")
+        assert response.status_code == 403
+        stop.assert_not_awaited()
+
+    def test_running_task_stop_is_passed_through(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        result = {"ok": True, "kind": "shell"}
+        with patch("app.core.query_engine.stop_session_task", new=AsyncMock(return_value=result)) as stop:
+            response = client.post("/api/v1/sessions/test-session-id/tasks/child/stop")
+        assert response.status_code == 200
+        assert response.json() == {"session_id": "test-session-id", "task_id": "child", **result}
+        stop.assert_awaited_once_with("test-session-id", "child")
+
+
+class TestGetSessionContextUsage:
+    """Test GET /api/v1/sessions/{session_id}/context-usage endpoint."""
+
+    def _make_state(self, *, is_connected=True, usage_return=None, hang=False):
+        """Build a fake pooled SessionState with a mocked adapter."""
+        state = MagicMock()
+        state.is_connected = is_connected
+        if hang:
+            async def _hang():
+                await asyncio.sleep(2)
+            state.adapter.get_context_usage = _hang
+        else:
+            state.adapter.get_context_usage = AsyncMock(return_value=usage_return)
+        return state
+
+    def _patch_pool(self, state):
+        """Patch the source get_session_pool so peek() returns ``state``.
+
+        The endpoint imports get_session_pool from app.core.session_pool at
+        call time, so patching the source binding (not a frozen from-import)
+        governs it.
+        """
+        mock_pool = MagicMock()
+        mock_pool.peek.return_value = state
+        return patch("app.core.session_pool.get_session_pool", return_value=mock_pool)
+
+    def test_context_usage_unknown_session_404(self, client, mock_database):
+        """Unknown session should 404 before touching the pool."""
+        mock_database.get_session.return_value = None
+        mock_database.get_session_by_sdk_id.return_value = None
+
+        response = client.get("/api/v1/sessions/non-existent/context-usage")
+
+        assert response.status_code == 404
+
+    def test_context_usage_not_pooled(self, client, mock_database, sample_session):
+        """Session exists but pool.peek returns None -> not_connected."""
+        mock_database.get_session.return_value = sample_session
+
+        with self._patch_pool(None):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "not_connected"}
+
+    def test_context_usage_state_not_connected(self, client, mock_database, sample_session):
+        """State present but is_connected False -> not_connected."""
+        mock_database.get_session.return_value = sample_session
+        state = self._make_state(is_connected=False)
+
+        with self._patch_pool(state):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "not_connected"}
+
+    def test_context_usage_connected_returns_usage(self, client, mock_database, sample_session):
+        """Connected + adapter returns a dict -> available True, usage passed through."""
+        mock_database.get_session.return_value = sample_session
+        usage = {
+            "categories": [{"name": "system", "tokens": 1200}],
+            "totalTokens": 1200,
+            "maxTokens": 200000,
+            "percentage": 0.6,
+        }
+        state = self._make_state(usage_return=usage)
+
+        with self._patch_pool(state):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": True, "source": "live", "usage": usage}
+
+    def test_context_usage_connected_unsupported(self, client, mock_database, sample_session):
+        """Connected + adapter returns None -> unsupported, NO persisted fallback.
+
+        A snapshot exists but must be ignored on a connected session: the
+        frontend falls back to its live estimate, not a stale snapshot.
+        """
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_context_usage_snapshot.return_value = {
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "data": {"totalTokens": 999, "maxTokens": 200000},
+        }
+        state = self._make_state(usage_return=None)
+
+        with self._patch_pool(state):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "unsupported"}
+
+    def test_context_usage_timeout(self, client, mock_database, sample_session):
+        """Connected + adapter call hangs past the bound -> timeout, NO fallback.
+
+        A snapshot exists but must be ignored on a connected session.
+        """
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_context_usage_snapshot.return_value = {
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "data": {"totalTokens": 999, "maxTokens": 200000},
+        }
+        state = self._make_state(hang=True)
+
+        with self._patch_pool(state), \
+                patch(
+                    "app.core.query_persistence.SDK_CONTEXT_USAGE_TIMEOUT_SECONDS",
+                    0.05,
+                ):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "timeout"}
+
+    def test_context_usage_persisted_when_not_connected(
+        self, client, mock_database, sample_session
+    ):
+        """Not connected + column populated -> persisted snapshot, source=persisted."""
+        mock_database.get_session.return_value = sample_session
+        usage = {
+            "categories": [{"name": "system", "tokens": 1200}],
+            "totalTokens": 1200,
+            "maxTokens": 200000,
+            "percentage": 0.6,
+        }
+        mock_database.get_session_context_usage_snapshot.return_value = {
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "data": usage,
+        }
+
+        # Session exists but is not in the pool (evicted after finishing).
+        with self._patch_pool(None):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "available": True,
+            "source": "persisted",
+            "captured_at": "2024-01-15T10:30:00+00:00",
+            "usage": usage,
+        }
+
+    def test_context_usage_not_connected_empty_column(
+        self, client, mock_database, sample_session
+    ):
+        """Not connected + no persisted snapshot -> available False, not_connected."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.get_session_context_usage_snapshot.return_value = None
+
+        with self._patch_pool(None):
+            response = client.get("/api/v1/sessions/test-session-id/context-usage")
+
+        assert response.status_code == 200
+        assert response.json() == {"available": False, "reason": "not_connected"}
+
+
+# =============================================================================
+# Archived chats are read-only until restored (#1822)
+# =============================================================================
+
+class TestArchivedSessionRefusals:
+    """Resume, "Resume here" (adopt) and worker move refuse an archived chat."""
+
+    @pytest.mark.parametrize("method,path,body", [
+        ("post", "/api/v1/sessions/test-session-id/resume", None),
+        ("post", "/api/v1/sessions/test-session-id/adopt", None),
+        ("post", "/api/v1/sessions/test-session-id/move", {"target_instance_id": "other-worker"}),
+    ])
+    def test_archived_session_is_refused(self, client, mock_database, sample_session, method, path, body):
+        sample_session["status"] = "archived"
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
+            response = getattr(client, method)(path, **({"json": body} if body else {}))
+
+        assert response.status_code == 409
+        assert "archived" in response.json()["detail"]
+        submit.assert_not_called()
+        mock_database.adopt_session.assert_not_called()
+        mock_database.unpin_session.assert_not_called()

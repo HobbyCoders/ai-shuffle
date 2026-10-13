@@ -1,0 +1,34 @@
+name: Folder confinement (macOS)
+
+# Native macOS checks for the private folder and upload broker. Linux runs the
+# same tests in CI Backend. No Mac is available locally, so dispatch this
+# on a standard GitHub-hosted macOS runner when the broker needs a native check:
+# `gh workflow run ci-folder-confinement.yml --ref <branch>`.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: folder-confinement-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS folder confinement
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Stdlib only: no app dependencies, credentials or network.
+      - name: Exercise the native descriptor walk
+        run: |
+          sw_vers
+          uname -m
+          stat -f '%N dev=%d' / /Users /Applications /private /System/Volumes/Data
+          python tests/core/test_chat_files.py
+          python tests/core/test_confined_files.py

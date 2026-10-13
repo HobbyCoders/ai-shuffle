@@ -1,0 +1,6 @@
+# Dependencies are shared with ../frontend: `npm run deps` links node_modules there.
+node_modules
+.svelte-kit
+build
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*

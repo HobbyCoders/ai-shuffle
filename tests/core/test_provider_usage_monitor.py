@@ -1,0 +1,563 @@
+"""OpenRouter model-key snapshots and provider refresh scheduling.
+
+The inference key only reads /key. Account ledgers use the independent
+management-key reader covered in test_openrouter_account_usage.py.
+"""
+
+import asyncio
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.core.provider_usage import (
+    ProviderUsageMonitor,
+    _openrouter_limit_resets_at,
+    _openrouter_windows_and_credits,
+)
+
+
+# ---------------------------------------------------------------------------
+# _openrouter_windows_and_credits
+# ---------------------------------------------------------------------------
+
+class TestRefreshScheduling:
+    @pytest.mark.asyncio
+    async def test_shared_task_is_not_cancelled_by_a_waiter(self):
+        monitor = ProviderUsageMonitor()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def poll():
+            entered.set()
+            await release.wait()
+
+        with patch.object(monitor, "_poll_providers", new=AsyncMock(side_effect=poll)) as impl:
+            first = monitor.request_refresh()
+            await asyncio.wait_for(entered.wait(), 1)
+            assert monitor.request_refresh(force=True) is first
+            waiter = asyncio.create_task(monitor.poll_once())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert monitor.refreshing
+            release.set()
+            await first
+            assert not monitor.refreshing
+            assert monitor.request_refresh() is None
+            impl.assert_awaited_once()
+            await monitor.poll_once()
+            assert impl.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_failure_finishes_and_is_throttled(self):
+        monitor = ProviderUsageMonitor()
+        with patch.object(monitor, "_poll_providers", new=AsyncMock(side_effect=RuntimeError)):
+            await monitor.poll_once()
+        assert not monitor.refreshing
+        assert monitor.request_refresh() is None
+
+    @pytest.mark.asyncio
+    async def test_provider_jobs_are_concurrent_and_bounded(self):
+        monitor = ProviderUsageMonitor()
+        entered, release = asyncio.Event(), asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def poll(row):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                entered.set()
+            await release.wait()
+            active -= 1
+
+        rows = [{"id": str(i), "provider_type": "grok"} for i in range(8)]
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
+            monitor, "_poll_grok_provider", new=AsyncMock(side_effect=poll)
+        ), patch.object(monitor, "_poll_fal", new=AsyncMock()):
+            task = monitor.request_refresh()
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+            finally:
+                release.set()
+                await task
+        assert peak == 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("success", [True, False])
+    async def test_api_result_does_not_trigger_subscription_billing(self, success):
+        """Each row gets only its own registry sources.
+
+        The Admin-API poll's outcome must not cascade into the ChatGPT
+        subscription poll, and the API-key row must never be handed to it.
+        """
+        monitor = ProviderUsageMonitor()
+        rows = [{"id": "api", "provider_type": "openai", "base_url": "https://api.openai.com"},
+                {"id": "sub", "provider_type": "chatgpt"}]
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
+            monitor, "_poll_openai_provider", new=AsyncMock(return_value=success)
+        ) as poll, patch.object(
+            monitor, "_poll_codex_provider", new=AsyncMock()
+        ) as codex, patch("app.db.database.get_codex_tokens") as tokens, patch.object(
+            monitor, "_poll_fal", new=AsyncMock()
+        ):
+            await monitor.poll_once()
+        poll.assert_awaited_once_with(rows[0])
+        codex.assert_awaited_once_with(rows[1])
+        tokens.assert_not_called()
+
+
+class TestOpenrouterWindowsAndCredits:
+    def test_non_null_limit_produces_one_credit_limit_window(self):
+        data = {
+            "limit": 10.0,
+            "limit_remaining": 5.0,
+            "usage": 5.0,
+            "usage_daily": 0.10,
+            "usage_weekly": 1.5,
+            "usage_monthly": 5.0,
+            "is_free_tier": False,
+            "label": "my-key",
+        }
+        windows, credits = _openrouter_windows_and_credits(data)
+
+        assert windows == [
+            {"type": "credit_limit", "utilization": 50.0, "resets_at": None}
+        ]
+        assert credits == {
+            "usage": 5.0,
+            "usage_daily": 0.10,
+            "usage_weekly": 1.5,
+            "usage_monthly": 5.0,
+            "limit": 10.0,
+            "limit_remaining": 5.0,
+            "is_free_tier": False,
+        }
+
+    def test_utilization_is_clamped_to_100(self):
+        data = {"limit": 10.0, "usage": 25.0}
+        windows, _ = _openrouter_windows_and_credits(data)
+        assert windows[0]["utilization"] == 100.0
+
+    def test_null_limit_produces_empty_windows_but_credits_populated(self):
+        data = {
+            "limit": None,
+            "usage": 3.10,
+            "usage_daily": 0.05,
+            "usage_weekly": 0.80,
+            "usage_monthly": 3.10,
+            "is_free_tier": True,
+        }
+        windows, credits = _openrouter_windows_and_credits(data)
+
+        assert windows == []
+        assert credits["usage"] == 3.10
+        assert credits["usage_daily"] == 0.05
+        assert credits["usage_weekly"] == 0.80
+        assert credits["usage_monthly"] == 3.10
+        assert credits["limit"] is None
+        assert credits["is_free_tier"] is True
+
+    def test_zero_or_negative_limit_is_treated_as_unlimited(self):
+        windows, credits = _openrouter_windows_and_credits({"limit": 0, "usage": 1.0})
+        assert windows == []
+        assert credits["limit"] == 0.0
+
+    def test_missing_usage_with_a_limit_omits_the_window(self):
+        # Can't compute a utilization without a usage figure — no window,
+        # but the (null) dollar figures still land in credits.
+        windows, credits = _openrouter_windows_and_credits({"limit": 10.0})
+        assert windows == []
+        assert credits["usage"] is None
+
+    def test_unparseable_fields_do_not_raise(self):
+        windows, credits = _openrouter_windows_and_credits(
+            {"limit": "oops", "usage": "also-oops"}
+        )
+        assert windows == []
+        assert credits["limit"] is None
+        assert credits["usage"] is None
+
+
+# ---------------------------------------------------------------------------
+# ProviderUsageMonitor.poll_once
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def monitor():
+    return ProviderUsageMonitor()
+
+
+class TestPollOnce:
+    @pytest.mark.asyncio
+    async def test_skips_chatgpt_anthropic_xai_and_custom_openai_hosts(self, monitor):
+        rows = [
+            {"id": "p-chatgpt", "provider_type": "chatgpt", "base_url": "https://x"},
+            {"id": "p-anthropic", "provider_type": "anthropic", "base_url": "https://x"},
+            {"id": "p-openai-custom", "provider_type": "openai", "base_url": "https://my-proxy.example/v1"},
+            {"id": "p-xai", "provider_type": "xai", "base_url": "https://api.x.ai", "auth_token": "xai-key"},
+        ]
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
+             patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
+             patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
+             patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
+             patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
+            await monitor.poll_once()
+
+        poll_provider.assert_not_called()
+        poll_grok.assert_not_called()
+        poll_openai.assert_not_called()
+        poll_fal.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_polls_openrouter_grok_and_openai_platform_rows(self, monitor):
+        rows = [
+            {"id": "p-chatgpt", "provider_type": "chatgpt", "base_url": "https://x"},
+            {"id": "p-or", "provider_type": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+            {"id": "p-grok", "provider_type": "grok", "auth_mode": "grok"},
+            {"id": "p-openai", "provider_type": "openai", "base_url": "https://api.openai.com/v1"},
+            {"id": "p-xai", "provider_type": "xai", "auth_mode": "api"},
+        ]
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
+             patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
+             patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
+             patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
+             patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
+            await monitor.poll_once()
+
+        poll_provider.assert_called_once_with(rows[1])
+        poll_grok.assert_called_once_with(rows[2])
+        poll_openai.assert_called_once_with(rows[3])
+        poll_fal.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_provider_read_failure_does_not_raise(self, monitor):
+        with patch(
+            "app.db.database.get_enabled_model_providers",
+            side_effect=RuntimeError("db down"),
+        ), patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
+            await monitor.poll_once()  # must not raise
+        # fal is independent of the model-provider list.
+        poll_fal.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_include_token_passed_as_keyword(self, monitor):
+        # AMENDMENT 2: include_token must be an explicit keyword (functools.partial),
+        # never a positional argument.
+        captured = {}
+
+        def _fake_get_enabled(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return []
+
+        with patch("app.db.database.get_enabled_model_providers", side_effect=_fake_get_enabled), \
+             patch.object(monitor, "_poll_fal", new=AsyncMock()):
+            await monitor.poll_once()
+
+        assert captured["args"] == ()
+        assert captured["kwargs"] == {"include_token": True}
+
+
+# ---------------------------------------------------------------------------
+# ProviderUsageMonitor._poll_provider
+# ---------------------------------------------------------------------------
+
+def _fake_httpx(status_code=200, json_body=None, raise_exc=None):
+    """Build a patch target for httpx.AsyncClient used as an async ctx manager."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_body if json_body is not None else {}
+
+    client = MagicMock()
+    if raise_exc is not None:
+        client.get = AsyncMock(side_effect=raise_exc)
+    else:
+        client.get = AsyncMock(return_value=resp)
+
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=client)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=ctx)
+
+
+_KEY_RESPONSE = {
+    "data": {
+        "label": "my-key",
+        "limit": 10.0,
+        "limit_remaining": 7.0,
+        "limit_reset": "monthly",
+        "usage": 3.0,
+        "usage_daily": 0.10,
+        "usage_weekly": 1.0,
+        "usage_monthly": 3.0,
+        "is_free_tier": False,
+        # Not in the allowlist — must never reach `raw`.
+        "key": "sk-or-super-secret",
+    }
+}
+
+_CREDITS_RESPONSE = {
+    "data": {
+        "total_credits": 25.0,
+        "total_usage": 4.25,
+    }
+}
+
+_PROVIDER_ROW = {
+    "id": "prov-or-1",
+    "provider_type": "openrouter",
+    "base_url": "https://openrouter.ai/api/v1",
+    "auth_token": "enc:whatever",
+}
+
+
+def _two_call_httpx(credits_status=200, credits_body=None, credits_exc=None):
+    """httpx.AsyncClient patch serving /key then /credits per request URL."""
+
+    def _factory(*args, **kwargs):
+        async def _get(url, headers=None):
+            if url.endswith("/credits"):
+                if credits_exc is not None:
+                    raise credits_exc
+                resp = MagicMock()
+                resp.status_code = credits_status
+                resp.json.return_value = (
+                    credits_body if credits_body is not None else {}
+                )
+                return resp
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = _KEY_RESPONSE
+            return resp
+
+        ctx = MagicMock()
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=_get)
+        ctx.__aenter__ = AsyncMock(return_value=client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    return _factory
+
+
+class TestPollProvider:
+    @pytest.mark.asyncio
+    async def test_upserts_normalized_snapshot_on_200(self, monitor):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient", _fake_httpx(200, _KEY_RESPONSE)
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)
+
+        upsert.assert_called_once()
+        args, kwargs = upsert.call_args
+        provider_id, provider_type, plan_type, windows, credits, raw, fetched_at = args
+        assert provider_id == "prov-or-1"
+        assert provider_type == "openrouter"
+        assert plan_type is None
+        # The key's monthly limit resets at the start of next month (UTC).
+        assert windows == [{"type": "credit_limit", "utilization": 30.0,
+                            "resets_at": _openrouter_limit_resets_at("monthly")}]
+        assert credits["usage"] == 3.0
+        assert credits["usage_monthly"] == 3.0
+        assert fetched_at is not None
+
+        # Raw whitelist enforcement: the key must never appear anywhere in `raw`.
+        assert "key" not in raw
+        assert "sk-or-super-secret" not in raw.values()
+        assert raw["label"] == "my-key"
+        assert raw["limit"] == 10.0
+
+    @pytest.mark.asyncio
+    async def test_model_key_is_only_sent_to_key_endpoint(self, monitor):
+        calls = []
+
+        def _client_factory(*args, **kwargs):
+            async def _get(url, headers=None):
+                calls.append((url, headers))
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.json.return_value = (
+                    _CREDITS_RESPONSE if url.endswith("/credits") else _KEY_RESPONSE
+                )
+                return resp
+
+            fake_ctx = MagicMock()
+            client = MagicMock()
+            client.get = AsyncMock(side_effect=_get)
+            fake_ctx.__aenter__ = AsyncMock(return_value=client)
+            fake_ctx.__aexit__ = AsyncMock(return_value=False)
+            return fake_ctx
+
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient", side_effect=_client_factory
+        ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
+            await monitor._poll_provider(_PROVIDER_ROW)
+
+        auth = {"Authorization": "Bearer sk-or-super-secret"}
+        assert calls == [
+            ("https://openrouter.ai/api/v1/key", auth),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_non_200_does_not_raise_and_does_not_upsert(self, monitor):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient", _fake_httpx(401, {})
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)
+
+        upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_network_exception_does_not_raise_and_does_not_upsert(self, monitor):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            _fake_httpx(raise_exc=ConnectionError("boom")),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)  # must not raise
+
+        upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_decrypt_failure_does_not_raise_and_does_not_upsert(self, monitor):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            side_effect=ValueError("decryption failed"),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)  # must not raise
+
+        upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_key_or_base_url_skips_without_error(self, monitor):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token", return_value=None
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)
+
+        upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_key_snapshot_never_includes_account_balance(self, monitor):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_two_call_httpx(200, _CREDITS_RESPONSE),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)
+
+        credits = upsert.call_args[0][4]
+        assert "total_credits" not in credits
+        assert "total_usage" not in credits
+        assert "balance_remaining" not in credits
+        # The model key only describes its own spending and configured limit.
+        assert credits["usage"] == 3.0
+        assert credits["limit"] == 10.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"credits_status": 404},
+            {"credits_status": 200, "credits_body": {"data": {}}},
+            {"credits_exc": ConnectionError("boom")},
+        ],
+    )
+    async def test_credits_failure_still_upserts_key_snapshot(self, monitor, kwargs):
+        upsert = MagicMock()
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_two_call_httpx(**kwargs),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_provider(_PROVIDER_ROW)  # must not raise
+
+        upsert.assert_called_once()
+        args = upsert.call_args[0]
+        assert args[3] == [
+            {"type": "credit_limit", "utilization": 30.0,
+             "resets_at": _openrouter_limit_resets_at("monthly")}
+        ]
+        credits = args[4]
+        assert credits["usage"] == 3.0
+        assert "balance_remaining" not in credits
+
+    @pytest.mark.asyncio
+    async def test_credits_call_is_skipped_when_key_fetch_fails(self, monitor):
+        calls = []
+
+        def _factory(*args, **kwargs):
+            async def _get(url, headers=None):
+                calls.append(url)
+                resp = MagicMock()
+                resp.status_code = 401
+                resp.json.return_value = {}
+                return resp
+
+            ctx = MagicMock()
+            client = MagicMock()
+            client.get = AsyncMock(side_effect=_get)
+            ctx.__aenter__ = AsyncMock(return_value=client)
+            ctx.__aexit__ = AsyncMock(return_value=False)
+            return ctx
+
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token",
+            return_value="sk-or-super-secret",
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient", side_effect=_factory
+        ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
+            await monitor._poll_provider(_PROVIDER_ROW)
+
+        assert calls == ["https://openrouter.ai/api/v1/key"]
+
+    @pytest.mark.asyncio
+    async def test_key_never_appears_in_credits_failure_logs(self, monitor, caplog):
+        secret = "sk-or-super-secret-value"
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token", return_value=secret
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_two_call_httpx(credits_exc=ConnectionError("boom")),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
+            with caplog.at_level(logging.DEBUG):
+                await monitor._poll_provider(_PROVIDER_ROW)
+
+        assert secret not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_key_never_appears_in_any_log_record(self, monitor, caplog):
+        secret = "sk-or-super-secret-value"
+        with patch(
+            "app.core.provider_usage._decrypt_provider_auth_token", return_value=secret
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient", _fake_httpx(401, {})
+        ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
+            with caplog.at_level(logging.DEBUG):
+                await monitor._poll_provider(_PROVIDER_ROW)
+
+        assert secret not in caplog.text

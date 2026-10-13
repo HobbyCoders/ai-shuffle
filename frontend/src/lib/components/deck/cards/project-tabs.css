@@ -1,0 +1,636 @@
+/* ══════════════════════════════════════════════════════════════════
+   project-tabs.css — Studio-v2 grouped-field primitives for the
+   Project detail tabs (General / MCP / Agents / Hooks / Memory).
+
+   The project tabs render inside ProjectCard's .pc-tabbody, which is
+   NOT inside StudioEditorShell's .ed-content — so they cannot inherit
+   the editor's field primitives. This plain (imported, unscoped)
+   stylesheet re-declares the same primitives, but EVERY rule is gated
+   under `.ptab` so these common class names (.set-group, .set-row,
+   .inp, .switch, …) can't leak into the rest of the app.
+
+   Mirrors StudioEditorShell.svelte so the Project
+   tabs match the Profile editor exactly. Theme tokens only.
+   ══════════════════════════════════════════════════════════════════ */
+
+.ptab {
+	display: block;
+	color: var(--foreground);
+}
+
+/* ── Grouped card ── */
+.ptab .set-group {
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	overflow: hidden;
+	margin-bottom: 18px;
+}
+.ptab .set-group:last-child {
+	margin-bottom: 0;
+}
+.ptab .set-grouphead {
+	padding: 15px 18px 13px;
+	border-bottom: 1px solid var(--border);
+}
+.ptab .set-grouphead h3 {
+	font-family: var(--font-display, Georgia, serif);
+	font-weight: 700;
+	font-size: 16px;
+	margin: 0;
+	color: var(--foreground);
+	display: flex;
+	align-items: center;
+	gap: 9px;
+}
+.ptab .set-grouphead h3 svg {
+	width: 17px;
+	height: 17px;
+	color: var(--muted-foreground);
+}
+.ptab .set-grouphead h3.danger,
+.ptab .set-row .lab h4.danger,
+.ptab .danger {
+	color: var(--destructive);
+}
+.ptab .set-grouphead p {
+	margin: 6px 0 0;
+	font-size: 12.5px;
+	color: var(--muted-foreground);
+	line-height: 1.5;
+}
+
+/* Group header with trailing actions / metadata. */
+.ptab .grouphead-row {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 14px;
+}
+.ptab .grouphead-row > div {
+	min-width: 0;
+}
+.ptab .head-acts {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-shrink: 0;
+	padding-top: 2px;
+}
+
+/* ── Rows ── */
+.ptab .set-row {
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	padding: 14px 18px;
+	border-bottom: 1px solid var(--border);
+}
+.ptab .set-row:last-child {
+	border-bottom: none;
+}
+.ptab .set-row .lab {
+	min-width: 0;
+	flex: 1;
+}
+.ptab .set-row .lab h4 {
+	font-size: 13.5px;
+	font-weight: 600;
+	margin: 0 0 3px;
+	color: var(--foreground);
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	flex-wrap: wrap;
+}
+.ptab .set-row .lab p {
+	margin: 0;
+	font-size: 12px;
+	color: var(--muted-foreground);
+	line-height: 1.45;
+	word-break: break-word;
+}
+.ptab .set-row .lab p.mono {
+	font-family: var(--font-mono, monospace);
+	font-size: 11.5px;
+}
+.ptab .set-row .ctl {
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	gap: 9px;
+}
+.ptab .set-row.stack {
+	display: block;
+}
+.ptab .set-row.stack .lab {
+	margin-bottom: 10px;
+}
+.ptab .set-row.stack .ctl {
+	display: block;
+}
+/* Inline inputs/selects fill the row when stacked (long paths, URLs). */
+.ptab .set-row.stack .ctl .inp,
+.ptab .set-row.stack .ctl .sel {
+	width: 100%;
+}
+.ptab .set-row.disabled .lab h4 {
+	opacity: 0.6;
+}
+
+/* ── Full-width field ── */
+.ptab .fld {
+	width: 100%;
+	font: inherit;
+	font-size: 13.5px;
+	color: var(--foreground);
+	background: var(--background);
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	padding: 10px 12px;
+}
+.ptab .fld:focus {
+	outline: none;
+	border-color: var(--ring, var(--primary));
+}
+.ptab textarea.fld {
+	resize: vertical;
+	min-height: 96px;
+	line-height: 1.6;
+}
+.ptab textarea.fld.code,
+.ptab .fld.mono {
+	font-family: var(--font-mono, monospace);
+	font-size: 12.5px;
+}
+
+/* ── Compact inline input ── */
+.ptab .inp {
+	height: 36px;
+	padding: 0 12px;
+	border: 1px solid var(--border);
+	border-radius: 9px;
+	background: var(--background);
+	font: inherit;
+	font-size: 13px;
+	color: var(--foreground);
+	min-width: 220px;
+}
+.ptab .inp.mono {
+	font-family: var(--font-mono, monospace);
+	font-size: 12px;
+}
+.ptab .inp:focus,
+.ptab .sel:focus {
+	outline: none;
+	border-color: var(--ring, var(--primary));
+}
+.ptab .inp::placeholder,
+.ptab .fld::placeholder {
+	color: var(--muted-foreground);
+	opacity: 0.65;
+}
+
+/* ── Select ── */
+.ptab .sel {
+	height: 36px;
+	padding: 0 32px 0 12px;
+	border: 1px solid var(--border);
+	border-radius: 9px;
+	background: var(--background);
+	font: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--foreground);
+	appearance: none;
+	cursor: pointer;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239090a8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 10px center;
+}
+.ptab .sel.fld {
+	width: 100%;
+	height: 38px;
+}
+
+/* ── Toggle switch ── */
+.ptab .switch {
+	width: 34px;
+	height: 20px;
+	flex-shrink: 0;
+	border-radius: 11px;
+	background: var(--muted);
+	border: 1px solid var(--border);
+	position: relative;
+	padding: 0;
+	cursor: pointer;
+	transition: background 0.18s, border-color 0.18s;
+}
+.ptab .switch i {
+	position: absolute;
+	top: 1px;
+	left: 1px;
+	width: 15px;
+	height: 15px;
+	border-radius: 50%;
+	background: var(--foreground);
+	transition: left 0.18s, background 0.18s;
+}
+.ptab .switch.on {
+	background: var(--primary);
+	border-color: var(--primary);
+}
+.ptab .switch.on i {
+	left: 16px;
+	background: var(--primary-foreground);
+}
+.ptab .switch:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+/* ── Segmented control ── */
+.ptab .seg {
+	display: inline-flex;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	overflow: hidden;
+	background: var(--background);
+}
+.ptab .seg button {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	border: none;
+	border-right: 1px solid var(--border);
+	background: none;
+	padding: 8px 13px;
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background 0.12s, color 0.12s;
+}
+.ptab .seg button:last-child {
+	border-right: none;
+}
+.ptab .seg button:hover {
+	color: var(--foreground);
+}
+.ptab .seg button.on {
+	background: var(--primary);
+	color: var(--primary-foreground);
+}
+.ptab .seg button svg {
+	width: 14px;
+	height: 14px;
+}
+
+/* ── Small mono pill ── */
+.ptab .pill-s {
+	font-family: var(--font-mono, monospace);
+	font-size: 10.5px;
+	font-weight: 500;
+	padding: 3px 8px;
+	border-radius: 6px;
+	background: var(--muted);
+	color: var(--muted-foreground);
+	white-space: nowrap;
+}
+.ptab .pill-s.acc {
+	background: var(--primary);
+	color: var(--primary-foreground);
+}
+
+/* ── Status badge ── */
+.ptab .badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 10.5px;
+	font-weight: 600;
+	padding: 2px 8px;
+	border-radius: 999px;
+	background: var(--muted);
+	color: var(--muted-foreground);
+	white-space: nowrap;
+}
+.ptab .badge.success {
+	background: color-mix(in oklch, var(--success) 16%, transparent);
+	color: var(--success);
+}
+.ptab .badge.muted {
+	background: var(--muted);
+	color: var(--muted-foreground);
+}
+.ptab .badge.mono {
+	font-family: var(--font-mono, monospace);
+	font-weight: 500;
+}
+
+/* ── Inline hint ── */
+.ptab .hint {
+	font-size: 11.5px;
+	font-weight: 500;
+	color: var(--muted-foreground);
+}
+
+/* ── Dashed info callout ── */
+.ptab .ed-note {
+	display: flex;
+	gap: 11px;
+	padding: 13px 15px;
+	border: 1px dashed var(--border);
+	border-radius: 11px;
+	font-size: 12.5px;
+	color: var(--muted-foreground);
+	line-height: 1.5;
+	margin-top: 18px;
+}
+.ptab .ed-note svg {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	margin-top: 1px;
+	color: var(--muted-foreground);
+}
+.ptab .ed-note a {
+	color: var(--foreground);
+	text-decoration: underline;
+}
+
+/* ── Action buttons ── */
+.ptab .ed-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 7px 13px;
+	border-radius: 8px;
+	border: 1px solid var(--border);
+	background: var(--background);
+	color: var(--foreground);
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+.ptab .ed-btn:hover {
+	background: var(--muted);
+}
+.ptab .ed-btn.sm {
+	padding: 5px 10px;
+	font-size: 12px;
+}
+.ptab .ed-btn.primary {
+	background: var(--primary);
+	color: var(--primary-foreground);
+	border-color: var(--primary);
+}
+.ptab .ed-btn.primary:hover {
+	opacity: 0.9;
+	background: var(--primary);
+}
+.ptab .ed-btn.danger {
+	color: var(--destructive);
+	border-color: color-mix(in oklch, var(--destructive) 35%, transparent);
+	background: color-mix(in oklch, var(--destructive) 8%, transparent);
+}
+.ptab .ed-btn.danger:hover {
+	background: color-mix(in oklch, var(--destructive) 16%, transparent);
+}
+.ptab .ed-btn:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+
+/* ── Square icon button (next to a select / row action) ── */
+.ptab .icon-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 36px;
+	flex-shrink: 0;
+	background: var(--background);
+	border: 1px solid var(--border);
+	border-radius: 9px;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.ptab .icon-btn:hover {
+	background: var(--muted);
+	color: var(--foreground);
+}
+.ptab .icon-btn:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.ptab .icon-btn.danger {
+	color: var(--destructive);
+}
+.ptab .icon-btn.danger:hover {
+	background: color-mix(in oklch, var(--destructive) 14%, transparent);
+	border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
+}
+
+/* ── RowActionMenu rows ──
+   Rows that collapse their per-row actions into a RowActionMenu (Agents delete,
+   MCP remove, Hooks test/delete) reveal the inline rail on hover/focus via the
+   inherited --ram-reveal custom property (the component owns opacity + the
+   touch/narrow ⋮ collapse). Gated on `:has(.ram)` so ONLY rows that actually
+   embed a menu are affected — General/Memory form rows keep their always-visible
+   controls untouched. Any always-visible control (a .switch) sits outside the
+   menu as a sibling and is unaffected. */
+.ptab .set-row:has(.ram) {
+	--ram-reveal: 0;
+}
+/* Inside a RowActionMenu tray the boxed .icon-btn primitive flattens to the
+   app-wide tray treatment (flat icon, no box) so these popups match
+   Sessions/Build; .icon-btn outside trays keeps its box. */
+.ptab .ram .icon-btn {
+	background: transparent;
+	border-color: transparent;
+}
+.ptab .ram .icon-btn:hover {
+	background: var(--hover-overlay);
+}
+.ptab .ram .icon-btn.danger:hover {
+	background: color-mix(in oklch, var(--destructive) 14%, transparent);
+	border-color: transparent;
+}
+.ptab .set-row:has(.ram):hover,
+.ptab .set-row:has(.ram):focus-within {
+	--ram-reveal: 1;
+}
+
+/* ── Control stacked vertically (control + helper below) ── */
+.ptab .ctl-col {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 8px;
+}
+.ptab .ctl-col .inp,
+.ptab .ctl-col .sel {
+	width: 100%;
+}
+
+/* ── Inline control row (select/input + adjacent icon button) ── */
+.ptab .grp-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+}
+.ptab .grp-row .sel,
+.ptab .grp-row .inp {
+	flex: 1;
+	min-width: 0;
+}
+
+/* ── Required asterisk ── */
+.ptab .req {
+	color: var(--destructive);
+	font-weight: 700;
+}
+
+/* ── Text-link buttons ── */
+.ptab .lnk {
+	background: none;
+	border: none;
+	padding: 0;
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--foreground);
+	cursor: pointer;
+}
+.ptab .lnk:hover {
+	text-decoration: underline;
+}
+.ptab .lnk.muted {
+	color: var(--muted-foreground);
+	font-weight: 500;
+}
+
+/* ── Field-level error ── */
+.ptab .fld-err {
+	margin: 7px 0 0;
+	font-size: 11.5px;
+	color: var(--destructive);
+}
+
+/* ── Empty paragraph helper ── */
+.ptab .empty {
+	margin: 10px 0 0;
+	font-size: 12.5px;
+	color: var(--muted-foreground);
+}
+
+/* ── Search input ── */
+.ptab .tsearch {
+	position: relative;
+	margin-bottom: 16px;
+}
+.ptab .tsearch svg {
+	position: absolute;
+	left: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 15px;
+	height: 15px;
+	color: var(--muted-foreground);
+	pointer-events: none;
+}
+.ptab .tsearch .inp {
+	width: 100%;
+	min-width: 0;
+	padding-left: 36px;
+}
+
+/* ── Empty state (no items) ── */
+.ptab .empty-state {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	gap: 8px;
+	padding: 48px 24px;
+	border: 1px dashed var(--border);
+	border-radius: var(--radius);
+	background: var(--card);
+}
+.ptab .empty-state svg {
+	width: 30px;
+	height: 30px;
+	color: var(--muted-foreground);
+	opacity: 0.6;
+	margin-bottom: 2px;
+}
+.ptab .empty-state .es-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--foreground);
+	margin: 0;
+}
+.ptab .empty-state .es-desc {
+	font-size: 12.5px;
+	color: var(--muted-foreground);
+	line-height: 1.5;
+	margin: 0;
+	max-width: 360px;
+}
+.ptab .empty-state .es-action {
+	margin-top: 4px;
+}
+
+/* ── Loading ── */
+.ptab .ptab-loading {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 48px 24px;
+}
+.ptab .ptab-spinner {
+	width: 22px;
+	height: 22px;
+	border: 2px solid var(--border);
+	border-top-color: var(--primary);
+	border-radius: 50%;
+	animation: ptab-spin 0.8s linear infinite;
+}
+@keyframes ptab-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ── Responsive ── */
+@media (max-width: 560px) {
+	.ptab .set-row {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 10px;
+	}
+	.ptab .set-row .ctl {
+		justify-content: flex-start;
+	}
+	/* Rows with a RowActionMenu keep their control cluster right-aligned when the
+	   row stacks, so the ⋮ sits at the row's right edge and its tray floats left
+	   into the row instead of off the left edge. */
+	.ptab .set-row:has(.ram) .ctl {
+		justify-content: flex-end;
+	}
+	/* Plain inline inputs/selects fill the row instead of shrinking to a
+	   narrow box on the right (fixes the cramped Project ID field). */
+	.ptab .set-row .ctl .inp,
+	.ptab .set-row .ctl .sel {
+		width: 100%;
+	}
+	.ptab .inp {
+		min-width: 0;
+	}
+}

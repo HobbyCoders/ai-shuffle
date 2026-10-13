@@ -1,0 +1,21 @@
+# Shell scripts are COPYed into the Linux container image and run there, so they
+# must use LF line endings — CRLF would break the `#!/bin/bash` shebang. Force
+# LF on checkout regardless of the user's core.autocrlf setting (Windows).
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+# Connector catalog digests cover exact bytes, including in Windows bundles.
+app/core/connectors/*.py text eol=lf
+# The site tests read these as raw text and compare exact content (#2124): the
+# docs.json hash covers the docs sources and the render script, the buyer install
+# files (and their served copies) are published with SHA-256 sums and embedded
+# verbatim in the docs, and _headers and wrangler.toml are parsed line by line.
+# Keep LF on Windows checkouts with core.autocrlf=true.
+docs/content/**/*.md text eol=lf
+docs/install/compose/compose.yaml text eol=lf
+docs/install/compose/env.example text eol=lf
+# Cloud site LF rules live in hobbycoders-cloud; local_ci compares these
+# app docs copies byte for byte, including on Windows checkouts.
+frontend/src/lib/docs/content/** text eol=lf
+# Tests import these scripts; Vitest on Windows fails on a CRLF after the #! line.
+frontend/scripts/*.mjs text eol=lf
+.githooks/* text eol=lf

@@ -1,0 +1,117 @@
+/**
+ * Authentication store
+ *
+ * Migrated to Svelte 5 runes.
+ */
+
+import type { AuthStatus } from '$lib/api/client';
+import { getAuthStatus, logout as apiLogout } from '$lib/api/auth';
+import { createSubscribers } from './store-utils';
+
+// ============================================
+// Types
+// ============================================
+
+interface AuthState {
+	status: AuthStatus | null;
+	loading: boolean;
+	error: string | null;
+}
+
+// ============================================
+// Reactive State
+// ============================================
+
+let _state = $state<AuthState>({
+	status: null,
+	loading: true,
+	error: null
+});
+
+// Account-scoped caches subscribe to this state. A superseded status response
+// must never move them back to the previous principal.
+let requestEpoch = 0;
+let pendingLogout: Promise<void> | null = null;
+
+// ============================================
+// Subscribe shim (centralized via store-utils)
+// ============================================
+
+const { subscribe, update: _update, createDerived } =
+	createSubscribers<AuthState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
+
+// ============================================
+// Exported Store
+// ============================================
+
+export const auth = {
+	get current() {
+		return _state;
+	},
+
+	subscribe,
+
+	async checkAuth() {
+		const epoch = ++requestEpoch;
+		_update(s => ({ ...s, loading: true, error: null }));
+		try {
+			// A refresh during logout must observe the completed cookie change.
+			if (pendingLogout) await pendingLogout;
+			if (epoch !== requestEpoch) return _state.status;
+			const status = await getAuthStatus();
+			if (epoch === requestEpoch) _update(s => ({ ...s, status, loading: false }));
+			return epoch === requestEpoch ? status : _state.status;
+		} catch (e) {
+			if (epoch === requestEpoch) _update(s => ({ ...s, loading: false, error: 'Failed to check auth status' }));
+			throw e;
+		}
+	},
+
+	async logout() {
+		const epoch = ++requestEpoch;
+		// Retire authenticated sync work before dispatching the logout request.
+		_update(s => ({ ...s, status: s.status ? { ...s.status, authenticated: false } : null, loading: false, error: null }));
+		const request = apiLogout();
+		pendingLogout = request;
+		try {
+			await request;
+			if (epoch !== requestEpoch) return;
+			const status = await getAuthStatus();
+			if (epoch === requestEpoch) _update(s => ({ ...s, status, loading: false }));
+		} catch (e: any) {
+			if (epoch === requestEpoch) _update(s => ({ ...s, loading: false, error: e.detail || 'Logout failed' }));
+			throw e;
+		} finally {
+			if (pendingLogout === request) pendingLogout = null;
+		}
+	},
+
+	clearError() {
+		_update(s => ({ ...s, error: null }));
+	},
+
+};
+
+// ============================================
+// Derived stores (via store-utils createDerived)
+// ============================================
+
+export const isAuthenticated = createDerived(() => _state.status?.authenticated ?? false);
+export const isAdmin = createDerived(() => _state.status?.is_admin ?? false);
+export const claudeAuthenticated = createDerived(() => _state.status?.claude_authenticated ?? false);
+// "Any usable credential" (PA10): the Claude subscription login OR at least one
+// enabled model provider with a stored credential. This — not claudeAuthenticated
+// — is what gates the composer (send / mic / attach) and the first-run setup
+// Continue, so an install with only a GPT/OpenRouter/Anthropic-API credential is
+// fully usable. Older backends omit the field: fall back to claude_authenticated
+// so the gate behaves exactly as before.
+export const anyCredential = createDerived(
+	() => _state.status?.has_any_credential ?? _state.status?.claude_authenticated ?? false
+);
+// The server's agent gate: license plus any ready provider (null on older backends).
+export const agentGate = createDerived(() => _state.status?.agent_gate ?? null);
+export const githubAuthenticated = createDerived(() => _state.status?.github_authenticated ?? false);
+export const username = createDerived(() => _state.status?.username ?? null);

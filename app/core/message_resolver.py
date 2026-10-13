@@ -1,0 +1,240 @@
+"""
+Unified message resolution — single entry point for the JSONL → PostgreSQL fallback chain.
+
+V2: live render state rides the append-only session event feed; this resolver
+serves only PERSISTED transcripts (SDK JSONL/transcript store, then the message
+rows in Postgres as the final fallback).
+
+Usage:
+    from app.core.message_resolver import message_resolver
+
+    result = message_resolver.resolve(session_id, sdk_session_id, working_dir)
+    result.messages  # List[Dict] in normalized camelCase format
+    result.source    # "jsonl" | "database"
+    result.usage     # Optional usage dict
+"""
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Canonical message fields — the output contract of the resolver
+# =============================================================================
+
+# These are conditionally present (only included if truthy)
+_OPTIONAL_FIELDS = (
+    "subtype", "systemSubtype", "systemData",
+    "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
+    "agentId", "agentType", "agentDescription", "agentPrompt", "agentStatus", "agentChildren",
+    "metadata",
+    "commandId", "commandName", "commandArgs",
+)
+
+
+@dataclass
+class ResolvedMessages:
+    """Result of message resolution."""
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    source: str = "none"  # "jsonl", "database", "none"
+    usage: Optional[Dict[str, Any]] = None
+
+
+def _normalize_jsonl_message(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a JSONL-parsed message to the canonical format.
+
+    JSONL messages from parse_session_history() are already in camelCase
+    and close to the canonical format. This just ensures consistency.
+    """
+    msg: Dict[str, Any] = {
+        "id": m.get("id", ""),
+        "role": m.get("role", "user"),
+        "type": m.get("type") or "text",
+        "content": m.get("content", ""),
+        "streaming": False,
+    }
+    for f in _OPTIONAL_FIELDS:
+        value = m.get(f)
+        if value is not None:
+            msg[f] = value
+    return msg
+
+
+def _normalize_db_message(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a database message (snake_case) to the canonical camelCase format.
+
+    Database messages have fields like tool_name, tool_input, tool_id (snake_case).
+    The canonical format uses toolName, toolInput, toolId (camelCase).
+    """
+    role = m.get("role", "user")
+
+    # Determine message type from available data
+    msg_type = None
+    if m.get("tool_name"):
+        msg_type = "tool_use"
+    elif role in ("tool_use", "tool_result"):
+        msg_type = role
+        role = "assistant"  # Normalize tool roles to assistant
+    elif role == "assistant":
+        msg_type = "text"
+
+    msg: Dict[str, Any] = {
+        "id": f"msg-{m.get('id', 0)}",
+        "role": role,
+        "type": msg_type,
+        "content": m.get("content", ""),
+        "streaming": False,
+    }
+
+    # Map snake_case DB fields to camelCase
+    if m.get("tool_name"):
+        msg["toolName"] = m["tool_name"]
+    if m.get("tool_id"):
+        msg["toolId"] = m["tool_id"]
+    if m.get("tool_input"):
+        msg["toolInput"] = m["tool_input"]
+    if m.get("metadata"):
+        msg["metadata"] = m["metadata"]
+    if m.get("profile_id"):
+        msg["profile_id"] = m["profile_id"]
+
+    return msg
+
+
+class MessageResolver:
+    """Unified message resolution with JSONL → PostgreSQL fallback.
+
+    All code that needs to load session messages should use this instead of
+    implementing the fallback chain directly.
+    """
+
+    @staticmethod
+    def resolve(
+        session_id: str,
+        sdk_session_id: Optional[str] = None,
+        working_dir: Optional[str] = None,
+    ) -> ResolvedMessages:
+        """Resolve messages for a session from the best available source.
+
+        Priority:
+        1. JSONL files (Claude SDK session history / transcript store)
+        2. PostgreSQL database (fallback)
+
+        Args:
+            session_id: AI Shuffle session ID
+            sdk_session_id: Claude SDK session UUID (for JSONL lookup)
+            working_dir: Project working directory (for JSONL file location)
+
+        Returns:
+            ResolvedMessages with normalized messages and metadata
+        """
+        # --- Tier 1: JSONL files (persistent, written by Claude CLI) ---
+        if sdk_session_id:
+            jsonl_result = MessageResolver._try_jsonl(session_id, sdk_session_id, working_dir)
+            if jsonl_result is not None:
+                return jsonl_result
+
+        # --- Tier 2: PostgreSQL database (fallback) ---
+        return MessageResolver._try_database(session_id)
+
+    # -------------------------------------------------------------------------
+    # Private tier methods
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _try_jsonl(
+        session_id: str,
+        sdk_session_id: str,
+        working_dir: Optional[str],
+    ) -> Optional[ResolvedMessages]:
+        """Try to load messages from JSONL session files."""
+        try:
+            from app.core.jsonl_parser import parse_session_history
+
+            messages, usage_data = parse_session_history(
+                sdk_session_id,
+                working_dir or _default_working_dir(),
+            )
+            if not messages:
+                return None
+
+            normalized = [_normalize_jsonl_message(m) for m in messages]
+
+            usage = None
+            if usage_data:
+                usage = {
+                    "input_tokens": usage_data.get("last_input_tokens", 0),
+                    "output_tokens": usage_data.get("total_tokens_out", 0),
+                    "cache_creation_tokens": usage_data.get("cache_creation_tokens", 0),
+                    "cache_read_tokens": usage_data.get("cache_read_tokens", 0),
+                    # Also keep raw totals for callers that need them
+                    "total_tokens_in": usage_data.get("total_tokens_in", 0),
+                    "total_tokens_out": usage_data.get("total_tokens_out", 0),
+                    "last_input_tokens": usage_data.get("last_input_tokens", 0),
+                }
+
+            return ResolvedMessages(
+                messages=normalized,
+                source="jsonl",
+                usage=usage,
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
+            return None
+
+    @staticmethod
+    def _try_database(session_id: str) -> ResolvedMessages:
+        """Load messages from the PostgreSQL database (final fallback)."""
+        from app.db import database
+
+        db_messages = database.get_session_messages(session_id)
+        normalized = [_normalize_db_message(dict(m)) for m in db_messages]
+
+        return ResolvedMessages(
+            messages=normalized,
+            source="database",
+        )
+
+
+def _default_working_dir() -> str:
+    """Get the default working directory from settings."""
+    from app.core.config import settings
+    return str(settings.effective_workspace_dir)
+
+
+def resolve_working_dir(session: Dict[str, Any]) -> str:
+    """Resolve the working directory for a session (auxiliary history/JSONL reader).
+
+    The origin resolver is the SINGLE cwd authority for every session, so this
+    reader defers to it unconditionally — no legacy worktree/project walk. It is
+    resolver-FIRST (no ``project_v2_id`` gate): ``resolve_existing_cwd``
+    self-heals the session's ``project_v2_id`` / ``branch`` off its legacy
+    ``project_id`` / ``worktree_branch`` and returns this runner's checkout path
+    when that dir exists on disk. Crucially it is a PURE READ — it NEVER
+    materializes a checkout (no ``git worktree add`` / clone), which is exactly
+    right here: materialization is the spawn path's job (query_options).
+
+    Returns the default workspace when the resolver yields ``None`` — no
+    project_v2, or a checkout not materialized on this runner. This auxiliary
+    reader degrades instead of raising; it must never break history/JSONL reads.
+    """
+    from app.core import project_resolver
+
+    try:
+        v2_cwd = project_resolver.resolve_existing_cwd(session)
+    except Exception:  # noqa: BLE001 — this reader must never break history reads
+        logger.debug(
+            "resolve_working_dir: resolver failed; using default workspace",
+            exc_info=True,
+        )
+        v2_cwd = None
+    if v2_cwd is not None:
+        return v2_cwd
+    return _default_working_dir()
+
+
+# Module-level singleton
+message_resolver = MessageResolver()

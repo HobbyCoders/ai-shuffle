@@ -1,0 +1,9 @@
+{
+  "name": "ai-shuffle-source-publisher",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pinned Wrangler CLI for app source and installer publication; cloud services live separately.",
+  "devDependencies": {
+    "wrangler": "4.131.1"
+  }
+}

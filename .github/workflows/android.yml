@@ -1,0 +1,291 @@
+name: Android CI
+
+# Android app (android/); cloud services live in hobbycoders-cloud. Manual
+# or called by a release; pull requests run no CI (scripts/local_ci.py). Chat loads the phone UI from the paired worker's
+# /mobile/ (app/mobile_ui.py), so mobile/ and frontend/ changes ship with a
+# worker update and are covered by frontend CI, not an emulator run. The APK
+# bundles mobile/ only as the offline demo. Signed sideload builds require
+# publish_download; normal CI only stages APKs for emulator verification.
+# A merge must not ship a client before its workers serve /mobile/
+# (docs/mobile-desktop-ui-split.md).
+# The publish job only fires from a dispatch or a release workflow_call that
+# sets publish_download.
+#
+# Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
+on:
+  workflow_dispatch:
+    inputs:
+      publish_download:
+        description: Publish only after compatible workers and account hub are deployed and verified
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      publish_download:
+        description: Compatible workers and account hub have been deployed and verified
+        type: boolean
+        default: false
+      release_tag:
+        description: Existing versioned release to attach the verified APK to
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and test Android app
+    # A cold ubuntu-latest runner needs ~18 minutes for unit tests/lint alone;
+    # leave time to package both APKs (and signed release artifacts when asked).
+    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Robolectric's Android 16 runtime requires Java 21; app bytecode stays 17.
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The APK carries mobile/ (+ shared frontend/src/lib) only as the offline
+      # demo; chat loads the UI from the worker. Gradle's checkOfflineDemo task
+      # refuses to assemble without it, so this runs before any gradlew invocation.
+      - name: Chat download bridge tests
+        run: node --test app/src/test/js/chat-downloads.test.cjs
+
+      - name: Build and bundle the offline demo
+        working-directory: frontend
+        run: |
+          npm ci
+          bash ../android/scripts/sync-offline-demo.sh
+
+      - name: Unit tests and Android lint
+        run: |
+          python3 ci/test-apk-download.py
+          python3 ci/test-publish-apk.py
+          python3 ci/test-mobile-apk.py
+          ./gradlew testDebugUnitTest lintDebug --stacktrace
+
+      - name: Build and verify debug APK
+        run: |
+          ./gradlew assembleDebug --max-workers=2 --stacktrace
+          python3 ci/verify-mobile-apk.py app/build/outputs/apk/debug/app-debug.apk
+      - name: Build Android test APK
+        run: ./gradlew assembleDebugAndroidTest --max-workers=2 --stacktrace
+
+      - name: Upload instrumentation APKs
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: android-instrumentation-apks
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+
+      - name: Decode release keystore
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is not set — cannot sign the release APK."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build release APK
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          # Minutes since the Unix epoch fit Android's versionCode range and
+          # increase across both main CI and the separate release workflow.
+          export ANDROID_VERSION_CODE=$(( $(date +%s) / 60 ))
+          if [ -n "$RELEASE_TAG" ]; then
+            version="$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]')"
+            version="${version#v}"; version="${version#V}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || exit 1
+            export ANDROID_VERSION_NAME="$version"
+          fi
+          ./gradlew assembleRelease bundleRelease --stacktrace
+          python3 ci/verify-mobile-apk.py app/build/outputs/apk/release/app-release.apk
+          python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
+
+      - name: Verify APK is signed with the release key
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)"
+          "$APKSIGNER" verify --print-certs "$APK"
+
+      - name: Prepare public APK download
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        run: python3 ci/prepare-apk-download.py
+
+      - name: Upload public download files
+        if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: android-download
+          path: android/app/build/outputs/download/
+          if-no-files-found: error
+
+  android-ui:
+    name: Android emulator verification (API ${{ matrix.api }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub-hosted runners have 4 vCPUs and 16 GB. The app uses no
+          # Google Play services, so both levels run the plain AOSP image:
+          # API 36 google_apis spent the guest CPU on Play services startup,
+          # hit SystemUI/GMS ANRs before install (run 38343028922) and, with
+          # the whole host, still lost window focus and delivered obscured
+          # taps mid-suite (run 38344827383). API 36 keeps the larger guest.
+          - api: 34
+            target: default
+            cores: 2
+            memory: 2048
+          - api: 36
+            target: default
+            cores: 4
+            memory: 4096
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-instrumentation-apks
+          # run-android-ui-tests.sh installs from instrumentation-apks/ relative
+          # to android/, its working directory.
+          path: android/instrumentation-apks
+      - name: Free hosted-runner disk before preparing the AVD
+        run: |
+          df -h
+          # This job only installs prebuilt APKs; none of these toolchains or
+          # container images is used. Keep SDK tools, platforms and system images.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk
+          sudo docker image prune --all --force
+          df -h
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Check emulator readiness and instrumentation result parsers
+        run: |
+          python3 ci/test-emulator-readiness.py
+          python3 ci/test-instrumentation-parser.py
+          python3 ci/test-ui-runner.py
+      - name: Enable emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+      # The emulator action catches launch-hook errors and still attempts boot.
+      # A separate failing step is necessary to genuinely stop before launch.
+      - name: Prepare AVD and check disk space before emulator startup
+        run: |
+          sdkmanager --install platform-tools 'platforms;android-${{ matrix.api }}' emulator 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64'
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          avdmanager create avd --force --name test --package 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64' --device pixel_6 <<< no
+          printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
+          bash ci/emulator-diagnostics.sh before-boot
+          bash ci/emulator-storage.sh check
+      - name: Exercise native onboarding and tool permissions
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: ${{ matrix.target }}
+          arch: x86_64
+          profile: pixel_6
+          working-directory: android
+          # Reuse the AVD whose filesystem passed the standalone preflight.
+          force-avd-creation: false
+          # API 24+ first boot enforces 6 GiB regardless of smaller requests.
+          disk-size: 6144M
+          disable-animations: true
+          pre-emulator-launch-script: bash ci/emulator-diagnostics.sh before-boot
+          # Persist startup errors and guest logcat even if boot fails before script runs.
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back emulated -no-snapshot -memory ${{ matrix.memory }} -cores ${{ matrix.cores }}
+            -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
+          script: bash ci/run-android-ui-tests.sh
+      - name: Collect emulator host diagnostics
+        if: always()
+        run: bash ci/emulator-diagnostics.sh after-emulator
+      # Diagnostics only: a passing run is proven by the job result, so keep
+      # reports, logcat and screenshots only when verification fails.
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 3
+          name: android-ui-verification-api-${{ matrix.api }}
+          path: |
+            ${{ runner.temp }}/android-emulator/
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+            android/app/build/outputs/ui-screenshots/
+            android/app/build/outputs/connected_android_test_additional_output/
+          if-no-files-found: warn
+
+  publish:
+    name: Publish verified Android download
+    needs: [build, android-ui]
+    if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    # Never interrupt an asset upload midway through replacing the rolling APK.
+    concurrency:
+      group: android-download-${{ inputs.release_tag || 'android-latest' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-download
+          path: android-download
+      - name: Publish APK and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash android/ci/publish-apk.sh android-download
+

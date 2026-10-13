@@ -1,0 +1,83 @@
+import { mount } from 'svelte';
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import '../src/app.css';
+import { installMobileShell } from '../src/shell/register';
+
+// The mobile shell (collapsed composer, swipe gesture, controls sheet) is
+// registered before the shared component graph loads, exactly as the app's
+// root layout does. The web UI never has it, so this fixture lives here.
+installMobileShell();
+
+const params = new URLSearchParams(location.search);
+const compact = params.get('layout') !== 'centered';
+const mode = params.get('mode') === 'code' ? 'code' : 'chat';
+const branch = 'feature/mobile-composer-with-a-deliberately-long-branch-name';
+const project = { id: 'composer-fixture', name: 'mobile-composer-repository-with-a-deliberately-long-name', path: '/fixture/composer' };
+
+// Install isolated transports before importing the real component/store graph.
+// No request reaches a backend, and every navigation starts with the same picks.
+localStorage.setItem('ai-shuffle.sessionMode', mode);
+// `voice=on` turns the voice surface on so the call button renders. A call
+// started here creates its session (stubbed) and attaches (stubbed), then stops
+// at the microphone, which the fixture always denies: no audio, no realtime
+// connection, nothing leaves the page.
+const voice = params.get('voice') === 'on';
+const requests: string[] = [];
+const calls: { method: string; path: string; body: unknown }[] = [];
+(window as unknown as { fixtureRequests: string[] }).fixtureRequests = requests;
+(window as unknown as { fixtureCalls: typeof calls }).fixtureCalls = calls;
+const CREATED_SESSION = 'fixture-call-session';
+if (voice) {
+	Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
+		getUserMedia: async () => { throw new DOMException('Fixture denies the microphone', 'NotAllowedError'); },
+	} });
+}
+window.fetch = async (input, init) => {
+	const path = new URL(input instanceof Request ? input.url : String(input), location.href).pathname;
+	const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+	requests.push(path);
+	calls.push({ method, path, body: typeof init?.body === 'string' ? JSON.parse(init.body) : null });
+	let data: unknown = [];
+	if (voice && path.endsWith('/settings/voice')) data = { voice_mode_enabled: true };
+	else if (method === 'POST' && path === '/api/v1/sessions') data = { session_id: CREATED_SESSION, mode };
+	else if (method === 'POST' && path === '/api/v1/sessions/with-worktree') data = { session_id: CREATED_SESSION, branch_name: 'call/auto-fixture', base_branch: 'main', worktree_path: '/fixture/w', status: 'active', query_started: false };
+	else if (method === 'POST' && path === `/api/v1/voice/sessions/${CREATED_SESSION}/attach`) data = { session_id: CREATED_SESSION, client_secret: 'fixture-secret', model: 'gpt-realtime' };
+	else if (path.endsWith('/auth/status')) data = { authenticated: true, claude_authenticated: true, claude_token_valid: true, github_authenticated: true, has_any_credential: true, onboarding_complete: true };
+	else if (path === '/api/v1/projects') data = [project];
+	else if (path.endsWith('/git/status')) data = { is_git_repo: true, current_branch: branch, is_clean: true, default_branch: 'main' };
+	else if (path.endsWith('/git/branches')) data = { branches: [branch, 'main', 'feature/another-branch'].map(name => ({ name, is_current: name === branch, is_remote: false })) };
+	else if (path.endsWith('/git/worktrees')) data = { worktrees: [] };
+	else if (path.endsWith('/sync-worktrees')) data = { is_git_repo: true, active_worktrees: 0, cleaned_up: [] };
+	else if (path.endsWith('/git/graph')) data = { commits: [], total: 0 };
+	else if (path.endsWith('/git/changed-files')) data = { files: [] };
+	else if (path.endsWith('/git/pr-state')) data = { branch, lookup_failed: false };
+	else if (path.endsWith('/cluster/installs')) data = { installs: [], self_instance_id: 'fixture' };
+	else if (path.endsWith('/cluster/projects')) data = { projects: [] };
+	return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+};
+window.WebSocket = class { constructor() { throw new Error('Fixture forbids backend WebSockets'); } } as unknown as typeof WebSocket;
+
+const { auth } = await import('../../frontend/src/lib/stores/auth.svelte');
+await auth.checkAuth();
+const { activeSession } = await import('../../frontend/src/lib/stores/active-session');
+activeSession.newChat();
+if (mode === 'code') {
+	const { appData } = await import('../../frontend/src/lib/stores/app-data.svelte');
+	const { git } = await import('../../frontend/src/lib/stores/git.svelte');
+	await appData.loadProjects();
+	activeSession.setProject(project.id);
+	activeSession.setWorktreeIntent(params.get('worktree') === 'off' ? 'local' : 'worktree');
+	activeSession.setWorktreeBaseBranch(branch);
+	await git.loadRepository(project.id);
+	// Exercise ContextPillBar's active-session row separately from ExecutionModeBar.
+	if (params.get('context') === 'active') activeSession.addSystemMessage('Fixture conversation already has a message.');
+}
+// A branch session needs an agent picked, as in the app.
+if (voice) activeSession.setProfile('fixture-agent');
+// `device=worker` picks another install as the runner for the new session.
+if (params.get('device') === 'worker') activeSession.setDeviceIntent({ id: 'worker-1', name: 'Studio PC' });
+const { default: ComposerGesture } = await import('./ComposerGesture.svelte');
+// Last, as in the app: the mobile rules follow the shared component styles.
+await import('../src/mobile.css');
+mount(ComposerGesture, { target: document.getElementById('app')!, props: { compact } });

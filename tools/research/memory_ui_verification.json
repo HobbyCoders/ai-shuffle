@@ -1,0 +1,51 @@
+{
+  "scope": "isolated real app, Claude Sonnet via existing CLI auth, Chat mode, inference disabled",
+  "save_session": "cb4b6a8c-e7f5-4e59-bb82-2ae386d5d5da",
+  "saved_fact_id": "m1",
+  "saved_revision": 1,
+  "saved_text": "The user's name is Rowan Audit.",
+  "save_receipt_seen_in_ui": true,
+  "cross_session_observation": [
+    "What's my name?\n6:09 PM\nMemory verification\n\nYour name is Rowan Audit."
+  ],
+  "source_session_deletion": {
+    "delete_status": 204,
+    "after_status": 404
+  },
+  "fact_survives_source_deletion": true,
+  "after_source_deleted_and_cold_restart": [
+    "What's my name?\n6:12 PM\nMemory verification\n\nYour name is Rowan Audit."
+  ],
+  "correction": [
+    "What's my name?\n6:12 PM\nMemory verification\n\nYour name is Rowan Audit.\n\nCorrection: my name is Mira Audit, not Rowan Audit. Please update your saved memory.\n6:12 PM\nWorked for 4s\n\u00b7 Searched code 1 time and used 1 tool\nMemory verification\n\nUpdated. Your name is now saved as Mira Audit."
+  ],
+  "correction_record": {
+    "id": "m1",
+    "revision": 2,
+    "text": "The user's name is Mira Audit.",
+    "protected": true
+  },
+  "new_session_after_correction": [
+    "What's my name?\n6:12 PM\nMemory verification\n\nYour name is Mira Audit."
+  ],
+  "forget_conversation": [
+    "Please forget my saved name.\n6:19 PM\nWorked for 8s\n\u00b7 Searched code 1 time and used 1 tool\nMemory verification\n\nDone \u2014 your saved name has been forgotten."
+  ],
+  "new_session_after_forget": [
+    "What's my name?\n6:20 PM\nWorked for 46s\n\u00b7 Used 1 tool\nMemory verification\n\nI don't have your name saved. I know your email is [account email redacted], but nothing beyond that. If you'd like me to remember your name, just tell me and I'll save it."
+  ],
+  "forget_store_readback": {
+    "active": 0,
+    "archived": 0,
+    "recent_tombstones": 1,
+    "deleted_values_remain": false
+  },
+  "notes": [
+    "OpenRouter live attempt failed with HTTP401; native-provider credentials were not verified.",
+    "Successful UI cases used real Claude Sonnet, Chat mode, custom neutral test agent, app inference disabled, provider-native auto memory disabled.",
+    "Source-session deletion and a cold app restart did not remove the saved fact.",
+    "Warm-cache delegated-tool filtering and profile permission alias mapping were fixed after live failures; denial-preservation regression tests were added.",
+    "A later-session CLI cache added qualified bundle names to its deny complement; this was fixed and the final Forget/Recall flow succeeded on the warm cache."
+  ],
+  "personal_data_redacted": true
+}

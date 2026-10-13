@@ -1,0 +1,118 @@
+# AI Shuffle with Docker Compose.
+#
+# 1. Put this file and env.example in an empty folder.
+# 2. Copy env.example to .env and adjust the settings if needed.
+# 3. Run: docker compose up -d
+# 4. Open http://localhost:8000 on this computer.
+#
+# Full guide: "Install with Docker Compose" in the AI Shuffle docs. Needs Docker Engine 24 or later
+# with Compose 2.24 or later, on a 64-bit Intel or AMD (amd64) host.
+#
+# Everything you keep (database, settings, sign-ins, projects) lives in the
+# named volumes below and in WORKSPACE_DIR. Updating is: change
+# AI_SHUFFLE_VERSION in .env, then `docker compose up -d`. Never run
+# `docker compose down -v`; -v deletes the volumes.
+
+name: ai-shuffle
+
+services:
+  ai-shuffle:
+    # A pinned public release. No account or Docker login is needed.
+    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-0.9.6}
+    container_name: ai-shuffle
+    restart: unless-stopped
+
+    # The app stops its agents first, then its private PostgreSQL database
+    # writes a clean checkpoint. That can take up to 90 seconds; Docker's
+    # default of 10 seconds would cut it off.
+    stop_grace_period: 90s
+
+    # The built-in browser (Chromium) needs more shared memory than Docker's
+    # 64 MB default.
+    shm_size: 1gb
+
+    # A burst of short-lived agent processes must not exhaust the process table.
+    pids_limit: 8192
+
+    # The code-mode sandbox around agents' Python code, on by default. These
+    # relax Docker's default seccomp and AppArmor filters and its /proc masking
+    # for the whole container; remove them to opt out. See "The code-mode
+    # sandbox" in the install guide.
+    security_opt:
+      - seccomp=unconfined
+      # Lets the sandbox mount its own /proc:
+      - systempaths=unconfined
+      # Docker ignores this on hosts without AppArmor:
+      - apparmor=unconfined
+
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # Plain http:// on a LAN address needs this off; keep it on behind HTTPS.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Seeds the owner password on the first start only (see env.example).
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      # Optional: links a paid Cloud plan on the first start (see env.example).
+      LICENSE_KEY: ${LICENSE_KEY:-}
+      # Optional: each applies only once uncommented here (a line in .env alone
+      # does not reach the container). The install guide explains each one.
+      # The reverse proxy's address, as AI Shuffle sees it:
+      # TRUSTED_PROXIES: "172.18.0.1"
+      # The code-mode sandbox: auto (the default), required or off:
+      # CODE_MODE_OS_SANDBOX: "auto"
+      # Ranges the built-in browser may open. This list replaces the localhost
+      # default, so keep the first two ranges to still allow localhost:
+      # BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32"
+      # Refuse localhost too (no effect when BROWSER_SSRF_ALLOW is set):
+      # BROWSER_SSRF_ALLOW_LOOPBACK: "false"
+      # Ranges to refuse even if BROWSER_SSRF_ALLOW lists them:
+      # BROWSER_SSRF_BLOCK: "192.168.1.1/32"
+
+    # Loopback only by default: the web UI is reachable from this computer.
+    # To use it from another device, set BIND_HOST in .env to one address of
+    # this host (for example its LAN or Tailscale IP). Never 0.0.0.0, and
+    # never forward this port from your router.
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-8000}:8000"
+
+    volumes:
+      # Database, encryption key, sessions and logs.
+      - data:/data
+      # Your projects. A folder on this host so you can open the files directly.
+      - ${WORKSPACE_DIR:-./workspace}:/workspace
+      # AI Shuffle settings.
+      - fluid-settings:/home/appuser/.fluid
+      # Provider CLI sign-in (the Claude Code CLI, for a Claude subscription),
+      # kept when the container is replaced.
+      - claude-home:/home/appuser/.claude
+      # Provider CLI programs (Claude Code installed on demand from Settings
+      # or setup with Anthropic's installer; it updates itself). Reinstalled
+      # at start only while Keep Claude Code installed is on.
+      - local-home:/home/appuser/.local
+      # GitHub CLI sign-in.
+      - gh-auth:/home/appuser/.config/gh
+      # The built-in browser's profile, so sites you signed in to stay signed in.
+      - browser-profile:/home/appuser/chrome-profile
+
+    # Ready once the database answers. First start can take a few minutes
+    # while it sets up, including installing the Claude Code CLI.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data:
+  fluid-settings:
+  claude-home:
+  local-home:
+  gh-auth:
+  browser-profile:

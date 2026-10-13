@@ -1,0 +1,1201 @@
+/* Playfair Display - self-hosted via fontsource (avoids CSP issues with Google Fonts) */
+
+@import 'tailwindcss';
+
+/* Tailwind v4 discovers template sources itself (project root, honouring
+   .gitignore). The docs markdown is prose, not markup — keep it out of the
+   scan so stray words can't seed utilities into the bundle. */
+@source not './lib/docs/content';
+
+/* `dark:` follows the `.dark` class the theme store sets on <html>, never the
+   OS preference (was `darkMode: 'class'` in tailwind.config.js). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+   DESIGN TOKENS → UTILITIES  (was theme.extend in tailwind.config.js)
+
+   `inline` makes each utility reference the underlying custom property
+   directly (`background-color: var(--primary)`), so utilities track the
+   .dark / .light switch and runtime preset overrides. Without it Tailwind
+   would resolve `--color-primary: var(--primary)` once, on :root.
+   `reference` stops Tailwind re-emitting these as `--color-*` variables on
+   :root — nothing reads them, and the shadow entries below would otherwise
+   be emitted as `--shadow-s: var(--shadow-s)`.
+   ============================================================ */
+@theme inline reference {
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+
+	--color-secondary: var(--secondary);
+
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+
+	--color-success: var(--success);
+
+	--color-warning: var(--warning);
+	--color-warning-foreground: var(--warning-foreground);
+
+	--color-info: var(--info);
+
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+
+	--color-card: var(--card);
+
+	--color-selection: var(--selection);
+	--color-selection-text: var(--selection-text);
+
+	/* Radius scale keyed off the --radius token. `rounded-sm` keeps
+	   Tailwind's default 0.25rem: it is the v4 name for what v3 called a
+	   bare `rounded`. */
+	--radius-lg: var(--radius);
+	--radius-md: calc(var(--radius) - 2px);
+
+	/* Utility names deliberately match the token names (`shadow-s` →
+	   `var(--shadow-s)`, defined in @layer base below). */
+	--shadow-s: var(--shadow-s);
+	--shadow-selection: var(--selection-shadow);
+
+	--background-color-hover-overlay: var(--hover-overlay);
+	--background-color-selection-emphasis: var(--selection-bg-emphasis);
+
+	--border-color-selection: var(--selection-ring);
+}
+
+@layer base {
+	/* ========================================
+	   DARK THEME (Default)
+	   ======================================== */
+	:root,
+	.dark {
+		/* Background colors */
+		--background: oklch(0.145 0.004 240);
+
+		/* Display font */
+		--font-display: 'Playfair Display', Georgia, serif;
+		--foreground: oklch(0.965 0.003 240);
+
+		/* Elevated surfaces */
+		--card: oklch(0.178 0.005 240);
+		--card-foreground: oklch(0.955 0.003 240);
+		--popover: oklch(0.185 0.006 240);
+		--popover-foreground: oklch(0.965 0.003 240);
+
+		/* Primary: Teal accent */
+		--primary: oklch(0.72 0.14 180);
+		--primary-foreground: oklch(0.16 0.03 190);
+
+		/* Secondary/Muted */
+		--secondary: oklch(0.22 0.006 240);
+		--secondary-foreground: oklch(0.90 0.003 240);
+		--muted: oklch(0.225 0.006 240);
+		--muted-foreground: oklch(0.705 0.008 240);
+		--subtle-foreground: oklch(0.575 0.008 240);
+
+		/* Accent for hover states */
+		--accent: oklch(0.24 0.007 240);
+		--accent-foreground: oklch(0.97 0.003 240);
+
+		/* Studio Noir accent set */
+		--emerald: oklch(0.76 0.15 155);
+		--rose: oklch(0.70 0.175 20);
+		--blue: oklch(0.72 0.115 250);
+
+		/* Semantic colors (same hues as the accent set above) */
+		--destructive: oklch(0.70 0.175 20);
+		--destructive-foreground: oklch(0.18 0.045 20);
+		--success: oklch(0.76 0.15 155);
+		--success-foreground: oklch(0.18 0.045 155);
+		--warning: oklch(0.80 0.145 78);
+		--warning-foreground: oklch(0.22 0.05 78);
+		--info: oklch(0.72 0.115 250);
+
+		/* Borders and inputs */
+		--border: oklch(1 0 0 / 0.085);
+		--border-strong: oklch(1 0 0 / 0.15);
+		--input: oklch(1 0 0 / 0.10);
+		--ring: oklch(0.72 0.14 180);
+
+		/* Sidebar plane */
+		--sidebar: oklch(0 0 0);
+		--sidebar-foreground: oklch(0.94 0.003 240);
+		--sidebar-border: oklch(1 0 0 / 0.08);
+		--sidebar-accent: oklch(1 0 0 / 0.045);
+		--sidebar-accent-active: oklch(1 0 0 / 0.085);
+		--sidebar-muted: oklch(0.68 0.008 240);
+
+		/* Studio Noir surface effects */
+		--glow: oklch(0.72 0.14 180 / 0.30);
+		--code-bg: oklch(0.125 0.005 240);
+		--scrim: oklch(1 0 0 / 0.04);
+		--grain-opacity: 0.05;
+
+		/* Shadow system */
+		--shadow-s: 0 1px 2px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.18);
+		--shadow-m: 0 4px 10px rgba(0,0,0,0.32), 0 2px 4px rgba(0,0,0,0.18);
+		--shadow-l: 0 14px 34px rgba(0,0,0,0.42), 0 4px 10px rgba(0,0,0,0.22);
+
+		/* Border radius */
+		--radius: 10px;
+
+		/* Scrollbar colors */
+		--scrollbar-thumb: oklch(0.32 0.006 240);
+		--scrollbar-thumb-hover: oklch(0.42 0.006 240);
+
+		/* Glass effects (derived from theme variables for preset compatibility) */
+		--glass-bg: color-mix(in oklch, var(--card) 85%, transparent);
+		--glass-border: color-mix(in oklch, var(--border) 40%, transparent);
+
+		/* Border variations */
+		--border-subtle: oklch(1 0 0 / 0.06);
+
+		/* Primary variations */
+		--primary-10: oklch(0.72 0.14 180 / 0.1);
+		--primary-20: oklch(0.72 0.14 180 / 0.2);
+
+		/* Glow effect - uses theme primary color */
+		--glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
+
+		/* Selection state system - derived from --ring for preset compatibility */
+		--selection: var(--ring);
+		--selection-bg: color-mix(in oklch, var(--selection) 10%, transparent);
+		--selection-bg-emphasis: color-mix(in oklch, var(--selection) 15%, transparent);
+		--selection-ring: color-mix(in oklch, var(--selection) 70%, transparent);
+		--selection-glow: color-mix(in oklch, var(--selection) 25%, transparent);
+		--selection-text: var(--selection);
+		--selection-shadow: 0 0 0 1.5px var(--selection-ring), 0 0 10px var(--selection-glow);
+		--selection-shadow-subtle: 0 0 8px var(--selection-glow);
+
+		/* Interactive hover overlay */
+		--hover-overlay: oklch(1 0 0 / 0.055);
+		--active-overlay: oklch(1 0 0 / 0.09);
+		--border-subtle: oklch(1 0 0 / 0.06);
+
+		/* ========================================
+		   SEMANTIC UI COLORS
+		   Tool badges, feature indicators, chips, status
+		   ======================================== */
+
+		/* Tool colors - for permission badges and tool indicators */
+		--tool-bash: oklch(0.76 0.15 155);           /* Emerald - terminal/bash */
+		--tool-read: oklch(0.72 0.115 250);          /* Blue - reading files */
+		--tool-write: oklch(0.80 0.145 78);          /* Amber - writing files */
+		--tool-edit: oklch(0.77 0.14 55);            /* Orange - editing */
+		--tool-glob: oklch(0.72 0.145 300);          /* Purple - glob patterns */
+		--tool-grep: oklch(0.70 0.155 285);          /* Violet - searching */
+		--tool-web: oklch(0.72 0.14 180);            /* Teal - web operations */
+		--tool-task: oklch(0.70 0.13 265);           /* Indigo - task/agent */
+		--tool-notebook: oklch(0.72 0.15 350);       /* Rose - notebook */
+		--tool-default: oklch(0.575 0.008 240);      /* Gray - fallback */
+
+		/* Feature colors - for plugin/profile feature indicators */
+		--feature-commands: oklch(0.72 0.115 250);   /* Blue */
+		--feature-agents: oklch(0.72 0.145 300);     /* Purple */
+		--feature-skills: oklch(0.76 0.15 155);      /* Emerald */
+		--feature-hooks: oklch(0.77 0.14 55);        /* Orange */
+
+		/* Status colors with opacity variants */
+		--status-success-bg: oklch(0.76 0.15 155 / 0.14);
+		--status-success-border: oklch(0.76 0.15 155 / 0.28);
+		--status-warning-bg: oklch(0.80 0.145 78 / 0.14);
+		--status-warning-border: oklch(0.80 0.145 78 / 0.28);
+		--status-error-bg: oklch(0.70 0.175 20 / 0.14);
+		--status-error-border: oklch(0.70 0.175 20 / 0.28);
+		--status-info-bg: oklch(0.72 0.115 250 / 0.14);
+		--status-info-border: oklch(0.72 0.115 250 / 0.28);
+		--status-pending-bg: oklch(0.575 0.008 240 / 0.14);
+		--status-pending-border: oklch(0.575 0.008 240 / 0.28);
+		/* Merged: the one state git owns that no semantic token covered.
+		   Purple, same hue as --feature-agents, so a merged PR reads apart
+		   from success green at a glance. */
+		--status-merged: oklch(0.74 0.145 300);
+
+		/* Chip/badge colors - derived from theme primary */
+		--chip-primary-bg: color-mix(in srgb, var(--primary) 15%, transparent);
+
+		/* Modal overlay */
+		--modal-overlay: oklch(0 0 0 / 0.6);
+
+		/* Button gradients */
+		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) c h));
+
+		/* Input states - dark mode (derived from theme variables) */
+		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
+		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
+		--input-bg-focus: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
+		--input-border: var(--border);
+		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
+
+		/* Typography - font families (can be overridden by theme presets) */
+		--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+		--font-serif: 'Playfair Display', Georgia, ui-serif, serif;
+		--font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+
+	/* ========================================
+	   LIGHT THEME
+	   ======================================== */
+	.light {
+		/* Background colors */
+		--background: oklch(0.995 0 0);
+		--foreground: oklch(0.21 0.005 250);
+
+		/* Elevated surfaces */
+		--card: oklch(1 0 0);
+		--card-foreground: oklch(0.21 0.005 250);
+		--popover: oklch(1 0 0);
+		--popover-foreground: oklch(0.21 0.005 250);
+
+		/* Primary: Teal accent (slightly adjusted for light bg) */
+		--primary: oklch(0.60 0.115 180);
+		--primary-foreground: oklch(0.99 0 0);
+
+		/* Secondary/Muted */
+		--secondary: oklch(0.958 0.002 250);
+		--secondary-foreground: oklch(0.28 0.006 250);
+		--muted: oklch(0.965 0.002 250);
+		--muted-foreground: oklch(0.475 0.008 250);
+		--subtle-foreground: oklch(0.565 0.008 250);
+
+		/* Accent for hover states */
+		--accent: oklch(0.955 0.003 250);
+		--accent-foreground: oklch(0.21 0.005 250);
+
+		/* Studio Noir accent set */
+		--emerald: oklch(0.55 0.14 155);
+		--rose: oklch(0.55 0.19 22);
+		--blue: oklch(0.55 0.16 255);
+
+		/* Semantic colors (same hues as the accent set above) */
+		--destructive: oklch(0.55 0.19 22);
+		--destructive-foreground: oklch(0.99 0 0);
+		--success: oklch(0.55 0.14 155);
+		--success-foreground: oklch(0.99 0 0);
+		--warning: oklch(0.63 0.145 62);
+		--warning-foreground: oklch(0.22 0.05 62);
+		--info: oklch(0.55 0.16 255);
+
+		/* Borders and inputs */
+		--border: oklch(0.21 0.01 250 / 0.11);
+		--border-strong: oklch(0.21 0.01 250 / 0.20);
+		--input: oklch(0.21 0.01 250 / 0.14);
+		--ring: oklch(0.60 0.115 180);
+
+		/* Sidebar plane */
+		--sidebar: oklch(0.968 0.002 250);
+		--sidebar-foreground: oklch(0.21 0.005 250);
+		--sidebar-border: oklch(0.21 0.01 250 / 0.10);
+		--sidebar-accent: oklch(0.21 0.01 250 / 0.045);
+		--sidebar-accent-active: oklch(0.21 0.01 250 / 0.085);
+		--sidebar-muted: oklch(0.455 0.008 250);
+
+		/* Studio Noir surface effects */
+		--glow: oklch(0.60 0.115 180 / 0.22);
+		--code-bg: oklch(0.975 0.002 250);
+		--scrim: oklch(0.21 0.01 250 / 0.035);
+		--grain-opacity: 0.028;
+
+		/* Shadow system (lighter for light theme) */
+		--shadow-s: 0 1px 2px rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.08);
+		--shadow-m: 0 4px 10px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.06);
+		--shadow-l: 0 14px 34px rgba(0,0,0,0.10), 0 4px 10px rgba(0,0,0,0.05);
+
+		/* Border radius */
+		--radius: 10px;
+
+		/* Scrollbar colors */
+		--scrollbar-thumb: oklch(0.82 0.004 250);
+		--scrollbar-thumb-hover: oklch(0.72 0.006 250);
+
+		/* Glass effects (derived from theme variables for preset compatibility) */
+		--glass-bg: color-mix(in oklch, var(--card) 85%, transparent);
+		--glass-border: color-mix(in oklch, var(--border) 40%, transparent);
+
+		/* Glow effect - uses theme primary color */
+		--glow-color-soft: color-mix(in srgb, var(--primary) 20%, transparent);
+
+		/* Selection state system - light theme adjustments */
+		--selection: var(--ring);
+		--selection-bg: color-mix(in oklch, var(--selection) 8%, transparent);
+		--selection-bg-emphasis: color-mix(in oklch, var(--selection) 12%, transparent);
+		--selection-ring: color-mix(in oklch, var(--selection) 55%, transparent);
+		--selection-glow: color-mix(in oklch, var(--selection) 18%, transparent);
+		--selection-text: var(--selection);
+		--selection-shadow: 0 0 0 1.5px var(--selection-ring), 0 0 8px var(--selection-glow);
+		--selection-shadow-subtle: 0 0 6px var(--selection-glow);
+
+		/* Interactive hover overlay */
+		--hover-overlay: oklch(0.21 0.01 250 / 0.045);
+		--active-overlay: oklch(0.21 0.01 250 / 0.075);
+		--border-subtle: oklch(0.21 0.01 250 / 0.07);
+
+		/* ========================================
+		   SEMANTIC UI COLORS - LIGHT THEME
+		   ======================================== */
+
+		/* Tool colors - slightly darker for light backgrounds */
+		--tool-bash: oklch(0.55 0.14 155);
+		--tool-read: oklch(0.55 0.16 255);
+		--tool-write: oklch(0.63 0.145 62);
+		--tool-edit: oklch(0.58 0.155 50);
+		--tool-glob: oklch(0.52 0.17 300);
+		--tool-grep: oklch(0.50 0.18 285);
+		--tool-web: oklch(0.60 0.115 180);
+		--tool-task: oklch(0.50 0.15 265);
+		--tool-notebook: oklch(0.54 0.17 350);
+		--tool-default: oklch(0.565 0.008 250);
+
+		/* Feature colors - light theme */
+		--feature-commands: oklch(0.55 0.16 255);
+		--feature-agents: oklch(0.52 0.17 300);
+		--feature-skills: oklch(0.55 0.14 155);
+		--feature-hooks: oklch(0.58 0.155 50);
+
+		/* Status colors with opacity variants - light theme */
+		--status-success-bg: oklch(0.55 0.14 155 / 0.12);
+		--status-success-border: oklch(0.55 0.14 155 / 0.25);
+		--status-warning-bg: oklch(0.63 0.145 62 / 0.12);
+		--status-warning-border: oklch(0.63 0.145 62 / 0.25);
+		--status-error-bg: oklch(0.55 0.19 22 / 0.12);
+		--status-error-border: oklch(0.55 0.19 22 / 0.25);
+		--status-info-bg: oklch(0.55 0.16 255 / 0.12);
+		--status-info-border: oklch(0.55 0.16 255 / 0.25);
+		--status-pending-bg: oklch(0.565 0.008 250 / 0.12);
+		--status-pending-border: oklch(0.565 0.008 250 / 0.25);
+		/* Merged — light theme; darkened the same way the other purples are. */
+		--status-merged: oklch(0.52 0.17 300);
+
+		/* Chip/badge colors - derived from theme primary */
+		--chip-primary-bg: color-mix(in srgb, var(--primary) 12%, transparent);
+
+		/* Modal overlay - light theme */
+		--modal-overlay: oklch(0 0 0 / 0.5);
+
+		/* Button gradients - light theme */
+		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.06) c h));
+
+		/* Input states - light mode (derived from theme variables) */
+		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
+		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
+		--input-bg-focus: var(--background);
+		--input-border: var(--border);
+		--input-border-hover: color-mix(in oklch, var(--border) 70%, var(--primary) 30%);
+
+		/* Primary variations */
+		--primary-10: oklch(0.60 0.115 180 / 0.1);
+		--primary-20: oklch(0.60 0.115 180 / 0.2);
+	}
+
+	/* Theme transition for smooth changes */
+	html {
+		transition: background-color 0.3s ease, color 0.3s ease;
+	}
+
+	/* Tailwind v4 preflight defaults borders to currentcolor (v3: gray-200);
+	   everything borders with the theme token instead. */
+	*,
+	::before,
+	::after {
+		border-color: var(--border);
+	}
+
+	/* Tailwind v4 preflight no longer gives buttons a pointer cursor. */
+	button:not(:disabled),
+	[role="button"]:not(:disabled) {
+		cursor: pointer;
+	}
+
+	/* Smoother transitions */
+	* {
+		transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
+		transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+		transition-duration: 150ms;
+	}
+
+	/* Better focus states */
+	:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	html, body {
+		background-color: var(--background);
+		color: var(--foreground);
+		min-height: 100vh;
+		min-height: 100dvh;
+		height: 100%;
+		font-family: var(--font-sans);
+		font-size: 14px;
+		line-height: 1.5;
+		font-synthesis: none;
+		text-rendering: optimizeLegibility;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		font-feature-settings: "cv05" 1, "ss01" 1;
+		overflow: hidden;
+	}
+
+	::selection {
+		background: color-mix(in oklch, var(--primary) 30%, transparent);
+	}
+}
+
+/* Tabular monospace helper (Studio Noir) */
+.mono {
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	font-feature-settings: "tnum" 1, "zero" 1;
+	letter-spacing: -0.01em;
+}
+
+/* ============================================================
+   COMPOSITING BUDGET  (PERFORMANCE_REVIEW §3.2 R13)
+   ------------------------------------------------------------
+   Every backdrop-filter over the scrolling transcript makes the compositor
+   re-sample the pixels behind it on each frame the transcript moves, and a
+   `mix-blend-mode` overlay forces the whole stacking context through a blend
+   pass. On integrated GPUs that is the difference between a smooth scroll and
+   a visibly stepped one.
+
+   So the effects are expressed as ONE set of custom properties. Capable
+   machines keep the design's character (glass composer, frosted rails, grain);
+   a machine that asks for less transparency — or that the app has profiled as
+   low-end (`data-fx="low"`, see utils/perf-profile.ts) — gets `none`, which
+   removes the compositing work entirely rather than merely reducing the blur
+   radius, plus opaque surfaces so the UI still reads as layered.
+
+   Blur radii are also down from the pre-review values (composer 22px → 8px,
+   rails 12px → 8px): blur cost grows with the radius, and the visual difference
+   above 8px on these small surfaces is marginal. */
+:root {
+	--fx-rail-backdrop: blur(8px) saturate(140%);
+	--fx-grain-blend: overlay;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+	:root {
+		--fx-rail-backdrop: none;
+		--fx-grain-blend: normal;
+		--grain-opacity: 0;
+		--glass-bg: var(--card);
+	}
+}
+
+:root[data-fx='low'] {
+	--fx-rail-backdrop: none;
+	--fx-grain-blend: normal;
+	--grain-opacity: 0;
+	--glass-bg: var(--card);
+}
+
+/* Procedural grain overlay for large surfaces.
+   Host element must be position: relative (or otherwise positioned). */
+.grain::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	z-index: 40;
+	opacity: var(--grain-opacity);
+	mix-blend-mode: var(--fx-grain-blend, overlay);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
+	background-size: 200px 200px;
+}
+
+/* Scrollbar styling using CSS variables */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+	background: transparent;
+	border-radius: calc(var(--radius, 0.75rem) * 0.33);
+}
+
+*::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	border-radius: calc(var(--radius, 0.75rem) * 0.33);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+	background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+/* Glass effect for modals/popovers */
+.glass {
+	background: var(--glass-bg);
+	backdrop-filter: var(--fx-rail-backdrop);
+	-webkit-backdrop-filter: var(--fx-rail-backdrop);
+}
+
+/* Code blocks (chrome is rebuilt in wave 2 — keep this neutral) */
+pre {
+	background-color: var(--code-bg);
+	border-radius: calc(var(--radius, 10px) * 0.67);
+	padding: 1rem;
+	overflow-x: auto;
+	font-family: var(--font-mono);
+	font-size: 12.25px;
+	line-height: 1.72;
+}
+
+code {
+	font-family: var(--font-mono);
+}
+
+/* Button base styles */
+.btn {
+	@apply px-4 py-2 rounded-lg font-medium;
+	transition: all 150ms ease;
+}
+
+.btn:active {
+	transform: scale(0.98);
+}
+
+.btn-primary {
+	background: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) calc(c + 0.02) calc(h - 5)));
+	color: var(--primary-foreground);
+	box-shadow: var(--shadow-s);
+}
+
+.btn-primary:hover {
+	box-shadow: var(--shadow-m);
+	filter: brightness(1.1);
+}
+
+/* Disabled: visibly unavailable. This rule is unlayered and Tailwind v4 utilities
+   live in @layer utilities, so it beats `disabled:opacity-*` and `cursor-*` utilities
+   whatever their specificity (:where only keeps it weaker than other unlayered rules).
+   To change a disabled button's look, add an unlayered rule, not a utility. */
+.btn:where(:disabled) {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.btn:disabled:active {
+	transform: none;
+}
+
+.btn-primary:disabled:hover {
+	box-shadow: var(--shadow-s);
+	filter: none;
+}
+
+.btn-secondary {
+	background-color: var(--secondary);
+	color: var(--secondary-foreground);
+	border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+	background-color: var(--accent);
+}
+
+/* Input styles */
+.input {
+	width: 100%;
+	padding: 0.5rem 1rem;
+	background-color: var(--input);
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	color: var(--foreground);
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+/* Inputs use theme variables for consistent theming */
+.input {
+	background-color: var(--input-bg);
+	border-color: var(--input-border);
+}
+
+.input:hover:not(:focus) {
+	background-color: var(--input-bg-hover);
+	border-color: var(--input-border-hover);
+}
+
+.input::placeholder {
+	color: var(--muted-foreground);
+}
+
+.input:focus {
+	outline: none;
+	box-shadow: 0 0 0 2px var(--ring);
+	border-color: var(--ring);
+	background-color: var(--input-bg-focus);
+}
+
+/* Select element styling */
+select.input {
+	cursor: pointer;
+	appearance: none;
+	-webkit-appearance: none;
+	-moz-appearance: none;
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+	background-position: right 0.5rem center;
+	background-repeat: no-repeat;
+	background-size: 1.25em 1.25em;
+	padding-right: 2.5rem;
+}
+
+.dark select.input {
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+}
+
+select.input option {
+	background-color: var(--card);
+	color: var(--foreground);
+	padding: 0.5rem;
+}
+
+/* Global select element styling (for selects without .input class) */
+select {
+	color-scheme: light dark;
+}
+
+select option {
+	background-color: var(--popover);
+	color: var(--popover-foreground);
+}
+
+.dark select option {
+	background-color: oklch(0.20 0.01 260);
+}
+
+.light select option {
+	background-color: oklch(1 0 0);
+}
+
+/* Card styles */
+.card {
+	background-color: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	transition: box-shadow 200ms ease, transform 200ms ease;
+}
+
+.card:hover {
+	box-shadow: var(--shadow-m);
+}
+
+/* Markdown prose styling (Studio Noir body metrics) */
+.prose {
+	color: var(--foreground);
+	max-width: 100%;
+	width: 100%;
+	font-size: 14px;
+	line-height: 1.68;
+	overflow-wrap: break-word;
+	word-wrap: break-word;
+}
+
+.prose :where(p):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 12px;
+}
+
+.prose :where(p):last-child:not(:where([class~="not-prose"] *)) {
+	margin-bottom: 0;
+}
+
+/* Inline code pill — never applies inside <pre> */
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"] *)) {
+	font-family: var(--font-mono);
+	font-weight: 400;
+	font-size: 12.5px;
+	padding: 1.5px 5px;
+	border-radius: 5px;
+	background-color: var(--muted);
+	border: 1px solid var(--border);
+	color: var(--foreground);
+	word-break: break-all;
+	overflow-wrap: anywhere;
+}
+
+.prose :where(pre code):not(:where([class~="not-prose"] *)) {
+	font-family: var(--font-mono);
+	font-size: inherit;
+	padding: 0;
+	background-color: transparent;
+	border: none;
+}
+
+.prose :where(a):not(:where([class~="not-prose"] *)) {
+	color: var(--primary);
+	font-weight: 500;
+	text-decoration: underline;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 2px;
+}
+
+.prose :where(a):not(:where([class~="not-prose"] *)):hover {
+	opacity: 0.8;
+}
+
+.prose :where(ul):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 12px;
+	padding-left: 18px;
+	list-style-type: disc;
+	list-style-position: outside;
+}
+
+.prose :where(ol):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 12px;
+	padding-left: 18px;
+	list-style-type: decimal;
+	list-style-position: outside;
+}
+
+.prose :where(li):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 5px;
+	display: list-item;
+}
+
+.prose :where(li):not(:where([class~="not-prose"] *))::marker {
+	color: var(--subtle-foreground);
+}
+
+.prose :where(li > p):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 0;
+	display: inline;
+}
+
+.prose :where(h1):not(:where([class~="not-prose"] *)) {
+	font-size: 1.5rem;
+	font-weight: 700;
+	margin-top: 1.5rem;
+	margin-bottom: 1rem;
+}
+
+.prose :where(h2):not(:where([class~="not-prose"] *)) {
+	font-size: 1.25rem;
+	font-weight: 700;
+	margin-top: 1.25rem;
+	margin-bottom: 0.75rem;
+}
+
+.prose :where(h3):not(:where([class~="not-prose"] *)) {
+	font-size: 1.125rem;
+	font-weight: 700;
+	margin-top: 1rem;
+	margin-bottom: 0.5rem;
+}
+
+.prose :where(h4):not(:where([class~="not-prose"] *)) {
+	font-size: 1rem;
+	font-weight: 700;
+	margin-top: 0.75rem;
+	margin-bottom: 0.5rem;
+}
+
+.prose :where(blockquote):not(:where([class~="not-prose"] *)) {
+	border-left: 4px solid var(--primary);
+	padding-left: 1rem;
+	font-style: italic;
+	background-color: color-mix(in oklch, var(--muted) 20%, transparent);
+	padding-top: 0.5rem;
+	padding-bottom: 0.5rem;
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
+/* Table wrapper for horizontal scrolling on mobile */
+.prose :where(table):not(:where([class~="not-prose"] *)) {
+	display: block;
+	width: 100%;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
+.prose :where(table):not(:where([class~="not-prose"] *)) tbody,
+.prose :where(table):not(:where([class~="not-prose"] *)) thead {
+	display: table;
+	width: 100%;
+	border-collapse: collapse;
+}
+
+.prose :where(th):not(:where([class~="not-prose"] *)) {
+	border: 1px solid var(--border);
+	padding: 0.5rem 0.75rem;
+	background-color: var(--muted);
+	text-align: left;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.prose :where(td):not(:where([class~="not-prose"] *)) {
+	border: 1px solid var(--border);
+	padding: 0.5rem 0.75rem;
+}
+
+.prose :where(tr):not(:where([class~="not-prose"] *)):hover {
+	background-color: color-mix(in oklch, var(--muted) 30%, transparent);
+}
+
+.prose :where(strong):not(:where([class~="not-prose"] *)) {
+	font-weight: 600;
+}
+
+.prose :where(em):not(:where([class~="not-prose"] *)) {
+	font-style: italic;
+}
+
+/* ========================================
+   RESPONSIVE UTILITY CLASSES / MOBILE LAYOUT FALLBACKS — removed
+   These width-keyed visibility helpers (.mobile-only, .desktop-only,
+   .mobile-hidden, .desktop-hidden, .tablet-only, .tablet-hidden,
+   .context-panel-desktop, .dock-desktop, .rail-desktop, .rail-mobile,
+   .main-content-responsive, .has-mobile-rail, .context-panel-responsive,
+   .rail-responsive, .deck-layout-responsive and the matching
+   [data-layout] selectors) had no consumers anywhere in the app. The
+   mobile/desktop shell is now chosen by platform, not width — see
+   docs/mobile-desktop-ui-split.md. Gate shell-specific chrome on
+   the html[data-platform] attribute instead (the web build is desktop-only;
+   the mobile rules live in mobile/src/mobile.css).
+   ======================================== */
+
+/* ========================================
+   MOBILE OPTIMIZATIONS
+   ======================================== */
+
+@media (max-width: 639px) {
+	html {
+		font-size: 16px;
+		-webkit-text-size-adjust: 100%;
+	}
+
+	.btn {
+		min-height: 44px;
+		padding-left: 1rem;
+		padding-right: 1rem;
+	}
+
+	.input {
+		min-height: 44px;
+		font-size: 16px;
+	}
+
+	select.input {
+		font-size: 16px;
+	}
+
+	}
+
+/* ========================================
+   ACCESSIBILITY: REDUCED MOTION
+   ======================================== */
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	/* The streaming cursor is injected as raw HTML by AssistantMessage, so it
+	   carries Tailwind's animate-pulse and is outside any component's scoped
+	   styles — it needs an explicit global stop, and must settle FULLY VISIBLE
+	   rather than mid-fade. Same for the "live" dot on a streaming name line. */
+	.streaming-cursor {
+		animation: none !important;
+		opacity: 1 !important;
+	}
+
+	}
+
+/* Touch-friendly tap targets */
+button, a, .clickable {
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* ── Generated media (images / video / audio rendered inline in chat) ────────
+   Markup is produced by src/lib/utils/media.ts and injected via {@html}, so
+   these styles must be global (Svelte scoped styles do not reach {@html}). */
+.generated-media-container {
+	position: relative;
+}
+/* Hover/focus reveal for the download + expand overlay buttons */
+.media-overlay-buttons {
+	opacity: 0;
+}
+.generated-media-container:hover .media-overlay-buttons,
+.media-overlay-buttons:focus-within {
+	opacity: 1;
+}
+/* Touch devices have no hover — keep the controls visible */
+@media (hover: none) {
+	.media-overlay-buttons {
+		opacity: 1;
+	}
+}
+.generated-media-container .media-zoomable {
+	cursor: zoom-in;
+}
+.generated-media-container.generated-audio audio {
+	height: 2.25rem;
+}
+
+/* ── Composer context chips ─────────────────────────────────────────────────
+   The small filled chips that float above the chat composer (agent, runner,
+   repository, branch, worktree). Shared by ProfileSelector, ExecutionModeBar,
+   BranchSelector and ContextPillBar, so the look lives here once. Components
+   layer their own scoped rules (sheet-mode rows, open/unset states) on top. */
+.ctx-chip {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 22px;
+	max-width: 100%;
+	min-width: 0;
+	padding: 0 7px;
+	background: var(--muted);
+	border: 0;
+	border-radius: 5px;
+	color: var(--muted-foreground);
+	font: inherit;
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	transition: background-color 0.12s ease, color 0.12s ease;
+}
+button.ctx-chip,
+label.ctx-chip {
+	cursor: pointer;
+}
+button.ctx-chip:hover:not(:disabled),
+label.ctx-chip:hover,
+button.ctx-chip.open {
+	background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
+	color: var(--foreground);
+}
+button.ctx-chip:disabled {
+	cursor: default;
+}
+.ctx-chip:focus-visible,
+.ctx-chip:has(input:focus-visible) {
+	outline: 1px solid var(--primary);
+	outline-offset: 2px;
+}
+.ctx-chip > svg,
+.ctx-chip > :where(span, div) > svg {
+	flex-shrink: 0;
+	color: var(--subtle-foreground);
+}
+.ctx-chip .ctx-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+/* Trailing chevron on menu chips: smaller and dimmer than the leading glyph. */
+.ctx-chip .ctx-chip-chev {
+	width: 10px;
+	height: 10px;
+	margin-left: -1px;
+	color: var(--subtle-foreground);
+	opacity: 0.8;
+}
+/* The checkbox-style worktree chip: a real (visually hidden) input drives a
+   12px box that fills with the accent when checked. */
+.ctx-chip input[type='checkbox'] {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	opacity: 0;
+	pointer-events: none;
+}
+.ctx-chip .ctx-chip-cb {
+	display: grid;
+	place-items: center;
+	width: 12px;
+	height: 12px;
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px var(--subtle-foreground);
+	background: transparent;
+	flex-shrink: 0;
+	transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.ctx-chip .ctx-chip-cb > svg {
+	width: 9px;
+	height: 9px;
+	color: var(--primary-foreground);
+	display: none;
+}
+.ctx-chip .ctx-chip-cb.checked {
+	background: var(--primary);
+	box-shadow: none;
+}
+.ctx-chip .ctx-chip-cb.checked > svg {
+	display: block;
+}
+/* Hairline separator between chip groups. */
+.ctx-sep {
+	width: 1px;
+	height: 12px;
+	margin: 0 2px;
+	background: var(--border-strong);
+	flex-shrink: 0;
+}
+
+/* ============================================================
+   DESKTOP APP CHROME
+   The desktop shell (desktop/) is a frameless Electron window whose
+   OS window controls are overlaid on the page. `html.desktop` is set by
+   $lib/services/desktop.ts. Chromium's Window Controls Overlay reports
+   the area the controls leave free through env(titlebar-area-*):
+   on macOS the traffic lights take the left edge, on Windows and Linux
+   the caption buttons take the right edge. The top strip of the layout
+   (sidebar brand row + top bar) becomes the drag handle; anything
+   clickable inside it opts back out with no-drag.
+   ============================================================ */
+html.desktop {
+	--titlebar-left: env(titlebar-area-x, 0px);
+	--titlebar-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+	/* The strip that doubles as the window title bar: Sidebar `.sb-head`
+	   (48px) and the two top bars (52px) share this height. */
+	--titlebar-height: env(titlebar-area-height, 52px);
+}
+
+/* Expanded chat previews must stay below native caption buttons, which
+   are drawn above the web page (including modal dialogs). */
+html.desktop:not(.desktop-fullscreen) {
+	--desktop-overlay-top: var(--titlebar-height);
+}
+
+html.desktop .sb-head,
+html.desktop .topbar {
+	-webkit-app-region: drag;
+	app-region: drag;
+	user-select: none;
+}
+html.desktop .sb-head :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right),
+html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right) {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
+
+/* Electron applies drag and no-drag regions in document order and ignores
+   stacking, so a later drag region wins over an earlier no-drag one drawn on
+   top of it. Two consequences (#1823):
+   - Notifications draw in the NotificationDock, which sits under the top bar
+     in both layout and document order and is no-drag itself.
+   - In a narrow window the floating sidebar covers the start of the top bar
+     but comes before it in the document, so its header buttons (bell, update)
+     lost their clicks to the strip. While it floats, the strip stops dragging;
+     its scrim covers the page anyway. */
+html.desktop .app-body:has(> .sidebar-slot.floating) .topbar {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
+
+/* Keep the drag strips exactly as tall as the OS title-bar area so
+   double-click-to-maximise and drag hit the same band everywhere. */
+html.desktop .sb-head {
+	height: var(--titlebar-height);
+}
+html.desktop .topbar {
+	height: var(--titlebar-height);
+}
+
+/* macOS: traffic lights sit over whichever pane is leftmost. */
+html.desktop-darwin .sidebar-slot .sb-head {
+	padding-left: calc(var(--titlebar-left) + 2px);
+}
+html.desktop-darwin .app-body > .main-panel:first-child .topbar,
+html.desktop-darwin .app-shell.mobile .topbar-mobile {
+	padding-left: calc(var(--titlebar-left) + 4px);
+}
+html.desktop-darwin.desktop-fullscreen .sidebar-slot .sb-head,
+html.desktop-darwin.desktop-fullscreen .app-body > .main-panel:first-child .topbar,
+html.desktop-darwin.desktop-fullscreen .app-shell.mobile .topbar-mobile {
+	padding-left: 4px;
+}
+
+/* Windows and Linux: caption buttons sit over the right end of the top bar. */
+html.desktop-win32 .topbar,
+html.desktop-linux .topbar {
+	padding-right: calc(var(--titlebar-right) + 10px);
+}
+html.desktop-win32.desktop-fullscreen .topbar,
+html.desktop-linux.desktop-fullscreen .topbar {
+	padding-right: 14px;
+}
+/* The mobile-width top bar has nothing on its right; give the caption
+   buttons the spacer's width instead of the title. */
+html.desktop-win32 .topbar-mobile .tb-spacer,
+html.desktop-linux .topbar-mobile .tb-spacer {
+	width: calc(var(--titlebar-right) + 8px);
+}
+
+/* Dim the top strip slightly when the window is in the background, the
+   way native title bars do. */
+html.desktop.desktop-blurred :is(.sb-head, .topbar) {
+	opacity: 0.85;
+}
+
+/* ---- Unified strip -------------------------------------------------------
+   The sidebar's black plane continues across the whole window: the main
+   panel's top bar takes the sidebar colours, the vertical divider between
+   sidebar and panel starts below the strip, and the strip's only edge is
+   the hairline over the (lighter) main panel. The strip holds what the two
+   headers already held: brand, search and bell on the left; sidebar toggle,
+   breadcrumb, the current page's actions and the account badge on the
+   right. Nothing else moves up here. */
+html.desktop .topbar {
+	background: var(--sidebar);
+	color: var(--sidebar-foreground);
+	border-bottom-color: var(--sidebar-border);
+}
+html.desktop .topbar .tb-icon:hover {
+	background: var(--sidebar-accent);
+}
+html.desktop .sidebar-slot:not(.floating) {
+	border-right-color: transparent;
+}
+html.desktop .sidebar-slot:not(.floating)::after {
+	content: '';
+	position: absolute;
+	top: var(--titlebar-height);
+	bottom: 0;
+	right: -1px;
+	width: 1px;
+	background: var(--sidebar-border);
+	pointer-events: none;
+}
+/* Page actions lent to the strip keep their own button styles; only the
+   spacing is normalised so pages with a primary button and pages with a
+   search field sit on the same line. */
+html.desktop .topbar .page-actions > :is(button, a) {
+	height: 30px;
+}

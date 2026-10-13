@@ -1,0 +1,363 @@
+<script lang="ts">
+	import Banner from '$lib/components/Banner.svelte';
+	/**
+	 * AddProjectModal - Shared "Add Project" modal with directory browser
+	 *
+	 * Used by WorkspaceSelector and ProjectCard to create new projects.
+	 * Includes DirectoryBrowser for location selection, auto-derived name/ID from path.
+	 */
+	import { X } from 'lucide-svelte';
+	import { appData } from '$lib/stores/app-data.svelte';
+	import { getWorkspaceConfig } from '$lib/api/auth';
+	import { onMount } from 'svelte';
+	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
+	import { focusTrap } from '$lib/components/ui/focus-trap';
+
+	interface Props {
+		open: boolean;
+		onClose: () => void;
+		onCreated?: (projectId: string) => void;
+	}
+
+	let { open, onClose, onCreated }: Props = $props();
+
+	let isLocalMode = $state(false);
+
+	let projectId = $state('');
+	let projectName = $state('');
+	let projectPath = $state('');
+	let adding = $state(false);
+	let addError = $state<string | null>(null);
+	let nameManuallyEdited = $state(false);
+	let idManuallyEdited = $state(false);
+
+	onMount(async () => {
+		try {
+			const config = await getWorkspaceConfig();
+			isLocalMode = config.is_local_mode;
+		} catch {
+			// Default to non-local on error
+		}
+	});
+
+	// Reset form when modal opens
+	$effect(() => {
+		if (open) {
+			projectId = '';
+			projectName = '';
+			projectPath = '';
+			addError = null;
+			nameManuallyEdited = false;
+			idManuallyEdited = false;
+		}
+	});
+
+	function deriveNameAndId(path: string) {
+		const dirName = path.split(/[/\\]/).filter(Boolean).pop() || '';
+		if (!nameManuallyEdited) {
+			projectName = dirName;
+		}
+		if (!idManuallyEdited) {
+			projectId = dirName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 50);
+		}
+	}
+
+	function handleDirectorySelect(path: string) {
+		projectPath = path;
+		deriveNameAndId(path);
+	}
+
+	function handlePathInput(e: Event) {
+		const value = (e.target as HTMLInputElement).value;
+		projectPath = value;
+		if (value.trim()) {
+			deriveNameAndId(value);
+		}
+	}
+
+	async function handleAddProject() {
+		if (!projectId.trim() || !projectName.trim() || !projectPath.trim()) return;
+
+		adding = true;
+		addError = null;
+
+		try {
+			const created = await appData.createProject({
+				id: projectId.trim(),
+				name: projectName.trim(),
+				path: projectPath.trim()
+			});
+			onClose();
+			// Use the server-assigned id — the backend may rewrite it (auto-suffix
+			// on a cross-install id collision), so passing the requested id would
+			// select a project that GET /projects never returns.
+			onCreated?.(created.id);
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			addError = err.detail || err.message || 'Failed to add project';
+		} finally {
+			adding = false;
+		}
+	}
+
+	function handleWindowKeydown(e: KeyboardEvent) {
+		if (open && e.key === 'Escape' && !e.defaultPrevented) {
+			e.preventDefault();
+			onClose();
+		}
+	}
+</script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
+
+{#if open}
+	<div class="create-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="add-project-title" tabindex="-1" use:focusTrap>
+		<button class="create-modal-backdrop-btn" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
+		<div class="create-modal add-project-modal">
+			<div class="create-modal-header">
+				<h3 id="add-project-title" class="create-modal-title">Add Project</h3>
+				<button class="create-modal-close" onclick={onClose} aria-label="Close">
+					<X size={16} strokeWidth={1.5} />
+				</button>
+			</div>
+
+			{#if addError}
+				<Banner message={addError} />
+			{/if}
+
+			<div class="create-modal-field">
+				<span class="create-modal-label">Location</span>
+				<DirectoryBrowser
+					selectedPath={projectPath}
+					onSelect={handleDirectorySelect}
+				/>
+			</div>
+
+			<div class="create-modal-field">
+				<label class="create-modal-label" for="add-project-path">Path</label>
+				<input
+					id="add-project-path"
+					type="text"
+					class="create-modal-input create-modal-input--mono"
+					placeholder={isLocalMode ? '/path/to/project' : 'my-project'}
+					value={projectPath}
+					oninput={handlePathInput}
+					onkeydown={(e) => { if (e.key === 'Enter' && projectId.trim() && projectName.trim() && projectPath.trim()) handleAddProject(); }}
+				/>
+				<span class="path-hint">Select a folder above or type a path. New folders will be created automatically.</span>
+			</div>
+
+			<div class="create-modal-row">
+				<div class="create-modal-field create-modal-field--half">
+					<label class="create-modal-label" for="add-project-name">Display Name</label>
+					<input
+						id="add-project-name"
+						type="text"
+						class="create-modal-input"
+						placeholder="My Project"
+						bind:value={projectName}
+						oninput={() => { nameManuallyEdited = true; }}
+						onkeydown={(e) => { if (e.key === 'Enter' && projectId.trim() && projectName.trim() && projectPath.trim()) handleAddProject(); }}
+					/>
+				</div>
+				<div class="create-modal-field create-modal-field--half">
+					<label class="create-modal-label" for="add-project-id">Project ID</label>
+					<input
+						id="add-project-id"
+						type="text"
+						class="create-modal-input create-modal-input--mono"
+						placeholder="my-project"
+						bind:value={projectId}
+						oninput={() => { idManuallyEdited = true; }}
+						onkeydown={(e) => { if (e.key === 'Enter' && projectId.trim() && projectName.trim() && projectPath.trim()) handleAddProject(); }}
+					/>
+				</div>
+			</div>
+
+			<div class="create-modal-actions">
+				<button class="modal-btn cancel" onclick={onClose}>
+					Cancel
+				</button>
+				<button
+					class="modal-btn create"
+					disabled={!projectId.trim() || !projectName.trim() || !projectPath.trim() || adding}
+					onclick={handleAddProject}
+				>
+					{#if adding}Adding...{:else}Add Project{/if}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<style>
+	.create-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+	}
+
+	.create-modal-backdrop-btn {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		background: color-mix(in oklch, var(--background) 70%, transparent);
+		backdrop-filter: blur(4px);
+		border: none;
+		cursor: default;
+		padding: 0;
+	}
+
+	.create-modal {
+		position: relative;
+		z-index: 1;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 20px;
+		width: 380px;
+		max-width: 90vw;
+		box-shadow: var(--shadow-l);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.add-project-modal {
+		width: 500px;
+	}
+
+	.create-modal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.create-modal-title {
+		font-size: 0.9375rem;
+		font-weight: 600;
+		color: var(--foreground);
+		margin: 0;
+	}
+
+	.create-modal-close {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		background: transparent;
+		border: none;
+		border-radius: 6px;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
+
+	.create-modal-close:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+
+	.create-modal-field {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.create-modal-field--half {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.create-modal-row {
+		display: flex;
+		gap: 12px;
+	}
+
+	.create-modal-label {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+	}
+
+	.create-modal-input {
+		width: 100%;
+		padding: 8px 12px;
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		outline: none;
+		transition: border-color 150ms ease;
+	}
+
+	.create-modal-input--mono {
+		font-family: var(--font-mono, 'JetBrains Mono', 'SF Mono', monospace);
+		font-size: 0.75rem;
+	}
+
+	.create-modal-input:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
+	.path-hint {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		opacity: 0.7;
+	}
+
+	.create-modal-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-top: 4px;
+	}
+
+	.modal-btn {
+		padding: 6px 14px;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		border-radius: 8px;
+		border: none;
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
+
+	.modal-btn.cancel {
+		background: var(--secondary);
+		color: var(--muted-foreground);
+	}
+
+	.modal-btn.cancel:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.modal-btn.create {
+		background: var(--primary);
+		color: var(--primary-foreground);
+	}
+
+	.modal-btn.create:hover {
+		opacity: 0.9;
+	}
+
+	.modal-btn.create:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	@media (max-width: 400px) {
+		.create-modal-row {
+			flex-direction: column;
+		}
+	}
+</style>

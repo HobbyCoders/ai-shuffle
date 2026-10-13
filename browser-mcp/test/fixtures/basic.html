@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>browser-mcp fixture</title>
+  </head>
+  <body>
+    <header>
+      <h1>Fixture Page</h1>
+      <nav aria-label="Primary">
+        <a href="#home">Home</a>
+        <a href="#about">About</a>
+      </nav>
+    </header>
+    <main>
+      <p>Some intro paragraph that is not interactive.</p>
+      <label>Name <input id="name" type="text" /></label>
+      <button id="go" onclick="document.getElementById('out').textContent = 'clicked ' + document.getElementById('name').value">Submit</button>
+      <p id="out"></p>
+      <ul id="rows"></ul>
+      <!-- Tall spacer so the deep target sits well below the fold, exercising
+           the region-screenshot -> coordinate-act round trip on a scrolled page. -->
+      <div style="height:1500px"></div>
+      <button
+        id="deep"
+        style="width:200px;height:40px"
+        onclick="document.getElementById('deepout').textContent = 'deep-clicked'"
+      >
+        Deep Button
+      </button>
+      <p id="deepout"></p>
+    </main>
+    <script>
+      // Emit console output so browser_console has something to filter.
+      console.log("fixture-console-log ready");
+      console.error("fixture-console-error boom");
+      // Render many similar rows to exercise sibling collapsing.
+      const ul = document.getElementById("rows");
+      for (let i = 1; i <= 20; i++) {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = "#item-" + i;
+        a.textContent = "Item " + i;
+        li.appendChild(a);
+        ul.appendChild(li);
+      }
+    </script>
+  </body>
+</html>

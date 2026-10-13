@@ -1,0 +1,257 @@
+name: Build and Push Docker Image
+
+# Images build ON DEMAND and through release.yml — not on every merge.
+# Per-merge builds were removed for cost: ~40 images a day were pushed and
+# never pulled, since deploys happen when someone asks for one, not when a PR
+# lands.
+#
+#   - manual main builds -> immutable candidate/full-SHA tags only
+#   - release.yml -> immutable version/full-SHA tags, or verified digest reuse
+#
+# No moving aliases here. release.yml's final promote-image job moves aliases
+# by digest only after lifecycle, buyer-install and source-signing gates pass.
+#
+# The package is PRIVATE: ghcr.io/hobbycoders/ai-shuffle-server. The old
+# ghcr.io/hobbycoders/ai-shuffle package was public, and GitHub never lets a
+# public package become private again, so it is frozen and nothing pushes to
+# it. Customers pull through the licensed registry path in
+# docs/install/registry.md, never from GHCR directly.
+#
+# linux/amd64 only. The arm64 leg doubled every build and nothing consumed it
+# (the Unraid host and the cloud worker are both amd64); a manifest list of one
+# platform needs no digest/merge dance, so this is a single direct push.
+on:
+  # Manual trigger (with the no-cache escape hatch).
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Rebuild an existing vX.Y.Z tag using the verification tools from this workflow ref'
+        required: false
+        type: string
+      image_digest:
+        description: 'Reuse this verified immutable digest instead of rebuilding'
+        required: false
+        type: string
+      candidate_tag:
+        description: 'Immutable canary tag; staging never moves aliases'
+        required: false
+        type: string
+      promote_latest:
+        description: 'Must remain false; aliases require the final release promotion job'
+        required: false
+        type: boolean
+        default: false
+      no_cache:
+        description: 'Build without Docker cache (forces full rebuild)'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Immutable release tag to build and verify'
+        required: true
+        type: string
+      image_digest:
+        description: 'Reuse this verified immutable digest instead of rebuilding'
+        required: false
+        type: string
+      candidate_tag:
+        description: 'Immutable canary tag; staging never moves aliases'
+        required: false
+        type: string
+      promote_latest:
+        description: 'Must remain false; aliases require the final release promotion job'
+        required: false
+        type: boolean
+        default: false
+      no_cache:
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      digest:
+        description: 'Immutable published image digest'
+        value: ${{ jobs.build.outputs.digest }}
+      image:
+        description: 'Private image repository the release was pushed to'
+        value: ${{ jobs.build.outputs.image }}
+
+# Serialize a release tag without cancelling a publish; manual branch rebuilds
+# can still supersede each other. Different release versions do not conflict.
+concurrency:
+  group: docker-build-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: ${{ inputs.release_tag == '' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ai-shuffle-server
+
+jobs:
+  build:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.published.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate requested release tag
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]'
+
+      # Keep release source immutable while allowing repaired verification tools.
+      - name: Checkout release source
+        if: inputs.release_tag != ''
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          path: release-source
+          fetch-depth: 0
+
+      - name: Identify image source
+        id: source
+        working-directory: ${{ inputs.release_tag && 'release-source' || '.' }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sequence=$(python3 "$GITHUB_WORKSPACE/scripts/release/sequence_offset.py" show --revision HEAD)" >> "$GITHUB_OUTPUT"
+          # The release tag is the version source: "0.8.18" on a tag,
+          # "0.8.18-dev.N+g<sha>" on main. Empty (tags not fetched) falls back
+          # to the checked-in app.__version__.
+          echo "app_version=$(python3 "$GITHUB_WORKSPACE/android/ci/resolve-version-name.py" --release-tag "$RELEASE_TAG" 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+
+      - name: Validate staging inputs
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          PROMOTE: ${{ inputs.promote_latest }}
+        run: |
+          [ "$PROMOTE" != true ] || { echo 'Use the final release promotion job; builders never move aliases'; exit 1; }
+          if [ -n "$CANDIDATE_TAG" ]; then
+            [[ "$CANDIDATE_TAG" =~ ^candidate-[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$ ]] || exit 1
+            [ "$PROMOTE" != true ] || exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker requires lowercase image names but github.repository preserves casing
+      - name: Lowercase image name
+        id: image
+        run: |
+          echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+          echo "image=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          # A release always gets its exact version. latest, X.Y and X move
+          # only when the caller promotes a final release (release.yml does);
+          # rebuilding an old tag never drags them backwards. Prereleases
+          # never get X.Y or X (metadata-action skips them).
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            # Moving aliases are only written by the final release promotion job.
+            type=raw,value=${{ inputs.candidate_tag }},enable=${{ inputs.candidate_tag != '' }}
+            # Tag with git short SHA (simple prefix, works for all events)
+            type=raw,value=sha-${{ steps.source.outputs.sha }}
+
+      - name: Verify and load an existing candidate digest
+        if: inputs.image_digest != ''
+        env:
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          SOURCE: ${{ inputs.release_tag && 'release-source' || '.' }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 scripts/release/verify_image.py --digest "$IMAGE_DIGEST" --checkout "$SOURCE"
+          if [ -n "$RELEASE_TAG" ]; then
+            actual=$(docker buildx imagetools inspect "$IMAGE:${RELEASE_TAG#v}" --format '{{.Manifest.Digest}}')
+            [ "$actual" = "$IMAGE_DIGEST" ] || { echo 'Version tag differs from reused digest'; exit 1; }
+          fi
+
+      - name: Build candidate image
+        if: inputs.image_digest == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.release_tag && 'release-source' || '.' }}
+          file: ${{ inputs.release_tag && 'release-source/Dockerfile' || './Dockerfile' }}
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ai-shuffle:postgres-candidate
+          load: true
+          push: false
+          # Shared scope; GitHub cache access remains branch-isolated.
+          cache-from: type=gha,scope=Dockerfile
+          cache-to: type=gha,mode=max,scope=Dockerfile
+          # inputs.no_cache is '' on tag pushes; coerce to a strict boolean
+          # (the action rejects anything but YAML true/false literals).
+          no-cache: ${{ inputs.no_cache == true }}
+          build-args: |
+            ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
+            APPLICATION_SOURCE_TREE=${{ steps.source.outputs.tree }}
+            APP_VERSION=${{ steps.source.outputs.app_version }}
+
+      # Verify release and candidate images, including reused digests, before
+      # publication. Plain branch SHA builds retain the existing cheaper path;
+      # container-postgres.yml can verify those independently.
+      - name: Verify actual container lifecycle and UI
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' || inputs.candidate_tag != '' || inputs.image_digest != ''
+        run: python scripts/verify_container_postgres.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
+
+      - name: Upload container evidence
+        if: always() && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' || inputs.candidate_tag != '' || inputs.image_digest != '')
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 7
+          name: container-postgres-${{ github.sha }}
+          path: ${{ runner.temp }}/container-postgres
+          if-no-files-found: ignore
+
+      - name: Push the candidate without rebuilding
+        if: inputs.image_digest == ''
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: python3 scripts/release/push_candidate.py
+
+      - name: Record immutable image digest
+        id: published
+        env:
+          REUSED_DIGEST: ${{ inputs.image_digest }}
+          VERSION_TAG: ${{ steps.meta.outputs.version }}
+        run: |
+          if [ -n "$REUSED_DIGEST" ]; then
+            digest="$REUSED_DIGEST"
+          else
+            digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION_TAG" --format '{{.Manifest.Digest}}')
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"

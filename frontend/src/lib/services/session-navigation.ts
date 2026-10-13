@@ -1,0 +1,62 @@
+import { activeSession } from '$lib/stores/active-session';
+import { appData } from '$lib/stores/app-data.svelte';
+import { appMode, normalizeSessionMode } from '$lib/stores/sessionMode.svelte';
+import { layout } from '$lib/stores/layout.svelte';
+import { archivedChats } from '$lib/stores/archived-chats';
+import { subagentChats } from '$lib/stores/subagent-chats';
+import type { Session } from '$lib/api/client';
+
+/** A same-origin deep link whose fallback stays in the current desktop or phone UI. */
+export function sessionHref(sessionId: string, pathname: string = typeof window === 'undefined' ? '/' : window.location.pathname): string {
+	// Accept pathnames only, not origins, protocol-relative URLs, queries or fragments.
+	const path = pathname.startsWith('/') && !pathname.startsWith('//') && !/[\\?#\x00-\x20\x7f]/.test(pathname)
+		? pathname : '/';
+	return `${path}?session=${encodeURIComponent(sessionId)}`;
+}
+
+function ordinarySessionClick(event: MouseEvent): boolean {
+	return !event.defaultPrevented && event.button === 0 && !event.ctrlKey && !event.metaKey
+		&& !event.shiftKey && !event.altKey;
+}
+
+/** Shared session selection for the sidebar, deep links and in-app links. */
+export function openSession(sessionId: string, openedSession?: Session): void {
+	// Persistent assistant homes are intentionally absent from ordinary lists.
+	const session = openedSession ?? appData.current.sessions.find((row) => row.id === sessionId);
+	const worktreeInfo = session?.worktree_id || session?.worktree_branch || session?.branch ? {
+		worktreeId: session.worktree_id ?? null,
+		worktreeBranch: session.worktree_branch ?? session.branch ?? '',
+		worktreeDeleted: session.worktree_deleted ?? false,
+		worktreeIntent: 'worktree' as const,
+	} : null;
+	appMode.set(normalizeSessionMode(session?.mode), false);
+	// An archived chat opens read-only; /live corrects a row this tab lacks.
+	if (session) archivedChats.mark(sessionId, session.status === 'archived');
+	// A subagent's chat opens without Git or private access controls.
+	if (session?.is_worker !== undefined) subagentChats.mark(sessionId, session.is_worker);
+	const select = () => {
+		activeSession.switchSession(sessionId, session?.project_id, worktreeInfo,
+			session?.title || null, session?.project_v2_id ?? null);
+		layout.openChat(sessionId);
+	};
+	if (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed) {
+		layout.setSidebarCollapsed(true);
+		requestAnimationFrame(select);
+	} else {
+		select();
+	}
+}
+
+/** Open a Task or Swarm child's transcript, known to be a subagent's chat before /live answers. */
+export function openSubagentLink(event: MouseEvent, sessionId: string): void {
+	if (!ordinarySessionClick(event)) return;
+	subagentChats.mark(sessionId, true);
+	openSessionLink(event, sessionId);
+}
+
+/** Consume ordinary link clicks in the current app; retain native new-tab gestures. */
+export function openSessionLink(event: MouseEvent, sessionId: string): void {
+	if (!ordinarySessionClick(event)) return;
+	event.preventDefault();
+	openSession(sessionId);
+}

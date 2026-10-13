@@ -1,0 +1,506 @@
+/**
+ * Autocomplete Design System
+ *
+ * Shared styles for slash command (/) and mention (@) autocomplete menus.
+ * Command palette style — clean, focused, minimal chrome.
+ * Uses the project's CSS variable theming system.
+ */
+
+/* ========================================
+   Entrance Animations
+   ======================================== */
+
+@keyframes autocomplete-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes autocomplete-item-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ========================================
+   Panel Container
+   ======================================== */
+
+.autocomplete-panel {
+  background: var(--popover, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, calc(var(--radius, 0.75rem) * 1.167));
+  box-shadow: var(--shadow-l, 0 8px 32px -8px oklch(0 0 0 / 0.3));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: autocomplete-slide-up 120ms ease-out;
+}
+
+/* ========================================
+   Header & Footer Bars
+   ======================================== */
+
+.autocomplete-header,
+.autocomplete-footer {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  background: var(--muted);
+  font-size: var(--text-xs, 0.6875rem);
+  color: var(--text-secondary, var(--muted-foreground));
+  letter-spacing: var(--tracking-wide, 0.02em);
+  flex-shrink: 0;
+}
+
+.autocomplete-header {
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+}
+
+.autocomplete-footer {
+  border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 12px);
+}
+
+.autocomplete-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ========================================
+   Keyboard Hints
+   ======================================== */
+
+.autocomplete-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 var(--space-1, 4px);
+  background: color-mix(in oklch, var(--background) 80%, var(--muted));
+  border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  border-radius: var(--radius-sm, calc(var(--radius, 0.75rem) * 0.5));
+  box-shadow: 0 1px 0 color-mix(in oklch, var(--border) 30%, transparent);
+  font-family: var(--card-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 0.625rem;
+  font-weight: 500;
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.autocomplete-hint-text {
+  color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
+  font-size: var(--text-xs, 0.6875rem);
+}
+
+/* ========================================
+   List Container
+   ======================================== */
+
+.autocomplete-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1, 4px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Item stagger animation */
+.autocomplete-list > li {
+  animation: autocomplete-item-enter 100ms ease-out both;
+}
+.autocomplete-list > li:nth-child(1) { animation-delay: 0ms; }
+.autocomplete-list > li:nth-child(2) { animation-delay: 15ms; }
+.autocomplete-list > li:nth-child(3) { animation-delay: 30ms; }
+.autocomplete-list > li:nth-child(4) { animation-delay: 45ms; }
+.autocomplete-list > li:nth-child(5) { animation-delay: 60ms; }
+.autocomplete-list > li:nth-child(6) { animation-delay: 75ms; }
+.autocomplete-list > li:nth-child(7) { animation-delay: 90ms; }
+.autocomplete-list > li:nth-child(8) { animation-delay: 105ms; }
+.autocomplete-list > li:nth-child(9) { animation-delay: 120ms; }
+.autocomplete-list > li:nth-child(10) { animation-delay: 135ms; }
+.autocomplete-list > li:nth-child(n+11) { animation: none; opacity: 1; }
+
+/* Custom scrollbar */
+.autocomplete-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.autocomplete-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.autocomplete-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, color-mix(in oklch, var(--foreground) 15%, transparent));
+  border-radius: var(--radius-full, 9999px);
+}
+
+.autocomplete-list::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover, color-mix(in oklch, var(--foreground) 25%, transparent));
+}
+
+/* ========================================
+   Section Headers
+   ======================================== */
+
+.autocomplete-section-header {
+  padding: var(--space-2, 8px) var(--space-3, 12px) var(--space-1, 4px);
+  font-size: var(--text-xs, 0.6875rem);
+  font-weight: 600;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* Reset animation for section header li */
+li.autocomplete-section-header {
+  animation: none;
+  opacity: 1;
+}
+
+/* ========================================
+   List Items
+   ======================================== */
+
+.autocomplete-item {
+  width: 100%;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  padding-left: calc(var(--space-3, 12px) - 3px);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 12px);
+  text-align: left;
+
+  background: transparent;
+  border: none;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
+  cursor: pointer;
+
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--foreground);
+
+  transition: background 80ms ease;
+}
+
+.autocomplete-item:hover {
+  background: color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+
+.autocomplete-item.selected {
+  background: color-mix(in oklch, var(--primary) 8%, var(--popover, var(--card)));
+  border-left-color: var(--primary);
+}
+
+/* ========================================
+   Item Content Structure
+   ======================================== */
+
+.autocomplete-item-icon {
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.autocomplete-item-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.autocomplete-item-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.autocomplete-item-name {
+  font-size: var(--text-sm, 0.75rem);
+  font-weight: 500;
+  color: var(--foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.autocomplete-item-description {
+  font-size: var(--text-xs, 0.6875rem);
+  color: var(--text-secondary, var(--muted-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.autocomplete-item-meta {
+  flex-shrink: 0;
+  font-size: var(--text-xs, 0.6875rem);
+  color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1, 4px);
+}
+
+/* ========================================
+   Match Highlighting
+   ======================================== */
+
+.autocomplete-match {
+  font-weight: 700;
+  color: var(--primary);
+}
+
+/* ========================================
+   Command-Specific Styles
+   ======================================== */
+
+.command-name {
+  font-family: var(--card-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: var(--text-sm, 0.75rem);
+  font-weight: 500;
+  color: var(--primary);
+}
+
+.command-hint {
+  font-family: var(--card-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: var(--text-xs, 0.6875rem);
+  color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 60%, transparent));
+  margin-left: var(--space-1, 4px);
+}
+
+/* ========================================
+   Type Badges
+   ======================================== */
+
+.autocomplete-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2, 8px);
+  font-size: var(--text-xs, 0.6875rem);
+  font-weight: 500;
+  border-radius: var(--radius-full, 9999px);
+  flex-shrink: 0;
+}
+
+/* Command types */
+.autocomplete-badge.type-plugin {
+  background: color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 15%, transparent);
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+  border: 1px solid color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 25%, transparent);
+}
+
+.autocomplete-badge.type-interactive {
+  background: color-mix(in oklch, var(--primary) 15%, transparent);
+  color: var(--primary);
+  border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent);
+}
+
+.autocomplete-badge.type-builtin {
+  background: color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 15%, transparent);
+  color: var(--feature-skills, oklch(0.65 0.18 145));
+  border: 1px solid color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 25%, transparent);
+}
+
+.autocomplete-badge.type-custom {
+  background: color-mix(in oklch, var(--feature-commands, oklch(0.65 0.15 240)) 15%, transparent);
+  color: var(--feature-commands, oklch(0.65 0.15 240));
+  border: 1px solid color-mix(in oklch, var(--feature-commands, oklch(0.65 0.15 240)) 25%, transparent);
+}
+
+.autocomplete-badge.type-skill {
+  background: color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 15%, transparent);
+  color: var(--feature-skills, oklch(0.65 0.18 145));
+  border: 1px solid color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 25%, transparent);
+}
+
+/* File types */
+.autocomplete-badge.type-folder {
+  background: color-mix(in oklch, var(--warning) 15%, transparent);
+  color: var(--warning);
+  border: 1px solid color-mix(in oklch, var(--warning) 25%, transparent);
+}
+
+.autocomplete-badge.type-history {
+  background: color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 15%, transparent);
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+  border: 1px solid color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 25%, transparent);
+}
+
+.autocomplete-badge.type-notes {
+  background: color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 15%, transparent);
+  color: var(--feature-skills, oklch(0.65 0.18 145));
+  border: 1px solid color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 25%, transparent);
+}
+
+.autocomplete-badge.type-chat {
+  background: color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 15%, transparent);
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+  border: 1px solid color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 25%, transparent);
+}
+
+.autocomplete-badge.type-note {
+  background: color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 15%, transparent);
+  color: var(--feature-skills, oklch(0.65 0.18 145));
+  border: 1px solid color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 25%, transparent);
+}
+
+.autocomplete-badge.type-subagents,
+.autocomplete-badge.type-subagent {
+  background: color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 15%, transparent);
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+  border: 1px solid color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 25%, transparent);
+}
+
+/* ========================================
+   File Icons - Semantic Colors
+   ======================================== */
+
+.autocomplete-icon-folder {
+  color: var(--warning);
+}
+
+.autocomplete-icon-file {
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.autocomplete-icon-history {
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+}
+
+.autocomplete-icon-notes {
+  color: var(--feature-skills, oklch(0.65 0.18 145));
+}
+
+.autocomplete-icon-subagents,
+.autocomplete-icon-subagent {
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+}
+
+/* ========================================
+   Breadcrumb Navigation
+   ======================================== */
+
+.autocomplete-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1, 4px);
+  font-size: var(--text-xs, 0.6875rem);
+  color: var(--muted-foreground);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.autocomplete-breadcrumb-segment {
+  cursor: pointer;
+  color: var(--primary);
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: opacity 80ms ease;
+}
+
+.autocomplete-breadcrumb-segment:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.autocomplete-breadcrumb-separator {
+  color: var(--muted-foreground);
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+.autocomplete-breadcrumb-current {
+  color: var(--foreground);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ========================================
+   Loading State
+   ======================================== */
+
+.autocomplete-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6, 24px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-size: var(--text-sm, 0.75rem);
+}
+
+.autocomplete-loading-spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid color-mix(in oklch, var(--primary) 20%, transparent);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: autocomplete-spin 0.8s linear infinite;
+  margin-right: var(--space-2, 8px);
+}
+
+@keyframes autocomplete-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ========================================
+   Empty State
+   ======================================== */
+
+.autocomplete-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6, 24px);
+  color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
+  font-size: var(--text-sm, 0.75rem);
+  text-align: center;
+  gap: var(--space-2, 8px);
+}
+
+.autocomplete-empty-icon {
+  width: 2rem;
+  height: 2rem;
+  opacity: 0.4;
+}
+
+/* Touch device adjustments */
+@media (pointer: coarse) {
+  .autocomplete-item {
+    min-height: 44px;
+  }
+
+  /* Hide keyboard shortcut hints on touch devices - not applicable */
+  .autocomplete-footer {
+    display: none;
+  }
+}

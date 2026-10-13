@@ -1,0 +1,307 @@
+"""
+Notification database operations — the user-facing notification history (the bell).
+
+The persisted backing store for the unified notification system. Every bell
+notification (and any explicitly persisted banner) lands here:
+
+- **Server-originated** notifications written by
+  ``app/services/notification_service.py`` (the ``emit_notification`` funnel).
+- **Client-originated** persisted notifications POSTed by the frontend store
+  (``frontend/src/lib/stores/notifications.ts``) to ``/api/v1/notifications``.
+
+Distinct from ``error_log`` (debug/observability, read by the GetAppErrors MCP
+tool): this is the *user-facing message layer*, with per-row ``read`` /
+``dismissed`` state.
+
+Rows are serialized to the wire shape the frontend store consumes directly:
+``created_at`` becomes epoch milliseconds and ``action_kind`` / ``action_payload``
+collapse into a single ``action`` object. Read paths are defensive (return
+``[]`` / ``0`` rather than raising) so the bell can never crash the page.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
+
+from app.db.base import get_db, row_to_dict, rows_to_list, logger
+
+# Bound a single fetch — the NotificationCenter only ever shows recent history.
+DEFAULT_LIMIT = 100
+MAX_LIMIT = 200
+
+
+class NotificationOwner(str):
+    """Legacy storage key with an explicit authenticated event audience."""
+
+    def __new__(cls, user_id: str, user_type: str):
+        value = super().__new__(cls, user_id)
+        value.user_type = user_type
+        return value
+
+
+def normalize_surface(surface: Optional[str]) -> str:
+    """Return the two-surface wire value without rewriting historical rows.
+
+    Existing ``toast`` / ``inline`` rows remain intact in storage and are exposed
+    as persistent bell notifications. Unknown historical values degrade the same
+    way rather than leaking unsupported surface values to clients.
+    """
+    return "banner" if surface == "banner" else "notification"
+
+
+def _serialize(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Convert a DB row into the frontend-facing wire shape.
+
+    ``created_at`` → epoch milliseconds (the store's ``AppNotification.created_at``
+    is a JS timestamp); ``action_kind`` + ``action_payload`` → a single ``action``
+    object. Never raises — bad rows degrade gracefully.
+    """
+    if not row:
+        return None
+
+    created = row.get("created_at")
+    created_ms = 0
+    try:
+        if hasattr(created, "timestamp"):
+            created_ms = int(created.timestamp() * 1000)
+        elif isinstance(created, str) and created:
+            created_ms = int(datetime.fromisoformat(created).timestamp() * 1000)
+    except (ValueError, TypeError, OverflowError):
+        created_ms = 0
+
+    action = None
+    if row.get("action_kind"):
+        payload = row.get("action_payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (ValueError, TypeError):
+                payload = None
+        action = {"kind": row["action_kind"], "payload": payload}
+
+    count_payload = {}
+    if row.get("category") == "wake_failed":
+        raw = row.get("action_payload") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = {}
+        if isinstance(raw, dict):
+            count_payload = raw
+    return {
+        **({"occurrence_count": count_payload.get("_occurrence_count", 1)}
+           if row.get("category") == "wake_failed" else {}),
+        "id": row["id"],
+        "user_id": row.get("user_id"),
+        "severity": row.get("severity") or "info",
+        "surface": normalize_surface(row.get("surface")),
+        "category": row.get("category"),
+        "source": row.get("source") or "server",
+        "title": row.get("title"),
+        "message": row.get("message") or "",
+        "session_id": row.get("session_id"),
+        "read": bool(row.get("read")),
+        "dismissed": bool(row.get("dismissed")),
+        # Everything that reaches this table is persisted history by definition.
+        "persist": True,
+        "created_at": created_ms,
+        "action": action,
+    }
+
+
+def create_notification(
+    user_id: Optional[str],
+    *,
+    severity: str = "info",
+    message: str,
+    surface: str = "notification",
+    category: Optional[str] = None,
+    source: str = "server",
+    title: Optional[str] = None,
+    action_kind: Optional[str] = None,
+    action_payload: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+    read: bool = False,
+    dismissed: bool = False,
+    notification_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist a notification and return it in wire shape.
+
+    ``notification_id`` lets a client-originated notification reuse the id it
+    already generated locally (so optimistic UI + the persisted row line up).
+    Idempotent on id collision: an existing row is returned untouched.
+    """
+    nid = notification_id or str(uuid.uuid4())
+    surface = normalize_surface(surface)
+    created_at = datetime.now(timezone.utc).isoformat()
+    payload_json = json.dumps(action_payload) if action_payload is not None else None
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if category == "wake_failed" and source == "server" and session_id:
+            # Serialize all stalled emitters for a durable session, including
+            # competing runtimes; owner scope is part of the open-incident key.
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            cursor.execute(
+                "SELECT * FROM notifications WHERE session_id=%s "
+                "AND user_id IS NOT DISTINCT FROM %s AND category='wake_failed' "
+                "AND source='server' AND dismissed=FALSE ORDER BY created_at DESC LIMIT 1",
+                (session_id, user_id),
+            )
+            existing = row_to_dict(cursor.fetchone())
+            if existing:
+                stored = existing.get("action_payload") or {}
+                if isinstance(stored, str):
+                    stored = json.loads(stored)
+                count = int(stored.get("_occurrence_count", 1)) + 1
+                updated_payload = {**(action_payload or stored), "_occurrence_count": count}
+                cursor.execute(
+                    "UPDATE notifications SET message=%s, title=%s, severity=%s, "
+                    "action_payload=%s WHERE id=%s RETURNING *",
+                    (message, title, severity, json.dumps(updated_payload), existing["id"]),
+                )
+                return _serialize(row_to_dict(cursor.fetchone()))
+            payload_json = json.dumps({**(action_payload or {}), "_occurrence_count": 1})
+        cursor.execute(
+            """INSERT INTO notifications
+                  (id, user_id, severity, surface, category, source, title,
+                   message, action_kind, action_payload, session_id, read,
+                   dismissed, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (id) DO NOTHING
+               RETURNING *""",
+            (nid, user_id, severity, surface, category, source, title,
+             message, action_kind, payload_json, session_id, read,
+             dismissed, created_at),
+        )
+        row = cursor.fetchone()
+        if row:
+            return _serialize(row_to_dict(row))
+        # id already existed — return the existing row.
+        cursor.execute("SELECT * FROM notifications WHERE id = %s", (nid,))
+        return _serialize(row_to_dict(cursor.fetchone()))
+
+
+def get_notification(user_id: Optional[str], notification_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single notification scoped to its owner."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM notifications WHERE id = %s AND user_id IS NOT DISTINCT FROM %s",
+                (notification_id, user_id),
+            )
+            return _serialize(row_to_dict(cursor.fetchone()))
+    except Exception:
+        logger.debug("get_notification failed", exc_info=True)
+        return None
+
+
+def list_notifications(
+    user_id: Optional[str],
+    *,
+    limit: int = DEFAULT_LIMIT,
+    include_dismissed: bool = False,
+) -> List[Dict[str, Any]]:
+    """Return a user's recent notifications, newest first (wire shape).
+
+    Defensive: returns ``[]`` on any failure rather than crashing the page that
+    hydrates the bell.
+    """
+    try:
+        limit = max(1, min(limit, MAX_LIMIT))
+        query = "SELECT * FROM notifications WHERE user_id IS NOT DISTINCT FROM %s"
+        params: List[Any] = [user_id]
+        if not include_dismissed:
+            query += " AND dismissed = FALSE"
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = rows_to_list(cursor.fetchall())
+        return [_serialize(r) for r in rows if r]
+    except Exception:
+        logger.debug("list_notifications failed", exc_info=True)
+        return []
+
+
+def unread_count(user_id: Optional[str]) -> int:
+    """Count a user's unread, non-dismissed notifications. Returns 0 on failure."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT COUNT(*) AS count FROM notifications
+                    WHERE user_id IS NOT DISTINCT FROM %s
+                      AND read = FALSE AND dismissed = FALSE""",
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return 0
+            return row["count"] if isinstance(row, dict) else row[0]
+    except Exception:
+        logger.debug("unread_count failed", exc_info=True)
+        return 0
+
+
+def mark_read(user_id: Optional[str], notification_id: str) -> bool:
+    """Mark a single notification read. Returns True if a row changed."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE notifications SET read = TRUE
+                WHERE id = %s AND user_id IS NOT DISTINCT FROM %s""",
+            (notification_id, user_id),
+        )
+        return cursor.rowcount > 0
+
+
+def mark_all_read(user_id: Optional[str]) -> int:
+    """Mark every unread notification for a user read. Returns rows changed."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE notifications SET read = TRUE
+                WHERE user_id IS NOT DISTINCT FROM %s AND read = FALSE""",
+            (user_id,),
+        )
+        return cursor.rowcount
+
+
+def dismiss(user_id: Optional[str], notification_id: str) -> bool:
+    """Dismiss (soft-hide) a single notification. Returns True if a row changed."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE notifications SET dismissed = TRUE
+                WHERE id = %s AND user_id IS NOT DISTINCT FROM %s""",
+            (notification_id, user_id),
+        )
+        return cursor.rowcount > 0
+
+
+def clear_all(user_id: Optional[str]) -> int:
+    """Delete every notification for a user (clear the bell). Returns rows deleted."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM notifications WHERE user_id IS NOT DISTINCT FROM %s",
+            (user_id,),
+        )
+        return cursor.rowcount
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'notifications',
+    'create_notification mark_read mark_all_read dismiss clear_all',
+    scope='notification',
+)

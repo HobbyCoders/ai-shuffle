@@ -1,0 +1,233 @@
+"""Which API user a session runs as, and what that key may reach.
+
+A session belongs to the key that started it (``sessions.api_user_id``); NULL
+is the owner. Worker sessions minted before workers inherited that column
+carry NULL and belong to whoever owns the session that spawned them, so every
+lookup walks ``is_worker`` parents the same way
+:func:`app.api.sessions_helpers.api_user_owns_session` does.
+
+Synchronous (DB reads): async callers go through ``run_sync``/``to_thread``.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Iterable, Mapping, Optional, Set
+
+_OWNER_DEPTH = 8
+
+
+def session_api_user_id(row: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The API user ``row`` runs as; ``None`` means the owner."""
+    from app.db import database
+
+    for _ in range(_OWNER_DEPTH):
+        if not row:
+            return None
+        owner = row.get("api_user_id")
+        if owner or not row.get("is_worker") or not row.get("parent_session_id"):
+            return owner or None
+        row = database.get_session(row["parent_session_id"])
+    return None
+
+
+# The owner's own chat socket (web app, desktop, a paired phone) stamps its turns
+# with the socket's ``user_id``: ``"admin"`` for the owner, ``"paired:<id>"`` for
+# a device paired to the owner (app/api/websocket.py). A key's socket stamps the
+# key instead, and every other submit path (wakes, voice, connectors, workers,
+# scheduler successors) stamps neither or copies them onto its own source.
+_OWNER_SOCKET_SOURCES = frozenset({"user", "queue"})
+
+
+def _owner_socket_turn(payload: Mapping[str, Any], source: Optional[str]) -> bool:
+    user_id = payload.get("user_id")
+    return (
+        (source or "user") in _OWNER_SOCKET_SOURCES
+        and isinstance(user_id, str)
+        and (user_id == "admin" or user_id.startswith("paired:"))
+    )
+
+
+def turn_api_user_id(
+    payload: Optional[Mapping[str, Any]],
+    source: Optional[str],
+    session_row: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """The API user a turn on ``session_row`` runs as; ``None`` means the owner.
+
+    An explicit ``payload.api_user_id`` wins. Otherwise the turn runs as the key
+    that owns the session (walking worker parents): a turn submitted without a
+    principal on a key's session must never get the owner's admin tools and
+    credentials. The one way to run as the owner on a key's session is the
+    owner path, a message the owner typed or queued on their own chat socket
+    (``user``/``queue`` source stamped with the owner's socket ``user_id``). An
+    owner stamp on any other source (a wake or continuation that copied it from
+    an earlier turn) is refused and the turn runs as the key.
+    """
+    payload = payload or {}
+    explicit = payload.get("api_user_id")
+    if explicit:
+        return explicit
+    owner_key = session_api_user_id(session_row)
+    if not owner_key:
+        return None
+    if _owner_socket_turn(payload, source):
+        return None
+    return owner_key
+
+
+def viewer_api_user_id(session_id: Optional[str]) -> Optional[str]:
+    """The API user behind an app session id or its store (``sdk``) id.
+
+    ``None`` when the session is the owner's or has no app row (a store-only
+    session, such as a standalone fluid run, is never an API key's).
+    """
+    if not session_id:
+        return None
+    from app.db import database
+
+    row = database.get_session(session_id) or database.get_session_by_sdk_id(session_id)
+    return session_api_user_id(row)
+
+
+def visible_store_ids(store_ids: Iterable[str], api_user_id: str) -> Set[str]:
+    """The subset of transcript-store ids whose app session ``api_user_id`` owns.
+
+    A store id with no app session row is nobody's key's, so it is never
+    visible to one. An app session id is accepted too: recall names a session
+    another worker runs by it, since that session has no store id here.
+    """
+    from app.db import database
+    from app.db.base import get_db
+
+    ids = sorted({sid for sid in store_ids if sid})
+    if not ids:
+        return set()
+    placeholders = ", ".join(["%s"] * len(ids))
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, sdk_session_id, api_user_id, is_worker, parent_session_id "
+            f"FROM sessions WHERE sdk_session_id IN ({placeholders}) "
+            f"OR id IN ({placeholders})",
+            ids + ids,
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    wanted = set(ids)
+    visible: Set[str] = set()
+    for row in rows:
+        owner = row.get("api_user_id")
+        if not owner and row.get("is_worker") and row.get("parent_session_id"):
+            owner = session_api_user_id(database.get_session(row["parent_session_id"]))
+        if owner == api_user_id:
+            visible.update(
+                key for key in (row.get("sdk_session_id"), row.get("id")) if key in wanted
+            )
+    return visible
+
+
+SUBSCRIPTION_MODEL_WARNING = (
+    "This API user's model uses your personal subscription, so its runs are "
+    "refused. Pick a model on an API-key provider."
+)
+SUBSCRIPTION_AGENT_WARNING = (
+    "Agent “{agent}” runs on your personal subscription, so this API "
+    "user's runs on it are refused. Pick a model on an API-key provider here, "
+    "or change the agent's model."
+)
+
+
+CONNECTOR_NO_OWNER_WARNING = (
+    "{connector} runs on your personal subscription, so its messages are "
+    "refused. Add your own account under the connection so your messages can "
+    "use it, or pick a model on an API-key provider."
+)
+
+
+def owner_sender_connector(user_id: Optional[str]) -> Optional[Mapping[str, Any]]:
+    """The connector bound to API user ``user_id`` that can recognise the
+    owner's own account (``connector_service.OWNER_SENDER_TYPES``), or
+    ``None``. Messages from the owner's account on it may use the owner's
+    subscriptions, so its API user may be set to one. Blocking.
+    """
+    if not user_id:
+        return None
+    from app.core import connector_service
+    from app.db import database
+
+    for row in database.get_all_connectors() or []:
+        if row.get("api_user_id") == user_id and row.get("type") in connector_service.OWNER_SENDER_TYPES:
+            return row
+    return None
+
+
+def _subscription_reason(user: Mapping[str, Any]) -> Optional[str]:
+    from app.core import credential_gate
+
+    model = user.get("model")
+    if model:
+        return SUBSCRIPTION_MODEL_WARNING if credential_gate.selection_uses_subscription(model) else None
+    from app.db import database
+
+    for profile_id in user.get("profile_ids") or []:
+        profile = database.get_profile(profile_id)
+        if not profile:
+            continue
+        config = profile.get("config") or {}
+        if (config.get("model") or config.get("provider")) and credential_gate.selection_uses_subscription(
+            config.get("model"), config.get("provider")
+        ):
+            return SUBSCRIPTION_AGENT_WARNING.format(agent=profile.get("name") or profile_id)
+    return None
+
+
+def subscription_warning(user: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Why ``user``'s saved setup would be refused for using the owner's
+    subscription sign-in (``credential_gate.requester_refusal``), or ``None``.
+
+    The key's own model decides when it has one. With none ("Agent default")
+    each of its assigned agents' saved models is checked. An agent with no
+    saved model, or a key open to every agent, is not flagged here: the run
+    is still refused at start if it lands on a subscription. A key that runs a
+    connector which knows the owner's own account is fine once that account
+    is set: only the owner's messages use the subscription. Blocking.
+    """
+    if not user:
+        return None
+    try:
+        reason = _subscription_reason(user)
+        if not reason:
+            return None
+        connector = owner_sender_connector(user.get("id"))
+        if connector is None:
+            return reason
+        from app.core import connector_service
+
+        if connector_service.owner_sender_ids(connector):
+            return None
+        return CONNECTOR_NO_OWNER_WARNING.format(connector=connector.get("name") or "This connection")
+    except Exception:  # noqa: BLE001 — a warning must never break the settings list
+        import logging
+
+        logging.getLogger(__name__).warning("Could not check an API user's model", exc_info=True)
+    return None
+
+
+def worker_refusal(api_user_id: Optional[str], profile_id: str) -> Optional[str]:
+    """Why a session running as ``api_user_id`` may not start a worker on
+    ``profile_id``; ``None`` = allowed.
+
+    The owner is unrestricted. An API key is held to its assigned agents
+    (``profile_ids``, empty = any), and a key that was deleted or deactivated
+    may not start anything.
+    """
+    if not api_user_id:
+        return None
+    from app.db import database
+
+    user = database.get_api_user(api_user_id)
+    if not user or not user.get("is_active", True):
+        return "This session's API key is no longer active."
+    allowed = user.get("profile_ids") or []
+    if allowed and profile_id not in allowed:
+        return f"This API key is not allowed to use agent '{profile_id}'."
+    return None

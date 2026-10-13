@@ -1,0 +1,283 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
+
+const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
+const authState = vi.hoisted(() => ({ current: { status: { auth_mode: 'local' } as { auth_mode?: string } }, logout: vi.fn() }));
+vi.mock('$lib/stores/auth.svelte', () => ({ auth: authState }));
+vi.mock('$lib/api/client', () => ({ api, getErrorMessage: (e: Error) => e.message }));
+import AccountPanel from './AccountPanel.svelte';
+
+const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_svg: null, error: null };
+const waiting = { ...disconnected, status: 'waiting', code: 'TESTONLYCODE', authorization_url: 'https://account.example.com/claim?code=TESTONLYCODE', signup_url: 'https://account.example.com/claim?code=TESTONLYCODE&screen=signup', qr_svg: '<svg></svg>' };
+const profile = { account: { id: 'acct', username: 'desk.owner', profile_complete: true }, servers: [{ id: 's1', name: 'Desk', url: null, current: true }, { id: 's2', name: 'Laptop', url: 'https://laptop.example', current: false }] };
+function reads(path: string, connection: unknown, account: unknown = profile) {
+	api.get.mockImplementation(async (p: string) => {
+		if (p === '/mobile/hub/connection') return connection;
+		if (p === '/mobile/hub/account') return account;
+		throw new Error('Unexpected GET ' + p);
+	});
+	void path;
+}
+beforeEach(() => { vi.resetAllMocks(); vi.spyOn(window, 'open').mockReturnValue(null); authState.current.status = { auth_mode: 'local' }; reads('', disconnected); });
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+it('ignores an older inventory response after a forced refresh', async () => {
+	let finish!: (value: unknown) => void;
+	api.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connected' };
+		return new Promise((resolve) => { finish = resolve; });
+	});
+	const view = render(AccountPanel, { variant: 'setup' });
+	await waitFor(() => expect(finish).toBeTypeOf('function'));
+	const newer = { ...profile, servers: [profile.servers[0]] };
+	api.get.mockResolvedValue(newer);
+	await view.component.loadProfile(true);
+	finish(profile);
+	await tick();
+	expect(screen.queryByText('Laptop')).toBeNull();
+	expect(screen.getByText('Desk (this worker)')).toBeTruthy();
+});
+
+it('waits for account activation before loading the profile and loads it on the next poll', async () => {
+	vi.useFakeTimers();
+	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'connecting' });
+	render(AccountPanel);
+	await tick(); await vi.advanceTimersByTimeAsync(0);
+	expect(screen.getByText('Signed in · finishing connection…')).toBeTruthy();
+	expect(api.get.mock.calls.some(([path]) => path === '/mobile/hub/account')).toBe(false);
+	expect(screen.queryByRole('alert')).toBeNull();
+	reads('', { ...disconnected, signed_in: true, profile_ready: true, status: 'connected' });
+	await vi.advanceTimersByTimeAsync(4000);
+	expect(screen.getByText('@desk.owner')).toBeTruthy();
+	expect(screen.getByText('Remote access is on')).toBeTruthy();
+});
+
+it('opens the account page from the first click and clears the opener', async () => {
+ const tab = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() };
+ vi.mocked(window.open).mockReturnValue(tab as unknown as Window);
+ api.post.mockResolvedValue(waiting);
+ render(AccountPanel, { variant: 'setup' });
+ await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+ expect(window.open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank');
+ expect(tab.opener).toBeNull();
+ expect(tab.location.replace).toHaveBeenCalledExactlyOnceWith(waiting.authorization_url);
+ expect(api.post).toHaveBeenCalledOnce();
+});
+
+it('closes the reserved tab on a failed offer and keeps a retry available', async () => {
+ const tab = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() };
+ vi.mocked(window.open).mockReturnValue(tab as unknown as Window);
+ api.post.mockRejectedValue(new Error('Account service unavailable'));
+ render(AccountPanel);
+ await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+ expect(tab.close).toHaveBeenCalledOnce();
+ expect(tab.location.replace).not.toHaveBeenCalled();
+ expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+});
+
+it('offers only sign in in settings', async () => {
+	api.post.mockResolvedValue(waiting);
+	render(AccountPanel);
+	await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+	expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
+	expect((await screen.findByRole('link', { name: 'Sign in in browser' })).getAttribute('href')).toBe(waiting.authorization_url);
+});
+
+it('keeps settings compact with an icon-only refresh immediately after sign out', async () => {
+	reads('', { ...disconnected, signed_in: true, status: 'connected' });
+	render(AccountPanel);
+	await screen.findByText('@desk.owner');
+	expect(screen.queryByRole('list')).toBeNull();
+	expect(screen.queryByText('This is the name your other devices see.')).toBeNull();
+	const refresh = screen.getByRole('button', { name: 'Refresh account' });
+	expect(refresh.textContent).toBe('');
+	expect(screen.getByRole('button', { name: 'Sign out' }).nextElementSibling).toBe(refresh);
+	api.get.mockClear();
+	await fireEvent.click(refresh);
+	expect(api.get).toHaveBeenCalledWith('/mobile/hub/account', { cache: 'no-store' });
+});
+
+it('offers account creation during setup, then opens the matching page', async () => {
+	api.post.mockResolvedValue(waiting);
+	render(AccountPanel, { workerName: 'Desk worker', variant: 'setup' });
+	expect(await screen.findByText('Not signed in')).toBeTruthy();
+	expect(screen.queryByRole('link')).toBeNull();
+	await fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
+	expect(api.post).toHaveBeenCalledExactlyOnceWith('/mobile/hub/connection', { name: 'Desk worker' });
+	const link = await screen.findByRole('link', { name: 'Create account in browser' });
+	expect(link.getAttribute('href')).toBe(waiting.signup_url);
+	expect(screen.queryByText(/TEST ONLY CODE/)).toBeNull();
+	await fireEvent.click(screen.getByRole('button', { name: 'Use my phone instead' }));
+	expect(screen.getByRole('button', { name: 'Copy connection code' })).toBeTruthy();
+	expect(screen.getByLabelText('Worker connection QR code')).toBeTruthy();
+	api.delete.mockResolvedValue(disconnected);
+	await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+	expect(api.delete).toHaveBeenCalledWith('/mobile/hub/connection');
+	expect(screen.queryByRole('link')).toBeNull();
+});
+
+it('reopens an existing offer for sign in without minting a second code', async () => {
+	reads('', waiting);
+	render(AccountPanel);
+	await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+	expect(api.post).not.toHaveBeenCalled();
+	expect((await screen.findByRole('link', { name: 'Sign in in browser' })).getAttribute('href')).toBe(waiting.authorization_url);
+});
+
+it.each(['locked', 'unavailable'])('disables sign in when the link is %s and explains why', async (status) => {
+	reads('', { ...disconnected, status, error: 'Connection prerequisite unavailable' });
+	render(AccountPanel);
+	const signIn = await screen.findByRole('button', { name: 'Sign in' });
+	expect((signIn as HTMLButtonElement).disabled).toBe(true);
+	expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
+	expect(screen.getByRole('alert').textContent).toBe('Connection prerequisite unavailable');
+	expect(signIn.getAttribute('aria-describedby')).toBe('account-panel-error');
+});
+
+it('shows the username, every worker on the account and signs out', async () => {
+	reads('', { ...disconnected, signed_in: true, status: 'connected' });
+	api.delete.mockResolvedValue(disconnected);
+	render(AccountPanel, { variant: 'setup' });
+	expect(await screen.findByText('@desk.owner')).toBeTruthy();
+	const workers = screen.getByRole('list', { name: 'Workers on this account' });
+	expect(within(workers).getByText('Laptop')).toBeTruthy();
+	expect(within(workers).getByText('Desk (this worker)')).toBeTruthy();
+	expect(screen.getByText('Remote access is on')).toBeTruthy();
+	expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Sign this browser out' })).toBeNull();
+	await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+	expect(api.delete).toHaveBeenCalledExactlyOnceWith('/mobile/hub/connection');
+	expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+	expect(screen.queryByText('@desk.owner')).toBeNull();
+});
+
+it('asks for a username when the account still has a temporary one and saves it', async () => {
+	reads('', { ...disconnected, signed_in: true, status: 'connected' }, { ...profile, account: { ...profile.account, username: 'user-12345', profile_complete: false } });
+	api.patch.mockResolvedValue({ ...profile, account: { id: 'acct', username: 'chosen.name', profile_complete: true } });
+	render(AccountPanel);
+	const input = await screen.findByLabelText('Choose your username') as HTMLInputElement;
+	expect(input.value).toBe('user-12345');
+	await fireEvent.input(input, { target: { value: 'Bad Name!' } });
+	await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+	expect(api.patch).not.toHaveBeenCalled();
+	expect(screen.getByRole('alert').textContent).toContain('3–64 letters');
+	await fireEvent.input(input, { target: { value: ' Chosen.Name ' } });
+	await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+	expect(api.patch).toHaveBeenCalledExactlyOnceWith('/mobile/hub/account', { username: 'chosen.name' });
+	expect(await screen.findByText('@chosen.name')).toBeTruthy();
+	expect(screen.queryByLabelText('Choose your username')).toBeNull();
+	await fireEvent.click(screen.getByRole('button', { name: 'Edit username' }));
+	expect((screen.getByLabelText('Username') as HTMLInputElement).value).toBe('chosen.name');
+	await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+	expect(screen.queryByLabelText('Username')).toBeNull();
+});
+
+it('keeps the profile error scoped and retryable, and offers browser sign-out for account sessions', async () => {
+	authState.current.status = { auth_mode: 'account' };
+	api.get.mockImplementation(async (p: string) => {
+		if (p === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connecting' };
+		throw new Error('Profile unavailable');
+	});
+	render(AccountPanel);
+	expect((await screen.findByRole('alert')).textContent).toContain('Profile unavailable');
+	expect(screen.getByText('Turning on remote access…')).toBeTruthy();
+	reads('', { ...disconnected, signed_in: true, status: 'connecting' });
+	await fireEvent.click(screen.getByRole('button', { name: 'Retry profile' }));
+	expect(await screen.findByText('@desk.owner')).toBeTruthy();
+	await fireEvent.click(screen.getByRole('button', { name: 'Sign this browser out' }));
+	expect(authState.logout).toHaveBeenCalledOnce();
+});
+
+it('reports a failed start and lets the user try again', async () => {
+	api.post.mockRejectedValue(new Error('Account service is unavailable'));
+	render(AccountPanel);
+	await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+	expect((await screen.findByRole('alert')).textContent).toContain('Account service is unavailable');
+	expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('keeps a local sign-out warning visible across background refreshes', async () => {
+	vi.useFakeTimers();
+	reads('', { ...disconnected, signed_in: true, status: 'connected' });
+	api.delete.mockResolvedValue({ ...disconnected, error: 'Signed out on this worker. Remove its listing from your account.' });
+	render(AccountPanel);
+	await tick(); await vi.advanceTimersByTimeAsync(0);
+	await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+	reads('', disconnected);
+	await vi.advanceTimersByTimeAsync(4000);
+	expect(screen.getByRole('alert').textContent).toContain('Signed out on this worker.');
+	expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy();
+});
+
+it('does not guess the account state before the first answer arrives', async () => {
+	let reject!: (reason: Error) => void;
+	api.get.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+	render(AccountPanel);
+	expect(screen.getByText('Checking account…')).toBeTruthy();
+	expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+	reject(new Error('Account request failed'));
+	await screen.findByRole('alert');
+	expect(screen.getByText('Account status unavailable')).toBeTruthy();
+	reads('', disconnected);
+	await fireEvent.click(screen.getByRole('button', { name: 'Retry account status' }));
+	expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+});
+
+it('refreshes account-wide workers and devices during setup without losing offline registrations', async () => {
+	vi.useFakeTimers();
+	let inventory = { ...profile, devices: [{ id: 'phone', name: 'Phone', platform: 'android' }] };
+	api.get.mockImplementation(async (p: string) => p === '/mobile/hub/connection'
+		? { ...disconnected, signed_in: true, status: 'connected' } : inventory);
+	render(AccountPanel, { variant: 'setup' });
+	await tick(); await vi.advanceTimersByTimeAsync(0);
+	expect(within(screen.getByRole('list', { name: 'Phones and browsers on this account' })).getByText('Phone · android')).toBeTruthy();
+	inventory = { ...profile, servers: [profile.servers[0]], devices: [{ id: 'browser', name: 'Browser', platform: 'web' }] };
+	await vi.advanceTimersByTimeAsync(32_000);
+	expect(screen.queryByText('Laptop')).toBeNull();
+	expect(screen.queryByText('Phone · android')).toBeNull();
+	expect(screen.getByText('Browser · web')).toBeTruthy();
+	inventory = { ...inventory, servers: [...profile.servers, { id: 'offline', name: 'Offline PC', url: null, current: false }] };
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account' }));
+	await tick();
+	expect(screen.getByText('Offline PC')).toBeTruthy();
+});
+
+it('distinguishes an old hub from an account with no phone or browser registrations', async () => {
+	reads('', { ...disconnected, signed_in: true, status: 'connected' });
+	render(AccountPanel, { variant: 'setup' });
+	expect(await screen.findByText('Update the account service to see its phones and browsers here.')).toBeTruthy();
+	reads('', { ...disconnected, signed_in: true, status: 'connected' }, { ...profile, devices: [] });
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account' }));
+	expect(await screen.findByText('No phones or browsers registered to this account.')).toBeTruthy();
+});
+
+it('explains a tunnel_limit refusal and links to Settings > Cloud', async () => {
+	const message = 'Remote access is off: this account already uses its one remote connection. Remote access for more workers needs an AI Shuffle Cloud plan (Settings > Cloud), or turn off remote access on another worker. Local use is not affected.';
+	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
+		refusal: { code: 'tunnel_limit', limit: 1, used: 1, licensed: false, message } });
+	const { layout } = await import('$lib/stores/layout.svelte');
+	const opened = vi.spyOn(layout, 'openFeaturePage');
+	render(AccountPanel);
+	const alert = await screen.findByRole('alert');
+	expect(alert.textContent).toContain('needs an AI Shuffle Cloud plan');
+	expect(alert.textContent).toContain('1 of 1 remote connection in use');
+	expect(screen.getByText('Signed in · remote access off')).toBeTruthy();
+	expect(screen.getByText('Remote access is off: connection limit reached')).toBeTruthy();
+	// The message shows once, not again as a plain error.
+	expect(screen.getAllByText(message)).toHaveLength(1);
+	await fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings > Cloud' }));
+	expect(opened).toHaveBeenCalledExactlyOnceWith('settings', 'category=cloud');
+	opened.mockRestore();
+});
+
+it('points to Settings > Cloud in words during setup, where there is no Settings card', async () => {
+	const message = 'Remote access is off.';
+	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'limited', error: message,
+		refusal: { code: 'tunnel_limit', limit: 3, used: 3, licensed: true, message } });
+	render(AccountPanel, { variant: 'setup' });
+	const alert = await screen.findByRole('alert');
+	expect(alert.textContent).toContain('3 of 3 remote connections in use');
+	expect(alert.textContent).toContain('Settings > Cloud once setup is done');
+	expect(within(alert).queryByRole('button')).toBeNull();
+});

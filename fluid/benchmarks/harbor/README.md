@@ -1,0 +1,146 @@
+# Benchmarking fluid vs Claude Code on Terminal-Bench 2.0
+
+[Terminal-Bench 2.0](https://www.tbench.ai/docs/run-terminal-bench-2-0) scores
+agent harnesses (model + scaffold as a pair) on 89 real terminal tasks, each in
+its own Docker container. [Harbor](https://harborframework.com) is its official
+runner and ships a first-party Claude Code agent — so the comparison is: same
+dataset, same model, Harbor's `claude-code` agent vs this repo's
+`FluidAgent` adapter ([fluid_agent.py](fluid_agent.py)).
+
+Fairness notes:
+
+- Both sides call the same Anthropic model with the same API key. fluid uses
+  its **native** Anthropic backend here — never the `delegated_claude` backend,
+  which would just be Claude Code wearing a fluid hat.
+- `fluid run --approval-policy never_ask` mirrors
+  `claude -p --dangerously-skip-permissions`: fully autonomous, no prompts.
+- Resolve rate is only half the story. fluid's pitch is efficiency, so compare
+  tokens, cost per solved task, and cache hit rate too — the adapter reports
+  all of these into Harbor's results (see below).
+
+## Prerequisites
+
+- Docker running (Docker Desktop with WSL2 on Windows).
+- [uv](https://docs.astral.sh/uv/) installed.
+- Harbor: `uv tool install harbor`
+- `ANTHROPIC_API_KEY` set in the environment.
+
+## 1. Build the fluid wheel
+
+The adapter uploads a locally built wheel into each task container (so runs
+benchmark your working tree, not a published package):
+
+```bash
+uv build
+```
+
+This produces `dist/fluid-*.whl`; the adapter picks the newest automatically
+(override with `FLUID_WHEEL=/path/to/wheel`).
+
+## 2. Smoke-test the setup
+
+Oracle run (no model, verifies Docker + dataset):
+
+```bash
+harbor run -d terminal-bench/terminal-bench-2 -a oracle -l 5
+```
+
+fluid on 5 tasks with a cheap model (run from the repo root — `PYTHONPATH=.`
+lets Harbor import the adapter):
+
+```bash
+PYTHONPATH=. harbor run -d terminal-bench/terminal-bench-2 -a benchmarks.harbor.fluid_agent:FluidAgent -m anthropic/claude-haiku-4-5 -k 5
+```
+
+PowerShell equivalent: `$env:PYTHONPATH = "."` first, then the same
+`harbor run` command.
+
+## 3. The paired comparison
+
+Same model, same task set, both agents. Terminal-Bench runs are noisy — do 3–5
+trials per side and compare means; single-run deltas under ~5 points mean
+nothing.
+
+```bash
+PYTHONPATH=. harbor run -d terminal-bench/terminal-bench-2 -a benchmarks.harbor.fluid_agent:FluidAgent -m anthropic/claude-sonnet-5
+```
+
+```bash
+harbor run -d terminal-bench/terminal-bench-2 -a claude-code -m anthropic/claude-sonnet-5
+```
+
+### Running through OpenRouter instead
+
+Both sides can route through OpenRouter (set `OPENROUTER_API_KEY` instead of
+`ANTHROPIC_API_KEY`):
+
+- **fluid**: just use the OpenRouter model slug —
+  `-m openrouter/anthropic/claude-haiku-4.5`. Harbor resolves
+  `OPENROUTER_API_KEY` from the prefix and passes it through to fluid's
+  native `openrouter` backend.
+- **claude-code**: use OpenRouter's Anthropic-compatible endpoint:
+  `--agent-env ANTHROPIC_BASE_URL=https://openrouter.ai/api`
+  `--agent-env ANTHROPIC_AUTH_TOKEN=$OPENROUTER_API_KEY` with the model slug
+  as Claude Code sees it (see the
+  [OpenRouter Claude Code guide](https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration)).
+
+**Caching note:** fluid's OpenRouter leg places `cache_control` breakpoints
+(system tail + newest history block) for `anthropic/…` models, so both sides
+cache through OpenRouter. Placement granularity still differs slightly from
+the direct Anthropic API (chat/completions has no tool-defs cache slot), so
+for the tightest efficiency comparison the direct Anthropic API remains the
+reference run.
+
+### Claude Code on a Pro/Max subscription
+
+Harbor's claude-code agent can bill the Claude Code leg to a subscription
+instead of the API. Generate a long-lived OAuth token once with
+`claude setup-token` (interactive browser login), then:
+
+```bash
+CLAUDE_FORCE_OAUTH=1 CLAUDE_CODE_OAUTH_TOKEN=<token> harbor run -d terminal-bench/terminal-bench-2 -a claude-code -m anthropic/claude-haiku-4-5
+```
+
+Subscription-leg caveats:
+
+- **Usage limits, not invoices.** A full 89-task trial can exhaust a Pro
+  plan's 5-hour usage window mid-run; Max plans have more headroom. Add
+  `--max-retries 3` so rate-limit stalls retry instead of failing the trial.
+- **Wall-clock skew.** Rate-limit waits inflate the subscription leg's task
+  times — don't compare wall clock across legs in this configuration.
+- **Cost skew.** `cost_usd` on the subscription leg is Claude Code's estimate
+  of what the tokens *would* cost on the API, not money spent. Compare token
+  counts and resolve rate; treat cross-leg cost as indicative only.
+
+Useful variants:
+
+- Single task: `--include-task-name "<task-name>"`
+- fluid with code-as-actions: add `--agent-kwarg code_mode=true`
+  (and `--agent-kwarg continual=true` for the continual harness). Running
+  fluid with and without `code_mode` is its own interesting ablation.
+- Retry transient API failures: `--max-retries 3`
+
+## 4. Reading results
+
+Harbor prints a job directory at the end of each run. Per trial it stores the
+task verdict plus the agent context the adapter fills in:
+`n_input_tokens` / `n_cache_tokens` / `n_output_tokens`, `cost_usd`, and
+`metadata.cache_hit_rate` / `metadata.num_model_calls` (parsed from fluid's
+`[usage]` and `[done]` output lines, saved verbatim at
+`<job>/…/logs/agent/fluid.txt`). Compare per side:
+
+- **resolve rate** (Harbor's headline number)
+- **cost per solved task** and total tokens
+- **cache hit rate** (fluid's first-class metric)
+- **model calls per task** (code-mode should drive this down)
+
+fluid's `[usage]` line reports `cache_write` (cache-creation) tokens, and the
+adapter includes them in `n_input_tokens`, so the prompt total is complete.
+For cross-side cost comparisons still prefer `cost_usd`, which is
+provider-reported.
+
+## Cost warning
+
+Full Terminal-Bench 2.0 with a Sonnet-class model costs roughly $50–150+ per
+trial. Iterate on Haiku with `-k 5`/`-k 10` until everything is green, then
+commit to full paired trials.

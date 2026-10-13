@@ -1,0 +1,179 @@
+{
+  "audit_completed": true,
+  "generated_at": "2026-09-10T20:31:56.347506+00:00",
+  "scope": "Synthetic isolated reproductions; no live UI, provider, database, or network transport exercised",
+  "source_sha256": {
+    "fluid/fluid/codemode/skills.py": "a295675cdbf13268c02987e5097856fd90aad5a84cade7e9202200a3ea2ac3e7",
+    "fluid/fluid/codemode/continual.py": "368ed265f647c46d4e169dacc153270c5b577438fd26360d8006ee6d5c04d3f1",
+    "fluid/fluid/tools/builtins/remember.py": "f6be249136357965479715c35b741ad224a6265c29d0ee2541317ec23e6e2ba9",
+    "fluid/fluid/tools/builtins/recall.py": "ceb27ea44cc1088d121ae1a4b1007fa2929526dbbad38003ade2d3fffb60ec5d",
+    "app/network/memory_records.py": "89f281280c52f1bb5e3c312250635e180650c252b5f423e20fd1de385994732a"
+  },
+  "cases": [
+    {
+      "id": "C01",
+      "contract": "Direct store writes survive a fresh store read",
+      "contract_holds": true,
+      "observed": {
+        "fresh_store_read_matches_saved_id": true
+      }
+    },
+    {
+      "id": "C02",
+      "contract": "Local save and reap enforce live and archive caps",
+      "contract_holds": true,
+      "observed": {
+        "live_count": 40,
+        "archive_count": 200,
+        "live_cap": 40,
+        "archive_cap": 200
+      }
+    },
+    {
+      "id": "C03",
+      "contract": "Remember rejects a credential-shaped synthetic value",
+      "contract_holds": true,
+      "observed": {
+        "tool_rejected_synthetic_credential": true,
+        "journal_entries": 0
+      }
+    },
+    {
+      "id": "M01",
+      "contract": "An acknowledged explicit save is immediately durable",
+      "contract_holds": false,
+      "observed": {
+        "tool_error": false,
+        "journal_entries": 1,
+        "durable_facts_after_acknowledgment": 0
+      }
+    },
+    {
+      "id": "M02",
+      "contract": "A model no-op cannot consume an unfulfilled explicit save",
+      "contract_holds": false,
+      "observed": {
+        "durable_facts": 0,
+        "pending_journal_entries": 0,
+        "synthesis_cursor": 1
+      }
+    },
+    {
+      "id": "M03",
+      "contract": "Explicit identity survives ordinary context eviction",
+      "contract_holds": false,
+      "observed": {
+        "explicit_fact_in_prompt": false,
+        "explicit_fact_archived": true,
+        "live_count": 40
+      }
+    },
+    {
+      "id": "M04",
+      "contract": "Repeated identical saves are idempotent",
+      "contract_holds": false,
+      "observed": {
+        "returned_ids": [
+          "m1",
+          "m2"
+        ],
+        "live_count": 2
+      }
+    },
+    {
+      "id": "M05",
+      "contract": "Forgetting reaches the archive",
+      "contract_holds": false,
+      "observed": {
+        "delete_returned": false,
+        "remaining_matches": 1
+      }
+    },
+    {
+      "id": "M06",
+      "contract": "Tool-only provenance survives retrieval and archiving",
+      "contract_holds": false,
+      "observed": {
+        "tool_only_fact_returned_live": true,
+        "tool_only_fact_returned_archived": true,
+        "archived_provenance": "session"
+      }
+    },
+    {
+      "id": "M07",
+      "contract": "Concurrent successful saves retain both records",
+      "contract_holds": false,
+      "observed": {
+        "returned_ids": [
+          "m1",
+          "m1"
+        ],
+        "live_count_after_two_successful_saves": 1
+      }
+    },
+    {
+      "id": "M08",
+      "contract": "Model-only cleanup cannot delete an explicit fact",
+      "contract_holds": false,
+      "observed": {
+        "explicit_fact_survives_model_only_cleanup": false
+      }
+    },
+    {
+      "id": "M09",
+      "contract": "A rewrite of an unknown ID cannot insert a record",
+      "contract_holds": false,
+      "observed": {
+        "insertions_by_rewrite_only_consolidation": 1
+      }
+    },
+    {
+      "id": "M10",
+      "contract": "Project identity is portable across checkout paths",
+      "contract_holds": false,
+      "observed": {
+        "same_project_distinct_checkout_keys": true,
+        "project_fact_loaded_in_other_checkout": false
+      }
+    },
+    {
+      "id": "M11",
+      "contract": "Sync imports obey the same live capacity limit",
+      "contract_holds": false,
+      "observed": {
+        "live_count_after_sync": 41,
+        "configured_live_cap": 40
+      }
+    },
+    {
+      "id": "M12",
+      "contract": "Archiving is not published as forgetting",
+      "contract_holds": false,
+      "observed": {
+        "locally_archived_fact_published_as_deleted": true,
+        "fact_still_locally_searchable": true
+      }
+    },
+    {
+      "id": "M13",
+      "contract": "The curator can address namespaced peer IDs",
+      "contract_holds": false,
+      "observed": {
+        "namespaced_peer_fact_can_be_rewritten_by_curator": false
+      }
+    },
+    {
+      "id": "M14",
+      "contract": "An unprocessed journal has a hard storage bound",
+      "contract_holds": false,
+      "observed": {
+        "unprocessed_bytes": 1066251,
+        "reap_threshold_bytes": 1048576,
+        "lines_dropped": 0,
+        "pending_entries": 115
+      }
+    }
+  ],
+  "contracts_failed": 14,
+  "contracts_checked": 17
+}

@@ -1,0 +1,1213 @@
+"""
+Comprehensive tests for the preferences API endpoints.
+
+Tests cover:
+- Preference CRUD operations (get, set, delete)
+- User identity resolution (API user vs admin)
+- Authentication requirements
+- Error handling and edge cases
+- Different value types (strings, numbers, objects, arrays)
+"""
+
+import pytest
+from unittest.mock import patch, MagicMock
+
+
+@pytest.mark.asyncio
+async def test_preference_identity_resolution_runs_off_loop(monkeypatch):
+    import threading
+    from app.api import preferences
+    loop_thread = threading.get_ident()
+    calls = []
+    def identity(request):
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return "admin", "owner"
+    monkeypatch.setattr(preferences, "get_user_identity", identity)
+    monkeypatch.setattr(preferences.database, "get_all_user_preferences", lambda *a: [])
+    monkeypatch.setattr(preferences.database, "get_user_preference", lambda *a: None)
+    monkeypatch.setattr(preferences.database, "delete_user_preference", lambda *a: True)
+    monkeypatch.setattr(preferences.database, "set_user_preference",
+                        lambda *a, **kw: {"key": "theme", "value": "dark"})
+    body = preferences.PreferenceValue(key="theme", value="dark")
+    await preferences.get_all_preferences(None)
+    await preferences.get_preference(None, "theme")
+    await preferences.set_preference(None, "theme", body)
+    await preferences.set_preference_post(None, "theme", body)
+    await preferences.delete_preference(None, "theme")
+    assert len(calls) == 5
+
+
+class TestPreferencesModuleImports:
+    """Verify preferences module can be imported correctly."""
+
+    def test_preferences_module_imports(self):
+        """Preferences module should import without errors."""
+        from app.api import preferences
+        assert preferences is not None
+
+    def test_preferences_router_exists(self):
+        """Preferences router should exist."""
+        from app.api.preferences import router
+        assert router is not None
+
+    def test_preferences_router_prefix(self):
+        """Preferences router should have correct prefix."""
+        from app.api.preferences import router
+        assert router.prefix == "/api/v1/preferences"
+
+    def test_preferences_router_tags(self):
+        """Preferences router should have correct tags."""
+        from app.api.preferences import router
+        assert "Preferences" in router.tags
+
+
+class TestPreferenceModels:
+    """Test Pydantic models for preference validation."""
+
+    def test_preference_value_valid(self):
+        """PreferenceValue should accept valid data."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="test_key", value="test_value")
+        assert pref.key == "test_key"
+        assert pref.value == "test_value"
+
+    def test_preference_value_with_dict(self):
+        """PreferenceValue should accept dict values."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="settings", value={"theme": "dark", "fontSize": 14})
+        assert pref.key == "settings"
+        assert pref.value == {"theme": "dark", "fontSize": 14}
+
+    def test_preference_value_with_list(self):
+        """PreferenceValue should accept list values."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="openTabs", value=["tab1", "tab2", "tab3"])
+        assert pref.key == "openTabs"
+        assert pref.value == ["tab1", "tab2", "tab3"]
+
+    def test_preference_value_with_number(self):
+        """PreferenceValue should accept numeric values."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="scrollPosition", value=150)
+        assert pref.key == "scrollPosition"
+        assert pref.value == 150
+
+    def test_preference_value_with_boolean(self):
+        """PreferenceValue should accept boolean values."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="showSidebar", value=True)
+        assert pref.key == "showSidebar"
+        assert pref.value is True
+
+    def test_preference_value_with_null(self):
+        """PreferenceValue should accept null values."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="activeSelection", value=None)
+        assert pref.key == "activeSelection"
+        assert pref.value is None
+
+    def test_preference_response_valid(self):
+        """PreferenceResponse should accept valid data."""
+        from app.api.preferences import PreferenceResponse
+
+        resp = PreferenceResponse(
+            key="test_key",
+            value="test_value",
+            updated_at="2024-01-01T00:00:00"
+        )
+        assert resp.key == "test_key"
+        assert resp.value == "test_value"
+        assert resp.updated_at == "2024-01-01T00:00:00"
+
+    def test_preference_response_optional_updated_at(self):
+        """PreferenceResponse should allow None updated_at."""
+        from app.api.preferences import PreferenceResponse
+
+        resp = PreferenceResponse(key="test_key", value="test_value")
+        assert resp.key == "test_key"
+        assert resp.value == "test_value"
+        assert resp.updated_at is None
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+@pytest.fixture
+def sample_preference():
+    """Sample preference data."""
+    return {
+        "id": 1,
+        "user_type": "api_user",
+        "user_id": "test-api-user-id",
+        "key": "openTabs",
+        "value": ["session-1", "session-2"],
+        "updated_at": "2024-01-01T00:00:00"
+    }
+
+
+@pytest.fixture
+def mock_request():
+    """Mock FastAPI Request object."""
+    request = MagicMock()
+    request.state = MagicMock()
+    return request
+
+
+# =============================================================================
+# User Identity Tests
+# =============================================================================
+
+class TestGetUserIdentity:
+    """The API uses the same verified principal as global preference sync."""
+
+    @pytest.mark.parametrize("identity", [
+        ("api_user", "api-user-123"),
+        ("admin", "local-owner"),
+        ("paired", "paired-device-123"),
+        ("account", "https://hub.example#account-123"),
+    ])
+    def test_delegates_to_verified_principal(self, mock_request, identity):
+        from app.api.preferences import get_user_identity
+
+        with patch("app.api.preferences.request_preference_identity", return_value=identity) as resolve:
+            assert get_user_identity(mock_request) == identity
+        resolve.assert_called_once_with(mock_request)
+
+    def test_missing_principal_does_not_fall_back_to_admin(self, mock_request):
+        from app.api.preferences import get_user_identity
+
+        with patch("app.api.preferences.request_preference_identity", side_effect=PermissionError("Authenticated identity required")):
+            with pytest.raises(PermissionError):
+                get_user_identity(mock_request)
+
+
+# =============================================================================
+# GET Preference Tests
+# =============================================================================
+
+class TestGetPreference:
+    """Test get_preference endpoint function."""
+
+    @pytest.mark.asyncio
+    async def test_get_preference_success(self, mock_request, sample_preference):
+        """Should return preference when it exists."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.get_user_preference.return_value = {
+                    "key": "openTabs",
+                    "value": ["session-1", "session-2"],
+                    "updated_at": "2024-01-01T00:00:00"
+                }
+
+                result = await get_preference(
+                    request=mock_request,
+                    key="openTabs",
+                    token="test-token"
+                )
+
+        assert result is not None
+        assert result.key == "openTabs"
+        assert result.value == ["session-1", "session-2"]
+        assert result.updated_at == "2024-01-01T00:00:00"
+        mock_database.get_user_preference.assert_called_once_with(
+            "api_user", "test-api-user-id", "openTabs"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_preference_not_found(self, mock_request):
+        """Should return None when preference does not exist."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.get_user_preference.return_value = None
+
+                result = await get_preference(
+                    request=mock_request,
+                    key="nonexistent",
+                    token="test-token"
+                )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_preference_admin_user(self, mock_request):
+        """Should use admin identity for admin users."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "myadmin")
+                mock_database.get_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "dark",
+                    "updated_at": "2024-01-01T00:00:00"
+                }
+
+                result = await get_preference(
+                    request=mock_request,
+                    key="theme",
+                    token="test-token"
+                )
+
+        assert result is not None
+        assert result.key == "theme"
+        assert result.value == "dark"
+        mock_database.get_user_preference.assert_called_once_with(
+            "admin", "myadmin", "theme"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_preference_complex_value(self, mock_request):
+        """Should return complex nested values correctly."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.get_user_preference.return_value = {
+                    "key": "uiState",
+                    "value": {
+                        "sidebar": {"collapsed": False, "width": 250},
+                        "tabs": ["tab1", "tab2"],
+                        "zoom": 1.5
+                    },
+                    "updated_at": "2024-01-01T00:00:00"
+                }
+
+                result = await get_preference(
+                    request=mock_request,
+                    key="uiState",
+                    token="test-token"
+                )
+
+        assert result is not None
+        assert result.value["sidebar"]["width"] == 250
+        assert result.value["tabs"] == ["tab1", "tab2"]
+        assert result.value["zoom"] == 1.5
+
+    @pytest.mark.asyncio
+    async def test_get_preference_without_updated_at(self, mock_request):
+        """Should handle preference without updated_at field."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.get_user_preference.return_value = {
+                    "key": "simple",
+                    "value": "test"
+                }
+
+                result = await get_preference(
+                    request=mock_request,
+                    key="simple",
+                    token="test-token"
+                )
+
+        assert result is not None
+        assert result.key == "simple"
+        assert result.value == "test"
+        assert result.updated_at is None
+
+    @pytest.mark.asyncio
+    async def test_get_preference_default_owner_identity(self, mock_request):
+        """Should use the verified default owner identity."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin")
+                mock_database.get_user_preference.return_value = None
+
+                await get_preference(
+                    request=mock_request,
+                    key="somePref",
+                    token="test-token"
+                )
+
+        mock_database.get_user_preference.assert_called_once_with(
+            "admin", "admin", "somePref"
+        )
+
+
+# =============================================================================
+# PUT Preference Tests
+# =============================================================================
+
+class TestSetPreference:
+    """Test set_preference endpoint function."""
+
+    @pytest.mark.asyncio
+    async def test_set_preference_success(self, mock_request):
+        """Should set preference successfully."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "openTabs",
+                    "value": ["session-1", "session-2", "session-3"],
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(
+                    key="openTabs",
+                    value=["session-1", "session-2", "session-3"]
+                )
+                result = await set_preference(
+                    request=mock_request,
+                    key="openTabs",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "openTabs"
+        assert result.value == ["session-1", "session-2", "session-3"]
+        assert result.updated_at == "2024-01-02T00:00:00"
+        mock_database.set_user_preference.assert_called_once_with(
+            "api_user", "test-api-user-id", "openTabs",
+            ["session-1", "session-2", "session-3"], only_if_missing=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_string_value(self, mock_request):
+        """Should set string preference value."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "dark",
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="theme", value="dark")
+                result = await set_preference(
+                    request=mock_request,
+                    key="theme",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "theme"
+        assert result.value == "dark"
+
+    @pytest.mark.asyncio
+    async def test_set_preference_number_value(self, mock_request):
+        """Should set numeric preference value."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "fontSize",
+                    "value": 16,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="fontSize", value=16)
+                result = await set_preference(
+                    request=mock_request,
+                    key="fontSize",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "fontSize"
+        assert result.value == 16
+
+    @pytest.mark.asyncio
+    async def test_set_preference_boolean_value(self, mock_request):
+        """Should set boolean preference value."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "showSidebar",
+                    "value": False,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="showSidebar", value=False)
+                result = await set_preference(
+                    request=mock_request,
+                    key="showSidebar",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "showSidebar"
+        assert result.value is False
+
+    @pytest.mark.asyncio
+    async def test_set_preference_null_value(self, mock_request):
+        """Should set null preference value."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "selectedItem",
+                    "value": None,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="selectedItem", value=None)
+                result = await set_preference(
+                    request=mock_request,
+                    key="selectedItem",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "selectedItem"
+        assert result.value is None
+
+    @pytest.mark.asyncio
+    async def test_set_preference_complex_object(self, mock_request):
+        """Should set complex nested object value."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                complex_value = {
+                    "layout": {
+                        "sidebar": {"width": 300, "collapsed": False},
+                        "panels": [
+                            {"id": "main", "size": 70},
+                            {"id": "details", "size": 30}
+                        ]
+                    },
+                    "settings": {"autoSave": True, "syncInterval": 5000}
+                }
+                mock_database.set_user_preference.return_value = {
+                    "key": "workspaceState",
+                    "value": complex_value,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="workspaceState", value=complex_value)
+                result = await set_preference(
+                    request=mock_request,
+                    key="workspaceState",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "workspaceState"
+        assert result.value["layout"]["sidebar"]["width"] == 300
+        assert result.value["settings"]["autoSave"] is True
+
+    @pytest.mark.asyncio
+    async def test_set_preference_admin_user(self, mock_request):
+        """Should use admin identity for admin users."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "superadmin")
+                mock_database.set_user_preference.return_value = {
+                    "key": "adminSetting",
+                    "value": "secret",
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="adminSetting", value="secret")
+                await set_preference(
+                    request=mock_request,
+                    key="adminSetting",
+                    body=body,
+                    token="test-token"
+                )
+
+        mock_database.set_user_preference.assert_called_once_with(
+            "admin", "superadmin", "adminSetting", "secret", only_if_missing=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_without_updated_at(self, mock_request):
+        """Should handle response without updated_at field."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "simple",
+                    "value": "test"
+                }
+
+                body = PreferenceValue(key="simple", value="test")
+                result = await set_preference(
+                    request=mock_request,
+                    key="simple",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "simple"
+        assert result.value == "test"
+        assert result.updated_at is None
+
+    @pytest.mark.asyncio
+    async def test_set_preference_update_existing(self, mock_request):
+        """Should update existing preference (upsert behavior)."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                # Simulate an update (set_user_preference handles upsert)
+                mock_database.set_user_preference.return_value = {
+                    "key": "existingKey",
+                    "value": "newValue",
+                    "updated_at": "2024-01-03T00:00:00"
+                }
+
+                body = PreferenceValue(key="existingKey", value="newValue")
+                result = await set_preference(
+                    request=mock_request,
+                    key="existingKey",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value == "newValue"
+
+    @pytest.mark.asyncio
+    async def test_set_preference_empty_string_value(self, mock_request):
+        """Should handle empty string values."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "emptyValue",
+                    "value": "",
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="emptyValue", value="")
+                result = await set_preference(
+                    request=mock_request,
+                    key="emptyValue",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value == ""
+
+    @pytest.mark.asyncio
+    async def test_set_preference_empty_array_value(self, mock_request):
+        """Should handle empty array values."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "emptyList",
+                    "value": [],
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="emptyList", value=[])
+                result = await set_preference(
+                    request=mock_request,
+                    key="emptyList",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value == []
+
+    @pytest.mark.asyncio
+    async def test_set_preference_empty_object_value(self, mock_request):
+        """Should handle empty object values."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "emptyObj",
+                    "value": {},
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="emptyObj", value={})
+                result = await set_preference(
+                    request=mock_request,
+                    key="emptyObj",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value == {}
+
+    @pytest.mark.asyncio
+    async def test_set_preference_large_value(self, mock_request):
+        """Should handle large values."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                large_value = {"items": [f"item-{i}" for i in range(1000)]}
+                mock_database.set_user_preference.return_value = {
+                    "key": "largeData",
+                    "value": large_value,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="largeData", value=large_value)
+                result = await set_preference(
+                    request=mock_request,
+                    key="largeData",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert len(result.value["items"]) == 1000
+
+
+# =============================================================================
+# POST Preference Tests (for sendBeacon support)
+# =============================================================================
+
+class TestSetPreferencePost:
+    """Test set_preference_post endpoint function.
+
+    This endpoint mirrors PUT functionality but accepts POST requests.
+    Needed for navigator.sendBeacon() which only supports POST method.
+    """
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_success(self, mock_request):
+        """Should set preference via POST successfully."""
+        from app.api.preferences import set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "theme_settings",
+                    "value": {"preset": "dark", "customColors": []},
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(
+                    key="theme_settings",
+                    value={"preset": "dark", "customColors": []}
+                )
+                result = await set_preference_post(
+                    request=mock_request,
+                    key="theme_settings",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "theme_settings"
+        assert result.value == {"preset": "dark", "customColors": []}
+        assert result.updated_at == "2024-01-02T00:00:00"
+        mock_database.set_user_preference.assert_called_once_with(
+            "api_user", "test-api-user-id", "theme_settings",
+            {"preset": "dark", "customColors": []}, only_if_missing=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_complex_value(self, mock_request):
+        """Should handle complex values via POST (sendBeacon use case)."""
+        from app.api.preferences import set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                # Simulates the kind of data sendBeacon would send on page unload
+                complex_value = {
+                    "openTabs": ["tab-1", "tab-2"],
+                    "activeTab": "tab-1",
+                    "scrollPositions": {"tab-1": 100, "tab-2": 200}
+                }
+                mock_database.set_user_preference.return_value = {
+                    "key": "session_state",
+                    "value": complex_value,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="session_state", value=complex_value)
+                result = await set_preference_post(
+                    request=mock_request,
+                    key="session_state",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value["openTabs"] == ["tab-1", "tab-2"]
+        assert result.value["activeTab"] == "tab-1"
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_admin_user(self, mock_request):
+        """Should use admin identity for admin users via POST."""
+        from app.api.preferences import set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin_user")
+                mock_database.set_user_preference.return_value = {
+                    "key": "admin_setting",
+                    "value": "value",
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="admin_setting", value="value")
+                await set_preference_post(
+                    request=mock_request,
+                    key="admin_setting",
+                    body=body,
+                    token="test-token"
+                )
+
+        mock_database.set_user_preference.assert_called_once_with(
+            "admin", "admin_user", "admin_setting", "value", only_if_missing=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_mirrors_put_behavior(self, mock_request):
+        """POST and PUT should produce identical results for same input."""
+        from app.api.preferences import set_preference, set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                expected_result = {
+                    "key": "test_key",
+                    "value": {"data": "test"},
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+                mock_database.set_user_preference.return_value = expected_result
+
+                body = PreferenceValue(key="test_key", value={"data": "test"})
+
+                # Call PUT
+                put_result = await set_preference(
+                    request=mock_request,
+                    key="test_key",
+                    body=body,
+                    token="test-token"
+                )
+
+                # Call POST
+                post_result = await set_preference_post(
+                    request=mock_request,
+                    key="test_key",
+                    body=body,
+                    token="test-token"
+                )
+
+        # Both should return identical results
+        assert put_result.key == post_result.key
+        assert put_result.value == post_result.value
+        assert put_result.updated_at == post_result.updated_at
+
+
+# =============================================================================
+# DELETE Preference Tests
+# =============================================================================
+
+class TestDeletePreference:
+    """Test delete_preference endpoint function."""
+
+    @pytest.mark.asyncio
+    async def test_delete_preference_success(self, mock_request):
+        """Should delete preference successfully."""
+        from app.api.preferences import delete_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.delete_user_preference.return_value = True
+
+                result = await delete_preference(
+                    request=mock_request,
+                    key="openTabs",
+                    token="test-token"
+                )
+
+        assert result["deleted"] is True
+        mock_database.delete_user_preference.assert_called_once_with(
+            "api_user", "test-api-user-id", "openTabs"
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_preference_not_found(self, mock_request):
+        """Should return deleted=False when preference does not exist."""
+        from app.api.preferences import delete_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.delete_user_preference.return_value = False
+
+                result = await delete_preference(
+                    request=mock_request,
+                    key="nonexistent",
+                    token="test-token"
+                )
+
+        assert result["deleted"] is False
+
+    @pytest.mark.asyncio
+    async def test_delete_preference_admin_user(self, mock_request):
+        """Should use admin identity for admin users."""
+        from app.api.preferences import delete_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin123")
+                mock_database.delete_user_preference.return_value = True
+
+                result = await delete_preference(
+                    request=mock_request,
+                    key="adminPref",
+                    token="test-token"
+                )
+
+        assert result["deleted"] is True
+        mock_database.delete_user_preference.assert_called_once_with(
+            "admin", "admin123", "adminPref"
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_preference_default_owner_identity(self, mock_request):
+        """Should use the verified default owner identity."""
+        from app.api.preferences import delete_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin")
+                mock_database.delete_user_preference.return_value = True
+
+                await delete_preference(
+                    request=mock_request,
+                    key="somePref",
+                    token="test-token"
+                )
+
+        mock_database.delete_user_preference.assert_called_once_with(
+            "admin", "admin", "somePref"
+        )
+
+
+# =============================================================================
+# Edge Cases and Value Types Tests
+# =============================================================================
+
+class TestPreferencesEdgeCases:
+    """Test edge cases and different value types."""
+
+    @pytest.mark.asyncio
+    async def test_get_preference_special_characters_in_key(self, mock_request):
+        """Should handle keys with special characters."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.get_user_preference.return_value = {
+                    "key": "ui.settings.theme",
+                    "value": "dark",
+                    "updated_at": "2024-01-01T00:00:00"
+                }
+
+                result = await get_preference(
+                    request=mock_request,
+                    key="ui.settings.theme",
+                    token="test-token"
+                )
+
+        assert result is not None
+        mock_database.get_user_preference.assert_called_once_with(
+            "api_user", "test-api-user-id", "ui.settings.theme"
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_float_value(self, mock_request):
+        """Should handle float values."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "zoomLevel",
+                    "value": 1.75,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="zoomLevel", value=1.75)
+                result = await set_preference(
+                    request=mock_request,
+                    key="zoomLevel",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value == 1.75
+
+    @pytest.mark.asyncio
+    async def test_set_preference_negative_number(self, mock_request):
+        """Should handle negative numbers."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                mock_database.set_user_preference.return_value = {
+                    "key": "offset",
+                    "value": -100,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="offset", value=-100)
+                result = await set_preference(
+                    request=mock_request,
+                    key="offset",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value == -100
+
+    @pytest.mark.asyncio
+    async def test_set_preference_nested_arrays(self, mock_request):
+        """Should handle deeply nested arrays."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
+                nested_value = {
+                    "matrix": [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                    "tags": [["a", "b"], ["c", "d"]]
+                }
+                mock_database.set_user_preference.return_value = {
+                    "key": "nestedData",
+                    "value": nested_value,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="nestedData", value=nested_value)
+                result = await set_preference(
+                    request=mock_request,
+                    key="nestedData",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value["matrix"][0] == [1, 2, 3]
+        assert result.value["tags"][1] == ["c", "d"]
+
+
+# =============================================================================
+# User Isolation Tests
+# =============================================================================
+
+class TestUserIsolation:
+    """Test that preferences are isolated between users."""
+
+    @pytest.mark.asyncio
+    async def test_different_api_users_get_different_preferences(self, mock_request):
+        """Different API users should have separate preference namespaces."""
+        from app.api.preferences import get_preference
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                # First user
+                mock_identity.return_value = ("api_user", "user-1")
+                mock_database.get_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "dark"
+                }
+
+                await get_preference(
+                    request=mock_request,
+                    key="theme",
+                    token="test-token"
+                )
+
+                # Verify called with first user's ID
+                mock_database.get_user_preference.assert_called_with(
+                    "api_user", "user-1", "theme"
+                )
+
+                # Second user
+                mock_identity.return_value = ("api_user", "user-2")
+                mock_database.get_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "light"
+                }
+
+                await get_preference(
+                    request=mock_request,
+                    key="theme",
+                    token="test-token"
+                )
+
+                # Verify called with second user's ID
+                mock_database.get_user_preference.assert_called_with(
+                    "api_user", "user-2", "theme"
+                )
+
+    @pytest.mark.asyncio
+    async def test_api_user_and_admin_have_separate_preferences(self, mock_request):
+        """API users and admin users should have separate preference namespaces."""
+        from app.api.preferences import set_preference, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                # API user request
+                mock_identity.return_value = ("api_user", "api-user-1")
+                mock_database.set_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "dark",
+                    "updated_at": "2024-01-01T00:00:00"
+                }
+
+                body = PreferenceValue(key="theme", value="dark")
+                await set_preference(
+                    request=mock_request,
+                    key="theme",
+                    body=body,
+                    token="test-token"
+                )
+
+                first_call = mock_database.set_user_preference.call_args
+                assert first_call[0][0] == "api_user"
+                assert first_call[0][1] == "api-user-1"
+
+                # Admin user request
+                mock_identity.return_value = ("admin", "admin")
+
+                body = PreferenceValue(key="theme", value="light")
+                await set_preference(
+                    request=mock_request,
+                    key="theme",
+                    body=body,
+                    token="test-token"
+                )
+
+                second_call = mock_database.set_user_preference.call_args
+                assert second_call[0][0] == "admin"
+                assert second_call[0][1] == "admin"
+
+
+# =============================================================================
+# PreferenceValue Model Validation Tests
+# =============================================================================
+
+class TestPreferenceValueValidation:
+    """Test PreferenceValue Pydantic model validation."""
+
+    def test_preference_value_requires_key(self):
+        """PreferenceValue should require key field."""
+        from app.api.preferences import PreferenceValue
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            PreferenceValue(value="test")
+
+    def test_preference_value_empty_key_allowed(self):
+        """PreferenceValue should allow empty key (not recommended but valid)."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="", value="test")
+        assert pref.key == ""
+
+    def test_preference_value_unicode_key(self):
+        """PreferenceValue should handle unicode keys."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="theme_emoji", value="test")
+        assert pref.key == "theme_emoji"
+
+    def test_preference_value_unicode_value(self):
+        """PreferenceValue should handle unicode values."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="message", value="Hello World")
+        assert pref.value == "Hello World"
+
+    def test_preference_value_with_special_json_chars(self):
+        """PreferenceValue should handle values with special JSON characters."""
+        from app.api.preferences import PreferenceValue
+
+        pref = PreferenceValue(key="code", value='function() { return "test"; }')
+        assert pref.value == 'function() { return "test"; }'
+
+
+# =============================================================================
+# PreferenceResponse Model Tests
+# =============================================================================
+
+class TestPreferenceResponseModel:
+    """Test PreferenceResponse Pydantic model."""
+
+    def test_preference_response_serialization(self):
+        """PreferenceResponse should serialize correctly."""
+        from app.api.preferences import PreferenceResponse
+
+        resp = PreferenceResponse(
+            key="test",
+            value={"nested": True},
+            updated_at="2024-01-01T00:00:00"
+        )
+        data = resp.model_dump()
+
+        assert data["key"] == "test"
+        assert data["value"] == {"nested": True}
+        assert data["updated_at"] == "2024-01-01T00:00:00"
+
+    def test_preference_response_with_list_value(self):
+        """PreferenceResponse should handle list values."""
+        from app.api.preferences import PreferenceResponse
+
+        resp = PreferenceResponse(
+            key="tabs",
+            value=["tab1", "tab2", "tab3"]
+        )
+
+        assert resp.value == ["tab1", "tab2", "tab3"]
+
+    def test_preference_response_with_none_value(self):
+        """PreferenceResponse should handle None values."""
+        from app.api.preferences import PreferenceResponse
+
+        resp = PreferenceResponse(
+            key="selection",
+            value=None
+        )
+
+        assert resp.value is None
