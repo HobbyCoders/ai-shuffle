@@ -45,7 +45,7 @@ name: ai-shuffle
 services:
   ai-shuffle:
     # A pinned public release. No account or Docker login is needed.
-    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-0.9.6}
+    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-1.0.0}
     container_name: ai-shuffle
     restart: unless-stopped
 
@@ -157,7 +157,7 @@ volumes:
 
 # The release to run. Pinned on purpose: nothing changes until you change it.
 # To update: set the new version here, then run `docker compose up -d`.
-AI_SHUFFLE_VERSION=0.9.6
+AI_SHUFFLE_VERSION=1.0.0
 
 # --- Where and how it is reachable -------------------------------------------
 
@@ -290,7 +290,7 @@ docker run -d \
   -v ai-shuffle_local-home:/home/appuser/.local \
   -v ai-shuffle_gh-auth:/home/appuser/.config/gh \
   -v ai-shuffle_browser-profile:/home/appuser/chrome-profile \
-  ghcr.io/hobbycoders/ai-shuffle-server:0.9.6
+  ghcr.io/hobbycoders/ai-shuffle-server:1.0.0
 ```
 
 - Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).
