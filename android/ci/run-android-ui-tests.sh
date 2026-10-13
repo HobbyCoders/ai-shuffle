@@ -27,6 +27,7 @@ adb -s emulator-5554 install -r instrumentation-apks/androidTest/debug/app-debug
 # ordering bugs in document-start script registration (seen on WebView 151).
 adb -s emulator-5554 shell am force-stop com.hobbycoders.aishuffle
 timeout --kill-after=15s 180s adb -s emulator-5554 shell am instrument -w -r \
+  -e timeout_msec 120000 \
   -e class 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#coldChatStartsWithBootstrapAndNativeBridges' \
   com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/cold-chat.txt"
 python3 ci/check-instrumentation.py "$out/cold-chat.txt"
@@ -34,7 +35,12 @@ python3 ci/check-instrumentation.py "$out/cold-chat.txt"
 # The real Save dialog needs an external driver and has a separate manual run.
 # Exclude only that opt-in test, so the strict result parser continues rejecting
 # every unexpected skip or failure.
-timeout --kill-after=15s 600s adb -s emulator-5554 shell am instrument -w -r \
+# On ubuntu-latest the 61-test suite reached test 59 at 596 seconds;
+# the old 600s suite deadline killed a healthy test, not a hung refresh.
+# Give the full suite room while bounding each test independently (milliseconds).
+# Keep the host deadline as a backstop for an unresponsive instrumentation process.
+timeout --kill-after=15s 1200s adb -s emulator-5554 shell am instrument -w -r \
+  -e timeout_msec 180000 \
   -e notClass 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \
   -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
   com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"

@@ -120,14 +120,32 @@ class OfflineDemoSmokeTest {
                     repeat(10) { launch ->
                         touches.clear()
                         gestures.clear()
-                        ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
+                        ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use { scenario ->
+                            lateinit var workers: ServerListActivity
+                            scenario.onActivity { workers = it }
                             onView(withText("Workers")).check(matches(isDisplayed()))
                             onView(withText("Explore offline demo")).check(doesNotExist())
                             openSettings()
                             assertEquals("Launch $launch must deliver one unobscured tap: $touches",
                                 listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0), gestures.toList())
                             onView(withText("Settings")).check(matches(isDisplayed()))
-                            if (launch == 0) TestScreenshots.capture("offline-demo-after-settings-tap")
+                            if (launch == 0) {
+                                // Espresso can see Settings before the outgoing Workers
+                                // window is hidden. Do not ask that disappearing window
+                                // to commit a frame: it may stop drawing after enumeration.
+                                kotlinx.coroutines.runBlocking {
+                                    kotlinx.coroutines.withTimeout(5_000) {
+                                        var hidden = false
+                                        while (!hidden) {
+                                            instrumentation.runOnMainSync {
+                                                hidden = !workers.window.decorView.isShown
+                                            }
+                                            if (!hidden) kotlinx.coroutines.delay(50)
+                                        }
+                                    }
+                                }
+                                TestScreenshots.capture("offline-demo-after-settings-tap")
+                            }
                             onView(withText("Explore offline demo")).perform(scrollTo(), click())
                             onView(withText("Exit offline demo")).perform(click())
                             onView(withText("Settings")).check(matches(isDisplayed()))

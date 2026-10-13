@@ -40,7 +40,8 @@ concurrency:
 jobs:
   build:
     name: Build and test Android app
-    timeout-minutes: 20
+    # Allow enough job headroom for unit tests, lint and debug packaging before emulator smoke checks.
+    timeout-minutes: 35
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -167,13 +168,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # GitHub-hosted runners have 4 vCPUs and 16 GB. The app uses no
+          # Google Play services, so both levels run the plain AOSP image:
+          # API 36 google_apis spent the guest CPU on Play services startup,
+          # hit SystemUI/GMS ANRs before install (run 38343028922) and, with
+          # the whole host, still lost window focus and delivered obscured
+          # taps mid-suite (run 38344827383). API 36 keeps the larger guest.
           - api: 34
             target: default
+            cores: 2
+            memory: 2048
           - api: 36
-            target: google_apis
+            target: default
+            cores: 4
+            memory: 4096
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: android
@@ -185,6 +196,14 @@ jobs:
           # run-android-ui-tests.sh installs from instrumentation-apks/ relative
           # to android/, its working directory.
           path: android/instrumentation-apks
+      - name: Free hosted-runner disk before preparing the AVD
+        run: |
+          df -h
+          # This job only installs prebuilt APKs; none of these toolchains or
+          # container images is used. Keep SDK tools, platforms and system images.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk
+          sudo docker image prune --all --force
+          df -h
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -192,6 +211,7 @@ jobs:
         run: |
           python3 ci/test-emulator-readiness.py
           python3 ci/test-instrumentation-parser.py
+          python3 ci/test-ui-runner.py
       - name: Enable emulator acceleration
         run: sudo chmod 666 /dev/kvm
       # The emulator action catches launch-hook errors and still attempts boot.
@@ -222,7 +242,7 @@ jobs:
           # Persist startup errors and guest logcat even if boot fails before script runs.
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-            -camera-back emulated -no-snapshot -memory 2048 -cores 2
+            -camera-back emulated -no-snapshot -memory ${{ matrix.memory }} -cores ${{ matrix.cores }}
             -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
           script: bash ci/run-android-ui-tests.sh
       - name: Collect emulator host diagnostics

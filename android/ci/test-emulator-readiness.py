@@ -24,7 +24,7 @@ class EmulatorReadinessTest(unittest.TestCase):
 
     def test_only_exact_launcher_anr_is_recoverable(self):
         self.assertEqual("launcher_anr", readiness(LAUNCHER_ANR, UNLOCKED, AWAKE))
-        for package in ("com.hobbycoders.aishuffle", "com.android.systemui", "com.android.launcher3.other"):
+        for package in ("com.hobbycoders.aishuffle", "com.android.systemui.other", "com.android.launcher3.other"):
             self.assertEqual("other_error", readiness(LAUNCHER_ANR.replace("com.android.launcher3", package), UNLOCKED, AWAKE))
         self.assertEqual("other_error", readiness(LAUNCHER_ANR.replace("Application Not Responding", "Application Error"), UNLOCKED, AWAKE))
 
@@ -45,7 +45,7 @@ class EmulatorReadinessTest(unittest.TestCase):
     def test_full_dump_with_historical_focus_is_not_ready(self):
         self.assertEqual("waiting", readiness(HOME + LAUNCHER_ANR, UNLOCKED, AWAKE))
 
-    def run_preparation(self, snapshots):
+    def run_preparation(self, snapshots, deadline_seconds=12):
         self.commands = []
         self.diagnostics = 0
         self.elapsed = 0
@@ -71,7 +71,7 @@ class EmulatorReadinessTest(unittest.TestCase):
             self.diagnostics += 1
 
         with tempfile.TemporaryDirectory() as folder:
-            prepare(adb, Path(folder), deadline_seconds=12, sleep=sleep, clock=lambda: self.elapsed,
+            prepare(adb, Path(folder), deadline_seconds=deadline_seconds, sleep=sleep, clock=lambda: self.elapsed,
                     diagnostics=diagnostics)
 
     def test_normal_boot_never_restarts_any_application(self):
@@ -96,6 +96,22 @@ class EmulatorReadinessTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "refusing recovery"):
             self.run_preparation([LAUNCHER_ANR.replace("com.android.launcher3", "com.hobbycoders.aishuffle")])
         self.assertFalse(any("force-stop" in command for command in self.commands))
+
+    def test_systemui_boot_anr_gets_one_restart_then_all_readiness_checks(self):
+        systemui_anr = LAUNCHER_ANR.replace("com.android.launcher3", "com.android.systemui")
+        self.assertEqual("systemui_anr", readiness(systemui_anr, UNLOCKED, AWAKE))
+        self.assertEqual("other_error", readiness(systemui_anr.replace("Application Not Responding", "Application Error"), UNLOCKED, AWAKE))
+        self.run_preparation([systemui_anr, "mCurrentFocus=null", HOME], deadline_seconds=30)
+        kills = [command for command in self.commands if any("kill" in part for part in command)]
+        self.assertEqual([("shell", "su 0 kill -9 $(pidof com.android.systemui)")], kills)
+        self.assertFalse(any("force-stop" in command for command in self.commands))
+        self.assertEqual(1, self.diagnostics)
+
+    def test_repeated_systemui_anr_fails_without_repeated_recovery(self):
+        systemui_anr = LAUNCHER_ANR.replace("com.android.launcher3", "com.android.systemui")
+        with self.assertRaisesRegex(RuntimeError, "SystemUI hung again"):
+            self.run_preparation([systemui_anr], deadline_seconds=30)
+        self.assertEqual(1, sum(any("kill" in part for part in command) for command in self.commands))
 
     def test_lost_focus_restarts_stability_count_and_eventually_times_out(self):
         with self.assertRaisesRegex(RuntimeError, "never reached"):

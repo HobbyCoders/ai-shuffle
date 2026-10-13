@@ -1,8 +1,11 @@
 """Require an unlocked, focused launcher before installing the app under test.
 
-API 34 first boot can leave a Quickstep ANR in front of every app. Recover only
-that exact launcher failure, once, before any Shuffle code runs. Never dismiss
-an application/system ANR during instrumentation or turn off Android's dialogs.
+API 34 first boot can leave a Quickstep ANR in front of every app, and API 36
+first boot on a 4-vCPU hosted runner can leave a SystemUI ANR (its
+KeyguardService bind times out while the cold image is still optimizing; runs
+38343028922 and 38347338129). Recover only those exact first-boot failures,
+each once, before any Shuffle code is installed. Never dismiss an application
+ANR, never recover during instrumentation, and never turn off Android's dialogs.
 """
 
 import os
@@ -13,6 +16,7 @@ import time
 from pathlib import Path
 
 LAUNCHER = "com.android.launcher3"
+SYSTEMUI = "com.android.systemui"
 
 
 def readiness(displays: str, policy: str, power: str) -> str:
@@ -24,6 +28,8 @@ def readiness(displays: str, policy: str, power: str) -> str:
     focus = focuses[0].strip()
     if re.fullmatch(r"Window\{[^}]+ u0 Application Not Responding: " + re.escape(LAUNCHER) + r"\}", focus):
         return "launcher_anr"
+    if re.fullmatch(r"Window\{[^}]+ u0 Application Not Responding: " + re.escape(SYSTEMUI) + r"\}", focus):
+        return "systemui_anr"
     if "Application Not Responding:" in focus or "Application Error:" in focus:
         return "other_error"
     # AOSP API 34 uses Quickstep; Google's API 36 image uses Pixel Launcher.
@@ -49,6 +55,7 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
     adb("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME")
     deadline = clock() + deadline_seconds
     recovered = False
+    systemui_recovered = False
     stable = 0
     while clock() < deadline:
         displays = adb("shell", "dumpsys", "window", "displays")
@@ -69,6 +76,22 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
             adb("shell", "am", "force-stop", LAUNCHER)
             adb("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME", "-p", LAUNCHER)
             recovered = True
+            stable = 0
+        elif state == "systemui_anr":
+            if systemui_recovered:
+                raise RuntimeError("SystemUI hung again after its single pre-test restart")
+            print("First-boot SystemUI ANR detected before app installation; retaining diagnostics and restarting SystemUI once", flush=True)
+            for name, data in (("displays", displays), ("policy", policy), ("power", power)):
+                (out / f"systemui-anr-{name}.txt").write_text(data, encoding="utf-8")
+            diagnostics()
+            # SystemUI is persistent: `am force-stop` skips it. Killing the hung
+            # process closes its ANR dialog and Android restarts it. Emulator
+            # system images are userdebug, so `su` is available.
+            adb("shell", "su 0 kill -9 $(pidof com.android.systemui)")
+            sleep(10)
+            adb("shell", "wm", "dismiss-keyguard")
+            adb("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME")
+            systemui_recovered = True
             stable = 0
         elif state == "ready":
             stable += 1
