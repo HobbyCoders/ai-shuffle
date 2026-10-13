@@ -8,7 +8,7 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
-## 0.9.4
+## 0.9.5
 
 AI Shuffle is now open source under AGPL-3.0. Local use is free and needs no license; an AI Shuffle Cloud plan only controls remote workers.
 
@@ -55,6 +55,7 @@ AI Shuffle is now open source under AGPL-3.0. Local use is free and needs no lic
 
 - Public-repository cutover tooling: catalog repin, staged image promotion, verified digest promotion, DCO sign-off.
 - CI moved to GitHub-hosted runners; tests run on the worker before every push.
+- 0.9.4 was tagged but never published: its container and desktop acceptance check still expected the old beta license mode. 0.9.5 is the same code with that check fixed.
 
 ## 0.9.3
 

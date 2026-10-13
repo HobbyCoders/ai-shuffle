@@ -45,9 +45,10 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
   const license = page.getByTestId('setup-license');
   await license.waitFor();
   const status = await workerJson(page, '/api/v1/license');
-  assert.equal(status.mode, 'beta', 'Offline acceptance expects the unlicensed beta build, not a fabricated lease');
+  assert.equal(status.mode, 'cloud', 'Offline acceptance expects free local use with no Cloud link, not a fabricated lease');
+  assert.equal(status.linked, false, 'A fresh container must not be linked to AI Shuffle Cloud');
   assert.equal(status.allowed, true);
-  await license.getByRole('heading', { name: 'Beta: no license needed', exact: true }).waitFor();
+  await license.getByRole('heading', { name: 'Local use is free', exact: true }).waitFor();
   await license.getByRole('button', { name: 'Continue', exact: true }).click();
   // One provider step: every agent provider is a choice, none is connected
   // here, so Continue stays disabled. Claude's own pay choice (subscription or
