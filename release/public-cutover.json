@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "old_repository": "HobbyCoders/ai-shuffle-private",
+  "new_repository": "HobbyCoders/ai-shuffle",
+  "old_repository_id": 1099968661,
+  "export_pr": 2356,
+  "maximum_shipped_sequence": 2647,
+  "maximum_desktop_sequence": 1791873574486,
+  "published_revision": "13366783e7f2cf1d1d4c712affd564763bca407d",
+  "envelope_sha256": "55ed9fef4fcb90f0416d1d4a6645dd4e84811d22e52e2b256cabd0a903bb8146"
+}
