@@ -126,11 +126,9 @@ def detail(payload) -> str:
     return str(payload)[:300]
 
 
-# What a refused agent turn's setup message talks about. Today the turn routes
-# answer "Claude CLI not authenticated. Please run 'claude login' in the
-# container." The shared credential gate (app/core/credential_gate.py, being
-# added) may word it differently, answer with another 4xx, or refuse inside the
-# event stream instead; any of these counts, as long as no turn runs.
+# The credential gate asks the buyer to set up a provider in Settings. Older
+# images may ask for a CLI login instead, and refusals can be HTTP errors or
+# stream events; either counts, as long as the refusal is about provider setup.
 SETUP_MESSAGE = re.compile(r"sign(ed)?[ -]?in|log ?in|credential|api key|set ?up|settings|not authenticated", re.I)
 # Means the check's own API key was not accepted, not that the gate refused.
 API_KEY_REJECTED = "API key required"
@@ -149,7 +147,11 @@ def stream_refusal(response, deadline: float) -> tuple[str | None, list[str]]:
             kind = str(event.get("type", ""))
             types.append(kind)
             message = str(event.get("message") or event.get("error") or event.get("detail") or "")
-            if ("error" in kind or kind == "done") and SETUP_MESSAGE.search(message):
+            if "error" in kind or (kind == "done" and message):
+                assert API_KEY_REJECTED not in message, f"the check's API key was refused: {message}"
+                assert "profile not found" not in message.lower(), f"the check's profile was not found: {message}"
+                assert SETUP_MESSAGE.search(message), (
+                    f"agent turn refused in the stream, but not with a setup message: {message}")
                 return message, types
             if kind == "done":
                 break
@@ -223,7 +225,19 @@ def owner_login(api: Api, password: str) -> str:
 def check_turn_refused(api: Api, token: str) -> str:
     """An agent turn with no Claude login, API key or other provider must not run."""
     status, profiles = api.call("GET", "/api/v1/agents", bearer=token)
-    profile = profiles[0]["id"] if status == 200 and isinstance(profiles, list) and profiles else "default"
+    assert status == 200 and isinstance(profiles, list), (
+        f"listing agents answered {status}, expected a list: {detail(profiles)}")
+    if not profiles:
+        # Fresh installs ship no agents. Create one just as the buyer does;
+        # never invent an id that would fail before reaching the credential gate.
+        status, created = api.call("POST", "/api/v1/agents",
+                                  {"name": "buyer-install-check", "config": {}}, bearer=token)
+        assert status == 201, f"creating the check's agent answered {status}: {detail(created)}"
+        profiles = [created]
+    selected = profiles[0]
+    assert isinstance(selected, dict) and isinstance(selected.get("id"), str) and selected["id"].strip(), (
+        f"the check's agent has no usable id: {detail(selected)}")
+    profile = selected["id"]
     status, user = api.call("POST", "/api/v1/api-users", {"name": "buyer-install-check"}, bearer=token)
     assert status == 201 and user.get("api_key"), f"creating an API user answered {status}: {detail(user)}"
     turn = {"prompt": "Reply with the single word ready.", "profile": profile}
@@ -236,6 +250,7 @@ def check_turn_refused(api: Api, token: str) -> str:
             except ValueError:
                 message = text[:300]
             assert API_KEY_REJECTED not in message, f"the check's API key was refused: {message}"
+            assert "profile not found" not in message.lower(), f"the check's profile was not found: {message}"
             assert SETUP_MESSAGE.search(message), (
                 f"agent turn refused with {response.status}, but not with a setup message: {message}")
             return f"agent turn without a credential refused ({response.status}): {message}"
