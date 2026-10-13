@@ -1,7 +1,7 @@
 {
   "name": "ai-shuffle-frontend",
   "license": "AGPL-3.0-only",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "private": true,
   "type": "module",
   "overrides": {

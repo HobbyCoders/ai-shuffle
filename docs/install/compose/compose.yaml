@@ -18,7 +18,7 @@ name: ai-shuffle
 services:
   ai-shuffle:
     # A pinned public release. No account or Docker login is needed.
-    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-0.9.5}
+    image: ghcr.io/hobbycoders/ai-shuffle-server:${AI_SHUFFLE_VERSION:-0.9.6}
     container_name: ai-shuffle
     restart: unless-stopped
 
