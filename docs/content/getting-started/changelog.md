@@ -8,6 +8,16 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.0.0
+
+The first release from the public repository, [github.com/HobbyCoders/ai-shuffle](https://github.com/HobbyCoders/ai-shuffle). The app is the same as 0.9.6; what changes is where it is built and how it is signed.
+
+### Updates and installs
+
+- Releases are now built from the public repository and signed with a new update key. Installs on 0.9.6 already trust it and update in-app as usual. Older installs should update to 0.9.6 first: Docker installs pull the `0.9.6` image (keeping the data volume), Windows updates in-app, and Linux reinstalls the 0.9.6 package.
+- The Android app has a new signing key. If you installed the APK from the downloads page, uninstall it once and install the 1.0.0 APK. Google Play installs update normally.
+- Release notes, issues and pull requests start fresh in the public repository; earlier issue and pull request numbers refer to the private archive.
+
 ## 0.9.6
 
 AI Shuffle is now open source under AGPL-3.0. Local use is free and needs no license; an AI Shuffle Cloud plan only controls remote workers.
