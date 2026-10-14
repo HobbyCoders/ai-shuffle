@@ -28,6 +28,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('guided private service access', () => {
+	it('preselects an explicit saved service without asking for a token', async () => {
+		const { onComplete } = mount({
+			request: { id: 'r/1', kind: 'service', purpose: 'Read saved inventory', expires_at: Date.now() / 1000 + 86400, saved_id: 'cf' },
+			savedConnections: [{ id: 'cf', kind: 'service', label: 'Inventory API', target: url, fingerprint: '', writable: false }]
+		});
+		expect(field('Connection').value).toBe('cf');
+		expect(m.post).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue to review' }));
+		expect(screen.queryByLabelText('API key or token')).toBeNull();
+		await fireEvent.click(screen.getByRole('checkbox', { name: /I approve access/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'cf', minutes: 60, save_connection: false });
+	});
+
 	it('prefills the official endpoint, keeps setup separate from secrets and uses only official guide links', async () => {
 		mount();
 		expect(field('Service address').value).toBe(url);

@@ -64,6 +64,10 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
             "purpose": {"type": "string"},
+            "saved_id": {
+                "type": "string",
+                "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Omit connection hints and plugin/service when using this.",
+            },
             "suggested_host": {
                 "type": "string", "maxLength": 64,
                 "description": "Machine only: known unicast IPv4 or IPv6 literal, editable for review. Hostnames are not supported; pass the machine IP. No URLs, credentials or interface scope; omit when unknown.",

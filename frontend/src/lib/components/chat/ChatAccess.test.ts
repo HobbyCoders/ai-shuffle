@@ -183,14 +183,14 @@ describe('private access header panel', () => {
   snapshot = {...empty(), requests: [{id:'r1',kind:'machine',purpose:'Check the logs',expires_at:9999999999}]};
   render(ChatAccess, {sessionId:'s1'}); await flush();
   await openAccess(); await flush();
-  await fireEvent.input(screen.getByLabelText('Server IP address'), {target:{value:'10.0.0.2'}});
+  await fireEvent.input(screen.getByLabelText('Server IP or hostname'), {target:{value:'10.0.0.2'}});
   await fireEvent.input(screen.getByLabelText('Password'), {target:{value:'test-only-password'}});
   await fireEvent.click(document.body); await flush();
   expect(panel()).toBeNull();
   await openAccess(); await flush();
   expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('');
   // Non-secret connection details stay so the owner can carry on.
-  expect((screen.getByLabelText('Server IP address') as HTMLInputElement).value).toBe('10.0.0.2');
+  expect((screen.getByLabelText('Server IP or hostname') as HTMLInputElement).value).toBe('10.0.0.2');
   await fireEvent.click(screen.getByRole('button', {name:/Use a private key instead/}));
   await fireEvent.input(screen.getByLabelText('Private key'), {target:{value:'test-only-key'}});
   await fireEvent.input(screen.getByLabelText('Key passphrase'), {target:{value:'test-only-passphrase'}});
@@ -663,7 +663,7 @@ describe('editing a saved connection inline', () => {
   expect(within(row('NAS')).getByRole('form', {name: 'Edit NAS'})).toBeTruthy();
   expect(within(row('NAS')).queryByRole('button', {name: 'Delete NAS'})).toBeNull();
   expect((form.getByLabelText('Name') as HTMLInputElement).value).toBe('NAS');
-  expect((form.getByLabelText('Server IP address') as HTMLInputElement).value).toBe('10.0.0.2');
+  expect((form.getByLabelText('Server IP or hostname') as HTMLInputElement).value).toBe('10.0.0.2');
   expect((form.getByLabelText('Port') as HTMLInputElement).value).toBe('22');
   expect((form.getByLabelText('Username') as HTMLInputElement).value).toBe('root');
   const password = form.getByLabelText('Password') as HTMLInputElement;

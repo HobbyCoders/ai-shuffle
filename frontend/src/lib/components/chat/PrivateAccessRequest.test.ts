@@ -38,6 +38,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('PrivateAccessRequest', () => {
+	it('preselects an explicit saved ID without knowing its address', async () => {
+		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect saved server', expires_at: inAnHour(), saved_id: 'lab' } });
+		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('lab');
+		expect(m.post).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: 'lab', connection: null }));
+	});
+
+	it('accepts owner-entered hostnames up to 253 characters', async () => {
+		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour() } });
+		const input = field('Server IP or hostname');
+		expect(input.maxLength).toBe(253);
+		await fireEvent.input(input, { target: { value: 'build.example' } });
+		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
+		await fireEvent.input(field('Password'), { target: { value: 'test-only' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ connection: expect.objectContaining({ host: 'build.example' }) }));
+	});
+
 	it('offers the saved server matching the structured hints and grants it without sending credentials', async () => {
 		const { onComplete } = mount();
 		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
@@ -59,7 +78,7 @@ describe('PrivateAccessRequest', () => {
 	])('defaults to new rather than an unrelated saved connection for %j', hints => {
 		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Check 10.0.0.5 and 10.0.0.9', expires_at: inAnHour(), ...hints } });
 		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('');
-		expect(field('Server IP address').value).toBe(hints.suggested_host ?? '');
+		expect(field('Server IP or hostname').value).toBe(hints.suggested_host ?? '');
 		expect(field('Port').value).toBe(String(hints.suggested_port ?? 22));
 		expect(field('Username').value).toBe(hints.suggested_username ?? '');
 		expect(field('Password').value).toBe('');
@@ -83,10 +102,10 @@ describe('PrivateAccessRequest', () => {
 
 	it('prefills editable new-machine fields and submits the reviewed values', async () => {
 		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect VM', expires_at: inAnHour(), suggested_host: '10.0.0.50', suggested_port: 2222, suggested_username: 'x' } });
-		expect(field('Server IP address').value).toBe('10.0.0.50');
+		expect(field('Server IP or hostname').value).toBe('10.0.0.50');
 		expect(field('Port').value).toBe('2222');
 		expect(field('Username').value).toBe('x');
-		await fireEvent.input(field('Server IP address'), { target: { value: '10.0.0.60' } });
+		await fireEvent.input(field('Server IP or hostname'), { target: { value: '10.0.0.60' } });
 		await fireEvent.input(field('Port'), { target: { value: '22' } });
 		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
 		await fireEvent.input(field('Password'), { target: { value: 'card-only' } });
@@ -111,7 +130,7 @@ describe('PrivateAccessRequest', () => {
 		m.post.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
 		const { onComplete } = mount();
 		await fireEvent.change(screen.getByLabelText('Connection'), { target: { value: '' } });
-		await fireEvent.input(field('Server IP address'), { target: { value: ' 10.0.0.7 ' } });
+		await fireEvent.input(field('Server IP or hostname'), { target: { value: ' 10.0.0.7 ' } });
 		await fireEvent.input(field('Username'), { target: { value: ' deploy ' } });
 		await fireEvent.input(field('Password'), { target: { value: 'hunter2' } });
 		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
@@ -134,7 +153,7 @@ describe('PrivateAccessRequest', () => {
 
 	it('uses a private key instead of the password and pins a typed host key', async () => {
 		mount({ savedConnections: [] });
-		await fireEvent.input(field('Server IP address'), { target: { value: '10.0.0.7' } });
+		await fireEvent.input(field('Server IP or hostname'), { target: { value: '10.0.0.7' } });
 		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
 		await fireEvent.click(screen.getByRole('button', { name: /Use a private key/ }));
 		expect(screen.queryByLabelText('Password')).toBeNull();

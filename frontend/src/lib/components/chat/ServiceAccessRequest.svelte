@@ -5,7 +5,7 @@
 	import './private-access.css';
 
 	type Saved = { id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean };
-	type Request = { id: string; kind: string; purpose: string; expires_at: number; service_provider?: string; suggested_url?: string };
+	type Request = { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; service_provider?: string; suggested_url?: string };
 	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: {
 		sessionId: string; request: Request; savedConnections: Saved[]; vaultAvailable: boolean;
 		owner?: string | null; clearSecretsKey?: number; onComplete: () => void;
@@ -13,8 +13,8 @@
 	const cloudflareUrl = 'https://api.cloudflare.com/client/v4';
 	const where = $derived(owner ?? 'this worker');
 	const savedOptions = $derived(savedConnections.filter(s => s.kind === 'service'));
-	// A saved credential is never chosen on the owner's behalf.
-	let savedId = $state('');
+	// An explicit saved ID preselects only; the owner must still approve.
+	let savedId = $state(untrack(() => savedConnections.find(s => s.id === request.saved_id && s.kind === 'service')?.id ?? ''));
 	const saved = $derived(savedOptions.find(s => s.id === savedId));
 	let provider = $state(untrack(() => request.service_provider === 'cloudflare' ? 'cloudflare' : 'custom'));
 	let serviceUrl = $state(untrack(() => request.suggested_url || (request.service_provider === 'cloudflare' ? cloudflareUrl : '')));

@@ -25,6 +25,7 @@ import ipaddress
 import logging
 import os
 import re
+import socket
 import threading
 import time
 import uuid
@@ -53,7 +54,7 @@ class GrantInput(BaseModel):
     minutes: int = Field(default=60, ge=1, le=480)
     path: str = Field(default="", max_length=4096)
     writable: bool = False
-    host: str = Field(default="", max_length=64)
+    host: str = Field(default="", max_length=253)
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(default="", max_length=128)
     fingerprint: str = Field(default="", max_length=100)
@@ -79,7 +80,7 @@ class SavedConnectionEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str | None = Field(default=None, max_length=80)
     # SSH machine
-    host: str | None = Field(default=None, max_length=64)
+    host: str | None = Field(default=None, max_length=253)
     port: StrictInt | None = Field(default=None, ge=1, le=65535)
     username: str | None = Field(default=None, max_length=128)
     password: SecretStr = Field(default_factory=lambda: SecretStr(""))
@@ -101,14 +102,43 @@ POSIX_USERNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
 
 
 def machine_address(host: str) -> str:
-    """A unicast IP literal without an interface scope, normalised; never a hostname."""
+    """Validate an owner-entered IP or DNS name; resolution happens at approval."""
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        raise AccessDenied("Enter the machine IP as an IPv4 or IPv6 literal, not a hostname, URL or credentials.") from None
+        name = host.removesuffix(".")
+        if len(host) > 253 or not name or any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in name.split(".")
+        ):
+            raise AccessDenied("Enter a machine IP or hostname, not a URL or credentials.") from None
+        return name.lower()
     if "%" in host or address.is_unspecified or address.is_multicast or address.is_link_local:
         raise AccessDenied("Use a unicast IP address without an interface scope for this machine.")
     return str(address)
+
+
+async def resolve_machine_address(host: str, port: int) -> str:
+    """Resolve once, reject ambiguous/unsafe DNS, then use only the pinned IP."""
+    host = machine_address(host.strip())
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        async with asyncio.timeout(10):
+            answers = await asyncio.get_running_loop().getaddrinfo(
+                host, port, type=socket.SOCK_STREAM)
+        addresses = {ipaddress.ip_address(answer[4][0]) for answer in answers}
+    except (OSError, ValueError, TimeoutError):
+        raise AccessDenied("Could not resolve the machine hostname. Check it and try again.") from None
+    if len(addresses) != 1 or any(
+        address.is_loopback or address.is_unspecified or address.is_multicast
+        or address.is_link_local or getattr(address, "ipv4_mapped", None)
+        for address in addresses
+    ):
+        raise AccessDenied("The hostname must resolve to one unicast, non-loopback IP address.")
+    return str(next(iter(addresses)))
 
 
 def _same_address(a: str, b: str) -> bool:
@@ -284,6 +314,7 @@ class AccessRequest:
     suggested_host: str = ""
     suggested_port: int | None = None
     suggested_username: str = ""
+    saved_id: str = ""
     service_provider: str = ""
     suggested_url: str = ""
     plugin_id: str = ""
@@ -296,6 +327,8 @@ class AccessRequest:
 
     def public(self):
         result = {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
+        if self.saved_id:
+            result["saved_id"] = self.saved_id
         if self.suggested_path:
             result["suggested_path"] = self.suggested_path
         if self.kind == "machine":
@@ -318,8 +351,8 @@ logger = logging.getLogger(__name__)
 SERVICE_PREPARATION_SECONDS = 24 * 3600
 CLOUDFLARE_API_URL = "https://api.cloudflare.com/client/v4"
 
-# ChatResources is a read-only listing that must answer promptly. Its one
-# database read runs on this small pool instead of asyncio's shared default
+# ChatResources is a read-only listing that must answer promptly. Its
+# database reads run on this small pool instead of asyncio's shared default
 # executor, which every ``run_sync``/``to_thread`` caller in the process
 # queues on, and the lookup is bounded so a stall returns a clear error rather
 # than holding the turn until the tool-call ceiling.
@@ -572,8 +605,18 @@ class Broker:
     async def request(self, session_id: str, kind: str, purpose: str, suggested_path: str = "",
                       service_provider: str = "", suggested_url: str = "", plugin: str = "",
                       service: str = "", suggested_host: str = "",
-                      suggested_port: int | None = None, suggested_username: str = ""):
+                      suggested_port: int | None = None, suggested_username: str = "",
+                      saved_id: str = ""):
         owner = await session_owner(session_id)
+        if not isinstance(saved_id, str):
+            raise AccessDenied("Unknown saved connection.")
+        if saved_id:
+            if (plugin or service or suggested_path or suggested_host or suggested_port is not None
+                    or suggested_username or service_provider or suggested_url):
+                raise AccessDenied("Use saved_id without connection hints or plugin sign-in.")
+            saved = await self._saved_metadata(owner)
+            if not any(entry["id"] == saved_id and entry["kind"] == kind for entry in saved):
+                raise AccessDenied("Unknown saved connection for this resource kind.")
         if not isinstance(plugin, str) or not isinstance(service, str):
             raise AccessDenied("Name an installed plugin and one service it declares.")
         if plugin or service:
@@ -634,7 +677,8 @@ class Broker:
         for pending in self._live_requests(session_id, owner):
             if (kind == "service" and pending.kind == kind and pending.purpose == purpose.strip()
                     and pending.service_provider == service_provider and pending.suggested_url == suggested_url
-                    and pending.plugin_id == plugin and pending.plugin_service == service):
+                    and pending.plugin_id == plugin and pending.plugin_service == service
+                    and pending.saved_id == saved_id):
                 try:
                     await _defer_if_away(session_id, "private service access request")
                 except AccessDenied:
@@ -648,7 +692,7 @@ class Broker:
                                 suggested_path=suggested_path, service_provider=service_provider,
                                 suggested_url=suggested_url, plugin_id=plugin, plugin_service=service,
                                 suggested_host=suggested_host, suggested_port=suggested_port,
-                                suggested_username=suggested_username)
+                                suggested_username=suggested_username, saved_id=saved_id)
         with self._pending_lock:
             self.requests[request.id] = request
         self._notify(session_id, owner)
@@ -950,9 +994,7 @@ class Broker:
                 grant.secret = spec.secret.get_secret_value()
                 grant.target = origin.url
             else:
-                address = ipaddress.ip_address(spec.host)
-                if address.is_unspecified or address.is_multicast or address.is_link_local:
-                    raise AccessDenied("Use a unicast IP address for this machine.")
+                address = await resolve_machine_address(spec.host, spec.port)
                 fingerprint = spec.fingerprint.strip()
                 if fingerprint and not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}=?", fingerprint):
                     raise AccessDenied("A host-key fingerprint looks like SHA256: followed by 43 characters. "
@@ -1032,20 +1074,35 @@ class Broker:
                     live.append(grant)
         return live
 
-    async def resources(self, session_id: str) -> dict:
-        """The model-facing grant listing (ChatResources). Never asks the user.
+    async def _saved_metadata(self, owner: tuple) -> list[dict]:
+        # Explicit allowlist: catalogue targets, fingerprints, auth settings and
+        # credentials belong only to the owner's card, never the model.
+        from app.core import chat_vault
 
-        Unlike ``snapshot`` it skips the saved-connection catalogue, which the
-        tool never returned, so its only blocking step is the session-owner
-        read. That read runs on the listing's own pool under
-        ``LISTING_TIMEOUT_SECONDS``, so neither a pending RequestChatAccess nor
-        a busy shared executor can hold it. Timing logs carry no addresses,
-        labels or credentials.
+        def read():
+            return [{key: entry[key] for key in ("id", "kind", "label")}
+                    for entry in chat_vault.catalog(owner, cache_empty=True)]
+
+        try:
+            async with asyncio.timeout(LISTING_TIMEOUT_SECONDS):
+                return await asyncio.get_running_loop().run_in_executor(_listing_executor, read)
+        except TimeoutError:
+            raise AccessDenied("Listing saved connections timed out; no access was changed.") from None
+
+    async def resources(self, session_id: str) -> dict:
+        """List handles and owner-scoped saved labels, never connection details.
+
+        Database reads use the listing's own pool with bounded waits, so a
+        pending RequestChatAccess or busy shared executor cannot hold them.
+        Timing logs carry no addresses, labels or credentials.
         """
         started = time.monotonic()
         try:
             async with asyncio.timeout(LISTING_TIMEOUT_SECONDS):
                 owner = await session_owner(session_id, executor=_listing_executor)
+                saved = await self._saved_metadata(owner)
+                if await session_owner(session_id, executor=_listing_executor) != owner:
+                    raise AccessDenied("Session ownership changed.")
         except TimeoutError:
             logger.warning(
                 "ChatResources listing timed out: session=%s owner_lookup=%.2fs default_executor=%s",
@@ -1073,7 +1130,8 @@ class Broker:
         log("ChatResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
             "total=%.3fs default_executor=%s", session_id, len(grants), looked_up - started,
             finished - looked_up, total, _default_executor_load())
-        result = {"grants": grants, "folder_available": folder_available}
+        result = {"grants": grants, "folder_available": folder_available,
+                  "saved_connections": saved}
         pending = [r.model_pending() for r in self._live_requests(session_id, owner) if r.kind == "service"]
         if pending:
             result["pending_requests"] = pending

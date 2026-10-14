@@ -6,7 +6,7 @@
 	import ServiceAccessRequest from './ServiceAccessRequest.svelte';
 	import PluginServiceAccess from './PluginServiceAccess.svelte';
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
-	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
+	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
 	// A mirrored conversation's access lives on the device that runs it; this worker only relays.
 	const where = $derived(owner ?? 'this worker');
 	const sentTo = $derived(owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker');
@@ -23,9 +23,10 @@
 		const tick = setInterval(() => { now = Date.now(); }, 1000);
 		return () => clearInterval(tick);
 	});
-	// Only structured hints can select a saved machine. Never infer a target
-	// from free-text purpose or fall back to an unrelated saved connection.
+	// An explicit saved ID or structured hints can preselect a saved machine.
+	// Never infer a target from purpose or fall back to an unrelated entry.
 	let savedId = $state(untrack(() => {
+		if (request.saved_id) return savedConnections.find(s => s.id === request.saved_id && (s.kind ?? 'machine') === request.kind)?.id ?? '';
 		if (!machine || !request.suggested_host) return '';
 		const normalizeHost = (value: string) => {
 			const host = value.toLowerCase().replace(/\.$/, '');
@@ -150,7 +151,7 @@
 				</div>
 			{:else if machine}
 				<div class="pa-grid host">
-					<label class="pa-field"><span>Server IP address</span><input class="card-form-input" required inputmode="decimal" spellcheck="false" bind:value={host} /></label>
+					<label class="pa-field"><span>Server IP or hostname</span><input class="card-form-input" required maxlength="253" spellcheck="false" bind:value={host} /></label>
 					<label class="pa-field"><span>Port</span><input class="card-form-input" required type="number" min="1" max="65535" bind:value={port} /></label>
 				</div>
 				<div class="pa-grid">

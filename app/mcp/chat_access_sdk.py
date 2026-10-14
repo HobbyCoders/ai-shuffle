@@ -20,8 +20,10 @@ the action and use RequestChatAccess. Follow its resource-specific card instruct
 Never ask for addresses, passwords, private keys, API keys, tokens or other
 connection details in chat or aloud in voice: the user enters and approves them
 in the private input card. Never reveal private inputs or put secrets in tool arguments.
-You receive only temporary handles, resource kinds, permissions and expiry.
-Saved connections avoid re-entering credentials, but each session needs its own grant.
+Approved access returns only temporary handles, resource kinds, permissions and expiry.
+ChatResources also lists saved connection IDs, kinds and owner-chosen labels, never
+addresses or credentials. Re-request a suitable entry with saved_id rather than
+asking for credentials again; each session still needs its own approved grant.
 Initial access always requires card approval. Grants expire and are lost on restart;
 scope, expiry and revocation apply in every permission mode. After a grant,
 writes, commands and non-GET/HEAD API requests skip further confirmation only in
@@ -49,10 +51,11 @@ def create_chat_access_server(session_id: str):
                                               suggested_username=args.get("suggested_username", ""),
                                               service_provider=args.get("service_provider", ""),
                                               suggested_url=args.get("suggested_url", ""),
-                                              plugin=args.get("plugin", ""), service=args.get("service", ""))
+                                              plugin=args.get("plugin", ""), service=args.get("service", ""),
+                                              saved_id=args.get("saved_id", ""))
             elif operation == "resources":
-                # Grant metadata only: pending command/write contents belong to
-                # the approval UI, saved connections to the access panel.
+                # Saved labels/IDs only; targets and pending command/write
+                # contents belong exclusively to the owner's approval UI.
                 result = await broker.resources(session_id)
             else:
                 result = await broker.run(session_id, args.get("grant_id", ""), operation, args)
@@ -64,11 +67,12 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private card for an SSH machine, Linux/macOS folder or HTTPS service; explain why in purpose. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, NOT access: preparation lasts 24 hours and can be reopened without rushing. Do not poll, re-request or assume consent; after the user confirms readiness, call ChatResources. Identical retries reuse pending preparation without extending it; cancelled/expired cards need a new request with user consent. Hints are editable, grant no access and must be known, never guessed; omit unknowns for private entry. Machine hints use only host/port/username as specified below. A saved connection is preselected only if host and any supplied port/user match; otherwise the card starts a new connection. Approved details stay private, never in results. Folder paths are on this worker (Docker: container path, not an unmounted host path); hints do not create folders. For services, explain the task and required read-only resources so the user can scope a token. Cloudflare prefills its official API endpoint. For a plugin-declared sign-in pass plugin and service instead of hints: ChatHttpRequest attaches its token only to the plugin's declared address. No generic OAuth. Follow the private-resource safety rules in the prompt.", {
+    @tool("RequestChatAccess", "Show a private card for an SSH machine, Linux/macOS folder or HTTPS service; explain why in purpose. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, NOT access: preparation lasts 24 hours and can be reopened without rushing. Do not poll, re-request or assume consent; after the user confirms readiness, call ChatResources. Identical retries reuse pending preparation without extending it; cancelled/expired cards need a new request with user consent. Hints are editable, grant no access and must be known, never guessed; omit unknowns for private entry. Machine hints use only host/port/username as specified below. Call ChatResources first for saved connection IDs, kinds and labels. Pass saved_id alone (without hints or plugin sign-in) to preselect an owned entry for approval, not to grant access. Without saved_id, machine hints preselect only when host and any supplied port/user match. Approved details stay private, never in results. Folder paths are on this worker (Docker: container path, not an unmounted host path); hints do not create folders. For services, explain the task and required read-only resources so the user can scope a token. Cloudflare prefills its official API endpoint. For a plugin-declared sign-in pass plugin and service instead of hints: ChatHttpRequest attaches its token only to the plugin's declared address. No generic OAuth. Follow the private-resource safety rules in the prompt.", {
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
             "purpose": {"type": "string"},
+            "saved_id": {"type": "string", "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Omit connection hints and plugin/service when using this."},
             "suggested_host": {"type": "string", "maxLength": 64, "description": "Machine only: known unicast IPv4 or IPv6 literal, editable for review. Hostnames are not supported; pass the machine IP. No URLs, credentials or interface scope; omit when unknown."},
             "suggested_port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Machine only: known SSH port, editable for review. Omit when unknown."},
             "suggested_username": {"type": "string", "maxLength": 128, "description": "Machine only: known POSIX username, editable for review. Never passwords, keys or credentials; omit when unknown."},
@@ -83,7 +87,7 @@ def create_chat_access_server(session_id: str):
     async def request(args):
         return await invoke("request", args)
 
-    @tool("ChatResources", "List opaque resource handles and pending service preparation IDs for this session, without private connection details. Pending preparation is not access.", {})
+    @tool("ChatResources", "List opaque resource handles, pending service preparation IDs, and this owner's saved connection IDs, kinds and labels on this worker. Never returns saved addresses or credentials. Re-request a suitable saved entry with RequestChatAccess(saved_id=...). Saved entries and pending preparation are not access.", {})
     async def resources(args):
         return await invoke("resources", args)
 
