@@ -172,15 +172,17 @@ reinstall, because database migrations do not run backwards.
 
 ### Two-step edge transition
 
-1. Keep `SOURCE_CHANNEL: edge` in `desktop-source.yml` and publish this
-   compatibility build first. Existing edge workers reject a manifest signed
-   nightly until they have installed code that recognizes both names. Deploy
+1. Publish the compatibility build signed `edge` first. Existing edge workers
+   without alias support reject a manifest signed `nightly` until they have
+   installed code that recognizes both names. Deploy
    the hub aliases before updated clients request `/v1/desktop/manifest/nightly`.
    Older Docker images without `source-supervisor` also need a compatible
    image: a source-only update cannot replace their supervisor. Images with
    that capability hand over to the updated supervisor after a restart.
-2. After the affected workers have that code, change the workflow's one
-   `SOURCE_CHANNEL` value to `nightly`. This PR deliberately leaves it `edge`.
+2. `desktop-source.yml` now sets `SOURCE_CHANNEL: nightly`, and the publisher
+   defaults to `nightly`. Before running publication, confirm affected workers
+   have the compatibility code from step 1. This source change alone does not
+   verify or upgrade installed launchers.
    `/v1/desktop/manifest/nightly` and `/v1/desktop/manifest/edge` serve identical
    signed bytes from the existing D1 `edge` lane; the publisher keeps that
    storage key even when it signs `nightly`. The hub never rewrites a signature.
@@ -339,12 +341,13 @@ with `--require-hashes`, then fluid with `--no-deps --no-build-isolation`.
 `scripts/lock_requirements.sh` regenerates both locks; the native lock is
 constrained by `requirements.lock` so a shared package never pins differently.
 
-License lease (D8): when its own worker has a lease, the desktop adds it as
+Optional Cloud lease: when its own worker has a lease, the desktop adds it as
 `X-Shuffle-Lease` to the manifest and archive requests, read from the worker's
 token-protected `GET /api/v1/internal/desktop/source-lease`. The header is
 attached only after the URL is checked to be a hub update endpoint, and
-redirects are refused. Without a lease (beta mode, an attached or older
-worker, first launch before any worker runs) requests go out as before.
+redirects are refused. Without a lease, requests go out without that header.
+Downloads, local use and updates require no account, license key or lease;
+the Cloud lease controls remote-worker capacity, not access to updates.
 
 Release notes: the desktop's update state carries the manifest's `version`
 (as `release`) and `notes`, and its "Update ready" notification names the

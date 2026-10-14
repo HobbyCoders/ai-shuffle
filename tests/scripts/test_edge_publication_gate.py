@@ -169,7 +169,7 @@ def test_workflow_wiring_matches_the_gate():
     assert f"github.actor_id == '{gate.OWNER_ID}'" in condition
     assert set(config["on"]) == {"schedule", "workflow_dispatch"}
     assert config["on"]["schedule"] == [{"cron": "0 6 * * *"}]
-    assert config["env"]["SOURCE_CHANNEL"] == "edge"
+    assert config["env"]["SOURCE_CHANNEL"] == "nightly"
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
     assert steps[-1]["if"] == "steps.changed.outputs.changed == 'true'"
@@ -323,11 +323,12 @@ def signed_feed(monkeypatch):
     return publish, response
 
 
+@pytest.mark.parametrize("signed_channel", ["edge", "nightly"])
 @pytest.mark.parametrize("fault", [None, "signature", "channel", "revision", "oversize",
                                    "missing-fields", "size", "container", "tree"])
-def test_published_pointer_uses_complete_updater_verification(signed_feed, isolated_edge_cache, fault):
+def test_published_pointer_uses_complete_updater_verification(signed_feed, isolated_edge_cache, fault, signed_channel):
     publish, response = signed_feed
-    changes = {"channel": "stable"} if fault == "channel" else {}
+    changes = {"channel": "stable" if fault == "channel" else signed_channel}
     if fault in ("size", "container", "tree"):
         changes[fault] = {"size": 0, "container": {}, "tree": "invalid"}[fault]
     publish("invalid" if fault == "revision" else REVISION, changes=changes,

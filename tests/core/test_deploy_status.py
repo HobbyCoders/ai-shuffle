@@ -254,8 +254,9 @@ def test_publish_edge_first_without_a_refusal_stays_plain(repo, monkeypatch, pub
     assert report["workers"][0]["edge_publication_refusal"] is None
 
 
+@pytest.mark.parametrize("channel", ["nightly", "edge"])
 @pytest.mark.parametrize("scenario", ["refused", "offered", "published", "no refusal", "stable", "current", "offline", "unknown"])
-def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
+def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario, channel):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from app.api.auth import require_admin
@@ -265,7 +266,7 @@ def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
     monkeypatch.setattr(ds, "_edge_refusals", {})
     monkeypatch.setattr(ds, "find_repo", lambda: root)
     monkeypatch.setattr(ds, "_refresh", lambda repo: None)
-    row = _row("ServerWorker", shas["a"], is_self=True)
+    row = _row("ServerWorker", shas["a"], channel=channel, is_self=True)
     if scenario == "offered":
         row["offered"] = shas["b"]
     elif scenario == "stable":

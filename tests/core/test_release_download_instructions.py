@@ -44,6 +44,10 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "Desktop installers are opt-in" in body
     assert "https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server" in body
     assert "docs/install" in body
+    assert "Downloads, local use and updates are free" in body
+    assert "Optional AI Shuffle Cloud plans control remote-worker capacity" in body
+    assert "active license" not in body
+    assert "license lease" not in body
 
 
 def test_docker_commands_pin_release_and_preserve_runtime_data():
