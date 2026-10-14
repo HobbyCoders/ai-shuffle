@@ -118,11 +118,21 @@ describe('automation detail state', () => {
 describe('automation whose agent was deleted', () => {
     const unlinked: Automation = { ...automation, profile_id: null, last_error: 'Its agent was deleted.' };
 
-    it('tags the Studio row No agent', () => {
-        render(AutomationsStudio, { automations: [unlinked], pendingApprovals: [], profiles: [{ id: 'gp', name: 'General Purpose' }] as never,
-            onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
-        expect(screen.getByText('No agent')).toBeTruthy();
-        expect(screen.queryByText('General Purpose')).toBeNull();
+    it.each([1280, 390])('keeps No agent in the visible row body at %ipx', (width) => {
+        vi.stubGlobal('innerWidth', width);
+        try {
+            render(AutomationsStudio, { automations: [{ ...unlinked, last_error: null }], pendingApprovals: [], profiles: [{ id: 'gp', name: 'General Purpose' }] as never,
+                onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
+            const chip = screen.getByText('No agent');
+            // jsdom does not lay out media queries. Guard the structure: the
+            // warning must not live in metadata hidden by the phone breakpoint.
+            // Real 390px rendering is checked in the browser as well.
+            expect(chip.closest('.as-body')).toBeTruthy();
+            expect(chip.closest('.as-meta')).toBeNull();
+            expect(screen.queryByText('General Purpose')).toBeNull();
+        } finally {
+            vi.unstubAllGlobals();
+        }
     });
     it('asks for another agent in the detail', () => {
         render(AutomationDetail, { automation: unlinked, profiles: [{ id: 'gp', name: 'General Purpose' }] as never,

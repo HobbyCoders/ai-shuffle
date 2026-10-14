@@ -11,7 +11,8 @@ const automationsApi = vi.hoisted(() => ({
 	getAutomations: vi.fn(),
 	getPendingApprovals: vi.fn(),
 	getAutomationRuns: vi.fn(),
-	getAutomationStats: vi.fn()
+	getAutomationStats: vi.fn(),
+	enableAutomation: vi.fn()
 }));
 vi.mock('$lib/api/automations', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/api/automations')>()),
@@ -66,7 +67,26 @@ beforeEach(() => {
 		path === '/agents' ? [{ id: 'general-purpose', name: 'General Purpose' }] : []
 	);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe.each([1280, 390])('list errors at %ipx', (width) => {
+	it.each(['edit', 'create'])('clears the refused-enable error when opening %s', async (destination) => {
+		vi.stubGlobal('innerWidth', width);
+		automationsApi.getAutomations.mockResolvedValue([{ ...orphan, profile_id: null }]);
+		const message = 'Choose an agent before re-enabling this automation';
+		automationsApi.enableAutomation.mockRejectedValue({ detail: message });
+		render(AutomationsCard, { props: { mobile: false } });
+		await fireEvent.click(await screen.findByRole('button', { name: 'Enable automation' }));
+		expect(await screen.findByText(message)).toBeTruthy();
+		await fireEvent.click(destination === 'edit'
+			? screen.getByTitle('Edit')
+			: screen.getAllByRole('button', { name: /New automation/ })[0]);
+		await waitFor(() => expect(document.querySelector('select.sel[data-agent-picker]')).toBeTruthy());
+		await waitFor(() => expect(screen.queryByText(message)).toBeNull());
+		await fireEvent.click(screen.getByRole('button', { name: /^Automations/ }));
+		expect(screen.queryByText(message)).toBeNull();
+	});
+});
 
 async function openOrphanDetail() {
 	await fireEvent.click(await screen.findByText('Nightly digest'));

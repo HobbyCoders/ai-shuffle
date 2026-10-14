@@ -105,7 +105,7 @@ describe('stale worktree visibility', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
 		expect(mocks.forgetWorktree).not.toHaveBeenCalled();
 		await fireEvent.click(screen.getByRole('button', { name: 'Forget fix/stale' }));
-		expect(screen.getByText(/removes Git's record of this worktree and its entry in AI Shuffle/)).toBeTruthy();
+		expect(screen.getByText(/deletes Git's administrative files for this worktree and removes its entry in AI Shuffle/)).toBeTruthy();
 		expect(screen.getByText(/Checkout files, branches and chat history are kept/)).toBeTruthy();
 		// Cancel is the default action: a stray Enter backs out (#2072).
 		expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
