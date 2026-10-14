@@ -4,7 +4,7 @@ Outside contributions are welcome. For a bug, use [Report a problem](SUPPORT.md)
 
 ## Before you change code
 
-Read [AGENTS.md](AGENTS.md) for repository rules. Work from current `main` on a separate branch in your fork. Keep a pull request focused on one change, follow existing conventions, and add a test that catches the problem. Keep `docs/content` and `frontend/src/lib/docs/content` in sync when you change behavior they describe.
+Work from current `main` on a separate branch in your fork. Keep a pull request focused on one change, follow existing conventions, and add a test that catches the problem. Keep `docs/content` and `frontend/src/lib/docs/content` in sync when you change behavior they describe.
 
 The team’s [internal contribution guide](docs/internal/CONTRIBUTING.md) and [development guide](docs/internal/DEVELOPMENT.md) cover setup and repository internals. They remain team references; this page describes the outside contribution process.
 
@@ -26,7 +26,7 @@ PYTHONPATH=fluid pytest tests/<path> -m "not slow and not integration" -q
 
 In Windows PowerShell, set `$env:PYTHONPATH="fluid"` first, then run the same `pytest` command. For Fluid’s own tests, use `python -m pytest fluid/tests/unit/<files> -q`. Do not run the whole `tests/` tree by hand, or use more than two pytest workers.
 
-For frontend work, run `npm ci` and `npx svelte-kit sync` in `frontend/` once per checkout, then run the targeted tests or type check described in [AGENTS.md](AGENTS.md). Do not copy dependencies or credential files from another checkout.
+For frontend work, run `npm ci` and `npx svelte-kit sync` in `frontend/` once per checkout, then run a targeted test (`npx vitest run <file>`) or the type check (`npx svelte-check --tsconfig ./tsconfig.json`) rather than a full build. Do not copy dependencies or credential files from another checkout.
 
 Before a push, commit your changes and run:
 
