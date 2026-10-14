@@ -456,13 +456,61 @@ async def admitted(published, index):
     return await asyncio.wait_for(next_receipt(), 5)
 
 
+async def provider_turn(worker, child):
+    """Admission publishes an id before task-start commits the target's turn."""
+    async def visible():
+        while True:
+            # Worker.active also swaps process globals: never hold it across
+            # an await while the dispatcher is still running as the parent.
+            with worker.active():
+                rows = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+            if rows:
+                [turn] = rows  # Duplicate turns are still a failure.
+                return turn
+            await asyncio.sleep(0.001)
+    return await asyncio.wait_for(visible(), 5)
+
+
 async def report_from_target(a, child, **kwargs):
+    await provider_turn(a, child)
     with a.active():
         finish_child(child, **kwargs)
         assert remote_task.owe_if_finished(child)
         body = remote_tasks.get_child(child)["report"]
         assert await remote_task.deliver_due() == 1
         return body
+
+
+def test_provider_turn_waits_for_target_commit_after_admission(workers, monkeypatch):
+    from app.db import turns
+    worker = workers("target")
+    with worker.active():
+        database.create_session(session_id="child", profile_id="default", project_id=None,
+                                title="Child", is_active=True)
+    read_turns = all_turns
+
+    async def scenario():
+        observed_empty = asyncio.Event()
+
+        def observe(child):
+            rows = read_turns(child)
+            if not rows:
+                observed_empty.set()
+            return rows
+
+        monkeypatch.setattr(f"{__name__}.all_turns", observe)
+
+        async def enqueue_after_read():
+            await observed_empty.wait()
+            with worker.active():
+                return turns.enqueue_turn("child", "provider_agent", prompt="Dependency report.")
+
+        producer = asyncio.create_task(enqueue_after_read())
+        turn = await provider_turn(worker, "child")
+        assert turn["id"] == (await producer)["id"]
+        assert turn["prompt"] == "Dependency report."
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("dependent", [False, True])
@@ -507,10 +555,10 @@ def test_remote_swarm_holds_slot_routes_messages_and_uses_actual_report(workers,
             assert snapshot["tasks"][0]["result"] == body["report"]
             second_child = snapshot["tasks"][1]["worker_session_id"]
             assert snapshot["tasks"][1]["status"] == "running"
+            turn = await provider_turn(a, second_child)
             with a.active():
                 prompt = remote_task.report_owed(second_child)
                 assert prompt["owner_session_id"] == "caller"
-                [turn] = [t for t in all_turns(second_child) if t["source"] == "provider_agent"]
                 assert (body["report"] in turn["prompt"]) is dependent
             assert (await remote_task.handle_task_report(body, a.device_id))["duplicate"]
             assert wakes() == []
@@ -617,9 +665,8 @@ def test_remote_swarm_start_races_keep_report_and_routing_ownership(workers, mon
                 assert snapshot["tasks"][0]["result"] == early_reports[0]["report"]
                 assert wakes() == []
                 child = snapshot["tasks"][1]["worker_session_id"]
-                with a.active():
-                    [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
-                    assert early_reports[0]["report"] in turn["prompt"]
+                turn = await provider_turn(a, child)
+                assert early_reports[0]["report"] in turn["prompt"]
                 await report_from_target(a, child, text="Successor finished.")
                 await asyncio.wait_for(coordinator.jobs[key], 5)
                 assert coordinator.snapshot(key)["status"] == "completed"
@@ -696,9 +743,8 @@ def test_uncertain_swarm_start_unknown_grace_is_bounded(
                 snapshot = await admitted(published, 1)
                 assert snapshot["tasks"][0]["result"] == body["report"]
                 second_child = snapshot["tasks"][1]["worker_session_id"]
-                with a.active():
-                    [turn] = [t for t in all_turns(second_child) if t["source"] == "provider_agent"]
-                    assert body["report"] in turn["prompt"]
+                turn = await provider_turn(a, second_child)
+                assert body["report"] in turn["prompt"]
                 await report_from_target(a, second_child, text="Dependent report.")
                 expected_status = "completed"
             else:

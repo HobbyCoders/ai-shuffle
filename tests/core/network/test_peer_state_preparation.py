@@ -30,7 +30,10 @@ def capture_jobs(monkeypatch):
     hub.reset_for_tests()
 
 
-async def test_slow_capture_survives_request_timeout_and_bootstraps(workers, monkeypatch):
+@pytest.mark.parametrize("cold_dependency_seconds", [0, 0.1])
+async def test_slow_capture_survives_request_timeout_and_bootstraps(
+    workers, monkeypatch, cold_dependency_seconds,
+):
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home")
@@ -43,9 +46,11 @@ async def test_slow_capture_survives_request_timeout_and_bootstraps(workers, mon
     capture = peer_snapshot.capture
     verify, apply = peer_snapshot.verify_manifest, peer_snapshot.apply
     calls = []
+    polled = threading.Event()
     def slow(recipient, *args, **kwargs):
         calls.append(recipient)
         time.sleep(0.15)  # Longer than the per-request budget, not the polling budget.
+        assert polled.wait(5)  # Require two polls even on a heavily loaded worker.
         return capture(recipient, *args, **kwargs)
     def verify_as_joiner(*args):
         with b.active():
@@ -64,7 +69,14 @@ async def test_slow_capture_survives_request_timeout_and_bootstraps(workers, mon
     monkeypatch.setattr(transport.PeerLink, "authenticate", authenticated)
     app = FastAPI()
     app.include_router(network_api.router)
-    app.dependency_overrides[tokens.require_device] = lambda: b.device_id
+    dependency_calls = []
+    def authenticated_device():
+        if not dependency_calls:
+            # Exercise cold dependency setup exceeding the *request* budget.
+            time.sleep(cold_dependency_seconds)
+        dependency_calls.append(True)
+        return b.device_id
+    app.dependency_overrides[tokens.require_device] = authenticated_device
     asgi = httpx.ASGITransport(app=app)
     # ASGITransport does not enforce httpx timeouts, so enforce the actual
     # client's timeout at the transport boundary, including each API request.
@@ -73,13 +85,30 @@ async def test_slow_capture_survives_request_timeout_and_bootstraps(workers, mon
             return await asyncio.wait_for(asgi.handle_async_request(request),
                                           timeout=request.extensions["timeout"]["read"])
     waits = []
+    def on_wait(message):
+        waits.append(message)
+        if len(waits) >= 2:
+            polled.set()
     link = transport.PeerLink(a.device_id, ["https://a.example.com"])
     link.base_url, link.token = "https://a.example.com", "test-token"
     # Only A is active during background capture. Switch to B only after the
     # manifest is ready, for verification/application (the harness uses globals).
     with a.active():
-        async with httpx.AsyncClient(transport=TimedASGI()) as client:
-            assert await link.receive_state(client, ctx, on_wait=waits.append) > 0
+        # Warm the actual route/dependency graph without starting the capture.
+        # Cold ASGI setup is not part of the capture-polling request budget.
+        with monkeypatch.context() as warmup:
+            warmup.setattr(peer_snapshot, "state", lambda *a, **kw: {"status": "preparing"})
+            async with httpx.AsyncClient(transport=asgi) as client:
+                response = await client.post("https://a.example.com/api/v1/network/peer/state",
+                                             params={"prepare": "true", "format": 2})
+                assert response.status_code == 200
+                assert response.json() == {"status": "preparing"}
+        assert dependency_calls and calls == []
+        try:
+            async with httpx.AsyncClient(transport=TimedASGI()) as client:
+                assert await link.receive_state(client, ctx, on_wait=on_wait) > 0
+        finally:
+            polled.set()
     with b.active():
         engine.finish_bootstrap()
         assert engine.context().bootstrap_state == engine.BOOTSTRAP_READY
