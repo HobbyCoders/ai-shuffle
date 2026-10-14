@@ -1178,13 +1178,19 @@ def provision_worktree_runtime(
 
 def _is_directory_link(path: Path, info: Optional[os.stat_result] = None) -> bool:
     """Detect symlinks, junctions and other Windows reparse points without following."""
+    # Recovery callers use the Path probe; the removal walk supplies lstat
+    # metadata already, avoiding another filesystem lookup for every entry.
+    if info is None and path.is_symlink():
+        return True
     try:
         info = info if info is not None else os.lstat(path)
     except FileNotFoundError:
         return False
     isjunction = getattr(os.path, "isjunction", None)
     return bool(
-        stat.S_ISLNK(info.st_mode)
+        getattr(info, "st_reparse_tag", 0)
+        == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+        or stat.S_ISLNK(info.st_mode)
         or (isjunction is not None and isjunction(path))
         or getattr(info, "st_file_attributes", 0)
         & stat.FILE_ATTRIBUTE_REPARSE_POINT

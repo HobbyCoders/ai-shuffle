@@ -21,6 +21,33 @@ def worktree(tmp_path, monkeypatch):
     return main, wt
 
 
+def test_linked_root_is_neither_recoverable_nor_detached(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    remnant = tmp_path / "remnant"
+    cm._link_directory(target, remnant)
+
+    assert cm._is_empty_cleanup_remnant(str(remnant), {"path": str(remnant)}) is False
+    summary = cm.sever_runtime_links(str(remnant))
+    assert summary["severed"] == []
+    assert "worktree root is a link" in summary["errors"][0]
+    assert cm._is_directory_link(remnant)
+    assert target.is_dir()
+
+
+def test_legacy_junction_tag_is_still_detected(tmp_path, monkeypatch):
+    candidate = tmp_path / "junction"
+    candidate.mkdir()
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    # This constant is Windows-only; supply a sentinel for the Linux simulation.
+    monkeypatch.setattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 1, raising=False)
+    monkeypatch.setattr(
+        os, "lstat",
+        lambda path: SimpleNamespace(st_reparse_tag=stat.IO_REPARSE_TAG_MOUNT_POINT),
+    )
+    assert cm._is_directory_link(candidate)
+
+
 @pytest.mark.parametrize("relative_parent", [".", "arbitrary/deep"])
 def test_removal_detaches_unknown_nested_directory_link(
     worktree, tmp_path, monkeypatch, relative_parent
