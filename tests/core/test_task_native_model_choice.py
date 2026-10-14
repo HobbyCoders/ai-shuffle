@@ -92,7 +92,8 @@ async def test_mixed_roster_resolves_owner_named_models_across_enabled_providers
         {"provider_models": {apm.NATIVE_PROVIDER_KEY: "prov:chatgpt:gpt-5.6-luna"}},
     )
     contract = apm.build_task_contract("caller", None)
-    assert "gpt-helper" in contract.input_schema["properties"]["agent"]["enum"]
+    assert "enum" not in contract.input_schema["properties"]["agent"]
+    assert "gpt-helper" in {target.id for target in contract.targets}
 
     for agent, model, ok in [
         ("gpt-helper", "haiku", True),        # a Claude alias moves it to Claude

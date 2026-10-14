@@ -842,8 +842,10 @@ def build_task_contract(
         "type": "string",
         "description": "Target subagent ID from the provider-scoped roster above.",
     }
-    if resolved_targets:
-        agent_property["enum"] = [target.id for target in resolved_targets]
+    # A session's published schema can outlive this roster (including a
+    # createSubagent call in the same model turn). Do not freeze IDs in a
+    # client-side enum: dispatch_task_tool re-reads the roster and enforces the
+    # caller's current allowlist/provider eligibility on every invocation.
 
     properties: dict[str, Any] = {
         "agent": agent_property,

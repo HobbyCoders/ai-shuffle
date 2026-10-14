@@ -8237,7 +8237,9 @@ async def test_subagent_roster_is_recomputed_at_every_turn_start(monkeypatch, ag
     await adapter.send_query("now use the reviewer")
     task = adapter._registry.get("Task")
     assert "reviewer" in task.description and "gpt-5.6-mini" in task.description
-    assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
+    # The roster text refreshes, but IDs are admitted by the live host rather
+    # than a schema enum that could go stale again within this turn.
+    assert "enum" not in task.input_schema["properties"]["agent"]
     assert "- Reviewer: Checks diffs." in engine.system
     agents = [section.text for section in engine.system_sections.sections if section.kind == "agents"]
     assert len(agents) == 1

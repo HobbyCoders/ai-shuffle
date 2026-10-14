@@ -418,7 +418,8 @@ def test_task_model_takes_any_model_and_states_the_user_rule(lane):
 def test_without_a_default_unpinned_agents_are_listed_as_needing_one(lane):
     contract = apm.build_task_contract("caller", None)
     assert "enum" not in contract.input_schema["properties"]["model"]
-    assert "plain" in contract.input_schema["properties"]["agent"]["enum"]
+    assert "enum" not in contract.input_schema["properties"]["agent"]
+    assert "plain" in {target.id for target in contract.targets}
     assert "- plain (no model: not pinned and the owner has not chosen" in contract.description
     assert "subagent default:" not in contract.description
 

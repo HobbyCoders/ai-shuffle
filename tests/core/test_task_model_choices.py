@@ -148,7 +148,8 @@ async def test_file_agent_choice_keeps_callers_provider(lane):
     db.update_model_provider("lane", default_model=None)
     registry = {"reader": {"name": "reader", "description": "Read files", "prompt": "Read files"}}
     contract = apm.build_task_contract("caller", "lane", apm.file_subagent_targets(registry, "astra"))
-    assert "reader" in contract.input_schema["properties"]["agent"]["enum"]
+    assert "enum" not in contract.input_schema["properties"]["agent"]
+    assert "reader" in {target.id for target in contract.targets}
     result = await td.dispatch_task_tool(
         {"agent": "reader", "prompt": "go", "model": "sol"},
         caller_session_id="parent", caller_provider_id="lane", agent_registry=registry,
