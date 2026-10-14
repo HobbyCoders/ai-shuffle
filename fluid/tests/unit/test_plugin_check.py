@@ -113,3 +113,56 @@ def test_missing_folder_and_command_line(tmp_path, capsys) -> None:
     assert main([str(_valid(tmp_path / "cf-dns"))]) == 0
     assert "OK: cf-dns" in capsys.readouterr().out
     assert main([str(tmp_path / "nope")]) == 1
+
+@pytest.mark.parametrize("filename", ["AGENTS.md", "CLAUDE.md"])
+def test_draft_instructions_are_checked_but_not_installed(tmp_path, filename):
+    root = _valid(tmp_path / "draft")
+    _write(root / filename, "# Draft rules\nNo secrets.\n")
+    result = check_plugin_folder(root)
+    assert result.ok, result.render()
+    assert f"{filename} is not installed" in result.render()
+    saved = save_authored_plugin(result.spec, home=tmp_path / "installed")
+    assert not (saved.path / filename).exists()
+    _write(root / filename, "sk-abcdefghijklmnopqrstuvwxyz123456")
+    assert not check_plugin_folder(root).ok
+
+
+def test_scaffold_cli_to_checked_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert main(["--new", "zone-report"]) == 0
+    root = tmp_path / ".fluid" / "plugin-drafts" / "zone-report"
+    manifest = json.loads((root / "plugin.json").read_text())
+    assert manifest["name"] == "zone-report" and manifest["version"] == "0.1.0"
+    assert list((root / "skills").iterdir()) == []
+    rules = (root / "AGENTS.md").read_text()
+    for phrase in ("${VAR}", "model", "effort", "provider", "permissionMode",
+                   "hooks", "allowed-tools", "python -m fluid.context.plugin_check ."):
+        assert phrase in rules
+    assert not check_plugin_folder(root).ok  # An empty draft cannot be installed.
+    _write(root / "skills" / "report" / "SKILL.md",
+           "---\nname: report\ndescription: Report zones\n---\nReport zones.\n")
+    assert main([str(root)]) == 0
+    result = check_plugin_folder(root)
+    saved = save_authored_plugin(result.spec, home=tmp_path / "installed")
+    assert (saved.path / "skills" / "report" / "SKILL.md").is_file()
+    assert not (saved.path / "AGENTS.md").exists()
+    before = (root / "plugin.json").read_bytes()
+    assert main(["--new", "zone-report"]) == 1
+    assert (root / "plugin.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("name", ["../escape", "/absolute", "UPPER", "", "a/b", "a" * 64])
+def test_scaffold_rejects_invalid_names_without_writing(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert main(["--new", name]) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_scaffold_refuses_existing_symlink(tmp_path):
+    from fluid.context.plugin_check import scaffold_plugin
+    target = tmp_path / "target"
+    target.mkdir()
+    (tmp_path / "draft").symlink_to(target, target_is_directory=True)
+    with pytest.raises(FileExistsError):
+        scaffold_plugin("draft", drafts_root=tmp_path)
+    assert list(target.iterdir()) == []

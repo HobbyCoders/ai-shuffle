@@ -6804,7 +6804,9 @@ def test_github_section_carries_the_git_hazard_rules():
 
     # CI waits are parked on a Monitor, never blocked on in Bash.
     assert "never wait in Bash" in text
-    assert "Monitor(command=" in text and "gh pr checks" in text
+    assert "background-command tool's CI wait recipe" in text
+    assert "gh pr checks" not in text and "Monitor(command=" not in text
+    assert "preserving its exit code" in text
     # Worktrees share one stash stack: a bare pop can land another session's
     # work in this tree.
     assert "git stash" in text and 'push -u -m "<tag>"' in text

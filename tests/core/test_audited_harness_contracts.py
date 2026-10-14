@@ -19,6 +19,37 @@ def test_read_only_code_mode_omits_unavailable_workflows():
     assert len(text) < len(ha.CODE_MODE_SECTION)
 
 
+@pytest.mark.parametrize("full", [False, True], ids=["restricted", "full"])
+def test_compiled_code_mode_uses_wired_capabilities(tmp_path, monkeypatch, full):
+    from fluid.tools.registry import ToolRegistry
+    from fluid.tools.builtins import register_builtins
+    from fluid.codemode.projection import Projection
+    registry = ToolRegistry()
+    register_builtins(registry)
+    specs = registry.list_tools(loaded_only=False)
+    options = SessionOptions(model="claude", cwd=str(tmp_path), setting_sources=[],
+                             extra={"github_connected": True, "automatic_workflows": True})
+    options.tool_allowlist = ["Read", "Bash", "Task", "Monitor", "Write"]
+    monkeypatch.setattr(ha, "_agent_context", lambda *a, **k: (None, {}))
+    wired = frozenset(key for s in specs for key in s.requires_extra) if full else frozenset()
+    permitted = ha._wired_tool_names(registry, frozenset(options.tool_allowlist), wired)
+    from fluid.tools.builtins import refine_builtin_descriptions
+    refine_builtin_descriptions(registry, allowed=permitted)
+    projection = Projection(registry.list_tools(loaded_only=False))
+    codemode = types.SimpleNamespace(_projection=lambda: projection)
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        "AGENT", None, options, code_mode=True, codemode=codemode,
+        registry=registry, wired=wired)
+    assert compiled is not None
+    assert "# GitHub" in compiled.text
+    assert "browser verification surface is unavailable" in compiled.text
+    for name in ("Task", "Monitor"):
+        assert bool(re.search(r"\b" + name + r"\b", compiled.text)) == full
+    assert "browser_navigate" not in compiled.text
+    if not full:
+        assert "report the verification gap" in compiled.text
+
+
 def test_optional_workflow_blocks_require_their_tools():
     text = ha._code_mode_section(frozenset({"Monitor"}))
     assert "Monitor" in text and "Task" not in text

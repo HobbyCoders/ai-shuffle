@@ -70,6 +70,8 @@ def _monitor_description() -> str:
     the trigger is stated outright — anything expected to outlast a Bash call —
     and the doctrine comes from fluid's own fragment.
     """
+    from fluid.tools.fragments import CI_WAIT_GUIDANCE
+
     return (
         "Run a long-running shell command in the background and be woken when "
         "it finishes. Returns a task_id immediately; when the command exits "
@@ -86,9 +88,8 @@ def _monitor_description() -> str:
         f"{_park_doctrine()}\n"
         "\n"
         "The command must exit for a completion to fire, so give a watch its "
-        "own end condition and time budget — for GitHub CI that is "
-        "`gh pr checks <PR> --watch --fail-fast`, which blocks until the "
-        "checks settle. Pass wait_seconds for work that will probably be "
+        "own end condition and time budget. "
+        f"{CI_WAIT_GUIDANCE} Pass wait_seconds for work that will probably be "
         "quick: if it finishes inside the wait you get the result right here "
         "and nothing parks at all. A non-zero exit comes back as an ordinary "
         "result with failed: true and exit_code — a failing test run is an "
