@@ -1113,6 +1113,76 @@ describe('feedController optimistic seeding (worktree double-load fix)', () => {
 		expect(deps.state.isStreaming).toBe(true);
 	});
 
+	it.each([400, 4000, 8000])('does not inspect %i published history rows again during visible or hidden deltas', (count) => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		for (let i = 0; i < count; i++) {
+			hoisted.onEvent!(userMessage(`u-${i}`, `turn-${i}`, `question ${i}`));
+		}
+		hoisted.onEvent!(textDelta('answer', 'start'));
+		hoisted.onEvent!(caughtUp(0));
+
+		// Count reads of actual reducer-produced history, not a seeded consumer
+		// fixture. Neither appending to the open text row nor publishing it needs
+		// to read the role of any historical row.
+		let historyReads = 0;
+		for (const message of deps.state.messages.slice(0, count)) {
+			const role = message.role;
+			Object.defineProperty(message, 'role', {
+				configurable: true, enumerable: true,
+				get: () => { historyReads++; return role; },
+			});
+		}
+		const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+		for (let i = 0; i < 20; i++) {
+			if (i === 10) {
+				hidden.mockReturnValue(true);
+				document.dispatchEvent(new Event('visibilitychange'));
+			}
+			hoisted.onEvent!(textDelta(`delta-${i}`, 'x'));
+			vi.advanceTimersByTime(STREAM_FOLD_MS);
+		}
+		hidden.mockRestore();
+		expect(historyReads).toBe(0);
+		document.dispatchEvent(new Event('visibilitychange'));
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		expect(deps.state.messages).toHaveLength(count + 1);
+		expect(deps.state.messages.at(-1)?.content).toBe(`start${'x'.repeat(20)}`);
+	});
+
+	it('seeds new local sends after publication and reconciles acknowledgements without duplicates', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(userMessage('old', 'old-turn', 'previous question'));
+		hoisted.onEvent!(caughtUp(0));
+
+		for (const id of ['one', 'two']) {
+			deps.update(s => ({ ...s, messages: [...s.messages, {
+				id: `local-${id}`, role: 'user', content: `question ${id}`, commandId: `cmd-${id}`,
+			}] }));
+			hoisted.onEvent!(textDelta(`delta-${id}`, 'answer'));
+			vi.advanceTimersByTime(STREAM_FOLD_MS);
+			expect(deps.state.messages.some(m => m.id === `local-${id}`)).toBe(true);
+			hoisted.onEvent!({ ...userMessage(`ack-${id}`, `turn-${id}`, `question ${id}`), command_id: `cmd-${id}` });
+			flushRaf();
+		}
+		expect(deps.state.messages.filter(m => m.role === 'user').map(m => m.content))
+			.toEqual(['previous question', 'question one', 'question two']);
+	});
+
+	it('re-seeds the same local array when a stopped feed starts with a fresh reducer', () => {
+		const deps = makeDeps({ messages: [{ id: 'local', role: 'user', content: 'pending', commandId: 'cmd' }] });
+		feedController.attach(deps);
+		feedController.start('s1');
+		const published = deps.state.messages;
+		feedController.stop();
+		expect(deps.state.messages).toBe(published);
+		feedController.start('s1');
+		expect(deps.state.messages.map(m => m.id)).toEqual(['local']);
+	});
+
 	it('#1282: seeding before each streamed delta does not rescan history per user row', () => {
 		const TURNS = 300;
 		const deps = makeDeps();

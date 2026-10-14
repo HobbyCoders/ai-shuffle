@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { pendingQueue, isLocalPendingId, LOCAL_PENDING_PREFIX, type PendingEntry } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages, isLocalPendingId, LOCAL_PENDING_PREFIX, type PendingEntry } from './pending-queue';
+import type { ChatMessage, PendingPeerMessage } from '../types';
 
 /**
  * The pending bubble ("Not seen yet") is written by two unordered producers: the
@@ -23,6 +24,16 @@ function authoritative(rows: PendingEntry[]): PendingEntry[] {
 
 beforeEach(() => {
 	pendingQueue.reset(SID, true);
+});
+
+describe('pending peer messages', () => {
+	it('preserves an empty queue without inspecting transcript rows', () => {
+		const rows: PendingPeerMessage[] = [];
+		const role = vi.fn(() => 'user' as const);
+		const messages: ChatMessage[] = [{ id: 'history', content: 'done', get role() { return role(); } }];
+		expect(reconcilePendingPeerMessages(rows, messages)).toBe(rows);
+		expect(role).not.toHaveBeenCalled();
+	});
 });
 
 describe('pendingQueue — optimistic echo', () => {

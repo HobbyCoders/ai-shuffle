@@ -382,6 +382,11 @@ export function cachedTranscriptCount(): number {
 
 // ─── Optimistic-message seeding ───────────────────────────────────────────────
 
+// Local sends replace the app's message array. Already-inspected arrays and our
+// own publications cannot contain a new optimistic row, even when reduction has
+// since copied its array. Keep only the latest reference, scoped to this feed.
+let seededMessages: ActiveSessionState['messages'] | null = null;
+
 /**
  * Pull any locally-appended optimistic user messages (stamped with a `commandId`
  * by message-sender, or a plain trailing user send) into the reducer BEFORE the
@@ -395,8 +400,9 @@ export function cachedTranscriptCount(): number {
 function seedOptimistic(): void {
 	if (!deps) return;
 	const app = deps.getState();
-	if (app.sessionId !== currentSessionId) return;
-	// Runs before EVERY reduced SSE event, so it must not be O(user rows x
+	if (app.sessionId !== currentSessionId || app.messages === seededMessages) return;
+	seededMessages = app.messages;
+	// Runs for a new local array, so it must not be O(user rows x
 	// reducer rows): index the reducer's ids/command ids once per call (#1282).
 	let knownIds: Set<string> | null = null;
 	let knownCommandIds: Set<string> | null = null;
@@ -532,6 +538,9 @@ function fold(hydrationComplete = false): void {
 	// can never claim ownership on the fed session's behalf.
 	if (reducerState.usage !== null) usageApplied = true;
 	if (hydrationComplete) transcriptPublished = true;
+	// Every published row already belongs to the reducer; do not re-index it
+	// before the next event. Only a subsequent local array needs seeding.
+	seededMessages = patch.messages ?? null;
 	deps.update((s) =>
 		s.sessionId === currentSessionId
 			? {
@@ -779,6 +788,7 @@ function teardown(capture: boolean): void {
 	resetFeedFlags();
 	optimisticStreaming = false;
 	currentSessionId = null;
+	seededMessages = null;
 	reducerState = initialState();
 	pendingQueue.reset(null);
 }
