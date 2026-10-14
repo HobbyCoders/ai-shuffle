@@ -35,7 +35,7 @@ Nothing an agent writes runs unless you press Enter.
 
 Only you, the owner, signed in with your owner password, from your own paired phone, or from the desktop app. API keys, other people's devices and shared links cannot open a terminal. Trusted home network access without a password is not enough either.
 
-Agents cannot open or type into a terminal.
+Agents cannot open or type into a terminal through the terminal API. This is an API restriction, not a security boundary against an agent with its own shell: by default its commands run as the app's OS user and can read the install's database connection details and credential keys. Owner-only checks and filtering secrets from shell environments do not remove that file access. See [What a shell can reach](/docs/features/profiles#permission-modes) and [Docker agent isolation](/docs/getting-started/install-docker-compose#keep-agents-away-from-ai-shuffles-own-keys-optional).
 
 Signing out disconnects every terminal. The shells keep running, and you can reconnect after signing in again.
 
@@ -63,7 +63,7 @@ Terminals keep running when you reload the page or close the tab. When you come 
 
 - Up to 8 terminals per worker. Close one to open another.
 - Stopping or updating AI Shuffle ends every terminal.
-- A terminal runs as the same user as AI Shuffle, with that user's files and tools. AI Shuffle's own secrets are kept out of it. Treat a terminal like signing in to the worker yourself.
+- A terminal runs as the worker's workspace user, with that user's files and tools. Known app secrets are filtered from its environment, but by default the install's database and key files remain readable by that user. Docker agent isolation is optional and off by default; when active, it restricts terminal shells as well as agent shells. Treat a terminal like signing in to the worker yourself.
 
 ## Not available yet
 
