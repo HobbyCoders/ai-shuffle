@@ -422,3 +422,83 @@ async def test_interrupted_turn_does_not_start_another_checkpoint(tmp_path, manu
         assert terminal.cost_usd == 0.125
     finally:
         await loop.aclose()
+
+
+async def test_interrupted_manual_compaction_persists_the_ladder(tmp_path):
+    from fluid.events import ContextCompaction, Interrupt, Interrupted
+    started = asyncio.Event()
+
+    class Waiting(Provider):
+        async def stream(self, request):
+            yield StreamChunk("message_start", {"usage": {"input_tokens": 100}})
+            started.set()
+            await asyncio.Event().wait()
+
+    cfg = config(trigger_tokens=10_000_000)
+    loop = NativeLoop(provider=Waiting(), store=JsonlStore(tmp_path), model="fixture",
+                      context_window=40_000, compaction=cfg)
+    await loop._ensure_session()
+    sid = loop.session_id
+    path = nodes(15)
+    for node in path:
+        await loop.store.append(sid, node)
+    try:
+        from fluid.events import UserTurn
+        await loop.submit(UserTurn(content="/compact"))
+        await asyncio.wait_for(started.wait(), 3)
+        await loop.submit(Interrupt())
+        await asyncio.wait_for(loop.wait_turn(), 3)
+        events = loop.bus.log(sid)
+        assert any(isinstance(e, Interrupted) for e in events)
+        assert any(isinstance(e, ContextCompaction) and e.tier < 4 for e in events)
+        view = loop._compactor.view(path)
+        assert view != [n.message for n in path]  # the ladder did change the view
+    finally:
+        await loop.aclose()
+    fresh = NativeLoop(provider=Provider(), store=JsonlStore(tmp_path), model="fixture",
+                       session_id=sid, context_window=40_000, compaction=cfg)
+    await fresh._rehydrate_compaction(sid)
+    assert fresh._compactor.view(path) == view
+    await fresh.aclose()
+
+
+async def test_failed_background_booking_is_retried_and_reconciled(tmp_path):
+    from fluid.events import Usage
+    provider = LoopProvider()
+    attempts, billed = [], []
+
+    async def flaky(event):
+        attempts.append(event.seq)
+        if len(attempts) == 1:
+            raise RuntimeError("database unavailable")
+        billed.append(event.seq)
+
+    loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="fixture",
+                      context_window=40_000, compaction=config(trigger_tokens=10_000_000))
+    loop._background_usage_sink = flaky
+    try:
+        task = await start_checkpoint(loop, provider)
+        await asyncio.wait_for(task, 3)
+        [usage] = [e for e in loop.bus.log(loop.session_id)
+                   if isinstance(e, Usage) and e.raw.get("auxiliary_background")]
+        assert attempts == [usage.seq] and billed == []
+        assert list(loop._unbooked_usage) == [usage.seq]
+        await turn(loop, "next turn")  # turn end retries off the turn path
+        await asyncio.wait_for(loop._booking_task, 3)
+        assert billed == [usage.seq] and not loop._unbooked_usage
+        sid = loop.session_id
+    finally:
+        await loop.aclose()
+    # A later engine re-offers persisted background Usage; the host's booking
+    # is keyed by (session, seq), so this reconciles without double counting.
+    seen = []
+
+    async def record(event):
+        seen.append(event.seq)
+
+    fresh = NativeLoop(provider=Provider(), store=JsonlStore(tmp_path), model="fixture",
+                       session_id=sid, background_usage_sink=record)
+    await fresh._rehydrate_last_call_usage(sid, [])
+    await asyncio.wait_for(fresh._booking_task, 3)
+    assert seen == [usage.seq]
+    await fresh.aclose()

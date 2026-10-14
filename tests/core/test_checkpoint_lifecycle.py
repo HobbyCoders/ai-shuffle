@@ -184,6 +184,9 @@ async def test_idle_host_stop_cancels_and_books_reported_usage(mock_db, monkeypa
             await query_session_lifecycle.stop_all_background_tasks(sid, user_stop=True)
         assert task.cancelled()
         assert loop._pending_summary is None
+        # Only the side call is cancelled: a continuation turn running on the
+        # same engine is ended (or not) by the caller's own interrupt.
+        assert not loop._interrupted.is_set()
         loop._schedule_checkpoint(loop.session_id, "after-stop")
         assert loop._summary_task is None
         row = database.get_session(sid)

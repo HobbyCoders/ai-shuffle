@@ -2918,8 +2918,10 @@ class HarnessAdapter(ProviderAdapter):
         """Stop session-owned work even when no receive_events pump is running."""
         cancel = getattr(self._engine, "cancel_checkpoint", None)
         if callable(cancel):
-            # Interrupt latches scheduling off too, until the next explicit turn.
-            await self._engine.submit(Interrupt())
+            # Only the summary side call: a turn still running on this engine
+            # (a continuation that overlaps the stopped one) is not ours to end.
+            # Callers that stop the turn interrupt it themselves.
+            await cancel(latch=True)
 
     async def _book_background_usage(self, event: Any) -> None:
         """Book a side call independently of turn terminals, with a durable claim."""

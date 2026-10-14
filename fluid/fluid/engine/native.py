@@ -1255,6 +1255,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._background_usage_sink = background_usage_sink
         self._summary_task: asyncio.Task | None = None
         self._pending_summary: tuple[str, str, str] | None = None
+        # Set by a host Stop/archive teardown: no new background checkpoint
+        # until the next turn the owner or host starts.
+        self._checkpoint_latched = False
+        # Background side-call Usage the host sink has not confirmed yet:
+        # failed bookings, and persisted ones found on resume. Booking is
+        # idempotent per (session, seq), so a retry never double counts.
+        self._unbooked_usage: dict[int, Usage] = {}
+        self._booking_task: asyncio.Task | None = None
         # Last model call's real prompt accounting, per session:
         # ``session_id -> (assistant node the call produced, provider usage)``.
         # get_context_usage() prefers it over the chars/4 estimate, but only
@@ -1631,6 +1639,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
+            self._checkpoint_latched = False
             self._peer_delivery_sealed = False
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Interrupt):
@@ -1880,6 +1889,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             except asyncio.CancelledError:
                 pass
         await self.cancel_checkpoint()
+        if self._booking_task is not None and not self._booking_task.done():
+            # Let a deferred booking finish; anything left is reconciled from
+            # the persisted Usage by the next engine for this session.
+            with suppress(Exception, asyncio.TimeoutError):
+                await asyncio.wait_for(self._booking_task, 10)
         await self._emit_session_end()
         if self._codemode is not None:
             await self._codemode.aclose()
@@ -2143,6 +2157,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:
             return None
         self._seed_p_cold(sid, events)
+        for event in events:
+            raw = event.raw if isinstance(event.raw, dict) else {}
+            if raw.get("auxiliary_background") and event.seq:
+                self._unbooked_usage.setdefault(event.seq, event)
+        self._retry_unbooked_usage()
         on_path = {n.node_id for n in nodes}
         for event in reversed(events):
             if not isinstance(event, Usage) or event.node_id not in on_path:
@@ -2523,8 +2542,37 @@ class NativeLoop(BackgroundLifecycleMixin):
         estimate = self._compactor.estimate_view_tokens(nodes, self._context_overhead_tokens())
         return min(1.0, max(0.6, measured / estimate)) if measured and estimate else 1.0
 
-    async def cancel_checkpoint(self) -> None:
-        """Cancel session-owned checkpoint work, including while the loop is idle."""
+    async def _book_unbooked_usage(self) -> None:
+        """Hand pending background Usage to the host sink; keep failures for a
+        later retry (the next turn end, or the next engine's resume scan)."""
+        sink = self._background_usage_sink
+        if sink is None:
+            return
+        for seq, event in sorted(self._unbooked_usage.items()):
+            try:
+                await sink(event)
+            except Exception as exc:  # noqa: BLE001 — retried later, never lost
+                log.warning("background usage booking deferred (%s)", type(exc).__name__)
+                return
+            self._unbooked_usage.pop(seq, None)
+
+    def _retry_unbooked_usage(self) -> None:
+        """Retry deferred bookings off the turn path, one attempt at a time."""
+        if not self._unbooked_usage or self._background_usage_sink is None:
+            return
+        if self._booking_task is not None and not self._booking_task.done():
+            return
+        self._booking_task = asyncio.create_task(self._book_unbooked_usage())
+
+    async def cancel_checkpoint(self, *, latch: bool = False) -> None:
+        """Cancel session-owned checkpoint work, including while the loop is idle.
+
+        Never touches a running turn. ``latch`` (host Stop/archive teardown)
+        also keeps a turn that ends afterwards from scheduling a new build,
+        until the next turn starts.
+        """
+        if latch:
+            self._checkpoint_latched = True
         task = self._summary_task
         if task is not None and not task.done():
             task.cancel()
@@ -2576,7 +2624,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             ))
             if background and self._background_usage_sink is not None:
                 assert isinstance(event, Usage)
-                await self._background_usage_sink(event)
+                self._unbooked_usage[event.seq] = event
+                await self._book_unbooked_usage()
 
         key = self._affinity_key()
         extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}
@@ -2594,7 +2643,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
 
     def _schedule_checkpoint(self, sid: str, turn_id: str) -> None:
-        if (self._interrupted.is_set() or self._background_closed
+        if (self._interrupted.is_set() or self._background_closed or self._checkpoint_latched
                 or not self._compactor.config.summary_enabled or self._pending_summary is not None):
             return
         if self._summary_task is not None and not self._summary_task.done():
@@ -2677,6 +2726,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         promotions: list[Promotion] = []
         failure: str | None = None
         scale = 1.0
+        interrupted = False
         if not self._compactor.active:
             failure = "compaction is turned off for this session"
         elif not nodes:
@@ -2718,15 +2768,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             except asyncio.CancelledError:
                 if not self._interrupted.is_set():
                     raise
-                usage, cost = self._partial_usage(self._turn_usage)
-                await self._emit_terminal_with_park(Interrupted(
-                    session_id=sid, turn_id=turn_id, usage=usage, cost_usd=cost,
-                ))
-                return
+                # The ladder already changed the compactor's view: persist its
+                # promotions below so a restarted engine renders the same view.
+                interrupted = True
             except Exception as exc:  # noqa: BLE001 — reported as a failed compaction
                 log.warning("manual compaction failed", exc_info=True)
                 failure = f"compaction failed: {type(exc).__name__}"
-            if not promotions and failure is None:
+            if not promotions and failure is None and not interrupted:
                 failure = (
                     "nothing could be compacted: the context is already as small "
                     "as compaction makes it without touching the most recent work"
@@ -2748,12 +2796,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                 decision_reason="manual",
                 render_version=self._compactor.render_version,
             ))
-        else:
+        elif not interrupted:
             await self._emit(DelegatedDiagnostic(
                 session_id=sid, turn_id=turn_id, kind="compaction_failed",
                 message=failure or "nothing could be compacted",
             ))
         usage, cost = self._partial_usage(self._turn_usage)
+        if interrupted:
+            await self._emit_terminal_with_park(Interrupted(
+                session_id=sid, turn_id=turn_id, usage=usage, cost_usd=cost,
+            ))
+            return
         await self._emit_terminal_with_park(TurnComplete(
             session_id=sid, turn_id=turn_id, stop_reason="end_turn",
             num_model_calls=0, usage=usage, cost_usd=cost if cost is not None else 0.0,
@@ -2804,6 +2857,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason=reason)
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
+            if not cancelled:
+                self._retry_unbooked_usage()
             if not cancelled and not self._interrupted.is_set():
                 self._schedule_checkpoint(sid, turn_id)
             # _run_turn owns the active id through cancellation settlement.
