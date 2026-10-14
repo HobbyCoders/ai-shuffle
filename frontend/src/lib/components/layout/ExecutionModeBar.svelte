@@ -570,7 +570,7 @@
 									<p class="stale-detail">{wt.binding_warning || wt.status_error || 'Directory missing; needs cleanup. Existing files are preserved.'}</p>
 									{#if !$git.workerTarget && !wt.binding_warning && (wt.exists === false || wt.status_error?.includes('not its own Git working tree'))}
 										{#if forgetConfirm === wt.id}
-											<p class="stale-detail">Forget this registration? This removes Git's record of this worktree and its entry in AI Shuffle. Checkout files, branches and chat history are kept.</p>
+											<p class="stale-detail">Forget this registration? This deletes Git's administrative files for this worktree and removes its entry in AI Shuffle. Checkout files, branches and chat history are kept.</p>
 											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={() => forgetWorktree(wt)}>{forgetting === wt.id ? 'Forgetting…' : 'Confirm forget'}</button>
 											<button type="button" class="branch-item" use:focusOnMount disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = null; forgetError = null; }}>Cancel</button>
 											{#if forgetError}<p class="stale-detail" role="alert">{forgetError}</p>{/if}

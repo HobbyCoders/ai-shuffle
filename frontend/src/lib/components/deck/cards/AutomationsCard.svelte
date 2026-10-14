@@ -234,11 +234,13 @@
 	}
 
 	function openCreate() {
+		error = '';
 		resetForm();
 		currentView = 'create';
 	}
 
 	function openEdit(automation: Automation) {
+		error = '';
 		selectedAutomation = automation;
 		formName = automation.name;
 		formDescription = automation.description || '';

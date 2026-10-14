@@ -240,13 +240,14 @@
 										<span class="as-sd as-sd--{dotClass(a)}" title={a.status}></span>
 										{a.name}
 										{#if !a.is_enabled}<span class="as-badge as-badge--warn">Disabled</span>{/if}
+										{#if !a.profile_id}<span class="as-tag as-tag-warn" title="Its agent was removed. Pick another agent.">No agent</span>{/if}
 									</h4>
 									{#if rowDesc(a)}<p class="as-desc">{rowDesc(a)}</p>{/if}
 									{#if a.last_error}<p class="as-row-error" role="status" title={a.last_error}>{a.last_error}</p>{/if}
 								</div>
 								<div class="as-meta">
 									{#each triggerTags(a) as tag}<span class="as-tag">{tag}</span>{/each}
-									{#if !a.profile_id}<span class="as-tag as-tag-warn" title="Its agent was removed. Pick another agent.">No agent</span>{:else if profileNames.get(a.profile_id)}<span class="as-tag">{profileNames.get(a.profile_id)}</span>{/if}
+									{#if a.profile_id && profileNames.get(a.profile_id)}<span class="as-tag">{profileNames.get(a.profile_id)}</span>{/if}
 									<span class="as-tag" class:as-tag-warn={!!a.model_error} title={a.model_error || 'Model its runs use'}>{automationModelLabel(a)}</span>
 									<span class="as-stat as-stat--{stat.tone}">{stat.text}</span>
 								</div>
@@ -381,7 +382,7 @@
 
 	.as-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; font-family: var(--font-mono, monospace); }
 	.as-tag.as-tag-warn { color: var(--destructive); }
-	.as-tag { font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+	.as-tag { font-family: var(--font-mono, monospace); font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 	.as-stat { font-size: 0.6875rem; white-space: nowrap; color: var(--muted-foreground); }
 	.as-stat--live { color: var(--primary); }
 	.as-stat--warn { color: var(--warning, #d97706); }
