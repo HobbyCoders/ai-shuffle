@@ -38,9 +38,13 @@ keywords.
 
 ## 2. Make the folder
 
-Pick a name of lowercase letters, digits and hyphens (`zone-report`), start
-at version `0.1.0`, and create `~/.fluid/plugin-drafts/<name>/` with only
-these files:
+Pick a name of lowercase letters, digits and hyphens (`zone-report`) and run:
+`python -m fluid.context.plugin_check --new <name>`.
+This creates `~/.fluid/plugin-drafts/<name>/` with `plugin.json` at `0.1.0`,
+an empty `skills/` folder and `AGENTS.md`. It refuses to overwrite an existing
+draft. Read its `AGENTS.md` before editing, including when resuming an older
+draft. Replace the manifest's placeholder description and add at least one
+component; an empty scaffold is not installable. Only these files are allowed:
 
 ```
 <name>/
@@ -50,6 +54,8 @@ these files:
   agents/<agent>.md           optional
   mcp.json                    optional
   README.md                   optional, not installed
+  AGENTS.md                   draft rules, not installed
+  CLAUDE.md                   optional draft rules, not installed
 ```
 
 Nothing else: no hooks, scripts, binaries, `.env` files, or another tool's

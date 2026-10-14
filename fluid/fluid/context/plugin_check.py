@@ -21,7 +21,7 @@ The native layout::
       commands/<name>.md          frontmatter: description (optional)
       agents/<name>.md            frontmatter: name (= file), description, tools (optional)
       mcp.json                    {"mcpServers": {...}} (optional)
-      README.md                   optional, not installed
+      README.md, AGENTS.md, CLAUDE.md  optional draft guidance, not installed
 
 Nothing else may be in the folder: no hooks, scripts or binaries, because a
 plugin installed from a chat can only carry what the owner can review in
@@ -217,9 +217,11 @@ def check_plugin_folder(path: str | Path) -> CheckResult:
                 result.errors.append('mcp.json: must be {"mcpServers": {"<name>": {...}}}')
                 continue
             servers = block
-        elif rel == "README.md":
+        elif rel in {"README.md", "AGENTS.md", "CLAUDE.md"}:
             _read_text(root, item, result)
-            result.warnings.append("README.md is not installed; the description in plugin.json is shown instead")
+            result.warnings.append(
+                f"{rel} is not installed; the description in plugin.json is shown instead"
+            )
         elif len(parts) == 3 and parts[0] == "skills" and parts[2] == "SKILL.md":
             text = _read_text(root, item, result)
             if text is None:
@@ -331,10 +333,62 @@ def check_plugin_folder(path: str | Path) -> CheckResult:
     return result
 
 
+def scaffold_plugin(name: str, *, drafts_root: Path | None = None) -> Path:
+    """Create a new draft, never replacing an existing folder or symlink."""
+    if not _NAME_RE.fullmatch(name):
+        raise ValueError("name must be 1-63 lowercase letters, digits or hyphens, starting with a letter or digit")
+    parent = drafts_root if drafts_root is not None else Path.home() / ".fluid" / "plugin-drafts"
+    parent.mkdir(parents=True, exist_ok=True)
+    root = parent / name
+    root.mkdir()  # exist_ok=False: no overwriting a draft (including a symlink).
+    (root / "skills").mkdir()
+    manifest = {
+        "name": name, "version": "0.1.0",
+        "description": "Describe what this plugin does.", "skills": "./skills/",
+    }
+    (root / "plugin.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text(_DRAFT_RULES, encoding="utf-8")
+    return root
+
+
+_DRAFT_RULES = """# Plugin draft rules
+
+Allowed files: plugin.json; skills/<name>/SKILL.md; commands/<name>.md;
+agents/<name>.md; mcp.json; root README.md, AGENTS.md and CLAUDE.md.
+The three root Markdown files are draft guidance only and are not installed.
+No hooks, scripts, binaries, .env files or foreign manifest folders.
+
+Never put keys, tokens or passwords in any file or ask for them in chat.
+Every MCP env value must be a ${VAR} reference, never a literal value.
+Declare outside services by name; credentials belong in approved private cards.
+
+plugin.json requires name, version and description; start at 0.1.0. Allowed
+optional keys: author, skills, mcpServers, extensions (ai.shuffle).
+Skill frontmatter: name (folder name), description. Command frontmatter:
+optional description. Subagent frontmatter: name (file name), description,
+optional tools. Subagents must omit model, effort, provider, permissionMode,
+hooks and allowed-tools: model/effort and permissions come from the chat.
+Use lowercase letters, digits and hyphens for names.
+
+Add at least one skill, command, agent or MCP server, then run from this folder:
+`python -m fluid.context.plugin_check .`
+Fix every problem before installing. Install switched off; only the owner
+reviews and enables the plugin. Raise the version for subsequent changes.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 1:
-        print("usage: python -m fluid.context.plugin_check <plugin folder>")
+    if len(args) == 2 and args[0] == "--new":
+        try:
+            root = scaffold_plugin(args[1])
+        except (OSError, ValueError) as exc:
+            print(f"Cannot scaffold plugin: {exc}")
+            return 1
+        print(f"Created {root}. Read AGENTS.md, add a component, then check the draft.")
+        return 0
+    if len(args) != 1 or args[0].startswith("--"):
+        print("usage: python -m fluid.context.plugin_check <plugin folder> | --new <name>")
         return 2
     result = check_plugin_folder(args[0])
     print(result.render())
