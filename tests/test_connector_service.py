@@ -184,9 +184,9 @@ class TestGetConnectorTypeInfo:
             for field in discord["config_fields"]
         )
 
-    def test_returns_15_types(self):
+    def test_returns_14_offered_types(self):
         types = get_connector_type_info()
-        assert len(types) == 15
+        assert len(types) == 14
 
     def test_all_types_have_required_fields(self):
         types = get_connector_type_info()
@@ -196,12 +196,12 @@ class TestGetConnectorTypeInfo:
             assert "description" in t
             assert "config_fields" in t
 
-    def test_type_names_match_enum(self):
+    def test_type_names_exclude_unavailable_teams(self):
         types = get_connector_type_info()
         type_names = {t["type"] for t in types}
         expected = {
             "telegram", "discord", "whatsapp", "webhook", "slack", "line",
-            "signal", "imessage", "msteams", "bluebubbles", "spotify",
+            "signal", "imessage", "bluebubbles", "spotify",
             "hue", "homeassistant", "gmail", "plaid",
         }
         assert type_names == expected

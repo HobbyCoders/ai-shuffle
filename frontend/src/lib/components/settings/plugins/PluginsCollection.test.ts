@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import type { PluginDetails, PluginInfo } from '$lib/api/plugins';
 import responses from '$lib/api/__fixtures__/plugin-responses.json';
+import connectorCatalog from '../../../../../../app/core/connectors/catalog.json';
 
 const m = vi.hoisted(() => ({
 	getInstalledPlugins: vi.fn(),
@@ -171,6 +172,25 @@ describe('the list (from PluginsHub)', () => {
 		expect(rows()).toHaveLength(1);
 		await fireEvent.input(search, { target: { value: 'no-such-plugin' } });
 		expect(within(pane).getByText('No plugins match your search.')).toBeTruthy();
+	});
+
+	it('renders the offered Apps catalog without Teams or its install action', async () => {
+		// Mirror the discovery response from the shipped catalog; the backend
+		// package/API tests exercise the actual producer and direct install guard.
+		const offered = Object.entries(connectorCatalog.packages)
+			.filter(([, spec]) => !('offered' in spec) || spec.offered !== false)
+			.map(([type]) => ({ ...gmail, type, name: type, plugin_id: `${type}@shuffle-connectors`, plugin_installed: false }));
+		m.getConnectorTypes.mockResolvedValue(offered);
+		m.getAvailablePlugins.mockResolvedValue([]);
+		m.getInstalledPlugins.mockResolvedValue([]);
+		await show('explore');
+		const pane = detail();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Apps' }));
+		expect(pane.querySelectorAll('[data-settings-nav-item]')).toHaveLength(14);
+		expect(within(pane).getByRole('button', { name: 'Set up telegram' })).toBeTruthy();
+		expect(within(pane).getByRole('button', { name: 'Set up gmail' })).toBeTruthy();
+		expect(within(pane).queryByText(/Microsoft Teams|msteams/i)).toBeNull();
+		expect(within(pane).queryByRole('button', { name: /Install.*Teams/i })).toBeNull();
 	});
 
 	it('filters apps independently of agent plugins', async () => {

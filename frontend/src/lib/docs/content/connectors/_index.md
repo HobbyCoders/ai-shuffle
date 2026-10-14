@@ -25,7 +25,7 @@ Connectors link AI Shuffle to the apps and services you already use.
 | [iMessage](/docs/connectors/imessage) | Chat with your agent through iMessage. Needs AI Shuffle on a Mac (macOS app coming soon) |
 | [LINE](/docs/connectors/line) | Send LINE messages |
 | [BlueBubbles](/docs/connectors/bluebubbles) | Send iMessages through a BlueBubbles server |
-| [Microsoft Teams](/docs/connectors/msteams) | Connect a Teams app (messages not supported yet) |
+| [Microsoft Teams](/docs/connectors/msteams) | Not available yet; not offered for installation |
 | [Gmail](/docs/connectors/gmail) | Search, read, send and organize email |
 | [Spotify](/docs/connectors/spotify) | Control playback and playlists |
 | [Philips Hue](/docs/connectors/hue) | Control lights and scenes |

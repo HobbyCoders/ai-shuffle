@@ -251,13 +251,13 @@ class TestOwnerBoundary:
 
 
 class TestDiscovery:
-    def test_types_list_every_connector_type_with_its_fields(self, owner):
+    def test_types_list_only_offered_connector_types_with_their_fields(self, owner):
         response = owner.get(BASE + "/types")
         assert response.status_code == 200
         types = {t["type"]: t for t in response.json()}
         assert set(types) == {
             "telegram", "discord", "whatsapp", "webhook", "slack", "line", "signal", "imessage",
-            "msteams", "bluebubbles", "spotify", "hue", "homeassistant", "gmail", "plaid"}
+            "bluebubbles", "spotify", "hue", "homeassistant", "gmail", "plaid"}
         telegram = types["telegram"]
         assert telegram["name"] == "Telegram"
         assert telegram["description"] == "Telegram bot via Bot API"
