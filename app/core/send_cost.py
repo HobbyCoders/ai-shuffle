@@ -83,20 +83,29 @@ def _prompt_tokens(usage: Dict[str, Any]) -> int:
 
 def assess(
     *, leg: Optional[str], context_tokens: Optional[int], last_call_at: Optional[float],
-    now: float,
+    now: float, projected_after_compact_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """The verdict for one chat from its leg, size and last call. Pure."""
+    """The verdict for one chat from its leg, size and last call. Pure.
+
+    Native Compact has an estimated retained floor (system/tools, protected
+    recent history and checkpoint). Warn only where reclaiming down to that
+    floor saves at least 25%, with 150k as a minimum warning threshold.
+    """
+    threshold = LARGE_CONTEXT_TOKENS
+    if leg != "delegated" and projected_after_compact_tokens is not None:
+        # ceil(projection / .75): preserves the existing >=25% savings gate.
+        threshold = max(threshold, (projected_after_compact_tokens * 4 + 2) // 3)
     ttl = CACHE_TTL_SECONDS.get(leg or "")
     idle = (now - last_call_at) if last_call_at is not None else None
     cold = ttl is not None and idle is not None and idle > ttl
-    large = context_tokens is not None and context_tokens >= LARGE_CONTEXT_TOKENS
+    large = context_tokens is not None and context_tokens >= threshold
     return {
         "leg": leg,
         "context_tokens": context_tokens,
         "last_call_at": last_call_at,
         "idle_seconds": round(idle, 1) if idle is not None else None,
         "cache_ttl_seconds": ttl,
-        "threshold_tokens": LARGE_CONTEXT_TOKENS,
+        "threshold_tokens": threshold,
         "cold": cold,
         "large": large,
         "warn": bool(cold and large),
@@ -212,6 +221,7 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
     last = _last_call(session_id)
     context_tokens: Optional[int] = None
     data: Dict[str, Any] = {}
+    snapshot: Dict[str, Any] = {}
     try:
         snapshot = database.get_session_context_usage_snapshot(session_id) or {}
         data = snapshot.get("data") or {}
@@ -222,14 +232,31 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
         context_tokens = None
     if context_tokens is None and last is not None:
         context_tokens = _prompt_tokens(last["usage"]) or None
-    state = assess(
-        leg=leg, context_tokens=context_tokens,
-        last_call_at=last["at"] if last else None,
-        now=time.time() if now is None else now,
-    )
     projection = _native_projection(leg, data)
-    if projection is not None and context_tokens is not None and projection > context_tokens * 0.75:
-        state["warn"] = False
+    captured_at = _epoch(snapshot.get("captured_at"))
+    last_call_at = last["at"] if last else None
+    # A long idle does not stale a projection; a newer call does. Legacy
+    # snapshots without a capture time cannot justify a floor-relative threshold.
+    if (captured_at is None or not math.isfinite(captured_at)
+            or last_call_at is None or captured_at < last_call_at):
+        projection = None
+    if projection is not None:
+        from app.core.query_options import decode_provider_model
+
+        raw_model = session.get("model") or session.get("launched_model")
+        decoded = decode_provider_model(raw_model) if raw_model else None
+        model = decoded[1] if decoded else raw_model
+        if model and data.get("model") and model != data["model"]:
+            projection = None  # Changing models invalidates the old projection.
+    state = assess(
+        leg=leg, context_tokens=context_tokens, last_call_at=last_call_at,
+        now=time.time() if now is None else now,
+        projected_after_compact_tokens=projection,
+    )
+    if leg != "delegated" and projection is None:
+        # Preserve the existing fixed-threshold warning and estimate fallback
+        # when the floor is unknown. Never price using an out-of-date projection.
+        data = {**data, "compaction": None}
     state["cost_comparison"] = None
     if state["warn"] and context_tokens is not None:
         try:
