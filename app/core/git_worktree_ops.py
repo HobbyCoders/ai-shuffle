@@ -379,12 +379,9 @@ class GitWorktreeMixin:
             True if successful, False otherwise
         """
         try:
-            # Detach provisioned runtime links (node_modules, venv, built
-            # assets) BEFORE git sees the directory. On Windows they are
-            # junctions, and `git worktree remove` recurses through a junction
-            # into its target — left in place, removing a provisioned worktree
-            # guts the main checkout's node_modules. Local import: this module
-            # is a git_service mixin and checkout_manager imports git_service.
+            # Preflight the whole tree BEFORE git can recurse: detach even
+            # unknown nested junctions/reparse points and refuse mount points.
+            # Local import: checkout_manager itself imports git_service.
             from app.core.checkout_manager import sever_runtime_links
 
             sever_summary = sever_runtime_links(path)
@@ -393,7 +390,7 @@ class GitWorktreeMixin:
                 # be attached — continuing is how the main checkout's
                 # node_modules got deleted.
                 logger.warning(
-                    "Severing runtime links in %s hit errors; refusing git "
+                    "Removal safety preflight in %s hit errors; refusing git "
                     "worktree remove: %s",
                     path,
                     sever_summary["errors"],
