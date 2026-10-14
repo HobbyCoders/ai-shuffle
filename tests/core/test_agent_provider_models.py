@@ -112,6 +112,37 @@ def test_provider_roster_rejects_uncurated_assignment(mock_db, monkeypatch):
     assert pinned[0].provider_id is None
 
 
+def test_mapped_agent_survives_creation_of_unmapped_agent(mock_db, monkeypatch):
+    """Provider composites are decoded before validation, even after CRUD."""
+    import asyncio
+    import json
+    from app.db import database
+    from app.mcp.config_subagents import _create_subagent_tools
+
+    database.create_profile("caller", "Caller", None, {"model": "opus"})
+    database.create_profile("mapped", "Mapped", None, {
+        "provider_models": {"provider-1": "prov:provider-1:gpt-worker"},
+    })
+    monkeypatch.setattr(database, "get_model_provider", lambda *a, **kw: {
+        "id": "provider-1", "enabled": True,
+    })
+    # A composite passed directly to the provider validator would be rejected.
+    monkeypatch.setattr("app.core.provider_agent.validate_provider_model",
+                        lambda provider, model, **kw: SimpleNamespace(ok=model == "gpt-worker"))
+    before = available_subagents("caller", "provider-1")
+    assert [(t.id, t.model) for t in before if t.id == "mapped"] == [("mapped", "gpt-worker")]
+    create = next(t for t in _create_subagent_tools(is_admin=True) if t.name == "createSubagent")
+    response = asyncio.run(create.handler({
+        "name": "Unmapped", "description": "New agent", "prompt": "Check changes",
+    }))
+    assert json.loads(response["content"][0]["text"])["success"]
+    after = {t.id: t for t in available_subagents("caller", "provider-1")}
+    assert {"mapped", "unmapped"} <= after.keys()
+    assert after["mapped"].model == "gpt-worker"
+    assert after["mapped"].model_source == "pin"
+    assert after["unmapped"].model_source == "unset"
+
+
 def test_disabled_provider_has_no_roster(mock_db, monkeypatch):
     from app.db import database
 
@@ -144,7 +175,8 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
 
     contract = build_task_contract("caller", None)
 
-    assert "reviewer" in contract.input_schema["properties"]["agent"]["enum"]
+    assert "enum" not in contract.input_schema["properties"]["agent"]
+    assert "reviewer" in {target.id for target in contract.targets}
     # Task's model takes any model the user asked for (#1830): a checked
     # string, never an enum of every provider's models.
     assert "enum" not in contract.input_schema["properties"]["model"]

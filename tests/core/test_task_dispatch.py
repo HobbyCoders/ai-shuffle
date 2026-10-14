@@ -1268,8 +1268,66 @@ def test_delegated_task_schema_advertises_discovered_file_agent(
 ):
     tool = _builtin_task_tool("s-cli-schema", "root-agent", str(file_agent_project))
 
-    assert "researcher" in tool.input_schema["properties"]["agent"]["enum"]
+    assert "enum" not in tool.input_schema["properties"]["agent"]
     assert "researcher" in tool.description
+
+
+@pytest.mark.parametrize("delegated", [False, True], ids=["native", "delegated"])
+async def test_published_task_accepts_live_subagent_crud(agents, delegated):
+    """Keep the original schema/handler while real config tools mutate the DB."""
+    from jsonschema import validate
+    from app.core.agent_provider_models import build_task_contract
+    from app.mcp.config_subagents import _create_subagent_tools
+
+    _mk_session(agents, "live-roster", "root-agent")
+    config = {tool.name: tool for tool in _create_subagent_tools(is_admin=True)}
+    tool = _builtin_task_tool("live-roster", "root-agent", None) if delegated else None
+    schema = tool.input_schema if tool else build_task_contract("root-agent", None).input_schema
+    seen = []
+
+    async def worker(**kwargs):
+        seen.append(kwargs)
+        return WorkerOutcome(ok=True, session_id="live-child", report="checked")
+
+    async def invoke(agent):
+        args = {"agent": agent, "prompt": "check", "mode": "sync"}
+        # This is the unchanged schema published before createSubagent.
+        validate(args, schema)
+        if tool:
+            return _envelope(await tool.handler(args))
+        return await td.dispatch_task_tool(args, caller_session_id="live-roster")
+
+    created = _envelope(await config["createSubagent"].handler({
+        "name": "Live Reviewer", "description": "Check changes", "prompt": "Review",
+        "model": "sonnet",
+    }))
+    assert created["success"], created
+    agent = created["subagent_id"]
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=worker):
+        result = await invoke(agent)
+        assert result["ok"], result
+        assert seen[-1]["model_id"] == "sonnet"
+        updated = _envelope(await config["updateSubagent"].handler({
+            "subagent_id": agent, "model": "haiku",
+        }))
+        assert updated["success"], updated
+        result = await invoke(agent)
+        assert result["ok"], result
+        assert seen[-1]["model_id"] == "haiku"
+        deleted = _envelope(await config["deleteSubagent"].handler({
+            "subagent_id": agent, "confirm": True,
+        }))
+        assert deleted["success"], deleted
+        result = await invoke(agent)
+        assert not result["ok"], result
+        assert len(seen) == 2
+        # Opening the schema must not open the caller's invoke allowlist.
+        agents.update_profile("root-agent", config={
+            "model": "opus", "agent_invoke_mode": "none",
+        })
+        result = await invoke("helper")
+        assert not result["ok"], result
+        assert len(seen) == 2
 
 
 def test_delegated_task_tool_without_a_cwd_still_serves_db_agents(agents):
