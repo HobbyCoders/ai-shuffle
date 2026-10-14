@@ -117,8 +117,9 @@ SESSION_TTL_SECONDS = 600.0
 SESSION_RENEW_MARGIN_SECONDS = 30.0
 SESSIONS_PER_DEVICE = 4
 SESSIONS_MAX = 256
-# Pending handshakes (hello answered, session not yet opened). Past it new
-# hellos are refused rather than evicting another requester's handshake.
+# Pending handshakes from unrecognised addresses (hello answered, session not
+# yet opened). Past it new hellos are refused rather than evicting another
+# requester's handshake; member addresses keep reserved room like tokens.
 PENDING_MAX = 2048
 # Sequence numbers kept per session to refuse replays; older ones are
 # refused below a moving floor.
@@ -369,6 +370,7 @@ class _Pending:
     transcript: bytes
     client_public: bytes
     requester: str = ""
+    reserved: bool = False
 
 
 @dataclass
@@ -396,13 +398,28 @@ def _purge(now: float) -> None:
         _sessions.pop(key, None)
 
 
-def server_hello(ctx, *, device_id: str, client_ephemeral: str, challenge: str, requester: str = "") -> dict:
+def _unreserved_pending_count() -> int:
+    return sum(1 for pending in _pending.values() if not pending.reserved)
+
+
+def at_capacity() -> bool:
+    """Whether a new, unrecognised requester would be refused a LAN handshake."""
+    with _lock:
+        _purge(time.monotonic())
+        return _unreserved_pending_count() >= PENDING_MAX
+
+
+def server_hello(ctx, *, device_id: str, client_ephemeral: str, challenge: str, requester: str = "",
+                 member_address: bool = False) -> dict:
     """Answer a hello for an active member with a challenge issued by ``tokens``.
 
     Bounded like the ``tokens`` challenges: one requester holds at most
     ``tokens.CHALLENGES_PER_DEVICE`` pending handshakes per device (its own
     oldest makes room), and a full table refuses new hellos instead of
     evicting a handshake another requester (the member) is completing.
+    Advertised or previously authenticated member addresses keep reserved
+    room beyond that ceiling, using the same address policy as ``tokens``.
+    Naming a member's public device id alone does not earn reserved room.
     """
     from app.network import tokens
     try:
@@ -413,16 +430,17 @@ def server_hello(ctx, *, device_id: str, client_ephemeral: str, challenge: str, 
     server_ephemeral = crypto.b64u_encode(_x25519_public(private))
     body = transcript(network_id=ctx.network_id, client=device_id, server=ctx.device_id, challenge=challenge,
                       client_ephemeral=client_ephemeral, server_ephemeral=server_ephemeral)
+    reserved = member_address or tokens.is_known_member_address(device_id, requester)
     with _lock:
         now = time.monotonic()
         _purge(now)
         mine = [k for k, p in _pending.items() if p.device_id == device_id and p.requester == requester]
         while len(mine) >= tokens.CHALLENGES_PER_DEVICE:
             _pending.pop(mine.pop(0), None)
-        if len(_pending) >= PENDING_MAX:
+        if not reserved and _unreserved_pending_count() >= PENDING_MAX:
             raise LanBusy("Too many pending LAN handshakes; retry shortly")
         _pending[challenge] = _Pending(now + tokens.CHALLENGE_TTL_SECONDS, device_id, challenge, private, body,
-                                       client_public, requester)
+                                       client_public, requester, reserved)
     signature = crypto.sign(ctx.identity.signing_private, _HELLO_DOMAIN + body)
     return {"v": PROTOCOL, "challenge": challenge, "server_ephemeral": server_ephemeral,
             "device_id": ctx.device_id, "network_id": ctx.network_id,

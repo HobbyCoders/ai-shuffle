@@ -798,13 +798,13 @@ async def peer_lan_hello(body: LanHelloRequest, request: Request) -> dict:
     _challenge_limiter.check(requester)
     ctx = await _require_lan()
     member_address = False
-    if tokens.at_capacity():
+    if tokens.at_capacity() or lan.at_capacity():
         row = await run_sync(store.get_member, body.device_id)
         member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
     challenge = tokens.new_challenge(body.device_id, requester, member_address=member_address)
     try:
         return lan.server_hello(ctx, device_id=body.device_id, client_ephemeral=body.ephemeral, challenge=challenge,
-                                requester=requester)
+                                requester=requester, member_address=member_address)
     except lan.LanBusy as exc:
         raise HTTPException(429, str(exc), headers={"Retry-After": str(tokens.CHALLENGE_RETRY_AFTER_SECONDS)}) from exc
     except lan.LanRejected as exc:
