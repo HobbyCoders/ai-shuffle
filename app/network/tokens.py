@@ -96,6 +96,12 @@ def _unreserved_count() -> int:
     return sum(1 for entry in _challenges.values() if not entry[3])
 
 
+def is_known_member_address(device_id: str, requester: str) -> bool:
+    """Whether this address has proved possession of this member's signing key."""
+    with _lock:
+        return (device_id, requester) in _member_addresses
+
+
 def _remember_member_address(device_id: str, requester: str) -> None:
     key = (device_id, requester)
     with _lock:

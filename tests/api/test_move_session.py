@@ -139,6 +139,27 @@ def test_offline_target_409s(client, mock_database):
     mock_database.adopt_session.assert_not_called()
 
 
+@pytest.mark.parametrize("error", [
+    ValueError("Cannot verify checkout activity (session unresolved-session)"),
+    control.ControlRefused("Source refused the handoff"),
+    control.RunnerUnreachable("Destination unreachable"),
+])
+def test_handoff_refusal_logs_the_409_reason(client, mock_database, mock_handoff, caplog, error):
+    mock_database.get_session.return_value = _session()
+    mock_database.get_install.return_value = {"device_name": "Target"}
+    mock_handoff.side_effect = error
+
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]):
+        response = _move(client)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == str(error)
+    assert any(record.levelname == "WARNING"
+               and record.message == f"Move handoff refused for session test-session-id to {TARGET}: {error}"
+               for record in caplog.records)
+    mock_database.adopt_session.assert_not_called()
+
+
 def test_project_session_without_checkout_on_target_409s(client, mock_database):
     """Project session + target has no checkout row at all → 409, no write.
 

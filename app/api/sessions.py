@@ -474,6 +474,7 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
         moved = await handoff.move(session, target)
     except (control.RunnerUnreachable, control.ControlRefused, engine.NotEnrolled,
             PermissionError, ValueError) as exc:
+        logger.warning("Move handoff refused for session %s to %s: %s", session_id, target, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception:
         logger.warning("Move handoff failed for session %s", session_id, exc_info=True)
