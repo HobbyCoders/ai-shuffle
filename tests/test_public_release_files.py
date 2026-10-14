@@ -99,3 +99,35 @@ def test_pull_request_template_requires_dco_and_local_checks():
     text = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text()
     for required in ("Signed-off-by:", "git commit -s", "draft", "python scripts/local_ci.py"):
         assert required in text
+
+
+# Per-checkout agent files and team working notes stay out of the public tree.
+PRIVATE_PATH = re.compile(
+    r"^(\.fluid/|AGENTS\.md$|CLAUDE\.md$|AGENTS\.local\.md$|CLAUDE\.local\.md$"
+    r"|docs/(audits|design|mockups|perf|settings-redesign)/"
+    r"|docs/internal/(AUDIT_|HANDOFF_|PERFORMANCE_|backlog-triage|repair-lifecycle))"
+)
+
+
+def _tracked_files():
+    import shutil
+    import subprocess
+    if not (ROOT / ".git").exists() or shutil.which("git") is None:
+        pytest.skip("not a git checkout")
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True)
+    return [p for p in out.stdout.decode("utf-8").split("\0") if p]
+
+
+def test_private_agent_files_and_working_notes_are_not_tracked():
+    tracked = [p for p in _tracked_files() if PRIVATE_PATH.match(p)]
+    assert tracked == [], f"keep these out of the public repo: {tracked}"
+
+
+def test_owner_machine_names_stay_out_of_tracked_files():
+    import subprocess
+    _tracked_files()
+    hits = subprocess.run(
+        ["git", "-C", str(ROOT), "grep", "-lE", r"\b(HomeLab|GamingPC)\b", "--", "."],
+        capture_output=True, text=True,
+    ).stdout.split()
+    assert [h for h in hits if h != "tests/test_public_release_files.py"] == []

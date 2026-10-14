@@ -19,13 +19,7 @@ image excludes `docs/`, and the update source archive carries only
 | [managed-worker-connections.md](managed-worker-connections.md) | Managed worker connection credentials. |
 | [managed-worker-credential-repair.md](managed-worker-credential-repair.md) | Reconnecting one revoked account worker on Android. |
 | [mobile-web-session-reservations.md](mobile-web-session-reservations.md) | Mobile web session reservations. |
-
-## Audits, handoffs and investigations
-
-- [AUDIT_REMEDIATION_2026-09-04.md](AUDIT_REMEDIATION_2026-09-04.md), [AUDIT_FIX_VERIFICATION.md](AUDIT_FIX_VERIFICATION.md), [HANDOFF_SESSION_AUDIT_ROUND3.md](HANDOFF_SESSION_AUDIT_ROUND3.md)
-- [HANDOFF_COMPOSER_SPLIT_CHIPS.md](HANDOFF_COMPOSER_SPLIT_CHIPS.md)
-- [PERFORMANCE_REMEDIATION_2026-08.md](PERFORMANCE_REMEDIATION_2026-08.md), [PERFORMANCE_HANDOFF_TESTING.md](PERFORMANCE_HANDOFF_TESTING.md)
-- [repair-lifecycle-2026-09-07.md](repair-lifecycle-2026-09-07.md), [private-access-acceptance.md](private-access-acceptance.md), [backlog-triage-2026-09-19.md](backlog-triage-2026-09-19.md)
+| [private-access-acceptance.md](private-access-acceptance.md) | Acceptance checks for private machine, folder and service access. |
 
 ## Internal pages that stay at their old paths
 
@@ -36,10 +30,9 @@ Code, CI, scripts or tests name these paths, so they stay where they are:
 | [../RESTORE.md](../RESTORE.md) | `scripts/deploy.sh`, `tools/backup-db.sh`, `tools/restore-db.sh`, container tests |
 | [../LOCAL_ACCESS.md](../LOCAL_ACCESS.md), [../credential-key-recovery.md](../credential-key-recovery.md) | operator guides linked from other docs |
 | [../MEMORY_ARCHITECTURE.md](../MEMORY_ARCHITECTURE.md) | app and test comments |
-| [../PERFORMANCE_REVIEW_2026-08.md](../PERFORMANCE_REVIEW_2026-08.md) | app, frontend and test comments |
 | [../mobile-desktop-ui-split.md](../mobile-desktop-ui-split.md) | `app/mobile_ui.py`, `frontend/scripts/check-no-mobile-ui.mjs`, `frontend/src/lib/api/runtime.ts`, the Android and iOS `MobileUi` code, and UI code |
 | [../provider-usage-sources.md](../provider-usage-sources.md) | `app/core/usage_sources.py` |
-| `../network/`, `../ci/`, `../install/`, `../design/`, `../audits/` (historical reviews and mockups live in the private archive) | workflows, the hub, tests and code comments |
+| `../network/`, `../ci/`, `../install/` (historical reviews, audits, hand-offs and mockups live in the private archive) | workflows, the hub, tests and code comments |
 
 ## Buyer documentation
 

@@ -4,8 +4,7 @@ Tests run on the machine where the change was made, before it is pushed.
 GitHub Actions does not test pull requests: no workflow starts on a pull
 request or a push to a branch. The daily schedule only publishes an attested
 nightly; it never runs tests. CI minutes go only to work no local machine can do: release builds, signing, publishing, deploys, and the
-macOS and iOS checks we have no Mac for. See the
-[October paid CI audit](paid-ci-audit-2026-10.md) for the historical rationale.
+macOS and iOS checks we have no Mac for.
 
 Public-app workflows use standard GitHub-hosted `ubuntu-latest`,
 `windows-latest` and `macos-latest` runners (some existing jobs pin an OS
