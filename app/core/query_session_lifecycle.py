@@ -562,6 +562,14 @@ async def stop_all_background_tasks(
         if include_shells and respect_shell_preference and _keep_monitor_shells_on_stop():
             include_shells = False
 
+    # Checkpoints belong to the pooled engine, not the task registry. Idle
+    # sessions have no turn runtime to interrupt, but Stop/archive must still
+    # cancel their provider call and clear any pending checkpoint.
+    state = get_session_pool().peek(session_id)
+    cancel_checkpoint = getattr(getattr(state, "adapter", None), "cancel_checkpoint", None)
+    if callable(cancel_checkpoint):
+        await cancel_checkpoint()
+
     active = task_registry.get_active(session_id)
     # A worker shutting down (docker stop, quitting the desktop app) ends only
     # its own work: a Task child running on another worker keeps running, and

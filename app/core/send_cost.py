@@ -59,7 +59,9 @@ def _last_call(session_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT created_at, payload FROM session_events WHERE session_id=%s "
-            "AND event_type='turn.usage' ORDER BY seq DESC LIMIT 1",
+            "AND event_type='turn.usage' "
+            "AND COALESCE(payload->'usage'->>'auxiliary_source', '') = '' "
+            "ORDER BY seq DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()
@@ -117,7 +119,7 @@ def compare_costs(
 
     Neither path assumes a cache hit: a rewritten prompt cannot reuse the old
     cached history. Delegated calls also pay the CLI's observed 1-hour cache
-    write rate. Native compaction is mechanical and makes no model call.
+    write rate. Native checkpoints also pay for a summary side call.
     Unknown input/output rates must stay unknown, not become a free option.
     """
     from fluid.providers.pricing import estimate_cost, resolve_price
@@ -137,7 +139,7 @@ def compare_costs(
         return total if total is not None and math.isfinite(total) and total >= 0 else None
 
     cold = cost(context_tokens, reply_tokens)
-    compaction = cost(context_tokens, summary_tokens) if leg == "delegated" else 0.0
+    compaction = cost(context_tokens, summary_tokens)
     continued = cost(compacted_context_tokens, reply_tokens)
     if cold is None or compaction is None or continued is None:
         return None
@@ -150,7 +152,7 @@ def compare_costs(
         "compact_continue_usd": compact,
         "compacted_context_tokens": compacted_context_tokens,
         "reply_tokens": reply_tokens,
-        "summary_tokens": summary_tokens if leg == "delegated" else 0,
+        "summary_tokens": summary_tokens,
         "recommendation": "compact" if compact < cold else "send",
     }
 
@@ -177,6 +179,9 @@ def _comparison(
     overhead = _context_overhead_tokens(snapshot) or 0
     retained = min(tokens, max(math.ceil(tokens * COMPACT_RETAINED_RATIO),
                                overhead + SUMMARY_OUTPUT_TOKENS))
+    projection = _native_projection(leg, snapshot)
+    if projection is not None:
+        retained = projection
     reply = (last or {}).get("usage", {}).get("output_tokens")
     reply = int(reply) if isinstance(reply, (int, float)) and not isinstance(reply, bool) \
         and math.isfinite(reply) and reply > 0 else DEFAULT_REPLY_TOKENS
@@ -184,6 +189,17 @@ def _comparison(
         model=model, leg=leg, context_tokens=tokens, compacted_context_tokens=retained,
         reply_tokens=reply, summary_tokens=SUMMARY_OUTPUT_TOKENS, resolver=resolver,
     )
+
+
+def _native_projection(leg: Optional[str], snapshot: Dict[str, Any]) -> Optional[int]:
+    if leg == "delegated":
+        return None
+    compaction = snapshot.get("compaction")
+    value = compaction.get("projectedAfterCompactTokens") if isinstance(compaction, dict) else None
+    if (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0):
+        return int(value)
+    return None
 
 
 def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict[str, Any]:
@@ -211,6 +227,9 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
         last_call_at=last["at"] if last else None,
         now=time.time() if now is None else now,
     )
+    projection = _native_projection(leg, data)
+    if projection is not None and context_tokens is not None and projection > context_tokens * 0.75:
+        state["warn"] = False
     state["cost_comparison"] = None
     if state["warn"] and context_tokens is not None:
         try:

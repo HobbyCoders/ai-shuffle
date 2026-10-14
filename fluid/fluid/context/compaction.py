@@ -2,14 +2,15 @@
 
 Tier 1 (:mod:`fluid.context.trim`) replaces old tool results with placeholders.
 Tier 2 collapses whole old turns ("spans") into extractive digests. Tier 3
-folds runs of old digests into one-line epoch stubs. Every evicted thing
+folds runs of old digests into one-line epoch stubs. Optional tier 4 replaces an
+old compacted prefix with persisted model-written checkpoint text. Every evicted thing
 carries a node ref, and the ``HistoryExpand`` / ``HistorySearch`` builtins
 re-hydrate originals from the session store — loss is recoverable, never
 permanent.
 
 Invariants (shared with tier 1, enforced here):
 
-* **Mechanical only.** No model writes any digest. ``render_span_digest`` and
+* **Mechanical tiers 1–3.** No model writes their digests. ``render_span_digest`` and
   ``render_epoch_stub`` are pure functions of (nodes, config): extractive,
   deterministic, byte-identical on every render — which is what makes tier
   state cheap to persist (decisions only; text is re-derived).
@@ -119,6 +120,12 @@ class CompactionConfig:
     # fully recoverable tool-result eviction without the model ever reading a
     # digest of its own history configure exactly that.
     enabled: bool = True
+    # Tier 4 is opt-in for library callers; mechanical tiers remain independent.
+    summary_enabled: bool = False
+    summary_trigger_window_ratio: float = 0.10
+    summary_max_output_tokens: int = 4_000
+    summary_input_cap_tokens: int = 120_000
+    summary_model: str | None = None
     # Whether the session can call HistoryExpand and HistorySearch. Off, the
     # digests and stubs stop naming a recovery route the model cannot take.
     recall_tools: bool = True
@@ -373,9 +380,9 @@ def derive_trigger_tokens(
 
 @dataclass(frozen=True, kw_only=True)
 class Promotion:
-    """What one batch rung did — the persistable decision, never the text."""
+    """A persistable rung decision, with frozen text for a model checkpoint."""
 
-    tier: int  # 1 | 2 | 3
+    tier: int  # 1 | 2 | 3 | 4
     # "trigger" | "overflow" | "image_consumed" | "turn_budget" | "sweep"
     reason: str = "trigger"
     trimmed: tuple[tuple[str, str], ...] = ()  # (node_id, tool_use_id)
@@ -399,6 +406,7 @@ class Promotion:
     # an event written before the field existed, so it renders as it did then.
     # Compactor.rehydrate never replays above the compactor's own version.
     render_version: int = CURRENT_RENDER_VERSION
+    summary_text: str = ""
 
 
 def describe_promotions(
@@ -978,6 +986,7 @@ class Compactor:
     # Sticky promotion state: span key (start, end) -> SPAN_DIGEST|EPOCH_STUB,
     # and epoch ranges by their start node for O(1) lookup while walking.
     _digested: dict = field(default_factory=dict)
+    _summaries: dict[tuple[str, str], str] = field(default_factory=dict)
     _epoch_by_start: dict = field(default_factory=dict)
     _digest_by_start: dict = field(default_factory=dict)
     _optional_retry: tuple[int, int] | None = None
@@ -1040,7 +1049,7 @@ class Compactor:
     @property
     def active(self) -> bool:
         """True when this compactor rewrites the view at all."""
-        return self.config.enabled or self.config.trim.enabled
+        return self.config.enabled or self.config.trim.enabled or bool(self._summaries)
 
     @property
     def trim_only(self) -> bool:
@@ -1077,6 +1086,14 @@ class Compactor:
         i = 0
         while i < len(nodes):
             node = nodes[i]
+            summary = max(((end, text) for (start, end), text in self._summaries.items()
+                           if start == node.node_id and end in index and index[end] >= i),
+                          key=lambda item: index[item[0]], default=None)
+            if summary is not None:
+                end, text = summary
+                out.append(self._summary_message(node.node_id, end, text))
+                i = index[end] + 1
+                continue
             if not self.config.enabled:
                 # Trim-only: tier 2/3 decisions are never made here, and a
                 # persisted one rehydrated from a session that *did* run the
@@ -2470,6 +2487,7 @@ class Compactor:
         context_window: int | None = None,
         output_reserve_tokens: int = 0,
         scale: float = 1.0,
+        pending_summary: tuple[str, str, str] | None = None,
     ) -> list[Promotion]:
         """Compact on request (a host's "compact now"), with the guarded ladder.
 
@@ -2484,7 +2502,7 @@ class Compactor:
         """
         if not self.active:
             return []
-        return self.escalate(
+        promotions = self.escalate(
             nodes,
             overhead_tokens=overhead_tokens,
             context_window=context_window,
@@ -2494,6 +2512,139 @@ class Compactor:
             stop_tokens=self._deep_target(context_window, scale),
             decision_reason="manual",
         )
+        if pending_summary is not None:
+            promo = self.apply_summary(nodes, pending_summary, overhead_tokens=overhead_tokens,
+                                       decision_reason="manual")
+            if promo is not None:
+                promotions.append(promo)
+        return promotions
+
+    def _summary_message(self, start: str, end: str, text: str) -> Message:
+        ref = start if start == end else f"{start}..{end}"
+        header = (
+            f"[checkpoint summary of {ref} — written by the model from the compacted history; "
+            f'originals intact: HistoryExpand("{ref}") re-reads verbatim, HistorySearch finds text]'
+            if self.config.recall_tools else
+            f"[checkpoint summary of {ref} — written by the model from the compacted history; "
+            "the originals are not recoverable in this session, so do not reconstruct "
+            "their detail from memory]"
+        )
+        return Message(role="user", content=[Text(text=f"{header}\n{_outrank_line(self.config)}\n{text}")])
+
+    def summary_region(
+        self, nodes: list[SessionNode], *, context_window: int | None = None,
+        scale: float = 1.0, due_only: bool = False,
+    ) -> tuple[str, str, str] | None:
+        """A whole-turn compacted prefix, frozen before starting the side call.
+
+        Never includes a protected turn or the recency tail. Input truncation
+        preserves an earlier checkpoint and the newest rendered material; the
+        original nodes remain recoverable even when the input cap is reached.
+        """
+        if not self.config.enabled or not self.config.summary_enabled or not nodes:
+            return None
+        self._settle_replay(nodes)
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        spans = split_spans(nodes)
+        protected = self._protected_spans(spans, self.config.keep_recent_turns, wake_aware=True)
+        guard = min((index[spans[i][0].node_id] for i in protected), default=len(nodes))
+        tail = self._recency_tail_start(nodes, context_window, scale)
+        if tail is not None:
+            guard = min(guard, tail)
+        ends = {span[-1].node_id for span in spans}
+        eligible = [(start, end) for start, end in self._digested
+                    if start in index and end in index and index[start] <= index[end] < guard]
+        whole = [(start, end) for start, end in eligible if end in ends]
+        if not whole:
+            return None
+        end = max(whole, key=lambda key: index[key[1]])[1]
+        stop = index[end] + 1
+        residue = sum(estimate_tokens_of_messages(self._render(nodes[index[s]:index[e] + 1]))
+                      for s, e in eligible if index[e] < stop)
+        if due_only and (not context_window or residue * scale <=
+                         context_window * self.config.summary_trigger_window_ratio):
+            return None
+        # Do not repeatedly summarize an unchanged checkpoint.
+        if (nodes[0].node_id, end) in self._summaries:
+            return None
+        rendered = self._render(nodes[:stop])
+        def content_text(block: Any) -> str:
+            if isinstance(block, Text):
+                return block.text
+            if isinstance(block, ToolUseBlock):
+                return f"tool_use {block.id} {block.name}: {json.dumps(block.input, ensure_ascii=False)}"
+            if isinstance(block, ToolResultBlock):
+                body = "\n".join([*(content_text(part) for part in block.content),
+                                  *(steer.render() for steer in block.delivered_steers)])
+                return f"tool_result {block.tool_use_id} error={block.is_error}: {body}"
+            # Checkpoints are text-only. Never send image bytes or opaque/signed
+            # reasoning blobs to a side model as though they were conversation.
+            return f"[{type(block).__name__} omitted; recover the original node for detail]"
+
+        text = "\n\n".join(f"[{m.role}]\n" + "\n".join(content_text(b) for b in m.content)
+                            for m in rendered)
+        cap = max(1, self.config.summary_input_cap_tokens) * 4
+        if len(text) > cap:
+            previous = next((m.text() for m in rendered
+                             if m.text().startswith("[checkpoint summary")), "")
+            marker = "\n[older material omitted to fit summary input budget]\n"[:cap]
+            prefix = previous[:max(0, cap - len(marker) - 1)]
+            tail_chars = cap - len(prefix) - len(marker)
+            text = prefix + marker + (text[-tail_chars:] if tail_chars else "")
+        return nodes[0].node_id, end, text
+
+    def apply_summary(
+        self, nodes: list[SessionNode], pending: tuple[str, str, str], *,
+        overhead_tokens: int = 0, decision_reason: str = "summary_batch",
+    ) -> Promotion | None:
+        """Commit persisted text only on its original path and only if it saves."""
+        if not self.config.enabled or not self.config.summary_enabled:
+            return None
+        start, end, text = pending
+        index = {n.node_id: i for i, n in enumerate(nodes)}
+        if not text.strip() or start not in index or end not in index or index[start] > index[end]:
+            return None
+        before = self._estimate(nodes, overhead_tokens)
+        restore = self._tier_snapshot()
+        for key in list(self._digested):
+            if key[0] in index and key[1] in index and index[start] <= index[key[0]] <= index[key[1]] <= index[end]:
+                self._retire(key)
+        self._mark_span(start, end, "summary")
+        self._summaries[(start, end)] = text
+        after = self._estimate(nodes, overhead_tokens)
+        if after >= before:
+            restore()
+            return None
+        return Promotion(tier=4, reason="summary", summary_text=text,
+                         spans=((start, end, "summary"),), before_tokens=before,
+                         after_tokens=after, reclaimed_chars=(before - after) * 4,
+                         decision_reason=decision_reason, first_changed_message=0)
+
+    def projected_after_compact(
+        self, nodes: list[SessionNode], *, overhead_tokens: int = 0,
+        context_window: int | None = None, output_reserve_tokens: int = 0,
+        scale: float = 1.0, pending: tuple[str, str, str] | None = None,
+    ) -> int:
+        """Dry-run manual compaction, in calibrated tokens, without mutating state."""
+        from copy import deepcopy
+
+        candidate = deepcopy(self)
+        candidate.compact_now(nodes, overhead_tokens=overhead_tokens,
+                              context_window=context_window,
+                              output_reserve_tokens=output_reserve_tokens, scale=scale)
+        ladder = candidate._estimate(nodes, overhead_tokens)
+        region = candidate.summary_region(nodes, context_window=context_window, scale=scale)
+        if region is None:
+            return int(ladder * scale)
+        start, end, _ = region
+        stop = next(i + 1 for i, n in enumerate(nodes) if n.node_id == end)
+        # A ready checkpoint has an exact rendered estimate. Otherwise reserve
+        # the configured output budget plus its recoverability header.
+        text = pending[2] if pending and pending[:2] == (start, end) else ""
+        summary_tokens = (estimate_tokens_of_messages([candidate._summary_message(start, end, text)])
+                          + (0 if text else self.config.summary_max_output_tokens / max(scale, 0.01)))
+        projected = overhead_tokens + summary_tokens + estimate_tokens_of_messages(candidate.view(nodes[stop:]))
+        return int(min(ladder, projected) * scale)
 
     def estimate_view_tokens(self, nodes: list[SessionNode], overhead_tokens: int = 0) -> int:
         """Estimated tokens of the current view (chars/4 units)."""
@@ -2525,10 +2676,12 @@ class Compactor:
                 self.trimmer.mark_image_consumed(promo.trimmed)
             else:
                 self.trimmer.mark_trimmed(promo.trimmed, render_version=version)
-            if not self.config.enabled:
-                continue  # trim-only: tier 2/3 history is not re-armed
             for start, end, kind in promo.spans:
+                if not self.config.enabled and kind != "summary":
+                    continue  # trim-only: tier 2/3 history is not re-armed
                 self._mark_span(start, end, kind, render_version=version)
+                if kind == "summary":
+                    self._summaries[(start, end)] = promo.summary_text
                 self._replayed_spans.append((start, end))
 
     def _settle_replay(self, nodes: list[SessionNode]) -> None:
@@ -2563,6 +2716,8 @@ class Compactor:
         """Drop one promoted span, leaving any newer span with its start."""
         start, end = key
         self._digested.pop(key, None)
+        # Keep superseded checkpoint text for forks ending before its successor.
+        # Only _digested counts residency; rendering chooses the widest on-path checkpoint.
         self._span_versions.pop(key, None)
         if self._digest_by_start.get(start) == end:
             self._digest_by_start.pop(start)
@@ -2583,6 +2738,7 @@ class Compactor:
         epochs = dict(self._epoch_by_start)
         digests = dict(self._digest_by_start)
         versions = dict(self._span_versions)
+        summaries = dict(self._summaries)
         trimmed = set(self.trimmer._trimmed)
         consumed = set(self.trimmer._image_consumed)
 
@@ -2595,6 +2751,8 @@ class Compactor:
             self._digest_by_start.update(digests)
             self._span_versions.clear()
             self._span_versions.update(versions)
+            self._summaries.clear()
+            self._summaries.update(summaries)
             self.trimmer._trimmed.clear()
             self.trimmer._trimmed.update(trimmed)
             self.trimmer._image_consumed.clear()
@@ -2611,6 +2769,8 @@ class Compactor:
         )
         if kind == EPOCH_STUB:
             self._epoch_by_start[start] = end
+        elif kind == "summary":
+            pass  # rendered from the persisted text, never a mechanical digest
         else:
             self._digest_by_start[start] = end
 
@@ -2766,9 +2926,7 @@ class Compactor:
             span_ids = {n.node_id for n in span}
             for start, end in list(self._digested):
                 if start in span_ids and end in span_ids:
-                    self._digested.pop((start, end))
-                    self._digest_by_start.pop(start, None)
-                    self._epoch_by_start.pop(start, None)
+                    self._retire((start, end))
             self._mark_span(*key, SPAN_DIGEST)
             after = self._estimate(nodes, overhead_tokens)
             if after >= current:

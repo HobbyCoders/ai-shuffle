@@ -61,7 +61,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -464,8 +464,8 @@ _COMPACT_REQUEST_RE = re.compile(r"^/compact\s*$")
 def _is_compact_request(content: Any) -> bool:
     """Whether a turn's content is a bare ``/compact`` (the whole message).
 
-    Arguments are not accepted: native compaction is mechanical and takes no
-    instructions, so "/compact keep the API notes" stays an ordinary message.
+    Custom instructions are not accepted: "/compact keep the API notes"
+    stays an ordinary message, even when the checkpoint tier is enabled.
     """
     if isinstance(content, str):
         return bool(_COMPACT_REQUEST_RE.match(content.strip()))
@@ -1006,6 +1006,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         cache_probe: CacheProbeConfig | None = None,
         cache_key: str | None = None,
         pricing: PricingResolver | None = None,
+        background_usage_sink: Callable[[Usage], Awaitable[None]] | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         allowed_tools: Sequence[str] | None = None,
@@ -1251,6 +1252,20 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
         self._trimmer = self._compactor.trimmer
         self._compaction_rehydrated = False
+        self._background_usage_sink = background_usage_sink
+        self._summary_task: asyncio.Task | None = None
+        # A manual compaction's own build: only an Interrupt (or the turn's
+        # own cancellation) ends it, never a host teardown of background work.
+        self._manual_summary_task: asyncio.Task | None = None
+        self._pending_summary: tuple[str, str, str] | None = None
+        # Set by a host Stop/archive teardown: no new background checkpoint
+        # until the next turn the owner or host starts.
+        self._checkpoint_latched = False
+        # Background side-call Usage the host sink has not confirmed yet:
+        # failed bookings, and persisted ones found on resume. Booking is
+        # idempotent per (session, seq), so a retry never double counts.
+        self._unbooked_usage: dict[int, Usage] = {}
+        self._booking_task: asyncio.Task | None = None
         # Last model call's real prompt accounting, per session:
         # ``session_id -> (assistant node the call produced, provider usage)``.
         # get_context_usage() prefers it over the chars/4 estimate, but only
@@ -1627,10 +1642,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
+            self._checkpoint_latched = False
             self._peer_delivery_sealed = False
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Interrupt):
             self._interrupted.set()
+            await self.cancel_checkpoint()
+            manual = self._manual_summary_task
+            if manual is not None and not manual.done():
+                manual.cancel()  # the manual turn awaits it and reports Interrupted
         elif isinstance(op, Steer):
             # Mid-turn user text: queued here, appended to the NEXT tool
             # result inside the steering marker (fluid.context.steering) —
@@ -1874,6 +1894,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
+        await self.cancel_checkpoint()
+        if self._booking_task is not None and not self._booking_task.done():
+            # Let a deferred booking finish; anything left is reconciled from
+            # the persisted Usage by the next engine for this session.
+            with suppress(Exception, asyncio.TimeoutError):
+                await asyncio.wait_for(self._booking_task, 10)
         await self._emit_session_end()
         if self._codemode is not None:
             await self._codemode.aclose()
@@ -1926,9 +1952,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             # stub is a stateless view policy inside ``Compactor._render``), so
             # with context rewriting disabled it would report reclaimed tokens
             # the request never actually saves. Report nothing instead.
-            if self._compactor.active:
-                compaction_stats = self._compactor.stats(nodes)
             measured = await self._measured_next_prompt(sid, nodes)
+            if self._compactor.active:
+                compaction_stats = self._compaction_stats(nodes, measured)
         # The deferred-tool catalog the NEXT user turn will carry (tools not
         # yet announced — every deferred tool before the first turn) is real
         # prompt text that request sends; on the JSON-tool path it is ~1.7k
@@ -2002,7 +2028,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         """The provider-cache view the compactor prices this call with.
 
         Plan item 3 (see fluid.context.cache_signal). ``gap_s`` is the time
-        since this engine's previous request for the session.
+        since the previous request for the session, seeded from persisted
+        measured Usage on a new engine (the completion timestamp is a proxy).
         ``static_changed`` compares a hash of the system prompt and tool
         schemas with the one sent last. ``resumed`` marks this engine's first
         call for the session and the first call of an unparked turn
@@ -2033,9 +2060,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             if state is None:
                 seeds: dict[str, float] = getattr(self, "_p_cold_seed", {})
                 seed = seeds.pop(sid, None)
+                requested_at = getattr(self, "_cache_requested_at_seed", {}).pop(sid, None)
                 recorded = self._last_call_usage.get(sid)
                 state = states[sid] = {
-                    "requested_at": None, "static": None, "p_cold": seed,
+                    "requested_at": requested_at, "static": None, "p_cold": seed,
                     # A seeded EWMA already holds the newest persisted call.
                     "folded": (
                         recorded[0] if recorded is not None and seed is not None
@@ -2135,6 +2163,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:
             return None
         self._seed_p_cold(sid, events)
+        for event in events:
+            raw = event.raw if isinstance(event.raw, dict) else {}
+            if raw.get("auxiliary_background") and event.seq:
+                self._unbooked_usage.setdefault(event.seq, event)
+        self._retry_unbooked_usage()
         on_path = {n.node_id for n in nodes}
         for event in reversed(events):
             if not isinstance(event, Usage) or event.node_id not in on_path:
@@ -2152,18 +2185,23 @@ class NativeLoop(BackgroundLifecycleMixin):
         return None
 
     def _seed_p_cold(self, sid: str, events: list[Any]) -> None:
-        """Seed the cache signal's miss EWMA from the newest persisted calls.
+        """Seed cache age and miss EWMA from the newest persisted calls.
 
         A resumed engine would otherwise start from "never missed". Reads
         the last ``P_COLD_SEED_CALLS`` measured Usage events, oldest first,
         whatever path they were on: the miss rate describes the provider
-        route, not the branch.
+        route, not the branch. Auxiliary side calls are skipped.
         """
         from fluid.context.cache_signal import P_COLD_SEED_CALLS, p_cold_from_hit_rates
 
         rates: list[float] = []
+        requested_at: float | None = None
         for event in events:
             if not isinstance(event, Usage):
+                continue
+            if isinstance(event.raw, dict) and event.raw.get("auxiliary_source"):
+                # A tool's or the summarizer's side call: not this session's
+                # main prompt, so neither its hit rate nor its time applies.
                 continue
             total = _measured_prompt_tokens({
                 "input_tokens": event.input_tokens,
@@ -2172,6 +2210,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             })
             if total > 0:
                 rates.append(int(event.cache_read_tokens or 0) / total)
+                # Events are in sequence order; zero is a legacy/unstamped ts.
+                requested_at = event.ts if event.ts > 0 else None
+        if requested_at is not None:
+            timestamps: dict[str, float] = getattr(self, "_cache_requested_at_seed", {})
+            timestamps[sid] = requested_at
+            self._cache_requested_at_seed = timestamps
         seed = p_cold_from_hit_rates(rates[-P_COLD_SEED_CALLS:])
         if seed is not None:
             seeds: dict[str, float] = getattr(self, "_p_cold_seed", {})
@@ -2500,8 +2544,171 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_event("user", _plain_text(content))
         await self._start_and_loop(sid, turn_id, user_node)
 
+    def _summary_scale(self, nodes: list[SessionNode], measured: int | None) -> float:
+        estimate = self._compactor.estimate_view_tokens(nodes, self._context_overhead_tokens())
+        return min(1.0, max(0.6, measured / estimate)) if measured and estimate else 1.0
+
+    async def _book_unbooked_usage(self) -> None:
+        """Hand pending background Usage to the host sink; keep failures for a
+        later retry (the next turn end, or the next engine's resume scan)."""
+        sink = self._background_usage_sink
+        if sink is None:
+            return
+        for seq, event in sorted(self._unbooked_usage.items()):
+            try:
+                await sink(event)
+            except Exception as exc:  # noqa: BLE001 — retried later, never lost
+                log.warning("background usage booking deferred (%s)", type(exc).__name__)
+                return
+            self._unbooked_usage.pop(seq, None)
+
+    def _retry_unbooked_usage(self) -> None:
+        """Retry deferred bookings off the turn path, one attempt at a time."""
+        if not self._unbooked_usage or self._background_usage_sink is None:
+            return
+        if self._booking_task is not None and not self._booking_task.done():
+            return
+        self._booking_task = asyncio.create_task(self._book_unbooked_usage())
+
+    async def cancel_checkpoint(self, *, latch: bool = False) -> None:
+        """Cancel session-owned checkpoint work, including while the loop is idle.
+
+        Never touches a running turn. ``latch`` (host Stop/archive teardown)
+        also keeps a turn that ends afterwards from scheduling a new build,
+        until the next turn starts.
+        """
+        if latch:
+            self._checkpoint_latched = True
+        task = self._summary_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._summary_task = None
+        self._pending_summary = None
+
+    async def _build_checkpoint(self, sid: str, turn_id: str,
+                                region: tuple[str, str, str], *,
+                                background: bool = False) -> tuple[str, str, str] | None:
+        from fluid.context.checkpoint_summary import build_checkpoint
+
+        cfg = self._compactor.config
+        model = cfg.summary_model or self.model
+
+        async def account(usage: dict[str, Any]) -> None:
+            # No node/context snapshot: side calls cannot measure the main window.
+            raw = dict(usage)
+            if "cost_usd" not in raw:
+                cost = None
+                estimator = getattr(self.provider, "estimate_cost", None)
+                if estimator is not None:
+                    try:
+                        cost = estimator(model, raw)
+                    except Exception:
+                        pass
+                if cost is None:
+                    cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
+                if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
+                    cost = 0.0
+                if cost is not None:
+                    raw.update(cost_usd=cost, cost_from_table=True)
+            raw.update(model=model, auxiliary_source="checkpoint_summary")
+            # Ownership is fixed at dispatch, not by whichever turn happens to
+            # be active at completion. Background calls never enter a terminal.
+            if background:
+                raw["auxiliary_background"] = True
+            else:
+                self._accumulate_usage(self._turn_usage, raw)
+            event = await self._emit(Usage(
+                session_id=sid, turn_id=turn_id,
+                input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
+                output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
+                cache_read_tokens=raw.get("cache_read_input_tokens", 0),
+                cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
+            ))
+            if background and self._background_usage_sink is not None:
+                assert isinstance(event, Usage)
+                self._unbooked_usage[event.seq] = event
+                await self._book_unbooked_usage()
+
+        key = self._affinity_key()
+        extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}
+        try:
+            # Bound provider stalls too; ordinary turns never await this task.
+            async with asyncio.timeout(180):
+                text = await build_checkpoint(
+                    self.provider, model=model, text=region[2],
+                    max_tokens=cfg.summary_max_output_tokens, extra=extra,
+                    wire_state=self._wire_state("checkpoint"), account=account,
+                )
+            return region[0], region[1], text
+        except Exception as exc:
+            log.warning("checkpoint build dropped (%s)", type(exc).__name__)
+            return None
+
+    def _schedule_checkpoint(self, sid: str, turn_id: str) -> None:
+        if (self._interrupted.is_set() or self._background_closed or self._checkpoint_latched
+                or not self._compactor.config.summary_enabled or self._pending_summary is not None):
+            return
+        if self._summary_task is not None and not self._summary_task.done():
+            return
+
+        async def build() -> None:
+            try:
+                nodes = await self.store.load_path(sid)
+                measured = await self._measured_next_prompt(sid, nodes)
+                region = self._compactor.summary_region(
+                    nodes, context_window=self.context_window,
+                    scale=self._summary_scale(nodes, measured), due_only=True,
+                )
+                if region is not None:
+                    self._pending_summary = await self._build_checkpoint(sid, turn_id, region, background=True)
+            except Exception as exc:
+                log.warning("checkpoint scheduling dropped (%s)", type(exc).__name__)
+
+        self._summary_task = asyncio.create_task(build())
+
+    def _apply_pending_checkpoint(
+        self, nodes: list[SessionNode], *, cache: CacheSignal | None, turn_boundary: bool,
+        measured: int | None, overhead: int, batch_due: bool,
+    ) -> Promotion | None:
+        pending = self._pending_summary
+        if pending is None:
+            return None
+        ids = {n.node_id for n in nodes}
+        if pending[0] not in ids or pending[1] not in ids:
+            self._pending_summary = None  # fork/rewind: never install another path's summary
+            return None
+        threshold = self._compactor._threshold(
+            self._compactor.config.trigger_tokens, self.context_window,
+            self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+        )
+        size = measured or self._compactor.estimate_view_tokens(nodes, overhead)
+        cold = turn_boundary and cache is not None and cache.cold_now
+        if not (cold or batch_due or size >= threshold):
+            return None
+        self._pending_summary = None
+        return self._compactor.apply_summary(
+            nodes, pending, overhead_tokens=overhead,
+            decision_reason="summary_cold" if cold else "summary_batch",
+        )
+
+    def _compaction_stats(self, nodes: list[SessionNode], measured: int | None) -> dict[str, int]:
+        stats = self._compactor.stats(nodes)
+        stats["projectedAfterCompactTokens"] = self._compactor.projected_after_compact(
+            nodes, overhead_tokens=self._context_overhead_tokens(),
+            context_window=self.context_window,
+            output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+            scale=self._summary_scale(nodes, measured), pending=self._pending_summary,
+        )
+        return stats
+
     async def _run_manual_compaction(self, sid: str, turn_id: str, source: str) -> None:
-        """An owner-requested compaction: one turn, no model call, no new node.
+        """An owner-requested compaction: no new conversation node.
+
+        The optional checkpoint side call is allowed to block this request.
 
         Runs :meth:`Compactor.compact_now` (the guarded ladder window
         protection uses) on the current path. Its promotions are emitted and
@@ -2525,6 +2732,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         promotions: list[Promotion] = []
         failure: str | None = None
         scale = 1.0
+        interrupted = False
         if not self._compactor.active:
             failure = "compaction is turned off for this session"
         elif not nodes:
@@ -2542,10 +2750,44 @@ class NativeLoop(BackgroundLifecycleMixin):
                     output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
                     scale=scale,
                 )
+                if self._compactor.config.summary_enabled and not self._interrupted.is_set():
+                    # Only the owner's manual request may wait for this call.
+                    if self._summary_task is not None and not self._summary_task.done():
+                        # Wait without inheriting its fate: a host teardown may
+                        # cancel the background build, which is not this turn.
+                        await asyncio.wait([self._summary_task])
+                    region = self._compactor.summary_region(
+                        nodes, context_window=self.context_window, scale=scale,
+                    )
+                    if region is not None and not self._interrupted.is_set():
+                        pending = self._pending_summary
+                        if pending is None or pending[:2] != region[:2]:
+                            self._manual_summary_task = asyncio.create_task(
+                                self._build_checkpoint(sid, turn_id, region)
+                            )
+                            try:
+                                pending = await self._manual_summary_task
+                            finally:
+                                self._manual_summary_task = None
+                        self._pending_summary = None
+                        if pending is not None:
+                            promo = self._compactor.apply_summary(
+                                nodes, pending, overhead_tokens=overhead, decision_reason="manual",
+                            )
+                            if promo is not None:
+                                promotions.append(promo)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise  # the turn itself is being cancelled (engine closing)
+                # Only the summary call was cancelled. The ladder already
+                # changed the compactor's view: persist its promotions below so
+                # a restarted engine renders the same view.
+                interrupted = self._interrupted.is_set()
             except Exception as exc:  # noqa: BLE001 — reported as a failed compaction
                 log.warning("manual compaction failed", exc_info=True)
                 failure = f"compaction failed: {type(exc).__name__}"
-            if not promotions and failure is None:
+            if not promotions and failure is None and not interrupted:
                 failure = (
                     "nothing could be compacted: the context is already as small "
                     "as compaction makes it without touching the most recent work"
@@ -2567,14 +2809,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                 decision_reason="manual",
                 render_version=self._compactor.render_version,
             ))
-        else:
+        elif not interrupted:
             await self._emit(DelegatedDiagnostic(
                 session_id=sid, turn_id=turn_id, kind="compaction_failed",
                 message=failure or "nothing could be compacted",
             ))
+        usage, cost = self._partial_usage(self._turn_usage)
+        if interrupted:
+            await self._emit_terminal_with_park(Interrupted(
+                session_id=sid, turn_id=turn_id, usage=usage, cost_usd=cost,
+            ))
+            return
         await self._emit_terminal_with_park(TurnComplete(
             session_id=sid, turn_id=turn_id, stop_reason="end_turn",
-            num_model_calls=0, usage={}, cost_usd=0.0,
+            num_model_calls=0, usage=usage, cost_usd=cost if cost is not None else 0.0,
         ))
 
     async def _start_and_loop(
@@ -2622,6 +2870,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason=reason)
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
+            if not cancelled:
+                self._retry_unbooked_usage()
+            if not cancelled and not self._interrupted.is_set():
+                self._schedule_checkpoint(sid, turn_id)
             # _run_turn owns the active id through cancellation settlement.
             # Interrupted turns discard their pending interjections. Other
             # terminal paths have already retained accepted peers in history;
@@ -2980,6 +3232,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 trimmed=tuple((n, t) for n, t in e.trimmed),
                 spans=tuple((s, en, k) for s, en, k in e.spans),
                 render_version=e.render_version,
+                summary_text=e.summary,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -3101,6 +3354,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             tier=promo.tier, reason=promo.reason,
             trimmed=[list(p) for p in promo.trimmed],
             spans=[list(s) for s in promo.spans],
+            summary=promo.summary_text,
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,
@@ -3288,6 +3542,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Measured first: on a resumed engine it rehydrates the last
             # call's usage, which also seeds the cache signal's miss rate.
             measured_prompt = await self._measured_window_prompt(sid, nodes)
+            cache = self._cache_signal(
+                sid, overhead_tokens=overhead_tokens,
+                turn_start=user_node.node_id if num_calls == 0 else None,
+            )
             rendered, promotions = self._compactor.apply(
                 nodes,
                 overhead_tokens=overhead_tokens,
@@ -3303,11 +3561,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                 measured_prompt_tokens=measured_prompt,
                 # The provider cache as this call will find it, so a rewrite
                 # on a warm cache is priced instead of taken at the trigger.
-                cache=self._cache_signal(
-                    sid, overhead_tokens=overhead_tokens,
-                    turn_start=user_node.node_id if num_calls == 0 else None,
-                ),
+                cache=cache,
             )
+            summary = self._apply_pending_checkpoint(
+                nodes, cache=cache, turn_boundary=num_calls == 0,
+                measured=measured_prompt, overhead=overhead_tokens, batch_due=bool(promotions),
+            )
+            if summary is not None:
+                promotions.append(summary)
+                rendered = self._compactor.view(nodes)
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
@@ -3822,7 +4084,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # rewriting disabled, ``stats`` would price reclaimed tokens
                     # the request never actually saved.
                     compaction=(
-                        self._compactor.stats(nodes)
+                        self._compaction_stats(nodes, prompt_tokens)
                         if self._compactor.active
                         else None
                     ),

@@ -11,6 +11,8 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.context.cache_signal import (
     CacheSignal,
     Zones,
@@ -187,8 +189,9 @@ def test_cold_now_commits_at_the_trigger() -> None:
     legacy = Compactor(config=CompactionConfig())
     _, expected = _apply(legacy, nodes, overhead=overhead, cache=None)
     for reason in ("gap", "static_changed", "resumed"):
+        # A resume is cold only when the previous call's age is unknown.
         signal = CacheSignal(
-            gap_s=600.0 if reason == "gap" else 5.0,
+            gap_s={"gap": 600.0, "static_changed": 5.0, "resumed": None}[reason],
             static_changed=reason == "static_changed", resumed=reason == "resumed",
             reuse_floor=overhead,
         )
@@ -453,8 +456,10 @@ async def test_engine_prices_rewrites_from_live_hit_rates(tmp_path) -> None:
         await loop.aclose()
 
 
-async def test_resumed_engine_seeds_p_cold_from_persisted_usage(tmp_path) -> None:
-    loop, _ = await _run_engine(tmp_path, hit=0.0)
+async def test_resumed_engine_seeds_p_cold_from_persisted_usage(tmp_path, monkeypatch) -> None:
+    loop, events = await _run_engine(tmp_path, hit=0.0)
+    last_usage = next(e for e in reversed(events) if isinstance(e, Usage))
+    monkeypatch.setattr("fluid.engine.native.time.time", lambda: last_usage.ts + 30)
     sid = loop.session_id
     await loop.aclose()
     fresh = NativeLoop(provider=_UsageProvider(0, 0.0), store=JsonlStore(tmp_path),
@@ -466,11 +471,78 @@ async def test_resumed_engine_seeds_p_cold_from_persisted_usage(tmp_path) -> Non
     # Every persisted call missed, so the seed is 1 and the resumed engine
     # prices the next warm rewrite as nearly free.
     assert signal.resumed and signal.p_cold == 1.0
+    assert signal.gap_s == 30.0 and not signal.cold_now
+    assert not signal.static_changed  # A new engine has no previous static hash.
     again = fresh._cache_signal(sid, overhead_tokens=1_000, turn_start=None)
     assert not again.resumed and again.p_cold == 1.0
     fresh.system = "a different system prompt"
     assert fresh._cache_signal(sid, overhead_tokens=1_000, turn_start=None).static_changed
     await fresh.aclose()
+
+
+@pytest.mark.parametrize("gap,reason", [(20, ""), (300, ""), (400, "gap")])
+def test_resumed_cache_signal_uses_known_gap(gap, reason) -> None:
+    signal = CacheSignal(resumed=True, gap_s=gap)
+    assert signal.cold_reason == reason
+    assert signal.to_dict()["resumed"] is True
+    assert CacheSignal(resumed=True, gap_s=gap, static_changed=True).cold_reason == "static_changed"
+
+
+@pytest.mark.parametrize("gap,reason", [(20, ""), (400, "gap")])
+async def test_unpark_cache_signal_uses_known_gap(tmp_path, monkeypatch, gap, reason) -> None:
+    from fluid.events.model import TurnStarted
+    from fluid.store.base import persist_event
+
+    loop = NativeLoop(provider=_UsageProvider(0, 0.0), store=JsonlStore(tmp_path), model="m")
+    sid = (await loop.store.create_session()).session_id
+    now = 1_000.0
+    monkeypatch.setattr("fluid.engine.native.time.time", lambda: now)
+    try:
+        assert loop._cache_signal(sid, overhead_tokens=0, turn_start=None).cold_reason == "resumed"
+        await persist_event(loop.store, TurnStarted(
+            session_id=sid, node_id="wake", seq=1, source="unpark",
+            model="m", provider="fake",
+        ))
+        await loop._note_wake_turn_starts(sid)
+        now += gap
+        signal = loop._cache_signal(sid, overhead_tokens=0, turn_start="wake")
+        assert signal.resumed and signal.gap_s == gap
+        assert signal.cold_reason == reason
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("events,expected_gap,reason", [
+    ([], None, "resumed"),
+    ([(0, 100)], None, "resumed"),  # Legacy Usage without a timestamp is unknown.
+    ([(970, 100), (995, 0)], 30, ""),  # Unmeasured Usage is not a call seed.
+    ([(500, 100), (970, 100)], 30, ""),
+    ([(600, 100)], 400, "gap"),
+    # A tool's or the summarizer's side call is not the session's last prompt.
+    ([(600, 100), (990, 100, "checkpoint_summary")], 400, "gap"),
+])
+async def test_fresh_cache_signal_seeds_newest_measured_usage(
+    tmp_path, monkeypatch, events, expected_gap, reason,
+) -> None:
+    from fluid.store.base import persist_event
+
+    store = JsonlStore(tmp_path)
+    sid = (await store.create_session()).session_id
+    for seq, (ts, tokens, *source) in enumerate(events, start=1):
+        raw = {"auxiliary_source": source[0]} if source else {}
+        await persist_event(store, Usage(session_id=sid, node_id="off-path",
+                                        seq=seq, ts=ts, input_tokens=tokens, raw=raw))
+    fresh = NativeLoop(provider=_UsageProvider(0, 0.0), store=JsonlStore(tmp_path),
+                       model="m", session_id=sid)
+    monkeypatch.setattr("fluid.engine.native.time.time", lambda: 1_000.0)
+    try:
+        # Provider-cache age is session-wide even when the measured node is off-path.
+        assert await fresh._rehydrate_last_call_usage(sid, []) is None
+        signal = fresh._cache_signal(sid, overhead_tokens=0, turn_start=None)
+        assert signal.resumed and not signal.static_changed
+        assert signal.gap_s == expected_gap and signal.cold_reason == reason
+    finally:
+        await fresh.aclose()
 
 
 # ── The boundary sweep (plan item 8) ────────────────────────────────────

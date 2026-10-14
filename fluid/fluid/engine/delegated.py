@@ -490,9 +490,10 @@ def compaction_summary_in_transcript(
     The CLI records a compaction as a ``system/compact_boundary`` entry
     followed by a ``user`` entry flagged ``isCompactSummary`` that holds the
     summary text. The boundary whose ``uuid`` is ``boundary_uuid`` is the one
-    wanted; when no entry carries that uuid (or none was given), the last
-    boundary is taken if it was written within ``_COMPACTION_SUMMARY_MAX_AGE``
-    of ``now``. Reads at most the last ``_STEER_SCAN_BYTES``. Blocking.
+    wanted; when it is absent, return "" so the reader can retry. Only when
+    no UUID was given is the last boundary taken if it was written within
+    ``_COMPACTION_SUMMARY_MAX_AGE`` of ``now``. Reads at most the last
+    ``_STEER_SCAN_BYTES``. Blocking.
     """
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
@@ -522,10 +523,11 @@ def compaction_summary_in_transcript(
             boundaries[-1][2] = _summary_text(entry)
     if not boundaries:
         return ""
-    chosen = None
-    if boundary_uuid:
+    if boundary_uuid is not None:
         chosen = next((b for b in boundaries if b[0] == boundary_uuid), None)
-    if chosen is None:
+        if chosen is None:
+            return ""
+    else:
         last = boundaries[-1]
         current = time.time() if now is None else now
         if last[1] is None or current - last[1] > _COMPACTION_SUMMARY_MAX_AGE:

@@ -238,6 +238,11 @@ Knobs for tool-result trimming and the compaction ladder
 | `wake_aware_turns` | `true` | Turns started by an unpark, a wakeup or a peer message do not count toward `keep_recent_turns`, so a run of wakes cannot push a real user turn out of the protected set. |
 | `cache_schedule` | `true` | When the engine reports the cache state, rewrites are priced against it: below the opportunistic floor nothing is built, under the trigger a batch commits only on a cold cache, and over the trigger a warm rewrite waits until deferring costs as much as rebuilding. The hard zone and window protection always commit. |
 | `opportunistic_floor_window_ratio` | `0.45` | Window fraction below which the cache-priced schedule never builds a batch. |
+| `summary_enabled` | `false` | Opt-in model-written checkpoint tier, independent of mechanical tiers 1–3. AI Shuffle enables it for native sessions. An already persisted checkpoint still renders when this switch is off. |
+| `summary_trigger_window_ratio` | `0.10` | Build after a turn when compacted residue exceeds this fraction of the known window. Unknown window disables automatic builds, not manual compaction. |
+| `summary_max_output_tokens` | `4000` | Output budget of the checkpoint side call; also the fallback output allowance in `compaction.projectedAfterCompactTokens`. |
+| `summary_input_cap_tokens` | `120000` | Maximum chars/4 input estimate. Beyond it, retain the previous checkpoint and newest rendered material. |
+| `summary_model` | none | Override the session model for the no-tools side call, using the same provider. |
 | `sweep_mode` | `"shadow"` | The turn-boundary sweep of old tool results and already-seen images. `"off"` plans nothing, `"shadow"` logs what it would reclaim without changing the prompt, `"on"` commits it. |
 | `sweep_keep_tokens` | `20000` | The newest results of earlier turns, up to this many tokens, that the sweep leaves alone. |
 | `sweep_pin_tokens` | `16000` | Results the model fetched with `HistoryExpand` in the turn that just ended stay pinned for the next turn, newest first, up to this many tokens. |
@@ -246,6 +251,18 @@ Knobs for tool-result trimming and the compaction ladder
 | `steer_receipt_chars` | `1000` | From render version 2, a harness notice at least this long renders, once compacted, as a short receipt with a `HistoryExpand` ref. User and peer messages stay verbatim. |
 | `steer_receipt_preview_chars` | `300` | Characters of the notice that the receipt quotes. |
 | `intent_pin_tokens` | `4000` | From render version 2, epoch stubs keep the folded turns' user requests verbatim up to this many tokens. |
+
+Checkpoints use a guided layout for requests, constraints, decisions, exact
+identifiers, completed/pending work, errors and open questions. The engine builds
+one in the background without blocking the next turn and applies it only at a
+cold turn boundary or a due compaction batch. Manual Compact now can wait for a
+build after running the guarded mechanical ladder. Failed, empty or truncated
+builds are dropped; the ladder still works. Summary text is persisted with the
+tier-4 event, re-rendered without another model call, and ignored off its original
+path. Original nodes stay available for recall. Side-call usage/cost is recorded
+separately with `auxiliary_source="checkpoint_summary"` and no context snapshot.
+The projected post-compact size is a calibrated estimate, not a promise about a
+future model's output or billing.
 
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
