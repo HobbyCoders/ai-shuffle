@@ -5,9 +5,10 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
-# Sign the nightly channel; alias-aware clients still accept edge settings.
+# Transition step 1: ship alias-aware workers signed edge. Change only this
+# value to nightly after those workers have installed the compatibility build.
 env:
-  SOURCE_CHANNEL: nightly
+  SOURCE_CHANNEL: edge
 
 permissions:
   contents: read

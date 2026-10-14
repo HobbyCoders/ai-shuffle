@@ -169,7 +169,7 @@ def test_workflow_wiring_matches_the_gate():
     assert f"github.actor_id == '{gate.OWNER_ID}'" in condition
     assert set(config["on"]) == {"schedule", "workflow_dispatch"}
     assert config["on"]["schedule"] == [{"cron": "0 6 * * *"}]
-    assert config["env"]["SOURCE_CHANNEL"] == "nightly"
+    assert config["env"]["SOURCE_CHANNEL"] == "edge"
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
     assert steps[-1]["if"] == "steps.changed.outputs.changed == 'true'"

@@ -59,9 +59,8 @@ class CostPolicyTests(unittest.TestCase):
                     self.assertNotIn(leftover, text)
         self.assertFalse((ROOT / "scripts/ci/require-full-ci.py").exists())
 
-    def test_nightly_publication_waits_for_the_owner_local_pass(self):
+    def test_edge_publication_waits_for_the_owner_local_pass(self):
         config = workflow("desktop-source.yml")
-        self.assertEqual(config["env"]["SOURCE_CHANNEL"], "nightly")
         self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch"})
         gate = config["jobs"]["gate"]
         for clause in ("github.event_name == 'schedule'", "github.ref == 'refs/heads/main'",

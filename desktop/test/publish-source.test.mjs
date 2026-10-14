@@ -37,7 +37,7 @@ for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regr
    assert.equal(row.channel,'stable');assert.equal(manifest.channel,'stable');assert.equal(manifest.version,'1.2.3');assert.equal(manifest.notes,'Faster startup.');
    assert(events.includes('on-main'));assert(!events.some(url=>String(url).endsWith('/commits/main')),'a stable publish is pinned to its tag, not to main');
   }else{
-   assert.equal(row.channel,'edge');assert.equal(manifest.channel,scenario==='edge'?'edge':'nightly');assert.equal(manifest.version,'0.8.18-dev.4+gaaaaaaa');assert.equal(manifest.notes,'');
+   assert.equal(row.channel,'edge');assert.equal(manifest.channel,scenario==='nightly'?'nightly':'edge');assert.equal(manifest.version,'0.8.18-dev.4+gaaaaaaa');assert.equal(manifest.notes,'');
   }
  }
  assert(!events.some(url=>String(url).includes('/zipball/')),'the full-repository zipball is never published');

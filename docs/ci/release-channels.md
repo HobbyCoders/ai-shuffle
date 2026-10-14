@@ -172,17 +172,15 @@ reinstall, because database migrations do not run backwards.
 
 ### Two-step edge transition
 
-1. Publish the compatibility build signed `edge` first. Existing edge workers
-   without alias support reject a manifest signed `nightly` until they have
-   installed code that recognizes both names. Deploy
+1. Keep `SOURCE_CHANNEL: edge` in `desktop-source.yml` and publish this
+   compatibility build first. Existing edge workers reject a manifest signed
+   nightly until they have installed code that recognizes both names. Deploy
    the hub aliases before updated clients request `/v1/desktop/manifest/nightly`.
    Older Docker images without `source-supervisor` also need a compatible
    image: a source-only update cannot replace their supervisor. Images with
    that capability hand over to the updated supervisor after a restart.
-2. `desktop-source.yml` now sets `SOURCE_CHANNEL: nightly`, and the publisher
-   defaults to `nightly`. Before running publication, confirm affected workers
-   have the compatibility code from step 1. This source change alone does not
-   verify or upgrade installed launchers.
+2. After the affected workers have that code, change the workflow's one
+   `SOURCE_CHANNEL` value to `nightly`. This PR deliberately leaves it `edge`.
    `/v1/desktop/manifest/nightly` and `/v1/desktop/manifest/edge` serve identical
    signed bytes from the existing D1 `edge` lane; the publisher keeps that
    storage key even when it signs `nightly`. The hub never rewrites a signature.

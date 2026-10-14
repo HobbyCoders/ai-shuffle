@@ -4,7 +4,7 @@
 //
 // SOURCE_CHANNEL=nightly (desktop-source.yml, daily after a local full pass):
 //   current main, served at /v1/desktop/manifest/nightly and its /edge alias.
-// The edge input remains a transition alias; both names use the same D1 lane.
+// The workflow keeps SOURCE_CHANNEL=edge for the first compatibility release.
 // SOURCE_CHANNEL=stable (release.yml, after the release image passed container
 //   verification): the commit of RELEASE_TAG, which must be on main. Served at
 //   /v1/desktop/manifest, the address every customer install follows.
@@ -21,7 +21,7 @@ import path from 'node:path';
 import { readLauncher } from './launcher-contract.mjs';
 import { releaseRepository } from './release-repository.mjs';
 const { repository: repo, id: repositoryId } = await releaseRepository(process.env.GH_TOKEN);
-const channel = process.env.SOURCE_CHANNEL || 'nightly';
+const channel = process.env.SOURCE_CHANNEL || 'edge';
 if (!['stable', 'nightly', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or nightly (edge is a transition alias)');
 // Both public aliases share the existing D1 lane; never relabel signed bytes.
 const storageChannel = channel === 'nightly' ? 'edge' : channel;
