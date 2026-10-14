@@ -502,3 +502,55 @@ async def test_failed_background_booking_is_retried_and_reconciled(tmp_path):
     await asyncio.wait_for(fresh._booking_task, 3)
     assert seen == [usage.seq]
     await fresh.aclose()
+
+
+async def test_host_checkpoint_teardown_does_not_cancel_manual_compaction(tmp_path):
+    from fluid.events import ContextCompaction, ErrorEvent, TurnComplete, UserTurn
+    first_gate, first_started = asyncio.Event(), asyncio.Event()
+
+    class FirstBlocks(LoopProvider):
+        calls = 0
+
+        async def stream(self, request):
+            if request.system == CHECKPOINT_SYSTEM:
+                FirstBlocks.calls += 1
+                if FirstBlocks.calls == 1:
+                    first_started.set()
+                    await first_gate.wait()  # the background build never finishes
+            async for chunk in super().stream(request):
+                yield chunk
+
+    provider = FirstBlocks()
+    cfg = config(trigger_tokens=10_000_000)
+    loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="fixture",
+                      context_window=40_000, compaction=cfg)
+    await turn(loop, "start")
+    sid = loop.session_id
+    if loop._summary_task:
+        await loop._summary_task
+    path = nodes(15)
+    for node in path:
+        await loop.store.append(sid, node)
+    try:
+        loop._compactor._digest_until(path, overhead_tokens=0, target=0)
+        loop._schedule_checkpoint(sid, "background")
+        await asyncio.wait_for(first_started.wait(), 3)
+        background = loop._summary_task
+        before = len(loop.bus.log(sid))
+        await loop.submit(UserTurn(content="/compact"))
+        await asyncio.sleep(0.05)  # the manual turn is now waiting on the background build
+        await loop.cancel_checkpoint(latch=True)  # host Stop/archive teardown
+        await asyncio.wait_for(loop.wait_turn(), 5)
+        assert background.cancelled()
+        events = loop.bus.log(sid)[before:]
+        assert not [e for e in events if isinstance(e, ErrorEvent)]
+        assert any(isinstance(e, TurnComplete) and e.stop_reason == "end_turn" for e in events)
+        assert any(isinstance(e, ContextCompaction) and e.tier == 4 for e in events)
+        view = loop._compactor.view(await loop.store.load_path(sid))
+    finally:
+        await loop.aclose()
+    fresh = NativeLoop(provider=Provider(), store=JsonlStore(tmp_path), model="fixture",
+                       session_id=sid, context_window=40_000, compaction=cfg)
+    await fresh._rehydrate_compaction(sid)
+    assert fresh._compactor.view(await fresh.store.load_path(sid)) == view
+    await fresh.aclose()

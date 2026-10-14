@@ -1254,6 +1254,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._compaction_rehydrated = False
         self._background_usage_sink = background_usage_sink
         self._summary_task: asyncio.Task | None = None
+        # A manual compaction's own build: only an Interrupt (or the turn's
+        # own cancellation) ends it, never a host teardown of background work.
+        self._manual_summary_task: asyncio.Task | None = None
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -1645,6 +1648,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         elif isinstance(op, Interrupt):
             self._interrupted.set()
             await self.cancel_checkpoint()
+            manual = self._manual_summary_task
+            if manual is not None and not manual.done():
+                manual.cancel()  # the manual turn awaits it and reports Interrupted
         elif isinstance(op, Steer):
             # Mid-turn user text: queued here, appended to the NEXT tool
             # result inside the steering marker (fluid.context.steering) —
@@ -2747,17 +2753,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if self._compactor.config.summary_enabled and not self._interrupted.is_set():
                     # Only the owner's manual request may wait for this call.
                     if self._summary_task is not None and not self._summary_task.done():
-                        await self._summary_task
+                        # Wait without inheriting its fate: a host teardown may
+                        # cancel the background build, which is not this turn.
+                        await asyncio.wait([self._summary_task])
                     region = self._compactor.summary_region(
                         nodes, context_window=self.context_window, scale=scale,
                     )
                     if region is not None and not self._interrupted.is_set():
                         pending = self._pending_summary
                         if pending is None or pending[:2] != region[:2]:
-                            self._summary_task = asyncio.create_task(
+                            self._manual_summary_task = asyncio.create_task(
                                 self._build_checkpoint(sid, turn_id, region)
                             )
-                            pending = await self._summary_task
+                            try:
+                                pending = await self._manual_summary_task
+                            finally:
+                                self._manual_summary_task = None
                         self._pending_summary = None
                         if pending is not None:
                             promo = self._compactor.apply_summary(
@@ -2766,11 +2777,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                             if promo is not None:
                                 promotions.append(promo)
             except asyncio.CancelledError:
-                if not self._interrupted.is_set():
-                    raise
-                # The ladder already changed the compactor's view: persist its
-                # promotions below so a restarted engine renders the same view.
-                interrupted = True
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise  # the turn itself is being cancelled (engine closing)
+                # Only the summary call was cancelled. The ladder already
+                # changed the compactor's view: persist its promotions below so
+                # a restarted engine renders the same view.
+                interrupted = self._interrupted.is_set()
             except Exception as exc:  # noqa: BLE001 — reported as a failed compaction
                 log.warning("manual compaction failed", exc_info=True)
                 failure = f"compaction failed: {type(exc).__name__}"
