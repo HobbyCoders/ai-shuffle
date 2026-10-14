@@ -15,6 +15,9 @@ import pytest
 from fluid.codemode import os_sandbox
 
 NO_LINKS: dict[str, str] = {}
+POSIX_PATHS = pytest.mark.skipif(
+    sys.platform == "win32", reason="bwrap uses POSIX filesystem roots and bin/python venv layouts"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +130,7 @@ def _copied_venv(root, home: str | None):
     return str(exe)
 
 
+@POSIX_PATHS
 def test_copied_venv_binds_itself_and_its_base_outside_usr(tmp_path):
     venv = tmp_path / "my venv"
     exe = _copied_venv(venv, "/opt/py 3.12/bin")
@@ -134,6 +138,7 @@ def test_copied_venv_binds_itself_and_its_base_outside_usr(tmp_path):
     assert roots == [str(venv), "/opt/py 3.12"]
 
 
+@POSIX_PATHS
 def test_copied_venv_with_a_base_under_usr_binds_only_itself(tmp_path):
     exe = _copied_venv(tmp_path / "v", "/usr/bin")
     assert os_sandbox.python_roots(exe) == [str(tmp_path / "v")]
@@ -147,6 +152,7 @@ def test_venv_without_cfg_or_blank_home(tmp_path):
     assert os_sandbox.python_roots(exe) == [str(b)]
 
 
+@POSIX_PATHS
 def test_symlinked_venv_resolves_to_the_target_prefix(tmp_path):
     base = tmp_path / "base"
     (base / "bin").mkdir(parents=True)
@@ -165,6 +171,7 @@ def test_system_python_under_usr_needs_no_extra_root(monkeypatch):
     assert os_sandbox.python_roots("/usr/bin/python3") == []
 
 
+@POSIX_PATHS
 def test_too_broad_roots(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "home" / "me"))
     (tmp_path / "home" / "me").mkdir(parents=True)
@@ -242,6 +249,7 @@ def test_reset_cache_forgets_results_and_warnings(monkeypatch, caplog):
     assert len(probes) == 2
 
 
+@POSIX_PATHS
 def test_too_broad_prefix_is_refused_without_probing(monkeypatch):
     monkeypatch.setattr(os_sandbox, "python_roots", lambda p: ["/"])
     monkeypatch.setattr(os_sandbox, "_probe_once", lambda *a: pytest.fail("probed"))

@@ -81,7 +81,8 @@ for (const target of Object.keys(GH_ASSETS)) {
 		assert.equal(entry.archive, ghAsset(platform, arch).name);
 		assert.equal(entry.source, 'cli/cli');
 		assert.deepEqual(await readdir(cacheDir), []); // staging gone
-		if (platform !== 'win32') assert.equal((await stat(path.join(outDir, entry.binary))).mode & 0o777, 0o755);
+		// File modes are a property of the build host, not the target archive.
+		if (process.platform !== 'win32' && platform !== 'win32') assert.equal((await stat(path.join(outDir, entry.binary))).mode & 0o777, 0o755);
 		await validateBundledSymlinks(outDir, platform);
 	});
 }

@@ -8,7 +8,6 @@ anything, and must leave no inherited descriptor or privilege behind.
 from __future__ import annotations
 
 import os
-import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +28,7 @@ def test_wrap_off_returns_the_same_objects():
     assert out[0] is argv and out[1] is None and out[2] is None
 
 
+@linux
 def test_wrap_on_prefixes_the_runner_and_drops_secrets():
     env = {"PATH": os.defpath, "HOME": "/home/x", "DATABASE_URL": "postgresql://x", "PGPASSWORD": "p",
            "PGID": "100", "SHUFFLE_AGENT_ROOTS": "/x", "OWNER_TOKEN": "the owner's own"}
@@ -40,11 +40,15 @@ def test_wrap_on_prefixes_the_runner_and_drops_secrets():
     assert "DATABASE_URL" in env  # the caller's mapping is not modified
 
 
+@linux
 def test_wrap_on_defaults_the_working_directory_to_home():
+    import pwd
+
     _argv, cwd, _env = agent_runner.wrap(["sh"], None, {"PATH": os.defpath}, environ=ON)
     assert cwd == pwd.getpwuid(os.getuid()).pw_dir
 
 
+@linux
 def test_wrap_on_inherits_the_process_environment_when_env_is_none(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://never")
     monkeypatch.setenv("AGENT_RUNNER_PROBE", "1")
@@ -53,6 +57,7 @@ def test_wrap_on_inherits_the_process_environment_when_env_is_none(monkeypatch):
     assert not any(k.startswith("SHUFFLE_AGENT_") for k in env)
 
 
+@linux
 def test_wrap_on_raises_file_not_found_for_a_missing_command():
     with pytest.raises(FileNotFoundError):
         agent_runner.wrap(["no-such-command-xyz"], "/tmp", {"PATH": os.defpath}, environ=ON)
@@ -60,6 +65,7 @@ def test_wrap_on_raises_file_not_found_for_a_missing_command():
         agent_runner.wrap([], "/tmp", {"PATH": os.defpath}, environ=ON)
 
 
+@linux
 def test_strip_recovers_the_command():
     argv, _cwd, _env = agent_runner.wrap(["sh", "-c", "x -- y"], "/tmp", {"PATH": os.defpath}, environ=ON)
     assert agent_runner.strip(argv) == ["sh", "-c", "x -- y"]
