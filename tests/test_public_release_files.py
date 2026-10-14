@@ -49,15 +49,19 @@ def test_native_project_license_notices():
 def test_public_readme_order_and_install():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     assert re.findall(r"^## (.+)$", text, re.M) == [
-        "Why not just a terminal?", "Install", "Free and Cloud", "Contributing",
-        "Security", "License", "Not affiliated", "Links",
+        "What it is", "What you can do with it", "Install", "Free and Cloud",
+        "How it compares", "Contributing", "Security", "License", "Not affiliated",
     ]
-    assert text.index("[Watch the tour]") < text.index("## Why")
-    commands = re.search(r"```sh\n(.*?)```", text, re.S).group(1).splitlines()
+    assert text.index("[Watch the tour]") < text.index("## What it is")
+    block = re.search(r"```sh\n(.*?)```", text, re.S).group(1)
+    commands = [line.strip() for line in block.splitlines() if line.strip()]
     assert len(commands) == 3
     assert commands[-1] == "docker compose up -d"
     assert "ghcr.io/hobbycoders/ai-shuffle-server" in text
-    assert "https://hobbycoders.com/ai-shuffle/pricing" in text
+    # Installers live on the site's downloads page, which serves the current
+    # release; a GitHub "latest release" link is empty between releases.
+    assert "https://hobbycoders.com/ai-shuffle/downloads" in text
+    assert "releases/latest" not in text
     images = re.findall(r"!\[([^]]*)\]\(([^)]+)\)", text)
     assert images == [
         ("Chat transcript with a folded Worked for work log", "docs/images/readme/folded-work-log.png"),
@@ -70,7 +74,7 @@ def test_public_readme_order_and_install():
         assert image.is_file(), path
         assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), path
         assert image.stat().st_size < 500_000, path
-        assert text.index("[Watch the tour]") < text.index(f"![{alt}]") < text.index("## Why")
+        assert text.index("[Watch the tour]") < text.index(f"![{alt}]") < text.index("## Install")
 
 
 @pytest.mark.parametrize("name", [
