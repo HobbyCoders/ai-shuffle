@@ -2159,7 +2159,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         A resumed engine would otherwise start from "never missed". Reads
         the last ``P_COLD_SEED_CALLS`` measured Usage events, oldest first,
         whatever path they were on: the miss rate describes the provider
-        route, not the branch.
+        route, not the branch. Auxiliary side calls are skipped.
         """
         from fluid.context.cache_signal import P_COLD_SEED_CALLS, p_cold_from_hit_rates
 
@@ -2167,6 +2167,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         requested_at: float | None = None
         for event in events:
             if not isinstance(event, Usage):
+                continue
+            if isinstance(event.raw, dict) and event.raw.get("auxiliary_source"):
+                # A tool's or the summarizer's side call: not this session's
+                # main prompt, so neither its hit rate nor its time applies.
                 continue
             total = _measured_prompt_tokens({
                 "input_tokens": event.input_tokens,

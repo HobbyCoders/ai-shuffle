@@ -518,6 +518,8 @@ async def test_unpark_cache_signal_uses_known_gap(tmp_path, monkeypatch, gap, re
     ([(970, 100), (995, 0)], 30, ""),  # Unmeasured Usage is not a call seed.
     ([(500, 100), (970, 100)], 30, ""),
     ([(600, 100)], 400, "gap"),
+    # A tool's or the summarizer's side call is not the session's last prompt.
+    ([(600, 100), (990, 100, "checkpoint_summary")], 400, "gap"),
 ])
 async def test_fresh_cache_signal_seeds_newest_measured_usage(
     tmp_path, monkeypatch, events, expected_gap, reason,
@@ -526,9 +528,10 @@ async def test_fresh_cache_signal_seeds_newest_measured_usage(
 
     store = JsonlStore(tmp_path)
     sid = (await store.create_session()).session_id
-    for seq, (ts, tokens) in enumerate(events, start=1):
+    for seq, (ts, tokens, *source) in enumerate(events, start=1):
+        raw = {"auxiliary_source": source[0]} if source else {}
         await persist_event(store, Usage(session_id=sid, node_id="off-path",
-                                        seq=seq, ts=ts, input_tokens=tokens))
+                                        seq=seq, ts=ts, input_tokens=tokens, raw=raw))
     fresh = NativeLoop(provider=_UsageProvider(0, 0.0), store=JsonlStore(tmp_path),
                        model="m", session_id=sid)
     monkeypatch.setattr("fluid.engine.native.time.time", lambda: 1_000.0)
