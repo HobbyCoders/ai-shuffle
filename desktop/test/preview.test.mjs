@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { getConfig, validateConfiguration } from './helpers/builder-config.mjs';
 const require = createRequire(import.meta.url);
 const { desktopIdentity, stableDataDir } = require('../dist/main/identity.js');
 const { WorkerSupervisor, buildWorkerEnv, writeManagedPostgres, prepareWorkerConfig } = require('../dist/main/worker.js');
@@ -35,7 +36,6 @@ test('preview identity comes exclusively from packaged metadata and installer ne
 	assert.notEqual(preview.appId, stable.appId); assert.notEqual(preview.protocol, stable.protocol);
 	assert.equal(preview.allowAttach, false); assert.equal(preview.updates, false);
 	assert.equal(preview.port, 8000); assert.equal(preview.protectedPort, 8001);
-	const { getConfig, validateConfiguration } = require('app-builder-lib/out/util/config/config');
 	const project = fileURLToPath(new URL('..', import.meta.url));
 	const config = await getConfig(project, 'electron-builder.preview.yml', null);
 	await validateConfiguration(config, { isEnabled: false });
