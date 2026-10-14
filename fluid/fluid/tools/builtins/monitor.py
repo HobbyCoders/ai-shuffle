@@ -46,6 +46,7 @@ from typing import Any
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.fragments import (
+    CI_WAIT_GUIDANCE,
     CWD_PARAM,
     DONT_PREDICT_PENDING,
     END_TURN_ON_BACKGROUND,
@@ -122,12 +123,9 @@ def describe(
         "The command must exit unless serves=true. Completion fires only on exit: "
         "unbounded tail -f, inotifywait -m or bare while true holds the session parked "
         "until it ends. For 'tell me when X is ready', use a self-terminating job wait "
-        "subcommand when available: gh pr checks <PR> --watch --fail-fast settles checks "
-        "and exits non-zero on failure, without a custom loop. Otherwise bound both the "
+        "subcommand when available, without a custom loop. Otherwise bound both the "
         "watch condition and total time." + budget_note + "\n\n"
-        "Give CI time to register after a push: sleep 20 && gh pr checks <PR> --watch "
-        "--fail-fast, all inside Monitor. An immediate 'no checks reported' means not "
-        "started yet, never as success. Silence is not success: cover EVERY terminal state "
+        + CI_WAIT_GUIDANCE + " Silence is not success: cover EVERY terminal state "
         "(succeeded, failed, cancelled, timed out), not just a success marker. Ask whether "
         "the command would end if the job died now; handle crashes, hangs and unexpected "
         "exits and cap total wait. Remote API watches should survive one failed request "

@@ -96,12 +96,13 @@ def compile_fixture(*, native=True):
         return compiled, full, specs
 
 
-def measure():
+def measure(*, native=True):
     import re
-    compiled, full, specs = compile_fixture()
+    compiled, full, specs = compile_fixture(native=native)
     # Split combined base/workflow blocks at their existing headings, preserving
     # order and every character. Separators count toward the aggregate totals.
-    system = "\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
+    system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
+              if native else compiled.text)
     sections = {}
     for index, text in enumerate(re.split(r"(?m)(?=^#{1,2} )", system)):
         if text:
@@ -119,8 +120,10 @@ def measure():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--delegated", action="store_true",
+                        help="Measure host append only; the CLI owns its preset and schemas")
     args = parser.parse_args()
-    result = measure()
+    result = measure(native=not args.delegated)
     if args.json:
         print(json.dumps(result, indent=2))
     else:

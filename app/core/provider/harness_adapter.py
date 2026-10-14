@@ -6228,11 +6228,9 @@ than reconstructing that state from raw git or asking the user. Plain git \
 remains the tool for local version control: status, diff, commit, branch, \
 push.
 
-CI takes minutes; never wait in Bash. Park on a Monitor whose loop ends on \
-ANY terminal state, not just the green one:
-Monitor(command="while true; do s=$(gh pr checks 123 --json bucket --jq \
-'.[].bucket' || true); case $s in *pending*) sleep 30;; *) echo checks: $s; \
-break;; esac; done")
+CI takes minutes; never wait in Bash. Use the available background-command \
+tool's CI wait recipe, preserving its exit code. If that capability is \
+unavailable, report the verification gap rather than polling in Bash.
 
 Worktrees share the main checkout's stash stack, so a bare `git stash` \
 followed by `git stash pop` can drop ANOTHER session's work into your tree. \

@@ -29,6 +29,15 @@ NO_VERIFY_READBACK = (
     "returned an error instead."
 )
 
+# One CI recipe, shared by the native and delegated Monitor descriptions.
+CI_WAIT_GUIDANCE = (
+    "Give CI time to register after a push: sleep 20 && gh pr checks <PR> --watch "
+    "--fail-fast, all inside Monitor. Preserve the exit code: failed or cancelled "
+    "checks must return non-zero; never mask it with a pipe, trailing command or "
+    "`|| true`. An immediate 'no checks reported' means not started yet, never "
+    "as success."
+)
+
 # Bash/Monitor — process isolation between calls.
 FRESH_PROCESS = (
     "Each call is a fresh process: environment variables, shell functions, "

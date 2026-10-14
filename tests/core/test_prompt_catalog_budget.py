@@ -5,20 +5,25 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 
 
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
-# origin/main da6b00497: full=141166, eager=107085 characters.
-MEASURED_FULL = 128_818
-MEASURED_EAGER = 94_737
+# Canonical CI recipe: native full=129070, eager=94923; delegated append=16307.
+MEASURED_FULL = 129_070
+MEASURED_EAGER = 94_923
+MEASURED_DELEGATED_APPEND = 16_307
 
 
 def test_prompt_catalog_budget():
     totals = measure()["totals"]
     for name, baseline in (("combined_full", MEASURED_FULL), ("compiled_eager", MEASURED_EAGER)):
-        ceiling = baseline * 110 // 100
+        ceiling = baseline * 101 // 100
         assert totals[name] <= ceiling, (
-            f"{name}: {totals[name]:,} chars exceeds {ceiling:,} (measured size + 10%). "
+            f"{name}: {totals[name]:,} chars exceeds {ceiling:,} (measured size + 1%). "
             "Run PYTHONPATH=fluid python scripts/measure_prompt_catalog.py, measure "
             "and justify the growth before updating this budget; do not drop rules."
         )
+
+
+def test_delegated_append_budget():
+    assert measure(native=False)["totals"]["compiled_eager"] <= MEASURED_DELEGATED_APPEND * 101 // 100
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native-code", "delegated-cli"])
@@ -48,6 +53,20 @@ def test_workflow_duplicates_have_one_owner(native):
     for phrase in ("24 hours", "cancelled/expired cards", "Docker: container path"):
         assert phrase in by_leaf["RequestChatAccess"].description
     assert "detached processes may survive" in by_leaf["ChatRunCommand"].description
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
+def test_ci_recipe_has_one_owner(native):
+    from fluid.tools.fragments import CI_WAIT_GUIDANCE
+    compiled, catalog, _ = compile_fixture(native=native)
+    system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
+              if native else compiled.text)
+    combined = system + "\n\n" + "\n\n".join(text for text, _ in catalog)
+    assert combined.count(CI_WAIT_GUIDANCE) == 1
+    assert combined.count("gh pr checks <PR> --watch --fail-fast") == 1
+    assert "echo checks:" not in combined
+    assert "gh pr checks" not in system
+    assert "failed or cancelled checks must return non-zero" in combined
 
 
 def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():
