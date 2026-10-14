@@ -6,12 +6,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { getConfig, validateConfiguration } from './helpers/builder-config.mjs';
 
 const require = createRequire(import.meta.url);
 const verify = require('../scripts/verify-packaged-runtime.cjs');
 
 test('standard and preview installers verify cloudflared after copying extraResources', async () => {
-  const { getConfig, validateConfiguration } = require('app-builder-lib/out/util/config/config');
   const project = fileURLToPath(new URL('..', import.meta.url));
   for (const filename of ['electron-builder.yml', 'electron-builder.preview.yml']) {
     const config = await getConfig(project, filename, null);
