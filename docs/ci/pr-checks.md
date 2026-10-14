@@ -31,8 +31,18 @@ python scripts/local_ci.py           # the suites this branch's changes reach
 python scripts/local_ci.py list      # what each suite runs, and when
 ```
 
-`local_ci.py` compares the branch with `origin/main` and runs each suite the
-change reaches: backend (the same function-level selection the backend test
+`local_ci.py` compares the branch with `main` on the remote whose URL points to
+`HobbyCoders/ai-shuffle` (`origin` is preferred when it matches), and runs each
+suite the change reaches. This works even when `origin` points elsewhere and the
+public repository has another remote name. For forks or another comparison
+branch, set `LOCAL_CI_BASE=<remote>/<branch>` or
+`git config local-ci.base <remote>/<branch>`; the environment takes precedence.
+The comparison branch is fetched before changed-suite checks; fetch failures and
+unrelated histories stop with an explanation. `full --attest` ignores these
+overrides for publication authorization: it fetches the public repository's
+`main` and requires a clean checkout at that exact revision.
+
+The suites are: backend (the same function-level selection the backend test
 map gives), fluid, frontend, mobile, tools, browser-mcp, docs, desktop, the
 Android app and download bridge, the workflow policy tests and the in-app update
 reach check. It runs at low CPU priority with at most two test workers
@@ -198,7 +208,7 @@ if labels are removed later; the existing publisher consumes the owner's status.
 ## Full suite on main, and nightly publication
 
 Nightly publication waits for a full local pass on the exact `main` revision.
-On a clean checkout of the current `origin/main`, on any worker:
+On a clean checkout of the current public `main` (resolved by repository URL), on any worker:
 
 ```bash
 python scripts/local_ci.py full --attest

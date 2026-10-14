@@ -481,6 +481,8 @@ def test_attestation_requires_reach_acceptance(monkeypatch, accepted):
     monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(local_ci, "git", lambda *a: "head")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "resolve_base", lambda **kw: "public/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base: None)
     monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
@@ -499,6 +501,8 @@ def test_attestation_rechecks_labels_before_success(monkeypatch):
     monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(local_ci, "git", lambda *a: "head")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "resolve_base", lambda **kw: "public/main")
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base: None)
     monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
@@ -506,3 +510,131 @@ def test_attestation_rechecks_labels_before_success(monkeypatch):
     monkeypatch.setattr(local_ci, "attest", lambda state, *a: posted.append(state))
     assert local_ci.main(["full", "--attest"]) == 1
     assert posted == ["pending", "failure"]
+
+@pytest.fixture
+def base_repo(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    monkeypatch.delenv("LOCAL_CI_BASE", raising=False)
+    git = local_ci.git
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    git("remote", "add", "origin", "https://github.com/example/archive.git")
+    git("remote", "add", "public", "https://github.com/HobbyCoders/ai-shuffle.git")
+    return git
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/HobbyCoders/ai-shuffle.git",
+    "https://github.com/hobbycoders/ai-shuffle/",
+    "git@github.com:HobbyCoders/ai-shuffle.git",
+    "ssh://git@github.com/HobbyCoders/ai-shuffle.git",
+])
+def test_base_selects_public_remote_not_origin(base_repo, url):
+    base_repo("remote", "set-url", "public", url)
+    assert local_ci.resolve_base() == "public/main"
+    base_repo("remote", "set-url", "origin", url)
+    assert local_ci.resolve_base() == "origin/main"
+
+
+def test_base_override_precedence_and_attest_is_independent(base_repo, monkeypatch):
+    base_repo("config", "local-ci.base", "origin/topic")
+    assert local_ci.resolve_base() == "origin/topic"
+    monkeypatch.setenv("LOCAL_CI_BASE", "refs/remotes/public/release/topic")
+    assert local_ci.resolve_base() == "public/release/topic"
+    assert local_ci.resolve_base(public_only=True) == "public/main"
+
+
+def test_missing_public_remote_explains_override_but_cannot_attest(base_repo, monkeypatch):
+    base_repo("remote", "remove", "public")
+    with pytest.raises(local_ci.Failure, match="No remote points to.*LOCAL_CI_BASE"):
+        local_ci.resolve_base()
+    monkeypatch.setenv("LOCAL_CI_BASE", "origin/main")
+    assert local_ci.resolve_base() == "origin/main"
+    with pytest.raises(local_ci.Failure, match="for --attest"):
+        local_ci.resolve_base(public_only=True)
+
+
+def test_fetch_targets_resolved_tracking_ref(base_repo, monkeypatch):
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        if args[0] == "fetch":
+            return ""
+        return base_repo(*args)
+
+    monkeypatch.setattr(local_ci, "git", git)
+    local_ci.fetch_base("public/release/topic")
+    assert calls[-1] == ("fetch", "-q", "--", "public",
+                         "+refs/heads/release/topic:refs/remotes/public/release/topic")
+    with pytest.raises(local_ci.Failure, match="expected <remote>/<branch>"):
+        local_ci.fetch_base("HEAD")
+
+
+def test_fetch_refreshes_a_real_remote_tracking_ref(base_repo):
+    base_repo("commit", "--allow-empty", "-qm", "Root")
+    revision = base_repo("rev-parse", "HEAD")
+    base_repo("update-ref", "refs/heads/main", revision)
+    base_repo("remote", "add", "mirror", str(local_ci.ROOT))
+    local_ci.fetch_base("mirror/main")
+    assert base_repo("rev-parse", "refs/remotes/mirror/main") == revision
+
+
+def test_fetch_failure_stops_checks(base_repo, monkeypatch):
+    def git(*args):
+        if args[0] == "fetch":
+            raise subprocess.CalledProcessError(1, args)
+        return base_repo(*args)
+
+    monkeypatch.setattr(local_ci, "git", git)
+    with pytest.raises(local_ci.Failure, match="Could not refresh.*public/main"):
+        local_ci.run_suites("changed", None, sys.executable)
+
+
+def test_changed_suites_and_push_use_public_history(base_repo, monkeypatch):
+    base_repo("commit", "--allow-empty", "-qm", "Public root")
+    public = base_repo("rev-parse", "HEAD")
+    tree = base_repo("rev-parse", "HEAD^{tree}")
+    archive = base_repo("commit-tree", tree, "-m", "Unrelated archive root")
+    base_repo("update-ref", "refs/remotes/origin/main", archive)
+    base_repo("update-ref", "refs/remotes/public/main", public)
+    (local_ci.ROOT / "example.py").write_text("value = 1\n")
+    base_repo("add", "example.py")
+    base_repo("commit", "-qm", "Change")
+    fetched, contexts = [], []
+    monkeypatch.setattr(local_ci, "fetch_base", fetched.append)
+    monkeypatch.setattr(local_ci, "SUITES", [local_ci.Suite("example", ["*.py"], contexts.append, "test")])
+    monkeypatch.setattr(local_ci, "NOT_LOCAL", [])
+    assert local_ci.run_suites("changed", None, sys.executable) == (["example"], [], [])
+    assert fetched == ["public/main"]
+    assert contexts[0].base == public
+    assert contexts[0].files == ["example.py"]
+    monkeypatch.setattr(local_ci, "update_reach", lambda ctx, **kw: contexts.append(ctx))
+    local_ci.push_update_reach("HEAD", "refs/heads/topic")
+    assert contexts[-1].base == public
+    with pytest.raises(local_ci.Failure, match="No common history.*origin/main"):
+        local_ci.comparison_base("origin/main", "HEAD")
+
+
+@pytest.mark.parametrize("clean,public_head", [(False, "head"), (True, "other")])
+def test_attestation_refuses_dirty_or_non_public_head(base_repo, monkeypatch, clean, public_head):
+    monkeypatch.setenv("LOCAL_CI_BASE", "origin/main")
+    fetched, posted = [], []
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: clean)
+    monkeypatch.setattr(local_ci, "fetch_base", fetched.append)
+    monkeypatch.setattr(local_ci, "attest", lambda *args: posted.append(args))
+
+    def git(*args):
+        if args == ("rev-parse", "HEAD") or args == ("rev-parse", "origin/main"):
+            return "head"
+        if args == ("rev-parse", "public/main"):
+            return public_head
+        return base_repo(*args)
+
+    monkeypatch.setattr(local_ci, "git", git)
+    with pytest.raises(local_ci.Failure, match="current public main"):
+        local_ci.cmd_check(local_ci.argparse.Namespace(command="full", attest=True, only=None))
+    assert fetched == ["public/main"]
+    assert posted == []
