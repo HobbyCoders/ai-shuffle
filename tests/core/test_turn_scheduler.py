@@ -1853,10 +1853,11 @@ async def test_wake_during_settlement_inherits_live_turn_context(mock_db):
     assert wake["payload"]["api_user_id"] == "u-live"
 
 
-async def test_wake_without_context_falls_back_to_session_profile(mock_db, caplog):
-    # Belt and braces: no usable turn at all, but the session row carries a
-    # profile — the wake inherits it (and says so in the log) rather than
-    # enqueueing profile-less.
+@pytest.mark.parametrize("legacy_terminal", [False, True])
+async def test_wake_without_context_falls_back_to_session_profile(mock_db, caplog, legacy_terminal):
+    # No context, or a legacy context with no profile: the wake inherits the
+    # session's profile (and says so in the log) rather than enqueueing
+    # profile-less.
     mock_db.execute(
         "INSERT INTO agents (id, name, config) VALUES (?, ?, ?)",
         ("p-sess", "Test", "{}"),
@@ -1865,6 +1866,13 @@ async def test_wake_without_context_falls_back_to_session_profile(mock_db, caplo
         "INSERT INTO sessions (id, profile_id) VALUES (?, ?)", ("nc1", "p-sess"),
     )
     mock_db.commit()
+
+    if legacy_terminal:
+        legacy = turns_db.enqueue_turn("nc1", "agent_message")
+        mock_db.execute(
+            "UPDATE turns SET state='completed', ended_at=NULL WHERE id=?", (legacy["id"],),
+        )
+        mock_db.commit()
 
     frame = _terminal_frame("task-n", "done")
     with caplog.at_level(logging.WARNING, logger="app.core.turn_scheduler"):

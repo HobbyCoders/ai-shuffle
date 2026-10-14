@@ -110,9 +110,17 @@ def answer_question_and_enqueue(
     with get_db() as conn:
         if not answer_interaction(row["id"], answer, answered_by_device, _conn=conn):
             return False
+        profile_id = context.get("profile_id")
+        if not profile_id:
+            # Legacy terminal turns can have no profile. Like a normal send or
+            # background wake, an answer must inherit the session's agent then.
+            cursor = conn.cursor()
+            cursor.execute("SELECT profile_id FROM sessions WHERE id=%s", (row["session_id"],))
+            session = cursor.fetchone()
+            profile_id = session["profile_id"] if session else None
         turns.enqueue_turn(
             row["session_id"], "user", prompt=prompt,
-            profile_id=context.get("profile_id"), project_id=context.get("project_id"),
+            profile_id=profile_id, project_id=context.get("project_id"),
             worktree_id=context.get("worktree_id"), overrides=overrides,
             payload={**(context.get("payload") or {}), "deferred_user_record": True,
                      "question_request_id": (row.get("payload") or {}).get("request_id")},

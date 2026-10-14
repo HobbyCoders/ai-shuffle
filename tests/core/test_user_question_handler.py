@@ -791,6 +791,39 @@ class TestNonblockingQuestions(TestUserQuestionHandler):
         mock_broadcast.assert_not_called()
         assert handler.get_pending_questions("s1") == []
 
+    @pytest.mark.parametrize("context_profile", [None, "p-context"])
+    async def test_answer_inherits_profile_with_legacy_terminal_turn(
+        self, handler, mock_broadcast, mock_db, context_profile,
+    ):
+        from app.db import turns
+
+        for profile_id in ("p-session", "p-context"):
+            mock_db.execute(
+                "INSERT INTO agents (id, name, config) VALUES (?, ?, ?)",
+                (profile_id, "Test", "{}"),
+            )
+        mock_db.execute(
+            "INSERT INTO sessions (id, profile_id) VALUES (?, ?)", ("legacy-q", "p-session"),
+        )
+        mock_db.commit()
+        legacy = turns.enqueue_turn("legacy-q", "agent_message", profile_id=context_profile)
+        mock_db.execute(
+            "UPDATE turns SET state='completed', ended_at=NULL WHERE id=?", (legacy["id"],),
+        )
+        mock_db.commit()
+
+        await handler.post_question(
+            request_id="legacy-answer", tool_use_id="tu", session_id="legacy-q",
+            questions=[{"question": "Color?"}], broadcast_func=mock_broadcast,
+        )
+        assert await handler.respond("legacy-answer", "legacy-q", {"Color?": "blue"})
+        (answer,) = turns.get_queued_turns("legacy-q")
+        assert answer["profile_id"] == (context_profile or "p-session")
+        assert answer["prompt"] == "Answer to your question:\nColor?\nblue"
+        assert not await handler.respond("legacy-answer", "legacy-q", {"Color?": "red"})
+        turns.start_turn(answer["id"], None, "runner")
+        assert turns.get_turn(answer["id"])["state"] == "running"
+
     async def test_concurrent_answers_accept_only_one(self, handler, mock_broadcast):
         from app.db import turns
         await handler.post_question(request_id="q-race", tool_use_id="tu", session_id="s1",
