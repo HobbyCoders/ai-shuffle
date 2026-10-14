@@ -9,9 +9,11 @@ import { test } from 'node:test';
 const script=fileURLToPath(new URL('../scripts/publish-source.mjs',import.meta.url));
 const preload=new URL('./helpers/publish-source-preload.mjs',import.meta.url).href;
 const stable=scenario=>['stable','stable-reuse','offmain','older','prerelease'].includes(scenario);
-for(const scenario of ['new','reuse','stable-reuse','clock-regression','moved','corrupt','stable','offmain','older','prerelease'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
+for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regression','moved','corrupt','stable','offmain','older','prerelease'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-publish-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const env={...process.env,RUNNER_TEMP:root,GITHUB_SHA:'a'.repeat(40),GH_TOKEN:'fixture',RELEASE_GITHUB_REPO_ID:'42',ACCOUNT_HUB_DATABASE_ID:'11111111-1111-1111-1111-111111111111',PUBLISH_TEST_CASE:scenario};
+ delete env.SOURCE_CHANNEL;
+ if(scenario==='nightly'||scenario==='edge')env.SOURCE_CHANNEL=scenario;
  if(stable(scenario))Object.assign(env,{SOURCE_CHANNEL:'stable',RELEASE_TAG:'v1.2.3',GITHUB_SHA:'f'.repeat(40)});
  if(scenario==='prerelease')env.RELEASE_TAG='v1.2.3-rc.1';
  const result=spawnSync(process.execPath,['--import',preload,script],{encoding:'utf8',env});
@@ -35,7 +37,7 @@ for(const scenario of ['new','reuse','stable-reuse','clock-regression','moved','
    assert.equal(row.channel,'stable');assert.equal(manifest.channel,'stable');assert.equal(manifest.version,'1.2.3');assert.equal(manifest.notes,'Faster startup.');
    assert(events.includes('on-main'));assert(!events.some(url=>String(url).endsWith('/commits/main')),'a stable publish is pinned to its tag, not to main');
   }else{
-   assert.equal(row.channel,'edge');assert.equal(manifest.channel,'edge');assert.equal(manifest.version,'0.8.18-dev.4+gaaaaaaa');assert.equal(manifest.notes,'');
+   assert.equal(row.channel,'edge');assert.equal(manifest.channel,scenario==='nightly'?'nightly':'edge');assert.equal(manifest.version,'0.8.18-dev.4+gaaaaaaa');assert.equal(manifest.notes,'');
   }
  }
  assert(!events.some(url=>String(url).includes('/zipball/')),'the full-repository zipball is never published');

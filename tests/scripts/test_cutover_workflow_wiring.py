@@ -5,9 +5,27 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from scripts.release import cutover_check
+from scripts.release import cutover_check, promote_image
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_release_notes_and_publisher_use_the_documented_public_image():
+    release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    docker = yaml.load((ROOT / ".github/workflows/docker-publish.yml").read_text(), Loader=yaml.BaseLoader)
+    compose = yaml.safe_load((ROOT / "docs/install/compose/compose.yaml").read_text())
+    image = compose["services"]["ai-shuffle"]["image"].split(":", 1)[0]
+    assert promote_image.IMAGE == image
+    assert docker["env"]["REGISTRY"] + "/" + docker["env"]["IMAGE_NAME"].replace(
+        "${{ github.repository_owner }}", "hobbycoders"
+    ) == image
+    notes = next(step["with"]["body"] for job in release["jobs"].values()
+                 for step in job.get("steps", []) if step.get("name") == "Create GitHub Release")
+    assert f"docker pull {image}:" in notes
+    assert f"package/{image.rsplit('/', 1)[1]}" in notes
+    assert "The image is public" in notes
+    for obsolete in ("(private)", "The image is private", "docker login", "licensed registry", "token that can read"):
+        assert obsolete not in notes
 
 
 @pytest.mark.parametrize("mutation", [None, "digest_missing", "digest_replaced", "docker_tag", "docker_caller",

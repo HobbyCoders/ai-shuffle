@@ -395,7 +395,7 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
 
     # An older published update can be offered while main is held. Keep that
     # actionable offer, but expose the current-main refusal independently of it.
-    held_candidates = [item for item in workers if item["online"] and item["channel"] == "edge"
+    held_candidates = [item for item in workers if item["online"] and item["channel"] in ("nightly", "edge")
                        and (item["behind"] or 0) > 0]
     if main and held_candidates:
         refusal = edge_refusal(repo, main)

@@ -11,11 +11,8 @@ name: Build and Push Docker Image
 # No moving aliases here. release.yml's final promote-image job moves aliases
 # by digest only after lifecycle, buyer-install and source-signing gates pass.
 #
-# The package is PRIVATE: ghcr.io/hobbycoders/ai-shuffle-server. The old
-# ghcr.io/hobbycoders/ai-shuffle package was public, and GitHub never lets a
-# public package become private again, so it is frozen and nothing pushes to
-# it. Customers pull through the licensed registry path in
-# docs/install/registry.md, never from GHCR directly.
+# The canonical public package is ghcr.io/hobbycoders/ai-shuffle-server.
+# Installs pull directly from GHCR without signing in; see docs/install/compose.
 #
 # linux/amd64 only. The arm64 leg doubled every build and nothing consumed it
 # (the Unraid host and the cloud worker are both amd64); a manifest list of one
@@ -74,7 +71,7 @@ on:
         description: 'Immutable published image digest'
         value: ${{ jobs.build.outputs.digest }}
       image:
-        description: 'Private image repository the release was pushed to'
+        description: 'Public image repository the release was pushed to'
         value: ${{ jobs.build.outputs.image }}
 
 # Serialize a release tag without cancelling a publish; manual branch rebuilds

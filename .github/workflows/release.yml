@@ -136,7 +136,7 @@ jobs:
             |-------|----------|--------------------|
             | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://hobbycoders.com/desktop) |
             | **Mobile** | Android 8.0+ | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle), or signed APK in this release's assets |
-            | **Docker** | Linux amd64 | [Container image](https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server) — `ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}` (private); buyers install from `docs/install` |
+            | **Docker** | Linux amd64 | [Container image](https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server) — `ghcr.io/hobbycoders/ai-shuffle-server:${{ env.RELEASE_VERSION }}` (public); install with `docs/install/compose` |
 
             Docker becomes available after its build and verification finish. Pull it
             from the container registry, not the release assets. Android installs and
@@ -150,9 +150,10 @@ jobs:
 
             On Windows, run the installer. To upgrade an existing copy, keep the same
             installation location, then use your usual AI Shuffle shortcut.
-            Downloads require your account and an active license. Updates use the
-            worker's license lease. The app runs its own worker and persistent
-            PostgreSQL database.
+            Downloads, local use and updates are free; no account or license key
+            is required. The app runs its own worker and persistent PostgreSQL
+            database. Optional AI Shuffle Cloud plans control remote-worker capacity,
+            not local use or updates.
             After that, use Download update and Update and restart inside AI Shuffle.
             The app fetches the newest stable release and prepares updates in the
             background. No command prompt or new installer is needed.
@@ -182,10 +183,9 @@ jobs:
 
             ### Docker install
 
-            The image is private. Customers pull it through their licensed registry
-            path and the files in `docs/install` (compose file and Unraid template).
-            For your own hosts, sign in once with `docker login ghcr.io` using a
-            token that can read the package.
+            The image is public. Pull it directly from GHCR without signing in
+            or providing a package token. For Docker Compose, use the files in
+            `docs/install/compose`.
 
             For a **new install**, use Docker Engine on a Linux amd64 host, or Docker
             Desktop with Linux containers on an x64 computer. Run these commands in

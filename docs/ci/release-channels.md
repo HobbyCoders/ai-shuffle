@@ -339,12 +339,13 @@ with `--require-hashes`, then fluid with `--no-deps --no-build-isolation`.
 `scripts/lock_requirements.sh` regenerates both locks; the native lock is
 constrained by `requirements.lock` so a shared package never pins differently.
 
-License lease (D8): when its own worker has a lease, the desktop adds it as
+Optional Cloud lease: when its own worker has a lease, the desktop adds it as
 `X-Shuffle-Lease` to the manifest and archive requests, read from the worker's
 token-protected `GET /api/v1/internal/desktop/source-lease`. The header is
 attached only after the URL is checked to be a hub update endpoint, and
-redirects are refused. Without a lease (beta mode, an attached or older
-worker, first launch before any worker runs) requests go out as before.
+redirects are refused. Without a lease, requests go out without that header.
+Downloads, local use and updates require no account, license key or lease;
+the Cloud lease controls remote-worker capacity, not access to updates.
 
 Release notes: the desktop's update state carries the manifest's `version`
 (as `release`) and `notes`, and its "Update ready" notification names the
