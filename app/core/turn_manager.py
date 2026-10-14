@@ -36,6 +36,7 @@ import logging
 import threading
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
+from app.core.db_polling import DB_POLL_ERRORS, DBPollWarnings
 from app.db import turns
 
 logger = logging.getLogger(__name__)
@@ -906,10 +907,16 @@ async def wait_session_idle(
     deadline = loop.time() + timeout
     interval = poll_interval
     wake = _SessionWake(session_id)
+    warnings = DBPollWarnings()
     try:
         while True:
-            if await asyncio.to_thread(_session_is_idle, session_id):
-                return True
+            try:
+                if await asyncio.to_thread(_session_is_idle, session_id):
+                    return True
+            except DB_POLL_ERRORS:
+                # An unavailable read is not proof of idle. Keep the same
+                # deadline and wake/backoff cadence; cancellation still escapes.
+                warnings.warn(logger, "Session idle", session_id)
             remaining = deadline - loop.time()
             # asyncio may fire a timer up to one clock resolution early, so
             # a deadline within that slack has lapsed: without this the final

@@ -18,6 +18,7 @@ import asyncio
 import pytest
 
 from app.core import provider_agent as pa
+from app.core.turn_manager import wait_session_idle as _real_wait_session_idle
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +558,53 @@ class TestDispatchWorker:
         assert outcome.truncated is False
         assert outcome.usage == {"tokens_in": 5}
         assert outcome.session_id
+
+    @pytest.mark.parametrize("probe", ["idle", "park_latest", "park_unsettled"])
+    def test_dispatch_retries_pool_exhaustion(
+        self, dispatch_env, monkeypatch, caplog, probe
+    ):
+        from psycopg2.pool import PoolError
+        from app.core import turn_manager
+        from app.db import turns
+
+        # Exercise the real waiter and park probe, not a retrying waiter stub.
+        monkeypatch.setattr(turn_manager, "wait_session_idle", _real_wait_session_idle)
+        monkeypatch.setattr(turn_manager, "_ensure_gateway_listener", lambda: None)
+        monkeypatch.setattr(pa, "PARK_RECHECK_SECONDS", 0.001)
+        failed = False
+        probes = []
+        latest_reads = 0
+
+        def busy(session_id):
+            nonlocal failed
+            probes.append(session_id)
+            if not failed and (
+                probe == "idle" or (probe == "park_unsettled" and latest_reads == 1)
+            ):
+                failed = True
+                raise PoolError("connection pool exhausted")
+            return False
+
+        def latest(session_id):
+            nonlocal failed, latest_reads
+            latest_reads += 1
+            if probe == "park_latest" and not failed:
+                failed = True
+                raise PoolError("connection pool exhausted")
+            if probe == "park_unsettled" and latest_reads == 1:
+                return {"state": "parked"}
+            return {"state": "completed"}
+
+        monkeypatch.setattr(turns, "session_has_unsettled_turns", busy)
+        monkeypatch.setattr(turns, "get_latest_run_turn", latest)
+        outcome = _dispatch()
+
+        assert failed
+        assert len(probes) >= 2
+        assert outcome.ok
+        assert outcome.report == "the worker's report"
+        assert "keeping worker busy and retrying" in caplog.text
+        assert turn_manager._waiters == {}
 
     def test_worker_session_is_bound_to_the_provider(self, dispatch_env):
         outcome = _dispatch()
@@ -1223,6 +1271,57 @@ class TestDispatchWorkerFailsClosed:
 
         assert not outcome.ok
         assert "no terminal turn event" in outcome.error
+
+
+@pytest.mark.parametrize("verdict", [pa.WAIT_DEADLINE, pa.WAIT_NO_FIRST_FRAME, pa.WAIT_RATE_LIMITED])
+def test_idle_db_outage_preserves_watchdogs(monkeypatch, verdict):
+    from psycopg2.pool import PoolError
+    from app.core import turn_manager
+    from app.db import turns
+
+    def unavailable(session_id):
+        raise PoolError("connection pool exhausted")
+
+    monkeypatch.setattr(turns, "session_has_unsettled_turns", unavailable)
+    monkeypatch.setattr(turn_manager, "_ensure_gateway_listener", lambda: None)
+    monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
+    monkeypatch.setattr(pa.rate_limit_breaker, "is_tripped", lambda _: verdict == pa.WAIT_RATE_LIMITED)
+
+    async def run():
+        now = asyncio.get_running_loop().time()
+        return await pa._await_worker_idle(
+            "worker-1", "provider-1",
+            first_frame_deadline=now if verdict == pa.WAIT_NO_FIRST_FRAME else None,
+            wall_cap=pa._WallCap(now, 0.02) if verdict == pa.WAIT_DEADLINE else None,
+        )
+
+    assert asyncio.run(run()) == verdict
+    assert turn_manager._waiters == {}
+
+
+def test_idle_db_outage_still_allows_cancellation(monkeypatch):
+    from psycopg2.pool import PoolError
+    from app.core import turn_manager
+    from app.db import turns
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        probed = asyncio.Event()
+
+        def unavailable(session_id):
+            loop.call_soon_threadsafe(probed.set)
+            raise PoolError("connection pool exhausted")
+
+        monkeypatch.setattr(turns, "session_has_unsettled_turns", unavailable)
+        monkeypatch.setattr(turn_manager, "_ensure_gateway_listener", lambda: None)
+        waiter = asyncio.create_task(pa._await_worker_idle("worker-1", None))
+        await asyncio.wait_for(probed.wait(), timeout=1.0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+    asyncio.run(run())
+    assert turn_manager._waiters == {}
 
 
 class TestDispatchWorkerRateLimitFailFast:
