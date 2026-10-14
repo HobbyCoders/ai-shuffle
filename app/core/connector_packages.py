@@ -47,6 +47,18 @@ def kind_for(plugin_id: str) -> str | None:
     return None
 
 
+def is_offered(kind: str) -> bool:
+    """Keep unfinished runtimes in source without advertising or installing them."""
+    if kind not in CATALOG["packages"]:
+        raise ValueError("Unknown connector plugin")
+    return CATALOG["packages"][kind].get("offered", True)
+
+
+def _require_offered(kind: str) -> None:
+    if not is_offered(kind):
+        raise ValueError(CATALOG["packages"][kind]["unavailable_reason"])
+
+
 def record(kind: str) -> dict | None:
     if kind not in CATALOG["packages"]:
         raise ValueError("Unknown connector plugin")
@@ -130,6 +142,7 @@ def _bundled_source(filename: str) -> bytes:
 def install(kind: str, scope: str = "user") -> PluginInfo:
     if kind not in CATALOG["packages"] or scope != "user":
         raise ValueError("Connector plugins are installed for this host in user scope")
+    _require_offered(kind)
     root().mkdir(parents=True, exist_ok=True)
     with lifecycle_lock():
         existing = record(kind)
@@ -202,6 +215,7 @@ def uninstall(kind: str) -> bool:
 
 
 def require_installed(kind: str) -> str:
+    _require_offered(kind)
     state = record(kind)
     if not state or not state.get("enabled"):
         raise ValueError("Install and enable this app in Plugins before connecting an account")
@@ -233,7 +247,7 @@ def available() -> list[AvailablePlugin]:
                             marketplace_path="", description=f"Official {kind} connector runtime",
                             installed=bool(record(kind)), enabled=info(kind).enabled, connector_type=kind,
                             format="shuffle", components=_components(kind))
-            for kind in CATALOG["packages"]]
+            for kind in CATALOG["packages"] if is_offered(kind)]
 
 
 def details(kind: str) -> PluginDetails:

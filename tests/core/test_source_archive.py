@@ -155,7 +155,11 @@ def test_update_archive_supplies_every_verified_connector_without_repo_access(re
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("no GitHub CLI allowed"))
     for variable in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
         monkeypatch.delenv(variable, raising=False)
-    for kind in catalog["packages"]:
+    offered = [kind for kind in catalog["packages"] if packages.is_offered(kind)]
+    for kind in set(catalog["packages"]) - set(offered):
+        with pytest.raises(ValueError, match="not available"):
+            packages.install(kind)
+    for kind in offered:
         assert packages.install(kind).connector_type == kind
         assert packages.require_installed(kind) == packages.package_id(kind)
         assert packages.record(kind)["revision"] == catalog["revision"]

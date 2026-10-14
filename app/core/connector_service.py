@@ -788,6 +788,7 @@ def get_connector_type_info() -> List[Dict]:
     from app.core.connectors.registry import _CONNECTOR_CLASSES
     from app.core import connector_packages
 
+    types = [t for t in types if connector_packages.is_offered(t["type"])]
     for type_info in types:
         state = connector_packages.record(type_info["type"])
         type_info["plugin_id"] = connector_packages.package_id(type_info["type"])

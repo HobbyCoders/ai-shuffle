@@ -66,6 +66,8 @@
       }
     },
     "msteams": {
+      "offered": false,
+      "unavailable_reason": "Microsoft Teams is not available yet: inbound Bot Framework authentication and messaging are not wired up.",
       "module": "msteams",
       "class": "MSTeamsConnector",
       "files": {

@@ -16,13 +16,42 @@ def local_package(monkeypatch):
     return packages
 
 def test_catalog_installs_verified_sources(local_package):
-    for kind in packages.CATALOG["packages"]:
+    for kind in (p.connector_type for p in packages.available()):
         installed = packages.install(kind)
         assert installed.connector_type == kind
         assert packages.require_installed(kind) == installed.id
         assert get_connector_class(kind).__module__.endswith("package_proxy")
     with pytest.raises(ValueError): packages.install("../../evil")
     with pytest.raises(ValueError): packages.install("gmail", "project")
+    with pytest.raises(ValueError, match="Unknown connector plugin"):
+        packages.require_installed("unknown")
+
+def test_teams_is_retained_but_not_offered_or_installable(local_package):
+    from app.core.connector_service import get_connector_type_info
+
+    assert packages.CATALOG["packages"]["msteams"]["offered"] is False
+    packages._verify(packages._SOURCE_DIR, "msteams")
+    assert "msteams" not in {p.connector_type for p in packages.available()}
+    assert "msteams" not in {t["type"] for t in get_connector_type_info()}
+    for operation in (packages.install, packages.require_installed):
+        with pytest.raises(ValueError, match="Microsoft Teams is not available yet"):
+            operation("msteams")
+    assert packages.record("msteams") is None
+
+
+def test_existing_teams_package_can_be_removed_but_not_reinstalled(local_package, monkeypatch):
+    catalog = copy.deepcopy(packages.CATALOG)
+    catalog["packages"]["msteams"]["offered"] = True
+    with monkeypatch.context() as patch:
+        patch.setattr(packages, "CATALOG", catalog)
+        packages.install("msteams")
+    assert "msteams" in {p.connector_type for p in packages.installed()}
+    for operation in (packages.install, packages.require_installed):
+        with pytest.raises(ValueError, match="Microsoft Teams is not available yet"):
+            operation("msteams")
+    packages.uninstall("msteams")
+    assert packages.record("msteams") is None
+
 
 def test_discord_bot_name_preserves_plugin_identity(local_package):
     available = next(p for p in packages.available() if p.connector_type == "discord")
@@ -111,6 +140,8 @@ async def test_new_accounts_require_installed_runtime(local_package):
     from app.core.connector_service import create_connector
     with pytest.raises(ValueError, match="Install"):
         await create_connector(name="new", connector_type="webhook", config={"mode": "inbound"}, events=[])
+    with pytest.raises(ValueError, match="Microsoft Teams is not available yet"):
+        await create_connector(name="Teams", connector_type="msteams", config={}, events=[])
     packages.install("webhook")
     result = await create_connector(name="new", connector_type="webhook", config={"mode": "inbound"}, events=[])
     assert result["config"]["runtime_plugin_id"] == "webhook@shuffle-connectors"
@@ -127,6 +158,9 @@ def test_canonical_plugin_api_lists_installs_and_guards_accounts(local_package):
     app.dependency_overrides[require_auth] = lambda: "test"
     app.dependency_overrides[require_admin] = lambda: "test"
     with TestClient(app) as client:
+        result = client.post("/api/v1/plugins/install", json={"plugin_id": "msteams@shuffle-connectors", "scope": "user"})
+        assert result.status_code == 400, result.text
+        assert "Microsoft Teams is not available yet" in result.json()["detail"]
         result = client.post("/api/v1/plugins/install", json={"plugin_id": "webhook@shuffle-connectors", "scope": "user"})
         assert result.status_code == 201, result.text
         assert result.json()["connector_type"] == "webhook"
@@ -153,14 +187,14 @@ def buyer_without_github(monkeypatch, tmp_path):
 
 
 def test_all_connectors_install_and_update_without_github(local_package, buyer_without_github, monkeypatch):
-    for kind in packages.CATALOG["packages"]:
+    for kind in (p.connector_type for p in packages.available()):
         packages.install(kind)
         assert packages.record(kind)["revision"] == packages.CATALOG["revision"]
-    previous = {kind: packages.record(kind) for kind in packages.CATALOG["packages"]}
+    previous = {p.connector_type: packages.record(p.connector_type) for p in packages.available()}
     catalog = copy.deepcopy(packages.CATALOG)
     catalog["release"] = "next-test-version"
     monkeypatch.setattr(packages, "CATALOG", catalog)
-    for kind in catalog["packages"]:
+    for kind in previous:
         packages.install(kind)
         assert packages.record(kind)["release"] == catalog["release"]
         assert packages.record(kind)["previous"]["release"] == previous[kind]["release"]
