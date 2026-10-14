@@ -1,5 +1,5 @@
 // Real-browser check for the transcript turn rail (TurnNavigator) inside the
-// real ChatView, with short (10) and long (80) histories at desktop and phone
+// real ChatView, with short (10) and long (80/300) histories at desktop and phone
 // widths. One rail at every length: it must scroll by wheel/touch/keyboard,
 // keep the current turn and both ends reachable, and never clip a target.
 //
@@ -85,7 +85,24 @@ async function run(viewport, touch, turns) {
 	await page.goto(`${base}?turns=${turns}`);
 	await page.waitForFunction(() => window.turnFixtureReady);
 	await page.locator('nav[aria-label="Navigate user turns"] .turn-rail button').first().waitFor();
-	await page.waitForTimeout(600);
+	// Font loading, async message rendering and the composer's first layout can
+	// still resize/re-pin a long transcript after the rail has mounted. Measure
+	// scroll containment only once that initial layout is actually quiescent.
+	await page.evaluate(() => document.fonts.ready);
+	await page.waitForFunction(() => {
+		const transcript = document.querySelector('.msg-scroll');
+		const rail = document.querySelector('.turn-rail').getBoundingClientRect();
+		const geometry = JSON.stringify([
+			transcript.scrollTop, transcript.scrollHeight, transcript.clientHeight,
+			rail.x, rail.y, rail.width, rail.height
+		]);
+		const previous = window.turnFixtureGeometry;
+		if (!previous || previous.geometry !== geometry) {
+			window.turnFixtureGeometry = { geometry, since: performance.now() };
+			return false;
+		}
+		return performance.now() - previous.since >= 500;
+	}, null, { timeout: 10000 });
 	const label = `${viewport.width}x${viewport.height} ${turns} turns`;
 	let state = await railState(page);
 	await page.screenshot({ path: join(shots, `${viewport.width}-${turns}-initial.png`) });
@@ -103,15 +120,20 @@ async function run(viewport, touch, turns) {
 	assert.equal(state.scrollable, turns > 30, `${label}: rail scrollability`);
 
 	// Wheel (desktop) or touch drag (phone) scrolls the rail to the first turn.
-	const railBox = await page.locator('.turn-rail').boundingBox();
+	const rail = page.locator('.turn-rail');
 	const transcriptBefore = await transcriptTop(page);
 	if (turns > 30) {
 		if (touch) {
 			// A finger dragging down the rail (raw touch events; Chrome turns them
 			// into a scroll gesture the same way it does on a phone).
 			const cdp = await context.newCDPSession(page);
-			const x = Math.round(railBox.x + 8);
 			for (let drag = 0; drag < Math.ceil(turns / 16); drag++) {
+				if ((await railState(page)).scrollTop === 0) break;
+				// The composer settling can move the rail between gestures. A
+				// cached y can hit the transcript instead, invalidating this check.
+				const railBox = await rail.boundingBox();
+				assert.ok(railBox, `${label}: rail missing before touch drag`);
+				const x = Math.round(railBox.x + railBox.width / 2);
 				let y = Math.round(railBox.y + 40);
 				await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
 				for (let step = 0; step < 20; step++) {
@@ -123,7 +145,9 @@ async function run(viewport, touch, turns) {
 				await page.waitForTimeout(300);
 			}
 		} else {
-			await page.mouse.move(railBox.x + 8, railBox.y + railBox.height / 2);
+			const railBox = await rail.boundingBox();
+			assert.ok(railBox, `${label}: rail missing before wheel scroll`);
+			await page.mouse.move(railBox.x + railBox.width / 2, railBox.y + railBox.height / 2);
 			for (let i = 0; i < Math.ceil(turns / 4); i++) await page.mouse.wheel(0, -400);
 		}
 		await page.waitForTimeout(400);
@@ -250,8 +274,8 @@ async function run(viewport, touch, turns) {
 }
 
 try {
-	for (const turns of (process.env.TURNS || '10,80').split(',').map(Number)) {
-		await run({ width: 1440, height: 900 }, false, turns);
+	for (const turns of (process.env.TURNS || '10,80,300').split(',').map(Number)) {
+		await run({ width: 1280, height: 900 }, false, turns);
 		await run({ width: 390, height: 844 }, true, turns);
 	}
 	console.log(`${passed} scenarios passed; screenshots in ${shots}`);

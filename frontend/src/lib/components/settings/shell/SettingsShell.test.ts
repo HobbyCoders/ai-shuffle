@@ -91,6 +91,10 @@ describe('SettingsShell index', () => {
 	it('loads a collection page on first visit and focuses its heading', async () => {
 		render(SettingsShell);
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'Logs' }));
+		// Wait for the real lazy module, not Testing Library's 1s query budget:
+		// a cold Vite transform can exceed it when other workers share the host.
+		// Keep this after the click so we still exercise first-visit loading.
+		await vi.dynamicImportSettled();
 		const heading = await screen.findByRole('heading', { level: 1, name: 'Logs' });
 		expect(screen.getByPlaceholderText('Search logs')).toBeTruthy();
 		expect(screen.getByRole('separator', { name: 'Resize list' })).toBeTruthy();
@@ -117,6 +121,7 @@ describe('SettingsShell search', () => {
 	it('replaces the nav with results and jumps to the row, flashing it', async () => {
 		const { container } = render(SettingsShell);
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'Logs' }));
+		await vi.dynamicImportSettled();
 		await screen.findByRole('heading', { level: 1, name: 'Logs' });
 
 		const box = screen.getByRole('combobox', { name: 'Search settings' });
