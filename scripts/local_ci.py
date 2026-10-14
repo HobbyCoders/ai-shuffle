@@ -36,7 +36,6 @@ from typing import Callable, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "HobbyCoders/ai-shuffle"
-BASE = "origin/main"
 SECURITY_GATE_VERSION = 2
 # Edge publication waits for this commit status on the exact main revision
 # (scripts/ci/edge_publication_gate.py).
@@ -71,7 +70,7 @@ class Failure(Exception):
 @dataclass
 class Context:
     mode: str                      # "changed" or "full"
-    base: str                      # merge base with origin/main
+    base: str                      # merge base with the resolved comparison ref
     files: list[str] | None        # changed paths; None in full mode
     python: str
     log: Callable[[str], None] = print
@@ -498,6 +497,53 @@ def choose_python() -> str:
     return os.environ.get("LOCAL_CI_PYTHON") or saved_python() or sys.executable
 
 
+def resolve_base(*, public_only: bool = False) -> str:
+    """Prefer the public repository, not a remote name inherited from an archive.
+
+    Comparison overrides are useful for forks, but cannot authorize publication.
+    """
+    if not public_only:
+        override = os.environ.get("LOCAL_CI_BASE", "").strip()
+        if not override:
+            configured = subprocess.run(["git", "config", "--get", "local-ci.base"],
+                                        cwd=ROOT, capture_output=True, text=True)
+            override = configured.stdout.strip() if configured.returncode == 0 else ""
+        if override:
+            return override.removeprefix("refs/remotes/")
+    remotes = git("remote").splitlines()
+    for remote in sorted(remotes, key=lambda name: (name != "origin", name)):
+        url = git("remote", "get-url", remote).rstrip("/")
+        if re.fullmatch(r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+                        + re.escape(REPOSITORY) + r"(?:\.git)?", url, re.IGNORECASE):
+            return f"{remote}/main"
+    raise Failure(f"No remote points to {REPOSITORY}; add a public repository remote"
+                  + (" for --attest" if public_only else
+                     " or set LOCAL_CI_BASE / git config local-ci.base to <remote>/<branch>"))
+
+
+def fetch_base(base: str) -> None:
+    """Refresh the exact tracking ref, even with a restricted fetch refspec."""
+    for remote in sorted(git("remote").splitlines(), key=len, reverse=True):
+        if base.startswith(remote + "/"):
+            branch = base[len(remote) + 1:]
+            try:
+                git("check-ref-format", f"refs/heads/{branch}")
+                git("fetch", "-q", "--", remote,
+                    f"+refs/heads/{branch}:refs/remotes/{base}")
+            except subprocess.CalledProcessError:
+                raise Failure(f"Could not refresh local CI base {base}; check the remote and branch") from None
+            return
+    raise Failure(f"Invalid local CI base {base!r}; expected <remote>/<branch>")
+
+
+def comparison_base(base: str, revision: str) -> str:
+    try:
+        return git("merge-base", base, revision)
+    except subprocess.CalledProcessError:
+        raise Failure(f"No common history between {revision} and {base}; use a branch based on "
+                      "that remote or set LOCAL_CI_BASE / git config local-ci.base") from None
+
+
 def changed_files(base: str) -> list[str]:
     names = set(git("diff", "--name-only", f"{base}...HEAD").splitlines())
     names |= set(git("diff", "--name-only", "HEAD").splitlines())
@@ -506,13 +552,14 @@ def changed_files(base: str) -> list[str]:
 
 
 def run_suites(mode: str, only: list[str] | None, python: str) -> tuple[list[str], list[str], list[str]]:
+    target = resolve_base()
     if mode == "changed":
-        subprocess.run(["git", "fetch", "-q", "origin", "main"], cwd=ROOT, check=False)
-    base = git("merge-base", BASE, "HEAD")
+        fetch_base(target)
+    base = comparison_base(target, "HEAD")
     files = None if mode == "full" else changed_files(base)
     ctx = Context(mode=mode, base=base, files=files, python=python)
     if files is not None:
-        print(f"{len(files)} files differ from {BASE}.")
+        print(f"{len(files)} files differ from {target}.")
     ran, skipped = [], []
     started = time.monotonic()
     for suite in SUITES:
@@ -579,9 +626,10 @@ def cmd_check(args) -> int:
     if args.attest:
         if mode != "full":
             raise Failure("--attest needs `full`")
-        subprocess.run(["git", "fetch", "-q", "origin", "main"], cwd=ROOT, check=True)
-        if not clean_checkout() or revision != git("rev-parse", BASE):
-            raise Failure("--attest runs only on a clean checkout of the current origin/main")
+        public_base = resolve_base(public_only=True)
+        fetch_base(public_base)
+        if not clean_checkout() or revision != git("rev-parse", public_base):
+            raise Failure(f"--attest runs only on a clean checkout of the current public main ({public_base})")
         attest_update_reach(revision)
         attest("pending", f"Full suite running on {machine()}", revision)
     clean = clean_checkout()
@@ -610,7 +658,7 @@ def cmd_check(args) -> int:
 
 
 def push_update_reach(revision: str, remote_ref: str) -> None:
-    base = git("merge-base", BASE, revision)
+    base = comparison_base(resolve_base(), revision)
     ctx = Context(mode="changed", base=base, files=None, python=choose_python())
     update_reach(ctx, head=revision, branch=remote_ref.removeprefix("refs/heads/"))
 
