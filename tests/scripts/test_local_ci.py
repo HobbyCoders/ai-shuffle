@@ -482,7 +482,7 @@ def test_attestation_requires_reach_acceptance(monkeypatch, accepted):
     monkeypatch.setattr(local_ci, "git", lambda *a: "head")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
     monkeypatch.setattr(local_ci, "resolve_base", lambda **kw: "public/main")
-    monkeypatch.setattr(local_ci, "fetch_base", lambda base: None)
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: None)
     monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
@@ -502,7 +502,7 @@ def test_attestation_rechecks_labels_before_success(monkeypatch):
     monkeypatch.setattr(local_ci, "git", lambda *a: "head")
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
     monkeypatch.setattr(local_ci, "resolve_base", lambda **kw: "public/main")
-    monkeypatch.setattr(local_ci, "fetch_base", lambda base: None)
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: None)
     monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
     monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
@@ -581,15 +581,36 @@ def test_fetch_refreshes_a_real_remote_tracking_ref(base_repo):
     assert base_repo("rev-parse", "refs/remotes/mirror/main") == revision
 
 
-def test_fetch_failure_stops_checks(base_repo, monkeypatch):
+def _failing_fetch(base_repo, monkeypatch):
+    calls = []
+
     def git(*args):
         if args[0] == "fetch":
+            calls.append(args)
             raise subprocess.CalledProcessError(1, args)
         return base_repo(*args)
 
     monkeypatch.setattr(local_ci, "git", git)
+    monkeypatch.setattr(local_ci.time, "sleep", lambda seconds: None)
+    return calls
+
+
+def test_fetch_failure_without_a_local_base_stops_checks(base_repo, monkeypatch):
+    calls = _failing_fetch(base_repo, monkeypatch)
     with pytest.raises(local_ci.Failure, match="Could not refresh.*public/main"):
         local_ci.run_suites("changed", None, sys.executable)
+    assert len(calls) == 2  # retried once
+
+
+def test_fetch_failure_keeps_the_existing_base_for_changed_checks(base_repo, monkeypatch, capsys):
+    # Concurrent local CI runs in worktrees of one clone race for the ref lock.
+    base_repo("commit", "--allow-empty", "-qm", "Public root")
+    base_repo("update-ref", "refs/remotes/public/main", base_repo("rev-parse", "HEAD"))
+    _failing_fetch(base_repo, monkeypatch)
+    local_ci.fetch_base("public/main")
+    assert "comparing with the copy already fetched" in capsys.readouterr().out
+    with pytest.raises(local_ci.Failure, match="Could not refresh"):
+        local_ci.fetch_base("public/main", strict=True)
 
 
 def test_changed_suites_and_push_use_public_history(base_repo, monkeypatch):
@@ -603,7 +624,7 @@ def test_changed_suites_and_push_use_public_history(base_repo, monkeypatch):
     base_repo("add", "example.py")
     base_repo("commit", "-qm", "Change")
     fetched, contexts = [], []
-    monkeypatch.setattr(local_ci, "fetch_base", fetched.append)
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: fetched.append(base))
     monkeypatch.setattr(local_ci, "SUITES", [local_ci.Suite("example", ["*.py"], contexts.append, "test")])
     monkeypatch.setattr(local_ci, "NOT_LOCAL", [])
     assert local_ci.run_suites("changed", None, sys.executable) == (["example"], [], [])
@@ -623,7 +644,7 @@ def test_attestation_refuses_dirty_or_non_public_head(base_repo, monkeypatch, cl
     fetched, posted = [], []
     monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: clean)
-    monkeypatch.setattr(local_ci, "fetch_base", fetched.append)
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: fetched.append(base))
     monkeypatch.setattr(local_ci, "attest", lambda *args: posted.append(args))
 
     def git(*args):

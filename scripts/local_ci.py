@@ -521,18 +521,38 @@ def resolve_base(*, public_only: bool = False) -> str:
                      " or set LOCAL_CI_BASE / git config local-ci.base to <remote>/<branch>"))
 
 
-def fetch_base(base: str) -> None:
-    """Refresh the exact tracking ref, even with a restricted fetch refspec."""
+def fetch_base(base: str, *, strict: bool = False) -> None:
+    """Refresh the exact tracking ref, even with a restricted fetch refspec.
+
+    Worktrees of one clone share their remote refs, so two local CI runs that
+    fetch at the same moment can lose git's ref lock. Retry once; then, unless
+    ``strict`` (attestation needs the current revision), carry on with the
+    tracking ref already on disk and say so.
+    """
     for remote in sorted(git("remote").splitlines(), key=len, reverse=True):
         if base.startswith(remote + "/"):
             branch = base[len(remote) + 1:]
             try:
                 git("check-ref-format", f"refs/heads/{branch}")
-                git("fetch", "-q", "--", remote,
-                    f"+refs/heads/{branch}:refs/remotes/{base}")
             except subprocess.CalledProcessError:
-                raise Failure(f"Could not refresh local CI base {base}; check the remote and branch") from None
-            return
+                raise Failure(f"Invalid local CI base {base!r}; expected <remote>/<branch>") from None
+            for attempt in range(2):
+                try:
+                    git("fetch", "-q", "--", remote,
+                        f"+refs/heads/{branch}:refs/remotes/{base}")
+                    return
+                except subprocess.CalledProcessError:
+                    if attempt == 0:
+                        time.sleep(2)
+            if not strict:
+                try:
+                    git("rev-parse", "--verify", "-q", f"refs/remotes/{base}")
+                except subprocess.CalledProcessError:
+                    pass
+                else:
+                    print(f"Warning: could not refresh {base}; comparing with the copy already fetched.")
+                    return
+            raise Failure(f"Could not refresh local CI base {base}; check the remote and branch")
     raise Failure(f"Invalid local CI base {base!r}; expected <remote>/<branch>")
 
 
@@ -627,7 +647,7 @@ def cmd_check(args) -> int:
         if mode != "full":
             raise Failure("--attest needs `full`")
         public_base = resolve_base(public_only=True)
-        fetch_base(public_base)
+        fetch_base(public_base, strict=True)
         if not clean_checkout() or revision != git("rev-parse", public_base):
             raise Failure(f"--attest runs only on a clean checkout of the current public main ({public_base})")
         attest_update_reach(revision)
