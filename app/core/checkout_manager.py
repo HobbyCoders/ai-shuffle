@@ -39,6 +39,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -1170,26 +1171,24 @@ def provision_worktree_runtime(
 # remove` there recurses THROUGH a junction into its target (verified on git
 # 2.50.1.windows.1, with and without --force): removing a provisioned worktree
 # gutted the main checkout's entire frontend/node_modules. shutil.rmtree has
-# been junction-safe since Python 3.8, so the app's own rmtree paths are fine —
-# git is the one deleter that must never see the links. Sever them first.
+# been junction-safe since Python 3.8, but git must never see the links.
+# Unknown nested links are just as dangerous as provisioned ones. Mounts must
+# also be refused: neither git nor rmtree is safe across a filesystem boundary.
 
 
-def _is_directory_link(path: Path) -> bool:
-    """Whether ``path`` is a directory link (symlink, or an NT junction)."""
+def _is_directory_link(path: Path, info: Optional[os.stat_result] = None) -> bool:
+    """Detect symlinks, junctions and other Windows reparse points without following."""
     try:
-        if path.is_symlink():
-            return True
-        if os.name == "nt":
-            import stat as stat_mod
-
-            st = os.lstat(path)
-            return (
-                getattr(st, "st_reparse_tag", 0)
-                == stat_mod.IO_REPARSE_TAG_MOUNT_POINT
-            )
-    except OSError:
-        pass
-    return False
+        info = info if info is not None else os.lstat(path)
+    except FileNotFoundError:
+        return False
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(
+        stat.S_ISLNK(info.st_mode)
+        or (isjunction is not None and isjunction(path))
+        or getattr(info, "st_file_attributes", 0)
+        & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 def _remove_directory_link(path: Path) -> None:
@@ -1202,56 +1201,69 @@ def _remove_directory_link(path: Path) -> None:
         os.rmdir(path)
 
 
+def _worktree_mount_points() -> set[Path]:
+    """Include same-device Linux bind mounts, which ismount/st_dev can miss."""
+    if os.sys.platform != "linux":
+        return set()
+    mounts = set()
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        field = line.split()[4]
+        for escaped, plain in ((r"\040", " "), (r"\011", "\t"), (r"\012", "\n"), (r"\134", "\\")):
+            field = field.replace(escaped, plain)
+        mounts.add(Path(field))
+    return mounts
+
+
 def sever_runtime_links(dest_root: str) -> Dict[str, List[str]]:
-    """Detach every link provisioning may have planted in ``dest_root``.
+    """Preflight recursive removal, detaching ALL links, not just provisioned ones.
 
-    Scans the same spots ``provision_worktree_runtime`` populates — a
-    ``node_modules`` at the root and in each immediate subdirectory, plus
-    ``_RUNTIME_LINK_DIRS`` — and removes the ones that are links. Real
-    directories are never touched: a worktree with its own installed
-    node_modules keeps it (the deletion that follows may take it, but that is
-    the deleter's business, and rmtree/git handle real directories correctly).
-
-    Best-effort and never raises, matching provisioning: a failure to sever
-    must not block a removal — the caller logs the summary and git's own
-    refusal modes still apply.
+    Walk without following symlinks/junctions/reparse points or crossing devices.
+    Mount points cannot safely be detached here: refuse them instead. Skip Git's
+    administrative internals, but inspect the .git entry itself. Real directories
+    and files are left to Git. Any inspection/detachment failure MUST block the
+    caller's recursive removal; errors are returned in the summary.
     """
     summary: Dict[str, List[str]] = {"severed": [], "errors": []}
     try:
-        dest = Path(dest_root)
-        candidates: List[Path] = [dest / "node_modules"]
+        dest = Path(os.path.abspath(dest_root))
         try:
-            children = sorted(p for p in dest.iterdir() if p.is_dir())
-        except OSError:
-            children = []
-        for child in children:
-            candidates.append(child / "node_modules")
-        candidates.extend(dest / rel for rel in _RUNTIME_LINK_DIRS)
-    except Exception as e:  # noqa: BLE001 - never fail a removal over this
-        logger.warning("checkout_manager: link severing aborted: %s", e)
-        summary["errors"].append(str(e))
-        return summary
+            root_info = dest.lstat()
+        except FileNotFoundError:
+            return summary
+        if _is_directory_link(dest, root_info):
+            raise ValueError(f"refusing removal: worktree root is a link: {dest}")
+        # Check the table before walking, including mounts under .git internals.
+        # Resolve only for mount-table comparison, never to traverse a link.
+        resolved = dest.resolve()
+        for mount in _worktree_mount_points():
+            if mount == resolved or resolved in mount.parents:
+                raise ValueError(f"refusing removal: mount point inside worktree: {mount}")
 
-    for cand in candidates:
-        try:
-            if not _is_directory_link(cand):
-                continue
-            _remove_directory_link(cand)
-            rel = str(cand.relative_to(dest))
-            summary["severed"].append(rel)
-            logger.info(
-                "checkout_manager: severed link %s before removal of %s",
-                rel,
-                dest_root,
-            )
-        except Exception as e:  # noqa: BLE001
-            summary["errors"].append(f"{cand}: {e}")
-            logger.warning(
-                "checkout_manager: could not sever link %s in %s: %s",
-                cand,
-                dest_root,
-                e,
-            )
+        pending = [dest]
+        while pending:
+            directory = pending.pop()
+            info = directory.lstat()
+            if _is_directory_link(directory, info):
+                raise ValueError(f"refusing removal: directory became a link: {directory}")
+            if info.st_dev != root_info.st_dev or os.path.ismount(directory):
+                raise ValueError(f"refusing removal: mount point or device boundary: {directory}")
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    candidate = Path(entry.path)
+                    info = entry.stat(follow_symlinks=False)
+                    if _is_directory_link(candidate, info):
+                        _remove_directory_link(candidate)
+                        summary["severed"].append(str(candidate.relative_to(dest)))
+                        continue  # Never inspect a link's children.
+                    if info.st_dev != root_info.st_dev or os.path.ismount(candidate):
+                        raise ValueError(
+                            f"refusing removal: mount point or device boundary: {candidate}"
+                        )
+                    if stat.S_ISDIR(info.st_mode) and entry.name != ".git":
+                        pending.append(candidate)
+    except Exception as e:  # noqa: BLE001 - fail closed, including inspection errors
+        summary["errors"].append(str(e))
+        logger.warning("checkout_manager: removal preflight failed for %s: %s", dest_root, e)
     return summary
 
 
