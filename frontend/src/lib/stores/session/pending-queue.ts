@@ -60,6 +60,9 @@ import type { ChatMessage, PendingPeerMessage } from '../types';
 export function reconcilePendingPeerMessages(
 	rows: PendingPeerMessage[], messages: ChatMessage[]
 ): PendingPeerMessage[] {
+	// Most folds have no peer deliveries pending. There is nothing to reconcile,
+	// so preserve the empty array and avoid scanning the entire transcript.
+	if (rows.length === 0) return rows;
 	const delivered = new Set(messages.filter(m => m.role === 'user').map(m => m.queuedTurnId ?? m.turnId));
 	const seen = new Set<string>();
 	return rows.filter(row => {
