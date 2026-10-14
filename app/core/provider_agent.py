@@ -37,6 +37,7 @@ from typing import (
 )
 
 from app.core import rate_limit_breaker
+from app.core.db_polling import DB_POLL_ERRORS, DBPollWarnings
 from app.core.model_effort import EFFORT_LEVELS
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB imports in this
@@ -1223,13 +1224,16 @@ def _worker_still_working(worker_session_id: str) -> bool:
     settles its own queue row ``completed`` the moment it is delivered, so it is
     newer than the turn that read it and later parked, and is not that turn.
 
-    Blocking (two indexed reads) — call it off the loop. Never raises: anything
-    unreadable answers "not working".
+    Blocking (two indexed reads) — call it off the loop. Transient DB failures
+    propagate to the dispatch poll for retry; other unreadable states retain
+    the legacy "not working" fallback.
     """
     try:
         from app.db import turns as turns_db
 
         row = turns_db.get_latest_run_turn(worker_session_id)
+    except DB_POLL_ERRORS:
+        raise  # Unknown is not finished; the dispatch loop will retry.
     except Exception:  # noqa: BLE001 — an unreadable row settles the dispatch
         logger.debug(
             "ProviderAgent: park probe failed for worker %s",
@@ -1254,6 +1258,8 @@ def _worker_still_working(worker_session_id: str) -> bool:
             return True
         pending = _unpublished_monitor_wakes(worker_session_id, row)
         return any(age < PENDING_WAKE_LIMIT_SECONDS for age in pending.values())
+    except DB_POLL_ERRORS:
+        raise
     except Exception:
         logger.debug("ProviderAgent: pending Monitor wake probe failed for %s", worker_session_id, exc_info=True)
         return False
@@ -2698,13 +2704,23 @@ async def dispatch_worker(
         settle_deadline: Optional[float] = None
         settle_budget = _background_settle_seconds()
         outstanding: List[Dict[str, Any]] = []
+        park_warnings = DBPollWarnings()
         while not wait_verdict and not supervised.torn_down:
             await wall_cap.refresh(asyncio.get_event_loop().time())
             hard_deadline = wall_cap.deadline()
             if hard_deadline is not None and asyncio.get_event_loop().time() >= hard_deadline:
                 wait_verdict = WAIT_DEADLINE
                 break
-            if await asyncio.to_thread(_worker_still_working, worker_session_id):
+            try:
+                still_working = await asyncio.to_thread(_worker_still_working, worker_session_id)
+            except DB_POLL_ERRORS:
+                park_warnings.warn(logger, "Worker park", worker_session_id)
+                # Retain any already-running drain deadline, as well as the
+                # wall cap checked above. Never settle merely on a failed read.
+                if settle_deadline is not None and asyncio.get_event_loop().time() >= settle_deadline:
+                    break
+                still_working = True
+            if still_working:
                 if not announced_park:
                     announced_park = True
                     logger.info(

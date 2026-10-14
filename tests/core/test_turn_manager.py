@@ -572,6 +572,50 @@ async def test_wait_settled_reads_off_the_event_loop(mock_db):
     assert threads and loop_thread not in threads
 
 
+@pytest.mark.parametrize("error_type", turn_manager.DB_POLL_ERRORS)
+async def test_wait_session_idle_retries_db_read(error_type, mock_db, caplog):
+    with patch.object(
+        turns, "session_has_unsettled_turns",
+        side_effect=[error_type("temporarily unavailable"), False],
+    ) as probe:
+        assert await turn_manager.wait_session_idle(
+            "s1", timeout=1.0, poll_interval=0.001
+        ) is True
+    assert probe.call_count == 2
+    assert "keeping worker busy and retrying" in caplog.text
+
+
+async def test_wait_session_idle_db_failure_backs_off_and_times_out(mock_db, caplog):
+    from psycopg2.pool import PoolError
+
+    with patch.object(
+        turns, "session_has_unsettled_turns",
+        side_effect=PoolError("connection pool exhausted"),
+    ) as probe:
+        assert await turn_manager.wait_session_idle(
+            "s1", timeout=0.2, poll_interval=0.01
+        ) is False
+    assert 2 <= probe.call_count <= 7
+    assert caplog.text.count("keeping worker busy and retrying") == 1
+
+
+@pytest.mark.parametrize("error_type", [asyncio.CancelledError, ValueError])
+async def test_wait_session_idle_does_not_swallow_other_errors(mock_db, error_type):
+    with patch.object(turns, "session_has_unsettled_turns", side_effect=error_type):
+        with pytest.raises(error_type):
+            await turn_manager.wait_session_idle("s1", timeout=1.0)
+
+
+def test_db_poll_warning_budget_recovers_after_interval(caplog):
+    from app.core import db_polling
+
+    warnings = db_polling.DBPollWarnings()
+    with patch.object(db_polling.time, "monotonic", side_effect=[100, 101, 129, 130]):
+        for _ in range(4):
+            warnings.warn(turn_manager.logger, "Session idle", "s1")
+    assert caplog.text.count("keeping worker busy and retrying") == 2
+
+
 async def test_wait_session_idle_reads_off_the_event_loop(mock_db):
     loop_thread = threading.get_ident()
     threads = set()
