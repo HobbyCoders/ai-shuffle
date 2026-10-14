@@ -57,7 +57,7 @@ def test_cache_state_reads_the_snapshot_then_the_last_call(monkeypatch):
 
 @pytest.mark.parametrize("leg,expected_compaction,recommendation", [
     ("delegated", 1.68, "send"),
-    ("openai_responses", 0.0, "compact"),
+    ("openai_responses", 0.88, "send"),  # checkpoint side call is not free
 ])
 def test_totals_include_compaction_and_same_reply_budget(leg, expected_compaction, recommendation):
     from fluid.providers.pricing import ModelPrice
@@ -121,8 +121,8 @@ def test_composite_model_uses_the_bound_catalog_rates(monkeypatch):
     )
     assert result["model"] == "custom-model"
     assert result["cold_resume_usd"] == pytest.approx(2.852)
-    assert result["compaction_usd"] == 0
-    assert result["compact_continue_usd"] == pytest.approx(0.612)
+    assert result["compaction_usd"] == pytest.approx(2.904)
+    assert result["compact_continue_usd"] == pytest.approx(3.516)
 
 
 @pytest.mark.parametrize("rates", [None, {"input": 2}, {"output": 10}])
@@ -155,6 +155,13 @@ def test_cache_state_prices_persisted_context_and_usage(mock_db):
     with get_db() as conn:
         conn.cursor().execute("UPDATE session_events SET created_at=%s WHERE session_id=%s", (
             datetime.fromtimestamp(NOW - 7200, timezone.utc).isoformat(), "cost-session"))
+    # A newer checkpoint side call does not refresh the main prompt's cache age.
+    session_events.append_events("cost-session", [{
+        "type": "turn.usage", "payload": {"usage": {
+            "input_tokens": 100, "output_tokens": 10,
+            "auxiliary_source": "checkpoint_summary",
+        }},
+    }])
     state = send_cost.cache_state(database.get_session("cost-session"), now=NOW)
     assert state["warn"] is True
     result = state["cost_comparison"]

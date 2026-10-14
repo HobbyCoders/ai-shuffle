@@ -190,16 +190,27 @@ class Result:
     sweeps: int = 0
     rewrite_tail: float = 0.0
     seconds: float = 0.0
+    post_batch: list[float] = field(default_factory=list)
+    summary_batches: int = 0
+    summary_after: list[int] = field(default_factory=list)
+    manual_ladder: int = 0
+    manual_before: int = 0
+    manual_after: int = 0
 
 
 def replay(s: Session, mode: str, *, window: int, reserve: int,
-           scale: float) -> Result:
+           scale: float, summary_tokens: int = 0) -> Result:
     started = time.monotonic()
-    compactor = Compactor(config=CompactionConfig(sweep_mode=mode))
+    compactor = Compactor(config=CompactionConfig(
+        sweep_mode=mode, summary_enabled=summary_tokens > 0,
+        summary_max_output_tokens=summary_tokens or 4_000,
+    ))
     compactor.wake_turn_starts = set(s.wake_starts)
     out = Result(mode=mode)
     p_cold: float | None = None
     previous: Call | None = None
+    pending: tuple[str, str, str] | None = None
+    stub = "s" * (int(summary_tokens / scale) * 4)
     for call in s.calls:
         nodes = s.nodes[:call.prefix]
         overhead = int(call.overhead / scale)
@@ -217,15 +228,46 @@ def replay(s: Session, mode: str, *, window: int, reserve: int,
             output_reserve_tokens=reserve, turn_boundary=call.boundary,
             measured_prompt_tokens=int(before * scale), cache=signal,
         )
+        threshold = compactor._threshold(compactor.config.trigger_tokens, window, reserve)
+        if pending is not None and ((call.boundary and signal.cold_now)
+                                    or promotions or before * scale >= threshold):
+            promo = compactor.apply_summary(nodes, pending, overhead_tokens=overhead)
+            pending = None
+            if promo is not None:
+                promotions.append(promo)
+                rendered = compactor.view(nodes)
+                out.summary_batches += 1
+                out.summary_after.append(int(promo.after_tokens * scale))
         after = overhead + estimate_tokens_of_messages(rendered)
         out.prompts.append(after * scale)
         if promotions:
             out.batches += 1
+            out.post_batch.append(after * scale)
             out.sweeps += any(p.reason == "sweep" for p in promotions)
             first = promotions[0].first_changed_message or 0
             out.rewrite_tail += estimate_tokens_of_messages(rendered[first:]) * scale
         p_cold = update_p_cold(p_cold, call.hit_rate)
         previous = call
+        # The next boundary represents a finished turn. A zero-latency stub
+        # is ready for the next eligible call; this is not provider latency.
+        next_index = len(out.prompts)
+        ended = next_index == len(s.calls) or s.calls[next_index].boundary
+        if ended and pending is None and summary_tokens:
+            region = compactor.summary_region(nodes, context_window=window, scale=scale, due_only=True)
+            if region:
+                pending = region[0], region[1], stub
+    if s.calls:
+        nodes = s.nodes  # include the last recorded assistant reply
+        overhead = int(s.calls[-1].overhead / scale)
+        out.manual_before = int(compactor.estimate_view_tokens(nodes, overhead) * scale)
+        compactor.compact_now(nodes, overhead_tokens=overhead, context_window=window,
+                              output_reserve_tokens=reserve, scale=scale)
+        out.manual_ladder = int(compactor.estimate_view_tokens(nodes, overhead) * scale)
+        region = compactor.summary_region(nodes, context_window=window, scale=scale)
+        if region and summary_tokens:
+            compactor.apply_summary(nodes, (region[0], region[1], stub), overhead_tokens=overhead,
+                                    decision_reason="manual")
+        out.manual_after = int(compactor.estimate_view_tokens(nodes, overhead) * scale)
     out.seconds = time.monotonic() - started
     return out
 
@@ -236,6 +278,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window", type=int, default=272_000)
     parser.add_argument("--reserve", type=int, default=32_000)
     parser.add_argument("--modes", default="off,on")
+    parser.add_argument("--summary-tokens", type=int, default=0,
+                        help="Enable tier 4 with a fixed-size stub; no model calls")
     args = parser.parse_args(argv)
     s = load(args.events)
     scale = calibrate(s)
@@ -247,7 +291,11 @@ def main(argv: list[str] | None = None) -> int:
               f"peak={100 * max(billed) / args.window:5.1f}%")
     for mode in args.modes.split(","):
         r = replay(s, mode.strip(), window=args.window, reserve=args.reserve,
-                   scale=scale)
+                   scale=scale, summary_tokens=args.summary_tokens)
+        print(f"  checkpoint={r.summary_batches} post_batch_max={max(r.post_batch, default=0):.0f} "
+              f"post_batch_last={r.post_batch[-1] if r.post_batch else 0:.0f} "
+              f"manual={r.manual_before}->{r.manual_ladder}->{r.manual_after} "
+              f"summary_after={r.summary_after}")
         over = sum(1 for p in r.prompts if p > 0.8 * args.window)
         print(f"  sweep {r.mode:6s} sum={sum(r.prompts) / 1e6:6.2f}M "
               f"peak={100 * max(r.prompts, default=0) / args.window:5.1f}% "

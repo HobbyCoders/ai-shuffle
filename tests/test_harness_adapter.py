@@ -7448,6 +7448,9 @@ async def test_recoverable_compaction_is_enabled_for_native_loops(monkeypatch, t
     compaction = captured["compaction"]
 
     assert compaction.enabled is True
+    assert compaction.summary_enabled is True
+    assert compaction.summary_max_output_tokens == 4_000
+    assert compaction.sweep_mode == "shadow"  # replay batch-count gate has not passed
     assert compaction.trim.enabled is True
     assert compaction.trigger_tokens == 120_000
     assert compaction.headroom_tokens == 16_000

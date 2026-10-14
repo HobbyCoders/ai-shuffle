@@ -464,8 +464,8 @@ _COMPACT_REQUEST_RE = re.compile(r"^/compact\s*$")
 def _is_compact_request(content: Any) -> bool:
     """Whether a turn's content is a bare ``/compact`` (the whole message).
 
-    Arguments are not accepted: native compaction is mechanical and takes no
-    instructions, so "/compact keep the API notes" stays an ordinary message.
+    Custom instructions are not accepted: "/compact keep the API notes"
+    stays an ordinary message, even when the checkpoint tier is enabled.
     """
     if isinstance(content, str):
         return bool(_COMPACT_REQUEST_RE.match(content.strip()))
@@ -1251,6 +1251,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
         self._trimmer = self._compactor.trimmer
         self._compaction_rehydrated = False
+        self._summary_task: asyncio.Task | None = None
+        self._pending_summary: tuple[str, str, str] | None = None
         # Last model call's real prompt accounting, per session:
         # ``session_id -> (assistant node the call produced, provider usage)``.
         # get_context_usage() prefers it over the chars/4 estimate, but only
@@ -1874,6 +1876,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
+            try:
+                await self._summary_task
+            except asyncio.CancelledError:
+                pass
         await self._emit_session_end()
         if self._codemode is not None:
             await self._codemode.aclose()
@@ -1926,9 +1934,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             # stub is a stateless view policy inside ``Compactor._render``), so
             # with context rewriting disabled it would report reclaimed tokens
             # the request never actually saves. Report nothing instead.
-            if self._compactor.active:
-                compaction_stats = self._compactor.stats(nodes)
             measured = await self._measured_next_prompt(sid, nodes)
+            if self._compactor.active:
+                compaction_stats = self._compaction_stats(nodes, measured)
         # The deferred-tool catalog the NEXT user turn will carry (tools not
         # yet announced — every deferred tool before the first turn) is real
         # prompt text that request sends; on the JSON-tool path it is ~1.7k
@@ -2513,8 +2521,118 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_event("user", _plain_text(content))
         await self._start_and_loop(sid, turn_id, user_node)
 
+    def _summary_scale(self, nodes: list[SessionNode], measured: int | None) -> float:
+        estimate = self._compactor.estimate_view_tokens(nodes, self._context_overhead_tokens())
+        return min(1.0, max(0.6, measured / estimate)) if measured and estimate else 1.0
+
+    async def _build_checkpoint(self, sid: str, turn_id: str,
+                                region: tuple[str, str, str]) -> tuple[str, str, str] | None:
+        from fluid.context.checkpoint_summary import build_checkpoint
+
+        cfg = self._compactor.config
+        model = cfg.summary_model or self.model
+
+        async def account(usage: dict[str, Any]) -> None:
+            # No node/context snapshot: side calls cannot measure the main window.
+            raw = dict(usage)
+            if "cost_usd" not in raw:
+                cost = None
+                estimator = getattr(self.provider, "estimate_cost", None)
+                if estimator is not None:
+                    try:
+                        cost = estimator(model, raw)
+                    except Exception:
+                        pass
+                if cost is None:
+                    cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
+                if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
+                    cost = 0.0
+                if cost is not None:
+                    raw.update(cost_usd=cost, cost_from_table=True)
+            raw.update(model=model, auxiliary_source="checkpoint_summary")
+            await self._emit(Usage(
+                session_id=sid, turn_id=turn_id,
+                input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
+                output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
+                cache_read_tokens=raw.get("cache_read_input_tokens", 0),
+                cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
+            ))
+
+        key = self._affinity_key()
+        extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}
+        try:
+            # Bound provider stalls too; ordinary turns never await this task.
+            async with asyncio.timeout(180):
+                text = await build_checkpoint(
+                    self.provider, model=model, text=region[2],
+                    max_tokens=cfg.summary_max_output_tokens, extra=extra,
+                    wire_state=self._wire_state("checkpoint"), account=account,
+                )
+            return region[0], region[1], text
+        except Exception as exc:
+            log.warning("checkpoint build dropped (%s)", type(exc).__name__)
+            return None
+
+    def _schedule_checkpoint(self, sid: str, turn_id: str) -> None:
+        if not self._compactor.config.summary_enabled or self._pending_summary is not None:
+            return
+        if self._summary_task is not None and not self._summary_task.done():
+            return
+
+        async def build() -> None:
+            try:
+                nodes = await self.store.load_path(sid)
+                measured = await self._measured_next_prompt(sid, nodes)
+                region = self._compactor.summary_region(
+                    nodes, context_window=self.context_window,
+                    scale=self._summary_scale(nodes, measured), due_only=True,
+                )
+                if region is not None:
+                    self._pending_summary = await self._build_checkpoint(sid, turn_id, region)
+            except Exception as exc:
+                log.warning("checkpoint scheduling dropped (%s)", type(exc).__name__)
+
+        self._summary_task = asyncio.create_task(build())
+
+    def _apply_pending_checkpoint(
+        self, nodes: list[SessionNode], *, cache: CacheSignal | None, turn_boundary: bool,
+        measured: int | None, overhead: int, batch_due: bool,
+    ) -> Promotion | None:
+        pending = self._pending_summary
+        if pending is None:
+            return None
+        ids = {n.node_id for n in nodes}
+        if pending[0] not in ids or pending[1] not in ids:
+            self._pending_summary = None  # fork/rewind: never install another path's summary
+            return None
+        threshold = self._compactor._threshold(
+            self._compactor.config.trigger_tokens, self.context_window,
+            self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+        )
+        size = measured or self._compactor.estimate_view_tokens(nodes, overhead)
+        cold = turn_boundary and cache is not None and cache.cold_now
+        if not (cold or batch_due or size >= threshold):
+            return None
+        self._pending_summary = None
+        return self._compactor.apply_summary(
+            nodes, pending, overhead_tokens=overhead,
+            decision_reason="summary_cold" if cold else "summary_batch",
+        )
+
+    def _compaction_stats(self, nodes: list[SessionNode], measured: int | None) -> dict[str, int]:
+        stats = self._compactor.stats(nodes)
+        stats["projectedAfterCompactTokens"] = self._compactor.projected_after_compact(
+            nodes, overhead_tokens=self._context_overhead_tokens(),
+            context_window=self.context_window,
+            output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+            scale=self._summary_scale(nodes, measured), pending=self._pending_summary,
+        )
+        return stats
+
     async def _run_manual_compaction(self, sid: str, turn_id: str, source: str) -> None:
-        """An owner-requested compaction: one turn, no model call, no new node.
+        """An owner-requested compaction: no new conversation node.
+
+        The optional checkpoint side call is allowed to block this request.
 
         Runs :meth:`Compactor.compact_now` (the guarded ladder window
         protection uses) on the current path. Its promotions are emitted and
@@ -2555,6 +2673,24 @@ class NativeLoop(BackgroundLifecycleMixin):
                     output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
                     scale=scale,
                 )
+                if self._compactor.config.summary_enabled:
+                    # Only the owner's manual request may wait for this call.
+                    if self._summary_task is not None and not self._summary_task.done():
+                        await self._summary_task
+                    region = self._compactor.summary_region(
+                        nodes, context_window=self.context_window, scale=scale,
+                    )
+                    if region is not None:
+                        pending = self._pending_summary
+                        if pending is None or pending[:2] != region[:2]:
+                            pending = await self._build_checkpoint(sid, turn_id, region)
+                        self._pending_summary = None
+                        if pending is not None:
+                            promo = self._compactor.apply_summary(
+                                nodes, pending, overhead_tokens=overhead, decision_reason="manual",
+                            )
+                            if promo is not None:
+                                promotions.append(promo)
             except Exception as exc:  # noqa: BLE001 — reported as a failed compaction
                 log.warning("manual compaction failed", exc_info=True)
                 failure = f"compaction failed: {type(exc).__name__}"
@@ -2635,6 +2771,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason=reason)
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
+            if not cancelled:
+                self._schedule_checkpoint(sid, turn_id)
             # _run_turn owns the active id through cancellation settlement.
             # Interrupted turns discard their pending interjections. Other
             # terminal paths have already retained accepted peers in history;
@@ -2993,6 +3131,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 trimmed=tuple((n, t) for n, t in e.trimmed),
                 spans=tuple((s, en, k) for s, en, k in e.spans),
                 render_version=e.render_version,
+                summary_text=e.summary,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -3114,6 +3253,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             tier=promo.tier, reason=promo.reason,
             trimmed=[list(p) for p in promo.trimmed],
             spans=[list(s) for s in promo.spans],
+            summary=promo.summary_text,
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,
@@ -3301,6 +3441,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Measured first: on a resumed engine it rehydrates the last
             # call's usage, which also seeds the cache signal's miss rate.
             measured_prompt = await self._measured_window_prompt(sid, nodes)
+            cache = self._cache_signal(
+                sid, overhead_tokens=overhead_tokens,
+                turn_start=user_node.node_id if num_calls == 0 else None,
+            )
             rendered, promotions = self._compactor.apply(
                 nodes,
                 overhead_tokens=overhead_tokens,
@@ -3316,11 +3460,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                 measured_prompt_tokens=measured_prompt,
                 # The provider cache as this call will find it, so a rewrite
                 # on a warm cache is priced instead of taken at the trigger.
-                cache=self._cache_signal(
-                    sid, overhead_tokens=overhead_tokens,
-                    turn_start=user_node.node_id if num_calls == 0 else None,
-                ),
+                cache=cache,
             )
+            summary = self._apply_pending_checkpoint(
+                nodes, cache=cache, turn_boundary=num_calls == 0,
+                measured=measured_prompt, overhead=overhead_tokens, batch_due=bool(promotions),
+            )
+            if summary is not None:
+                promotions.append(summary)
+                rendered = self._compactor.view(nodes)
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
@@ -3835,7 +3983,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # rewriting disabled, ``stats`` would price reclaimed tokens
                     # the request never actually saved.
                     compaction=(
-                        self._compactor.stats(nodes)
+                        self._compaction_stats(nodes, prompt_tokens)
                         if self._compactor.active
                         else None
                     ),

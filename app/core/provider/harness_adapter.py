@@ -5267,13 +5267,13 @@ def _delegated_tool_policy(
 
 
 def _compaction_config() -> CompactionConfig:
-    """Native fluid's deterministic, recoverable rendered-history policy.
+    """Native fluid's recoverable rendered-history policy.
 
-    All three mechanical tiers are enabled. They transform only the model-facing
-    view; exact nodes remain stored for recall, rewind, forks, and audit. Delegated
+    The mechanical ladder and background checkpoint tier are enabled. Only the
+    model-facing view changes; exact nodes remain for recall, rewind, forks and audit. Delegated
     loops manage their own context and never receive this configuration.
     """
-    return CompactionConfig()
+    return CompactionConfig(summary_enabled=True)
 
 
 def _codemode_kernel_config() -> KernelConfig:
