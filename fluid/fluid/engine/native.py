@@ -2002,7 +2002,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         """The provider-cache view the compactor prices this call with.
 
         Plan item 3 (see fluid.context.cache_signal). ``gap_s`` is the time
-        since this engine's previous request for the session.
+        since the previous request for the session, seeded from persisted
+        measured Usage on a new engine (the completion timestamp is a proxy).
         ``static_changed`` compares a hash of the system prompt and tool
         schemas with the one sent last. ``resumed`` marks this engine's first
         call for the session and the first call of an unparked turn
@@ -2033,9 +2034,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             if state is None:
                 seeds: dict[str, float] = getattr(self, "_p_cold_seed", {})
                 seed = seeds.pop(sid, None)
+                requested_at = getattr(self, "_cache_requested_at_seed", {}).pop(sid, None)
                 recorded = self._last_call_usage.get(sid)
                 state = states[sid] = {
-                    "requested_at": None, "static": None, "p_cold": seed,
+                    "requested_at": requested_at, "static": None, "p_cold": seed,
                     # A seeded EWMA already holds the newest persisted call.
                     "folded": (
                         recorded[0] if recorded is not None and seed is not None
@@ -2152,7 +2154,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         return None
 
     def _seed_p_cold(self, sid: str, events: list[Any]) -> None:
-        """Seed the cache signal's miss EWMA from the newest persisted calls.
+        """Seed cache age and miss EWMA from the newest persisted calls.
 
         A resumed engine would otherwise start from "never missed". Reads
         the last ``P_COLD_SEED_CALLS`` measured Usage events, oldest first,
@@ -2162,6 +2164,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         from fluid.context.cache_signal import P_COLD_SEED_CALLS, p_cold_from_hit_rates
 
         rates: list[float] = []
+        requested_at: float | None = None
         for event in events:
             if not isinstance(event, Usage):
                 continue
@@ -2172,6 +2175,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             })
             if total > 0:
                 rates.append(int(event.cache_read_tokens or 0) / total)
+                # Events are in sequence order; zero is a legacy/unstamped ts.
+                requested_at = event.ts if event.ts > 0 else None
+        if requested_at is not None:
+            timestamps: dict[str, float] = getattr(self, "_cache_requested_at_seed", {})
+            timestamps[sid] = requested_at
+            self._cache_requested_at_seed = timestamps
         seed = p_cold_from_hit_rates(rates[-P_COLD_SEED_CALLS:])
         if seed is not None:
             seeds: dict[str, float] = getattr(self, "_p_cold_seed", {})

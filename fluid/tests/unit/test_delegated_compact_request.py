@@ -87,14 +87,13 @@ def test_the_summary_after_the_matching_boundary_is_read(tmp_path) -> None:
     assert compaction_summary_in_transcript(str(path), "old", now=now) == "an older summary"
 
 
-def test_without_a_uuid_match_only_a_recent_last_boundary_counts(tmp_path) -> None:
-    """A frame whose uuid the transcript does not carry takes the last
-    boundary only when it was just written: an earlier compaction's summary
-    must never be taken for the new one."""
+def test_without_a_uuid_only_a_recent_last_boundary_counts(tmp_path) -> None:
+    """An explicit missing UUID must not substitute a recent, older compaction."""
     now = time.time()
     path = tmp_path / "t.jsonl"
     _transcript(path, [_cli_boundary("a", now - 3), _cli_summary("fresh")])
-    assert compaction_summary_in_transcript(str(path), "elsewhere", now=now) == "fresh"
+    assert compaction_summary_in_transcript(str(path), "elsewhere", now=now) == ""
+    assert compaction_summary_in_transcript(str(path), None, now=now) == "fresh"
     _transcript(path, [_cli_boundary("a", now - 5000), _cli_summary("stale")])
     assert compaction_summary_in_transcript(str(path), "elsewhere", now=now) == ""
     assert compaction_summary_in_transcript(str(path), None, now=now) == ""
@@ -103,8 +102,41 @@ def test_without_a_uuid_match_only_a_recent_last_boundary_counts(tmp_path) -> No
 def test_a_boundary_whose_summary_is_not_written_yet_reads_empty(tmp_path) -> None:
     now = time.time()
     path = tmp_path / "t.jsonl"
-    _transcript(path, [_cli_boundary("a", now - 1)])
+    _transcript(path, [
+        _cli_boundary("old", now - 3), _cli_summary("old summary"),
+        _cli_boundary("a", now - 1),
+    ])
     assert compaction_summary_in_transcript(str(path), "a", now=now) == ""
+
+
+async def test_summary_reader_retries_for_explicit_new_boundary(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "config" / "projects" / "p" / f"{CLI_SID}.jsonl"
+    now = time.time()
+    _transcript(path, [_cli_boundary("old", now - 3), _cli_summary("old summary")])
+    loop = _loop(tmp_path, [])
+    reads = []
+    original = delegated_mod.compaction_summary_in_transcript
+
+    def read_then_append(path_arg, boundary_uuid):
+        summary = original(path_arg, boundary_uuid)
+        reads.append(summary)
+        # Reproduce the frame arriving before the CLI flushes the boundary,
+        # then before it flushes that boundary's summary.
+        with path.open("a", encoding="utf-8") as fh:
+            if len(reads) == 1:
+                fh.write(json.dumps(_cli_boundary("new", now)) + "\n")
+            elif len(reads) == 2:
+                fh.write(json.dumps(_cli_summary("new summary")) + "\n")
+        return summary
+
+    monkeypatch.setattr(delegated_mod, "compaction_summary_in_transcript", read_then_append)
+    monkeypatch.setattr(delegated_mod, "COMPACTION_SUMMARY_INTERVAL", 0)
+    try:
+        summary = await loop._read_compaction_summary({"session_id": CLI_SID, "uuid": "new"})
+        assert summary == "new summary"
+        assert reads == ["", "", "new summary"]
+    finally:
+        await loop.aclose()
 
 
 def test_a_compact_command_is_recognised_in_the_last_text_block() -> None:

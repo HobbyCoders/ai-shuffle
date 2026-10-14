@@ -3,7 +3,7 @@
 A batch rewrites messages the provider already cached, so the next request
 re-bills everything after the first changed message at the full input price.
 Whether that is worth it depends on the cache. When the cache is cold anyway
-(a long pause, a changed system prompt or tool list, a resumed engine), the
+(a long pause, changed system prompt or tools, or an unknown resume gap), the
 rewrite costs nothing extra and should happen. When the cache is warm, the
 rewrite is a purchase: it costs one re-billed tail now and saves the cached
 price of the reclaimed tokens on every later call. Deferring is rent: each
@@ -65,9 +65,10 @@ ZONE_WINDOW = "window"
 class CacheSignal:
     """What the engine knows about the provider cache before one call.
 
-    ``gap_s`` is the time since the previous request of this session on this
-    engine, or None when there was none. ``static_changed`` says the system
-    prompt or tool list about to be sent differs from the last one sent.
+    ``gap_s`` is the time since the previous request of this session, seeded
+    from persisted usage on a new engine, or None when unknown.
+    ``static_changed`` says the system prompt or tool list about to be sent
+    differs from the last one sent.
     ``resumed`` marks the first call after an unpark or on a new engine.
     ``p_cold`` is an EWMA of per-call misses (hit rate under 0.5), seeded
     from the last persisted calls on resume. ``reuse_floor`` is the size of
@@ -88,11 +89,11 @@ class CacheSignal:
     def cold_reason(self) -> str:
         """Why the cache is cold now, or "" when it is presumed warm. A single
         earlier miss does not count: a miss writes the prefix it missed."""
-        if self.resumed:
-            return "resumed"
         if self.static_changed:
             return "static_changed"
-        if self.gap_s is not None and self.gap_s > COLD_GAP_SECONDS:
+        if self.gap_s is None:
+            return "resumed" if self.resumed else ""
+        if self.gap_s > COLD_GAP_SECONDS:
             return "gap"
         return ""
 
