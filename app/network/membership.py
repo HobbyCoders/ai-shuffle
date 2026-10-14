@@ -362,6 +362,21 @@ def verify_recovery_proof(record: Mapping[str, Any], network_key: bytes) -> bool
 # Applying records to a members map (pure)
 # ---------------------------------------------------------------------------
 
+def _advance_member(members: Dict[str, Member], member: Member) -> None:
+    """Advance one device, allowing only an identical state at a tied generation.
+
+    Signatures establish authority, not freshness. Apply this after verification
+    to certificates (including recovery) and revocations alike, regardless of
+    whether the device is currently active or revoked.
+    """
+    existing = members.get(member.device_id)
+    if existing is not None and member.generation <= existing.generation:
+        if member == existing:
+            return
+        raise MembershipError("Membership record does not advance device generation")
+    members[member.device_id] = member
+
+
 def apply_record(record: Mapping[str, Any], *, network_id: str, members: Dict[str, Member],
                  founder_device_id: Optional[str], network_key: Optional[bytes] = None) -> Dict[str, Member]:
     """Return the members map after ``record``; raises when it must be rejected."""
@@ -369,22 +384,20 @@ def apply_record(record: Mapping[str, Any], *, network_id: str, members: Dict[st
     if kind in (TYPE_CERTIFICATE, TYPE_RECOVERY):
         member = verify_certificate(record, network_id=network_id, members=members,
                                     founder_device_id=founder_device_id, network_key=network_key)
-        existing = members.get(member.device_id)
-        if existing is not None and existing.status == STATUS_REVOKED and existing.generation >= member.generation:
-            raise MembershipError("Device was revoked at a later generation")
-        members[member.device_id] = member
+        _advance_member(members, member)
         return members
     if kind == TYPE_REVOCATION:
         details = verify_revocation(record, network_id=network_id, members=members)
         existing = members.get(details["device_id"])
         if existing is None:
             raise MembershipError("Revocation names an unknown device")
-        members[details["device_id"]] = Member(
+        member = Member(
             device_id=existing.device_id, signing_public=existing.signing_public,
             encryption_public=existing.encryption_public, name=existing.name, kind=existing.kind,
             generation=details["generation"], status=STATUS_REVOKED,
             last_seq_accepted=details["last_seq_accepted"],
             last_incarnation_accepted=details["last_incarnation_accepted"])
+        _advance_member(members, member)
         return members
     if kind == TYPE_KEY:
         verify_key_record(record, network_id=network_id, members=members)
