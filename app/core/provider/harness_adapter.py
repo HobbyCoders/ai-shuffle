@@ -992,6 +992,7 @@ class HarnessAdapter(ProviderAdapter):
             self._engine = NativeLoop(
                 provider=provider_client,
                 store=store,
+                background_usage_sink=self._book_background_usage,
                 # fluid's NativeLoop annotates ``model`` as ``str`` while
                 # SessionOptions carries Optional[str]. The value is handed over
                 # exactly as before — the cast bridges the annotations only and
@@ -2913,6 +2914,35 @@ class HarnessAdapter(ProviderAdapter):
             )
 
 
+    async def cancel_checkpoint(self) -> None:
+        """Stop session-owned work even when no receive_events pump is running."""
+        cancel = getattr(self._engine, "cancel_checkpoint", None)
+        if callable(cancel):
+            # Interrupt latches scheduling off too, until the next explicit turn.
+            await self._engine.submit(Interrupt())
+
+    async def _book_background_usage(self, event: Any) -> None:
+        """Book a side call independently of turn terminals, with a durable claim."""
+        from app.db import database
+        from app.core.usage_attribution import usage_attribution
+
+        session_id = await asyncio.to_thread(self._resolve_app_session_id)
+        if not session_id:
+            raise RuntimeError("background usage has no app session")
+        extra = (self._options.extra or {}) if self._options else {}
+        attribution = await asyncio.to_thread(usage_attribution, extra.get("provider_id"))
+        await asyncio.to_thread(
+            database.settle_turn_usage,
+            session_id=session_id,
+            settlement_key=json.dumps(["fluid_auxiliary", event.session_id, event.seq]),
+            profile_id=extra.get("profile_id"), model=event.raw.get("model"),
+            tokens_in=event.input_tokens, tokens_out=event.output_tokens,
+            cache_read_tokens=event.cache_read_tokens,
+            cache_creation_tokens=event.cache_creation_tokens,
+            cost_usd=event.raw.get("cost_usd") or 0,
+            model_calls=1, turn_increment=0, **attribution,
+        )
+
     async def interrupt(self) -> None:
         if self._engine is not None:
             await self._engine.submit(Interrupt())
@@ -3497,6 +3527,11 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "Usage":
+            if event.raw.get("auxiliary_background"):
+                # The host sink owns this call, even if another turn's event
+                # pump happens to see it. Never contaminate that turn's totals,
+                # context gauge, or kill-path recovery records.
+                return []
             # Emit a contentless AssistantMessage NOW. Holding usage for the
             # next content block created a one-call lag and dropped the final
             # call's telemetry entirely. QueryEngine already treats an empty

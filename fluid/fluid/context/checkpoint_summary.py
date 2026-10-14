@@ -1,6 +1,7 @@
 """Best-effort checkpoint completion, isolated from the agent's tool loop."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -56,7 +57,14 @@ async def build_checkpoint(
                 failed = True
     finally:
         if usage and account is not None:
-            await account(usage)
+            # Stop can arrive while the durable usage/sink write is awaiting I/O.
+            # Finish that write before cancellation is allowed to tear us down.
+            booking = asyncio.create_task(account(usage))
+            try:
+                await asyncio.shield(booking)
+            except asyncio.CancelledError:
+                await booking
+                raise
     text = "".join(parts)
     if failed or stop in ("max_tokens", "length") or not text.strip():
         # Never log provider payloads or conversation text.

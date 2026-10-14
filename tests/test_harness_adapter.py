@@ -2353,6 +2353,14 @@ async def _connect_native_capturing(monkeypatch, tmp_path, model="gpt-4o", app_s
 
 
 @pytest.mark.asyncio
+async def test_native_connect_wires_background_usage_sink(monkeypatch, tmp_path):
+    captured = await _connect_native_capturing(monkeypatch, tmp_path)
+    sink = captured["background_usage_sink"]
+    assert sink.__func__ is HarnessAdapter._book_background_usage
+    assert sink.__self__._resolve_app_session_id() == "app-native"
+
+
+@pytest.mark.asyncio
 async def test_auxiliary_request_completes_without_memory_setup(monkeypatch, tmp_path, caplog):
     from unittest.mock import Mock
     from app.core import fluid_memory

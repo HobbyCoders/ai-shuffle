@@ -61,7 +61,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -1006,6 +1006,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         cache_probe: CacheProbeConfig | None = None,
         cache_key: str | None = None,
         pricing: PricingResolver | None = None,
+        background_usage_sink: Callable[[Usage], Awaitable[None]] | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         allowed_tools: Sequence[str] | None = None,
@@ -1251,6 +1252,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
         self._trimmer = self._compactor.trimmer
         self._compaction_rehydrated = False
+        self._background_usage_sink = background_usage_sink
         self._summary_task: asyncio.Task | None = None
         self._pending_summary: tuple[str, str, str] | None = None
         # Last model call's real prompt accounting, per session:
@@ -1633,6 +1635,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Interrupt):
             self._interrupted.set()
+            await self.cancel_checkpoint()
         elif isinstance(op, Steer):
             # Mid-turn user text: queued here, appended to the NEXT tool
             # result inside the steering marker (fluid.context.steering) —
@@ -1876,12 +1879,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
-        if self._summary_task and not self._summary_task.done():
-            self._summary_task.cancel()
-            try:
-                await self._summary_task
-            except asyncio.CancelledError:
-                pass
+        await self.cancel_checkpoint()
         await self._emit_session_end()
         if self._codemode is not None:
             await self._codemode.aclose()
@@ -2525,8 +2523,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         estimate = self._compactor.estimate_view_tokens(nodes, self._context_overhead_tokens())
         return min(1.0, max(0.6, measured / estimate)) if measured and estimate else 1.0
 
+    async def cancel_checkpoint(self) -> None:
+        """Cancel session-owned checkpoint work, including while the loop is idle."""
+        task = self._summary_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._summary_task = None
+        self._pending_summary = None
+
     async def _build_checkpoint(self, sid: str, turn_id: str,
-                                region: tuple[str, str, str]) -> tuple[str, str, str] | None:
+                                region: tuple[str, str, str], *,
+                                background: bool = False) -> tuple[str, str, str] | None:
         from fluid.context.checkpoint_summary import build_checkpoint
 
         cfg = self._compactor.config
@@ -2550,13 +2561,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if cost is not None:
                     raw.update(cost_usd=cost, cost_from_table=True)
             raw.update(model=model, auxiliary_source="checkpoint_summary")
-            await self._emit(Usage(
+            # Ownership is fixed at dispatch, not by whichever turn happens to
+            # be active at completion. Background calls never enter a terminal.
+            if background:
+                raw["auxiliary_background"] = True
+            else:
+                self._accumulate_usage(self._turn_usage, raw)
+            event = await self._emit(Usage(
                 session_id=sid, turn_id=turn_id,
                 input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
                 output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
                 cache_read_tokens=raw.get("cache_read_input_tokens", 0),
                 cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
             ))
+            if background and self._background_usage_sink is not None:
+                assert isinstance(event, Usage)
+                await self._background_usage_sink(event)
 
         key = self._affinity_key()
         extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}
@@ -2574,7 +2594,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
 
     def _schedule_checkpoint(self, sid: str, turn_id: str) -> None:
-        if not self._compactor.config.summary_enabled or self._pending_summary is not None:
+        if (self._interrupted.is_set() or self._background_closed
+                or not self._compactor.config.summary_enabled or self._pending_summary is not None):
             return
         if self._summary_task is not None and not self._summary_task.done():
             return
@@ -2588,7 +2609,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     scale=self._summary_scale(nodes, measured), due_only=True,
                 )
                 if region is not None:
-                    self._pending_summary = await self._build_checkpoint(sid, turn_id, region)
+                    self._pending_summary = await self._build_checkpoint(sid, turn_id, region, background=True)
             except Exception as exc:
                 log.warning("checkpoint scheduling dropped (%s)", type(exc).__name__)
 
@@ -2673,17 +2694,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                     output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
                     scale=scale,
                 )
-                if self._compactor.config.summary_enabled:
+                if self._compactor.config.summary_enabled and not self._interrupted.is_set():
                     # Only the owner's manual request may wait for this call.
                     if self._summary_task is not None and not self._summary_task.done():
                         await self._summary_task
                     region = self._compactor.summary_region(
                         nodes, context_window=self.context_window, scale=scale,
                     )
-                    if region is not None:
+                    if region is not None and not self._interrupted.is_set():
                         pending = self._pending_summary
                         if pending is None or pending[:2] != region[:2]:
-                            pending = await self._build_checkpoint(sid, turn_id, region)
+                            self._summary_task = asyncio.create_task(
+                                self._build_checkpoint(sid, turn_id, region)
+                            )
+                            pending = await self._summary_task
                         self._pending_summary = None
                         if pending is not None:
                             promo = self._compactor.apply_summary(
@@ -2691,6 +2715,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                             )
                             if promo is not None:
                                 promotions.append(promo)
+            except asyncio.CancelledError:
+                if not self._interrupted.is_set():
+                    raise
+                usage, cost = self._partial_usage(self._turn_usage)
+                await self._emit_terminal_with_park(Interrupted(
+                    session_id=sid, turn_id=turn_id, usage=usage, cost_usd=cost,
+                ))
+                return
             except Exception as exc:  # noqa: BLE001 — reported as a failed compaction
                 log.warning("manual compaction failed", exc_info=True)
                 failure = f"compaction failed: {type(exc).__name__}"
@@ -2721,9 +2753,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 session_id=sid, turn_id=turn_id, kind="compaction_failed",
                 message=failure or "nothing could be compacted",
             ))
+        usage, cost = self._partial_usage(self._turn_usage)
         await self._emit_terminal_with_park(TurnComplete(
             session_id=sid, turn_id=turn_id, stop_reason="end_turn",
-            num_model_calls=0, usage={}, cost_usd=0.0,
+            num_model_calls=0, usage=usage, cost_usd=cost if cost is not None else 0.0,
         ))
 
     async def _start_and_loop(
@@ -2771,7 +2804,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason=reason)
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
-            if not cancelled:
+            if not cancelled and not self._interrupted.is_set():
                 self._schedule_checkpoint(sid, turn_id)
             # _run_turn owns the active id through cancellation settlement.
             # Interrupted turns discard their pending interjections. Other
