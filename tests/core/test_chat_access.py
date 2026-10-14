@@ -1057,8 +1057,8 @@ def test_apply_saved_edit_address_and_credential_rules():
 
 
 @pytest.mark.parametrize("kind, changes, message", [
-    ("machine", {"host": "nas-LEAKCHECK.local"}, "not a hostname"),
-    ("machine", {"host": "https://10.0.0.1/LEAKCHECK"}, "not a hostname"),
+    ("machine", {"host": "-LEAKCHECK.local"}, "not a URL"),
+    ("machine", {"host": "https://10.0.0.1/LEAKCHECK"}, "not a URL"),
     ("machine", {"host": "224.0.0.1"}, "unicast"),
     ("machine", {"host": "0.0.0.0"}, "unicast"),
     ("machine", {"host": "fd00::1%LEAKCHECK"}, "interface scope"),
@@ -1137,7 +1137,7 @@ async def test_saved_edit_api_is_owner_only_and_never_echoes_secrets(broker, sav
                         {"password": "MUST-NOT-ECHO", "unknown": True}):
             response = await client.patch(endpoint, json=invalid)
             assert response.status_code == 422 and "MUST-NOT-ECHO" not in response.text
-        response = await client.patch(endpoint, json={"host": "nas.local", "password": "MUST-NOT-ECHO"})
+        response = await client.patch(endpoint, json={"host": "https://invalid.example", "password": "MUST-NOT-ECHO"})
         assert response.status_code == 400 and "MUST-NOT-ECHO" not in response.text
         response = await client.patch(f"/api/v1/chat-access/chat/saved/{'f' * 32}", json={"label": "Missing"})
         assert response.status_code == 400
@@ -1316,9 +1316,7 @@ def _listing_tools(monkeypatch, broker):
     monkeypatch.setattr(broker, "_notify", lambda *args, **kwargs: None)
     monkeypatch.setattr(sdk, "broker", broker)
 
-    def no_catalog(*args, **kwargs):
-        raise AssertionError("ChatResources must not read the saved-connection catalogue")
-    monkeypatch.setattr(chat_vault, "catalog", no_catalog)
+    monkeypatch.setattr(chat_vault, "catalog", lambda owner, **kwargs: [])
     return {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
 
 
@@ -1350,7 +1348,7 @@ async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_b
         response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
         assert not response.get("isError"), response
         assert json.loads(response["content"][0]["text"]) == {
-            "grants": [], "folder_available": chat_files.available(),
+            "grants": [], "folder_available": chat_files.available(), "saved_connections": [],
         }
         assert not request_task.done() and len(broker.requests) == 1 and not broker.actions
     finally:

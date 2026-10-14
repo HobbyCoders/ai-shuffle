@@ -33,7 +33,7 @@
 	type FromSubagent = { session_id?: string; subagent?: string };
 	type Grant = FromSubagent & { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = FromSubagent & { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
-	type Request = FromSubagent & { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string };
+	type Request = FromSubagent & { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string };
 	type Saved = SavedConnection;
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);

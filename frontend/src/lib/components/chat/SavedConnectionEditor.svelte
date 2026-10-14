@@ -142,7 +142,7 @@
 		<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow changes</strong><small>POST, PUT, PATCH and DELETE follow the session’s permission mode.</small></label>
 	{:else}
 		<div class="pa-grid host">
-			<label class="pa-field"><span>Server IP address</span><input class="card-form-input" required inputmode="decimal" spellcheck="false" bind:value={host} /></label>
+			<label class="pa-field"><span>Server IP or hostname</span><input class="card-form-input" required maxlength="253" spellcheck="false" bind:value={host} /></label>
 			<label class="pa-field"><span>Port</span><input class="card-form-input" required type="number" min="1" max="65535" bind:value={port} /></label>
 		</div>
 		<label class="pa-field"><span>Username</span><input class="card-form-input" required autocomplete="off" spellcheck="false" bind:value={username} /></label>
