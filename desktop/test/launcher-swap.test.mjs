@@ -1,5 +1,6 @@
 // #1821 D5 steps 2-4: replacing the installed Windows launcher (desktop/LAUNCHER.md).
-// Linux unit tests only; the Windows acceptance run is desktop-installer.yml.
+// Portable unit tests; POSIX executable fixtures are explicitly marked below.
+// The Windows acceptance run is desktop-installer.yml.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
@@ -27,6 +28,22 @@ function tmp(t) {
  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'launcher-swap-'));
  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
  return dir;
+}
+// File symlinks require Developer Mode or elevation on Windows. Probe the
+// capability instead of skipping link-safety coverage on capable Windows hosts.
+function requireFileSymlinks(t) {
+ const dir = tmp(t);
+ const target = path.join(dir, 'target');
+ fs.writeFileSync(target, 'probe');
+ try { fs.symlinkSync(target, path.join(dir, 'link'), 'file'); }
+ catch (error) {
+  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+   t.skip('file symlink creation requires Windows Developer Mode or elevation');
+   return false;
+  }
+  throw error;
+ }
+ return true;
 }
 function write(root, files) {
  for (const [name, value] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true }); fs.writeFileSync(path.join(root, name), value); }
@@ -84,7 +101,7 @@ test('the archive writer produces what @electron/asar (Electron\'s own format) r
  assert.deepEqual(asar.listPackage(file, {}).map(name => name.split(path.sep).join('/')).sort(),
   ['/dist', '/dist/empty.txt', '/dist/main', '/dist/main/x.js', '/node_modules', '/node_modules/@s', '/node_modules/@s/p', '/node_modules/@s/p/big.bin', '/package.json']);
  for (const { name, data } of members) {
-  assert.deepEqual(asar.extractFile(file, name), data, name);
+  assert.deepEqual(asar.extractFile(file, name.split('/').join(path.sep)), data, name);
   assert.deepEqual(readAsarMember(fs, file, name), data, name);
  }
  // The integrity record Electron checks when its fuse is on: the same as @electron/asar writes for the same files.
@@ -129,18 +146,23 @@ test('the new archive holds exactly the packed launcher files from the update, w
  assert.equal(members[0].data.toString(), INSTALLED_PACKAGE);
 });
 
-test('the new archive refuses links in the update, a different entry point and an update without the launcher files', t => {
+test('the new archive refuses links in the update', t => {
+ if (!requireFileSymlinks(t)) return;
  const f = install(t);
  const asar = path.join(f.resources, 'app.asar');
  const outside = path.join(f.dir, 'outside.js'); fs.writeFileSync(outside, 'planted');
  fs.symlinkSync(outside, path.join(f.desktopDir, 'dist/main/planted.js'));
  assert.throws(() => swap.launcherMembers(f.desktopDir, asar, fs), /link/);
  fs.unlinkSync(path.join(f.desktopDir, 'dist/main/planted.js'));
- fs.symlinkSync(f.dir, path.join(f.desktopDir, 'src/pages/dir-link'));
+ fs.symlinkSync(f.dir, path.join(f.desktopDir, 'src/pages/dir-link'), 'junction');
  assert.throws(() => swap.launcherMembers(f.desktopDir, asar, fs), /link/);
  fs.unlinkSync(path.join(f.desktopDir, 'src/pages/dir-link'));
  assert.doesNotThrow(() => swap.launcherMembers(f.desktopDir, asar, fs));
+});
 
+test('the new archive refuses a different entry point and an update without the launcher files', t => {
+ const f = install(t);
+ const asar = path.join(f.resources, 'app.asar');
  const other = install(t, { desktop: fakeDesktop(tmp(t), { main: 'dist/main/index.js' }) });
  assert.throws(() => swap.launcherMembers(other.desktopDir, path.join(other.resources, 'app.asar'), fs), /entry points/);
  fs.writeFileSync(path.join(f.resources, 'app.asar'), packAsar([{ name: 'package.json', data: Buffer.from('{"main":"dist/main/index.js"}') }]));
@@ -267,12 +289,13 @@ test('never swap from an unverified release: the signed release.json must verify
 });
 
 test('paths cannot be redirected: a linked install folder or archive is refused, a planted link is removed, never followed', async t => {
+ if (!requireFileSymlinks(t)) return;
  const f = install(t);
  assert.throws(() => swap.installedResources('AI Shuffle.exe', fs), /not a file/);
  // The install folder reached through a link (a junction on Windows).
  const real = path.join(f.dir, 'elsewhere');
  fs.renameSync(path.dirname(f.exe), real);
- fs.symlinkSync(real, path.dirname(f.exe));
+ fs.symlinkSync(real, path.dirname(f.exe), 'junction');
  await assert.rejects(swap.replaceLauncher(f.options()), /link/);
  assert(!fs.existsSync(path.join(real, 'resources', 'app.new.asar')));
  fs.unlinkSync(path.dirname(f.exe)); fs.renameSync(real, path.dirname(f.exe));
@@ -289,7 +312,9 @@ test('paths cannot be redirected: a linked install folder or archive is refused,
  assert.equal(await swap.replaceLauncher(f.options()), 'swapped');
  assert.equal(fs.readFileSync(victim, 'utf8'), 'keep me');
  assert(!fs.lstatSync(path.join(f.resources, 'app.asar.old')).isSymbolicLink());
- // A folder where the candidate goes stops the swap rather than being deleted.
+});
+
+test('a folder where the candidate goes stops the swap rather than being deleted', async t => {
  const g = install(t);
  fs.mkdirSync(path.join(g.resources, 'app.new.asar'));
  await assert.rejects(swap.replaceLauncher(g.options()), /is a directory/);
@@ -369,7 +394,7 @@ async function until(check, ms = 15000) {
  while (!check()) { if (Date.now() > end) throw new Error('timed out'); await new Promise(resolve => setTimeout(resolve, 50)); }
 }
 
-test('a new launcher that never reached the app is restored from app.asar.old after it exits, and the old one starts again', async t => {
+test('a new launcher that never reached the app is restored from app.asar.old after it exits, and the old one starts again', { skip: process.platform === 'win32' ? 'relaunch fixture is a POSIX shell script, not a Windows executable' : false }, async t => {
  const f = install(t);
  await swap.replaceLauncher(f.options());
  assert.equal(swap.launcherTrial(f.root, 2, fs), 'trial');
@@ -394,7 +419,7 @@ test('a new launcher that never reached the app is restored from app.asar.old af
  assert.equal(await swap.replaceLauncher(f.options({ selfTest: () => assert.fail('not again') })), 'skipped');
 });
 
-test('the restore helper only copies the archive the swap kept, never a changed or linked one', t => {
+test('the restore helper only copies the archive the swap kept, never a changed one', t => {
  const f = install(t);
  const resources = f.resources;
  const run = expected => spawnSync(process.execPath, ['-e', swap.RESTORE_HELPER, '999999999', resources, expected, path.join(f.dir, 'no-such.exe')], { encoding: 'utf8' });
@@ -403,13 +428,19 @@ test('the restore helper only copies the archive the swap kept, never a changed 
  fs.writeFileSync(path.join(resources, 'app.asar.old'), Buffer.from('changed after the swap'));
  assert.equal(run(sha(f.original)).status, 3);
  assert.deepEqual(f.asar(), swapped);
- const elsewhere = path.join(f.dir, 'elsewhere.asar'); fs.writeFileSync(elsewhere, f.original);
- fs.rmSync(path.join(resources, 'app.asar.old')); fs.symlinkSync(elsewhere, path.join(resources, 'app.asar.old'));
- assert.equal(run(sha(f.original)).status, 3);
- assert.deepEqual(f.asar(), swapped);
  // restoreLauncher does nothing without a swap on trial.
  swap.restoreLauncher(f.root, f.exe, 1, fs, path.join(f.dir, 'must-not-run'));
  assert.equal(f.marker(), null);
+});
+
+test('the restore helper refuses a linked old archive', t => {
+ if (!requireFileSymlinks(t)) return;
+ const f = install(t);
+ const elsewhere = path.join(f.dir, 'elsewhere.asar'); fs.writeFileSync(elsewhere, f.original);
+ fs.symlinkSync(elsewhere, path.join(f.resources, 'app.asar.old'));
+ const result = spawnSync(process.execPath, ['-e', swap.RESTORE_HELPER, '999999999', f.resources, sha(f.original), path.join(f.dir, 'no-such.exe')], { encoding: 'utf8' });
+ assert.equal(result.status, 3);
+ assert.deepEqual(f.asar(), f.original);
 });
 
 // Electron's own asar support and node mode, where its binary is installed (not on CI runners that skip the download).
@@ -430,7 +461,7 @@ test('real Electron in node mode opens the packed app.new.asar and passes its se
  fs.writeFileSync(candidate, packAsar(members.filter(m => !m.name.startsWith('node_modules/pend/'))));
  await assert.rejects(swap.selfTest(electron, candidate, realLauncher, f.root), /pend/);
 });
-test('real Electron in node mode runs the restore helper over a real archive with original-fs', { skip: electron ? false : 'no Electron binary installed' }, async t => {
+test('real Electron in node mode runs the restore helper over a real archive with original-fs', { skip: process.platform === 'win32' ? 'relaunch fixture is a POSIX shell script, not a Windows executable' : electron ? false : 'no Electron binary installed' }, async t => {
  const f = install(t);
  assert.equal(await swap.replaceLauncher(f.options()), 'swapped');
  const result = spawnSync(electron, ['-e', swap.RESTORE_HELPER, '999999999', f.resources, sha(f.original), f.exe], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' });

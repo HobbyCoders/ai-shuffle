@@ -52,11 +52,11 @@ class RecordingHost:
 # ─── SE-1: the audit guard cannot be found or neutered from a cell ────────────
 
 
-async def test_se1_busy_flag_via_installed_attr_cannot_neuter_the_guard(tmp_path) -> None:
+async def test_se1_busy_flag_via_installed_attr_cannot_neuter_the_guard(codemode_marker) -> None:
     """The old escape flipped ``_audit_guard._INSTALLED._busy``. There is no
     ``_INSTALLED`` module attribute any more, and the module is dropped from
     ``sys.modules``; the reach fails and ``os.system`` stays blocked."""
-    marker = tmp_path / "se1-busy"
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -65,7 +65,7 @@ async def test_se1_busy_flag_via_installed_attr_cannot_neuter_the_guard(tmp_path
             "ag = realimp('_audit_guard')\n"
             "g = ag._INSTALLED\n"
             "g._busy = True\n"
-            "realimp('os').system('touch " + str(marker) + "')\n"
+            f"realimp('os').system({command!r})\n"
             "'escaped'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -79,8 +79,8 @@ async def test_se1_busy_flag_via_installed_attr_cannot_neuter_the_guard(tmp_path
         await k.stop()
 
 
-async def test_se1_empty_deny_sets_via_installed_attr_fails(tmp_path) -> None:
-    marker = tmp_path / "se1-deny"
+async def test_se1_empty_deny_sets_via_installed_attr_fails(codemode_marker) -> None:
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -90,7 +90,7 @@ async def test_se1_empty_deny_sets_via_installed_attr_fails(tmp_path) -> None:
             "g = ag._INSTALLED\n"
             "g._exact = frozenset()\n"
             "g._starts = tuple()\n"
-            "realimp('os').system('touch " + str(marker) + "')\n"
+            f"realimp('os').system({command!r})\n"
             "'escaped'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -100,10 +100,10 @@ async def test_se1_empty_deny_sets_via_installed_attr_fails(tmp_path) -> None:
         await k.stop()
 
 
-async def test_se1_gc_walk_to_reach_the_guard_is_denied(tmp_path) -> None:
+async def test_se1_gc_walk_to_reach_the_guard_is_denied(codemode_marker) -> None:
     """``gc.get_objects`` (and friends) are denied from a cell, so a cell cannot
     enumerate live objects to find the guard, its closure cells, or the pipe."""
-    marker = tmp_path / "se1-gc"
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -117,7 +117,7 @@ async def test_se1_gc_walk_to_reach_the_guard_is_denied(tmp_path) -> None:
             "        break\n"
             "if guard is not None:\n"
             "    guard._busy = True\n"
-            "realimp('os').system('touch " + str(marker) + "')\n"
+            f"realimp('os').system({command!r})\n"
             "'escaped'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -128,8 +128,8 @@ async def test_se1_gc_walk_to_reach_the_guard_is_denied(tmp_path) -> None:
         await k.stop()
 
 
-async def test_se1_gc_walk_for_a_system_function_is_denied(tmp_path) -> None:
-    marker = tmp_path / "se1-gcfn"
+async def test_se1_gc_walk_for_a_system_function_is_denied(codemode_marker) -> None:
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -142,7 +142,7 @@ async def test_se1_gc_walk_for_a_system_function_is_denied(tmp_path) -> None:
             "        found = o\n"
             "        break\n"
             "if found:\n"
-            "    found('touch " + str(marker) + "')\n"
+            f"    found({command!r})\n"
             "'escaped'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -165,11 +165,11 @@ async def test_se1_gc_get_referrers_and_referents_are_denied() -> None:
         await k.stop()
 
 
-async def test_se1_adding_a_permissive_audit_hook_does_not_help(tmp_path) -> None:
+async def test_se1_adding_a_permissive_audit_hook_does_not_help(codemode_marker) -> None:
     """A cell may call ``sys.addaudithook`` (CPython suppresses a hook added
     while an existing hook raises on that event); it never removes ours, so
     ``os.system`` stays blocked afterwards."""
-    marker = tmp_path / "se1-hook"
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -180,7 +180,7 @@ async def test_se1_adding_a_permissive_audit_hook_does_not_help(tmp_path) -> Non
             "    sysmod.addaudithook(lambda e, a: None)\n"
             "except Exception:\n"
             "    pass\n"
-            "realimp('os').system('touch " + str(marker) + "')\n"
+            f"realimp('os').system({command!r})\n"
             "'escaped'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -272,12 +272,13 @@ async def test_se2_host_rejects_frames_missing_the_nonce_and_the_check_bites() -
 # ─── R8-1: model-controlled hooks run without a cell frame on the stack ───────
 
 
-async def test_r8_1_malicious_getstate_is_blocked_at_checkpoint(tmp_path) -> None:
+async def test_r8_1_malicious_getstate_is_blocked_at_checkpoint(codemode_marker) -> None:
     """A cell object whose ``__getstate__`` is a C callable
     (``functools.partial(exec, …)``) runs at checkpoint pickling with no
     ``<cell>`` frame on the stack. Checkpoint pickling runs under the guard's
     deny-any-frame region, so the payload is refused and the variable dropped."""
-    marker = tmp_path / "r8-getstate"
+    marker, command = codemode_marker
+    payload = f"import os; os.system({command!r})"
     k = SubprocessKernel()
     await k.start()
     try:
@@ -285,7 +286,7 @@ async def test_r8_1_malicious_getstate_is_blocked_at_checkpoint(tmp_path) -> Non
             "import functools\n"
             "class Evil:\n"
             "    __getstate__ = functools.partial(exec, "
-            f"\"import os; os.system('touch {marker}')\", {{}})\n"
+            f"{payload!r}, {{}})\n"
             "evil = Evil()\n'planted'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -298,11 +299,12 @@ async def test_r8_1_malicious_getstate_is_blocked_at_checkpoint(tmp_path) -> Non
         await k.stop()
 
 
-async def test_r8_1_malicious_repr_is_blocked_when_the_runner_displays_a_value(tmp_path) -> None:
+async def test_r8_1_malicious_repr_is_blocked_when_the_runner_displays_a_value(codemode_marker) -> None:
     """A cell whose final value has ``__repr__ = functools.partial(exec, …)``:
     the runner's ``repr(value)`` runs the payload with no ``<cell>`` frame. It
     runs inside the deny-any-frame region, so it is refused, not executed."""
-    marker = tmp_path / "r8-repr"
+    marker, command = codemode_marker
+    payload = f"import os; os.system({command!r})"
     k = SubprocessKernel()
     await k.start()
     try:
@@ -310,7 +312,7 @@ async def test_r8_1_malicious_repr_is_blocked_when_the_runner_displays_a_value(t
             "import functools\n"
             "class R:\n"
             "    __repr__ = functools.partial(exec, "
-            f"\"import os; os.system('touch {marker}')\", {{}})\n"
+            f"{payload!r}, {{}})\n"
             "R()",
             timeout=5, on_host_call=_no_tools,
         )
@@ -324,10 +326,10 @@ async def test_r8_1_malicious_repr_is_blocked_when_the_runner_displays_a_value(t
         await k.stop()
 
 
-async def test_r8_1_malicious_reduce_is_blocked_on_restore(tmp_path) -> None:
+async def test_r8_1_malicious_reduce_is_blocked_on_restore(codemode_marker) -> None:
     """The classic ``__reduce__`` reconstructor, blocked at restore (kept here so
     the escape-probe file covers the whole family in one place)."""
-    marker = tmp_path / "r8-reduce"
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -336,7 +338,7 @@ async def test_r8_1_malicious_reduce_is_blocked_on_restore(tmp_path) -> None:
             "    def __reduce__(self):\n"
             "        import json as _j\n"
             "        return (_j.__builtins__['__import__']('os').system, "
-            f"           ('touch {marker}',))\n"
+            f"           ({command!r},))\n"
             "evil = Evil()\n'planted'",
             timeout=5, on_host_call=_no_tools,
         )
@@ -351,16 +353,16 @@ async def test_r8_1_malicious_reduce_is_blocked_on_restore(tmp_path) -> None:
 # ─── core denials still hold (control) ───────────────────────────────────────
 
 
-async def test_core_denials_still_block_direct_escapes(tmp_path) -> None:
-    marker = tmp_path / "core"
+async def test_core_denials_still_block_direct_escapes(codemode_marker) -> None:
+    marker, command = codemode_marker
     k = SubprocessKernel(KernelConfig(allow_fs=False, allow_network=False))
     await k.start()
     try:
         for body in (
-            f"{_REAL_IMPORT}('os').system('touch {marker}')",
-            f"{_REAL_IMPORT}('subprocess').Popen(['touch', '{marker}'])",
+            f"{_REAL_IMPORT}('os').system({command!r})",
+            f"{_REAL_IMPORT}('subprocess').Popen({command!r}, shell=True)",
             f"{_REAL_IMPORT}('ctypes').CDLL(None)",
-            f"open('{marker}', 'w')",
+            f"open({str(marker)!r}, 'w')",
         ):
             r = await k.exec(body + "\n'x'", timeout=5, on_host_call=_no_tools)
             assert r.error is not None, body
@@ -386,12 +388,12 @@ _THREAD_PRELUDE = (
 
 
 @pytest.mark.parametrize("target", ["system", "open"])
-async def test_r11_1_denied_builtin_as_thread_target_is_blocked(tmp_path, target) -> None:
-    marker = tmp_path / "direct"
+async def test_r11_1_denied_builtin_as_thread_target_is_blocked(codemode_marker, target) -> None:
+    marker, command = codemode_marker
     call = (
-        f"th.start_new_thread(osm.system, ('touch {marker}',))\n"
+        f"th.start_new_thread(osm.system, ({command!r},))\n"
         if target == "system"
-        else f"th.start_new_thread(imp('_io').open, ('{marker}', 'w'))\n"
+        else f"th.start_new_thread(imp('_io').open, ({str(marker)!r}, 'w'))\n"
     )
     k = SubprocessKernel(KernelConfig(os_sandbox="off"))
     await k.start()
@@ -413,8 +415,8 @@ async def test_r11_1_denied_builtin_as_thread_target_is_blocked(tmp_path, target
         await k.stop()
 
 
-async def test_r11_1_python_thread_target_calling_denied_builtin_is_blocked(tmp_path) -> None:
-    marker = tmp_path / "pythread"
+async def test_r11_1_python_thread_target_calling_denied_builtin_is_blocked(codemode_marker) -> None:
+    marker, command = codemode_marker
     k = SubprocessKernel(KernelConfig(os_sandbox="off"))
     await k.start()
     try:
@@ -423,7 +425,7 @@ async def test_r11_1_python_thread_target_calling_denied_builtin_is_blocked(tmp_
             + "done = []\n"
             "def worker():\n"
             "    try:\n"
-            f"        osm.system('touch {marker}')\n"
+            f"        osm.system({command!r})\n"
             "    except BaseException as e:\n"
             "        box.append(repr(e))\n"
             "    done.append(1)\n"

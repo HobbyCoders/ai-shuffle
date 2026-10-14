@@ -161,8 +161,12 @@ def test_leading_non_letters_before_a_scheme_are_kept():
 @pytest.mark.parametrize(
     "blob",
     ["3f2a9b" * 100_000, "a" * 600_000, "1.2-" * 150_000, "x://" + "a:" * 300_000],
+    # pytest exports the node id in PYTEST_CURRENT_TEST. Auto-ids embed the
+    # entire blob and exceed Windows' environment-variable size limit.
+    ids=["hex", "letters", "punctuation", "colon-chain"],
 )
-def test_long_tokens_scan_in_linear_time(blob):
+def test_long_tokens_scan_in_linear_time(blob, request):
+    assert len(request.node.nodeid) < 32767, "PYTEST_CURRENT_TEST must fit on Windows"
     # A 60 KB hex blob took over a second per call on the transcript write
     # path while every position restarted the scheme scan (quadratic).
     import time

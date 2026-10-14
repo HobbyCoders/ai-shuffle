@@ -13,6 +13,8 @@ A session guard also keeps the machine's real ``claude`` CLI off PATH (see
 """
 
 import os
+import shlex
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -89,6 +91,20 @@ def isolate_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     return home
+
+
+@pytest.fixture(params=["plain", "probe's directory", r"backslash\Users"])
+def codemode_marker(tmp_path, request):
+    """An executable escape payload, including a path requiring Python quoting.
+
+    Use a shell builtin on both platforms, not POSIX-only touch. The generated
+    cells must repr() this command separately from shell argument quoting.
+    """
+    directory = tmp_path / request.param
+    directory.mkdir(parents=True)
+    marker = directory / "escaped"
+    quoted = subprocess.list2cmdline([str(marker)]) if os.name == "nt" else shlex.quote(str(marker))
+    return marker, f"echo escaped > {quoted}"
 
 
 @pytest.fixture(autouse=True)

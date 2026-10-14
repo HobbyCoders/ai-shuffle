@@ -602,8 +602,8 @@ async def test_final_expression_repr_is_capped_but_value_is_kept() -> None:
 
 # REGRESSION (item 6): restoring a checkpoint unpickles model-authored objects;
 # a crafted reconstructor must be blocked exactly as a live cell's os.system is.
-async def test_malicious_checkpoint_reduce_is_blocked_on_restore(tmp_path) -> None:
-    marker = tmp_path / "pwned"
+async def test_malicious_checkpoint_reduce_is_blocked_on_restore(codemode_marker) -> None:
+    marker, command = codemode_marker
     k = SubprocessKernel()
     await k.start()
     try:
@@ -615,7 +615,7 @@ async def test_malicious_checkpoint_reduce_is_blocked_on_restore(tmp_path) -> No
             "    def __reduce__(self):\n"
             "        import json as _j\n"
             "        return (_j.__builtins__['__import__']('os').system, "
-            f"           ('touch {marker}',))\n"
+            f"           ({command!r},))\n"
             "evil = Evil()\n"
             "'planted'",
             timeout=5, on_host_call=_no_tools,
@@ -634,8 +634,8 @@ async def test_malicious_checkpoint_reduce_is_blocked_on_restore(tmp_path) -> No
 
 # BITE: with the restore attribution removed, the same crafted checkpoint runs
 # os.system and creates the marker — proving the fix above bites.
-async def test_malicious_checkpoint_bite(tmp_path, monkeypatch) -> None:
-    marker = tmp_path / "pwned-bite"
+async def test_malicious_checkpoint_bite(tmp_path, monkeypatch, codemode_marker) -> None:
+    marker, command = codemode_marker
     variant = _runner_variant(
         tmp_path,
         (
@@ -653,7 +653,7 @@ async def test_malicious_checkpoint_bite(tmp_path, monkeypatch) -> None:
             "    def __reduce__(self):\n"
             "        import json as _j\n"
             "        return (_j.__builtins__['__import__']('os').system, "
-            f"           ('touch {marker}',))\n"
+            f"           ({command!r},))\n"
             "evil = Evil()\n"
             "'planted'",
             timeout=5, on_host_call=_no_tools,

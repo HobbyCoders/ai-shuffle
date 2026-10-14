@@ -15,7 +15,7 @@ from fluid.context.settings_import import preview_settings_import
 
 def _write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
     return path
 
 
@@ -131,6 +131,7 @@ def test_digest_helpers_reject_non_directories_and_unreadable(tmp_path: Path, mo
 
 def test_normalized_text_digest_ignores_line_endings_and_trailing_space(tmp_path: Path) -> None:
     a = _write(tmp_path / "a.md", "x  \r\ny\r\n\n")
+    assert a.read_bytes() == b"x  \r\ny\r\n\n"
     b = _write(tmp_path / "b.md", "x\ny")
     assert si._normalized_text_digest(a) == si._normalized_text_digest(b)
 
