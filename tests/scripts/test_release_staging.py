@@ -86,7 +86,8 @@ class Fake:
             self.state["sources"].append({"revision": record["revision"], "channel": "stable",
                 "manifest": record["source"]["manifest"], "sequence": self.c.source["sequence"],
                 "asset_id": record["source"]["asset"]["id"], "release_repository_id": record["repository"]["id"],
-                "release_repository": record["repository"]["name"], "withdrawn_at": None})
+                "release_repository": record["repository"]["name"], "withdrawn_at": None,
+                "version": self.c.source["version"], "size": record["source"]["asset"]["size"]})
         if sink == self.fail_after:
             self.fail_after = None
             raise OSError("injected lost acknowledgement")
@@ -173,7 +174,7 @@ def test_missing_durable_bundle(candidate):
 def test_withdrawn_and_historical_floors(candidate, withdrawn, same, sequence):
     fake = Fake(candidate)
     fake.state["sources"] = [{"revision": candidate.record["revision"] if same else "f" * 40,
-        "channel": "stable", "withdrawn_at": withdrawn, "sequence": sequence, "manifest": candidate.record["source"]["manifest"]}]
+        "channel": "stable", "version": "1.2.3", "withdrawn_at": withdrawn, "sequence": sequence, "manifest": candidate.record["source"]["manifest"]}]
     with pytest.raises(ValueError, match="withdrawn|obsolete"):
         p.activate(envelope(candidate), fake)
     assert not fake.writes
@@ -344,4 +345,168 @@ def test_default_release_graph_is_byte_semantically_unchanged():
     assert opt_in["if"] == "inputs.stage_only || inputs.promote != ''"
     steps.remove(opt_in)
     assert p.sha256(p.canonical(wf)) == "4734f1ce84ba9444098852f8935b25e1b915c78319819b9f706949ebfec080d7"
+
+
+def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):
+    artifacts = tmp_path / "artifacts"
+    for name in ("linux", "apk", "play", "source"):
+        (artifacts / name).mkdir(parents=True)
+    linux = []
+    for name in ("app.AppImage", "app.deb"):
+        data = name.encode()
+        (artifacts / "linux" / name).write_bytes(data)
+        linux.append({"name": name, "bytes": len(data), "sha256": p.sha256(data)})
+    (artifacts / "linux" / "linux-build-provenance.json").write_text(json.dumps({
+        "sourceCommit": candidate.record["revision"], "version": "1.2.3", "artifacts": linux}))
+    (artifacts / "linux" / "SHA256SUMS").write_text("\n".join(f"{a['sha256']}  {a['name']}" for a in linux) + "\n")
+    (artifacts / "apk" / "AI-Shuffle-Android.apk").write_bytes(b"apk")
+    (artifacts / "apk" / "AI-Shuffle-Android.apk.sha256").write_text(p.sha256(b"apk") + "  AI-Shuffle-Android.apk\n")
+    (artifacts / "apk" / "android-build.json").write_text(json.dumps({"commit": candidate.record["revision"], "versionName": "1.2.3"}))
+    (artifacts / "play" / "app-release.aab").write_bytes(b"bundle")
+    (artifacts / "play" / "signing-certificate.pem").write_bytes(b"public certificate")
+    (artifacts / "source" / "source-evidence.json").write_text(json.dumps(candidate.record["source"]))
+    remote = {candidate.record["source"]["asset"]["id"]: candidate.files[candidate.record["source"]["asset"]["id"]]}
+    release_assets = []
+    calls = []
+    def api(route):
+        if route == "releases/tags/v1.2.3":
+            return {"id": 9, "draft": True}
+        if route.startswith("releases/assets/"):
+            return remote[int(route.split("/")[-1])][0]
+        raise AssertionError(route)
+    def command(*args, **kw):
+        calls.append(args)
+        if args[:3] == ("gh", "release", "upload"):
+            path = Path(args[4])
+            data = path.read_bytes()
+            row = {"id": 200 + len(release_assets), "name": path.name, "size": len(data), "digest": "sha256:" + p.sha256(data), "state": "uploaded"}
+            release_assets.append(row)
+            remote[row["id"]] = row, data
+            return b""
+        if args[:2] == ("gh", "api"):
+            return remote[int(args[2].split("/")[-1])][1]
+        raise AssertionError(args)
+    monkeypatch.setattr(gh, "gates", lambda _: copy.deepcopy(candidate.state))
+    monkeypatch.setattr(gh, "api", api)
+    monkeypatch.setattr(gh, "inventory", lambda _: release_assets)
+    monkeypatch.setattr(gh, "command", command)
+    monkeypatch.setattr(gh, "container_sequence", lambda *args: 100)
+    monkeypatch.setenv("DESKTOP_APPLICATION_SIGNING_KEY", candidate.private.decode())
+    monkeypatch.setenv("STAGING_JOB_RESULTS", json.dumps({**{k: "success" for k in p.REQUIRED}, "windows": "skipped"}))
+    backend = gh.Backend(tmp_path / "work")
+    backend.public_key = candidate.public
+    monkeypatch.setattr(backend, "current", lambda _: copy.deepcopy(candidate.state))
+    monkeypatch.setattr(backend, "verify_image", lambda _: None)
+    args = SimpleNamespace(tag="v1.2.3", artifacts=artifacts, windows=False, image_digest=candidate.record["image_digest"],
+                           play_code=51, record=tmp_path / gh.RECORD)
+    gh.stage(args, backend)
+    signed = args.record.read_bytes()
+    record = p.verify_signed(signed, candidate.public)
+    assert record["source"]["manifest"] == candidate.record["source"]["manifest"]
+    assert len(record["assets"]) == 9
+    assert all("--clobber" not in call for call in calls)
+    assert all(call[:2] in {("gh", "api"), ("gh", "release")} for call in calls)
+    candidate.record = record
+    candidate.files = remote
+    fake = Fake(candidate)
+    p.activate(signed, fake)
+    p.activate(signed, fake)
+    assert fake.writes == ["source", "docker", "release"]
+
+
+def test_d1_executes_only_trusted_control_helper(candidate, tmp_path, monkeypatch):
+    control, untrusted = tmp_path / "control", tmp_path / "candidate"
+    relative = "scripts/source-publisher/node_modules/wrangler/bin/wrangler.js"
+    for directory in (control, untrusted):
+        (directory / relative).parent.mkdir(parents=True)
+    (untrusted / relative).write_text("throw Error('CANDIDATE HELPER EXECUTED');")
+    (control / relative).write_text("if(process.env.DESKTOP_APPLICATION_SIGNING_KEY || process.env.GH_TOKEN) throw Error('credential leaked'); console.log(JSON.stringify([{results:[{trusted:true}]}]));")
+    key = control / "desktop/build/application-update-key.pem"
+    key.parent.mkdir(parents=True)
+    key.write_bytes(candidate.public)
+    monkeypatch.setattr(gh, "CONTROL", control)
+    monkeypatch.setattr(gh, "ROOT", untrusted)
+    monkeypatch.chdir(untrusted)
+    monkeypatch.setenv("ACCOUNT_HUB_DATABASE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("DESKTOP_APPLICATION_SIGNING_KEY", "test-only-do-not-inherit")
+    monkeypatch.setenv("GH_TOKEN", "test-only-do-not-inherit")
+    assert gh.Backend(tmp_path / "output").sql("SELECT 1;") == [{"trusted": True}]
+
+
+def test_promoter_passes_verified_baseline_to_shared_cas(candidate, tmp_path, monkeypatch):
+    backend = gh.Backend(tmp_path / "work")
+    backend.public_key = candidate.public
+    fake = Fake(candidate)
+    monkeypatch.setattr(backend, "current", fake.current)
+    calls = []
+    monkeypatch.setattr(gh, "command", lambda *args, **kwargs: calls.append((args, kwargs)))
+    backend.write("source", candidate.record)
+    args, kwargs = calls[0]
+    assert args == ("node", str(gh.CONTROL / "scripts/ci/activate_source.mjs"))
+    assert json.loads(kwargs["data"])["expectedRevision"] is None
+    assert json.loads(kwargs["data"])["signed"] == candidate.record["source"]["manifest"]
+    assert "DESKTOP_APPLICATION_SIGNING_KEY" not in kwargs["env"]
+
+
+def test_promote_workflow_uses_control_checkout_and_isolated_python():
+    wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    for name in ("stage-begin", "stage-record", "promotion", "promotion-play"):
+        job = wf["jobs"][name]
+        checkouts = [s["with"] for s in job["steps"] if s.get("uses") == "actions/checkout@v4"]
+        assert checkouts[0]["path"] == "release-control" and checkouts[0]["ref"] == "main"
+        assert checkouts[1]["path"] == "release-candidate"
+        assert job["defaults"]["run"]["working-directory"] == "release-control"
+        assert all("python -I scripts/ci/release_staging_github.py" in s["run"]
+                   for s in job["steps"] if "release_staging_github.py" in s.get("run", ""))
+
+
+def test_candidate_python_helper_cannot_run_or_receive_secrets(tmp_path, monkeypatch):
+    control, untrusted = tmp_path / "control", tmp_path / "candidate"
+    relative = "scripts/ci/publication_source.py"
+    for directory in (control, untrusted):
+        (directory / relative).parent.mkdir(parents=True)
+    (untrusted / relative).write_text("raise RuntimeError('CANDIDATE HELPER EXECUTED')")
+    (control / relative).write_text("import json, os, sys\nassert sys.flags.isolated\nassert not any(k in os.environ for k in ['DESKTOP_APPLICATION_SIGNING_KEY','CLOUDFLARE_API_TOKEN','GH_TOKEN'])\nprint(json.dumps({'trusted': True, 'args': sys.argv[1:]}))\n")
+    monkeypatch.setattr(gh, "CONTROL", control)
+    monkeypatch.setattr(gh, "ROOT", untrusted)
+    monkeypatch.chdir(untrusted)
+    for key in ("DESKTOP_APPLICATION_SIGNING_KEY", "CLOUDFLARE_API_TOKEN", "GH_TOKEN"):
+        monkeypatch.setenv(key, "test-only-do-not-inherit")
+    result = gh.source_data("image-record", "a" * 40)
+    assert result == {"trusted": True, "args": ["image-record", "--source-root", str(untrusted), "--revision", "a" * 40]}
+
+
+@pytest.mark.parametrize("substituted", [False, True])
+def test_stopped_image_matches_trusted_candidate_descriptor(candidate, tmp_path, monkeypatch, substituted):
+    backend = gh.Backend(tmp_path / "work")
+    expected = {"revision": candidate.record["revision"], "source_tree": candidate.record["tree"], "sequence": 100}
+    monkeypatch.setattr(gh, "source_data", lambda action, revision: expected)
+    monkeypatch.setattr(gh, "git", lambda *args: candidate.record["revision"])
+    calls = []
+    def command(*args, **kwargs):
+        calls.append(args)
+        if args[:4] == ("docker", "buildx", "imagetools", "inspect"):
+            return candidate.record["image_digest"].encode()
+        if args[:2] == ("docker", "create"):
+            return b"stopped-container"
+        if args[:2] == ("docker", "cp"):
+            observed = {**expected, "source_tree": "d" * 40} if substituted else expected
+            Path(args[3]).write_text(json.dumps(observed))
+        return b""
+    monkeypatch.setattr(gh, "command", command)
+    if substituted:
+        with pytest.raises(ValueError, match="exact candidate"):
+            backend.verify_image(candidate.record["image_digest"])
+    else:
+        backend.verify_image(candidate.record["image_digest"])
+    assert calls[-1] == ("docker", "rm", "stopped-container")
+    assert not any("run" in call or "start" in call or "build" in call for call in calls)
+
+
+def test_obsolete_source_version_cannot_be_resigned_forward(candidate):
+    fake = Fake(candidate)
+    fake.state["sources"] = [{"channel": "stable", "version": "2.0.0"}]
+    with pytest.raises(ValueError, match="Obsolete version"):
+        p.activate(envelope(candidate), fake)
+    assert not fake.writes
 

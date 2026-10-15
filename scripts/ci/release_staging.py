@@ -110,11 +110,14 @@ def validate(record, current, public_pem):
     if source["container"]["sequence"] <= current["historical_image_floor"]:
         raise ValueError("Image is below the historical sequence floor")
     for row in current["sources"]:
+        if row["channel"] == "stable" and version("v" + row["version"]) > version(record["tag"]):
+            raise ValueError("Obsolete version is below an existing stable source")
         same = row["revision"] == record["revision"] and row["channel"] == "stable"
         if same:
             if (row.get("withdrawn_at") is not None or row["manifest"] != record["source"]["manifest"]
                     or row["asset_id"] != asset["id"] or row["release_repository_id"] != record["repository"]["id"]
-                    or row["release_repository"] != record["repository"]["name"]):
+                    or row["release_repository"] != record["repository"]["name"]
+                    or row["sequence"] != source["sequence"] or row["version"] != source["version"] or row["size"] != asset["size"]):
                 raise ValueError("Existing source was withdrawn or substituted")
         elif row["sequence"] >= source["sequence"]:
             # Includes withdrawn rows. Removing a bad release never lowers floors.

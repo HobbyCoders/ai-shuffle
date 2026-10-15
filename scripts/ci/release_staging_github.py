@@ -13,10 +13,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+CONTROL = Path(__file__).resolve().parents[2]
+ROOT = CONTROL  # CLI selects the candidate as data with --source-root.
+sys.path.insert(0, str(CONTROL))
 from scripts.ci import release_staging as protocol
 from scripts.ci import release_preflight as preflight
 from scripts.ci.public_cutover import mapping, container_sequence
@@ -26,8 +26,26 @@ REPO = preflight.REPOSITORY
 RECORD = "whole-release-stage.json"
 
 
-def command(*args, data=None, env=None):
-    result = subprocess.run(list(args), input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+def read_environment():
+    excluded = {"DESKTOP_APPLICATION_SIGNING_KEY", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
+                "ACCOUNT_HUB_DATABASE_ID", "GH_TOKEN", "GITHUB_TOKEN", "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"}
+    return {key: value for key, value in os.environ.items() if key not in excluded}
+
+
+def source_data(action, revision):
+    return json.loads(command(sys.executable, "-I", str(CONTROL / "scripts/ci/publication_source.py"), action,
+                              "--source-root", str(ROOT), "--revision", revision, env=read_environment()))
+
+
+def command(*args, data=None, env=None, cwd=None):
+    # Executable code and npm dependencies always resolve in the trusted control
+    # checkout, never in the candidate tree whose bytes are being released.
+    if env is None:
+        env = read_environment()
+        if args[0] == "gh" and os.environ.get("GH_TOKEN"):
+            env["GH_TOKEN"] = os.environ["GH_TOKEN"]
+    result = subprocess.run(list(args), input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=env, cwd=cwd or CONTROL)
     if result.returncode:
         # No raw stderr: publication tools may echo environment/configuration.
         raise ValueError(f"Release command failed: {args[0]} {args[1]} (exit {result.returncode})")
@@ -44,7 +62,7 @@ def api(route="", *, body=None, method=None):
 
 
 def git(*args):
-    return command("git", *args).decode().strip()
+    return command("git", *args, cwd=ROOT).decode().strip()
 
 
 def inventory(release_id):
@@ -94,14 +112,14 @@ def owner_gate(tag):
 
 def gates(tag):
     repository = owner_gate(tag)
-    command("git", "fetch", "origin", "main", "--tags")
+    command("git", "fetch", "origin", "main", "--tags", cwd=ROOT)
     # A remotely moved tag must never be hidden by an old local tag object.
     remote = git("ls-remote", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}")
     refs = dict(line.split()[::-1] for line in remote.splitlines())
     revision = preflight.verify_tag(ROOT, tag)
     if refs.get(f"refs/tags/{tag}^{{}}", refs.get(f"refs/tags/{tag}")) != revision:
         raise ValueError("Stale tag: remote revision differs")
-    command("git", "diff", "--exit-code", "HEAD", "--")
+    command("git", "diff", "--exit-code", "HEAD", "--", cwd=ROOT)
     preflight.verify_versions(ROOT, tag)
     preflight.verify_catalog(ROOT, remote=True)
     preflight.verify_merged_pr(revision)
@@ -120,7 +138,7 @@ class Backend:
     def __init__(self, directory):
         self.directory = directory
         directory.mkdir(parents=True, exist_ok=True)
-        self.public_key = (ROOT / "desktop/build/application-update-key.pem").read_bytes()
+        self.public_key = (CONTROL / "desktop/build/application-update-key.pem").read_bytes()
         self.cache = {}
         self.play = None
 
@@ -132,7 +150,7 @@ class Backend:
         config.write_text(json.dumps({"d1_databases": [{"binding": "DB", "database_name": "release-metadata", "database_id": database}]}))
         env = {k: v for k, v in os.environ.items() if k not in {"DESKTOP_APPLICATION_SIGNING_KEY", "GH_TOKEN", "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"}}
         try:
-            response = json.loads(command("node", "scripts/source-publisher/node_modules/wrangler/bin/wrangler.js",
+            response = json.loads(command("node", str(CONTROL / "scripts/source-publisher/node_modules/wrangler/bin/wrangler.js"),
                 "d1", "execute", "DB", "--remote", "--config", str(config), "--command", sql, "--json", env=env))
             if not isinstance(response, list) or any(r.get("success") is False for r in response):
                 raise ValueError("D1 operation did not succeed")
@@ -144,10 +162,19 @@ class Backend:
         state = gates(record["tag"])
         release = api("releases/tags/" + record["tag"])
         state["release_id"] = release["id"]
-        present = {a["id"] for a in inventory(release["id"])}
-        if any(a["id"] not in present for a in record.get("assets", [])):
-            raise ValueError("Staged asset missing from its release")
-        state["sources"] = self.sql("SELECT revision,channel,version,manifest,sequence,asset_id,release_repository,release_repository_id,withdrawn_at FROM source_releases;")
+        present = {a["id"] for a in inventory(release["id"]) if a["name"] != RECORD}
+        if present != {a["id"] for a in record.get("assets", [])}:
+            raise ValueError("Staged release asset set changed (missing or unrecorded assets)")
+        for page in range(1, 101):
+            releases = api(f"releases?per_page=100&page={page}")
+            for item in releases:
+                if not item["draft"] and re.fullmatch(preflight.FINAL, item["tag_name"]):
+                    state["newest_tag"] = max(state["newest_tag"], item["tag_name"], key=protocol.version)
+            if len(releases) < 100:
+                break
+        else:
+            raise ValueError("Incomplete published release inventory")
+        state["sources"] = self.sql("SELECT revision,channel,version,manifest,sequence,asset_id,size,release_repository,release_repository_id,withdrawn_at FROM source_releases;")
         state["installers"] = self.sql("SELECT version,revision,release_repository_id FROM desktop_installers UNION SELECT version,revision,release_repository_id FROM desktop_platform_installers;")
         _, baseline = mapping(ROOT, state["revision"])
         state["historical_source_floor"] = baseline["maximum_desktop_sequence"] if baseline else 0
@@ -174,8 +201,21 @@ class Backend:
         return path
 
     def verify_image(self, digest):
-        from scripts.release.verify_image import verify_image
-        verify_image(ROOT, digest)
+        revision = git("rev-parse", "HEAD")
+        expected = source_data("image-record", revision)
+        ref = f"{promote_image.IMAGE}@{digest}"
+        observed = command("docker", "buildx", "imagetools", "inspect", ref, "--format", "{{.Manifest.Digest}}").decode().strip()
+        if observed != digest:
+            raise ValueError("Registry digest does not match the staged image")
+        command("docker", "pull", ref)
+        container = command("docker", "create", ref).decode().strip()
+        proof = self.directory / "stopped-image.json"
+        try:
+            command("docker", "cp", f"{container}:/app/docker/image.json", str(proof))
+            if json.loads(proof.read_bytes()) != expected:
+                raise ValueError("Image provenance does not match the exact candidate tree/sequence/contract")
+        finally:
+            command("docker", "rm", container)
 
     def verify_provenance(self, record):
         def metadata(name):
@@ -217,12 +257,22 @@ class Backend:
         if sink == "source":
             source = protocol.verify_signed(record["source"]["manifest"], self.public_key)
             asset = record["source"]["asset"]
-            # Conditional insert includes ALL historical/withdrawn rows. Conflict
-            # never updates an existing signed sequence or clears a withdrawal.
-            values = [quote(record["revision"]), "'stable'", quote(record["tag"][1:]), str(asset["id"]), str(asset["size"]),
-                      quote(record["source"]["manifest"]), str(source["sequence"]), quote(REPO), str(record["repository"]["id"])]
-            self.sql("INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence,release_repository,release_repository_id) SELECT "
-                     + ",".join(values) + f" WHERE {source['sequence']} > COALESCE((SELECT MAX(sequence) FROM source_releases),0) ON CONFLICT(revision,channel) DO NOTHING;")
+            state = self.current(record)
+            protocol.validate(record, state, self.public_key)
+            stable = [row for row in state["sources"] if row["channel"] == "stable"]
+            baseline = max(stable, key=lambda row: row["sequence"], default=None)
+            if baseline:
+                verified = protocol.verify_signed(baseline["manifest"], self.public_key)
+                if verified.get("revision") != baseline["revision"] or verified.get("sequence") != baseline["sequence"]:
+                    raise ValueError("Stable baseline signed identity mismatch")
+            # Shared revision+sequence CAS, with the ORIGINAL signed bytes.
+            # The no-signing CLI deliberately never imports the publisher.
+            row = {"revision": record["revision"], "channel": "stable", "version": record["tag"][1:],
+                   "assetId": asset["id"], "size": asset["size"], "signed": record["source"]["manifest"],
+                   "sequence": source["sequence"], "repository": REPO, "repositoryId": record["repository"]["id"],
+                   "expectedRevision": baseline["revision"] if baseline else None}
+            env = {key: value for key, value in os.environ.items() if key not in {"DESKTOP_APPLICATION_SIGNING_KEY", "GH_TOKEN", "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"}}
+            command("node", str(CONTROL / "scripts/ci/activate_source.mjs"), data=protocol.canonical(row), env=env)
         elif sink == "installer":
             asset = next(a for a in record["assets"] if a["name"].endswith(".exe"))
             old = self.sql("SELECT version,revision,asset_id,sha256,release_repository_id FROM desktop_installers WHERE id=1;")
@@ -340,9 +390,11 @@ def load(args, backend):
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("begin", "stage", "seal", "promote", "play"))
     parser.add_argument("--tag", required=True)
+    parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--record", type=Path)
@@ -350,6 +402,7 @@ def main():
     parser.add_argument("--play-code", type=int)
     parser.add_argument("--windows", action="store_true")
     args = parser.parse_args()
+    ROOT = args.source_root.resolve()
     args.directory = args.directory.resolve()
     args.record = args.record or args.directory / RECORD
     backend = Backend(args.directory)

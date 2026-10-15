@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readLauncher } from './launcher-contract.mjs';
 import { releaseRepository } from './release-repository.mjs';
+import { publishSourcePointer } from './source-pointer.mjs';
 const { repository: repo, id: repositoryId } = await releaseRepository(process.env.GH_TOKEN);
 const channel = process.env.SOURCE_CHANNEL || 'edge';
 if (!['stable', 'nightly', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or nightly (edge is a transition alias)');
@@ -79,30 +80,7 @@ const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.git
 async function api(route, options = {}) {
  return fetch(`https://api.github.com/repos/${repo}/${route}`, { ...options, headers: { ...headers, ...options.headers } });
 }
-// Shared activation boundary for direct publication and stage/promote callers.
-// Call only after the exact-revision gate verifies expectedRevision's signed feed.
-// No signing or upload occurs here; a losing writer must reselect, never retry
-// with an unchecked new baseline.
-function publishSourcePointer(wrangler, { revision, channel, version, assetId, size, signed,
- sequence, repository, repositoryId, expectedRevision }) {
- const quote = value => `'${value.replaceAll("'", "''")}'`;
- let forwardGuard = '';
- if (channel !== 'stable') {
-  if (channel !== 'edge' || !/^[a-f0-9]{40}$/.test(expectedRevision ?? '')) throw Error('Missing verified publication baseline');
-  // The HTTPS feed can lag D1. Compare it to the actual lane, then CAS the
-  // revision AND sequence in the INSERT. Wall-clock order is not source order.
-  const latest = "SELECT revision,sequence FROM source_releases WHERE channel='edge' ORDER BY sequence DESC LIMIT 1";
-  const pointer = JSON.parse(wrangler('--command', latest + ';', '--json')).flatMap(item => item.results ?? [])[0];
-  if (pointer?.revision !== expectedRevision || !Number.isSafeInteger(pointer?.sequence)) throw Error('Published pointer changed or feed is stale; retry selection');
-  forwardGuard = ` AND (SELECT revision FROM (${latest}))=${quote(expectedRevision)} AND (SELECT sequence FROM (${latest}))=${pointer.sequence}`;
- }
- const insert = `INSERT INTO source_releases(revision,channel,version,asset_id,size,manifest,sequence,release_repository,release_repository_id) SELECT ${quote(revision)},${quote(channel)},${quote(version)},${assetId},${size},${quote(signed)},${sequence},${quote(repository)},${repositoryId} WHERE ${sequence} > COALESCE((SELECT MAX(sequence) FROM source_releases),0)${forwardGuard} ON CONFLICT(revision,channel) DO NOTHING;`;
- // Use the query API: bulk --file imports emit non-JSON progress and pause D1.
- wrangler('--command', insert);
- const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id,release_repository,release_repository_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(channel)};`, '--json'));
- const row = result.flatMap(item => item.results ?? [])[0];
- if (row?.manifest !== signed || row?.asset_id !== assetId || row?.release_repository !== repository || row?.release_repository_id !== repositoryId) throw new Error('Source pointer read-back did not match');
-}
+// Activation is shared with the no-signing whole-release promoter.
 
 // Nightly can lag main, but never a newer attestation or the signed pointer.
 let expectedEdge;
