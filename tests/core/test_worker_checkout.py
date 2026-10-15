@@ -50,7 +50,8 @@ def test_python_and_frontend_receipt_uses_local_checkout_without_copying(repo):
         "command": "npm ci && npx svelte-kit sync", "cwd": str(Path(checkout.path) / "frontend"),
     }]
     assert not (Path(checkout.path) / "frontend" / "node_modules").exists()
-    assert str(interpreter) in checkout.instructions()
+    receipt = json.loads(checkout.instructions().splitlines()[1])
+    assert receipt["runtime"]["python"] == str(interpreter)
 
 
 @pytest.mark.asyncio
@@ -68,7 +69,8 @@ async def test_real_setup_shell_is_tracked_in_worker_and_reports_completion(repo
     database.create_session(sid, "coder", project_v2_id=row["project_v2_id"])
     database.set_session_branch(sid, checkout.branch, checkout.project_v2_id)
     argv = [sys.executable, "-m", "venv", "--without-pip", ".venv"]
-    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    from fluid.tools.shell import resolve_shell
+    command = shlex.join(argv) if resolve_shell().posix else subprocess.list2cmdline(argv)
     command += f" && exit {exit_code}"
     git(parent, "config", "--local", "fluid.workerSetupCommand", command)
     done = asyncio.Event()
@@ -445,7 +447,8 @@ async def test_setup_completion_waits_for_initial_dispatch_context(
     row, parent, *_ = repo
     sid = "setup-race-" + submission
     argv = [sys.executable, "-c", "pass"]
-    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    from fluid.tools.shell import resolve_shell
+    command = shlex.join(argv) if resolve_shell().posix else subprocess.list2cmdline(argv)
     git(parent, "config", "--local", "fluid.workerSetupCommand", command)
     initial = []
     wakes = []

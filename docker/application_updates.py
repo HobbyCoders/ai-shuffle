@@ -550,7 +550,7 @@ class RuntimeOverlays:
         for path, _, _ in links:
             if not path.resolve().is_relative_to(target.resolve()) or not path.exists():
                 raise UpdateError("Runtime archive has a dangling or escaping link")
-        if verify and {str(path.relative_to(target)) for path in target.rglob("*")} != expected:
+        if verify and {path.relative_to(target).as_posix() for path in target.rglob("*")} != expected:
             raise UpdateError("Installed runtime contains files absent from signed archive")
 
     def prepare(self, items):

@@ -92,7 +92,7 @@ async def test_peer_open_refusal_preserves_error_and_releases_reservation(peers,
 @pytest.mark.asyncio
 async def test_stream_relays_arbitrary_bytes_input_resize_and_close(peers):
     source = service.TerminalRegistry()
-    terminal = await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer"), shell="sh"),
+    terminal = await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer")),
                                     "owner", SimpleNamespace(valid=True))
     remote = peers[0].list()[0]
     payload = b"\x00\xff\x1b[31mpeer bytes\r\n"
@@ -100,7 +100,9 @@ async def test_stream_relays_arbitrary_bytes_input_resize_and_close(peers):
     async with asyncio.timeout(5):
         while payload not in terminal.scrollback.snapshot():
             await asyncio.sleep(.01)
-    await terminal.write(b"printf 'RELAY_%s' OK\n")
+    command = (b"Write-Output ('RELAY_' + 'OK')\r"
+               if remote.shell in {"pwsh", "powershell"} else b"printf 'RELAY_%s' OK\n")
+    await terminal.write(command)
     async with asyncio.timeout(5):
         while b"RELAY_OK" not in terminal.scrollback.snapshot():
             await asyncio.sleep(.01)
@@ -118,7 +120,9 @@ async def test_stream_relays_arbitrary_bytes_input_resize_and_close(peers):
 async def test_peer_disconnect_lease_closes_shell(peers, monkeypatch):
     monkeypatch.setattr(relay, "LEASE_SECONDS", .02)
     lease = relay.authorize(SimpleNamespace(valid=True), "owner", "peer")
-    await relay.handle({"lease": lease, "op": "open", "options": {"shell": "sh"}}, "source")
+    opened = await relay.handle({"lease": lease, "op": "open", "options": {}}, "source")
+    assert "terminal" in opened, opened
+    assert peers[0].count == 1
     async with asyncio.timeout(2):
         while peers[0].count:
             await asyncio.sleep(.01)
@@ -226,7 +230,7 @@ async def test_real_grant_producer_feeds_terminal_and_immediate_revocation(ssh, 
 async def test_revoked_peer_owner_closes_stream_and_refuses_new_input(peers):
     request = SimpleNamespace(valid=True)
     source = service.TerminalRegistry()
-    terminal = await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer"), shell="sh"), "owner", request)
+    terminal = await targets.create(source, api.CreateTerminal(target=api.TargetRef(worker_id="peer")), "owner", request)
     request.valid = False
     with pytest.raises(service.TerminalError):
         await terminal.write(b"not delivered")

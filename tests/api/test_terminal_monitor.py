@@ -1,7 +1,9 @@
 """Files confinement and read-only Monitor attachment through real owner auth."""
 
 import asyncio
+import os
 import shlex
+import subprocess
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,11 +25,23 @@ def test_files_relative_root_and_subfolder_open_in_real_shell(ctx):
         assert terminal["cwd"] == str(expected)
         with wsc(tc, f"/api/v1/ws/terminals/{terminal['id']}") as ws:
             attach(ws)
-            ws.send_json({"type": "input", "data": "pwd; echo FOLDER_$((6*7))\n"})
+            command = ("(Get-Location).Path; Write-Output ('FOLDER_' + (6*7))\r"
+                       if terminal["shell"] in {"pwsh", "powershell"}
+                       else "pwd; echo FOLDER_$((6*7))\n")
+            ws.send_json({"type": "input", "data": command})
             assert str(expected).encode() in strip(read_until(ws, b"FOLDER_42"))
 
 
-@pytest.mark.parametrize("kind", ["absolute", "traversal", "symlink"])
+def directory_link(link, target):
+    """Exercise real directory indirection without requiring Windows elevation."""
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       check=True, capture_output=True)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.parametrize("kind", ["absolute", "traversal", "junction" if os.name == "nt" else "symlink"])
 def test_cwd_and_files_refuse_escape(ctx, kind):
     outside = ctx.tmp.parent
     if kind == "absolute":
@@ -35,7 +49,7 @@ def test_cwd_and_files_refuse_escape(ctx, kind):
     elif kind == "traversal":
         path = "work/../.."
     else:
-        (ctx.tmp / "escape").symlink_to(outside, target_is_directory=True)
+        directory_link(ctx.tmp / "escape", outside)
         path = "escape"
     tc = owner(ctx)
     for route, body in (
@@ -55,7 +69,7 @@ def test_files_missing_file_and_inside_symlink(ctx):
         response = tc.post("/api/v1/terminals/from-files", json={"path": path})
         assert response.status_code == 400
         assert response.json()["code"] == "bad_folder"
-    (ctx.tmp / "link").symlink_to(ctx.work, target_is_directory=True)
+    directory_link(ctx.tmp / "link", ctx.work)
     response = tc.post("/api/v1/terminals", json={"cwd": str(ctx.tmp / "link")})
     assert response.status_code == 201
     assert response.json()["terminal"]["cwd"] == str(ctx.work.resolve())

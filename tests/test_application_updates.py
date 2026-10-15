@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import stat
+import shutil
 import subprocess
+import sys
 import zipfile
 
 import httpx
@@ -22,6 +24,7 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="executes Linux container Python overlays and bin/python venv symlinks")
 def test_real_venvs_after_overlay_handover_use_image_python_and_survive_cleanup(feed, monkeypatch):
     from docker import application_updates as module
     updater, publish, *_ = feed
@@ -340,12 +343,15 @@ def test_pax_padding_cannot_smuggle_sparse_metadata(monkeypatch, tmp_path):
 
 
 def stub_venv(directory, executable=None):
-    """Model the base-interpreter links/config that real venv writes."""
+    """Model venv base metadata, using its supported copy form on Windows."""
     from docker.application_updates import IMAGE_PYTHON
     base = Path(executable or IMAGE_PYTHON).resolve()
     python = directory / "venv/bin/python"
     python.parent.mkdir(parents=True, exist_ok=True)
-    python.symlink_to(base)
+    if os.name == "nt":
+        shutil.copyfile(base, python)
+    else:
+        python.symlink_to(base)
     (directory / "venv/pyvenv.cfg").write_text(f"home = {base.parent}\nexecutable = {base}\n")
 
 
@@ -397,7 +403,7 @@ def test_runtime_unsafe_archives_never_leave_partial_overlays(feed, kind):
     assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
 
 
-def test_runtime_safe_node_links_and_offline_reuse(feed):
+def test_runtime_safe_node_links_and_offline_reuse(feed, requires_symlinks):
     import tarfile
     updater = feed[0]
     output = io.BytesIO()
@@ -509,8 +515,10 @@ def test_runtime_selection_is_opt_in_platform_specific_and_image_first(feed, mon
     _, _, env = updater.launch({"PATH": "/usr/bin"}, activate=True)
     assert item["sha256"] in env["PATH"]
     assert updater.overlays.installed(item).is_dir()
-    assert stat.S_IMODE(updater.overlays.root.stat().st_mode) == 0o755
-    assert stat.S_IMODE(updater.overlays.directory(item).stat().st_mode) == 0o755
+    # Windows exposes readonly bits, not the container filesystem's POSIX modes.
+    if os.name != "nt":
+        assert stat.S_IMODE(updater.overlays.root.stat().st_mode) == 0o755
+        assert stat.S_IMODE(updater.overlays.directory(item).stat().st_mode) == 0o755
     container = updater.manifest(B)["container"]
     assert module.selected_overlays(container, {"provides": ["base-1", item["capability"]]}) == []
     monkeypatch.setattr(module, "runtime_platform", lambda: "linux-unsupported")
@@ -728,6 +736,9 @@ def _no_inherited_update_settings(monkeypatch):
 
 @pytest.fixture
 def feed(tmp_path, monkeypatch):
+    # Model the image interpreter with a real local binary on non-container hosts.
+    if os.name == "nt":
+        monkeypatch.setattr("docker.application_updates.IMAGE_PYTHON", sys._base_executable)
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
     responses, requests = {}, []
