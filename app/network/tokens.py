@@ -194,7 +194,7 @@ def sign_challenge(signing_private: bytes, challenge: str, audience: str) -> str
 def canonical_endpoint(endpoint: str) -> str:
     """Canonical HTTP(S) base, never obtained from request/forwarded headers.
 
-    Lowercase scheme and IDNA host; compress/bracket IPv6; omit default ports
+    Lowercase scheme and ASCII host; compress/bracket IPv6; omit default ports
     and trailing slashes. Preserve path case and interior slashes, decode
     unreserved escapes and uppercase other escapes. Reject ambiguous dot paths,
     credentials, queries, fragments, scoped IPv6, whitespace and backslashes.
@@ -207,13 +207,23 @@ def canonical_endpoint(endpoint: str) -> str:
     url = urlsplit(endpoint)
     if url.scheme not in ("http", "https") or not url.hostname or url.username is not None or url.password is not None:
         raise ValueError("Invalid endpoint")
+    # Reject before .hostname lowercases Unicode (e.g. the Kelvin sign).
+    # Never use the stdlib IDNA-2003 codec: HTTPX dials IDNA-2008 names, so
+    # faß.example and fass.example must not collapse to one signed endpoint.
+    # International names must arrive as literal ASCII A-labels on both sides.
+    if not url.netloc.isascii():
+        raise ValueError("Endpoint hosts must use ASCII A-labels")
     host = url.hostname
     if "%" in host:
         raise ValueError("Scoped or escaped host is not supported")
     if ":" in host:
         host = "[" + str(ipaddress.IPv6Address(host)) + "]"
     else:
-        host = host.encode("idna").decode("ascii").lower()
+        host = host.lower()
+        labels = host.removesuffix(".").split(".")
+        if len(host.removesuffix(".")) > 253 or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels):
+            raise ValueError("Invalid ASCII endpoint host")
     port = url.port
     authority = host if port is None or port == {"http": 80, "https": 443}[url.scheme] else f"{host}:{port}"
     path = url.path

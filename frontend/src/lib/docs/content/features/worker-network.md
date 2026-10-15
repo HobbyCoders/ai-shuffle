@@ -64,8 +64,10 @@ LAN addresses, never against HTTP Host or forwarded headers. Tunnel rotation
 accepts the new advertisement immediately and rejects the removed address,
 including challenges issued before rotation; peers must refresh discovery.
 
-Canonical bases use lowercase HTTP(S) schemes and IDNA hosts, compressed bracketed
-IPv6, omitted default ports (80/443), and no trailing slashes. Path case and interior
+Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
+IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames
+must be supplied as ASCII A-labels (punycode); Unicode hosts are rejected in both
+proofs and advertisements, never re-encoded with a different IDNA version. Path case and interior
 slashes remain significant; unreserved percent escapes are decoded and other
 escapes use uppercase hex. A DNS trailing dot remains significant. Credentials,
 queries, fragments, scoped IPv6, whitespace, backslashes, dot path segments and

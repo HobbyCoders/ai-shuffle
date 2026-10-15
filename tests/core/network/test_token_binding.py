@@ -172,7 +172,7 @@ def test_unsigned_or_wrong_key_capability_cannot_pin(pair):
     ("https://[2001:db8::1]:8443/A//B/", "https://[2001:db8::1]:8443/A//B"),
     ("https://example.com/%7euser/%2f/", "https://example.com/~user/%2F"),
     ("https://example.com./Case/", "https://example.com./Case"),
-    ("https://bücher.example/", "https://xn--bcher-kva.example"),
+    ("https://XN--BCHER-KVA.example/", "https://xn--bcher-kva.example"),
 ])
 def test_normalization(raw, canonical):
     assert tokens.canonical_endpoint(raw) == canonical
@@ -185,6 +185,72 @@ def test_normalization(raw, canonical):
 def test_ambiguous_endpoints_rejected(raw):
     with pytest.raises(ValueError):
         tokens.canonical_endpoint(raw)
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("relay_endpoint", ["https://faß.example", "https://xn--fa-hia.example"])
+def test_idna_destinations_cannot_share_a_binding(pair, pinned, relay_endpoint):
+    server, peer, endpoints, client = pair
+    legitimate = "https://fass.example"
+    endpoints[:] = [legitimate]
+    assert httpx.URL("https://faß.example").raw_host == b"xn--fa-hia.example"
+    assert httpx.URL(legitimate).raw_host == b"fass.example"
+    with server.active():
+        if pinned:
+            assert post(client, request_body(client, server, peer, legitimate)).status_code == 200
+        # Reproduce the old IDNA-2003 proof: the client signed fass.example
+        # while HTTPX connected to xn--fa-hia.example. It must not be accepted.
+        body = request_body(client, server, peer, legitimate)
+        body["endpoint"] = relay_endpoint
+        response = post(client, body)
+        assert response.status_code == 403
+        assert "token" not in response.json()
+        assert bool(store.get_member(peer.device_id)["token_binding_required"]) == pinned
+
+
+def test_unicode_advertisement_cannot_authorize_another_ascii_host(pair):
+    server, peer, endpoints, client = pair
+    endpoints[:] = ["https://faß.example"]
+    with server.active():
+        assert post(client, request_body(client, server, peer, "https://fass.example")).status_code == 403
+        assert post(client, request_body(client, server, peer, "https://xn--fa-hia.example")).status_code == 403
+
+
+def test_punycoded_advertisement_works_and_rotates_without_aliasing(pair):
+    server, peer, endpoints, client = pair
+    endpoints[:] = ["https://XN--FA-HIA.example/"]
+    with server.active():
+        assert post(client, request_body(client, server, peer, "https://xn--fa-hia.example")).status_code == 200
+        assert store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer, "https://fass.example")).status_code == 403
+        endpoints[:] = ["https://fass.example"]
+        assert post(client, request_body(client, server, peer, "https://xn--fa-hia.example")).status_code == 403
+        assert post(client, request_body(client, server, peer, "https://fass.example")).status_code == 200
+
+
+@pytest.mark.parametrize("host", ["faß.example", "bücher.example", "K.example", "ｆａｓｓ.example",
+                                  "-bad.example", "bad-.example", "a..example", "under_score.example"])
+def test_non_ascii_and_invalid_dns_hosts_are_rejected(host):
+    with pytest.raises(ValueError):
+        tokens.canonical_endpoint("https://" + host)
+
+
+@pytest.mark.asyncio
+async def test_client_refuses_unicode_endpoint_before_sending_any_proof(pair):
+    server, peer, _, _ = pair
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"challenge": "nonce-from-relay-123456"})
+    with peer.active():
+        link = transport.PeerLink(server.device_id, [])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(ValueError, match="ASCII A-labels"):
+                await link._issue_token(client, engine.context(), "https://faß.example")
+    assert len(requests) == 1
+    assert requests[0].url.raw_host == b"xn--fa-hia.example"
+    assert requests[0].url.path.endswith("/challenge")
+    assert "signature" not in json.loads(requests[0].content)
 
 
 def test_transcript_is_versioned_and_unambiguous():
