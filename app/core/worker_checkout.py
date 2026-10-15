@@ -1,6 +1,7 @@
 """Host-owned Git isolation for Task and Swarm workers.
 
-Use the direct caller's committed HEAD, never an origin tip or the routing root.
+Use the caller's committed HEAD or an explicit validated review commit, never
+an inferred origin tip or the routing root.
 No model-chosen paths, credential copies, shared runtime links or automatic
 merges. A worker checkout that holds work (commits or file changes) is retained
 for review; one that provably holds nothing — a provisioning failure, a launch
@@ -53,18 +54,24 @@ class WorkerCheckout:
     base_commit: str
     project_v2_id: str
     parent_branch: str | None
+    runtime: dict | None = None
 
     def instructions(self) -> str:
         return (
             "# Host-provisioned worker checkout\n"
             + json.dumps({"path": self.path, "branch": self.branch,
                           "base_commit": self.base_commit,
-                          "integration_target": self.parent_branch})
+                          "integration_target": self.parent_branch,
+                          "runtime": self.runtime})
             + "\nThe app created and bound this dedicated checkout before launch. "
             "Use it instead of any checkout path in the assignment. Your default "
             "working directory is this checkout. Do not create another worktree "
             "or switch the parent's branch. Uncommitted parent changes and "
-            "dependencies are not copied; install required dependencies here. "
+            "dependencies are not copied. When runtime information is supplied, "
+            "use the recorded Python interpreter for "
+            "tests (do not install into the parent environment); prefer a checkout-local "
+            "venv once setup completes. Runtime setup status and ready-to-run Monitor "
+            "inputs are in the receipt. Do not race a running setup task. "
             "Commit scoped changes and return their SHAs and this checkout path "
             "for the parent's review/integration. Do not merge into the parent "
             "checkout, remove this worktree, or push/open a PR unless assigned. "
@@ -152,7 +159,7 @@ def _tool_surface(profile_id, tool_allowlist):
     return None
 
 
-def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None):
+def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None, *, base_commit=None):
     """Provision write-capable project workers; explicit research may share.
 
     Shares only explicitly declared surfaces of known, non-mutating builtins
@@ -163,11 +170,15 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     from app.core import checkout_manager, project_resolver
     from app.core.git_service import git_service
 
-    if _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
+    if base_commit is not None and (not isinstance(base_commit, str) or not _SHA.fullmatch(base_commit)):
+        raise WorkerCheckoutError("base_commit must be a full commit SHA already available locally.")
+    if base_commit is None and _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
         return None
     if parent_row is None:
         raise WorkerCheckoutError("The calling session is unavailable; refusing worker checkout inheritance.")
     if not (parent_row.get("project_v2_id") or parent_row.get("project_id")):
+        if base_commit is not None:
+            raise WorkerCheckoutError("base_commit requires a Git project checkout.")
         return None
     project = project_resolver.resolve_project_v2(dict(parent_row))
     if not project:
@@ -175,6 +186,8 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     expected = parent_row.get("branch") or parent_row.get("worktree_branch")
     parent_path = _caller_checkout(parent_row, expected)
     if not parent_path:
+        if base_commit is not None:
+            raise WorkerCheckoutError("base_commit requires a Git project checkout.")
         return None
     # An unbound caller (the project's base checkout) still integrates into a
     # real branch: report it, and hold it steady through provisioning.
@@ -184,10 +197,11 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
 
     with _project_lock(project["id"]):
-        tip = git_service._run_git(parent_path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
+        ref = base_commit or "HEAD"
+        tip = git_service._run_git(parent_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
         sha = tip.stdout.strip()
-        if tip.returncode or not _SHA.fullmatch(sha):
-            raise WorkerCheckoutError("The caller has no valid committed HEAD to fork a worker from.")
+        if tip.returncode or not _SHA.fullmatch(sha) or (base_commit and sha != base_commit):
+            raise WorkerCheckoutError("The requested base commit is unavailable locally; fetch it before dispatch.")
         # Creating the ref first prevents add_worktree's new-branch path fetching
         # origin and preferring an origin/<base> tip over the actual caller HEAD.
         if not git_service.create_branch(parent_path, branch, start_point=sha):
@@ -212,7 +226,10 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
             # Nothing has run in it yet: reclaim what this call created.
             _reclaim(parent_path, project["id"], path, branch, sha)
             raise
-    return WorkerCheckout(path, branch, sha, project["id"], target)
+    from app.core.worker_runtime import runtime_receipt
+
+    return WorkerCheckout(path, branch, sha, project["id"], target,
+                          runtime_receipt(parent_path, path))
 
 
 def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, base_commit: str) -> bool:

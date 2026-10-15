@@ -177,6 +177,7 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
 
     assert "enum" not in contract.input_schema["properties"]["agent"]
     assert "reviewer" in {target.id for target in contract.targets}
+    assert contract.input_schema["properties"]["base_commit"]["pattern"] == "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
     # Task's model takes any model the user asked for (#1830): a checked
     # string, never an enum of every provider's models.
     assert "enum" not in contract.input_schema["properties"]["model"]

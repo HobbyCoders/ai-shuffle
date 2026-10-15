@@ -1269,6 +1269,8 @@ class HarnessAdapter(ProviderAdapter):
         app_session_id = getattr(sdk_options, "aih_session_id", None)
         if app_session_id:
             opts.extra["app_session_id"] = app_session_id
+        if getattr(sdk_options, "aih_worker_run", False):
+            opts.extra["worker_run"] = True
         if getattr(sdk_options, "aih_automatic_workflows", False):
             opts.extra["automatic_workflows"] = True
         profile_id = getattr(sdk_options, "aih_profile_id", None)
@@ -5537,13 +5539,17 @@ def _tool_allowlist(options: SessionOptions) -> Optional[list]:
     ``allowed_tools``, which carries the SDK's permission vocabulary (see the
     field docs in ``provider/types.py``). Blank entries are dropped and an empty
     result degrades to None, so an accidental ``[]`` never blanks a session's
-    toolset — CE12's "restriction is exactly the list" only applies to a list
-    that actually names something.
+    toolset. A shell-capable worker surface also offers Monitor and task management,
+    subject to the owner's explicit blocks. This never expands permission grants.
     """
     raw = getattr(options, "tool_allowlist", None)
     if not raw:
         return None
+    from app.core.tool_access import shell_companion_tools
+
     names = [str(t).strip() for t in raw if str(t).strip()]
+    if options.extra.get("worker_run"):
+        names = shell_companion_tools(names, options.disallowed_tools)
     if _session_mode(options) == "chat" and "Read" in names:
         from app.core.attachment_read import DELEGATED_READ
         if DELEGATED_READ not in names:

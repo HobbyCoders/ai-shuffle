@@ -76,6 +76,18 @@ def _terminal_event(
     }])
 
 
+@pytest.mark.parametrize("source", ["provider_agent", "user"])
+def test_only_queued_worker_initial_turns_supply_fallback_context(mock_db, source):
+    turn = turns_db.enqueue_turn("queued-context", source, prompt="assignment",
+                                 overrides={"tool_allowlist": ["Bash", "Read"]})
+    context = turn_scheduler._latest_context_turn("queued-context")
+    if source == "provider_agent":
+        assert context["id"] == turn["id"]
+        assert context["overrides"] == turn["overrides"]
+    else:
+        assert context is None
+
+
 def _settled_turn(
     session_id,
     *,

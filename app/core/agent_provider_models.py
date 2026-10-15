@@ -860,6 +860,15 @@ def build_task_contract(
     }
     from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE, EFFORT_PROPERTY
 
+    properties["base_commit"] = {
+        "type": "string",
+        "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+        "description": (
+            "Optional full commit SHA for a local review checkout. Fetch the PR head "
+            "first; it must already exist in the caller's repository. Omitted: caller's "
+            "committed HEAD. Never inferred from the brief. Not supported with worker."
+        ),
+    }
     properties["effort"] = dict(EFFORT_PROPERTY)
     properties["model"] = {
         "type": "string",

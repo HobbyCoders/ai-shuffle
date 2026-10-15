@@ -1989,6 +1989,7 @@ def build_options_from_profile(
     # only ever knows its own `ses_...` handle, and a brand-new session has no
     # fluid id at connect time at all.
     options.aih_session_id = session_id
+    options.aih_worker_run = _is_worker_run(session_id)
     options.aih_profile_id = profile.get("id")
     options.aih_assistant_proactive = assistant_proactive
     options.aih_assistant_home = assistant_home

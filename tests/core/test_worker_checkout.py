@@ -13,6 +13,203 @@ from app.db import checkouts, database, projects_v2
 from tests.shared_fixtures import clean_task_registry, foreign_keys_off, pin_runner  # noqa: F401
 
 
+
+def test_explicit_review_base_is_materialized_not_parsed_from_prompt(repo, worker_runtime):
+    row, parent, base, tip = repo
+    review_sha = git(base, "rev-parse", "HEAD")
+    outcome = dispatch(base_commit=review_sha)
+    assert outcome.ok, outcome.error
+    assert worker_runtime[0]["head"] == review_sha != tip
+    assert git(parent, "rev-parse", "HEAD") == tip
+
+
+@pytest.mark.parametrize("value", ["HEAD", "--help", "abc123", "f" * 40, 123])
+def test_invalid_or_missing_review_commit_refuses_before_branch_creation(repo, value):
+    row, parent, *_ = repo
+    with pytest.raises(worker_checkout.WorkerCheckoutError):
+        worker_checkout.prepare_worker_checkout(row, "bad-ref", "coder", base_commit=value)
+    assert not git(parent, "branch", "--list", "task/bad-ref")
+
+
+def test_python_and_frontend_receipt_uses_local_checkout_without_copying(repo):
+    import json
+    row, parent, base, tip = repo
+    interpreter = parent / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("interpreter presence canary")
+    frontend = parent / "frontend"
+    frontend.mkdir()
+    (frontend / "package-lock.json").write_text("{}")
+    (frontend / "package.json").write_text(json.dumps({"devDependencies": {"@sveltejs/kit": "*"}}))
+    git(parent, "add", "frontend")
+    git(parent, "commit", "-m", "frontend manifests")
+    checkout = worker_checkout.prepare_worker_checkout(row, "runtime-receipt", "coder")
+    assert checkout.runtime["python"] == str(interpreter)
+    assert not (Path(checkout.path) / ".venv").exists()
+    assert checkout.runtime["frontend_monitor_inputs"] == [{
+        "command": "npm ci && npx svelte-kit sync", "cwd": str(Path(checkout.path) / "frontend"),
+    }]
+    assert not (Path(checkout.path) / "frontend" / "node_modules").exists()
+    assert str(interpreter) in checkout.instructions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_real_setup_shell_is_tracked_in_worker_and_reports_completion(repo, monkeypatch, exit_code):
+    import sys
+    import shlex
+    from app.core import worker_runtime as runtime, monitor_spawn, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.mcp import builtin_tools
+
+    row, parent, *_ = repo
+    sid = "real-setup-" + str(exit_code)
+    checkout = worker_checkout.prepare_worker_checkout(row, sid, "coder")
+    database.create_session(sid, "coder", project_v2_id=row["project_v2_id"])
+    database.set_session_branch(sid, checkout.branch, checkout.project_v2_id)
+    argv = [sys.executable, "-m", "venv", "--without-pip", ".venv"]
+    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    command += f" && exit {exit_code}"
+    git(parent, "config", "--local", "fluid.workerSetupCommand", command)
+    done = asyncio.Event()
+    frames = []
+
+    async def terminal(session_id, frame):
+        assert session_id == sid
+        frames.append(frame)
+        done.set()
+
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
+    monkeypatch.setattr(builtin_tools, "_emit_shell_start_frame", AsyncMock())
+    monkeypatch.setattr(builtin_tools, "_emit_shell_settle_frame", AsyncMock())
+    monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.01)
+    await runtime.start_worker_runtime(checkout, sid, "coder")
+    task_id = checkout.runtime["setup_task_id"]
+    assert task_registry.get_task(sid, task_id)["kind"] == "shell"
+    try:
+        await asyncio.wait_for(done.wait(), 20)
+        assert frames[0]["status"] == ("completed" if exit_code == 0 else "error")
+        assert frames[0]["task_id"] == task_id
+        assert (Path(checkout.path) / ".venv" / "pyvenv.cfg").is_file()
+        assert not (parent / ".venv").exists()
+        assert builtin_tools._background_tasks[task_id].exit_code == exit_code
+    finally:
+        task = builtin_tools._background_tasks[task_id]
+        if task.is_running():
+            await builtin_tools.stop_background_shell_task(task_id, session_id=sid)
+        builtin_tools._background_tasks.pop(task_id, None)
+        task_registry.clear_session(sid)
+
+
+def test_explicit_review_commit_requires_a_project(repo):
+    with pytest.raises(worker_checkout.WorkerCheckoutError, match="requires a Git project"):
+        worker_checkout.prepare_worker_checkout({}, "no-project", "coder", base_commit="a" * 40)
+
+
+def test_setup_spawn_failure_reports_status_without_leaking_command(repo, monkeypatch):
+    from app.core import worker_runtime as runtime, monitor_spawn
+    row, parent, *_ = repo
+    git(parent, "config", "--local", "fluid.workerSetupCommand", "private-command-canary")
+    checkout = worker_checkout.prepare_worker_checkout(row, "setup-failed", "coder")
+
+    def fail(*args, **kwargs):
+        raise OSError("private-command-canary")
+
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", fail)
+    asyncio.run(runtime.start_worker_runtime(checkout, "setup-failed", "coder"))
+    assert checkout.runtime["setup_status"].startswith("failed to start")
+    assert "private-command-canary" not in checkout.instructions()
+
+
+def test_local_setting_read_failure_is_nonfatal(monkeypatch):
+    from app.core.worker_runtime import _local_setting
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("git", 5)
+
+    monkeypatch.setattr(git_service, "_run_git", timeout)
+    assert _local_setting("unused", "fluid.workerSetupCommand") == ""
+
+
+@pytest.mark.asyncio
+async def test_runtime_setup_reads_run_off_the_event_loop(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from app.core import worker_runtime as runtime, monitor_spawn
+
+    loop_thread = threading.get_ident()
+    reads = []
+
+    def setting(path, key):
+        assert threading.get_ident() != loop_thread
+        reads.append("config")
+        return "setup-command"
+
+    def profile(profile_id):
+        assert threading.get_ident() != loop_thread
+        reads.append("profile")
+        return {"config": {}}
+
+    async def spawn(inputs, ctx):
+        assert threading.get_ident() == loop_thread
+        return SimpleNamespace(background_task=SimpleNamespace(task_id="setup-task"))
+
+    monkeypatch.setattr(runtime, "_local_setting", setting)
+    monkeypatch.setattr(database, "get_profile", profile)
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", lambda *a, **kw: spawn)
+    checkout = SimpleNamespace(path="unused", runtime={})
+    await runtime.start_worker_runtime(checkout, "worker", "coder")
+    assert reads == ["config", "profile"]
+    assert checkout.runtime["setup_task_id"] == "setup-task"
+
+
+def test_configured_python_wins_without_running_it(repo):
+    row, parent, *_ = repo
+    python = parent / "project-python"
+    python.write_text("not executable")
+    git(parent, "config", "--local", "fluid.workerPython", str(python))
+    checkout = worker_checkout.prepare_worker_checkout(row, "configured-python", "coder")
+    assert checkout.runtime["python"] == str(python)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_dispatch_starts_opted_in_runtime_without_joining(repo, worker_runtime, monkeypatch, enabled):
+    from types import SimpleNamespace
+    from app.core import monitor_spawn
+    row, parent, *_ = repo
+    calls = []
+    if enabled:
+        git(parent, "config", "--local", "fluid.workerSetupCommand", "project-setup-command")
+
+    def factory(sid, **kwargs):
+        assert kwargs == {"max_budget_seconds": 600}
+        async def spawn(inputs, ctx):
+            assert database.get_session(sid) is not None
+            assert worker_runtime, "setup must follow initial submission"
+            calls.append((sid, inputs))
+            return SimpleNamespace(background_task=SimpleNamespace(task_id="setup-task"))
+        return spawn
+
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", factory)
+    outcome = dispatch()
+    assert outcome.ok, outcome.error
+    assert bool(calls) == enabled
+    if enabled:
+        assert calls[0][1] == {"command": "project-setup-command", "cwd": worker_runtime[0]["overrides"]["cwd"]}
+        assert "scheduled after initial turn submission" in worker_runtime[0]["overrides"]["system_prompt_append"]
+
+
+@pytest.mark.parametrize("tools,blocked", [(["Read"], []), (["Bash"], ["Monitor"]), (["Bash"], ["mcp__builtins__Mon*"])])
+def test_runtime_respects_shell_restrictions(repo, monkeypatch, tools, blocked):
+    from app.core import worker_runtime as runtime, monitor_spawn
+    row, parent, *_ = repo
+    git(parent, "config", "--local", "fluid.workerSetupCommand", "must-not-run")
+    checkout = worker_checkout.prepare_worker_checkout(row, "restricted-runtime", "coder")
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", lambda *a, **kw: pytest.fail("restricted"))
+    asyncio.run(runtime.start_worker_runtime(checkout, "restricted-runtime", "coder", tools, blocked))
+    assert checkout.runtime["setup_status"].startswith("skipped")
+
+
 def git(path, *args):
     return subprocess.run(["git", *args], cwd=path, check=True,
                           capture_output=True, text=True).stdout.strip()
@@ -225,6 +422,120 @@ def test_bound_caller_without_a_local_checkout_still_refuses(repo, monkeypatch):
     monkeypatch.setattr(project_resolver, "resolve_local_checkout", lambda row: None)
     with pytest.raises(worker_checkout.WorkerCheckoutError, match="unavailable"):
         worker_checkout.prepare_worker_checkout(row, "orphan", "coder")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submission", ["queued", "running", "failed", "cancelled"])
+async def test_setup_completion_waits_for_initial_dispatch_context(
+    repo, monkeypatch, clean_task_registry, submission,
+):
+    """Real setup shell + real terminal scheduler, not a mocked terminal hook.
+
+    Keep the first turn queued (or running) deliberately, so a quick setup
+    cannot borrow a broad saved profile while waiting for an engine slot.
+    """
+    import shlex
+    import sys
+    from app.core import turn_manager, turn_scheduler, monitor_spawn
+    from app.core.provider_agent_feed import WorkerFeed
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    from app.mcp import builtin_tools
+
+    row, parent, *_ = repo
+    sid = "setup-race-" + submission
+    argv = [sys.executable, "-c", "pass"]
+    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    git(parent, "config", "--local", "fluid.workerSetupCommand", command)
+    initial = []
+    wakes = []
+    wake_ready = asyncio.Event()
+    real_enqueue = turn_scheduler._enqueue
+    original_tasks = set(builtin_tools._background_tasks)
+
+    async def started(_feed):
+        # Dispatch can await event recording here. Setup must not exist yet.
+        await asyncio.sleep(0)
+        assert set(builtin_tools._background_tasks) == original_tasks
+        assert turns.get_queued_turns(sid) == []
+
+    async def submit(session_id, source, **kwargs):
+        assert source == provider_agent.WORKER_TURN_SOURCE
+        if submission == "failed":
+            raise RuntimeError("initial submission refused")
+        if submission == "cancelled":
+            raise asyncio.CancelledError()
+        turn = turns.enqueue_turn(session_id, source, **kwargs)
+        initial.append(turn)
+        if submission == "running":
+            turns.start_turn(turn["id"], None, "test-runner")
+        return turn["id"]
+
+    def enqueue(session_id, source, **kwargs):
+        turn = real_enqueue(session_id, source, **kwargs)
+        if session_id == sid and source == "unpark":
+            wakes.append((len(initial), turn))
+        return turn
+
+    def kick(session_id):
+        if session_id == sid:
+            wake_ready.set()
+
+    async def idle(*args, **kwargs):
+        await asyncio.wait_for(wake_ready.wait(), 10)
+        # Simulate the provider completing after receiving the setup result;
+        # the terminal scheduler and the actual wake rows were not stubbed.
+        for turn in [*initial, *(turn for _, turn in wakes)]:
+            turns.settle_turn(turn["id"], "completed", stop_reason="end_turn")
+        return True
+
+    monkeypatch.setattr(WorkerFeed, "started", started)
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    monkeypatch.setattr(turn_manager, "wait_session_idle", idle)
+    monkeypatch.setattr(turn_scheduler, "_enqueue", enqueue)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", kick)
+    monkeypatch.setattr(builtin_tools, "_emit_shell_start_frame", AsyncMock())
+    monkeypatch.setattr(builtin_tools, "_emit_shell_settle_frame", AsyncMock())
+    monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda _sid: {
+        "terminal_found": True, "error": None, "interrupted": False, "usage": {},
+    })
+    monkeypatch.setattr(provider_agent, "final_assistant_text", lambda _sid: "completed")
+    try:
+        call = provider_agent.dispatch_worker(
+            parent_session_id="parent", profile_id="coder", worker_session_id=sid,
+            prompt="review the assigned commit", system_prompt_append="REVIEW ROLE",
+            tool_allowlist=["Bash", "Read"], tool_denylist=["TaskStop"],
+        )
+        if submission == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            outcome = await call
+            assert outcome.ok is (submission != "failed"), outcome.error
+        if submission in ("failed", "cancelled"):
+            assert not initial and not wakes
+            assert set(builtin_tools._background_tasks) == original_tasks
+            assert turns.get_queued_turns(sid) == []
+        else:
+            assert len(wakes) == 1
+            submitted_count, wake = wakes[0]
+            assert submitted_count == 1
+            assert wake["overrides"] == initial[0]["overrides"]
+            assert wake["parent_turn_id"] == initial[0]["id"]
+            assert initial[0]["prompt"] == "review the assigned commit"
+            assert wake["overrides"]["tool_allowlist"] == ["Bash", "Read"]
+            assert wake["overrides"]["tool_denylist"] == ["TaskStop"]
+            assert "REVIEW ROLE" in wake["overrides"]["system_prompt_append"]
+            assert "Host-provisioned worker checkout" in wake["overrides"]["system_prompt_append"]
+            assert wake["overrides"]["cwd"] != str(parent)
+    finally:
+        for task_id in set(builtin_tools._background_tasks) - original_tasks:
+            task = builtin_tools._background_tasks[task_id]
+            if task.is_running():
+                await builtin_tools.stop_background_shell_task(task_id, session_id=sid)
+            builtin_tools._background_tasks.pop(task_id, None)
+        task_registry.clear_session(sid)
 
 
 @pytest.fixture

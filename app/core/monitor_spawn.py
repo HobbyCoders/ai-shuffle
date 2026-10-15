@@ -970,13 +970,15 @@ def amend_native_monitor_spec(registry: Any) -> None:
 
 def make_fluid_monitor_spawner(
     session_id: "str | Callable[[], Optional[str]]",
+    *, max_budget_seconds: Optional[int] = None,
 ) -> Callable[[Dict[str, Any], Any], Any]:
     """The ``ctx.extra['monitor_spawn']`` callable for fluid's bare Monitor.
 
     ``session_id`` mirrors :mod:`app.core.task_dispatch`: the caller's APP
     session id, possibly a zero-argument supplier resolved at CALL time (a
     brand-new native session has no id at connect time; a connect-time
-    snapshot would stay empty forever).
+    snapshot would stay empty forever). ``max_budget_seconds`` is a host-only
+    upper bound for opted-in setup jobs, even when the normal deadline is off.
     """
 
     async def _spawn(input: Dict[str, Any], ctx: Any) -> Any:
@@ -1014,6 +1016,8 @@ def make_fluid_monitor_spawner(
         # the turn that started it can end without parking on it.
         serves = bool((input or {}).get("serves"))
         budget = monitor_deadline_seconds(command, serves=serves)
+        if max_budget_seconds is not None and not serves:
+            budget = min(budget, max_budget_seconds) if budget else max_budget_seconds
         from app.mcp.builtin_tools import _spawn_background
 
         # The launching tool_use_id, which fluid's native loop publishes on the
