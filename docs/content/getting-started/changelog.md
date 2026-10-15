@@ -10,13 +10,42 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 1.0.0
 
-The first release from the public repository, [github.com/HobbyCoders/ai-shuffle](https://github.com/HobbyCoders/ai-shuffle). The app is the same as 0.9.6; what changes is where it is built and how it is signed.
+The first release from the public repository, [github.com/HobbyCoders/ai-shuffle](https://github.com/HobbyCoders/ai-shuffle). It is built and signed there, and it brings the fixes and features below on top of 0.9.6.
 
 ### Updates and installs
 
 - Releases are now built from the public repository and signed with a new update key. Installs on 0.9.6 already trust it and update in-app as usual. Older installs should update to 0.9.6 first: Docker installs pull the `0.9.6` image (keeping the data volume), Windows updates in-app, and Linux reinstalls the 0.9.6 package.
 - The Android app has a new signing key. If you installed the APK from the downloads page, uninstall it once and install the 1.0.0 APK. Google Play installs update normally.
 - Release notes, issues and pull requests start fresh in the public repository; earlier issue and pull request numbers refer to the private archive.
+- Local use needs no license, and the Docker image pulls without a registry login.
+- The daily update channel is now called nightly. An existing edge setting keeps working and is treated as nightly.
+- Windows desktop: if an update fails on its first start, the app goes back to the version that worked instead of leaving the worker stopped. Leftover worker processes from a crash are cleaned up safely.
+
+### Sessions and agents
+
+- Long sessions keep their prompt cache after short pauses, so compaction no longer treats every quick wake-up as a cold start.
+- Background jobs report their completion once per run. A restarted job is never shown as finished because its earlier run ended.
+- When the browser tool cannot run, the agent is told why, for example that its checkout is no longer on its branch, instead of a bare "HTTP 503".
+- Session tools such as starting, listing and archiving chats keep working after a paired device renews its credentials.
+- Hand-offs between workers are more reliable in both directions.
+- Delegated workers get checkouts that are ready for setup and review.
+- Long chats open faster: the transcript loads in bounded pieces and avoids repeated scans.
+
+### Terminals
+
+- Open a terminal from the Files panel, and watch a background job's output read-only.
+- Terminals can run on SSH hosts you have granted to the chat.
+
+### Private access and network
+
+- Owner-approved SSH host names and labels for saved connections.
+- Network members keep room to connect on a busy LAN, and session-move refusals are logged.
+- Fixed a membership update that could roll back to an older generation.
+
+### Connectors and docs
+
+- Microsoft Teams is available as an experimental connector that you turn on yourself.
+- The security docs now spell out what agent shells can access and the limits of Docker isolation.
 
 ## 0.9.6
 
