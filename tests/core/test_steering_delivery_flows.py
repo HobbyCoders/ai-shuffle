@@ -951,7 +951,7 @@ async def test_a_delivered_task_notification_settles_the_card_mid_turn(mock_db):
 
     env["recorder"].record_task_terminal.assert_awaited_once_with(frames)
     retire.assert_awaited_once_with(sid, frames)
-    delivered.assert_called_once_with(sid, ["t1"])
+    delivered.assert_called_once_with(sid, ["t1"], frames=frames)
     stranded.assert_not_awaited()
     # A notification is not a user message: nothing recorded as one.
     env["recorder"].record_steered_user_message.assert_not_awaited()
