@@ -13,6 +13,7 @@ A terminal is a real command line (bash or sh) on your worker. It opens in the f
 - **On a computer:** click the terminal button under the message box. The Terminal panel opens on the right. Drag its edge to resize it.
 - **On a phone:** open the composer controls and tap **Terminal** under More actions. It fills the screen and adds the keys your keyboard lacks, such as Ctrl, Esc, Tab and the arrows.
 - **From an agent's reply:** shell code blocks show **Open terminal** and **Open and paste**. See [Commands from a reply](#commands-from-a-reply).
+- **From Files:** choose **Open terminal here** for the current folder on this worker.
 
 Each chat has its own tabs. Use **+** to open another terminal and choose its folder and shell. Closing the panel does not stop anything: the shells keep running and come back when you open the panel again.
 
@@ -67,6 +68,10 @@ Pasting puts the text at the prompt **without running it**. Press Enter when you
 - A paste with several lines asks first. In sh, paste one line at a time.
 - If a command is still running, wait until the prompt is back before pasting.
 
+## Watch an agent's background command
+
+Choose **Watch command** in the Terminal panel to view Monitor output for this chat. This view is read-only: it cannot send input to the command. Choose **Back to shells** to return to your interactive terminals.
+
 ## Reloads and other devices
 
 Terminals keep running when you reload the page or close the tab. When you come back, they reconnect and show their recent output. You can have the same terminal open on your computer and your phone at the same time.
@@ -84,5 +89,4 @@ Terminals keep running when you reload the page or close the tab. When you come 
 
 ## Not available yet
 
-- Watching a command an agent started in the background.
 - Terminal buttons for PowerShell and cmd code blocks.

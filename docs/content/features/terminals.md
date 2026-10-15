@@ -13,6 +13,7 @@ A terminal is a real command line (bash or sh) on your worker. It opens in the f
 - **On a computer:** click the terminal button under the message box. The Terminal panel opens on the right. Drag its edge to resize it.
 - **On a phone:** open the composer controls and tap **Terminal** under More actions. It fills the screen and adds the keys your keyboard lacks, such as Ctrl, Esc, Tab and the arrows.
 - **From an agent's reply:** shell code blocks show **Open terminal** and **Open and paste**. See [Commands from a reply](#commands-from-a-reply).
+- **From Files:** choose **Open terminal here** for the current folder on this worker.
 
 Each chat has its own tabs. Use **+** to open another terminal and choose its folder and shell. Closing the panel does not stop anything: the shells keep running and come back when you open the panel again.
 
@@ -43,12 +44,33 @@ Signing out disconnects every terminal. The shells keep running, and you can rec
 
 A terminal opened from a chat starts in the chat's own working copy, its project folder, or your workspace folder, in that order. You can also choose an existing folder within the Files workspace. Folders outside that root, including symlinks that lead outside it, are refused. If the folder does not exist, you get a clear message and no terminal opens.
 
+### Choose another target
+
+Use **+ → Target** to explicitly choose an approved writable SSH machine grant
+for this chat. Approve SSH access through the existing private-access card
+first; saved connections still require a fresh grant. SSH starts in that
+account's home and login shell. Credentials stay in the private-access broker
+and host keys are verified there.
+
+Revoking or expiring an SSH grant ends its SSH connection. After an SSH shell
+exits, choose its target again to open a new one. SSH terminals accept
+single-line paste only, without pressing Enter.
+
+Peer-worker terminals are not available: they need owner authorization verified
+independently by the receiving worker. The `NETWORK_PEER_TERMINALS` setting is
+off by default; turning it on does not enable this unfinished feature. Enrolled
+workers alone cannot authorize terminals, and peer targets are not offered.
+
 ## Pasting
 
 Pasting puts the text at the prompt **without running it**. Press Enter when you are ready.
 
 - A paste with several lines asks first. In sh, paste one line at a time.
 - If a command is still running, wait until the prompt is back before pasting.
+
+## Watch an agent's background command
+
+Choose **Watch command** in the Terminal panel to view Monitor output for this chat. This view is read-only: it cannot send input to the command. Choose **Back to shells** to return to your interactive terminals.
 
 ## Reloads and other devices
 
@@ -67,7 +89,4 @@ Terminals keep running when you reload the page or close the tab. When you come 
 
 ## Not available yet
 
-- Terminals on Windows workers.
-- Terminals on another of your workers, or directly on the machine that runs Docker.
-- Watching a command an agent started in the background.
 - Terminal buttons for PowerShell and cmd code blocks.
