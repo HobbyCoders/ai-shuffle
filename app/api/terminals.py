@@ -231,13 +231,154 @@ async def create_terminal(body: CreateTerminal, who: str = Depends(require_termi
     try:
         if body.target is not None:
             _check_target(body.target, await run_sync(service.worker_identity))
+        cwd = await run_sync(_validated_terminal_cwd, body.cwd)
         terminal = await registry.create(
-            created_by=who, session_id=body.session_id, cwd=body.cwd, shell=body.shell,
+            created_by=who, session_id=body.session_id, cwd=cwd, shell=body.shell,
             cols=body.cols, rows=body.rows,
         )
     except TerminalError as exc:
         return _error(exc)
     return JSONResponse({"terminal": terminal.to_dict()}, status_code=201)
+
+
+class FromFilesBody(BaseModel):
+    path: str = Field("", max_length=4096)
+
+
+def _validated_terminal_cwd(cwd: Optional[str]) -> Optional[str]:
+    if cwd is None:
+        return None
+    from app.api.workspace_files import validate_workspace_path
+
+    # Preserve the terminal API's absolute/existing-directory errors, then
+    # apply Files' resolved-path confinement (including symlink traversal).
+    path, _ = service.resolve_folder(None, cwd)
+    return str(validate_workspace_path(path))
+
+
+@router.post("/from-files", status_code=201)
+async def terminal_from_files(body: FromFilesBody, who: str = Depends(require_terminal_owner)):
+    from app.api.workspace_files import validate_workspace_path
+
+    path = await run_sync(validate_workspace_path, body.path)
+    return await create_terminal(CreateTerminal(cwd=str(path)), who)
+
+
+# Monitor watching is deliberately separate from interactive terminals. These
+# routes never create a PTY, attach stdin, resize, stop, or take ownership of a
+# command. The producer remains Monitor's existing bounded stdout reader.
+MONITOR_REFRESH_SECONDS = 0.25
+MONITOR_SNAPSHOT_CHARS = 256 * 1024
+
+
+def _monitor_task(session_id: str, task_id: str):
+    from app.mcp.builtin_tools import _background_tasks
+
+    task = _background_tasks.get(task_id)
+    if task is None or task.session_id != session_id:
+        raise HTTPException(404, "Background shell task not found")
+    return task
+
+
+def _monitor_info(task) -> dict:
+    from app.core.task_registry import task_registry
+
+    record = task_registry.get_task(task.session_id, task.task_id) or {}
+    return {
+        "id": task.task_id, "session_id": task.session_id,
+        "subject": record.get("description") or task.command,
+        "status": record.get("status") or (
+            "running" if task.is_running() else "completed" if task.exit_code == 0 else "error"
+        ),
+        "started_at": task.started_at, "exit_code": task.exit_code,
+    }
+
+
+def _monitor_snapshot(task) -> dict:
+    # Replacement snapshots tolerate the producer dropping its oldest lines,
+    # without guessing a cursor from a bounded buffer's changing length.
+    remaining = MONITOR_SNAPSHOT_CHARS
+    lines = []
+    truncated = False
+    for line in reversed(task.lines):
+        if len(line) + 1 > remaining:
+            if remaining > 1:
+                lines.append(line[-(remaining - 1):])
+            truncated = True
+            break
+        lines.append(line)
+        remaining -= len(line) + 1
+    reader = task._reader_task
+    return {
+        "type": "output", "readonly": True, "task": _monitor_info(task),
+        "lines": list(reversed(lines)), "truncated": truncated,
+        "finished": not task.is_running() and (reader is None or reader.done()),
+    }
+
+
+@router.get("/monitor")
+async def list_monitor_tasks(session_id: str = Query(..., min_length=1, max_length=200),
+                             who: str = Depends(require_terminal_owner)):
+    from app.mcp.builtin_tools import _background_tasks
+
+    return {"tasks": [_monitor_info(task) for task in list(_background_tasks.values())
+                      if task.session_id == session_id]}
+
+
+@router.get("/monitor/{task_id}")
+async def monitor_output(task_id: str, session_id: str = Query(..., min_length=1, max_length=200),
+                         who: str = Depends(require_terminal_owner)):
+    return _monitor_snapshot(_monitor_task(session_id, task_id))
+
+
+@ws_router.websocket("/api/v1/ws/terminals/monitor/{task_id}")
+async def monitor_socket(websocket: WebSocket, task_id: str,
+                         session_id: str = Query(..., min_length=1, max_length=200),
+                         token: Optional[str] = Query(None)) -> None:
+    await websocket.accept()
+    try:
+        who = await authenticate_terminal_socket(websocket, token)
+    except HTTPException:
+        await _close(websocket, 1013, "Authorization unavailable; retry later")
+        return
+    if not who:
+        await _close(websocket, 4001, "Authentication failed")
+        return
+    try:
+        task = _monitor_task(session_id, task_id)
+    except HTTPException:
+        await _close(websocket, 4004, "Background shell task not found")
+        return
+
+    async def send_output():
+        previous = None
+        while True:
+            snapshot = _monitor_snapshot(task)
+            if snapshot != previous:
+                await _send_json(websocket, snapshot)
+                previous = snapshot
+            if snapshot["finished"]:
+                await _close(websocket, 1000, "Command finished")
+                return
+            await asyncio.sleep(MONITOR_REFRESH_SECONDS)
+
+    async def refuse_input():
+        message = await websocket.receive()
+        if message["type"] != "websocket.disconnect":
+            await _close(websocket, 1008, "Monitor output is read-only")
+
+    tasks = [asyncio.create_task(send_output()), asyncio.create_task(refuse_input()),
+             asyncio.create_task(_hold_authority(websocket, token, who, asyncio.Event()))]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    except (WebSocketDisconnect, asyncio.TimeoutError, RuntimeError, OSError):
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @router.get("/{terminal_id}")
