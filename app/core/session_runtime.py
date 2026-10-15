@@ -1342,9 +1342,11 @@ class SessionRuntime:
             from app.core.assistant_service import assert_proactive_allowed
             await asyncio.to_thread(assert_proactive_allowed, proactive, self.session_id)
             turn_overrides["_assistant_proactive"] = proactive
-        completion_frames = list(
+        from app.core.turn_scheduler import current_task_frames
+
+        completion_frames = current_task_frames(self.session_id, list(
             ((self.turn.get("payload") or {}).get("pending_frames") or [])
-        )
+        ))
         if completion_frames:
             # The app turn queue owns wake admission and exactly-once execution.
             # Carry the claimed completions to HarnessAdapter so Fluid can clear
@@ -1432,6 +1434,9 @@ class SessionRuntime:
                         (self.turn.get("payload") or {}).get("task_ids")
                         or [f.get("task_id") for f in completion_frames
                             if isinstance(f, dict)],
+                        **({"frames": completion_frames} if any(
+                            f.get("task_incarnation") for f in completion_frames
+                        ) else {}),
                     )
                 except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
                     logger.warning(
@@ -2287,8 +2292,14 @@ class SessionRuntime:
         durable park state is untouched: it is the authority, and it already
         moved on.
         """
-        frames = entry.get("frames") or []
+        from app.core.turn_scheduler import current_task_frames
+
+        original_frames = entry.get("frames") or []
+        frames = current_task_frames(self.session_id, original_frames)
         task_ids = entry.get("task_ids") or []
+        if original_frames:
+            current_ids = {f.get("task_id") for f in frames}
+            task_ids = [tid for tid in task_ids if tid in current_ids]
         if frames:
             try:
                 await recorder.record_task_terminal(frames)
@@ -2307,7 +2318,10 @@ class SessionRuntime:
             from app.core import turn_scheduler
 
             await turn_scheduler.retire_task_terminals(self.session_id, frames)
-            turn_scheduler.on_task_notification_delivered(self.session_id, task_ids)
+            turn_scheduler.on_task_notification_delivered(
+                self.session_id, task_ids,
+                **({"frames": frames} if any(f.get("task_incarnation") for f in frames) else {}),
+            )
         except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
             logger.warning(
                 "SessionRuntime: task-notification delivery callback failed "

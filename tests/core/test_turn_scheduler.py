@@ -1029,7 +1029,7 @@ async def test_unpark_synthesizes_notification_turn(mock_db):
     assert wake["payload"] == {
         "api_user_id": "u-api",
         "task_ids": ["task-7"],
-        "pending_frames": [frame],
+        "pending_frames": [{**frame, "task_incarnation": task_registry.task_incarnation("u1", "task-7")}],
     }
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == wake["id"]
@@ -1072,7 +1072,10 @@ async def test_two_terminal_frames_batch_into_one_unpark(mock_db):
     assert "<summary>alpha done</summary>" in wake["prompt"]
     assert "<summary>beta done</summary>" in wake["prompt"]
     assert wake["payload"]["task_ids"] == ["task-a", "task-b"]
-    assert wake["payload"]["pending_frames"] == [f1, f2]
+    assert wake["payload"]["pending_frames"] == [
+        {**f, "task_incarnation": task_registry.task_incarnation("ub1", f["task_id"])}
+        for f in (f1, f2)
+    ]
 
 
 async def test_user_canceled_task_terminal_never_enqueues_wake(mock_db):
@@ -1728,7 +1731,9 @@ async def test_bare_then_rich_frame_upgrades_prompt(mock_db):
     (after,) = _by_source("bt1", "unpark")
     assert "<summary>crawl done</summary>" in after["prompt"]         # upgraded
     assert "<subagent_tokens>99</subagent_tokens>" in after["prompt"]
-    assert after["payload"]["pending_frames"] == [rich]              # replaced in place
+    assert after["payload"]["pending_frames"] == [
+        {**rich, "task_incarnation": task_registry.task_incarnation("bt1", "agent-1")}
+    ]  # replaced in place, preserving the delivery incarnation
     assert after["payload"]["task_ids"] == ["agent-1"]              # not duplicated
 
 
@@ -2282,7 +2287,9 @@ async def test_midturn_completion_is_steered_instead_of_queued(mock_db):
     assert "<task-id>task-mt1</task-id>" in steer["prompt"]
     assert "the child's report" in steer["prompt"]
     assert steer["task_ids"] == ["task-mt1"]
-    assert steer["frames"] == [frame]
+    assert steer["frames"] == [
+        {**frame, "task_incarnation": task_registry.task_incarnation("mt1", "task-mt1")}
+    ]
     # The receipt handler tells a notification id from a queued turn's row id by
     # this prefix — they share one namespace on the wire.
     assert steer["id"].startswith(turn_scheduler.TASK_STEER_ID_PREFIX)
@@ -2367,7 +2374,9 @@ async def test_unsteerable_turn_falls_back_to_the_queued_wake(mock_db):
     assert len(runtime.steers) == 1  # attempted...
     (wake,) = _by_source("mt4", "unpark")  # ...refused, so the wake stands
     assert "<task-id>task-mt4</task-id>" in wake["prompt"]
-    assert wake["payload"]["pending_frames"] == [frame]
+    assert wake["payload"]["pending_frames"] == [
+        {**frame, "task_incarnation": task_registry.task_incarnation("mt4", "task-mt4")}
+    ]
 
 
 async def test_a_steer_the_turn_never_delivered_re_enqueues_the_wake(mock_db):

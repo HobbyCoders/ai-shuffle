@@ -30,7 +30,7 @@ def test_late_monitor_start_does_not_revive_terminal_or_clear_delivery(monkeypat
     reg.mark_background_notification_delivered("worker", "monitor")
     # The host spawner registers first; the streamed Fluid start receipt can
     # be consumed after the independent completion watcher has finished.
-    reg.start_task("worker", "monitor", "shell", "checks")
+    reg.start_task("worker", "monitor", "shell", "checks", receipt_only=True)
     assert reg.get_active("worker") == []
     assert reg.is_woken("worker", "monitor")
     assert reg.finished_awaiting_report("worker") == []
@@ -261,3 +261,98 @@ def test_park_recovery_rechecks_new_registry_work_under_admission(mock_db, monke
     assert turns.get_turn(turn["id"])["state"] == "parked"
     assert turns.get_turn(turn["id"])["ended_at"] == parked["ended_at"]
     assert reg.get_task(sid, "new-monitor")["status"] == "running"
+
+
+@pytest.mark.parametrize("serves", [False, True])
+async def test_explicit_monitor_restart_needs_its_own_wake_and_delivery(
+    mock_db, monkeypatch, serves,
+):
+    """A mirrored start is not a restart; a real restart owns fresh receipts."""
+    sid, tid = "monitor-incarnations", "job"
+    reg = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", reg)
+    monkeypatch.setattr(query_engine, "task_registry", reg)
+    # Even equal wall-clock readings must produce distinct start identities.
+    monkeypatch.setattr("app.core.task_registry._now_iso", lambda: "2026-01-01T00:00:00+00:00")
+    adapter = SimpleNamespace(steer=AsyncMock(), prepare_background_completions=AsyncMock())
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(
+        peek=lambda sid: SimpleNamespace(adapter=adapter)))
+    runtime = sr.SessionRuntime(turns.enqueue_turn(sid, "user", prompt="checks"))
+    monkeypatch.setattr(runtime, "_turn_is_dying", AsyncMock(return_value=False))
+    sr._live_runtimes[sid] = runtime
+    recorder = SimpleNamespace(record_task_terminal=AsyncMock(), recording_failed=False)
+
+    reg.start_task(sid, tid, "shell", "first")
+    reg.mark_monitor_shell_task(sid, tid, serves=serves)
+    reg.complete_task(sid, tid, "completed")
+    first = {"task_id": tid, "status": "completed", "summary": "first finished"}
+    await REAL_TERMINAL(sid, first)
+    first_entry = runtime._task_steers[adapter.steer.call_args.kwargs["id"]]
+    first = first_entry["frames"][0]  # The stamped, in-flight receipt, not a new event.
+    assert await runtime._on_task_notification_delivered(recorder, first_entry)
+    assert reg.finished_awaiting_report(sid) == []
+
+    reg.start_task(sid, tid, "shell", "second")
+    assert reg.get_task(sid, tid)["status"] == "running"
+    assert reg.task_incarnation(sid, tid) != first["task_incarnation"]
+    assert not reg.is_woken(sid, tid)
+    assert tid not in reg._terminal_notified.get(sid, set())
+    # Late receipt for the first completion cannot spend the second wake.
+    await REAL_TERMINAL(sid, first)
+    assert adapter.steer.await_count == 1
+    assert not reg.is_woken(sid, tid)
+    query_engine._record_task_message(sid, query_engine.TaskStartedMessage(
+        subtype="task_started", data={}, task_id=tid,
+        description="old mirrored start", task_type="local_bash",
+    ))
+    assert reg.get_task(sid, tid)["subject"] == "second"
+
+    reg.complete_task(sid, tid, "completed")
+    second = {"task_id": tid, "status": "completed", "summary": "second finished"}
+    await REAL_TERMINAL(sid, second)
+    assert adapter.steer.await_count == 2
+    assert reg.is_woken(sid, tid)
+    assert [r["id"] for r in reg.finished_awaiting_report(sid)] == [tid]
+    # An in-flight first-run delivery receipt must not satisfy the second run.
+    assert await runtime._on_task_notification_delivered(recorder, first_entry)
+    assert adapter.prepare_background_completions.await_count == 1
+    assert tid not in reg._terminal_notified.get(sid, set())
+    assert [r["id"] for r in reg.finished_awaiting_report(sid)] == [tid]
+    second_entry = runtime._task_steers[adapter.steer.call_args.kwargs["id"]]
+    assert await runtime._on_task_notification_delivered(recorder, second_entry)
+    assert adapter.prepare_background_completions.await_count == 2
+    assert reg.finished_awaiting_report(sid) == []
+    assert tid in reg._terminal_notified[sid]
+
+
+
+async def test_queued_monitor_completions_keep_incarnations_separate(mock_db, monkeypatch):
+    sid, tid = "queued-monitor-incarnations", "job"
+    reg = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", reg)
+    monkeypatch.setattr(ts, "_kick_after_batch_window", lambda sid: None)
+    reg.start_task(sid, tid, "shell", "first")
+    reg.mark_monitor_shell_task(sid, tid)
+    reg.complete_task(sid, tid, "completed")
+    await REAL_TERMINAL(sid, {"task_id": tid, "status": "completed", "summary": "first done"})
+    first_wake = ts._queued_unpark_turn(sid)
+    first_frame = first_wake["payload"]["pending_frames"][0]
+
+    reg.start_task(sid, tid, "shell", "second")
+    reg.complete_task(sid, tid, "completed")
+    await REAL_TERMINAL(sid, {"task_id": tid, "status": "completed", "summary": "second done"})
+    wake = ts._queued_unpark_turn(sid)
+    assert wake["id"] == first_wake["id"]
+    frames = wake["payload"]["pending_frames"]
+    assert len(frames) == 2  # Same task id does not deduplicate different starts.
+    assert frames[0] == first_frame
+    assert frames[1]["task_incarnation"] != first_frame["task_incarnation"]
+    assert [r["id"] for r in reg.finished_awaiting_report(sid)] == [tid]
+
+    with _runtime_env(pump=make_pump([{"type": "done"}])) as env:
+        with patch("app.core.task_registry.task_registry", reg):
+            assert await sr.SessionRuntime(wake).execute() == "completed"
+    # Only this incarnation can settle the card, retire engine work and latch
+    # model delivery; the stale queued first-run frame never reaches those seams.
+    env["recorder"].record_task_terminal.assert_awaited_once_with([frames[1]])
+    assert reg.finished_awaiting_report(sid) == []
