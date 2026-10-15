@@ -6,13 +6,19 @@ client that shows a terminal (the web UI, desktop, Android). Code:
 authorization). Tests: `tests/core/test_terminals.py`,
 `tests/api/test_terminals_api.py`.
 
-Terminals support local Unix PTYs and Windows ConPTY, online enrolled peer
-workers, and explicitly selected private-access SSH machine grants. Peer
-input/output uses the authenticated control transport, with a target-bound
-opaque lease checked back against the initiating owner's credential on every
-operation. A lost relay expires and kills its peer shell within 60 seconds.
-The source holds the original credential only in memory, never in the wire
-payload, UI response, or an agent-facing tool.
+Terminals support local Unix PTYs and Windows ConPTY and explicitly selected
+private-access SSH machine grants. **Peer-worker terminals are unavailable.**
+`NETWORK_PEER_TERMINALS` defaults to `false` and is checked on the recipient.
+Setting it to `true` is not sufficient: recipient dispatch still refuses every
+operation until independent recipient-verified owner grants are implemented.
+Peers are not offered in the picker or advertised as relay-capable.
+
+An enrolled worker can forge a lease and its own callback response. Therefore
+neither membership nor a reverse `terminal-owner` callback is owner proof.
+The retained transport scaffold requires HTTPS on outbound calls/callbacks and
+recipient ingress, with no plaintext fallback. Its source and recipient leases
+have independent ten-minute deadlines; inactivity also expires the recipient.
+These safeguards do not substitute for the missing independent owner proof.
 
 SSH targets require an active, writable machine grant for this chat (including
 grants approved from saved connections). They reuse the private-access SSH
@@ -29,12 +35,12 @@ The Files-open and read-only Monitor APIs are documented below.
 
 | Where | Field | Values |
 | --- | --- | --- |
-| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `2` = owner-checked peer relay, `1` = local-only legacy, `0` = none |
+| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `1` = local only, `0` = none; `2` is reserved and not advertised |
 | `GET /api/v1/terminals/targets` | `supported` | `true` / `false` |
 
-`terminal` is `0` on a worker with no usable PTY/shell. `/targets` lists only
-online peers advertising version 2 or later, plus approved SSH grants; legacy
-peers remain local-only. `supported` is true when any target is usable.
+`terminal` is `0` on a worker with no usable PTY/shell. `/targets` lists the
+local worker and approved SSH grants, never peers (even when the peer setting
+is enabled). `supported` is true when any offered target is usable.
 Creating a local terminal on an unsupported worker returns `501 not_supported`
 with the message "Terminals are not supported on this worker yet." Clients
 should hide or disable the terminal button when the flag is off and show
@@ -520,13 +526,16 @@ text and output are never logged.
 
 ## Remote implementation
 
-`app/network/terminal_relay.py` handles the `terminal` and `terminal-owner`
-control actions. Membership alone cannot open a shell: an opaque lease is
-issued only after the UI owner check, bound to one target worker, and checked
-back at the source against the still-valid original credential. Bounded
-viewer output is base64-encoded for the JSON control transport; the UI still
-receives binary WebSocket output. A missing/old capability never enables a
-relay optimistically. No credentials or connections are replicated.
+`app/network/terminal_relay.py` registers the `terminal` and `terminal-owner`
+control actions. The terminal recipient rejects all operations, including when
+`NETWORK_PEER_TERMINALS=true`: there is no independent owner-proof issuer or
+verifier yet. Its old source callback must never be promoted to authorization.
+Transport-only tests explicitly stub the closed recipient gate to retain byte
+relay regression coverage; separate malicious-member tests exercise the real
+registered handler without those stubs, with the setting both on and off.
+All transport calls require `secure=True`; both inbound actions require the
+trusted HTTPS context. Plain HTTP and currently unsupported sealed-LAN control
+routes are refused rather than used as fallback.
 
 `app/core/terminal_targets.py` adapts peer/SSH streams to the existing bounded
 terminal registry. SSH tasks belong to the private-access grant and close the

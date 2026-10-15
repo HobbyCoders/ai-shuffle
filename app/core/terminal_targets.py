@@ -12,7 +12,7 @@ from app.network import control, runners, terminal_relay
 
 
 async def targets(session_id):
-    rows = await run_sync(runners.directory)
+    rows = await run_sync(runners.directory) if terminal_relay.peer_targets_enabled() else {"runners": []}
     result = [{"kind": "worker", "worker_id": row["id"], "name": row["device_name"], "available": True}
               for row in rows["runners"] if not row["is_self"] and row["online"]
               and row.get("capabilities", {}).get("terminal", 0) >= 2]
@@ -78,7 +78,7 @@ class PeerTerminal(StreamTerminal):
     async def call(self, op, **body):
         try:
             result = await control.call(self.target["worker_id"], "terminal",
-                                        {"lease": self.lease, "op": op, **body}, timeout=15)
+                                        {"lease": self.lease, "op": op, **body}, timeout=15, secure=True)
         except Exception as exc:
             raise TerminalError("peer_unavailable", "The terminal worker is unavailable or owner access expired.", 503) from exc
         if "error" in result:

@@ -31,7 +31,7 @@ def test_shape_has_all_keys_and_types():
     assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 4
     assert caps["move_wakes"] == rc.MOVE_WAKES_VERSION == 3
     assert caps["handoff_poll"] == 1
-    assert caps["terminal"] in (0, 2)
+    assert caps["terminal"] in (0, 1)
 
 
 def test_terminal_capability_off_without_pty():
@@ -41,7 +41,7 @@ def test_terminal_capability_off_without_pty():
         assert rc.detect_capabilities()["terminal"] == 0
     with patch.object(terminals, "pty_supported", return_value=True), \
             patch.object(terminals, "available_shells", return_value=[{"name": "sh", "path": "/bin/sh", "default": True}]):
-        assert rc.detect_capabilities()["terminal"] == 2
+        assert rc.detect_capabilities()["terminal"] == 1
 
 
 def test_os_matches_platform():

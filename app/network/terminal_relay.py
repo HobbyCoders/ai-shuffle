@@ -1,8 +1,9 @@
 """Owner-only peer terminal transport over the authenticated control channel.
 
-An enrolled worker is not itself owner authority. The recipient challenges an
-opaque, target-bound lease back at the source, where the original UI credential
-is rechecked. Neither credentials nor leases are returned to the UI or tools.
+Peer dispatch is fail-closed pending independent recipient-verified owner
+proof. A reverse callback can check revocation on an honest source, but a
+malicious enrolled worker can manufacture its answer; it is NOT owner proof.
+The transport implementation remains exercised by isolated unit tests only.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from app.db.async_database import run_sync
 from app.network import control, engine, membership
 
 LEASE_SECONDS = 30
+MAX_LIFETIME_SECONDS = 600
 _owners = {}
 _sessions = {}
 _opening = set()
@@ -27,9 +29,29 @@ def require_peer(device_id):
         raise PermissionError("Only active account workers may relay terminals")
 
 
+def peer_targets_enabled():
+    # Deliberately not a toggle for the unfinished authorization mechanism.
+    # Do not advertise peers until a recipient can verify owner authority
+    # without trusting anything signed/asserted by an enrolled worker alone.
+    return False
+
+
+def require_recipient_owner():
+    from app.core.config import settings
+
+    if not settings.network_peer_terminals:
+        raise PermissionError("Peer terminals are disabled (NETWORK_PEER_TERMINALS=false)")
+    raise PermissionError("Peer terminals unavailable: independent recipient owner proof is not implemented")
+
+
+def require_encrypted_transport():
+    if not control.inbound_https.get():
+        raise PermissionError("Terminal control requires authenticated HTTPS")
+
+
 def authorize(request, who, target):
     token = secrets.token_urlsafe(32)
-    _owners[token] = (request, who, target)
+    _owners[token] = (request, who, target, time.monotonic() + MAX_LIFETIME_SECONDS)
     return token
 
 
@@ -40,11 +62,12 @@ def forget(token):
 async def handle_owner(body, from_device):
     from app.api.terminals import require_terminal_owner
 
+    require_encrypted_transport()
     require_peer(from_device)
     entry = _owners.get(body.get("lease"))
-    if not entry or entry[2] != from_device:
+    if not entry or entry[2] != from_device or time.monotonic() >= entry[3]:
         return {"authorized": False}
-    request, who, _ = entry
+    request, who, _, _ = entry
     try:
         allowed = await run_sync(require_terminal_owner, request) == who
     except Exception:
@@ -57,12 +80,13 @@ async def _expire(key, registry):
         while key in _sessions:
             await asyncio.sleep(LEASE_SECONDS)
             entry = _sessions.get(key)
-            if entry and time.monotonic() - entry[2] >= LEASE_SECONDS:
+            if entry and (time.monotonic() - entry[2] >= LEASE_SECONDS
+                          or time.monotonic() >= entry[4]):
                 break
     finally:
         entry = _sessions.pop(key, None)
         if entry:
-            terminal, viewer, _, _ = entry
+            terminal, viewer, _, _, _ = entry
             terminal.detach(viewer)
             from app.core.terminals import TerminalError
             try:
@@ -74,11 +98,14 @@ async def _expire(key, registry):
 async def handle(body, from_device):
     from app.core import terminals as service
 
+    require_encrypted_transport()
     require_peer(from_device)
+    # Never substitute a source-worker callback for this recipient-side gate.
+    require_recipient_owner()
     lease = body.get("lease")
     if not isinstance(lease, str) or not 20 <= len(lease) <= 100:
         raise PermissionError("Owner authorization required")
-    proof = await control.call(from_device, "terminal-owner", {"lease": lease}, timeout=10)
+    proof = await control.call(from_device, "terminal-owner", {"lease": lease}, timeout=10, secure=True)
     if proof.get("authorized") is not True:
         raise PermissionError("Terminal owner authorization expired")
     key = (from_device, lease)
@@ -101,12 +128,14 @@ async def handle(body, from_device):
         viewer, replay = terminal.attach()
         viewer.push_output(replay)
         task = asyncio.create_task(_expire(key, registry))
-        _sessions[key] = [terminal, viewer, time.monotonic(), task]
+        _sessions[key] = [terminal, viewer, time.monotonic(), task, time.monotonic() + MAX_LIFETIME_SECONDS]
         return {"terminal": terminal.to_dict()}
     entry = _sessions.get(key)
     if not entry:
         raise LookupError("Terminal relay expired")
-    terminal, viewer, _, task = entry
+    terminal, viewer, _, task, expires_at = entry
+    if time.monotonic() >= expires_at:
+        raise PermissionError("Terminal lease expired")
     entry[2] = time.monotonic()
     if op == "close":
         _sessions.pop(key)

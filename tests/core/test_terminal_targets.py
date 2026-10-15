@@ -15,6 +15,12 @@ from app.network import control, engine, terminal_relay as relay
 
 @pytest.fixture
 def peers(monkeypatch, tmp_path):
+    # TRANSPORT-ONLY fixture: production dispatch remains closed until it has
+    # independent recipient owner proof. Never use these stubs for auth tests;
+    # the malicious-member regressions below exercise the real entry point.
+    monkeypatch.setattr(relay, "peer_targets_enabled", lambda: True)
+    monkeypatch.setattr(relay, "require_recipient_owner", lambda: None)
+    secure_context = control.inbound_https.set(True)
     directory = {"runners": [
         {"id": "peer", "device_name": "Peer", "is_self": False, "online": True, "capabilities": {"terminal": 2}},
         {"id": "old", "device_name": "Old", "is_self": False, "online": True, "capabilities": {"terminal": 1}},
@@ -31,6 +37,7 @@ def peers(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "require_terminal_owner", lambda request: "owner" if request.valid else "refused")
 
     async def call(device, action, body, **kwargs):
+        assert kwargs["secure"] is True
         if action == "terminal-owner":
             assert device == "source"
             return await relay.handle_owner(body, "peer")
@@ -44,6 +51,7 @@ def peers(monkeypatch, tmp_path):
     for entry in relay._sessions.values():
         entry[3].cancel()
     relay._sessions.clear()
+    control.inbound_https.reset(secure_context)
 
 
 @pytest.mark.asyncio

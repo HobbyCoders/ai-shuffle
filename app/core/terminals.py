@@ -242,9 +242,9 @@ def supported() -> bool:
 
 
 def capability_version() -> int:
-    """Terminal protocol: 2 = owner-checked peer relay, 1 = local only, 0 = none."""
+    """Advertise local terminals only until independent peer owner proof exists."""
     try:
-        return 2 if supported() else 0
+        return 1 if supported() else 0
     except Exception:  # noqa: BLE001 — capability detection never raises
         return 0
 

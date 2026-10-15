@@ -45,16 +45,20 @@ A terminal opened from a chat starts in the chat's own working copy, its project
 
 ### Choose another target
 
-Use **+ → Target** to explicitly choose an online enrolled worker with terminal
-relay support, or an approved writable SSH machine grant for this chat. Approve
-SSH access through the existing private-access card first; saved connections
-still require a fresh grant. SSH starts in that account's home and login shell.
-Credentials stay in the private-access broker and host keys are verified there.
+Use **+ → Target** to explicitly choose an approved writable SSH machine grant
+for this chat. Approve SSH access through the existing private-access card
+first; saved connections still require a fresh grant. SSH starts in that
+account's home and login shell. Credentials stay in the private-access broker
+and host keys are verified there.
 
-Signing out or losing owner authority closes peer relays; a disconnected relay
-ends its remote shell within a minute. Revoking or expiring an SSH grant ends
-its SSH connection. After a remote shell exits, choose its target again to open
-a new one. Remote terminals accept single-line paste only, without pressing Enter.
+Revoking or expiring an SSH grant ends its SSH connection. After an SSH shell
+exits, choose its target again to open a new one. SSH terminals accept
+single-line paste only, without pressing Enter.
+
+Peer-worker terminals are not available: they need owner authorization verified
+independently by the receiving worker. The `NETWORK_PEER_TERMINALS` setting is
+off by default; turning it on does not enable this unfinished feature. Enrolled
+workers alone cannot authorize terminals, and peer targets are not offered.
 
 ## Pasting
 
