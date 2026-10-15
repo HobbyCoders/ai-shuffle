@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from app.core import config
+from app.core.checkout_manager import _link_directory
 from app.core.worktree_manager import WorktreeError, WorktreeManager, worktree_manager
 from app.db import database
 from app.db.base import WorktreeStatus
@@ -91,7 +92,7 @@ def test_exclude_goes_to_common_dir_for_linked_worktree_project(project, tmp_pat
 def _assert_path_confined(repo, outside, link_at):
     """A symlinked ``.fluid`` (or ``.fluid/worktrees``) cannot move worktrees out."""
     link_at.parent.mkdir(parents=True, exist_ok=True)
-    os.symlink(outside, link_at, target_is_directory=True)
+    _link_directory(outside, link_at)
     with pytest.raises(WorktreeError, match="outside the project checkout"):
         worktree_manager._get_worktree_path(str(repo), "feature")
     assert list(outside.iterdir()) == []
@@ -129,7 +130,7 @@ def test_symlinked_worktree_leaf_outside_checkout_is_refused(project, tmp_path):
     outside.mkdir()
     worktrees = repo / ".fluid" / "worktrees"
     worktrees.mkdir(parents=True)
-    os.symlink(outside, worktrees / "feature", target_is_directory=True)
+    _link_directory(outside, worktrees / "feature")
     with pytest.raises(WorktreeError):
         worktree_manager._get_worktree_path(str(repo), "feature")
 
@@ -198,7 +199,7 @@ def test_recreate_errors(project, tmp_path):
     shutil.rmtree(repo / ".fluid")  # left behind by the attempt above
     outside = tmp_path / "elsewhere"
     outside.mkdir()
-    os.symlink(outside, repo / ".fluid", target_is_directory=True)
+    _link_directory(outside, repo / ".fluid")
     _worktree_row(record, "escape", tmp_path / "gone-too", wt_id="wt-escape")
     with pytest.raises(WorktreeError, match="outside the project checkout"):
         worktree_manager.recreate_worktree("wt-escape")

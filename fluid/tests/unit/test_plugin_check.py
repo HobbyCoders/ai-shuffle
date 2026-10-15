@@ -158,7 +158,7 @@ def test_scaffold_rejects_invalid_names_without_writing(tmp_path, monkeypatch, n
     assert list(tmp_path.iterdir()) == []
 
 
-def test_scaffold_refuses_existing_symlink(tmp_path):
+def test_scaffold_refuses_existing_symlink(tmp_path, requires_symlinks):
     from fluid.context.plugin_check import scaffold_plugin
     target = tmp_path / "target"
     target.mkdir()

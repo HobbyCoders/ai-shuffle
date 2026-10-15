@@ -168,7 +168,7 @@ class TestGetWorkingDirForProject:
 
         result = get_working_dir_for_project(None)
 
-        assert result == "/workspace"
+        assert result == str(Path("/workspace"))
         mock_database.get_project.assert_not_called()
 
     def test_returns_workspace_dir_when_project_not_found(self, mock_database, mock_settings):
@@ -180,7 +180,7 @@ class TestGetWorkingDirForProject:
 
         result = get_working_dir_for_project("nonexistent-project")
 
-        assert result == "/workspace"
+        assert result == str(Path("/workspace"))
         mock_database.get_project.assert_called_once_with("nonexistent-project")
 
     def test_returns_project_path_when_project_exists(self, mock_database, mock_settings):
@@ -192,7 +192,7 @@ class TestGetWorkingDirForProject:
 
         result = get_working_dir_for_project("test-project")
 
-        assert result == "/workspace/my-project"
+        assert result == str(Path("/workspace") / "my-project")
         mock_database.get_project.assert_called_once_with("test-project")
 
 
@@ -491,7 +491,7 @@ class TestExecuteRewindEndpoint:
         mock_jsonl_rewind_service.truncate_to_checkpoint.assert_called_once_with(
             sdk_session_id="sdk-session-1",
             target_uuid="uuid-1",
-            working_dir="/workspace",  # no project: the effective workspace
+            working_dir=str(Path("/workspace")),  # no project: the effective workspace
             include_response=True,
             target_role="user"
         )

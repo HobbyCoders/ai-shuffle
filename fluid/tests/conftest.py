@@ -93,6 +93,19 @@ def isolate_home(tmp_path_factory, monkeypatch):
     return home
 
 
+@pytest.fixture
+def requires_symlinks(tmp_path):
+    """Skip only link-dependent tests when this host cannot create symlinks."""
+    target = tmp_path / "symlink-capability-target"
+    target.write_text("probe", encoding="utf-8")
+    try:
+        (tmp_path / "symlink-capability-link").symlink_to(target)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires Developer Mode or elevation")
+        raise
+
+
 @pytest.fixture(params=["plain", "probe's directory", r"backslash\Users"])
 def codemode_marker(tmp_path, request):
     """An executable escape payload, including a path requiring Python quoting.

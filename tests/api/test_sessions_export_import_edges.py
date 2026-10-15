@@ -555,9 +555,10 @@ def _create_sharing_source(source, world, client):
             {"type": "tool_result", "tool_use_id": "t1", "content": text, "is_error": True},
         ]}},
     ])
-    # Noncanonical spacing and no final newline make byte-fidelity meaningful.
+    # Pin CRLF, noncanonical spacing and no final newline on every host so
+    # a text-mode read cannot silently weaken the private raw backup.
     raw = path.read_text().replace('"type":', '"type" :').rstrip("\n")
-    path.write_text(raw)
+    path.write_bytes(raw.replace("\n", "\r\n").encode("utf-8"))
     response = client.post("/api/v1/sessions/import-jsonl", json={"jsonl_path": str(path)})
     assert response.status_code == 200, response.text
     return response.json()["session_id"], path

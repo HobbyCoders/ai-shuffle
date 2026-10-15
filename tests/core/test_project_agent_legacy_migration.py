@@ -152,7 +152,7 @@ def _symlinked_fluid(tmp_path, link_target):
     return project
 
 
-def test_symlinked_fluid_dir_is_never_written_through(tmp_path):
+def test_symlinked_fluid_dir_is_never_written_through(tmp_path, requires_symlinks):
     # A cloned repo ships ``.fluid -> <user-global agents home>``.
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -163,7 +163,7 @@ def test_symlinked_fluid_dir_is_never_written_through(tmp_path):
     assert list(outside.rglob("*")) == []
 
 
-def test_symlinked_agents_dir_inside_the_project_is_refused(tmp_path):
+def test_symlinked_agents_dir_inside_the_project_is_refused(tmp_path, requires_symlinks):
     project = tmp_path / "project"
     _write(project / ".claude" / "agents" / "evil.md", _LEGACY)
     elsewhere = tmp_path / "elsewhere"

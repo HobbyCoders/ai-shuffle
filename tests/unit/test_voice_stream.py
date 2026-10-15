@@ -282,7 +282,7 @@ async def test_text_control_is_not_a_provider_event_passthrough(event):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", [" ", "🌎" * 4001])
+@pytest.mark.parametrize("text", [" ", "🌎" * 4001], ids=["empty", "oversize-unicode"])
 async def test_empty_or_oversize_text_is_rejected_without_closing_call(text):
     call = stream()
     await call.receive_text(json.dumps({"type": "input_text", "id": "request", "text": text}, ensure_ascii=False))

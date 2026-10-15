@@ -589,18 +589,31 @@ def test_journal_loss_record_rejects_corrupt_special_and_oversized_files(tmp_pat
     assert skills.read_journal_loss(record) is None
     record.write_text(" " * (skills.JOURNAL_LOSS_MAX_BYTES + 1) + "{}")
     assert skills.read_journal_loss(record) is None
-    record.unlink()
+
+
+
+def test_journal_loss_record_rejects_symlink(tmp_path, fresh_loss_buffer, requires_symlinks):
+    skills = fresh_loss_buffer
+    store = skills.SkillStore(tmp_path / "skills")
+    record = store.root / "journal_loss.json"
     target = tmp_path / "elsewhere.json"
     target.write_text('{"skipped_quota": 5}')
     record.symlink_to(target)
     assert skills.read_journal_loss(record) is None
-    record.unlink()
-    if hasattr(os, "mkfifo"):
-        os.mkfifo(record)
-        assert skills.read_journal_loss(record) is None  # never blocks on a FIFO
-        store._journal_skip("journal byte quota reached")
-        assert skills.read_journal_loss(record)["skipped_quota"] == 1
     assert target.read_text() == '{"skipped_quota": 5}'
+
+
+def test_journal_loss_record_rejects_fifo(tmp_path, fresh_loss_buffer):
+    import os
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("POSIX FIFO capability required")
+    skills = fresh_loss_buffer
+    store = skills.SkillStore(tmp_path / "skills")
+    record = store.root / "journal_loss.json"
+    os.mkfifo(record)
+    assert skills.read_journal_loss(record) is None  # never blocks on a FIFO
+    store._journal_skip("journal byte quota reached")
+    assert skills.read_journal_loss(record)["skipped_quota"] == 1
 
 
 def test_journal_loss_buffer_is_bounded(tmp_path, monkeypatch, fresh_loss_buffer):

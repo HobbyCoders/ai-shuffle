@@ -160,7 +160,7 @@ def test_unreadable_settings_and_project_files_are_never_overwritten(svc, body):
 def test_missing_claude_json_is_still_created_on_change(svc):
     assert not svc.USER_MCP_FILE.exists()
     assert svc.set_project_server_enabled("n", False) is True
-    assert _read(svc.USER_MCP_FILE)["projects"][str(svc.project_dir)]["disabledMcpServers"] == ["n"]
+    assert _read(svc.USER_MCP_FILE)["projects"][svc.project_dir.as_posix()]["disabledMcpServers"] == ["n"]
 
 
 def test_unreadable_claude_json_is_a_409_from_the_api(svc, monkeypatch):

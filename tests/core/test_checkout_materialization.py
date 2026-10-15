@@ -924,7 +924,7 @@ def _commit_fluid_symlink(repo: Path, target: Path) -> None:
     _git(repo, "commit", "-m", "add .fluid link")
 
 
-def test_branch_checkout_path_refuses_fluid_symlink_outside_base(tmp_path):
+def test_branch_checkout_path_refuses_fluid_symlink_outside_base(tmp_path, requires_symlinks):
     from app.core.worktree_manager import WorktreeError
     repo = _make_base_repo(tmp_path)
     outside = tmp_path / "outside"
@@ -936,7 +936,7 @@ def test_branch_checkout_path_refuses_fluid_symlink_outside_base(tmp_path):
 
 
 def test_ensure_checkout_refuses_fluid_symlink_outside_base(
-    project, base_checkout, tmp_path, workspace_root
+    project, base_checkout, tmp_path, workspace_root, requires_symlinks
 ):
     outside = tmp_path / "outside"
     _commit_fluid_symlink(base_checkout, outside)

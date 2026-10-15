@@ -145,7 +145,7 @@ async def test_import_jsonl_rejects_paths_outside_roots(mock_db, transcript_root
 
 
 @pytest.mark.asyncio
-async def test_import_jsonl_rejects_symlink_escaping_root(mock_db, transcript_roots, tmp_path):
+async def test_import_jsonl_rejects_symlink_escaping_root(mock_db, transcript_roots, tmp_path, requires_symlinks):
     projects, _ = transcript_roots
     secret = tmp_path / "secret.jsonl"
     secret.write_text("{}\n")

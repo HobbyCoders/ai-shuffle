@@ -5,6 +5,7 @@ Claude and Codex homes: the source is never modified, an existing destination
 is never overwritten, only ready items from a fresh preview are applied, and
 outside local mode the source home is confined to the configured mount.
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -166,8 +167,7 @@ def test_docker_mode_does_not_register_projects_outside_the_workspace(c, homes, 
     inside = workspace / "inside project"
     outside.mkdir()
     inside.mkdir()
-    _write(source / ".claude.json", '{"projects": {%s: {}, %s: {}}}' % (
-        f'"{outside}"', f'"{inside}"'))
+    _write(source / ".claude.json", json.dumps({"projects": {str(outside): {}, str(inside): {}}}))
     preview = c.post(f"{URL}/preview", json={"providers": ["claude"]}).json()
     projects = {Path(i["source"]).name: i for i in preview["items"] if i["kind"] == "project_registration"}
     assert projects["outside project"]["status"] == "diagnostic"

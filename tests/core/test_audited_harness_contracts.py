@@ -149,7 +149,7 @@ async def test_advertised_search_example_drives_real_grep_and_read(tmp_path):
     try:
         await kernel.set_vfs(Projection(registry.list_tools()).sources())
         code = re.search(r"```python\n(.*?)```", ha._CODE_MODE_SEARCH_EXAMPLE, re.S).group(1)
-        result = await kernel.exec(code.replace("/repo/src", str(tmp_path)), timeout=8,
+        result = await kernel.exec(code.replace('"/repo/src"', repr(str(tmp_path))), timeout=8,
                                    on_host_call=bridge.on_host_call)
         assert result.error is None, result.error
         assert len(reads) == len(set(reads)) == 2

@@ -21,6 +21,8 @@ from unittest.mock import patch, AsyncMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Set test environment variables before importing app modules.
+# A test process must never load the launching worker's private env file.
+os.environ.pop("AI_SHUFFLE_ENV_FILE", None)
 os.environ["TESTING"] = "1"
 # Never read a descriptor from the user's live DATA_DIR during collection or
 # fixture setup. Disposable PostgreSQL jobs opt in below with TEST_POSTGRES_DSN.
@@ -40,6 +42,19 @@ os.environ["DATA_DIR"] = _TEST_DATA.name
 os.environ["CORS_ORIGINS"] = "*"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def requires_symlinks(tmp_path):
+    """Probe symlink capability without hiding unrelated filesystem failures."""
+    target = tmp_path / "symlink-capability-target"
+    target.write_text("probe", encoding="utf-8")
+    try:
+        (tmp_path / "symlink-capability-link").symlink_to(target)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires Developer Mode or elevation")
+        raise
 
 # ─── No host worker configuration in tests ──────────────────────────────────
 # A run started from a chat on a running worker (the on-device suites,

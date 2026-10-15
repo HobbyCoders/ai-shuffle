@@ -111,7 +111,7 @@ def test_rename_refuses_git_metadata_source(client, project_dir, path):
     assert (project_dir / ".git" / "config").exists()
 
 
-def test_rename_refuses_git_metadata_reached_through_a_link(client, project_dir):
+def test_rename_refuses_git_metadata_reached_through_a_link(client, project_dir, requires_symlinks):
     (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
 
     response = _rename(client, "meta/hooks", "moved")
@@ -151,7 +151,7 @@ def test_create_folder_refuses_git_metadata_name(client, project_dir, dotgit):
     assert not (project_dir / "src" / ".git").exists()
 
 
-def test_create_folder_refuses_git_metadata_reached_through_a_link(client, project_dir):
+def test_create_folder_refuses_git_metadata_reached_through_a_link(client, project_dir, requires_symlinks):
     (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
 
     response = _mkdir(client, "meta/hooks", "pre-commit")
@@ -184,7 +184,7 @@ def test_delete_refuses_git_metadata(client, project_dir, path):
     assert (project_dir / ".git" / "config").exists()
 
 
-def test_delete_refuses_git_metadata_reached_through_a_link(client, project_dir):
+def test_delete_refuses_git_metadata_reached_through_a_link(client, project_dir, requires_symlinks):
     (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
 
     response = _delete(client, "meta/hooks")
@@ -194,7 +194,7 @@ def test_delete_refuses_git_metadata_reached_through_a_link(client, project_dir)
     assert (project_dir / ".git" / "hooks").is_dir()
 
 
-def test_delete_of_a_link_to_git_metadata_removes_only_the_link(client, project_dir):
+def test_delete_of_a_link_to_git_metadata_removes_only_the_link(client, project_dir, requires_symlinks):
     (project_dir / "meta").symlink_to(project_dir / ".git", target_is_directory=True)
 
     response = _delete(client, "meta")

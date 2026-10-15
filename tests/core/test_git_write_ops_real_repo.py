@@ -172,7 +172,8 @@ def _assert_discard_cannot_escape(svc, repo, tmp_path):
     anything outside it, or the target of an untracked symlink."""
     outside = tmp_path / "outside.txt"
     outside.write_text("keep\n")
-    os.symlink(repo / "src", repo / "src-link")          # untracked link to tracked dir
+    from app.core.checkout_manager import _link_directory
+    _link_directory(repo / "src", repo / "src-link")  # untracked directory link
     victims = [".", ".git", ".git/config", "../outside.txt", str(outside), "src-link"]
 
     ok, failed = svc.discard_changes(

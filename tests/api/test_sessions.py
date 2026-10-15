@@ -2036,8 +2036,8 @@ class TestExportSession:
         cd = response.headers["content-disposition"]
         assert "attachment" in cd
         assert cd.endswith('.jsonl"')
-        # Content must be the file bytes verbatim, not re-serialized.
-        assert response.text == raw
+        # Content must be the on-disk bytes verbatim, including native newlines.
+        assert response.content == jsonl_file.read_bytes()
 
     def test_export_session_jsonl_from_fluid_transcript(
         self, client, mock_database, sample_session

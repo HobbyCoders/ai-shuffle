@@ -513,14 +513,16 @@ def test_file_diff_of_staged_rename(svc, repo, backend):
     assert "renamed.txt" in result["diff"]
 
 
-def test_file_diff_never_reads_outside_the_repository(svc, tmp_path, repo, backend):
+@pytest.mark.parametrize("kind", ["relative", "absolute", "symlink"])
+def test_file_diff_never_reads_outside_the_repository(svc, tmp_path, repo, backend, kind, request):
     secret = tmp_path / "secret.txt"
     secret.write_text("TOP SECRET\n")
-    os.symlink(secret, repo / "leak.txt")  # untracked symlink out of the repo
-
-    for rel in ("../secret.txt", str(secret), "leak.txt"):
-        result = svc.get_file_diff(str(repo), rel)
-        assert "TOP SECRET" not in result["diff"], rel
+    if kind == "symlink":
+        request.getfixturevalue("requires_symlinks")
+        os.symlink(secret, repo / "leak.txt")
+    rel = {"relative": "../secret.txt", "absolute": str(secret), "symlink": "leak.txt"}[kind]
+    result = svc.get_file_diff(str(repo), rel)
+    assert "TOP SECRET" not in result["diff"], rel
     assert svc.get_file_diff(str(repo), "../secret.txt")["diff"] in (
         "", "Error: path traversal blocked",
     )

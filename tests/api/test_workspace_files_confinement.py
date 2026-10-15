@@ -68,7 +68,7 @@ def test_download_refuses_absolute_path(ws):
     assert "top secret" not in response.text
 
 
-def test_download_refuses_symlink_out_of_workspace(ws):
+def test_download_refuses_symlink_out_of_workspace(ws, requires_symlinks):
     client, workspace, outside = ws
     (workspace / "escape").symlink_to(outside / "secret.txt")
     response = client.get(f"{PREFIX}/files/download", params={"path": "escape"})
@@ -76,7 +76,7 @@ def test_download_refuses_symlink_out_of_workspace(ws):
     assert "top secret" not in response.text
 
 
-def test_list_refuses_symlinked_directory_out_of_workspace(ws):
+def test_list_refuses_symlinked_directory_out_of_workspace(ws, requires_symlinks):
     client, workspace, outside = ws
     (workspace / "linkdir").symlink_to(outside, target_is_directory=True)
     response = client.get(f"{PREFIX}/files", params={"path": "linkdir"})
@@ -123,7 +123,7 @@ def test_delete_refuses_traversal(ws):
     assert (outside / "secret.txt").exists()
 
 
-def test_delete_refuses_symlink_out_of_workspace(ws):
+def test_delete_refuses_symlink_out_of_workspace(ws, requires_symlinks):
     client, workspace, outside = ws
     (workspace / "escape").symlink_to(outside, target_is_directory=True)
     response = client.delete(f"{PREFIX}/files", params={"path": "escape"})

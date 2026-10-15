@@ -81,7 +81,7 @@ class TestBrowseDocker:
         assert r.status_code == 400
         assert r.json()["detail"] == "Browsing outside the workspace is not allowed"
 
-    def test_symlink_out_of_the_workspace_is_400(self, owner, docker, tmp_path):
+    def test_symlink_out_of_the_workspace_is_400(self, owner, docker, tmp_path, requires_symlinks):
         link = tmp_path / "workspace" / "escape"
         link.symlink_to(tmp_path / "outside")
         r = owner.get(BROWSE, params={"path": str(link)})
@@ -101,10 +101,18 @@ class TestBrowseDocker:
 
 
 class TestBrowseLocal:
-    def test_start_is_home_and_root(self, owner, local):
+    @pytest.mark.parametrize("platform", ["linux", "win32"])
+    def test_start_is_platform_roots(self, owner, local, monkeypatch, platform):
+        from pathlib import Path
+        import sys
+
+        monkeypatch.setattr(sys, "platform", platform)
+        original_exists = Path.exists
+        monkeypatch.setattr(Path, "exists", lambda path:
+                            str(path) == "C:\\" if str(path).endswith(":\\") else original_exists(path))
         body = owner.get(BROWSE).json()
         assert body["is_local_mode"] is True
-        assert [e["name"] for e in body["entries"]] == ["Home", "/"]
+        assert [e["name"] for e in body["entries"]] == (["C:"] if platform == "win32" else ["Home", "/"])
 
     def test_can_leave_the_workspace(self, owner, local, tmp_path):
         body = owner.get(BROWSE, params={"path": str(tmp_path / "outside")}).json()

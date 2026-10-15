@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -288,20 +288,25 @@ def test_unrelated_reports_never_freshen_an_undated_fable_window() -> None:
 
 
 def test_zone_less_reset_is_read_as_utc(monkeypatch) -> None:
-    """A zone-less ISO reset is UTC; reading it as host-local time would keep a
-    window "not yet reset" for hours on a host west of UTC."""
-    monkeypatch.setenv("TZ", "America/Los_Angeles")
-    time.tzset()
-    try:
-        passed = datetime.fromtimestamp(time.time() - 60, timezone.utc).replace(tzinfo=None)
-        pending = datetime.fromtimestamp(time.time() + 600, timezone.utc).replace(tzinfo=None)
-        out = _payload({"available": True, "fetched_at": time.time(), "windows": [
-            {"type": "five_hour", "utilization": 10, "resets_at": passed.isoformat()},
-            {"type": "seven_day", "utilization": 10, "resets_at": pending.isoformat()},
-        ]})
-    finally:
-        monkeypatch.delenv("TZ")
-        time.tzset()
+    """A zone-less ISO reset must not be interpreted in the host's timezone."""
+    import fluid.tools.builtins.usage as usage
+
+    class WestOfUtc(datetime):
+        def timestamp(self):
+            if self.tzinfo is None:
+                return self.replace(tzinfo=timezone(timedelta(hours=-8))).timestamp()
+            return super().timestamp()
+
+    # Windows has no tzset. Model only naive timestamp conversion, retaining
+    # real ISO parsing and aware datetime arithmetic on every platform.
+    monkeypatch.setattr(usage, "datetime", WestOfUtc)
+    passed = datetime.fromtimestamp(time.time() - 60, timezone.utc).replace(tzinfo=None)
+    pending = datetime.fromtimestamp(time.time() + 600, timezone.utc).replace(tzinfo=None)
+    assert WestOfUtc.fromisoformat(passed.isoformat()).timestamp() > time.time()
+    out = _payload({"available": True, "fetched_at": time.time(), "windows": [
+        {"type": "five_hour", "utilization": 10, "resets_at": passed.isoformat()},
+        {"type": "seven_day", "utilization": 10, "resets_at": pending.isoformat()},
+    ]})
     rolled, live = out["windows"]
     assert rolled.get("rolled_over") is True and rolled["remaining_percent"] == 100.0
     assert "rolled_over" not in live and live["remaining_percent"] == 10.0
