@@ -67,7 +67,31 @@ class CostPolicyTests(unittest.TestCase):
                        "github.actor_id == '76577322'", "github.triggering_actor == github.actor"):
             self.assertIn(clause, gate["if"])
         step = next(s for s in gate["steps"] if "edge_publication_gate.py" in s.get("run", ""))
-        self.assertEqual(step["name"], "Require a local full-suite pass on this revision")
+        # Selection may choose an ancestor, but can only authorize a revision
+        # through the owner's successful local attestation, never its label.
+        self.assertEqual(step["run"], "python scripts/ci/edge_publication_gate.py --select")
+        self.assertEqual(step["id"], "ci")
+        self.assertEqual(gate["outputs"]["ready"], "${{ steps.ci.outputs.ready }}")
+        self.assertEqual(gate["outputs"]["revision"], "${{ steps.ci.outputs.revision }}")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cost_policy_gate", ROOT / "scripts/ci/edge_publication_gate.py")
+        publication = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(publication)
+        self.assertEqual(publication.CONTEXT, "local/full-suite")
+        self.assertEqual(publication.OWNER_ID, "76577322")
+        newer, ancestor = "a" * 40, "b" * 40
+        def status(state, creator):
+            return {"context": publication.CONTEXT, "state": state, "creator": {"id": creator}}
+        statuses = {
+            newer: [status("success", "7"), status("pending", publication.OWNER_ID)],
+            ancestor: [status("success", publication.OWNER_ID)],
+        }
+        api = lambda endpoint: statuses[endpoint.split("/")[1]]
+        self.assertEqual(publication.newest_attested(api, [newer, ancestor])[0], ancestor)
+        statuses[ancestor] = [status("failure", publication.OWNER_ID)]
+        self.assertIsNone(publication.newest_attested(api, [newer, ancestor])[0])
+        statuses[newer] = [status("success", publication.OWNER_ID)]
+        self.assertEqual(publication.newest_attested(api, [newer, ancestor])[0], newer)
         self.assertEqual(config["jobs"]["publish"]["needs"], "gate")
         self.assertEqual(config["jobs"]["publish"]["if"], "needs.gate.outputs.ready == 'true'")
 

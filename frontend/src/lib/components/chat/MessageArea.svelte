@@ -11,6 +11,7 @@
 	// Whether each session was following the bottom (true) or the reader had
 	// scrolled up (false) when it was last on screen.
 	const autoScrollCache = new Map<string, boolean>();
+	const mountedRangeCache = new Map<string, { start: number; end: number }>();
 </script>
 
 <script lang="ts">
@@ -76,19 +77,11 @@
 	} from '$lib/utils/work-log';
 	import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';
 	import {
-		TRANSCRIPT_WINDOW_SIZE,
-		TRANSCRIPT_WINDOW_CHUNK,
-		clampWindowStart,
-		createWindowBackfill,
+		createTranscriptWindow,
 		classifyTurnEntry,
-		expandedWindowStart,
-		initialWindowStart,
-		isLiveTailIndex,
-		scrollTopPreservingBottom,
 		settleSkippedTurns,
-		shouldExpandOnScroll,
 		turnTopsFromVisibility,
-		windowStartForItem,
+		type TranscriptRange,
 		type TurnVisibility
 	} from './transcript-window';
 	import { classifyTranscriptRender } from '$lib/components/layout/chat-empty-state';
@@ -120,14 +113,6 @@
 	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import RunningTasksList from './RunningTasksList.svelte';
 	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
-
-	// How many trailing messages are kept OUT of content-visibility virtualization.
-	// The actively-growing tail (the streaming message + its immediate predecessors)
-	// must never be virtualized/re-estimated, or the browser re-guesses their
-	// intrinsic size against the 80px placeholder as the stream grows and
-	// scrollHeight jitters — the "scroll jumps around while streaming" bug. Far-up
-	// off-screen messages keep content-visibility for the paint/layout perf win.
-	const LIVE_TAIL = 8;
 
 	interface Props {
 		/**
@@ -688,97 +673,83 @@
 	// asked it, everything else on the newest turn.
 	const needsYouTurns = $derived(needsYouTurnIds(openNeedsYou, openMessages, pendingQuestionToolIds, newestTurnId));
 
-	// ── Windowed mounting (PERFORMANCE_REVIEW §3.2 R4) ─────────────────────
-	// Only a trailing window of display items is mounted. Everything below is
-	// about growing that window BACKWARDS without ever moving what the reader
-	// is looking at: on scroll-up, on a jump to an older turn, on demand, and —
-	// so in-page search and long-range scrolling eventually see everything — in
-	// idle-time chunks until the whole transcript is mounted.
-	let mountedStart = $state(0);
-	let windowSessionKey: string | null | undefined = undefined;
-	let previousItemCount = 0;
-	const windowBackfill = createWindowBackfill(
-		() => isMounted && mountedStart > 0 && !document.hidden && !$activeSession.isStreaming,
-		() => expandMountedWindow(expandedWindowStart(mountedStart, TRANSCRIPT_WINDOW_CHUNK))
-	);
-	const cancelWindowBackfill = windowBackfill.cancel;
-	const scheduleWindowBackfill = windowBackfill.schedule;
+	// A bounded slice, not an idle queue that eventually mounts all history.
+	// Explicit navigation remains available while streaming; hidden views do no
+	// optional mounting. A keyed DOM anchor survives eviction at either edge.
+	const transcriptWindow = createTranscriptWindow();
+	let mountedRange = $state<TranscriptRange>({ start: 0, end: 0 });
+	const mountedStart = $derived(mountedRange.start);
+	const mountedEnd = $derived(mountedRange.end);
+	const visibleItems = $derived(displayItems.slice(mountedStart, mountedEnd));
+	let windowSessionKey: string | undefined;
+	let windowShiftVersion = 0;
+	let windowShifting = false;
+	let revealedTurnId = $state<string | null>(null);
 
-	const visibleItems = $derived(
-		mountedStart > 0 ? displayItems.slice(mountedStart) : displayItems
-	);
-
-	/**
-	 * Mount `target`..end, holding the reader's distance from the BOTTOM fixed.
-	 *
-	 * Prepending above the viewport would otherwise push the visible content
-	 * down by the height of everything inserted. Distance-from-bottom is the
-	 * right invariant for a transcript: it also keeps a bottom-pinned view
-	 * pinned, with no special case.
-	 */
-	function expandMountedWindow(target: number): boolean {
-		const next = Math.max(0, Math.min(target, mountedStart));
-		if (next === mountedStart) return false;
+	function applyMountedRange(next: TranscriptRange, preserveAnchor = true) {
+		if (next.start === mountedStart && next.end === mountedEnd) return;
 		const container = containerRef;
-		const distanceFromBottom = container ? container.scrollHeight - container.scrollTop : null;
-		mountedStart = next;
-		if (container && distanceFromBottom !== null) {
-			void tick().then(() => {
-				if (!containerRef) return;
+		const top = container?.getBoundingClientRect().top ?? 0;
+		const candidates = preserveAnchor && container
+			? Array.from(container.querySelectorAll<HTMLElement>('[data-transcript-index]'))
+				.filter(node => {
+					const index = Number(node.dataset.transcriptIndex);
+					return index >= next.start && index < next.end;
+				})
+			: [];
+		const anchor = candidates.find(node => node.getBoundingClientRect().bottom > top) ?? candidates.at(-1);
+		const anchorTop = anchor?.getBoundingClientRect().top;
+		const version = ++windowShiftVersion;
+		windowShifting = true;
+		mountedRange = next;
+		if (windowSessionKey) {
+			mountedRangeCache.set(windowSessionKey, next);
+			evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
+		}
+		void tick().then(() => {
+			if (version !== windowShiftVersion) return;
+			if (container && container === containerRef && anchor?.isConnected && anchorTop !== undefined) {
 				markProgrammaticScrollSettling();
-				containerRef.scrollTop = scrollTopPreservingBottom(
-					containerRef.scrollHeight,
-					distanceFromBottom
-				);
-				lastKnownScrollTop = containerRef.scrollTop;
+				container.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+				lastKnownScrollTop = container.scrollTop;
 				lastScrollMetrics = readScrollMetrics();
-			});
-		}
-		return true;
+			}
+			windowShifting = false;
+		});
 	}
 
-	/** Mount everything above the window (the "show earlier messages" control). */
-	function mountAllEarlierItems() {
-		expandMountedWindow(0);
+	function loadOlderItems() {
+		disengageAutoScroll();
+		applyMountedRange(transcriptWindow.loadOlder());
+	}
+	function loadNewerItems() {
+		applyMountedRange(transcriptWindow.extendNewer());
 	}
 
-	/** Make sure a display item is mounted before we try to scroll to it. */
 	async function ensureItemMounted(itemIndex: number): Promise<void> {
-		if (itemIndex < 0 || itemIndex >= mountedStart) return;
-		if (expandMountedWindow(windowStartForItem(mountedStart, itemIndex))) {
-			await tick();
-		}
+		if (itemIndex < 0 || (itemIndex >= mountedStart && itemIndex < mountedEnd)) return;
+		applyMountedRange(transcriptWindow.windowAround(itemIndex), false);
+		await tick();
 	}
 
-	// Keep the window legal as the transcript grows, shrinks, or is replaced.
-	$effect(() => {
+	$effect.pre(() => {
 		const sessionKey = $activeSession.sessionId ?? 'new';
 		const count = displayItems.length;
+		const streaming = $activeSession.isStreaming;
 		untrack(() => {
 			const isNewSession = sessionKey !== windowSessionKey;
-			// A bulk arrival is a hydration (history load / reload), not streaming:
-			// re-window to the tail so a 500-message session does not mount whole.
-			const bulkArrival = count - previousItemCount > TRANSCRIPT_WINDOW_SIZE;
+			const saved = isNewSession ? mountedRangeCache.get(sessionKey) : undefined;
 			windowSessionKey = sessionKey;
-			previousItemCount = count;
-			if (isNewSession || bulkArrival) {
-				cancelWindowBackfill();
-				mountedStart = initialWindowStart(count);
-			} else {
-				const clamped = clampWindowStart(mountedStart, count);
-				if (clamped !== mountedStart) mountedStart = clamped;
+			transcriptWindow.onStreamingChange(streaming);
+			transcriptWindow.pauseWhenHidden(typeof document !== 'undefined' && document.hidden);
+			let next = transcriptWindow.setItemCount(count, { followTail: isNewSession || shouldAutoScroll });
+			// Restoring a remount uses the same bounded coordinate system as the
+			// saved scrollTop, never a full-history mount.
+			if (isNewSession && saved && autoScrollCache.get(sessionKey) === false && count > 0) {
+				next = transcriptWindow.windowAround(Math.min(count - 1, saved.start + Math.floor(transcriptWindow.cap / 2)));
 			}
+			applyMountedRange(next, !isNewSession && !shouldAutoScroll);
 		});
-	});
-
-	// Idle backfill driver: re-arms itself whenever there is still history above
-	// the mounted window.
-	$effect(() => {
-		if (!isMounted || mountedStart === 0 || $activeSession.isStreaming) {
-			cancelWindowBackfill();
-			return;
-		}
-		scheduleWindowBackfill();
 	});
 	let currentTurnIndex = $state(0);
 	let manualNavigationReleaseUntil = 0;
@@ -837,7 +808,10 @@
 	// Register those anchors without rebuilding the observer on every stream delta.
 	function observeTurnAnchor(anchor: HTMLElement) {
 		if (anchor.dataset.userTurnId) turnObserver?.observe(anchor);
-		return { destroy() { turnObserver?.unobserve(anchor); } };
+		return { destroy() {
+			turnObserver?.unobserve(anchor);
+			if (anchor.dataset.userTurnId) turnVisibility.delete(anchor.dataset.userTurnId);
+		} };
 	}
 
 	/** (Re)build the observer for the mounted anchors and the current geometry. */
@@ -864,7 +838,7 @@
 	$effect(() => {
 		if (!containerRef || !isMounted) return;
 		if (typeof IntersectionObserver === 'undefined') return;
-		const key = `${mountedStart}:${turnNavigationSignature}:${viewportHeight}`;
+		const key = `${mountedStart}:${mountedEnd}:${turnNavigationSignature}:${viewportHeight}`;
 		void key;
 		void tick().then(() => untrack(() => syncTurnObserver()));
 	});
@@ -904,10 +878,15 @@
 		if (!containerRef) return;
 		const item = turnNavigationItems[index];
 		if (!item) return;
-		// The target turn may be older than the mounted window — mount back to it
-		// first, otherwise the rail would silently refuse to move.
+		// Stop follow mode before mounting: concurrent deltas must not undo the
+		// jump. Nested work logs reveal their own bounded row slice as well.
+		disengageAutoScroll();
+		revealedTurnId = null;
+		await tick();
+		revealedTurnId = item.id;
 		const itemIndex = itemIndexByTurnId.get(item.id);
 		if (itemIndex !== undefined) await ensureItemMounted(itemIndex);
+		await tick();
 		if (!containerRef) return;
 		const anchor = document.getElementById(turnAnchorId(item.id));
 		if (!anchor || !containerRef.contains(anchor)) return;
@@ -1166,6 +1145,8 @@
 	}
 
 	function jumpToLatest() {
+		applyMountedRange(transcriptWindow.toTail(), false);
+		revealedTurnId = null;
 		clearJumpRevealTimer();
 		showJumpToLatest = false;
 		manualNavigationReleaseUntil = 0;
@@ -1247,11 +1228,16 @@
 			const currentScrollTop = containerRef.scrollTop;
 			const currentMetrics = readScrollMetrics();
 
-			// Reading back into history: mount the next chunk before the reader
-			// reaches the top of what is mounted. expandMountedWindow() holds the
-			// distance from the bottom, so nothing under the reader moves.
-			if (shouldExpandOnScroll(currentScrollTop, mountedStart)) {
-				expandMountedWindow(expandedWindowStart(mountedStart, TRANSCRIPT_WINDOW_CHUNK));
+			// Shift only in the reader's direction, never in response to our own
+			// anchor restoration or a rail jump.
+			if (!windowShifting && Date.now() >= manualNavigationReleaseUntil) {
+				const previousTop = lastScrollMetrics?.scrollTop ?? currentScrollTop;
+				if (currentScrollTop < previousTop && mountedStart > 0 && currentScrollTop < 900) {
+					loadOlderItems();
+				} else if (currentScrollTop > previousTop && mountedEnd < displayItems.length &&
+					containerRef.scrollHeight - currentScrollTop - containerRef.clientHeight < 900) {
+					loadNewerItems();
+				}
 			}
 
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
@@ -1272,7 +1258,7 @@
 				const next = nextStickToBottom(shouldAutoScroll, prev, currentMetrics);
 				// Smooth turn navigation must not accidentally re-arm follow mode merely
 				// because its destination happens to be near the live edge.
-				const resolvedNext = Date.now() < manualNavigationReleaseUntil ? false : next;
+				const resolvedNext = Date.now() < manualNavigationReleaseUntil || mountedEnd < displayItems.length ? false : next;
 				// eslint-disable-next-line no-console
 				if (STREAM_DEBUG && resolvedNext !== shouldAutoScroll) console.log(`[AS] handleScroll ${resolvedNext ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
 				shouldAutoScroll = resolvedNext;
@@ -1321,6 +1307,9 @@
 	// content. Passive — we never preventDefault, just observe direction.
 	function handleWheel(e: WheelEvent) {
 		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
+		// At the boundary the browser cannot emit another scroll event. This
+		// also covers a gesture arriving during the last programmatic frame.
+		if (e.deltaY < 0 && containerRef && containerRef.scrollTop <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
 	}
 
 	// Touch: accumulate downward travel from the gesture's lowest clientY.
@@ -1336,6 +1325,7 @@
 		touchLastY = Math.min(touchLastY, y);
 		if (isUserScrollUpGesture(0, touchDeltaY)) {
 			disengageAutoScroll();
+			if (containerRef && containerRef.scrollTop <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
 			touchLastY = y;
 		}
 	}
@@ -1371,11 +1361,8 @@
 				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
 
 				if (storedPosition > 0) {
-					// The saved offset was measured against the FULL transcript, so
-					// the window has to be opened all the way before it means
-					// anything — otherwise the restore clamps to the short content
-					// and drops the reader somewhere else entirely.
-					mountedStart = 0;
+					// The range effect restores the same bounded slice as the saved
+					// offset. Never mount all history to restore a reading position.
 					shouldAutoScroll = false;
 					programmaticScrollDepth++;
 					void tick().then(() => {
@@ -1417,8 +1404,7 @@
 	// Mobile browsers often restore a stale scroll position from their history state,
 	// causing the chat to appear scrolled to the middle instead of the bottom.
 	function handleVisibilityChange() {
-		if (document.hidden) cancelWindowBackfill();
-		else scheduleWindowBackfill();
+		applyMountedRange(transcriptWindow.pauseWhenHidden(document.hidden), !shouldAutoScroll);
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] visibility=${document.visibilityState} autoS=${shouldAutoScroll} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		if (document.visibilityState === 'visible' && shouldAutoScroll && containerRef) {
@@ -1452,7 +1438,7 @@
 
 	onDestroy(() => {
 		stopScrollSettle();
-		cancelWindowBackfill();
+		windowShiftVersion++;
 		turnObserver?.disconnect();
 		turnObserver = null;
 		clearJumpRevealTimer();
@@ -1990,23 +1976,19 @@
 		<!-- Messages -->
 		<div class="chat-column" bind:this={chatColumnRef}>
 			{#if mountedStart > 0}
-				<!-- Older turns are mounted on demand (scroll-up, timeline jump) and
-				     backfilled during idle time; this is the explicit way in — it
-				     matters for in-page search, which can only find mounted text. -->
+				<!-- Keyboard-accessible equivalent of scrolling into the older edge. -->
 				<div class="earlier-row">
-					<button type="button" class="earlier-button" onclick={mountAllEarlierItems}>
+					<button type="button" class="earlier-button" onclick={loadOlderItems}>
 						Show earlier messages
 					</button>
 				</div>
 			{/if}
 			{#each visibleItems as item, i (displayItemKey(item))}
-				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen
-				     messages. The last LIVE_TAIL items opt OUT (.msg-live) so the growing
-				     streaming region near the viewport bottom is never re-estimated. -->
+				<!-- Bounded mounting, with real row geometry for scroll anchoring. -->
 				<div
 					class="msg-virtualized"
+					data-transcript-index={mountedStart + i}
 					use:observeTurnAnchor
-					class:msg-live={isLiveTailIndex(mountedStart + i, displayItems.length, LIVE_TAIL)}
 					id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? turnAnchorId(item.message.id) : undefined}
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}
 				>
@@ -2026,16 +2008,25 @@
 						summary={item.summary}
 						compactSummary={item.compactSummary}
 						row={messageBody}
+						revealMessageId={revealedTurnId}
+						pagingEnabled={!shouldAutoScroll}
 						{observeTurnAnchor}
 					/>
 				{:else if item.kind === 'system_group'}
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
-					<SystemMessageGroup messages={item.messages} />
+					<SystemMessageGroup messages={item.messages} pagingEnabled={!shouldAutoScroll} />
 				{:else}
 					{@render messageBody(item.message, item.index)}
 				{/if}
 			</div>
 			{/each}
+
+			{#if mountedEnd < displayItems.length}
+				<div class="earlier-row">
+					<button type="button" class="earlier-button" onclick={loadNewerItems}>Show newer messages</button>
+					<button type="button" class="earlier-button" onclick={jumpToLatest}>Jump to latest</button>
+				</div>
+			{/if}
 
 			<!-- Peer messages stay attributed and read-only, outside user queue controls. -->
 			<PendingPeerMessages messages={pendingPeerMessages} />
@@ -2406,15 +2397,14 @@
 		.sk-line { animation: none; }
 	}
 
-	/* ── Windowed mounting affordance (R4) ────────────────────────────────
-	   Older turns mount on scroll-up and during idle backfill; this is the
-	   explicit control, and the honest signal that they are not mounted yet. */
+	/* Explicit, keyboard-accessible paging mirrors the bounded scroll edges. */
 	.earlier-row {
 		display: flex;
 		justify-content: center;
 	}
 
 	.earlier-button {
+		min-height: 44px;
 		padding: 5px 12px;
 		border: 1px solid color-mix(in oklch, var(--border) 84%, transparent);
 		border-radius: 999px;
@@ -2435,22 +2425,11 @@
 		outline-offset: 2px;
 	}
 
-	/* Browser-native virtualization: skip paint/layout for off-screen messages.
-	   `auto` in contain-intrinsic-size remembers the last rendered height so
-	   the scrollbar stays stable when scrolling back through history. */
+	/* The mounted slice is already bounded. Its rows need real geometry before
+	   anchor compensation: content-visibility's 80px estimates otherwise expand
+	   after the tick and move the preserved reading row a second time. */
 	.msg-virtualized {
-		content-visibility: auto;
-		contain-intrinsic-size: auto 80px;
-	}
-
-	/* The trailing live region (streaming message + immediate predecessors) opts
-	   out of content-visibility entirely: it is always on/near screen and
-	   actively growing, so virtualizing it re-estimates its height every delta
-	   and jitters scrollHeight. Rendering it in full also makes it a valid
-	   scroll-anchor target for the pinned-to-bottom path. */
-	.msg-virtualized.msg-live {
 		content-visibility: visible;
-		contain-intrinsic-size: auto;
 	}
 
 	.transcript-tail-spacer {

@@ -8,12 +8,14 @@
 	 */
 	import type { ChatMessage } from '$lib/stores/types';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
+	import BoundedTranscriptRows from './BoundedTranscriptRows.svelte';
 
 	interface Props {
 		messages: ChatMessage[];
+		pagingEnabled?: boolean;
 	}
 
-	let { messages }: Props = $props();
+	let { messages, pagingEnabled = true }: Props = $props();
 
 	// ToolUseGroup-style persisted expand: bind the <details> open state to
 	// component state so a user's expand survives streaming re-renders (an
@@ -102,11 +104,13 @@
 				{/if}
 			</span>
 		</summary>
-		<div class="sg-body">
-			{#each messages as m (m.id)}
-				<SystemMessage message={m} />
-			{/each}
-		</div>
+		{#if detailsOpen}
+			<div class="sg-body">
+				<BoundedTranscriptRows items={messages} keyOf={message => message.id ?? String(messages.indexOf(message))} label="system messages" {pagingEnabled}>
+					{#snippet children(message)}<SystemMessage {message} />{/snippet}
+				</BoundedTranscriptRows>
+			</div>
+		{/if}
 	</details>
 </div>
 

@@ -16,6 +16,43 @@ from app.db.async_database import run_sync
 logger = logging.getLogger(__name__)
 
 
+def teams_runtime_config(connector_id: str, config: Dict) -> Dict:
+    """Supply a local, connector-scoped state path; ignore user-supplied paths."""
+    from app.core.config import settings
+    # Hashing avoids interpreting IDs as paths. This state is local to the
+    # worker that hosts the bot, not synced or exposed as account config.
+    key = hashlib.sha256(connector_id.encode()).hexdigest()
+    return {**config, "_state_path": str(settings.data_dir / "connectors" / "msteams" / f"{key}.json")}
+
+
+async def receive_teams_activity(connector, authorization: str, activity: Dict) -> None:
+    """Authenticate before crossing the package RPC or storing a reference."""
+    from app.core.msteams_auth import bot_framework_auth
+    config = connector.config
+    await bot_framework_auth.validate(
+        authorization, activity, config.get("app_id", ""),
+        config.get("tenant_id") or "botframework.com",
+    )
+    sender = activity.get("from")
+    conversation = activity.get("conversation")
+    if not isinstance(sender, dict) or not isinstance(conversation, dict):
+        raise ValueError("Missing sender or conversation")
+    if not isinstance(conversation.get("id"), str) or not conversation["id"]:
+        raise ValueError("Missing conversation id")
+    user_id = sender.get("aadObjectId") or sender.get("id")
+    if not user_id or user_id not in [str(user) for user in (config.get("allowed_user_ids") or [])]:
+        return  # Authenticated but not authorized; do not create a reference.
+    if activity.get("type") not in ("message", "invoke"):
+        return  # Ignore authenticated lifecycle/typing activities.
+    if not isinstance(activity.get("text", ""), str) or not isinstance(activity.get("value", {}), dict):
+        raise ValueError("Invalid message content")
+    if not isinstance(activity.get("value", {}).get("action", ""), str):
+        raise ValueError("Invalid card action")
+    if not isinstance(activity.get("id"), str) or not activity["id"]:
+        raise ValueError("Missing activity id")
+    await connector.handle_webhook_activity(activity)
+
+
 # ---------------------------------------------------------------------------
 # Sensitive-field mapping (shared with ConnectorManager)
 # ---------------------------------------------------------------------------
@@ -695,12 +732,14 @@ def get_connector_type_info() -> List[Dict]:
         {
             "type": "msteams",
             "name": "Microsoft Teams",
-            "description": "Microsoft Teams via Bot Framework",
+            "description": "Experimental Microsoft Teams via authenticated Bot Framework webhook",
             "config_fields": [
                 {"key": "app_id", "label": "Application (Client) ID", "type": "text", "required": True},
                 {"key": "app_password", "label": "Client Secret", "type": "password", "required": True},
-                {"key": "tenant_id", "label": "Tenant ID", "type": "text", "required": False, "placeholder": "botframework.com"},
-                {"key": "allowed_user_ids", "label": "Allowed User IDs", "type": "list", "required": False},
+                {"key": "tenant_id", "label": "Tenant ID", "type": "text", "required": False, "placeholder": "botframework.com",
+                 "description": "For a single-tenant Azure Bot, enter its directory tenant UUID. Leave blank only for an existing multi-tenant bot."},
+                {"key": "allowed_user_ids", "label": "Allowed User IDs", "type": "list", "required": True,
+                 "description": "Microsoft Entra user object IDs permitted to message the agent and approve actions."},
                 {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
                  "description": "Restrict AI actions to these categories (empty = all): messages, presence, members"},
                 {"key": "auto_approve_destructive", "label": "Auto-approve Destructive Actions", "type": "text", "required": False,

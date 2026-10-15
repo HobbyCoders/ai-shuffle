@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "a2de1f989810991a6f5eb20ae6e6e86e515c7e99",
+  "revision": "2590a994851d2b38d717f85ac74606249da2ea48",
   "packages": {
     "telegram": {
       "module": "telegram",
@@ -67,12 +67,12 @@
     },
     "msteams": {
       "offered": false,
-      "unavailable_reason": "Microsoft Teams is not available yet: inbound Bot Framework authentication and messaging are not wired up.",
+      "unavailable_reason": "Microsoft Teams is not available yet by default: Azure live verification is pending. Administrators can opt in with AI_SHUFFLE_EXPERIMENTAL_MSTEAMS=1.",
       "module": "msteams",
       "class": "MSTeamsConnector",
       "files": {
-        "msteams.py": "7de56e59f68c935b67a9564a2610f604c2c6ec26240e0a0a5a4bbb35ddd6e859",
-        "msteams_actions.py": "9bdcabaa9092cddb414158607cd6f5d054d66331fa3ebd23469c7f6cde15d1fa"
+        "msteams.py": "c2dd0a94f3c599d1d105c531890ce6db946050ae5cdc73fa5ec1b19e3985ff92",
+        "msteams_actions.py": "64326379b68407cd3a4eeb0256143c9bc20a837b1ab6d145193774aa81c4e757"
       }
     },
     "bluebubbles": {
@@ -142,5 +142,5 @@
     ]
   },
   "sdk": 1,
-  "release": "4d7bd622108ef168"
+  "release": "60f4c35b2f961e18"
 }

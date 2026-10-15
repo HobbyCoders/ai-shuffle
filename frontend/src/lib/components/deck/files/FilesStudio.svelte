@@ -26,6 +26,10 @@
 	import { findWorker, workerOptions, type WorkerOption } from './files-workers';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
+	import FilesTerminalDrawer from './FilesTerminalDrawer.svelte';
+	import { TerminalSquare } from 'lucide-svelte';
+	let terminalDrawer: ReturnType<typeof FilesTerminalDrawer>;
+	let terminalBusy = $state(false);
 
 	let uploadInput = $state<HTMLInputElement | null>(null);
 	let showNewFolder = $state(false);
@@ -294,6 +298,11 @@
 			accent="files"
 		>
 			{#snippet actions()}
+				{#if workerId === null}
+					<button class="fs-btn" disabled={loading || !!loadError || terminalBusy} onclick={() => terminalDrawer.open(currentPath)} title="Open terminal in this folder on this worker">
+						<TerminalSquare size={15} strokeWidth={1.8} /><span>Open terminal here</span>
+					</button>
+				{/if}
 				<button class="fs-btn" onclick={openNewFolder} disabled={!!loadError}>
 					<FolderPlus size={15} strokeWidth={1.8} /><span>New folder</span>
 				</button>
@@ -498,6 +507,9 @@
 									onToggle={(e) => toggleRowActions(e, item.path)}
 									label="File actions"
 								>
+									{#if workerId === null}
+										<button class="fs-icon-btn" disabled={terminalBusy} title={item.type === 'directory' ? 'Open terminal here' : 'Open terminal in parent folder'} aria-label={`Open terminal ${item.type === 'directory' ? 'in' : 'in parent folder of'} ${item.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenPath = null; void terminalDrawer.open(item.type === 'directory' ? item.path : currentPath); }}><TerminalSquare size={14} strokeWidth={1.8} /></button>
+									{/if}
 									<button class="fs-icon-btn" title="Rename" aria-label="Rename {item.name}" onclick={(e) => startRename(item, e)}><Edit3 size={14} strokeWidth={1.8} /></button>
 									<button class="fs-icon-btn fs-icon-btn--danger" title="Delete" aria-label="Delete {item.name}" onclick={(e) => { e.stopPropagation(); pendingDelete = item; }}><Trash2 size={14} strokeWidth={1.8} /></button>
 									{#if item.type === 'file'}
@@ -525,6 +537,8 @@
 	</div>
 	</div>
 </div>
+
+<FilesTerminalDrawer bind:this={terminalDrawer} bind:busy={terminalBusy} />
 
 <input type="file" multiple bind:this={uploadInput} onchange={onUploadChange} style="display:none" />
 
@@ -776,6 +790,9 @@
 
 	@media (max-width: 767px) {
 		.fs-head { padding: 16px 16px 0; }
+		.fs-head :global(.sph-actions) { flex-wrap: wrap; flex-shrink: 1; }
+		.fs-btn { min-height: 44px; }
+		.fs-icon-btn { min-width: 44px; min-height: 44px; }
 		.fs-toolbar { padding: 12px 16px 10px; }
 		.fs-newfolder { margin: 0 16px 10px; }
 		.fs-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }

@@ -25,10 +25,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       ready: ${{ steps.ci.outputs.ready }}
+      revision: ${{ steps.ci.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Skip an unchanged main revision
         id: changed
@@ -37,12 +39,14 @@ jobs:
         if: steps.changed.outputs.changed == 'true'
         with:
           python-version: '3.12'
-      - name: Require a local full-suite pass on this revision
+      - run: python -m pip install "httpx==0.27.2" "cryptography>=44.0.0"
+        if: steps.changed.outputs.changed == 'true'
+      - name: Select the newest attested unpublished first-parent revision
         if: steps.changed.outputs.changed == 'true'
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci/edge_publication_gate.py
+        run: python scripts/ci/edge_publication_gate.py --select
 
   publish:
     needs: gate
@@ -58,36 +62,48 @@ jobs:
       contents: write
       statuses: read
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .publication-control
+    env:
+      SOURCE_REVISION: ${{ needs.gate.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.gate.outputs.revision }}
           fetch-depth: 0
+          persist-credentials: false
+      # Control code is trusted workflow-main code, never an older candidate.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .publication-control
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # Superseded jobs exit before installing the publication dependencies.
+      - run: python -m pip install "httpx==0.27.2" "cryptography>=44.0.0"
+      # Superseded jobs exit before installing the Node publication dependencies.
       - name: Skip superseded publication before build setup
         id: settled
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci/edge_publication_gate.py
+        run: python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"
       - uses: actions/setup-node@v4
         if: steps.settled.outputs.ready == 'true'
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: scripts/source-publisher/package-lock.json
+          cache-dependency-path: .publication-control/scripts/source-publisher/package-lock.json
       - run: npm ci --no-audit --no-fund
         if: steps.settled.outputs.ready == 'true'
-        working-directory: scripts/source-publisher
+        working-directory: .publication-control/scripts/source-publisher
       - name: Recheck the pass and main immediately before signing
         if: steps.settled.outputs.ready == 'true'
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci/edge_publication_gate.py
+        run: python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"
       - name: Publish signed source revision
         if: steps.ci.outputs.ready == 'true'
         env:
@@ -98,4 +114,4 @@ jobs:
           ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
           RELEASE_GITHUB_REPO: ${{ vars.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle' }}
           RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
-        run: node desktop/scripts/publish-source.mjs
+        run: node desktop/scripts/publish-source.mjs --source-root "$GITHUB_WORKSPACE"
