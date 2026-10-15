@@ -125,7 +125,12 @@ def gates(tag):
     preflight.verify_merged_pr(revision)
     if not preflight.newest_final(ROOT, tag):
         raise ValueError("Obsolete version cannot be staged or promoted")
-    from scripts.ci.edge_publication_gate import update_reach_readiness
+    from scripts.ci.edge_publication_gate import owner_status, update_reach_readiness
+    # Dispatch identity is not test evidence. Never cache this: current() calls
+    # gates() again immediately before each activation, including on retries.
+    status = owner_status(api, revision)
+    if status is None or status.get("state") != "success":
+        raise ValueError("Latest owner local/full-suite attestation is missing or not successful")
     ready, _ = update_reach_readiness(revision, root=ROOT)
     if not ready:
         raise ValueError("Current update-reach evidence missing or refused")

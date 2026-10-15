@@ -520,3 +520,125 @@ def test_release_inline_shell_is_valid():
                 result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
                 assert result.returncode == 0, (name, step.get("name"), result.stderr)
 
+
+@pytest.fixture
+def owner_gate_evidence(candidate, monkeypatch):
+    """Keep real gates()/owner_status(); fake only GitHub and unrelated gates."""
+    from scripts.ci import edge_publication_gate as edge
+    revision = candidate.record["revision"]
+    success = {"context": edge.CONTEXT, "creator": {"id": edge.OWNER_ID}, "state": "success"}
+    evidence = SimpleNamespace(rows=[success], calls=[], error=None)
+    def api(route):
+        evidence.calls.append(route)
+        assert route == f"commits/{revision}/statuses?per_page=100&page=1"
+        if evidence.error:
+            raise evidence.error
+        return evidence.rows
+    monkeypatch.setattr(gh, "api", api)
+    monkeypatch.setattr(gh, "owner_gate", lambda _: candidate.record["repository"])
+    monkeypatch.setattr(gh, "command", lambda *args, **kwargs: b"")
+    monkeypatch.setattr(gh, "git", lambda *args: f"{revision}\trefs/tags/v1.2.3" if args[0] == "ls-remote" else candidate.record["tree"])
+    monkeypatch.setattr(gh.preflight, "verify_tag", lambda *args: revision)
+    for name in ("verify_versions", "verify_catalog", "verify_merged_pr"):
+        monkeypatch.setattr(gh.preflight, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(gh.preflight, "newest_final", lambda *args: True)
+    monkeypatch.setattr(edge, "update_reach_readiness", lambda *args, **kwargs: (True, "fixture"))
+    return evidence
+
+
+@pytest.mark.parametrize("case", ["missing", "failure", "foreign", "pending", "api-error", "superseded"])
+@pytest.mark.parametrize("phase", ["stage", "promote"])
+def test_latest_owner_full_suite_is_required(candidate, owner_gate_evidence, case, phase):
+    evidence = owner_gate_evidence
+    success = copy.deepcopy(evidence.rows[0])
+    if case == "missing":
+        evidence.rows = []
+    elif case == "api-error":
+        evidence.error = ValueError("GitHub status API unavailable")
+    elif case == "foreign":
+        evidence.rows = [{**success, "creator": {"id": "not-the-owner"}}]
+    elif case == "superseded":
+        evidence.rows = [{**success, "state": "failure"}, success]
+    else:
+        evidence.rows = [{**success, "state": case}]
+    fake = Fake(candidate)
+    original_current = fake.current
+    def current(record):
+        return {**original_current(record), **gh.gates(record["tag"])}
+    fake.current = current
+    with pytest.raises(ValueError, match="attestation|API unavailable"):
+        if phase == "stage":
+            # stage() must refuse before even looking for candidate artifacts.
+            gh.stage(SimpleNamespace(tag="v1.2.3"), fake)
+        else:
+            p.activate(envelope(candidate), fake)
+    assert len(evidence.calls) == 1
+    assert not fake.writes
+
+
+def test_owner_gate_ignores_foreign_status_and_checks_exact_revision(owner_gate_evidence):
+    evidence = owner_gate_evidence
+    success = evidence.rows[0]
+    evidence.rows = [{**success, "state": "failure", "creator": {"id": "not-the-owner"}}, success]
+    assert gh.gates("v1.2.3")["owner"] is True
+    assert evidence.calls == [f"commits/{'a' * 40}/statuses?per_page=100&page=1"]
+
+
+@pytest.mark.parametrize("revoke_after", ["verification", "source"])
+def test_owner_attestation_is_rechecked_immediately_before_activation(candidate, owner_gate_evidence, revoke_after):
+    evidence = owner_gate_evidence
+    success = copy.deepcopy(evidence.rows[0])
+    fake = Fake(candidate)
+    original_current, original_provenance, original_write = fake.current, fake.verify_provenance, fake.write
+    def revoke():
+        evidence.rows = [{**success, "state": "failure"}, success]
+    def current(record):
+        return {**original_current(record), **gh.gates(record["tag"])}
+    def provenance(record):
+        original_provenance(record)
+        if revoke_after == "verification":
+            revoke()
+    def write(sink, record):
+        original_write(sink, record)
+        if sink == revoke_after:
+            revoke()
+    fake.current, fake.verify_provenance, fake.write = current, provenance, write
+    with pytest.raises(ValueError, match="attestation"):
+        p.activate(envelope(candidate), fake)
+    assert fake.writes == ([] if revoke_after == "verification" else ["source"])
+    # Retrying the signed candidate cannot reuse its formerly successful status.
+    with pytest.raises(ValueError, match="attestation"):
+        p.activate(envelope(candidate), fake)
+    assert fake.writes == ([] if revoke_after == "verification" else ["source"])
+    assert len(evidence.calls) >= 3
+
+
+def test_release_publication_credentials_are_step_scoped():
+    wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    forbidden = {"GH_TOKEN", "GITHUB_TOKEN", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
+                 "DESKTOP_APPLICATION_SIGNING_KEY", "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"}
+    def credential_free(env):
+        assert not forbidden.intersection(env)
+        assert "secrets." not in json.dumps(env)
+        assert "github.token" not in json.dumps(env)
+    credential_free(wf.get("env", {}))
+    for job in wf["jobs"].values():
+        credential_free(job.get("env", {}))
+        for step in job.get("steps", []):
+            run = step.get("run", "")
+            setup = step.get("uses", "").startswith(("actions/setup-", "docker/setup-"))
+            if setup or "pip install" in run or "npm ci" in run:
+                credential_free({**wf.get("env", {}), **job.get("env", {}), **step.get("env", {})})
+                assert "secrets." not in json.dumps(step)
+                assert "github.token" not in json.dumps(step)
+    for name in ("stage-begin", "stage-record", "promotion", "promotion-play"):
+        job = wf["jobs"][name]
+        assert job["permissions"]["statuses"] == "read"
+        for step in job["steps"]:
+            if "release_staging_github.py" in step.get("run", ""):
+                assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+                if name != "stage-begin":
+                    assert step["env"]["CLOUDFLARE_API_TOKEN"] == "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+            if step.get("uses") == "actions/checkout@v4":
+                assert step["with"]["persist-credentials"] == "false"
+
