@@ -205,7 +205,7 @@ async function main(): Promise<void> {
 		stackStarted = true;
 		// From here a first boot may migrate the database, so a crash must block it.
 		// Unrecorded, a crash would look harmless to the launcher: do not start.
-		try { await applications?.databaseStarting(); }
+		try { await applications?.requireRestorePoint(postgres.updateRestorePoint()); await applications?.databaseStarting(); }
 		catch (error) {
 			runtimeError = `Could not record the application start: ${error instanceof Error ? error.message : String(error)}`;
 			supervisor = null;
@@ -294,11 +294,23 @@ async function main(): Promise<void> {
 		// says so there. No launch dialog for everyone.
 		if (applications && state.phase === 'ready' && !state.external) {
 			// The initial timer may have fired while this revision was still booting.
-			void applications.healthy().then(() => { replaceLauncher(); return updater.check(); }).catch(error => console.error('Could not record healthy application', error));
+			void applications.healthy().then(async () => {
+				if (postgres) await applications.recoverRollback(async () => postgres!.updateRestorePoint());
+				replaceLauncher(); return updater.check();
+			}).catch(error => console.error('Could not record healthy application', error));
 		}
-		if (applications && state.phase === 'failed') {
+		if (applications && state.phase === 'failed' && !applicationFailed) {
 			applicationFailed = true;
-			void applications.failed().catch(error => console.error('Could not record failed application', error));
+			void (async () => {
+				await applications.failed();
+				// Stop/reap before the next launcher is allowed to replace any cluster files.
+				await supervisor?.stop({ force: true });
+				await postgres?.quiesce();
+				if (installedExecutable && await applications.rollbackVersion()) {
+					app.relaunch({ execPath: installedExecutable, args: installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')) });
+					app.quit();
+				}
+			})().catch(error => console.error('Could not recover failed application', error));
 		}
 		window.send('desktop:worker-state', desktopState());
 		// The status page hands over to the worker UI as soon as it answers;

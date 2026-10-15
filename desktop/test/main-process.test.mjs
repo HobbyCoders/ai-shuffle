@@ -31,7 +31,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		on: (name, fn) => appEvents.on(name, fn),
 		whenReady: async () => {},
 		quits: 0,
-		quit() { app.quits++; }, relaunch() {},
+		quit() { app.quits++; }, relaunch(options) { app.relaunched = options; },
 		protocol: [],
 		setAsDefaultProtocolClient(...args) { app.protocol.push(['set', ...args]); return true; },
 		isDefaultProtocolClient(...args) { app.protocol.push(['is', ...args]); return registered; },
@@ -81,6 +81,8 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		constructor(options) { super(); postgres = this; this.options = options; this.state = { phase: 'idle', port: null, error: null, logPath: '' }; }
 		async start() { if (postgresStart) await postgresStart(); this.state = { ...this.state, phase: 'ready', port: 5432 }; return this.state; }
 		async stop() { this.state = { ...this.state, phase: 'stopped' }; }
+		async quiesce() { await this.stop(); }
+		updateRestorePoint() { return { validate: async () => {} }; }
 		connection() { return {}; }
 		tail() { return []; }
 	}
@@ -130,7 +132,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 			'./source-build': buildModule.exports,
 			'./source-updates': { SourceUpdates: class {
 				constructor(options) { this.options = options; }
-				async attach() {} async application() { return delegatedApplication; } async databaseStarting() {} async healthy() {}
+				async attach() {} async application() { return delegatedApplication; } async requireRestorePoint() {} async databaseStarting() {} async healthy() {} async recoverRollback() {}
 			} },
 			'./source-profile': { readProfile: () => null, localFeed: () => undefined },
 			'./installed-host': { readInstalledHostSync: () => null },
@@ -443,8 +445,26 @@ test('the first-run disclosure is owned by a shown main window, and nothing star
 	assert.deepEqual(main.pages, ['status', URL_READY]);
 });
 
+test('first-start failure reaps the stack and relaunches the installed selector, not the failed source Electron',async()=>{
+ const events=[];
+ const updates={options:{root:'/isolated/source'},async requireRestorePoint(){events.push('validate');},async databaseStarting(){events.push('floor');},async healthy(){},async recoverRollback(){},async failed(){events.push('failed');},async rollbackVersion(){return '1.0.0';}};
+ const executable=path.resolve('Programs/AI Shuffle.exe');
+ const main=await launch({installed:{executable,updates},platform:'win32',postgresStart:async()=>events.push('postgres')});
+ assert.deepEqual(events,['validate','floor','postgres']);
+ const stop=main.worker.stop.bind(main.worker);main.worker.stop=async options=>{events.push('worker-stop');await stop(options);};
+ main.postgres.quiesce=async()=>{events.push('postgres-stop');};
+ main.worker.emit('state',{...main.worker.state,phase:'failed'});
+ for(let i=0;i<20&&!main.app.quits;i++)await tick();
+ assert.deepEqual(events.slice(3),['failed','worker-stop','postgres-stop']);
+ assert.equal(main.app.relaunched.execPath,executable);assert.equal(main.app.quits,1);
+});
+test('missing restore point fails closed before PostgreSQL or worker start',async()=>{
+ const updates={options:{root:'/isolated/source'},async requireRestorePoint(){throw Error('No verified database restore point');},async databaseStarting(){assert.fail('must not lower the fence');}};
+ const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates}});
+ assert.equal(main.postgres.state.phase,'idle');assert.equal(main.worker.state.phase,'idle');
+});
 test('quitting a first boot before its database started lets the next launch retry it; after that it does not', async () => {
-	const applications = () => ({ options: { root: '/isolated/source' }, deferred: 0, async deferBoot() { this.deferred++; }, async databaseStarting() { this.starting = (this.starting ?? 0) + 1; }, async healthy() {}, async failed() {} });
+	const applications = () => ({ options: { root: '/isolated/source' }, deferred: 0, async requireRestorePoint() {}, async recoverRollback() {}, async deferBoot() { this.deferred++; }, async databaseStarting() { this.starting = (this.starting ?? 0) + 1; }, async healthy() {}, async failed() {} });
 	const executable = '/Programs/AI Shuffle/AI Shuffle.exe';
 	// The tray's Quit while the first-run disclosure is still waiting.
 	const waiting = applications();

@@ -380,6 +380,24 @@ export async function terminateProcessTree(pid: number, timeoutMs = 10_000): Pro
 	return !isProcessAlive(pid);
 }
 
+/** Before touching a restore point, reap only an authenticated worker from this profile. */
+export async function quiesceRecordedWorker(stateDir: string): Promise<void> {
+	const file = path.join(stateDir, 'worker-process.json');
+	const previous = await readWorkerProcessRecord(file);
+	if (!previous) {
+		if (existsSync(file)) throw new Error('The worker process record is unreadable; database recovery is blocked');
+		return;
+	}
+	if (!previous.pid) {
+		if (!previous.port || !await isPortFree(previous.port)) throw new Error('Cannot prove the previous worker is stopped; database recovery is blocked');
+		return;
+	}
+	if (!isProcessAlive(previous.pid)) return;
+	const health = await fetchHealth(previous.port);
+	if (!health.ok || health.service !== 'ai-shuffle' || health.attach !== attachTokenHash(previous.token)) throw new Error('Cannot verify the previous worker is stopped; database restore is blocked');
+	if (!await terminateProcessTree(previous.pid)) throw new Error('The previous worker could not be reaped; database restore is blocked');
+}
+
 /** Owner-only launch barrier, also used when attaching to a running local worker. */
 export function syncBeforeOpen(port: number, listener: string | null = null): Promise<{ status: string }> {
 	return new Promise((resolve, reject) => {
@@ -870,6 +888,7 @@ export class WorkerSupervisor extends EventEmitter {
 			}
 			await Promise.race([exited, sleep(3000)]);
 		}
+		if (child.pid && isProcessAlive(child.pid)) throw new Error('The worker could not be reaped; database recovery is blocked');
 	}
 
 	/** Called only after the worker and database have stopped on app exit. */

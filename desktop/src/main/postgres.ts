@@ -26,6 +26,7 @@ import path from 'node:path';
 import type { PostgresConfig } from './settings';
 import { privateDirectory } from './private-file';
 import { isPortFree, isProcessAlive } from './worker';
+import { ColdClusterCopy } from './database-restore';
 
 export const POSTGRES_HOST = '127.0.0.1';
 export const POSTGRES_USER = 'ai_shuffle';
@@ -340,6 +341,26 @@ export class PostgresSupervisor extends EventEmitter {
 
 	stop(): Promise<void> {
 		return this.serialize(() => this.doStop());
+	}
+
+	/** Used only while the desktop single-instance lock is held and the worker is reaped. */
+	updateRestorePoint(): ColdClusterCopy {
+		return new ColdClusterCopy(this.opts.root, snapshot => this.quiesce(snapshot));
+	}
+
+	quiesce(requireClean = false): Promise<void> {
+		return this.serialize(async () => {
+			await this.doStop();
+			await this.clearPidFile();
+			const status = await this.exec(this.opts.binaries.pgCtl, pgCtlStatusArgs(this.dataDir));
+			// pg_ctl 3 = not running, 4 = no data directory (interrupted restore rename).
+			if (![3, 4].includes(status.code ?? -1) || this.rt.existsSync(this.pidFile)) throw new Error('PostgreSQL could not be stopped for the update restore point');
+			if (requireClean && this.rt.existsSync(path.join(this.dataDir, 'PG_VERSION'))) {
+				const control = path.join(path.dirname(this.opts.binaries.pgCtl), this.rt.platform === 'win32' ? 'pg_controldata.exe' : 'pg_controldata');
+				const result = await this.exec(control, [this.dataDir], { env: { LC_ALL: 'C', LANG: 'C' } });
+				if (result.code !== 0 || !/^Database cluster state:\s+shut down\s*$/m.test(result.stdout)) throw new Error('PostgreSQL is not cleanly shut down; the update restore point was not changed');
+			}
+		});
 	}
 
 	private async doStart(): Promise<PostgresState> {

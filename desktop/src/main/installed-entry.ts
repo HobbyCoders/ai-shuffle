@@ -1,7 +1,9 @@
 import { app, dialog, shell } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { SourceUpdates } from './source-updates';
+import { SourceUpdates, type RestoreDatabaseFactory } from './source-updates';
+import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
+import { quiesceRecordedWorker } from './worker';
 import { saveInstalledHost, launchInstalledSource, installedLaunchArgs, installedExecutable, requireInstalledElectron, InstallerRequired } from './installed-host';
 import { countLauncherStart, launcherTrial, parseLauncher, restoreLauncher, LAUNCHER_FILE } from './launcher-swap';
 
@@ -53,6 +55,28 @@ async function startWith(root: string, userData: string, baseline: { revision: s
     bootstrapNode: path.join(process.resourcesPath, process.platform === 'win32' ? 'worker/node/node.exe' : 'worker/node/bin/node'),
   });
   await updates.load();
+  const database: RestoreDatabaseFactory = async previous => {
+    // Never use the failed update's native runtime to open the previous cluster.
+    const resources = previous === baseline.revision ? process.resourcesPath : (await updates.application(previous)).resources;
+    const binaries = resolvePostgresBinaries({ packaged: true, resourcesPath: resources });
+    if ('error' in binaries) throw new Error(binaries.error);
+    const postgres = new PostgresSupervisor({ binaries, root: path.join(userData, 'postgres'), logDir: path.join(userData, 'logs'),
+      credentials: { load: () => null, save: async () => { throw new Error('Rollback must never change database credentials'); } } });
+    const copy = postgres.updateRestorePoint();
+    return {
+      validate: () => copy.validate(),
+      snapshot: async () => { await quiesceRecordedWorker(path.join(userData, 'worker')); await copy.snapshot(); },
+      restore: async () => { await quiesceRecordedWorker(path.join(userData, 'worker')); await copy.restore(); },
+      discard: () => copy.discard(),
+    };
+  };
+  try { await updates.recoverRollback(database); }
+  catch (error) {
+    // Keep the journal and migration fence. The owner can retry restoration, never a source-only rollback.
+    await app.whenReady();
+    await dialog.showMessageBox({ type: 'warning', title: 'AI Shuffle database recovery', message: 'Could not restore the previous version', detail: String(error), buttons: ['OK'] });
+    if (!await retryBlocked(updates, database)) { app.quit(); return; }
+  }
   await updates.useNewerBaseline();
   if (updates.recoveryRequired || (updates.recoveredState && updates.blocked)) {
     if (!await offerInstaller(updates)) { app.quit(); return; }
@@ -80,8 +104,15 @@ async function startWith(root: string, userData: string, baseline: { revision: s
     // useNewerBaseline clears source state only when the installed baseline is
     // newer than every build that may have migrated this database. Otherwise a
     // blocked first boot must fail closed, never downgrade to bundled code.
+    if (updates.blocked && !await retryBlocked(updates, database)) { app.quit(); return; }
+    await updates.prepareRollback(database);
+    const notice = await updates.rollbackNotice();
+    if (notice) {
+      await app.whenReady();
+      await dialog.showMessageBox({ type: 'warning', title: 'AI Shuffle update', message: notice, buttons: ['OK'] });
+      await fs.rm(path.join(root, 'rollback-notice.json'), { force: true });
+    }
     if (updates.hasSourceState) {
-      if (updates.blocked && !await retryBlocked(updates)) { app.quit(); return; }
       if (process.platform === 'linux') {
         let startSource: typeof import('./managed-entry').startManagedSource | undefined;
         const preflight = async (application: Awaited<ReturnType<SourceUpdates['application']>>) => {
@@ -93,6 +124,7 @@ async function startWith(root: string, userData: string, baseline: { revision: s
         try { selected = await updates.select(preflight); }
         catch (error) {
           if (!(error instanceof InstallerRequired)) throw error;
+          await updates.cancelPreparedRollback(database);
           // This attempt ran no source, but a previous retry may already have
           // migrated the database. Cancellation must preserve that recovery fence.
           // Retain the staged build, but offer installers rather than retry it.
@@ -133,8 +165,19 @@ async function startWith(root: string, userData: string, baseline: { revision: s
  * than only an error: nothing can check for updates while the app cannot open.
  * False when the user quits or no safe build remains; then offer an installer.
  */
-async function retryBlocked(updates: SourceUpdates): Promise<boolean> {
+async function retryBlocked(updates: SourceUpdates, database: RestoreDatabaseFactory): Promise<boolean> {
   await app.whenReady();
+  const previous = await updates.rollbackVersion();
+  if (previous) {
+    const { response } = await dialog.showMessageBox({
+      type: 'warning', title: 'AI Shuffle', message: 'The last update did not finish starting',
+      detail: 'Restore the verified database copy and run the previous version. If restoration fails, no worker will start and the restore point will be kept.',
+      buttons: [`Go back to ${previous}`, 'Quit'], defaultId: 0, cancelId: 1, noLink: true,
+    });
+    if (response !== 0) return false;
+    try { return await updates.recoverRollback(database, true); }
+    catch (error) { dialog.showErrorBox('AI Shuffle could not restore the database', String(error)); return false; }
+  }
   const { response } = await dialog.showMessageBox({
     type: 'warning', title: 'AI Shuffle', message: 'The last update did not finish starting',
     detail: 'AI Shuffle will not go back to an older version, because the update may already have changed your data. ' +

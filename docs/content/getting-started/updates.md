@@ -42,6 +42,12 @@ Updating the image always works, even when an in-app update would have, and it i
 
 The desktop app checks for new releases when it starts and once a day, and offers to install them.
 
+Before a source update first starts, a current desktop launcher stops the worker and managed PostgreSQL and saves one validated database restore point. If the copy fails (for example, the disk is full), the update does not start and the previous version is kept. Leave room for a database copy and temporary restore files.
+
+If the first start crashes, times out or is interrupted, the next launch restores that database copy before running the previous version. A notice names the failed update and the version restored; the failed update is not offered again automatically. The restore point is deleted once the new build is healthy. This protects the update's first start, not later downgrades or switching from nightly back to stable.
+
+If restoration fails, no older worker starts on the changed database. The recovery dialog offers **Go back to <previous version>** to retry the restoration, or **Quit**. Keep the restore point and logs. Older launchers and earlier failures without a verified restore point retain their migration fence: retry the affected build or install a verified newer release; never delete the fence or point older code at the database.
+
 ## The Claude Code CLI
 
 If you use Claude, the Claude Code CLI keeps itself up to date, as on any computer. Updating AI Shuffle does not reinstall it.

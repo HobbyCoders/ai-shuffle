@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import path from 'node:path';
 const code=readFileSync(new URL('../dist/main/installed-entry.js',import.meta.url),'utf8');
-function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false,build={revision:'a'.repeat(40),sequence:100},launcherJson=null,trial='none'}={}){
+function fixture({restoreVersion=null,restoreAlwaysFails=false,locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false,build={revision:'a'.repeat(40),sequence:100},launcherJson=null,trial='none'}={}){
  const events=[];const module={exports:{}};let options;let launched;
  const app={requestSingleInstanceLock:()=>{events.push('lock');return locked;},quit:()=>events.push('quit'),
   getPath:()=>path.resolve('existing-profile'),getName:()=> 'existing-name',getAppPath:()=>path.resolve('installed-app'),releaseSingleInstanceLock:()=>events.push('unlock'),commandLine:{getSwitchValue:()=>''},whenReady:async()=>{}};
- const dialog={showMessageBox:async options=>{events.push({dialog:options});return {response:answer};}};
- class SourceUpdates{constructor(value){options=value;}get hasSourceState(){return state?!!(state.active||state.pending):this.sourceState;}sourceState=source;get pendingVersion(){return state?.staged??state?.pending??null;}async application(revision){events.push('application');return {revision,desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};}blocked=blocked;async load(){events.push('load');}async useNewerBaseline(confirmed=false){events.push('baseline');if(confirmed&&confirmable){this.recoveryRequired=false;this.blocked=false;}}canConfirmBaselineRecovery=confirmable;recoveryRequired=recovery;recoveredState=recovered;async retryFailed(){events.push('retry');return retryAvailable;}async select(preflight){events.push('select');if(broken)throw Error('No healthy source build');const selected={revision:state?(state.pending??state.active):'b'.repeat(40),desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};await preflight?.(selected);if(preflight&&(!state||state.pending)){events.push('booting');if(state)state.booting=selected.revision;}return selected;}stageDownloads(){events.push('stage');}async cancelInstall(){events.push('cancel');if(state?.pending){state.staged=state.pending;delete state.pending;}this.sourceState=activeFallback;this.cancelled=true;}}
+ const dialog={showMessageBox:async options=>{events.push({dialog:options});return {response:answer};},showErrorBox:(title,detail)=>events.push({error:{title,detail}})};
+ let restoreAttempts=0;
+ class SourceUpdates{constructor(value){options=value;}async prepareRollback(){}async cancelPreparedRollback(){}async recoverRollback(){if(!restoreVersion)return false;restoreAttempts++;if(restoreAttempts===1||restoreAlwaysFails)throw Error('file locked');events.push('restored');this.blocked=false;this.sourceState=false;return true;}async rollbackVersion(){return restoreVersion;}async rollbackNotice(){return null;}get hasSourceState(){return state?!!(state.active||state.pending):this.sourceState;}sourceState=source;get pendingVersion(){return state?.staged??state?.pending??null;}async application(revision){events.push('application');return {revision,desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};}blocked=blocked;async load(){events.push('load');}async useNewerBaseline(confirmed=false){events.push('baseline');if(confirmed&&confirmable){this.recoveryRequired=false;this.blocked=false;}}canConfirmBaselineRecovery=confirmable;recoveryRequired=recovery;recoveredState=recovered;async retryFailed(){events.push('retry');return retryAvailable;}async select(preflight){events.push('select');if(broken)throw Error('No healthy source build');const selected={revision:state?(state.pending??state.active):'b'.repeat(40),desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};await preflight?.(selected);if(preflight&&(!state||state.pending)){events.push('booting');if(state)state.booting=selected.revision;}return selected;}stageDownloads(){events.push('stage');}async cancelInstall(){events.push('cancel');if(state?.pending){state.staged=state.pending;delete state.pending;}this.sourceState=activeFallback;this.cancelled=true;}}
  class InstallerRequired extends Error {}
  const host={InstallerRequired,requireInstalledElectron:async application=>{events.push('preflight');if(incompatible&&(state?application.revision==='b'.repeat(40):!events.includes('cancel')))throw new InstallerRequired('New installer required');},installedExecutable:()=>env.APPIMAGE??path.resolve('Programs/AI Shuffle.exe'),saveInstalledHost:async(root,value)=>events.push({host:value,root}),installedLaunchArgs:args=>args.filter(x=>x.startsWith('aishuffle:')),launchInstalledSource:async(...args)=>{launched=args;events.push('launch-source');}};
  vm.runInNewContext(code,{module,exports:module.exports,process:{platform,arch:'x64',env,versions:{electron:'44.2.0'},execPath:path.resolve('Programs/AI Shuffle.exe'),resourcesPath:path.resolve('resources'),argv:['AI Shuffle.exe','aishuffle://test']},require:id=>{
@@ -24,6 +25,8 @@ function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,p
    launcherTrial:(root,own)=>{events.push({trial:own});return trial;},countLauncherStart:()=>events.push('count'),
    restoreLauncher:(root,exe)=>events.push({restore:exe})};
   if(id==='./source-updates')return {SourceUpdates};if(id==='./installed-host')return host;
+  if(id==='./postgres')return {};
+  if(id==='./worker')return {};
   if(id==='./installer-updates')return {installerPlatform:()=>platform==='linux'?'linux':null,InstallerUpdates:class {
    constructor(options){events.push(['installer-options',options]);}async check(){events.push('installer-check');if(installerError)throw Error('Offline');return {kind:'available'};}async download(){events.push('installer-download');return {file:'verified-installer.AppImage',version:'0.9.2'};}
   }};
@@ -33,6 +36,20 @@ function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,p
  }});
  return {entry:module.exports,events,get options(){return options;},get launched(){return launched;}};
 }
+test('failed restore offers Go back to the previous version; successful retry selects bundled previous code',async()=>{
+ const f=fixture({source:true,blocked:true,answer:0,restoreVersion:'1.0.0'});
+ await f.entry.startInstalled();
+ const prompt=f.events.filter(e=>e.dialog).at(-1).dialog;
+ assert.deepEqual([...prompt.buttons],['Go back to 1.0.0','Quit']);
+ assert.ok(f.events.includes('restored'));assert.equal(f.events.at(-1),'run-bundled');assert.ok(!f.events.includes('select'));
+});
+test('failed or declined Go back never starts a worker',async()=>{
+ for(const settings of [{answer:1},{answer:0,restoreAlwaysFails:true}]){
+  const f=fixture({source:true,blocked:true,restoreVersion:'1.0.0',...settings});
+  await f.entry.startInstalled();assert.equal(f.events.at(-1),'quit');
+  assert.ok(!f.events.includes('run-bundled'));assert.ok(!f.events.includes('launch-source'));
+ }
+});
 test('initial installed launch is offline and uses bundled code with the existing profile',async()=>{
  const f=fixture();await f.entry.startInstalled();assert.equal(f.events.at(-1),'run-bundled');
  assert.equal(f.entry.installedContext().updates.hasSourceState,false);assert.equal(f.options.root,path.resolve('existing-profile','updates'));

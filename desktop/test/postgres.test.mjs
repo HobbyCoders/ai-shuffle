@@ -106,6 +106,29 @@ function supervisor(rt, credentials, extra = {}) {
 	return new PostgresSupervisor({ binaries, root: ROOT, logDir: LOGS, credentials, runtime: rt, ...extra });
 }
 
+test('update snapshot requires a stopped cluster and a clean control file; restore tolerates crash recovery state', async () => {
+ const {rt,execs}=fakeRuntime({files:{[path.join(DATA,'PG_VERSION')]:'16'},results:{pg_ctl:{code:3},pg_controldata:{stdout:'Database cluster state:               shut down\n'}}});
+ const pg=supervisor(rt,credentialsStore().credentials);
+ await pg.quiesce(true);
+ assert.equal(execs('pg_controldata').length,1);
+ assert.equal(execs('pg_controldata')[0].env.LC_ALL,'C');
+ assert.equal(execs('pg_controldata')[0].env.PGHOST,undefined);
+ await pg.quiesce(false); assert.equal(execs('pg_controldata').length,1);
+});
+test('update snapshot refuses live PostgreSQL, unclean shutdown and missing control tools',async()=>{
+ for(const results of [{pg_ctl:{code:0}},{pg_ctl:{code:3},pg_controldata:{stdout:'Database cluster state: in production'}},{pg_ctl:{code:3},pg_controldata:{code:-2}}]){
+  const {rt}=fakeRuntime({files:{[path.join(DATA,'PG_VERSION')]:'16'},results});
+  await assert.rejects(supervisor(rt,credentialsStore().credentials).quiesce(true),/PostgreSQL/);
+ }
+});
+test('update quiescence reaps an authenticated PostgreSQL orphan before accepting the cluster',async()=>{
+ const {rt,fs,execs}=fakeRuntime({files:{[PID_FILE]:`4242\n${DATA}\n0\n54321\n`,[path.join(DATA,'PG_VERSION')]:'16'},alive:[4242],results:{pg_isready:{code:0},pg_ctl:args=>{
+  if(args.at(-1)==='stop'){fs.delete(PID_FILE);return {code:0};}return {code:3};
+ },pg_controldata:{stdout:'Database cluster state: shut down\n'}}});
+ await supervisor(rt,credentialsStore().credentials).quiesce(true);
+ assert.ok(execs('pg_ctl').some(call=>call.args.at(-1)==='stop'));
+ assert.equal(fs.has(PID_FILE),false);
+});
 test('a fresh data directory gets initdb with a generated password, then a start, the database and saved managed settings', async () => {
 	const { rt, calls, fs, execs } = fakeRuntime({ results: { pg_ctl: null } });
 	rt.exec = ((original) => async (file, args, opts) => {
