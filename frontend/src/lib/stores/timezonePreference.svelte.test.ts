@@ -42,6 +42,30 @@ describe('timezonePreference', () => {
 		expect(tz.resolveTimezone()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
 	});
 
+	it('falls back to UTC when the browser zone is undetectable', async () => {
+		// An empty TZ makes ICU report "Etc/Unknown", which toLocaleString rejects.
+		const real = Intl.DateTimeFormat.prototype.resolvedOptions;
+		const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (
+			this: Intl.DateTimeFormat
+		) {
+			return { ...real.call(this), timeZone: 'Etc/Unknown' };
+		});
+		try {
+			const tz = await load();
+			expect(tz.resolveTimezone()).toBe('UTC');
+			expect(() => new Date().toLocaleString(undefined, { timeZone: tz.resolveTimezone() })).not.toThrow();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it('falls back to UTC for a cached zone this browser cannot use', async () => {
+		localStorage.setItem(STORAGE_KEY, 'Mars/Olympus_Mons');
+		const tz = await load();
+		expect(tz.current).toBe('Mars/Olympus_Mons');
+		expect(tz.resolveTimezone()).toBe('UTC');
+	});
+
 	it('starts from the cached value', async () => {
 		localStorage.setItem(STORAGE_KEY, 'Asia/Tokyo');
 		const tz = await load();

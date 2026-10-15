@@ -18,6 +18,23 @@ const SERVER_PREFERENCE_KEY = 'timezone';
 
 /** "local" means use the browser's default timezone */
 const DEFAULT_TIMEZONE = 'local';
+/**
+ * Used when the zone cannot be used for formatting. An undetectable system
+ * zone reports "Etc/Unknown" (for example an empty TZ), and a stale stored
+ * value may name a zone this browser lacks; either would make every
+ * toLocaleString({ timeZone }) call throw a RangeError.
+ */
+const FALLBACK_TIMEZONE = 'UTC';
+
+function isValidTimezone(tz: unknown): tz is string {
+	if (typeof tz !== 'string' || !tz) return false;
+	try {
+		new Intl.DateTimeFormat('en', { timeZone: tz });
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 function getStoredTimezone(): string {
 	if (!browser) return DEFAULT_TIMEZONE;
@@ -91,11 +108,8 @@ export const timezonePreference = {
 	 * "local" -> browser default; anything else is used as-is.
 	 */
 	resolveTimezone(): string {
-		const tz = _state;
-		if (tz === 'local') {
-			return Intl.DateTimeFormat().resolvedOptions().timeZone;
-		}
-		return tz;
+		const tz = _state === 'local' ? Intl.DateTimeFormat().resolvedOptions().timeZone : _state;
+		return isValidTimezone(tz) ? tz : FALLBACK_TIMEZONE;
 	}
 };
 
