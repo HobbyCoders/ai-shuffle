@@ -838,7 +838,7 @@ class ReadinessMonitor:
         return self.failures >= (self.limit if self.ever_ready else self.startup_limit)
 
 
-def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None):
+def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None, chrome_current=None):
     """Supervise until STOP (returns 0) or a failure the container must restart for (1).
 
     An application that exits or stops answering readiness is handed to
@@ -850,13 +850,14 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
     next_update = time.monotonic() + 1
     relaunched = []
     while not STOP.is_set():
+        chrome_process = chrome_current() if chrome_current is not None else chrome
         failure = update_failure = None
         if app.poll() is not None:
             failure = "application exited unexpectedly"
         elif db.process is not None and db.process.poll() is not None:
             log("managed PostgreSQL exited unexpectedly")
             return 1
-        elif chrome is not None and chrome.poll() is not None:
+        elif chrome_process is not None and chrome_process.poll() is not None:
             log("Chromium supervisor exited unexpectedly")
             return 1
         elif monitor is not None and time.monotonic() >= next_probe:
@@ -925,7 +926,7 @@ def _update_error(exc):
     return type(exc).__name__ == "UpdateError"
 
 
-def restart_into_update(current, updates, env):
+def restart_into_update(current, updates, env, before_start=None):
     """Replace the running app with the staged update; returns the new process.
 
     RestartRejected leaves ``current`` untouched and serving. Any other error
@@ -949,10 +950,12 @@ def restart_into_update(current, updates, env):
         raise RuntimeFailure("Could not quiesce the worker")
     stop_group(current, 30)
     updates.activating()  # copies the database, then records the first start
+    if before_start is not None:
+        before_start(child_env)
     return start_app(command, cwd, child_env, updates.root)
 
 
-def start_current(current, updates, env):
+def start_current(current, updates, env, before_start=None):
     """Stop ``current`` and start the version that should run now: after a
     failed first start, the previous one over the restored database copy.
     None when the worker cannot run (blocked, or its build fails to verify)."""
@@ -967,6 +970,8 @@ def start_current(current, updates, env):
         except Exception as exc:
             log(str(exc) if _update_error(exc) else f"cannot start the application ({type(exc).__name__})")
             return None
+    if before_start is not None:
+        before_start(child_env)
     return start_app(command, cwd, child_env, updates.root if updates is not None else None)
 
 
@@ -1055,38 +1060,56 @@ def run(settings, action, filename=None):
                                                channel=channel, lease=lease, database=db)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
-        if os.environ.get("START_CHROME", "1") == "1":
-            # Chromium is the agent's: with agent isolation its log and launch
-            # scripts are created as, and it runs as, PUID (no-ops otherwise).
+        chrome_selection = None
+
+        def select_chrome(selected_env):
+            # Re-select with the application revision, including rollback. Never
+            # modify os.environ: PostgreSQL keeps the image's PATH/libraries.
+            nonlocal chrome, chrome_log, chrome_scripts, chrome_selection
+            if os.environ.get("START_CHROME", "1") != "1":
+                return
+            if selected_env.get("SHUFFLE_RUNTIME_OVERLAYS") != "1":
+                selected_env = env  # preserve the image browser path for ordinary releases
+            selection = tuple(selected_env.get(key) for key in ("PATH", "LD_LIBRARY_PATH", "CHROME_EXECUTABLE"))
+            if chrome is not None and chrome.poll() is None and selection == chrome_selection:
+                return
+            stop_group(chrome, 5)
+            if updates is not None and isolation().ACTIVE is not None:
+                isolation().ensure_traversable(updates.root, log)
             with isolation().agent_files():
-                logdir = Path.home() / ".config"
-                logdir.mkdir(parents=True, exist_ok=True)
-                chrome_log = open(logdir / "chrome.log", "ab")
-                # Only the app's copy carries secrets and the lifecycle token.
-                command, child_env, chrome_scripts = chrome_command(chrome_env(env))
-            chrome = subprocess.Popen(command, env=child_env, stdout=chrome_log, stderr=chrome_log, start_new_session=True,
-                                      **isolation().agent_spawn())
+                if chrome_scripts is not None:
+                    shutil.rmtree(chrome_scripts)
+                if chrome_log is None:
+                    logdir = Path.home() / ".config"
+                    logdir.mkdir(parents=True, exist_ok=True)
+                    chrome_log = open(logdir / "chrome.log", "ab")
+                command, browser_env, chrome_scripts = chrome_command(chrome_env(selected_env))
+            chrome = subprocess.Popen(command, env=browser_env, stdout=chrome_log, stderr=chrome_log,
+                                      start_new_session=True, **isolation().agent_spawn())
+            chrome_selection = selection
+
         if STOP.is_set():
             return 0
         try:
             command, cwd, child_env = updates.launch(env) if updates else ([sys.executable, "-m", "app.main"], None, env)
         except UpdateError as exc:
             raise RuntimeFailure(str(exc)) from exc
+        select_chrome(child_env)
         app = start_app(command, cwd, child_env, updates and updates.root)
 
         def restart(current):
             nonlocal app
-            app = restart_into_update(current, updates, env)
+            app = restart_into_update(current, updates, env, before_start=select_chrome)
             return app
 
         def relaunch(current):
             nonlocal app
-            app = start_current(current, updates, env)
+            app = start_current(current, updates, env, before_start=select_chrome)
             return app
 
         log("authenticated database ready; application started")
         return watch(app, db, chrome, ReadinessMonitor(f"http://127.0.0.1:{settings.port}/health/ready"), updates,
-                     restart, relaunch)
+                     restart, relaunch, chrome_current=lambda: chrome)
     finally:
         try:
             if updates is not None:

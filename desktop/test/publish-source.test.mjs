@@ -9,7 +9,7 @@ import { test } from 'node:test';
 const script=fileURLToPath(new URL('../scripts/publish-source.mjs',import.meta.url));
 const preload=new URL('./helpers/publish-source-preload.mjs',import.meta.url).href;
 const stable=scenario=>['stable','stable-reuse','offmain','older','prerelease'].includes(scenario);
-for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regression','moved','newer-attested','stale-feed','pointer-race','corrupt','stable','offmain','older','prerelease'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
+for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regression','moved','newer-attested','stale-feed','pointer-race','corrupt','stable','offmain','older','prerelease','overlays'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-publish-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const env={...process.env,RUNNER_TEMP:root,GITHUB_SHA:'a'.repeat(40),GH_TOKEN:'fixture',RELEASE_GITHUB_REPO_ID:'42',ACCOUNT_HUB_DATABASE_ID:'11111111-1111-1111-1111-111111111111',PUBLISH_TEST_CASE:scenario};
  delete env.SOURCE_CHANNEL;
@@ -29,7 +29,7 @@ for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regr
  }else{
   const row=JSON.parse(await fs.readFile(path.join(root,'record.json'),'utf8')),signed=JSON.parse(row.manifest);
   assert.equal(row.asset_id,123);assert(verify(null,Buffer.from(signed.payload,'base64'),await fs.readFile(path.join(root,'public.pem'),'utf8'),Buffer.from(signed.signature,'base64')));
-  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64),requires:['base-1'],recommends:[]});
+  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64),requires:scenario==='overlays'?['base-1','node-24','runtime-overlays-v1']:['base-1'],recommends:[],...(scenario==='overlays'?{overlays:[{kind:'node',capability:'node-24',platform:'linux-x86_64',url:'https://runtimes.example/node.tar.gz',sha256:'d'.repeat(64),size:1024,unpacked_size:2048,executable:'node/bin/node'}]}:{})});
   // #1821 D5: the minimum launcher from desktop/launcher.json is signed with the release.
   assert.deepEqual(manifest.desktop,{launcher:JSON.parse(readFileSync(new URL('../launcher.json',import.meta.url),'utf8')).minimum});assert(events.includes('publish'));
   assert.equal(manifest.tree,'c'.repeat(64));assert(events.includes('archive'));

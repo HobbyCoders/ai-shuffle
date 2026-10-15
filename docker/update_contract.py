@@ -16,12 +16,11 @@ this string, and those images keep taking it.
 
 When to change this file:
 
-- The source starts to depend on something only a newer image has (a newer
-  Python, Node or PostgreSQL, a new system package, a supervisor change the app
-  relies on on images that run their own supervisor): add a capability to
-  CAPABILITIES and PROVIDES, add it to REQUIRES, and say so in the PR. Every
-  older image then shows "Needs a newer Docker image" for that release. To warn
-  users one or more releases ahead, put it in RECOMMENDS first.
+- The source needs a newer runtime: name the capability in CAPABILITIES and
+  REQUIRES, and either PROVIDES (baked into the image) or pinned OVERLAYS for
+  both architectures. Overlay releases require runtime-overlays-v1 so older
+  bootstraps refuse safely. PostgreSQL and OS ABI changes still require a new
+  image. To warn one or more releases ahead, use RECOMMENDS first.
 - You changed what the image bakes in (IMAGE_INPUTS: the Dockerfile, the root
   entrypoint, the CLI installer it runs) without the source depending on it:
   run ``python docker/update_contract.py --pin`` and commit. Older images keep
@@ -52,15 +51,24 @@ CAPABILITIES = {
     "base-1": "Python 3.12, Node 22, PostgreSQL 16 and Chromium; /app, /data and the appuser "
               "account; the supervisor's control directory (status, request and state files) "
               "and its internal desktop endpoints",
+    "runtime-overlays-v1": "the baked bootstrap can verify and cold-start signed runtime overlays",
     "source-supervisor": "the image starts the supervisor, the updater and the Chromium launch "
                          "scripts of the active verified update instead of its own copies",
 }
 # What an image built from this source provides.
-PROVIDES = ("base-1", "source-supervisor")
+PROVIDES = ("base-1", "source-supervisor", "runtime-overlays-v1")
 # What this source needs from the image it runs on.
 REQUIRES = ("base-1",)
 # What a coming release will require. Images without it say so in advance.
 RECOMMENDS = ()
+# Reviewed, hash-pinned tar archives for a release needing a newer runtime.
+# Keep empty until both architectures pass real runtime/rollback acceptance.
+# Each entry: kind (python/node/chromium/tools), capability (kind-version),
+# platform (linux-x86_64/linux-aarch64), HTTPS url, sha256, size, unpacked_size,
+# executable (relative to archive root), optional library_path. Python must be
+# relocatable and start without LD_LIBRARY_PATH (the supervisor uses it too).
+# Never provide base-*, source-supervisor, PostgreSQL or OS ABI through overlays.
+OVERLAYS = ()
 
 # Baked into the image and never replaced by an update: the image's build
 # recipe, the root entrypoint and the installer it runs before the supervisor.
@@ -87,7 +95,11 @@ def runtime(requires=REQUIRES):
 
 def manifest_fields():
     """The ``container`` fields publish-source.mjs signs (it adds ``sequence``)."""
-    return {"runtime": runtime(REQUIRES), "requires": sorted(REQUIRES), "recommends": sorted(RECOMMENDS)}
+    requires = set(REQUIRES) | ({"runtime-overlays-v1"} if OVERLAYS else set())
+    fields = {"runtime": runtime(requires), "requires": sorted(requires), "recommends": sorted(RECOMMENDS)}
+    if OVERLAYS:
+        fields["overlays"] = list(OVERLAYS)
+    return fields
 
 
 def image_record(revision, sequence):
@@ -124,9 +136,14 @@ def validate():
         for name in names:
             if not NAME.fullmatch(name) or name not in CAPABILITIES:
                 errors.append(f"{group} names {name!r}, which CAPABILITIES does not describe")
+    # Publication must include an overlay for both image architectures whenever
+    # the base image cannot provide a required runtime. Schema validation stays
+    # in the updater (this script also runs before Python dependencies install).
     for name in REQUIRES:
-        if name not in PROVIDES:
-            errors.append(f"REQUIRES names {name!r}, but images built from this source would not provide it")
+        platforms = {item.get("platform") for item in OVERLAYS if item.get("capability") == name}
+        if name not in PROVIDES and not {"linux-x86_64", "linux-aarch64"} <= platforms:
+            errors.append(f"REQUIRES names {name!r}, but images built from this source would not provide it "
+                          "and overlays do not cover both architectures")
     return errors
 
 

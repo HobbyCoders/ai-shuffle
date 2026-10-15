@@ -27,9 +27,17 @@ Most releases install from inside AI Shuffle:
 
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
+### Runtime overlays
+
+An overlay-aware Docker supervisor can install a release's required Python, Node, Chromium and relocatable tools/libraries on the persistent data volume. Nothing changes for an ordinary release: the image's runtimes remain the default. Overlays activate only when a signed release requires a capability the image lacks and includes an archive for this architecture with a pinned SHA-256 and size limits. Downloads and installed contents are verified before use; there are no privileged package-manager operations.
+
+The application revision selects its runtimes. If its first start fails and the database snapshot is restored, the previous revision and its runtime selection return together. Active, staged, previous and currently running supervisor runtimes are retained; unreferenced overlays are cleaned up. Downloads are limited to 512 MiB each, expanded payloads to 2 GiB each, and the overlay store to 8 GiB, with 256 MiB of free disk space reserved. Insufficient space leaves the current version running.
+
+This is delivery support, not a claim that every installed image can already update forever. Releases do not request overlays by default. Older images whose baked startup code rejects missing capabilities still need an overlay-aware bootstrap image before they can cold-start such a release. Runtime artifacts need acceptance on both supported architectures before publication. PostgreSQL stays on the image's existing major version; PostgreSQL major upgrades and incompatible operating-system/ABI changes are not attempted through overlays.
+
 ## Updating the Docker image
 
-Some releases change the container itself. The in-app update then says **This source update needs a newer container release**. Update the image instead:
+When no compatible runtime overlay can satisfy a release, the in-app update says **Needs a newer Docker image. This version keeps working.** It names the missing capabilities and does not stop the running version. Update the image instead:
 
 - **Docker Compose:** set `AI_SHUFFLE_VERSION` in `.env` to the new version and run `docker compose up -d`.
 - **docker run:** pull the new version, remove the container and start it again with the new version. See [Install with Docker](/docs/getting-started/install-docker-compose#update).

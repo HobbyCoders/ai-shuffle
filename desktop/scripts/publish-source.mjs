@@ -168,13 +168,14 @@ try {
   // What the revision needs from the Docker image (docker/update_contract.py,
   // #1821). runtime is all that images built before capabilities compare.
   const contract = source('contract', revision);
-  const { runtime, requires, recommends } = contract;
+  const { runtime, requires, recommends, overlays } = contract;
   const capabilities = list => Array.isArray(list) && list.length <= 32 && list.every(name => typeof name === 'string' && /^[a-z0-9][a-z0-9.-]{0,39}$/.test(name));
-  if (!/^[a-f0-9]{64}$/.test(runtime) || !capabilities(requires) || !capabilities(recommends)) throw Error('Invalid container runtime contract');
+  if (!/^[a-f0-9]{64}$/.test(runtime) || !capabilities(requires) || !capabilities(recommends) ||
+      (overlays !== undefined && (!Array.isArray(overlays) || overlays.length > 16 || !requires.includes('runtime-overlays-v1')))) throw Error('Invalid container runtime contract');
   // The oldest Windows launcher (the code in an installed app.asar) this
   // revision runs under (desktop/launcher.json, #1821 D5). Clients before it ignore the field.
   const { minimum: launcher } = readLauncher(git('show', `${revision}:desktop/launcher.json`));
-  const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends },
+  const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends, ...(overlays === undefined ? {} : { overlays }) },
    desktop: { launcher }, channel, version, notes, tree }));
   const signature = sign(null, payload, key);
   if (!trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, signature))) throw new Error('Signing key does not match launcher trust key');

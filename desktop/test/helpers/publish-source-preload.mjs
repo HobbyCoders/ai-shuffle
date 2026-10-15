@@ -65,7 +65,7 @@ cp.execFileSync=(exe,args,options={})=>{
   }
   if(command==='signing-floor')return JSON.stringify({floor:1,old_repository_id:null});
   if(command==='sequence')return '42';
-  if(command==='contract')return JSON.stringify({runtime:'b'.repeat(64),requires:['base-1'],recommends:[]});
+  if(command==='contract')return JSON.stringify({runtime:'b'.repeat(64),requires:scenario==='overlays'?['base-1','node-24','runtime-overlays-v1']:['base-1'],recommends:[],...(scenario==='overlays'?{overlays:[{kind:'node',capability:'node-24',platform:'linux-x86_64',url:'https://runtimes.example/node.tar.gz',sha256:'d'.repeat(64),size:1024,unpacked_size:2048,executable:'node/bin/node'}]}:{})});
   if(command==='version')return JSON.stringify('0.8.18-dev.4+gaaaaaaa');
   if(command==='archive'){
    events.push('archive');fs.writeFileSync(output,bytes);

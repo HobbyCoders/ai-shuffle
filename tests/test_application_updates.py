@@ -22,6 +22,290 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
 
 
+
+
+def test_runtime_bootstrap_gate_and_signed_handover(feed):
+    from docker.application_updates import HANDOVER_FILES, handover_target
+    updater = feed[0]
+    artifact = runtime_artifact()
+    offer_runtimes(feed, [artifact], entries={f"ai-shuffle-{B}/source.txt": "content", **{
+        f"ai-shuffle-{B}/{name}": "# verified" for name in HANDOVER_FILES}})
+    updater.image["provides"] = ["base-1", "source-supervisor"]
+    updater.check(download=True)
+    assert "runtime-overlays-v1" in json.loads((updater.root / "status.json").read_text())["message"]
+    assert updater.state == {}
+    updater.image["provides"].append("runtime-overlays-v1")
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    assert handover_target(updater.root, updater.image, updater.public_key)[0] == B
+    updater.overlays.directory(artifact[0]).joinpath("payload", artifact[0]["executable"]).write_text("tampered")
+    with pytest.raises(UpdateError, match="signed archive"):
+        handover_target(updater.root, updater.image, updater.public_key)
+
+
+@pytest.mark.parametrize("kind", ["traversal", "absolute", "symlink", "device", "duplicate"])
+def test_runtime_unsafe_archives_never_leave_partial_overlays(feed, kind):
+    import tarfile
+    updater = feed[0]
+    item, _ = runtime_artifact()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        member = tarfile.TarInfo({"traversal": "../escape", "absolute": "/escape"}.get(kind, "bin/node"))
+        if kind == "symlink":
+            member.type, member.linkname = tarfile.SYMTYPE, "../../escape"
+        elif kind == "device":
+            member.type = tarfile.CHRTYPE
+        archive.addfile(member)
+        if kind == "duplicate":
+            archive.addfile(member)
+    data = output.getvalue()
+    item.update(size=len(data), sha256=hashlib.sha256(data).hexdigest())
+    offer_runtimes(feed, [(item, data)])
+    with pytest.raises((UpdateError, ValueError), match="path|link|special|duplicate"):
+        updater.check(download=True)
+    assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
+
+
+def test_runtime_safe_node_links_and_offline_reuse(feed):
+    import tarfile
+    updater = feed[0]
+    output = io.BytesIO()
+    content = b"#!/bin/sh\necho npm\n"
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        member = tarfile.TarInfo("node/lib/npm/cli.js")
+        member.size, member.mode = len(content), 0o755
+        archive.addfile(member, io.BytesIO(content))
+        member = tarfile.TarInfo("node/bin/npm")
+        member.type, member.linkname = tarfile.SYMTYPE, "../lib/npm/cli.js"
+        archive.addfile(member)
+    item, _ = runtime_artifact(executable="node/bin/npm")
+    data = output.getvalue()
+    item.update(size=len(data), sha256=hashlib.sha256(data).hexdigest(), unpacked_size=len(content))
+    offer_runtimes(feed, [(item, data)])
+    updater.check(download=True)
+    requests = len(feed[3])
+    updater.overlays.prepare([item])
+    assert len(feed[3]) == requests
+    env, _ = updater.overlays.environment([item], {"PATH": "/bin"})
+    assert "node/bin" in env["PATH"]
+
+
+def test_runtime_prune_keeps_live_supervisor_previous_and_staged(feed, monkeypatch):
+    updater = feed[0]
+    artifacts = [runtime_artifact(version=str(n)) for n in (20, 22, 24, 26)]
+    for revision, artifact in zip((A, B, C, "e" * 40), artifacts):
+        signed = offer_runtimes(feed, [artifact], revision=revision)
+        directory = updater.directory(revision)
+        directory.mkdir(parents=True)
+        (directory / "release.json").write_bytes(signed)
+        updater.overlays.prepare([artifact[0]])
+    updater.state = {"active": B, "previous": A, "pending": C}
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", "e" * 40)
+    updater.prune_overlays()
+    assert all(updater.overlays.directory(item).exists() for item, _ in artifacts)
+    monkeypatch.delenv("SHUFFLE_HANDED_OVER")
+    stale = updater.overlays.root / ".staging-interrupted"
+    stale.mkdir()
+    updater.prune_overlays()
+    assert not updater.overlays.directory(artifacts[-1][0]).exists()
+    assert not stale.exists()
+
+
+def runtime_artifact(kind="node", version="24", *, executable=None, entries=None):
+    """Tiny executable tarballs, never actual runtime downloads."""
+    import tarfile
+    from docker.application_updates import runtime_platform
+
+    executable = executable or f"{kind}/bin/{kind}"
+    content = f"#!/bin/sh\necho {kind}-{version}\n".encode()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, value in (entries or {executable: content}).items():
+            member = tarfile.TarInfo(name)
+            member.size, member.mode = len(value), 0o755
+            archive.addfile(member, io.BytesIO(value))
+    data = output.getvalue()
+    item = {"kind": kind, "capability": f"{kind}-{version}", "platform": runtime_platform(),
+            "url": f"https://runtimes.example/{kind}-{version}.tar.gz", "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data), "unpacked_size": sum(len(v) for v in (entries or {executable: content}).values()),
+            "executable": executable}
+    return item, data
+
+
+def offer_runtimes(feed, artifacts, **kwargs):
+    updater, publish, _, _, responses = feed
+    updater.image["provides"] = ["base-1", "runtime-overlays-v1"]
+    for item, data in artifacts:
+        responses[httpx.URL(item["url"]).path] = data
+    return publish(container={"requires": ["base-1", "runtime-overlays-v1", *(item["capability"] for item, _ in artifacts)],
+                              "overlays": [item for item, _ in artifacts]}, **kwargs)
+
+
+@pytest.mark.parametrize("change", [
+    {"sha256": "bad"}, {"size": True}, {"unpacked_size": 2**40},
+    {"url": "http://runtimes.example/runtime.tar.gz"}, {"url": "https://user:pass@runtimes.example/x"},
+    {"executable": "../bin/python"}, {"platform": "windows-x86_64"},
+    {"kind": "postgres", "capability": "postgres-17"}, {"capability": "base-2"},
+])
+def test_runtime_manifest_rejects_invalid_signed_descriptors(feed, change):
+    updater = feed[0]
+    item, data = runtime_artifact()
+    item.update(change)
+    signed = offer_runtimes(feed, [(item, data)])
+    with pytest.raises(UpdateError, match="Invalid or unsigned"):
+        verify_manifest(signed, updater.public_key)
+
+
+def test_runtime_manifest_signature_covers_artifact_pins(feed):
+    item, data = runtime_artifact()
+    signed = offer_runtimes(feed, [(item, data)])
+    assert verify_manifest(signed, feed[0].public_key)["container"]["overlays"] == [item]
+    envelope = json.loads(signed)
+    payload = json.loads(base64.b64decode(envelope["payload"]))
+    payload["container"]["overlays"][0]["sha256"] = "f" * 64
+    envelope["payload"] = base64.b64encode(json.dumps(payload).encode()).decode()
+    with pytest.raises(UpdateError, match="Invalid or unsigned"):
+        verify_manifest(json.dumps(envelope), feed[0].public_key)
+
+
+def test_runtime_selection_is_opt_in_platform_specific_and_image_first(feed, monkeypatch):
+    from docker import application_updates as module
+    updater = feed[0]
+    item, data = runtime_artifact()
+    offer_runtimes(feed, [(item, data)])
+    updater.check(download=True)
+    assert updater.state == {"pending": B}
+    _, _, env = updater.launch({"PATH": "/usr/bin"}, activate=True)
+    assert item["sha256"] in env["PATH"]
+    assert updater.overlays.installed(item).is_dir()
+    assert stat.S_IMODE(updater.overlays.root.stat().st_mode) == 0o755
+    assert stat.S_IMODE(updater.overlays.directory(item).stat().st_mode) == 0o755
+    container = updater.manifest(B)["container"]
+    assert module.selected_overlays(container, {"provides": ["base-1", item["capability"]]}) == []
+    monkeypatch.setattr(module, "runtime_platform", lambda: "linux-unsupported")
+    assert module.unsatisfied_capabilities(container, updater.image) == [item["capability"]]
+    assert module.selected_overlays({"requires": ["base-1"]}, updater.image) == []
+
+
+@pytest.mark.parametrize("corrupt", ["checksum", "short", "oversized"])
+def test_runtime_download_hash_and_size_refused_without_activation(feed, corrupt):
+    updater, _, _, _, responses = feed
+    item, data = runtime_artifact()
+    offer_runtimes(feed, [(item, data)])
+    responses[httpx.URL(item["url"]).path] = {
+        "checksum": b"x" * len(data), "short": data[:-1], "oversized": data + b"x"}[corrupt]
+    with pytest.raises(UpdateError, match="checksum|signed size"):
+        updater.check(download=True)
+    assert updater.state == {}
+    assert list(updater.overlays.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("bound", ["free", "store", "expanded"])
+def test_runtime_disk_bounds_preserve_current_version(feed, monkeypatch, bound):
+    from docker import application_updates as module
+    updater = feed[0]
+    item, data = runtime_artifact()
+    if bound == "expanded":
+        item["unpacked_size"] = 1
+    elif bound == "store":
+        monkeypatch.setattr(module, "MAX_RUNTIME_STORE", 1)
+    else:
+        monkeypatch.setattr(module.shutil, "disk_usage", lambda _: type("Disk", (), {"free": 1})())
+    offer_runtimes(feed, [(item, data)])
+    with pytest.raises(UpdateError, match="disk space|expanded size"):
+        updater.check(download=True)
+    assert updater.state == {}
+    assert list(updater.overlays.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("mutation", ["file", "archive", "extra"])
+def test_cached_runtime_reverified_before_launch(feed, mutation):
+    updater = feed[0]
+    item, data = runtime_artifact()
+    offer_runtimes(feed, [(item, data)])
+    updater.check(download=True)
+    directory = updater.overlays.directory(item)
+    path = {"file": directory / "payload" / item["executable"],
+            "archive": directory / "runtime.tar", "extra": directory / "payload/extra.py"}[mutation]
+    path.write_bytes(b"tampered")
+    with pytest.raises(UpdateError, match="signed archive|checksum"):
+        updater.launch({}, activate=True)
+    assert "booting" not in updater.state
+
+
+def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, monkeypatch):
+    updater = feed[0]
+    artifacts = [runtime_artifact(kind) for kind in ("python", "node", "chromium")]
+    tool, data = runtime_artifact("tools", entries={"tools/bin/tool": b"tool", "tools/lib/libtest.so": b"lib"},
+                                 executable="tools/bin/tool")
+    tool["library_path"] = "tools/lib"
+    artifacts.append((tool, data))
+    offer_runtimes(feed, artifacts, entries={f"ai-shuffle-{B}/requirements.lock": "# pinned"})
+    monkeypatch.setattr(updater, "build", ContainerUpdates.build.__get__(updater))
+    commands = []
+    def run(command, cwd, env):
+        commands.append((command, dict(env)))
+        if "venv" in command:
+            path = Path(command[-1]) / "bin/python"
+            path.parent.mkdir(parents=True)
+            path.write_text("python")
+        if command == ["npm", "run", "build"] and cwd.name == "frontend":
+            (cwd / "build").mkdir(parents=True)
+            (cwd / "build/index.html").write_text("built")
+    monkeypatch.setattr(updater, "run_build", run)
+    updater.check(download=True)
+    assert artifacts[0][0]["sha256"] in commands[0][0][0]
+    build_env = commands[0][1]
+    assert artifacts[1][0]["sha256"] in build_env["PATH"]
+    assert artifacts[2][0]["sha256"] in build_env["CHROME_EXECUTABLE"]
+    assert tool["sha256"] in build_env["LD_LIBRARY_PATH"]
+    assert "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN" not in build_env
+    assert all("x-shuffle-lease" not in request.headers for request in feed[3]
+               if request.url.host == "runtimes.example")
+
+
+def test_runtime_rollback_restores_prior_selection_offline_and_prunes_unused(feed):
+    updater = feed[0]
+    updater.database = FakeDatabase()
+    first = runtime_artifact("node", "22")
+    second = runtime_artifact("node", "24")
+    offer_runtimes(feed, [first])
+    updater.check(download=True)
+    updater.launch({"PATH": "/image/bin"}, activate=True)
+    updater.activating()
+    updater.healthy()
+    original = updater.launch({"PATH": "/image/bin"})[2]
+    offer_runtimes(feed, [second], revision=C, sequence=3)
+    updater.check(download=True)
+    trial = updater.launch({"PATH": "/image/bin"}, activate=True)[2]
+    assert second[0]["sha256"] in trial["PATH"]
+    updater.activating()
+    updater.database.databases["ai_shuffle"] = "migrated"
+    assert updater.failed()
+    assert updater.launch({"PATH": "/image/bin"})[2] == original
+    assert updater.database.databases["ai_shuffle"] == "before"
+    restored = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {},
+                                database=updater.database)
+    assert restored.launch({"PATH": "/image/bin"})[2] == original
+    updater.prune_overlays()
+    assert updater.overlays.directory(first[0]).exists()
+    assert not updater.overlays.directory(second[0]).exists()
+
+
+def test_runtime_unsupported_postgres_and_architecture_do_not_download(feed):
+    updater, publish, _, requests, _ = feed
+    updater.image["provides"] = ["base-1"]
+    publish(container={"requires": ["base-1", "postgres-17"]})
+    updater.check(download=True)
+    status = json.loads((updater.root / "status.json").read_text())
+    assert status["phase"] == "image-required" and "postgres-17" in status["message"]
+    assert "tested backup and migration plan" in status["message"]
+    assert len(requests) == 1 and updater.state == {}
+
+
+
 def test_manifest_trust_key_rotation():
     keys = [Ed25519PrivateKey.generate() for _ in range(3)]
     public = [key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo) for key in keys]
@@ -1013,10 +1297,12 @@ def test_release_needing_a_new_base_is_refused_in_plain_words_naming_it(feed, im
     assert current.state == {}
     status = status_of(current)
     # The offered revision, not the running one, or it reads as up to date (#1901).
-    assert (status["phase"], status["message"], status["version"]) == ("image-required", IMAGE_REQUIRED, C[:12])
+    missing = "python-3.13" if "provides" in image else "runtime"
+    assert (status["phase"], status["message"], status["version"]) == (
+        "image-required", IMAGE_REQUIRED + " No compatible runtime overlay for: " + missing, C[:12])
     monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(updater.root))
     monkeypatch.setattr(policy.database, "get_system_setting", lambda key: None)
-    assert policy.status()["message"] == "Needs a newer Docker image. This version keeps working."
+    assert policy.status()["message"] == status["message"]
 
 
 def test_releases_published_before_capabilities_still_install_on_new_images(feed):
