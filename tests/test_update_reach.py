@@ -139,7 +139,7 @@ def test_launcher_closure_follows_imports_and_requires_but_stops_at_the_full_app
     files = reach.launcher_files(tree())
     assert {"desktop/src/main/managed-entry.ts", "desktop/src/main/installed-entry.ts",
             "desktop/src/main/installed-host.ts", "desktop/src/main/source-updates.ts",
-            "desktop/scripts/source-profile.cjs"} <= files
+            "desktop/scripts/source-profile.cjs", "desktop/src/main/worker-process.ts"} <= files
     assert "desktop/src/main/index.ts" not in files
     assert "desktop/src/main/worker.ts" not in files
 

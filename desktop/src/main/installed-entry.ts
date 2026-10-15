@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { SourceUpdates, type RestoreDatabaseFactory } from './source-updates';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
-import { quiesceRecordedWorker } from './worker';
+import { quiesceRecordedWorker } from './worker-process';
 import { ColdClusterCopy } from './database-restore';
 import { saveInstalledHost, launchInstalledSource, installedLaunchArgs, installedExecutable, requireInstalledElectron, InstallerRequired } from './installed-host';
 import { countLauncherStart, launcherTrial, parseLauncher, restoreLauncher, LAUNCHER_FILE } from './launcher-swap';

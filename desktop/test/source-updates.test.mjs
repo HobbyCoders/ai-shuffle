@@ -61,7 +61,7 @@ async function installedLauncher(f, rejectRevision = null, {baseline={revision:A
   if(id==='./source-updates')return {SourceUpdates:InstalledUpdates};
   if(id==='./postgres')return {resolvePostgresBinaries:()=>({}),PostgresSupervisor:class {async quiesce(){}}};
   if(id==='./database-restore')return {ColdClusterCopy:class {constructor(_root,quiesce){this.quiesce=quiesce;}async validate(){}async snapshot(){await this.quiesce(true);events.push('snapshot');}async restore(){await this.quiesce(false);events.push('restore');}async discard(){events.push('discard');}}};
-  if(id==='./worker')return {quiesceRecordedWorker:async()=>events.push('quiesce')};
+  if(id==='./worker-process')return {quiesceRecordedWorker:async()=>events.push('quiesce')};
   if(id==='./launcher-swap')return require('../dist/main/launcher-swap.js');
   if(id==='./installed-host')return {InstallerRequired,installedExecutable:()=>'/test/AI Shuffle.AppImage',saveInstalledHost:async()=>{},requireInstalledElectron:async()=>{}};
   if(id==='./index'){events.push('bundled');return {};}

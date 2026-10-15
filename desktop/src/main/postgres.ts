@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { PostgresConfig } from './settings';
 import { privateDirectory } from './private-file';
-import { isPortFree, isProcessAlive } from './worker';
+import { isPortFree, isProcessAlive } from './worker-process';
 import { ColdClusterCopy, durableJson } from './database-restore';
 import { readProcessIdentity, sameProcess, isProcessIdentity, execWithIdentity, signalVerifiedProcess, type ProcessIdentity } from './process-identity';
 

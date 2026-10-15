@@ -20,6 +20,8 @@ function loadMain(name, replacements = {}, globals = {}) {
 	const file = new URL(`../dist/main/${name}.js`, import.meta.url);
 	const localRequire = createRequire(file);
 	const module = { exports: {} };
+	// worker.js takes its port and health probes from worker-process.js; give it the same fakes.
+	if (name === 'worker' && !('./worker-process' in replacements)) replacements = { ...replacements, './worker-process': loadMain('worker-process', replacements, globals) };
 	vm.runInNewContext(readFileSync(file, 'utf8'), {
 		module, exports: module.exports, require: (id) => id in replacements ? replacements[id] : localRequire(id),
 		process, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, ...globals
