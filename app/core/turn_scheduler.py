@@ -170,7 +170,9 @@ def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
        ``interrupting``) — a background task can go terminal while its parent
        turn is still settling, and a wake enqueued inside that window must
        inherit that still-settling turn's context rather than none at all;
-    3. the most recent settled turn.
+    3. the most recent settled turn;
+    4. a queued initial worker turn — host setup can finish before that turn
+       is claimed, but its full dispatch restrictions must still be inherited.
 
     ``None`` when the session has no usable turns at all.
     """
@@ -181,6 +183,7 @@ def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
             "state='parked'",
             "state IN ('running','draining','interrupting')",
             "state IN ('completed','aborted')",
+            "state='queued' AND source='provider_agent'",
         ):
             cursor.execute(
                 "SELECT * FROM turns WHERE session_id=%s AND " + state_clause + " "

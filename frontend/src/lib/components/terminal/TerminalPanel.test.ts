@@ -129,6 +129,21 @@ function clipboardPaste(index: number, text: string) {
 
 const sentText = () => fx.socketInput.map((entry) => entry.data).join('');
 
+describe('Monitor watch mode', () => {
+	it('removes process controls and the mobile key bar while watching, then returns to shells', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ tasks: [] }))));
+		const view = await mount([info('t9', { busy: true })]);
+		await fireEvent.click(view.getByRole('button', { name: 'Watch command' }));
+		expect(await view.findByText('Read-only')).toBeTruthy();
+		expect(view.queryByRole('button', { name: 'Stop' })).toBeNull();
+		expect(view.queryByRole('button', { name: 'New terminal' })).toBeNull();
+		expect(view.queryByRole('button', { name: 'Close terminal 1' })).toBeNull();
+		await fireEvent.click(view.getByRole('button', { name: 'Back to shells' }));
+		expect(view.getByRole('button', { name: 'Stop' })).toBeTruthy();
+		expect(fx.socketInput).toEqual([]);
+	});
+});
+
 describe('Windows picker', () => {
 	it('opens the seeded Windows folder using the discovered PowerShell shell', async () => {
 		api.targets.mockResolvedValue({ ...targets,

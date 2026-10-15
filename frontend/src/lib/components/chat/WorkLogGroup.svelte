@@ -13,8 +13,9 @@
 	 * Live and settled render the SAME keyed row list, so when the turn settles
 	 * only `mode` flips: every row that stays on screen keeps its component, and
 	 * with it any tool, thinking or worker card the reader expanded (spec §6). A
-	 * row the reader clicked into stays mounted (hidden) while a fold hides it,
-	 * so reopening the fold shows it as they left it.
+	 * small cache of recently touched rows stays mounted while a fold hides it.
+	 * Both visible and retained rows share a bounded slice: very old card-local
+	 * expansion state may be released, while turn/run folds persist separately.
 	 *
 	 * Open/closed folds live in the fold-state store, keyed by `foldKey`, so they
 	 * survive a remount, a session switch and a reload. Without a key (tests,
@@ -33,6 +34,7 @@
 	import { isNavigableUserTurn, turnAnchorId } from '$lib/utils/transcript-navigation';
 	import type { ChatMessage } from '$lib/stores/types';
 	import MediaGallery from './MediaGallery.svelte';
+	import BoundedTranscriptRows from './BoundedTranscriptRows.svelte';
 	import { trackRunHeader } from './run-header-placement';
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
 	import type { WorkLogEntry, WorkLogRun, WorkLogSequenceEntry } from '$lib/utils/work-log';
@@ -64,6 +66,8 @@
 		gallery?: GalleryMedia[];
 		row: Snippet<[ChatMessage, number, ReadonlySet<string>?]>;
 		observeTurnAnchor?: Action<HTMLElement>;
+		revealMessageId?: string | null;
+		pagingEnabled?: boolean;
 	}
 
 	let {
@@ -80,6 +84,8 @@
 		summary = null,
 		compactSummary = null,
 		row,
+		revealMessageId = null,
+		pagingEnabled = true,
 		observeTurnAnchor = () => {}
 	}: Props = $props();
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
@@ -417,7 +423,10 @@
 	const trackTouch: Action<HTMLElement, string> = (node, key) => {
 		let current = key;
 		const mark = () => {
-			if (!touched[current]) touched = { ...touched, [current]: true };
+			// Keep a small convenience cache, never arbitrary hidden DOM for
+			// every tool the reader has ever opened in a multi-day turn.
+			const recent = Object.keys(touched).filter(id => id !== current).slice(-7);
+			touched = Object.fromEntries([...recent, current].map(id => [id, true]));
 		};
 		node.addEventListener('click', mark, true);
 		return {
@@ -425,6 +434,27 @@
 			destroy() { node.removeEventListener('click', mark, true); }
 		};
 	};
+
+	// Filter before windowing: hidden routine rows must not consume the budget
+	// or make protected user prompts inaccessible. Keep each folded run's header.
+	const renderSequence = $derived(sequence.map((entry, position) => ({ entry, position }))
+		.filter(({ entry, position }) => rowVisible(entry) || touched[rowKey(entry)] ||
+			(mode === 'live' && entry.run !== undefined && runEdges.first.get(entry.run) === position)));
+	const revealRowKey = $derived.by(() => {
+		if (!revealMessageId) return null;
+		const entry = sequence.find(item => item.message.id === revealMessageId || item.message.serverId === revealMessageId);
+		return entry ? rowKey(entry) : null;
+	});
+	$effect.pre(() => {
+		if (!revealRowKey) return;
+		const entry = sequence.find(item => rowKey(item) === revealRowKey);
+		if (!entry || rowVisible(entry)) return;
+		if (mode === 'settled') setOpen(true);
+		else {
+			const run = entry.run === undefined ? undefined : runByIndex.get(entry.run);
+			if (run) setRunOpen(run, true);
+		}
+	});
 
 	function isAssistantProse(entry: WorkLogSequenceEntry): boolean {
 		return entry.message.role === 'assistant' && (entry.message.type === 'text' || !entry.message.type);
@@ -480,7 +510,8 @@
 		{/if}
 		<div class="work-sequence" class:is-expanded={mode === 'settled' && open} class:is-collapsed={!(mode === 'settled' && open)}>
 			{#if mode === 'settled' && !open && gallery.length > 1}<MediaGallery items={gallery} />{/if}
-			{#each sequence as entry, position (rowKey(entry))}
+			<BoundedTranscriptRows items={renderSequence} keyOf={item => rowKey(item.entry)} revealKey={revealRowKey} startAtTail={true} {pagingEnabled}>
+			{#snippet children({ entry, position })}
 				{@const run = mode === 'live' && entry.run !== undefined ? runByIndex.get(entry.run) : undefined}
 				{@const visible = rowVisible(entry)}
 				{#if run && runEdges.first.get(run.index) === position}
@@ -556,7 +587,8 @@
 						Show fewer log entries
 					</button>
 				{/if}
-			{/each}
+			{/snippet}
+			</BoundedTranscriptRows>
 		</div>
 		{#if mode === 'settled' && foldable && open}
 			<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
@@ -585,12 +617,9 @@
 				<span class="fold-summary" title={summary}>· {summary}</span>
 			{/if}
 		</button>
-		{#each folded as entry (entry.message.id ?? entry.index)}
-			{@render row(entry.message, entry.index)}
-		{/each}
-		{#each tail as entry (entry.message.id ?? entry.index)}
-			{@render row(entry.message, entry.index)}
-		{/each}
+		<BoundedTranscriptRows items={[...folded, ...tail]} keyOf={rowKey} {pagingEnabled}>
+			{#snippet children(entry)}{@render row(entry.message, entry.index)}{/snippet}
+		</BoundedTranscriptRows>
 		<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m18 15-6-6-6 6" />
@@ -623,9 +652,9 @@
 				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
 			{/if}
 		</button>
-		{#each tail as entry (entry.message.id ?? entry.index)}
-			{@render row(entry.message, entry.index)}
-		{/each}
+		<BoundedTranscriptRows items={tail} keyOf={rowKey} startAtTail={mode === 'live'} {pagingEnabled}>
+			{#snippet children(entry)}{@render row(entry.message, entry.index)}{/snippet}
+		</BoundedTranscriptRows>
 	{/if}
 	</div>
 </section>

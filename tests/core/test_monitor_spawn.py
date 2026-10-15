@@ -483,8 +483,9 @@ def _jump_clock(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("setup_budget", [None, 600])
 async def test_deadline_stops_the_task_and_wakes_with_a_timeout(
-    spawner_harness, monkeypatch
+    spawner_harness, monkeypatch, setup_budget
 ):
     import asyncio
 
@@ -494,10 +495,11 @@ async def test_deadline_stops_the_task_and_wakes_with_a_timeout(
     monkeypatch.setattr(settings, "monitor_command_timeout_seconds", 1200)
     _jump_clock(monkeypatch)
 
-    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    spawn = ms.make_fluid_monitor_spawner("s-spawn", max_budget_seconds=setup_budget)
     outcome = await spawn({"command": "while true; do sleep 30; done"}, None)
 
-    assert "1200s time budget" in outcome.text
+    expected_budget = setup_budget or 1200
+    assert f"{expected_budget}s time budget" in outcome.text
     for _ in range(50):
         if frames:
             break
@@ -507,7 +509,7 @@ async def test_deadline_stops_the_task_and_wakes_with_a_timeout(
     # Parked forever became woken with a timeout — and a timeout is a stop,
     # not a failure.
     assert frames[0]["status"] == "killed"
-    assert "1200s" in frames[0]["summary"]
+    assert f"{expected_budget}s" in frames[0]["summary"]
     assert "time budget" in frames[0]["summary"]
     assert "not by a failure" in frames[0]["summary"]
     assert (

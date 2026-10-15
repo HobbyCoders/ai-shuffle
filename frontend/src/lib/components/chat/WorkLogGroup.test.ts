@@ -83,6 +83,37 @@ const baseProps = {
 afterEach(cleanup);
 
 describe('WorkLogGroup', () => {
+	it('reveals a distant protected user turn inside a giant group without exceeding the row cap', async () => {
+		const entries = Array.from({ length: 2000 }, (_, index) => ({
+			message: index === 500
+				? { id: 'nested-user', role: 'user' as const, type: 'text' as const, content: 'Nested prompt' }
+				: { ...message, id: `nested-${index}`, content: `Nested row ${index}` },
+			index, hiddenWhenCollapsed: false
+		}));
+		const view = render(WorkLogGroup, { ...baseProps, mode: 'live', sequence: entries, folded: entries });
+		expect(document.getElementById(turnAnchorId('nested-user'))).toBeNull();
+		await view.rerender({ revealMessageId: 'nested-user' });
+		expect(document.getElementById(turnAnchorId('nested-user'))).not.toBeNull();
+		expect(screen.getAllByTestId('work-row')).toHaveLength(60);
+	});
+
+	it('bounds a 2,000-row open work log and pages without retaining all touched rows', async () => {
+		const entries = Array.from({ length: 2000 }, (_, index) => ({
+			message: { ...message, id: `large-${index}`, content: `Row ${index}` },
+			index, hiddenWhenCollapsed: true
+		}));
+		render(WorkLogGroup, { ...baseProps, mode: 'settled', sequence: entries, folded: entries });
+		await fireEvent.click(screen.getByRole('button', { expanded: false }));
+		expect(screen.getAllByTestId('work-row')).toHaveLength(60);
+		for (const el of screen.getAllByTestId('work-row').slice(0, 12)) await fireEvent.click(el);
+		await fireEvent.click(screen.getByRole('button', { name: 'Show earlier log entries' }));
+		expect(screen.getAllByTestId('work-row')).toHaveLength(60);
+		expect(screen.queryByText('Row 1999')).toBeNull();
+		expect(screen.getByText('Row 1920')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide work details' }));
+		expect(screen.queryAllByTestId('work-row').length).toBeLessThanOrEqual(8);
+	});
+
 	it('hides settled agent messages, then expands them in transcript order', async () => {
 		const messages: ChatMessage[] = [
 			{ id: 'peer-1', role: 'system', type: 'system', systemSubtype: 'agent_message', content: 'First delivery' },

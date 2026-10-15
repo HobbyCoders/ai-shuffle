@@ -40,7 +40,7 @@ class FakeGitHub:
 
 
 def test_owner_success_on_current_main_publishes():
-    ready, reason = gate.publication_readiness(FakeGitHub([status()]), REVISION)
+    ready, reason = gate.exact_main_readiness(FakeGitHub([status()]), REVISION)
     assert ready, reason
     assert "backend, fluid passed" in reason
 
@@ -54,7 +54,7 @@ def test_owner_success_on_current_main_publishes():
     [status(state="error")],
 ])
 def test_missing_foreign_or_unfinished_pass_refuses(statuses):
-    ready, reason = gate.publication_readiness(FakeGitHub(statuses), REVISION)
+    ready, reason = gate.exact_main_readiness(FakeGitHub(statuses), REVISION)
     assert not ready
     assert reason.startswith(gate.MAIN_SUITE_REFUSAL)
     assert gate.COMMAND in reason
@@ -62,31 +62,31 @@ def test_missing_foreign_or_unfinished_pass_refuses(statuses):
 
 def test_newest_owner_status_wins():
     # GitHub lists newest first: a later failure beats an earlier success.
-    ready, _ = gate.publication_readiness(FakeGitHub([status(state="failure"), status()]), REVISION)
+    ready, _ = gate.exact_main_readiness(FakeGitHub([status(state="failure"), status()]), REVISION)
     assert not ready
     # A later success recovers from an earlier failure.
-    ready, _ = gate.publication_readiness(FakeGitHub([status(), status(state="failure")]), REVISION)
+    ready, _ = gate.exact_main_readiness(FakeGitHub([status(), status(state="failure")]), REVISION)
     assert ready
     # A stranger's newer success never hides the owner's failure.
-    ready, _ = gate.publication_readiness(FakeGitHub([status(creator="7"), status(state="failure")]), REVISION)
+    ready, _ = gate.exact_main_readiness(FakeGitHub([status(creator="7"), status(state="failure")]), REVISION)
     assert not ready
 
 
 def test_owner_status_on_a_later_page_is_found():
     statuses = [status(creator="7")] * 100 + [status()]
-    assert gate.publication_readiness(FakeGitHub(statuses), REVISION)[0]
+    assert gate.exact_main_readiness(FakeGitHub(statuses), REVISION)[0]
 
 
 def test_unbounded_status_history_fails_closed():
     with pytest.raises(ValueError):
-        gate.publication_readiness(FakeGitHub([status(creator="7")] * 1000), REVISION)
+        gate.exact_main_readiness(FakeGitHub([status(creator="7")] * 1000), REVISION)
 
 
 def test_unprotected_or_moved_main_refuses():
-    assert not gate.publication_readiness(FakeGitHub([status()], protected=False), REVISION)[0]
-    assert not gate.publication_readiness(FakeGitHub([status()], heads=[OTHER]), REVISION)[0]
+    assert not gate.exact_main_readiness(FakeGitHub([status()], protected=False), REVISION)[0]
+    assert not gate.exact_main_readiness(FakeGitHub([status()], heads=[OTHER]), REVISION)[0]
     # main moving while the statuses are read is caught by the recheck.
-    ready, reason = gate.publication_readiness(FakeGitHub([status()], heads=[REVISION, OTHER]), REVISION)
+    ready, reason = gate.exact_main_readiness(FakeGitHub([status()], heads=[REVISION, OTHER]), REVISION)
     assert not ready and "moved during verification" in reason
 
 
@@ -112,7 +112,7 @@ def test_trigger_cannot_add_workflow_requirements(kind, passed):
     # regardless of what triggered publication; no PR/tree/run reads are needed.
     assert gate.event_allowed(env(GITHUB_EVENT_NAME=kind), status_event())
     api = FakeGitHub([status()] if passed else [])
-    ready, reason = gate.publication_readiness(api, REVISION)
+    ready, reason = gate.exact_main_readiness(api, REVISION)
     assert ready is passed
     if not passed:
         assert gate.COMMAND in reason
@@ -141,8 +141,10 @@ def test_entrypoint_writes_output_and_annotates_refusal(statuses, ready, monkeyp
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(gate, "GitHub", lambda: FakeGitHub(statuses))
     monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: REVISION + "\n")
-    gate.main()
-    assert output.read_text() == f"ready={str(ready).lower()}\n"
+    monkeypatch.setattr(gate, "main_history", lambda api, **kw: [REVISION, OTHER])
+    monkeypatch.setattr(gate, "published_edge_revision", lambda: OTHER)
+    gate.main([])
+    assert output.read_text() == f"ready={str(ready).lower()}\nrevision={REVISION}\n"
     printed = capsys.readouterr().out
     assert ("::warning title=Edge publication refused::" in printed) is (not ready)
     assert summary.read_text(encoding="utf-8")
@@ -154,7 +156,34 @@ def test_entrypoint_refuses_unauthorized_events(monkeypatch, tmp_path):
     for key, value in env(GITHUB_EVENT_PATH=str(event_path)).items():
         monkeypatch.setenv(key, value)
     with pytest.raises(ValueError):
-        gate.main()
+        gate.main([])
+
+
+@pytest.mark.parametrize("state,age,expected", [
+    ("pending", 60, False), ("pending", 7201, True), ("success", 60, True), ("failure", 60, True),
+])
+def test_merge_guard_pending_and_crashed_markers(state, age, expected):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    marker = status(state=state)
+    marker["created_at"] = (now - timedelta(seconds=age)).isoformat()
+    ready, reason = gate.merge_readiness(FakeGitHub([marker]), now=now)
+    assert ready is expected
+    if age > 7200:
+        assert "possibly crashed" in reason
+
+
+def test_merge_guard_ignores_foreign_marker_and_catches_main_race():
+    assert gate.merge_readiness(FakeGitHub([status(state="pending", creator="7")]))[0]
+    assert not gate.merge_readiness(FakeGitHub([], heads=[REVISION, OTHER]))[0]
+    assert not gate.merge_readiness(FakeGitHub([status(state="pending")]))[0]
+
+
+def test_merge_guard_cli_needs_no_publication_event(monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    monkeypatch.setattr(gate, "GitHub", lambda: FakeGitHub([status(state="pending")]))
+    assert gate.main(["--merge-check"]) == 1
+    assert "inspect the run" in capsys.readouterr().out
 
 
 def test_annotation_escapes_workflow_command_data():
@@ -173,6 +202,32 @@ def test_workflow_wiring_matches_the_gate():
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
     assert steps[-1]["if"] == "steps.changed.outputs.changed == 'true'"
+    assert steps[-1]["run"].endswith("edge_publication_gate.py --select")
+    assert steps[0]["with"]["fetch-depth"] == "0"
+    publish = config["jobs"]["publish"]
+    assert publish["env"]["SOURCE_REVISION"] == "${{ needs.gate.outputs.revision }}"
+    assert publish["steps"][0]["with"]["ref"] == "${{ needs.gate.outputs.revision }}"
+    assert publish["steps"][1]["with"]["ref"] == "${{ github.sha }}"
+    assert publish["steps"][1]["with"]["path"] == ".publication-control"
+    assert publish["defaults"]["run"]["working-directory"] == ".publication-control"
+    assert publish["steps"][-1]["run"] == 'node desktop/scripts/publish-source.mjs --source-root "$GITHUB_WORKSPACE"'
+    for step in publish["steps"]:
+        if "edge_publication_gate.py" in step.get("run", ""):
+            assert step["run"] == 'python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"'
+        if "npm ci" in step.get("run", ""):
+            assert step["working-directory"] == ".publication-control/scripts/source-publisher"
+        if step.get("uses", "").startswith("actions/setup-node"):
+            assert step["with"]["cache-dependency-path"] == ".publication-control/scripts/source-publisher/package-lock.json"
+    publisher = (ROOT / "desktop/scripts/publish-source.mjs").read_text()
+    assert "controlPath('scripts/ci/publication_source.py')" in publisher
+    assert "controlPath('scripts/source-publisher/node_modules/wrangler/bin/wrangler.js')" in publisher
+    assert "['-I', gate, '--json', '--source-root', sourceRoot]" in publisher
+    assert "cwd: controlRoot" in publisher
+    for action in ("version", "archive", "signing-floor", "sequence", "contract"):
+        assert f"source('{action}', revision" in publisher
+    for candidate_helper in ("android/ci/resolve-version-name.py", "scripts/release/sequence_offset.py", "docker/update_contract.py"):
+        assert f"['{candidate_helper}'" not in publisher
+    assert publish["concurrency"]["cancel-in-progress"] == "false"
     text = (ROOT / "scripts/local_ci.py").read_text(encoding="utf-8")
     assert f'ATTEST_CONTEXT = "{gate.CONTEXT}"' in text
     assert "local_ci.py full --attest" in gate.COMMAND

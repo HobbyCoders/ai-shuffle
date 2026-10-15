@@ -630,16 +630,23 @@ def set_paired_client_session(
             client = _client(cursor.fetchone())
             if not client:
                 return None
+            cursor.execute('SELECT token_hash FROM paired_client_native_sessions WHERE client_id=%s',
+                           (client_id,))
+            previous = cursor.fetchone()
+            old_hash = previous['token_hash'] if previous else None
             cursor.execute("""INSERT INTO paired_client_native_sessions(client_id,token_hash,expires_at)
                 VALUES(%s,%s,%s) ON CONFLICT(client_id) DO UPDATE SET
                 token_hash=EXCLUDED.token_hash, expires_at=EXCLUDED.expires_at""",
                            (client_id, token_hash, expires_at.isoformat()))
+            _renew_chat_controllers(cursor, client_id, old_hash, token_hash)
             return client
         # Every web rotation serializes with reservations, including legacy
         # callers. A reservation alone never changes the active cookie.
-        cursor.execute('SELECT id FROM paired_clients WHERE id=%s AND revoked_at IS NULL FOR UPDATE', (client_id,))
-        if cursor.fetchone() is None:
+        cursor.execute('SELECT session_token_hash FROM paired_clients WHERE id=%s AND revoked_at IS NULL FOR UPDATE', (client_id,))
+        previous = cursor.fetchone()
+        if previous is None:
             return None
+        old_hash = previous['session_token_hash']
         if web_reservation_hash is not None:
             cursor.execute('''DELETE FROM paired_client_web_reservations
                 WHERE client_id=%s AND mobile_record_id=%s AND api_key_hash=%s
@@ -660,7 +667,20 @@ def set_paired_client_session(
             """,
             (token_hash, expires_at.isoformat(), client_id),
         )
-        return _client(cursor.fetchone())
+        client = _client(cursor.fetchone())
+        _renew_chat_controllers(cursor, client_id, old_hash, token_hash)
+        return client
+
+
+def _renew_chat_controllers(cursor, client_id, old_hash, new_hash):
+    # The locked device's existing slot is the continuity proof, not its id
+    # alone. Logout clears that proof; a subsequent mint must not revive chats.
+    # Keep owner/account/device provenance unchanged, and never refresh live
+    # socket principals: a rotated bearer credential remains invalid.
+    if old_hash:
+        cursor.execute('''UPDATE mobile_tool_identity SET credential_hash=%s
+            WHERE kind='paired' AND principal_id=%s AND credential_hash=%s''',
+            (new_hash, client_id, old_hash))
 
 
 def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None) -> bool:

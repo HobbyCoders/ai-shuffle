@@ -5738,7 +5738,8 @@ async def test_delegated_leg_forwards_the_allowlist_and_keeps_its_bans(
 
 
 @pytest.mark.asyncio
-async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_adapter):
+@pytest.mark.parametrize("worker", [False, True])
+async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_adapter, worker):
     """``aih_tool_allowlist`` is the surface channel through the projection
     shim. ``allowed_tools`` — the SDK's PERMISSION allowlist, full of MCP names
     and empty of builtins under a tools preset — must NOT become one: projecting
@@ -5764,8 +5765,10 @@ async def test_connect_with_sdk_options_threads_aih_tool_allowlist(recording_ada
         aih_tool_allowlist=["Read"],
         aih_provider_id=None,
         aih_session_id="app-sess",
+        aih_worker_run=worker,
     )
     await adapter.connect_with_sdk_options(sdk_options)
+    assert bool(adapter._options.extra.get("worker_run")) is worker
     assert made["delegated"]["allowed_tools"] == ["Read", "LSP", "ToolSearch"]
     assert adapter._options.tool_allowlist == ["Read"]
     assert adapter._options.allowed_tools == ["mcp__builtins__Task", "mcp__ai-tools"]

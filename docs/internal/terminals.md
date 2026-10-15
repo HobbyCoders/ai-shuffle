@@ -9,6 +9,7 @@ authorization). Tests: `tests/core/test_terminals.py`,
 Phase 1 covers interactive shells on **this worker only**, on a Unix PTY. Not
 covered yet: the ServerWorker host over SSH, terminals on other workers, Windows,
 watching an agent's background command, and "Open terminal here" from Files.
+The later Files-open and read-only Monitor APIs are documented below.
 Ids and payloads already carry a `target` so those can be added without
 breaking clients.
 
@@ -136,8 +137,25 @@ Without `cwd`, a new terminal opens in:
 3. the workspace folder (`workspace`), else
 4. the home folder (`home`).
 
-A requested `cwd` must be an absolute path to an existing directory.
-Anything else is refused with `400 bad_folder`; there is no silent fallback.
+A requested `cwd` must be an absolute path to an existing directory within
+Files' workspace root. Missing paths and files return `400 bad_folder`;
+paths outside the root return `400` with the Files boundary error. The Files
+validator resolves symlinks before checking confinement, so traversal and
+symlinks cannot select a folder outside that root. There is no silent fallback.
+The resolved name is not used as spawn authority: create and restart reopen it
+without following links and hold directory handles through process creation.
+On POSIX a fresh exec trampoline checks the held folder's inode ancestry and
+uses `fchdir` before the isolation runner or shell; it never passes the mutable
+folder pathname as the subprocess cwd. On Windows every directory component
+is pinned without delete sharing and reparse points are refused through ConPTY
+creation. A substitution detected before spawn returns `400 bad_folder`; a
+folder moved outside the held root during process creation makes the child
+exit without launching the shell. Restart retains this Files-root policy.
+
+`POST /api/v1/terminals/from-files` accepts `{"path": "relative/folder"}`
+(empty path means the Files root), resolves it with the same Files validator,
+and returns `201 {"terminal": <Terminal object>}`. It is owner-only, just like
+opening a terminal with an absolute `cwd`.
 A chat that runs on another worker is refused with `409 chat_on_other_worker`.
 
 A terminal created without `session_id` belongs to no chat and opens in the
@@ -148,6 +166,33 @@ to a CLI before any chat exists. The frontend keys that scope as
 list without `session_id` returns every terminal on the worker. Auth, the
 preview-cookie refusal and the environment scrub are the same as for chat
 terminals.
+
+## Read-only Monitor watching
+
+All watch routes use the same terminal owner checks, including refusing agents,
+passwordless local requests and preview cookies. They expose only retained local
+Monitor/background-shell buffers for the requested session, not subagent reports.
+
+- `GET /api/v1/terminals/monitor?session_id=...` returns `{"tasks": [...]}`.
+  Each task has `id`, `session_id`, `subject`, `status`, `started_at`, `exit_code`.
+- `GET /api/v1/terminals/monitor/{task_id}?session_id=...` returns one output
+  snapshot. Unknown tasks and tasks from a different session return `404`.
+- `WS /api/v1/ws/terminals/monitor/{task_id}?session_id=...` accepts the same
+  optional `token` credential as interactive sockets. It sends a snapshot on
+  attachment and when retained output or status changes (250 ms refresh).
+
+Each JSON frame is `{"type":"output","readonly":true,"task":{...},
+"lines":[...],"truncated":false,"finished":false}`. **Replace** the displayed
+lines on every frame; do not append them. The producer retains its existing
+bounded line buffer; snapshots additionally retain at most 256 Ki characters
+of its newest output (`truncated` indicates this additional cap). Output is
+plain text from Monitor's existing stdout reader, not a PTY byte stream. There
+is no input, resize, paste or stop operation. Any incoming WebSocket data closes
+with `1008`; disconnecting never stops the command. Authority is rechecked for
+the socket's lifetime. Auth refusal closes with `4001`, missing/wrong-session
+tasks with `4004`. After stdout drains, `finished:true` is sent and the socket
+closes normally (`1000`). Finished tasks remain readable while their in-memory
+Monitor buffer is retained; an app restart loses those buffers.
 
 ## Limits
 

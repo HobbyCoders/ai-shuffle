@@ -34,6 +34,10 @@ on:
         default: false
 
   workflow_call:
+    outputs:
+      version_code:
+        description: Version code of the exact signed bundle (for durable staging)
+        value: ${{ jobs.bundle.outputs.version_code }}
     inputs:
       release_tag:
         description: Immutable version tag created by release.yml

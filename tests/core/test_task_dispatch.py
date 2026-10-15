@@ -155,12 +155,22 @@ def test_empty_roster_refuses_task_without_dispatch(bare_db):
     dispatch.assert_not_called()
 
 
+@pytest.mark.parametrize("args", [{"base_commit": "HEAD"}, {"base_commit": 42},
+                                  {"base_commit": "a" * 40, "worker": "remote"}])
+def test_review_commit_input_fails_before_dispatch(agents, args):
+    with patch("app.core.provider_agent.dispatch_worker") as dispatched:
+        payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go", **args}, "s1"))
+    assert not payload["ok"] and "base_commit" in payload["error"]
+    dispatched.assert_not_called()
+
+
 def test_missing_prompt(agents):
     payload = asyncio.run(_dispatch({"agent": "helper", "prompt": ""}, "s1"))
     assert payload["ok"] is False and "prompt" in payload["error"]
 
 
-def test_dispatch_open_by_default(agents):
+@pytest.mark.parametrize("base_commit", [None, "a" * 40])
+def test_dispatch_open_by_default(agents, base_commit):
     """No enabled_agents on the caller -> any target dispatches (dispatch
     itself is stubbed)."""
     _mk_session(agents, "s-root", "root-agent")
@@ -168,8 +178,9 @@ def test_dispatch_open_by_default(agents):
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id="w1", report="done")
 
-    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
-        payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go"}, "s-root"))
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker) as dispatched:
+        payload = asyncio.run(_dispatch({"agent": "helper", "prompt": "go", "base_commit": base_commit}, "s-root"))
+    assert dispatched.call_args.kwargs.get("base_commit") == base_commit
     assert payload["ok"] is True
     assert payload["report_head"] == "done"
     assert payload["agent"] == "helper"
