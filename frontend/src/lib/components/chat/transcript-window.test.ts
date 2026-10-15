@@ -1,8 +1,15 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
 	TRANSCRIPT_WINDOW_SIZE,
+	TRANSCRIPT_WINDOW_CAP,
+	initialWindowRange,
+	olderWindowRange,
+	newerWindowRange,
+	windowRangeForItem,
+	clampWindowRange,
 	clampWindowStart,
 	createWindowBackfill,
+	createTranscriptWindow,
 	classifyTurnEntry,
 	expandedWindowStart,
 	initialWindowStart,
@@ -17,6 +24,119 @@ import {
 import { resolveCurrentTurnIndex } from '$lib/utils/transcript-navigation';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+
+describe('pure bounded ranges for reactive views', () => {
+	it('shifts, jumps, follows and clamps without mutating input', () => {
+		const tail = Object.freeze(initialWindowRange(2000));
+		expect(TRANSCRIPT_WINDOW_CAP).toBe(120);
+		expect(tail).toEqual({ start: 1880, end: 2000 });
+		const older = olderWindowRange(tail, 2000);
+		expect(older).toEqual({ start: 1850, end: 1970 });
+		expect(newerWindowRange(older, 2000)).toEqual(tail);
+		expect(clampWindowRange(older, 2100)).toBe(older);
+		expect(clampWindowRange(older, 2100, { followTail: true })).toEqual({ start: 1980, end: 2100 });
+		expect(windowRangeForItem(tail, 900, 2000)).toEqual({ start: 840, end: 960 });
+		expect(windowRangeForItem(tail, -1, 2000)).toBe(tail);
+		expect(windowRangeForItem(tail, 2000, 2000)).toBe(tail);
+		expect(clampWindowRange(tail, 20)).toEqual({ start: 0, end: 20 });
+		expect(clampWindowRange(tail, 0)).toEqual({ start: 0, end: 0 });
+	});
+
+	it('also bounds the rows of one giant group through repeated navigation', () => {
+		let range = initialWindowRange(2000, 30);
+		for (let i = 0; i < 200; i++) {
+			range = olderWindowRange(range, 2000, 10, 30);
+			expect(range.end - range.start).toBe(30);
+		}
+		expect(range).toEqual({ start: 0, end: 30 });
+		for (let i = 0; i < 200; i++) range = newerWindowRange(range, 2000, 10, 30);
+		expect(range).toEqual({ start: 1970, end: 2000 });
+	});
+});
+
+describe('bounded transcript range controller', () => {
+	it('caps mounting after appends, streaming changes, idle time and edge navigation', async () => {
+		vi.useFakeTimers();
+		const window = createTranscriptWindow({ cap: 120, step: 30 });
+		expect(window.setItemCount(2000)).toEqual({ start: 1880, end: 2000 });
+		window.onStreamingChange(true);
+		expect(window.setItemCount(2100)).toEqual({ start: 1980, end: 2100 });
+		window.onStreamingChange(false);
+		await vi.advanceTimersByTimeAsync(600_000);
+		expect(window.visibleRange).toEqual({ start: 1980, end: 2100 });
+		expect(vi.getTimerCount()).toBe(0);
+		for (let i = 0; i < 100; i++) {
+			const range = window.loadOlder();
+			expect(range.end - range.start).toBe(120);
+		}
+		expect(window.visibleRange).toEqual({ start: 0, end: 120 });
+		for (let i = 0; i < 100; i++) window.extendNewer();
+		expect(window.visibleRange).toEqual({ start: 1980, end: 2100 });
+		expect(window.followsTail).toBe(true);
+	});
+
+	it('retains overlap for a keyed anchor when shifting either edge', () => {
+		const window = createTranscriptWindow({ cap: 120, step: 30 });
+		window.setItemCount(2000);
+		const before = window.visibleRange;
+		const older = window.extendOlder();
+		expect(older).toEqual({ start: 1850, end: 1970 });
+		// DOM-side code can retain any key in this 90-item overlap, then restore
+		// its top offset rather than using the now-invalid bottom distance.
+		expect(Math.min(before.end, older.end) - Math.max(before.start, older.start)).toBe(90);
+		expect(window.extendNewer()).toEqual(before);
+	});
+
+	it('centres jumps, keeps historical readers in place on append, and returns to latest', () => {
+		const window = createTranscriptWindow();
+		window.setItemCount(2000);
+		expect(window.windowAround(900)).toEqual({ start: 840, end: 960 });
+		const anchorRange = window.visibleRange;
+		expect(window.setItemCount(2300)).toBe(anchorRange);
+		expect(window.onStreamingChange(true)).toBe(anchorRange);
+		expect(window.isStreaming).toBe(true);
+		expect(window.windowAround(-1)).toBe(anchorRange);
+		expect(window.windowAround(2300)).toBe(anchorRange);
+		expect(window.toTail()).toEqual({ start: 2180, end: 2300 });
+		expect(window.setItemCount(2400, { followTail: false })).toEqual({ start: 2180, end: 2300 });
+	});
+
+	it('freezes hidden appends and resumes once without disturbing historical readers', () => {
+		const window = createTranscriptWindow();
+		window.setItemCount(2000);
+		const before = window.pauseWhenHidden(true);
+		for (let count = 2001; count <= 2100; count++) expect(window.setItemCount(count)).toBe(before);
+		expect(window.pauseWhenHidden(false)).toEqual({ start: 1980, end: 2100 });
+		window.windowAround(900);
+		const history = window.pauseWhenHidden(true);
+		window.setItemCount(2400);
+		expect(window.pauseWhenHidden(false)).toBe(history);
+	});
+
+	it('clamps rewinds and empty histories even while hidden', () => {
+		const window = createTranscriptWindow();
+		window.setItemCount(2000);
+		window.pauseWhenHidden(true);
+		expect(window.setItemCount(20)).toEqual({ start: 0, end: 20 });
+		expect(window.setItemCount(0)).toEqual({ start: 0, end: 0 });
+		window.pauseWhenHidden(false);
+		expect(window.setItemCount(25)).toEqual({ start: 0, end: 25 });
+	});
+
+	it('validates bounds and keeps oversized steps overlapping when possible', () => {
+		expect(() => createTranscriptWindow({ cap: 0 })).toThrow(RangeError);
+		expect(() => createTranscriptWindow({ cap: Infinity })).toThrow(RangeError);
+		expect(() => createTranscriptWindow({ step: 0.5 })).toThrow(RangeError);
+		const window = createTranscriptWindow({ cap: 10, step: 50 });
+		expect(() => window.setItemCount(-1)).toThrow(RangeError);
+		window.setItemCount(100);
+		expect(window.loadOlder()).toEqual({ start: 81, end: 91 });
+		const single = createTranscriptWindow({ cap: 1 });
+		single.setItemCount(3);
+		expect(single.loadOlder()).toEqual({ start: 1, end: 2 });
+	});
+});
 
 describe('background transcript mounting', () => {
 	it('checks visibility, streaming and idle budget before producing each chunk', () => {

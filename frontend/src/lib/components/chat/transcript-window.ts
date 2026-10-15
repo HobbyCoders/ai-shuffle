@@ -7,16 +7,12 @@
  * tokenisation all still run at mount — so opening a 500-message session paid
  * hundreds of parse passes before first paint.
  *
- * The transcript therefore mounts a trailing WINDOW first (the part the reader
- * actually lands on) and grows it backwards: on scroll-up, on a jump to an older
- * turn, on demand from the "show earlier messages" control, and — so nothing is
- * permanently missing from in-page search — in idle-time chunks until the whole
- * transcript is mounted. The window never shrinks while a session is open, which
- * keeps the keyed `{#each}` append-only in both directions and makes every
- * transition here monotone.
+ * `createTranscriptWindow` mounts a bounded slice and shifts it on explicit
+ * scroll/search/turn navigation. It never schedules idle growth. The caller
+ * preserves a keyed DOM anchor across shifts, including eviction at either edge.
  *
- * Geometry stays pure; the background scheduler takes callbacks so its
- * visibility and idle-budget decisions can be tested independently.
+ * Legacy progressive-window helpers remain below for compatibility; unlike the
+ * bounded controller they only limit initial mounting, not eventual DOM size.
  */
 
 /** A bounded, half-open slice. Capture a keyed DOM anchor before moving it and
@@ -24,10 +20,61 @@
  * when a shift also unmounts rows at the opposite edge. */
 export interface TranscriptRange { readonly start: number; readonly end: number }
 
+/** Hard limit for outer items; nested row windows need their own bound. */
+export const TRANSCRIPT_WINDOW_CAP = 120;
+
+function rangeAt(start: number, count: number, cap: number, previous?: TranscriptRange): TranscriptRange {
+	if (!Number.isInteger(count) || count < 0 || !Number.isInteger(cap) || cap < 1) {
+		throw new RangeError('Item count must be non-negative and cap must be positive integers');
+	}
+	start = Math.max(0, Math.min(Math.floor(start), Math.max(0, count - cap)));
+	const end = Math.min(count, start + cap);
+	return previous?.start === start && previous.end === end ? previous : { start, end };
+}
+
+/** Fresh/open/latest range. All ranges are half-open and bounded by cap. */
+export function initialWindowRange(count: number, cap = TRANSCRIPT_WINDOW_CAP): TranscriptRange {
+	return rangeAt(count - cap, count, cap);
+}
+
+/** Keep the current anchor range on append, or explicitly follow the live tail. */
+export function clampWindowRange(
+	range: TranscriptRange, count: number,
+	{ followTail = false, cap = TRANSCRIPT_WINDOW_CAP }: { followTail?: boolean; cap?: number } = {}
+): TranscriptRange {
+	return rangeAt(followTail ? count - cap : range.start, count, cap, range);
+}
+
+function boundedStep(step: number, cap: number): number {
+	if (!Number.isInteger(step) || step < 1) throw new RangeError('Step must be a positive integer');
+	return Math.min(step, Math.max(1, cap - 1));
+}
+
+/** Shift a chunk, retaining overlap for a keyed DOM anchor whenever cap > 1. */
+export function olderWindowRange(
+	range: TranscriptRange, count: number, step = 30, cap = TRANSCRIPT_WINDOW_CAP
+): TranscriptRange {
+	return rangeAt(range.start - boundedStep(step, cap), count, cap, range);
+}
+
+export function newerWindowRange(
+	range: TranscriptRange, count: number, step = 30, cap = TRANSCRIPT_WINDOW_CAP
+): TranscriptRange {
+	return rangeAt(range.start + boundedStep(step, cap), count, cap, range);
+}
+
+/** Centre an explicit search/turn target. Invalid targets leave the range alone. */
+export function windowRangeForItem(
+	range: TranscriptRange, index: number, count: number, cap = TRANSCRIPT_WINDOW_CAP
+): TranscriptRange {
+	if (!Number.isInteger(index) || index < 0 || index >= count) return range;
+	return rangeAt(index - Math.floor(cap / 2), count, cap, range);
+}
+
 /** Pure per-view range controller. No timers or idle expansion: only explicit
  * navigation moves into history. Apply the same controller to rows inside a
  * large group: an outer-item cap alone cannot bound nested mounted rows. */
-export function createTranscriptWindow({ cap = 120, step = 30 }: { cap?: number; step?: number } = {}) {
+export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30 }: { cap?: number; step?: number } = {}) {
 	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1) {
 		throw new RangeError('Transcript cap and step must be positive integers');
 	}
@@ -39,9 +86,7 @@ export function createTranscriptWindow({ cap = 120, step = 30 }: { cap?: number;
 	let hidden = false;
 	let streaming = false;
 	function move(start: number): TranscriptRange {
-		start = Math.max(0, Math.min(Math.floor(start), Math.max(0, count - cap)));
-		const end = Math.min(count, start + cap);
-		if (start !== range.start || end !== range.end) range = { start, end };
+		range = rangeAt(start, count, cap, range);
 		return range;
 	}
 	function toTail(): TranscriptRange {
