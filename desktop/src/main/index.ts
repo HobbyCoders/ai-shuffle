@@ -295,7 +295,7 @@ async function main(): Promise<void> {
 		if (applications && state.phase === 'ready' && !state.external) {
 			// The initial timer may have fired while this revision was still booting.
 			void applications.healthy().then(async () => {
-				if (postgres) await applications.recoverRollback(async () => postgres!.updateRestorePoint());
+				if (postgres) await applications.finishRollback(async () => postgres!.updateRestorePoint());
 				replaceLauncher(); return updater.check();
 			}).catch(error => console.error('Could not record healthy application', error));
 		}

@@ -89,6 +89,35 @@ async function rollbackFixture(t, { baseline = false } = {}) {
  };
  return { f, u, db, calls, phases, journal, factory: async previous => { assert.equal(previous, A); return db; } };
 }
+test('restore journal: baseline C supersedes unused A-to-B snapshot without ever restoring it',async t=>{
+ const {f,u,factory,calls,journal}=await rollbackFixture(t);await u.prepareRollback(factory);
+ f.options.baseline={revision:C,sequence:300};
+ const installed=f.create();await installed.load();await installed.recoverRollback(factory);
+ assert.equal((await journal()).phase,'ready');
+ await installed.useNewerBaseline();
+ assert.equal((await journal()).phase,'committed','cancel is durable before C can start');
+ await installed.databaseStarting();await installed.healthy();await installed.finishRollback(factory);
+ assert.deepEqual(calls,['snapshot','discard']);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+ assert.equal(installed.version,C);
+});
+test('restore journal: stale snapshot cannot lower newer baseline floor, even via forced recovery or healthy callback',async t=>{
+ const {f,u,factory,calls}=await rollbackFixture(t);await u.prepareRollback(factory);await u.select();await u.databaseStarting();await u.failed();
+ await fs.writeFile(path.join(f.root,'database-floor.json'),JSON.stringify({schemaVersion:1,revision:C,sequence:300}));
+ const installed=f.create();await installed.load();
+ await assert.rejects(installed.recoverRollback(factory,true),/no longer matches/);
+ await assert.rejects(installed.finishRollback(factory),/cleanup refused/);
+ assert.deepEqual(calls,['snapshot']);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+});
+test('restore journal: interruption before baseline floor promotion leaves cleanup-only journal',async t=>{
+ const {f,u,factory,calls,journal}=await rollbackFixture(t);await u.prepareRollback(factory);f.options.baseline={revision:C,sequence:300};
+ const installed=f.create();await installed.load();
+ const undo=afterRename(async(from,to)=>{if(to.endsWith('restore-point.json'))throw Error('power loss');});
+ try{await assert.rejects(installed.useNewerBaseline(),/power loss/);}finally{undo();}
+ assert.equal((await journal()).phase,'committed');
+ const restart=f.create();await restart.load();await restart.recoverRollback(factory);await restart.useNewerBaseline();
+ assert.deepEqual(calls,['snapshot','discard']);assert.equal(restart.version,C);
+});
 test('restore journal: signed download to snapshot to migrated crash to previous source and floor', async t => {
  const { f, u, db, calls, phases, journal, factory } = await rollbackFixture(t);
  await u.prepareRollback(factory); assert.equal((await journal()).phase, 'ready');

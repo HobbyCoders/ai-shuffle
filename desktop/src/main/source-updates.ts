@@ -548,6 +548,16 @@ export class SourceUpdates {
   }
   private async finishBaselineRecovery(): Promise<void> {
     const baseline = this.options.baseline!;
+    // An unused snapshot must be irrevocably cancelled BEFORE a newer installer
+    // can open the database. A crash between these writes can only leave cleanup.
+    const journal = await this.journal();
+    if (journal && journal.phase !== 'committed') {
+      if (journal.phase !== 'ready' || this.state.booting || this.state.pending !== journal.revision ||
+          this.state.failed?.includes(journal.revision) || this.state.mayHaveMigrated?.[journal.revision] !== undefined) {
+        throw new Error('Finish database restoration before changing the installed baseline');
+      }
+      journal.phase = 'committed'; await durableJson(this.journalFile, journal);
+    }
     // Write ahead of clearing the block: a crash cannot erase the known floor.
     await this.writeMigrationFloor(baseline.revision, baseline.sequence);
     this.state.supersededFailed = [...new Set([...(this.state.supersededFailed ?? []), ...(this.state.failed ?? [])])];
@@ -783,19 +793,47 @@ export class SourceUpdates {
     if (!j || j.phase !== 'ready' || j.revision !== this.state.booting) throw new Error('No verified database restore point exists. Install the latest desktop launcher before starting this update.');
     await database?.validate();
   }
+  /** Healthy callbacks may only dispose of a point, never restore a database. */
+  async finishRollback(database: RestoreDatabaseFactory): Promise<void> {
+    const j = await this.journal();
+    if (!j) return;
+    if (j.phase !== 'committed') {
+      if (j.phase !== 'ready' || this.state.active !== j.revision || this.state.booting) {
+        throw new Error('Restore point does not belong to the confirmed healthy build; cleanup refused');
+      }
+      j.phase = 'committed'; await durableJson(this.journalFile, j);
+    }
+    await (await database(j.previous)).discard();
+    await fs.rm(this.journalFile); await syncDirectory(this.options.root);
+  }
+  private async assertRestoreProvenance(j: RestoreJournal): Promise<void> {
+    // Refresh the durable fence: another lifecycle step may have advanced it
+    // since this manager loaded. Never let an obsolete snapshot lower that floor.
+    await this.readMigrationFloor();
+    const floor = this.migrationFloor;
+    if (floor === null || (floor && floor.revision !== j.previous && floor.revision !== j.revision) ||
+        (floor?.revision === j.previous && floor.sequence !== j.floor?.sequence) ||
+        (floor?.revision === j.revision && floor.sequence !== await this.sequence(j.revision)) ||
+        (this.state.active && this.state.active !== j.previous) ||
+        (this.state.pending && this.state.pending !== j.revision) ||
+        Object.keys(this.state.mayHaveMigrated ?? {}).some(revision => revision !== j.previous && revision !== j.revision)) {
+      throw new Error('Database restore point no longer matches this database or the failed build; restoration refused');
+    }
+    if (j.phase !== 'preparing' && this.state.booting !== j.revision && this.state.staged !== j.revision &&
+        this.state.pending !== j.revision && !this.state.failed?.includes(j.revision)) {
+      throw new Error('Database restore point has no matching interrupted first start; restoration refused');
+    }
+  }
   /** Resume at every write/rename boundary; the migration fence is lowered ONLY after a validated restore. */
   async recoverRollback(database: RestoreDatabaseFactory, force = false): Promise<boolean> {
     const j = await this.journal();
     if (!j) return false;
-    if (j.phase === 'ready' && this.state.active === j.revision && !this.state.booting) {
-      j.phase = 'committed'; await durableJson(this.journalFile, j);
-    }
-    if (j.phase === 'committed') {
-      await (await database(j.previous)).discard();
-      await fs.rm(this.journalFile); await syncDirectory(this.options.root);
+    if (j.phase === 'committed' || (j.phase === 'ready' && this.state.active === j.revision && !this.state.booting)) {
+      await this.finishRollback(database);
       return false;
     }
     if (j.phase === 'ready' && !force && this.state.pending === j.revision && !this.state.booting && !this.state.failed?.includes(j.revision)) return false;
+    await this.assertRestoreProvenance(j);
     // Before using old code or its database tools, verify that exact code still exists.
     if (j.state.active) await this.application(j.previous);
     else if (this.options.baseline?.revision !== j.previous) throw new Error('The bundled previous version is no longer installed; restore is blocked');
