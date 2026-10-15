@@ -89,9 +89,21 @@ class FakeGh:
         self.dir = tmp_path / "fake-gh"
         bin_dir = self.dir / "bin"
         bin_dir.mkdir(parents=True)
-        script = bin_dir / "gh"
-        script.write_text(_SCRIPT.format(python=sys.executable), encoding="utf-8")
-        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        source = _SCRIPT.format(python=sys.executable)
+        if os.name == "nt":
+            # A .cmd wrapper would reinterpret shell metacharacters in argv.
+            # Use the same native executable launcher as Python entry points.
+            from distlib.scripts import ScriptMaker
+
+            maker = ScriptMaker(None, str(bin_dir))
+            maker.executable = sys.executable
+            maker.variants = {""}
+            maker.script_template = source
+            maker.make("gh = unused:main")
+        else:
+            script = bin_dir / "gh"
+            script.write_text(source, encoding="utf-8")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
         monkeypatch.setenv("FAKE_GH_DIR", str(self.dir))
         self._rules: list[dict[str, Any]] = []

@@ -87,6 +87,10 @@ def classify_clone_url(clone_url: str) -> Tuple[str, Optional[str]]:
             # guess, and refuse a host part (``file://host/path``).
             if not path.startswith("/") or "%" in path:
                 return "invalid", "A file:// clone URL must name an absolute local path"
+            if os.name == "nt" and re.match(r"^/[A-Za-z]:/", path):
+                # Canonical file:///C:/ URLs address C:/, not a root-relative
+                # directory literally named C: under the current drive.
+                path = path[1:]
             return "local", path
         return "invalid", "Unsupported clone URL: use an HTTPS or SSH URL"
     # Windows paths, read before the scp-like test the way git for Windows

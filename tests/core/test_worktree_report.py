@@ -1,5 +1,6 @@
 """Worktree janitor report: decide reclaimable without ever deleting."""
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -94,7 +95,7 @@ def test_report_unions_real_git_and_legacy_registry(mock_db, tmp_path, monkeypat
     real_git = wr._git
 
     def tracked_git(root, *args, **kwargs):
-        probes.append((root, args))
+        probes.append((str(Path(root)), args))
         return real_git(root, *args, **kwargs)
 
     monkeypatch.setattr(wr, "_git", tracked_git)
@@ -102,7 +103,7 @@ def test_report_unions_real_git_and_legacy_registry(mock_db, tmp_path, monkeypat
     assert result["total"] == 1
     assert ((str(path), ("status", "--porcelain")) in probes) is (state == "valid")
     row = result["projects"][0]["worktrees"][0]
-    assert row["path"] == str(path) and row["registry_ids"] == ["wt-report"]
+    assert Path(row["path"]) == path and row["registry_ids"] == ["wt-report"]
     assert row["state"] == state
     assert row["reclaimable"] is (state != "invalid")
     if state != "valid":

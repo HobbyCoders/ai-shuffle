@@ -1111,7 +1111,9 @@ def test_state_file_survives_power_loss_as_a_complete_record(tmp_path, monkeypat
     monkeypatch.setattr(policy.os, "fsync", lambda fd: synced.append(stat.S_ISDIR(os.fstat(fd).st_mode)) or real(fd))
     policy.atomic_json(tmp_path / "state.json", {"active": A})
     assert json.loads((tmp_path / "state.json").read_text()) == {"active": A}
-    assert synced == [False, True], "the file is flushed to disk before the rename, then the directory"
+    # Windows cannot open a directory with os.open for fsync; the file must
+    # still be flushed before replacement on every supported platform.
+    assert synced == ([False] if os.name == "nt" else [False, True])
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 
 

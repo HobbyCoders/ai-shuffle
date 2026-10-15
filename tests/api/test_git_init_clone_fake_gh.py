@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.api.common import reset_served_roots_cache
 from app.core import config
+from app.core.checkout_manager import _link_directory
 from app.db import database
 from tests.gh_stub import FakeGh
 from tests.git_flow_helpers import bare_of, build_git_app, github_repo, reset_git_state
@@ -309,12 +310,12 @@ def test_owner_cannot_clone_a_local_repo_outside_the_served_roots(env, form):
     if form == "symlink":
         link = env.workspace / "sources"
         link.mkdir(exist_ok=True)
-        (link / "alias.git").symlink_to(outside)
+        _link_directory(outside, link / "alias.git")
         url = str(link / "alias.git")
     else:
         url = {
             "path": str(outside),
-            "file_url": f"file://{outside}",
+            "file_url": outside.as_uri(),
             "relative": f"../../elsewhere/{outside.name}",
         }[form]
     if form == "relative":
@@ -332,7 +333,7 @@ def test_owner_cannot_clone_a_local_repo_outside_the_served_roots(env, form):
 def test_owner_can_clone_a_local_repo_inside_the_workspace(env, form):
     bare = _source_repo(env)
     target = _project(env, "p-clone", "local-ok")
-    url = str(bare) if form == "path" else f"file://{bare}"
+    url = str(bare) if form == "path" else bare.as_uri()
 
     response = env.client.post("/api/v1/projects/p-clone/git/clone", json={"clone_url": url})
 
@@ -371,7 +372,7 @@ def test_api_key_cannot_clone_another_projects_repository(env, as_api_key, form)
     victim = _source_repo(env, env.workspace / "victim")
     database.create_project("p-victim", "p-victim", None, "victim")
     target = _project(env, "p-clone", "thief")
-    url = {"path": str(victim), "file_url": f"file://{victim}", "relative": "../victim/src.git"}[form]
+    url = {"path": str(victim), "file_url": victim.as_uri(), "relative": "../victim/src.git"}[form]
 
     response = env.client.post("/api/v1/projects/p-clone/git/clone", json={"clone_url": url})
 

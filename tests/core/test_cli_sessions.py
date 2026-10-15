@@ -85,12 +85,16 @@ def test_no_credentials_or_outside_transcripts_opened(transcript, monkeypatch, t
     for invalid in ("../secret", "../../.credentials", "/etc/passwd"):
         with pytest.raises(ValueError):
             cs.get_session_info(invalid)
+    with pytest.raises(ValueError):
+        cs.get_subagent_messages(sid, "../../credentials")
+
+
+def test_symlinked_transcript_is_refused(transcript, tmp_path, requires_symlinks):
+    _, path, _ = transcript
     outside = tmp_path / "outside.jsonl"
     alias = path.parent / f"{uuid.uuid4()}.jsonl"
     alias.symlink_to(outside)
     assert cs.get_session_info(alias.stem) is None
-    with pytest.raises(ValueError):
-        cs.get_subagent_messages(sid, "../../credentials")
 
 
 def test_project_key_and_worktree_discovery(transcript, monkeypatch):
@@ -142,8 +146,13 @@ def test_message_chain_crosses_system_records_but_hides_sidechains(transcript, s
 ])
 def test_cli_project_key_golden_vectors(path, expected, monkeypatch):
     # These are POSIX path vectors, independent of the test host's drive/root.
-    from pathlib import Path
-    monkeypatch.setattr(Path, "resolve", lambda self: self)
+    from pathlib import PurePosixPath
+
+    class PosixVectorPath(PurePosixPath):
+        def resolve(self):
+            return self
+
+    monkeypatch.setattr(cs, "Path", PosixVectorPath)
     assert cs.project_key_for_directory(path) == expected
 
 @pytest.mark.parametrize("damage", [

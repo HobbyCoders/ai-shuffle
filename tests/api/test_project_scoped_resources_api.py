@@ -8,6 +8,7 @@ against a project in ``tmp_path``; the user-global Fluid plugin home is pointed
 at ``tmp_path`` too so nothing touches the developer's ``~/.fluid``.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -249,7 +250,7 @@ class TestProjectAgents:
     def test_create_list_get(self, client, project):
         r = self._create(client)
         assert r.status_code == 201
-        assert r.json()["file_path"] == ".fluid/agents/writer.md"
+        assert r.json()["file_path"] == str(Path(".fluid") / "agents" / "writer.md")
         assert (project / ".fluid" / "agents" / "writer.md").is_file()
 
         listed = client.get(f"/api/v1/projects/{PID}/agents").json()
@@ -361,7 +362,7 @@ class TestProjectMemory:
         url = f"/api/v1/projects/{PID}/memory/local"
         r = client.put(url, json={"content": "# Local\n"})
         assert r.status_code == 200
-        assert r.json()["exists"] is True and r.json()["size"] == len("# Local\n")
+        assert r.json()["exists"] is True and r.json()["size"] == (project / ".agents" / "AGENTS.md").stat().st_size
         assert (project / ".agents" / "AGENTS.md").read_text() == "# Local\n"
 
         assert client.get(url).json()["content"] == "# Local\n"

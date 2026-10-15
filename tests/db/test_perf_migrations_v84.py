@@ -211,7 +211,7 @@ def test_default_desktop_data_directory(managed_cluster_layout, monkeypatch, pla
 
 
 @pytest.mark.parametrize("invalid", ["missing", "unreadable", "version", "port", "path", "started", "symlink"])
-def test_refuse_invalid_managed_directory(managed_cluster_layout, monkeypatch, invalid):
+def test_refuse_invalid_managed_directory(managed_cluster_layout, monkeypatch, invalid, request):
     maintenance, cursor, root, data = managed_cluster_layout
     if invalid == "missing":
         root = root / "absent"
@@ -220,6 +220,7 @@ def test_refuse_invalid_managed_directory(managed_cluster_layout, monkeypatch, i
     elif invalid == "version":
         (data / "PG_VERSION").write_text("not a PG16 cluster")
     elif invalid == "symlink":
+        request.getfixturevalue("requires_symlinks")
         (data / "PG_VERSION").unlink()
         (root / "version").write_text("16\n")
         (data / "PG_VERSION").symlink_to(root / "version")

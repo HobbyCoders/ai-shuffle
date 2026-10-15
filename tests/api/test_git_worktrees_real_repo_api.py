@@ -8,6 +8,7 @@ real, only auth is overridden.
 
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -79,6 +80,7 @@ def test_stale_marker_is_reported_not_parent_status_and_recovery_is_detected(wt_
     client, repo, path, _ = wt_api
     marker = (path / ".git").read_text()
     # Keep .git present but point it at a main checkout that no longer exists.
+    (path / ".git").unlink()  # Git marks this file hidden on Windows.
     (path / ".git").write_text("gitdir: /missing-fixture/gitdir\n")
     response = client.get(BASE)
     assert response.status_code == 200
@@ -181,7 +183,7 @@ def test_cleanup_switched_branch_refuses_before_detaching_links_or_terminating(w
     dependency = tmp_path / "owned-dependency"
     dependency.mkdir()
     (dependency / "keep.txt").write_text("keep me")
-    (path / "node_modules").symlink_to(dependency, target_is_directory=True)
+    checkout_manager._link_directory(dependency, path / "node_modules")
     git(path, "switch", "-q", "-c", "feature/deliberate")
     terminate = AsyncMock()
     monkeypatch.setattr(worktree_manager, "terminate_worktree_sessions", terminate)
@@ -189,7 +191,7 @@ def test_cleanup_switched_branch_refuses_before_detaching_links_or_terminating(w
     monkeypatch.setattr(checkout_manager, "sever_runtime_links", lambda p: sever.append(p))
     response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
     assert response.status_code == 409 and "bound branch" in response.json()["detail"]
-    assert (path / "node_modules").is_symlink() and (dependency / "keep.txt").read_text() == "keep me"
+    assert checkout_manager._is_directory_link(path / "node_modules") and (dependency / "keep.txt").read_text() == "keep me"
     assert sever == [] and not terminate.called
     assert git(path, "branch", "--show-current") == "feature/deliberate"
     assert git(repo, "branch", "--list", "feature/api").strip() == "feature/api"
@@ -236,10 +238,15 @@ def test_cleanup_symlink_checkout_preserves_target(wt_api):
     client, _, path, tmp_path = wt_api
     preserved = tmp_path / "preserved-target"
     shutil.move(path, preserved)
-    path.symlink_to(preserved, target_is_directory=True)
+    from app.core.checkout_manager import _link_directory
+    _link_directory(preserved, path)
     response = client.delete(f"{BASE}/wt-1")
-    assert response.status_code == 409 and "symlink" in response.json()["detail"]
-    assert path.is_symlink() and (preserved / "wip.txt").read_text() == "wip\n"
+    assert response.status_code == 409
+    # A Windows junction is refused by Git; a POSIX symlink is caught earlier.
+    expected = "symlink" if path.is_symlink() else "preserved"
+    assert expected in response.json()["detail"]
+    from app.core.checkout_manager import _is_directory_link
+    assert _is_directory_link(path) and (preserved / "wip.txt").read_text() == "wip\n"
     assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
 
 
@@ -256,6 +263,7 @@ def test_cleanup_replaced_git_binding_preserves_directory(wt_api, monkeypatch, f
         git(repo, "worktree", "add", "--force", "-q", str(foreign_path), "feature/api")
     # The app registry and original Git administrative entry still name path,
     # but its marker belongs to another checkout (possibly another repository).
+    (path / ".git").unlink()  # Replace the hidden Windows marker, not its attributes.
     (path / ".git").write_text((foreign_path / ".git").read_text())
     terminate = AsyncMock()
     monkeypatch.setattr(worktree_manager, "terminate_worktree_sessions", terminate)
@@ -351,7 +359,7 @@ def test_worktree_file_browsing_is_confined(wt_api):
     assert names == ["docs", "a.txt", "wip.txt"]            # dirs first, hidden skipped
     assert root["worktreeId"] == "wt-1" and root["worktreePath"] == str(path)
     sub = client.get(f"{BASE}/wt-1/files", params={"path": "docs"}).json()
-    assert [f["path"] for f in sub["files"]] == ["docs/guide.md"]
+    assert [f["path"] for f in sub["files"]] == [str(Path("docs") / "guide.md")]
 
     for escape in ("..", "../..", "../../outside", str(tmp_path)):
         response = client.get(f"{BASE}/wt-1/files", params={"path": escape})
@@ -812,7 +820,8 @@ def test_delete_keeps_branch_by_default_and_reopen_errors_are_400(wt_api):
     shutil.rmtree(repo / ".fluid")
     outside = tmp_path / "outside"
     outside.mkdir()
-    os.symlink(outside, repo / ".fluid", target_is_directory=True)
+    from app.core.checkout_manager import _link_directory
+    _link_directory(outside, repo / ".fluid")
     response = client.post(f"{BASE}/wt-1/reopen")
     assert response.status_code == 400
     assert "outside the project checkout" in response.json()["detail"]

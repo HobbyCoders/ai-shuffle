@@ -26,9 +26,9 @@ def test_gh_prefers_bundled_path_then_system(tmp_path, monkeypatch, resolver):
         cli.write_text('fixture')
         cli.chmod(0o755)
     monkeypatch.setenv('PATH', os.pathsep.join([str(bundled), str(system)]))
-    assert resolver() == str(bundled / name)
+    assert os.path.normcase(resolver()) == os.path.normcase(str(bundled / name))
     (bundled / name).unlink()
-    assert resolver() == str(system / name)
+    assert os.path.normcase(resolver()) == os.path.normcase(str(system / name))
 
 
 def test_gh_child_environment_keeps_path_and_auth_config(tmp_path, monkeypatch):

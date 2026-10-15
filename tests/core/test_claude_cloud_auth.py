@@ -323,7 +323,7 @@ async def test_real_monitor_shell_has_no_cloud_auth(store, monkeypatch, tmp_path
     try:
         await asyncio.wait_for(task._reader_task, 10)
         assert task.exit_code == 0
-        assert "clean" in task.lines
+        assert "clean" in [line.rstrip("\r") for line in task.lines]
     finally:
         builtin_tools._background_tasks.pop(task.task_id, None)
 
@@ -835,8 +835,9 @@ def test_vertex_key_file_is_never_written_through_a_linked_folder(store, tmp_pat
     assert os.path.islink(store)
 
 
-def test_vertex_runs_starting_at_once_all_succeed(store):
-    """Finding 5: concurrent writers each use their own temp file."""
+@pytest.mark.parametrize("with_cleanup", [False, True])
+def test_vertex_runs_starting_at_once_all_succeed(store, with_cleanup):
+    """Concurrent writers and cleanup must not race file replacement."""
     import threading
 
     keys = [json.dumps({"type": "service_account", "private_key": f"fake-key-{i % 2}"}) for i in range(16)]
@@ -848,6 +849,8 @@ def test_vertex_runs_starting_at_once_all_succeed(store):
         try:
             for _ in range(20):
                 cloud._materialize_vertex(key)
+                if with_cleanup:
+                    cloud.remove_materialized_files()
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 

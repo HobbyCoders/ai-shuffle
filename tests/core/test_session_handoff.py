@@ -19,10 +19,37 @@ DIRECTORY = {"runners": [
 ]}
 
 
-@pytest.fixture(autouse=True)
-async def _clean(tmp_path, mock_db):
+async def _drain_runners():
     import asyncio
 
+    sh._pending.clear()  # Prevent finally -> schedule from spawning more.
+    tasks = list(sh._tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    # An all-done gather need not yield. Let queued discard callbacks run
+    # before asserting ownership is empty; this is not a timed retry.
+    await asyncio.sleep(0)
+    assert not sh._tasks
+
+
+async def test_cleanup_drains_callbacks_of_already_finished_runners():
+    import asyncio
+
+    async def finished():
+        return "done"
+
+    task = asyncio.create_task(finished())
+    await task
+    sh._tasks.add(task)
+    task.add_done_callback(sh._tasks.discard)
+    # gather() may finish synchronously when every runner is already done.
+    await _drain_runners()
+    assert not sh._tasks
+
+
+@pytest.fixture(autouse=True)
+async def _clean(tmp_path, mock_db):
     sh._pending.clear()
     sh._running.clear()
     sh._waiting.clear()
@@ -39,12 +66,7 @@ async def _clean(tmp_path, mock_db):
             # Drain runners before their loop/DB closes or another test reuses
             # s1. An old run_pending finally used to pop the NEW test's waiting
             # move when GC collected its closed loop, making cancel return False.
-            sh._pending.clear()  # Prevent finally -> schedule from spawning more.
-            tasks = list(sh._tasks)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            assert not sh._tasks
+            await _drain_runners()
             sh._waiting.clear()
             sh._moving.clear()
             sh._running.clear()

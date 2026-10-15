@@ -46,12 +46,15 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 from app.db import database
 
 logger = logging.getLogger(__name__)
+# One worker owns this credential directory; serialize its rotation and cleanup.
+_vertex_files_lock = Lock()
 
 CONFIG_SETTING = "claude_cloud_config"
 SECRETS_SETTING = "claude_cloud_secrets"
@@ -604,6 +607,11 @@ def _files_dir() -> Path:
 
 def remove_materialized_files() -> None:
     """Delete credential files written for the CLI (Vertex). Never raises."""
+    with _vertex_files_lock:
+        _remove_materialized_files_locked()
+
+
+def _remove_materialized_files_locked() -> None:
     try:
         entries = list(_files_dir().glob("vertex-*.json"))
     except Exception:  # noqa: BLE001 — no data dir, nothing written
@@ -627,6 +635,11 @@ def _materialize_vertex(credentials_json: str) -> str:
     starting at once each write their own temp file and both succeed.
     Raises ``OSError`` when it cannot write; the caller fails the run.
     """
+    with _vertex_files_lock:
+        return _materialize_vertex_locked(credentials_json)
+
+
+def _materialize_vertex_locked(credentials_json: str) -> str:
     directory = _files_dir()
     directory.mkdir(parents=True, exist_ok=True)
     if directory.is_symlink():

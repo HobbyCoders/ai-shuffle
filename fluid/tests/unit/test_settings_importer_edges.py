@@ -182,7 +182,7 @@ def test_review_sidecar_for_non_instruction_is_a_conflict(tmp_path: Path) -> Non
     assert outcome.status == "conflict" and "native destination already exists" in outcome.message
 
 
-def test_review_sidecar_under_a_symlinked_parent_is_rejected(tmp_path: Path) -> None:
+def test_review_sidecar_under_a_symlinked_parent_is_rejected(tmp_path: Path, requires_symlinks) -> None:
     item = _instruction_item(tmp_path)
     real = tmp_path / "real"
     real.mkdir()

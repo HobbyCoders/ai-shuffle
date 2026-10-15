@@ -75,7 +75,7 @@ def test_structure_and_useful_content_survive_without_mutation():
     "Budget token count 42; arbitrary fixture prose is not a recognized credential",
     "keep%20this \\u002e &#46;",
     "a" * 100_000,
-])
+], ids=["scp-url", "ssh-url", "http-url", "prose", "encoded-text", "large-text"])
 def test_unrecognized_content_is_unchanged(text):
     assert redact_export_text(text) == text
 

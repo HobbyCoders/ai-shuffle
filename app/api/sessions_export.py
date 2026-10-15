@@ -123,7 +123,8 @@ async def _load_jsonl_content(session: dict, working_dir: str) -> str:
                 )
                 if jsonl_path:
                     try:
-                        return jsonl_path.read_text(encoding="utf-8")
+                        with jsonl_path.open(encoding="utf-8", newline="") as source:
+                            return source.read()
                     except Exception as exc:
                         logger.error(
                             "Failed to read JSONL file for session %s: %s",

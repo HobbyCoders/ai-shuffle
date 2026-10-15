@@ -70,15 +70,11 @@ The last lines of each run list what this machine did not cover:
   wait for Windows; a stable release does (below). When DesktopWorker is off,
   Windows-only changes still merge and reach edge, and the gap shows in the
   pass record and in the ship-release preflight.
-- On Windows, the tests in `scripts/ci/windows_known_failures.txt`. They fail
-  there for reasons unrelated to the change (fake `gh` shell scripts,
-  symlinks, POSIX modules), so a Windows run skips them and names
-  [#2215](https://github.com/HobbyCoders/ai-shuffle/issues/2215). Linux
-  workers still run them, and a Windows failure that is not on the list
-  still fails the run. Remove lines as the tests are fixed; never add one to
-  get a push through. The desktop unit tests do not run on Windows yet
-  ([#2214](https://github.com/HobbyCoders/ai-shuffle/issues/2214)); Windows
-  typechecks and builds desktop, and a Linux worker runs its tests.
+- On Windows, tests requiring POSIX executables or unavailable symlink
+  privileges skip individually with their platform or capability reason.
+  Desktop typechecks and unit tests run on Windows as well as Linux.
+  `scripts/ci/windows_known_failures.txt` is empty, and a regression test keeps
+  it empty. Fix failures rather than adding exclusions to get a push through.
 - macOS folder confinement and the iOS app: no Mac. The owner dispatches
   `ci-folder-confinement.yml` or `ios.yml` when a change needs them, usually
   before a release.

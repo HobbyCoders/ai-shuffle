@@ -27,6 +27,17 @@ def test_create_repo_refuses_option_like_names_without_running_gh(gh, svc, name)
     assert gh.calls() == []
 
 
+def test_fake_gh_preserves_unicode_and_shell_metacharacters(gh, svc):
+    payload = 'snowman ☃ & | > < ^ %PATH% "quoted" trailing\\'
+    gh.on("probe", stdout=payload)
+
+    result = svc._run_gh(["probe", payload, "--body-file", "-"], stdin_data=payload)
+
+    assert result.returncode == 0
+    assert result.stdout == payload
+    assert gh.calls("probe") == [{"args": ["probe", payload, "--body-file", "-"], "stdin": payload}]
+
+
 def test_create_repo_argv(gh, svc):
     gh.on("repo", "create", stdout={"name": "app", "nameWithOwner": "acme/app",
                                     "url": "https://github.com/acme/app", "sshUrl": ""})

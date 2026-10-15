@@ -331,12 +331,6 @@ def docs(ctx: Context) -> None:
 
 
 def desktop(ctx: Context) -> None:
-    if os.name == "nt":
-        # The unit tests assume POSIX modes and symlinks (issue #2214); Linux
-        # workers run them. Windows still typechecks and builds.
-        node_package("desktop", "typecheck", "build")(ctx)
-        ctx.notes.append("Desktop unit tests not run on Windows (#2214); a Linux worker runs them.")
-        return
     node_package("desktop", "typecheck", "test")(ctx)
 
 
@@ -689,8 +683,7 @@ def cmd_check(args) -> int:
     elif not clean:
         print("Uncommitted changes: this pass is not recorded. Commit, then the pre-push hook re-runs it.")
     if args.attest:
-        known = " (known Windows failures skipped, #2215)" if os.name == "nt" else ""
-        attest("success", f"{', '.join(ran)} passed on {machine()}{known}", revision)
+        attest("success", f"{', '.join(ran)} passed on {machine()}", revision)
         print(f"Posted {ATTEST_CONTEXT} on {revision[:9]}; scheduled publication will recheck eligibility.")
     return 0
 

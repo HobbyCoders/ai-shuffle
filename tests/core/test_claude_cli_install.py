@@ -1,5 +1,6 @@
 """Native CLI jobs use only official commands and preserve the owner's home."""
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from unittest.mock import Mock
@@ -73,7 +74,10 @@ def test_native_worker_start_installs_only_when_enabled(worker, monkeypatch, kee
 def test_install_success_sets_marker_and_ownership(worker, monkeypatch):
     store, cli, root = worker
     def install(command):
-        assert command == ["bash", "-c", "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash"]
+        expected = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                     "irm https://claude.ai/install.ps1 | iex"] if sys.platform == "win32" else
+                    ["bash", "-c", "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash"])
+        assert command == expected
         cli.installed, cli.binary_path, cli.cli_version = True, str(ci._launcher()), "2.2.1"
         return 0, "installed", False
     monkeypatch.setattr(ci, "_run_command", install)
@@ -144,7 +148,8 @@ def test_installer_env_is_an_allow_list(worker, monkeypatch):
     assert set(seen) <= ci._INSTALLER_ENV
     for secret in ("ANTHROPIC_API_KEY", "DATABASE_URL", "GITHUB_TOKEN"):
         assert secret not in seen
-    assert seen["HTTPS_PROXY"] == "http://proxy:3128" and seen["no_proxy"] == "localhost"
+    assert seen["HTTPS_PROXY"] == "http://proxy:3128"
+    assert {key.upper(): value for key, value in seen.items()}["NO_PROXY"] == "localhost"
     assert seen["CLAUDE_CONFIG_DIR"] == "/claude-config"
     assert seen["PATH"].split(ci.os.pathsep)[0] == str(ci._launcher().parent)
 
@@ -193,7 +198,10 @@ def test_hard_timeout_kills_process_group(worker, monkeypatch):
     proc.wait.side_effect = [subprocess.TimeoutExpired("installer", 600), None]
     monkeypatch.setattr(ci.subprocess, "Popen", lambda *a, **kw: proc)
     kill = Mock()
-    monkeypatch.setattr(ci.os, "killpg", kill)
+    from types import SimpleNamespace
+    monkeypatch.setattr(ci, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(ci.os, "killpg", kill, raising=False)
+    monkeypatch.setattr(ci.signal, "SIGKILL", 9, raising=False)
     code, tail, timeout = ci._run_command(["bash"])
     assert timeout and code == -9
     assert proc.wait.call_args_list[0].kwargs == {"timeout": 600}
@@ -213,7 +221,9 @@ def test_windows_install_uses_official_powershell(worker, monkeypatch):
 
 
 def test_real_command_capture_is_bounded(worker):
-    code, tail, timeout = ci._run_command(["bash", "-c", "for i in {1..100}; do echo line-$i; done; exit 3"])
+    code, tail, timeout = ci._run_command([
+        sys.executable, "-c", "import sys; [print(f'line-{i}') for i in range(1, 101)]; sys.exit(3)",
+    ])
     assert code == 3 and not timeout
     assert len(tail.splitlines()) == 40 and tail.splitlines()[-1] == "line-100"
 
@@ -239,7 +249,10 @@ def test_remove_preserves_claude_home(worker):
     versions.mkdir(parents=True)
     (versions / "2.2.1").write_text("native")
     ci._launcher().parent.mkdir(parents=True)
-    ci._launcher().symlink_to(versions / "2.2.1")
+    if sys.platform == "win32":
+        ci._launcher().write_bytes((versions / "2.2.1").read_bytes())
+    else:
+        ci._launcher().symlink_to(versions / "2.2.1")
     home = root / ".claude"
     home.mkdir()
     (home / "settings.json").write_text("owner settings")
@@ -276,6 +289,7 @@ def test_update_uses_cli_updater_and_reports_versions(worker, monkeypatch):
     (None, False, False, False), ("1", False, False, True),
     ("0", True, True, False), (None, True, False, True), (None, False, True, True),
 ])
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux container entrypoint requires POSIX paths and shell")
 def test_entrypoint_decision(tmp_path, marker, has_data, has_cli, expected):
     entrypoint = (Path(__file__).resolve().parents[2] / "entrypoint.sh").read_text()
     decision = entrypoint[entrypoint.index("claude_cli_keep_installed() {"):entrypoint.index("# Direct --user")]
@@ -314,10 +328,20 @@ def _owned_install(store, cli, root):
     versions = root / ".local" / "share" / "claude" / "versions"
     versions.mkdir(parents=True)
     binary = versions / "2.2.1"
-    binary.write_bytes(Path("/bin/sleep").read_bytes())
-    binary.chmod(0o755)
     ci._launcher().parent.mkdir(parents=True)
-    ci._launcher().symlink_to(binary)
+    if sys.platform == "win32":
+        from distlib.scripts import ScriptMaker
+
+        binary.write_text("native fixture")
+        maker = ScriptMaker(None, str(ci._launcher().parent))
+        maker.executable = sys.executable
+        maker.variants = {""}
+        maker.script_template = "import time; time.sleep(30)\n"
+        maker.make("claude = unused:main")
+    else:
+        binary.write_bytes(Path("/bin/sleep").read_bytes())
+        binary.chmod(0o755)
+        ci._launcher().symlink_to(binary)
     cli.installed, cli.binary_path = True, str(ci._launcher())
     store[ci._key("claude_cli_installed_by_app")] = "1"
     ci.set_keep_installed(True)
@@ -337,20 +361,28 @@ def test_remove_refused_while_cli_runs(worker):
         assert ci._job["state"] == "failed" and "Claude Code is running" in ci._job["message"]
         assert ci._launcher().exists() and ci.keep_installed()
     finally:
+        import psutil
+        children = psutil.Process(running.pid).children(recursive=True)
+        for child in children:
+            child.kill()
         running.kill()
         running.wait()
+        psutil.wait_procs(children, timeout=5)
     assert ci._in_use() == []
 
 
 def test_installer_gets_no_stdin(worker):
-    code, tail, _ = ci._run_command(["bash", "-c", "if read -r line; then echo got; else echo eof; fi"])
+    code, tail, _ = ci._run_command([
+        sys.executable, "-c", "import sys; print('got' if sys.stdin.readline() else 'eof')",
+    ])
     assert code == 0 and tail == "eof"
     assert not (ci.settings.effective_data_dir / ci.JOB_RECORD).exists()
 
 
 def test_job_orphaned_by_restart_blocks_then_is_stopped(worker, monkeypatch):
     ci.settings.effective_data_dir.mkdir(parents=True)
-    orphan = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                              start_new_session=sys.platform != "win32")
     try:
         ci._record_job(orphan.pid)
         with pytest.raises(ValueError, match="before the worker restarted"):
@@ -359,10 +391,13 @@ def test_job_orphaned_by_restart_blocks_then_is_stopped(worker, monkeypatch):
         monkeypatch.setattr(ci, "TIMEOUT_SECONDS", 0)
         monkeypatch.setattr(ci, "_run_command", lambda cmd: (1, "offline", False))
         ci.start("install")
-        assert orphan.wait(5) == -9
+        exit_code = orphan.wait(5)
+        # Windows termination codes do not encode POSIX signals.
+        assert exit_code != 0 if sys.platform == "win32" else exit_code == -9
     finally:
         if orphan.poll() is None:
             orphan.kill()
+        orphan.wait(timeout=5)
     for t in threading.enumerate():
         if t.name == "claude-cli-install":
             t.join(5)

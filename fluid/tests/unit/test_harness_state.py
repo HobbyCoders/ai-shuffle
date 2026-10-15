@@ -166,7 +166,7 @@ async def test_standalone_worktree_identity_survives_restart(tmp_path):
     assert not (worktree / ".fluid").exists()
 
 
-def test_legacy_symlink_escape_is_not_copied(tmp_path):
+def test_legacy_symlink_escape_is_not_copied(tmp_path, requires_symlinks):
     ctx = ToolCtx(cwd=str(tmp_path / "repo"), session_id="s", extra={"harness_state_root": tmp_path / "global"})
     secret = tmp_path / "outside.md"
     secret.write_text("not legacy state")

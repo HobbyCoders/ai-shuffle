@@ -117,7 +117,9 @@ def _normalise(value, tmp: str):
     if isinstance(value, list):
         return [_normalise(v, tmp) for v in value]
     if isinstance(value, str):
-        return value.replace(tmp, HOME)
+        if value.startswith(tmp):
+            return HOME + value[len(tmp):].replace(os.sep, "/")
+        return value
     return value
 
 

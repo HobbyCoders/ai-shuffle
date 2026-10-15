@@ -43,6 +43,20 @@ def test_full_mode_reaches_every_suite():
     assert all(ctx.changed(suite.paths) for suite in local_ci.SUITES)
 
 
+@pytest.mark.parametrize("platform_name", ["nt", "posix"])
+def test_desktop_always_runs_unit_tests(monkeypatch, platform_name):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(local_ci, "os", SimpleNamespace(name=platform_name))
+    monkeypatch.setattr(
+        local_ci, "node_package",
+        lambda *args: lambda ctx: calls.append(args),
+    )
+    local_ci.desktop(context(["desktop/test/launcher-swap.test.mjs"]))
+    assert calls == [("desktop", "typecheck", "test")]
+
+
 def test_name_selection():
     assert local_ci.select_by_name(["requirements.txt"]) == "all"
     assert local_ci.select_by_name(["tests/conftest.py"]) == "all"
@@ -309,11 +323,8 @@ def test_windows_known_failures_list_is_well_formed():
     import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]
 
     tests, files = known.load()
-    assert tests or files
-    for entry in tests | files:
-        path = entry.split("::", 1)[0]
-        assert "\\" not in entry and "[" not in entry, entry
-        assert (ROOT / path).is_file(), f"{entry}: the file is gone; drop the line"
+    # All listed failures are retired. New regressions must not become skips.
+    assert (tests, files) == (set(), set())
     assert known.base_id("fluid\\tests\\unit\\test_x.py::test_y[a-b]") == "fluid/tests/unit/test_x.py::test_y"
 
     # fluid's rootdir is fluid/, so its ids lack the prefix; the path restores it.
@@ -488,9 +499,16 @@ def test_attestation_requires_reach_acceptance(monkeypatch, accepted):
     monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
     monkeypatch.setattr(local_ci, "save_record", lambda *a: None)
     posted = []
-    monkeypatch.setattr(local_ci, "attest", lambda state, *a: posted.append(state))
+    descriptions = []
+
+    def record(state, description, revision):
+        posted.append(state)
+        descriptions.append(description)
+
+    monkeypatch.setattr(local_ci, "attest", record)
     assert local_ci.main(["full", "--attest"]) == (0 if accepted else 1)
     assert posted == (["pending", "success"] if accepted else [])
+    assert all("known Windows failures skipped" not in text for text in descriptions)
 
 
 @pytest.mark.parametrize("state", ["pending", "success", "failure"])

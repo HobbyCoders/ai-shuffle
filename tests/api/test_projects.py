@@ -1450,7 +1450,9 @@ class TestProjectFileRoutesStayInProject:
             "/api/v1/projects/test-project/files/download", params={"path": str(other / "secret.txt")}
         )
 
-        assert response.status_code == 404
+        # Drive-qualified paths are refused before the POSIX leading-slash
+        # compatibility path can reinterpret them beneath the project.
+        assert response.status_code == (400 if other.drive else 404)
         assert "secret" not in response.text
 
     @pytest.mark.parametrize("path", TRAVERSALS)
@@ -1504,7 +1506,7 @@ class TestProjectFileRoutesStayInProject:
 
         response = client.delete("/api/v1/projects/test-project/files", params={"path": str(other)})
 
-        assert response.status_code == 404
+        assert response.status_code == (400 if other.drive else 404)
         assert (other / "secret.txt").exists()
 
     def test_delete_inside_project_still_works(self, client, layout):
@@ -1517,7 +1519,7 @@ class TestProjectFileRoutesStayInProject:
         assert not (project_dir / "sub" / "gone.txt").exists()
 
     @pytest.fixture
-    def alias(self, layout):
+    def alias(self, layout, requires_symlinks):
         """``real/keep.txt`` plus ``alias -> real`` and ``sub/link.txt -> ../real/keep.txt``."""
         project_dir, _ = layout
         real = project_dir / "real"
@@ -1558,7 +1560,7 @@ class TestProjectFileRoutesStayInProject:
         assert (alias / "real" / "keep.txt").read_text() == "keep"
         assert not (alias / "real" / new_name).exists()
 
-    def test_delete_through_a_symlinked_directory_stays_confined(self, client, layout, temp_dir):
+    def test_delete_through_a_symlinked_directory_stays_confined(self, client, layout, temp_dir, requires_symlinks):
         project_dir, other = layout
         (project_dir / "out").symlink_to(other, target_is_directory=True)
 

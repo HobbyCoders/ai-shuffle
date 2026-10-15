@@ -512,7 +512,7 @@ class JSONLRewindService:
             try:
                 # surrogateescape: write undecodable bytes of kept lines back
                 # exactly as they were read (see _parse_jsonl_entries).
-                with os.fdopen(temp_fd, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                with os.fdopen(temp_fd, 'w', encoding='utf-8', errors='surrogateescape', newline='\n') as f:
                     for entry in keep_entries:
                         # Use raw line if available (preserves exact formatting)
                         raw_line = entry.get('_raw_line')
