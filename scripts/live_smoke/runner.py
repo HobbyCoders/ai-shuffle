@@ -4,6 +4,23 @@ The client is injected (``client.HttpWorkerClient`` for real runs, a fake in
 tests). Every session the run creates is archived in ``finally``, so a
 failure, the token cap or Ctrl+C still cleans up, and the result file is
 written in every case.
+
+Operator-run two-worker acceptance (never scheduled): pair both workers, bring
+both to the candidate revision, configure an agent/provider and register the
+project used by subagent rows. Pass actual worker labels supplied by the operator;
+installation-specific names must not be committed to this tree::
+
+    python -m scripts.live_smoke run --peer "$PEER_LABEL" --agent "$AGENT_ID" --model "$MODEL_ID"
+    python -m scripts.live_smoke record "$REV" --worker "$WORKER_LABEL" --row ROW --status pass --evidence "..."
+    python -m scripts.live_smoke check "$REV" --worker "$LOCAL_LABEL" --worker "$PEER_LABEL"
+
+Repeat on the other worker with roles swapped, from its own loopback listener.
+Desktop launch-token restrictions may require manually recorded evidence; never
+copy credentials. Record browser/owner rows separately and import the peer's
+result file before checking both. --rows creates diagnostic partial files that
+cannot satisfy the gate. Image-edit rows can incur provider charges. The runner
+stops/archives its sessions. HB3 proves catalog availability, not Swarm execution;
+row 9 proves a consumed peer-message receipt, not obedience or mid-turn timing.
 """
 from __future__ import annotations
 
@@ -359,7 +376,13 @@ class Runner:
             if op == "workers":
                 self._check_workers(evidence)
                 continue
+            if op == "tool_catalog":
+                self._check_catalog(step["tools"], evidence)
+                continue
             within = step.get("within_s", within_default)
+            if op == "peer_delivery":
+                self._peer_delivery(step, sessions, evidence, within)
+                continue
             users_at_least = 1
             if op == "start":
                 alias = step.get("as", "a")
@@ -389,6 +412,44 @@ class Runner:
             s = self._wait(sid, within, users_at_least=users_at_least)
             self._check(step, s, sessions, evidence)
         return evidence
+
+    def _check_catalog(self, wanted: list, evidence: dict) -> None:
+        surface = self.client.tool_surface()
+        names = {t["name"] for group in surface.get("groups") or []
+                 if group.get("available") is True for t in group.get("tools") or [] if t.get("name")}
+        found = sorted(t for t in names if any(_has_tool({t}, w) for w in wanted))
+        evidence["tool_catalog"] = {"endpoint": "/api/v1/tools/surface", "tools": found}
+        for tool in wanted:
+            if not _has_tool(names, tool):
+                raise StepFailed(f"tool {tool} is absent from the available API catalog")
+
+    def _peer_delivery(self, step: dict, sessions: dict, evidence: dict, within: float) -> None:
+        sender = sessions[step["sender"]]
+        receiver = sessions[step["session"]]
+        message = self._fmt(step["message"], sessions)
+        request_id = self._fmt(step["request_id"], sessions)
+        deadline = self.clock() + within
+        turn_id = None
+        while True:
+            # Stable id/arguments read the original durable receipt; polling
+            # must never queue another message or infer delivery from a reply.
+            receipt = self.client.peer_message(sender, receiver, message, request_id)
+            evidence["peer_delivery"] = {k: receipt.get(k) for k in (
+                "session_id", "turn_id", "delivery_status")}
+            status = receipt.get("delivery_status")
+            if receipt.get("session_id") != receiver or not receipt.get("turn_id"):
+                raise StepFailed("invalid peer-message receipt")
+            if turn_id is not None and turn_id != receipt["turn_id"]:
+                raise StepFailed("peer-message retry returned a different turn id")
+            turn_id = receipt["turn_id"]
+            self._snapshot(receiver)  # enforce the token cap during delivery too
+            if status == "consumed":
+                return
+            if status not in ("queued", "begun"):
+                raise StepFailed(f"peer message was not consumed: {status!r}")
+            if self.clock() >= deadline:
+                raise StepFailed(f"peer message not consumed within {int(within)}s (status {status})")
+            self.sleep(self.poll_s)
 
     def _compact(self, sid: str, within: float) -> str:
         """POST /compact and wait for its outcome; returns the evidence line.
@@ -426,7 +487,7 @@ class Runner:
     def _check_workers(self, evidence: dict) -> None:
         status = self.client.deploy_status()
         workers = status.get("workers") or []
-        evidence["workers"] = [{k: w.get(k) for k in ("label", "short", "online")} for w in workers]
+        evidence["workers"] = [{k: w.get(k) for k in ("label", "revision", "short", "online")} for w in workers]
         if len(workers) < 2:
             raise StepFailed("deploy-status lists fewer than two workers")
         for w in workers:
@@ -448,7 +509,7 @@ class Runner:
         if self.only and len(selected) != len(set(self.only)):
             unknown = sorted(set(self.only) - {r["id"] for r in selected})
             raise SetupError(f"unknown row ids: {', '.join(unknown)}")
-        if any(r["kind"] == "script" for r in selected):
+        if any(s["op"] == "start" for r in selected for s in r.get("steps") or []):
             self.agent_choice = self.resolve_agent()
             self.agent = self.agent_choice["agent"]
         out_rows = [{"id": r["id"], "kind": r["kind"], "check": r["check"], "status": "not_run",

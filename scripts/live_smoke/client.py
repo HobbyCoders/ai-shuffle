@@ -80,6 +80,15 @@ class HttpWorkerClient:
     def installs(self) -> dict:
         return self._req("GET", "/cluster/installs")
 
+    def tool_surface(self) -> dict:
+        # Live MCP enumeration may take longer than the default request timeout.
+        return self._req("GET", "/tools/surface", timeout=120.0)
+
+    def peer_message(self, sender_id: str, session_id: str, message: str, request_id: str) -> dict:
+        return self._req("POST", f"/tools/sessions/{sender_id}/peer-message", json={
+            "session_id": session_id, "message": message, "request_id": request_id,
+        })
+
     def models(self) -> dict:
         return self._req("GET", "/models")
 

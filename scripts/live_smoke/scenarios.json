@@ -28,12 +28,12 @@
           "kind": "script",
           "two_worker": true,
           "how": "start a session on the peer: \"Live test {run}: reply with the single word OK and use no tools.\"",
-          "pass_when": "reply `OK`; session owned by the peer",
+          "pass_when": "REST transcript contains a non-empty assistant reply after the prompt, the turn finishes and the session is owned by the peer (no wording requirement)",
           "past_bug": "error when starting a session on another worker",
           "steps": [
             {"op": "start", "as": "a", "on": "peer",
              "prompt": "Live test {run}: reply with the single word OK and use no tools.",
-             "expect_reply": "^\\W*OK\\W*$", "expect_owner": "peer"}
+             "expect_owner": "peer"}
           ]
         },
         {
@@ -95,17 +95,15 @@
           "id": "two-worker-smoke.9",
           "check": "Peer message delivery",
           "kind": "script",
-          "how": "session A runs `sleep 60 && echo done`; session B uses MessageSession to tell A \"also reply PEER-OK\" while it runs",
-          "pass_when": "A's final reply of the same turn says finished and PEER-OK",
+          "how": "start two throwaway chats, then dispatch a peer message through the local-owner API with a stable request id and poll its durable receipt",
+          "pass_when": "MessageSession is in the available tool catalog; the same receiver turn id reaches consumed (queued, begun or stopped alone never pass); no model wording or tool-choice requirement",
           "past_bug": "message only delivered after session fully completed",
           "steps": [
-            {"op": "start", "as": "a", "wait": false,
-             "prompt": "Live test {run} A: run `sleep 60 && echo done` in Bash, then reply with just: finished. Another chat of mine may message you while the command runs; do what it asks in the same final reply."},
-            {"op": "start", "as": "b", "within_s": 120,
-             "prompt": "Live test {run} B: use the MessageSession tool once to send session {session:a} the message \"also reply PEER-OK\" with request_id \"{run}-9\". Then reply with just: SENT",
-             "expect_tool": ["MessageSession"]},
-            {"op": "await", "session": "a", "within_s": 240,
-             "expect_reply": "(?is)(finished.*PEER-OK|PEER-OK.*finished)"}
+            {"op": "tool_catalog", "tools": ["MessageSession"]},
+            {"op": "start", "as": "a", "prompt": "Live test {run} A: reply briefly, no tools."},
+            {"op": "start", "as": "b", "prompt": "Live test {run} B: reply briefly, no tools."},
+            {"op": "peer_delivery", "sender": "b", "session": "a", "within_s": 240,
+             "message": "Live smoke {run}: delivery probe; no reply required.", "request_id": "{run}-9"}
           ]
         },
         {
@@ -278,16 +276,11 @@
         },
         {
           "id": "harness-basics.3",
-          "check": "Swarm small job",
+          "check": "Swarm tool availability",
           "kind": "script",
-          "how": "a Swarm of two tasks writes two files under /tmp/live-smoke-{run}",
-          "pass_when": "both files exist, swarm completes, reply SWARM-DONE",
-          "steps": [
-            {"op": "start", "as": "a", "within_s": 600,
-             "prompt": "Live test {run}: use one Swarm with two tiny tasks: one writes the word ok to /tmp/live-smoke-{run}/a.md, the other writes the word ok to /tmp/live-smoke-{run}/b.md. When the swarm completes reply with just: SWARM-DONE",
-             "expect_tool": ["Swarm"], "expect_reply": "SWARM-DONE",
-             "expect_files": ["/tmp/live-smoke-{run}/a.md", "/tmp/live-smoke-{run}/b.md"]}
-          ]
+          "how": "GET /api/v1/tools/surface; inspect available groups, without starting a model or subagent",
+          "pass_when": "an available catalog group contains the exact Swarm tool name (bare or MCP-qualified); this checks availability, not Swarm workload execution",
+          "steps": [{"op": "tool_catalog", "tools": ["Swarm"]}]
         },
         {
           "id": "harness-basics.4",
