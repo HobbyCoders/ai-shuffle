@@ -715,11 +715,15 @@ def test_index_and_scan_return_identical_ranked_hits(recall, monkeypatch, terms)
 
 
 def test_events_heavy_toasted_recall_benchmark(recall, monkeypatch):
-    """#2084: 5,400 TOASTed nodes / 86,400 events (16:1), no timing gate.
+    """#2084: 5,400 native nodes / 86,400 events (16:1), no timing gate.
 
-    Print warm end-to-end p50s for the frozen CASE query and the term union;
-    gate exact ranked parity and fewer native buffer accesses instead of a
-    flaky wall-clock budget. All data lives in ON COMMIT DROP temp tables.
+    Model the observed long tail, not uniformly small messages: most native
+    texts are ~2 KB, some ~12/72 KB, and a few ~512 KB. Only 1/16 events are
+    searchable; local and mirrored events coexist. Trigrams scattered through
+    large texts exercise false-positive GIN rechecks as well as real matches.
+    Print the five diagnostic queries' warm p50s for frozen CASE vs term UNION,
+    and per-arm EXPLAIN/BUFFERS for the current query. Gate ranked parity and
+    buffer accesses, never noisy wall time. All rows are synthetic temp data.
     """
     import statistics
     import time
@@ -755,18 +759,29 @@ def test_events_heavy_toasted_recall_benchmark(recall, monkeypatch):
                 k = i * 24 + j
                 # Incompressible, TOAST-sized code/logs. Common terms overlap,
                 # but most OR matches do NOT match all three scoring terms.
-                tags = " ".join(t for t, stride in (("code", 2), ("log", 3), ("sample", 31), ("the", 1))
+                tags = " ".join(t for t, stride in (("code", 2), ("log", 3), ("sample", 31),
+                                                  ("the", 1), ("recall", 7), ("cache", 11), ("floor", 41))
                                 if k % stride == 0)
                 if i < 3 and j == 0:
-                    tags += " recallneedle quokkaneedle capybaraneedle"
-                filler = " ".join(md5(f"{k}-{n}".encode()).hexdigest() for n in range(160))
+                    tags += " cpu_tuple_cost toasted_recall_gin floor recall cache"
+                # Fixed distribution, deterministic incompressible bytes, and
+                # decoy trigrams far apart in the largest documents. An index
+                # hit must still fetch/decompress/recheck the whole document.
+                size = 512000 if k % 200 == 0 else 72000 if k % 50 == 0 else 12000 if k % 10 == 0 else 1800
+                filler = " ".join(md5(f"{k}-{n}".encode()).hexdigest() for n in range(size // 33))
+                if size >= 72000:
+                    filler = "cpu " + filler + " tuple unrelated cost toasted unrelated recall unrelated gin"
                 nodes.append((f"ses_bench-{i}", str(j), k,
                               Json(Message("user", [Text(tags + " " + filler)]).to_dict())))
             for j in range(384):
                 textual = j % 16 == 0
-                events.append((f"bench-{i}-{j}", f"bench-remote-{i}", j,
-                               "message.user" if textual else "tool.result",
-                               Json({"content": "code log sample the" if textual else "ignored tool output"}),
+                arm = "remote" if (j // 16) % 2 else "native"
+                text = "code log sample the recall cache"
+                if i < 3 and j == 16:
+                    text += " cpu_tuple_cost toasted_recall_gin floor"
+                events.append((f"bench-{i}-{j}", f"bench-{arm}-{i}", j,
+                               "message.user" if textual else "tool.input_delta",
+                               Json({"content": text if textual else "ignored tool input"}),
                                i * 384 + j))
         execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", nodes)
         execute_values(cur, "INSERT INTO session_events(id,session_id,seq,event_type,payload,created_at) VALUES %s",
@@ -789,8 +804,8 @@ def test_events_heavy_toasted_recall_benchmark(recall, monkeypatch):
             yield conn
 
         monkeypatch.setattr(recall, "get_db", shared)
-        for terms in (["recallneedle", "quokkaneedle", "capybaraneedle"],
-                      ["log", "code", "sample"], ["the"]):
+        for text in ("cpu_tuple_cost", "toasted_recall_gin floor", "recall cache", "log code sample", "the"):
+            terms = text.split()
             timings = {"before": [], "after": []}
             for run in range(4):
                 results = {}
@@ -803,6 +818,61 @@ def test_events_heavy_toasted_recall_benchmark(recall, monkeypatch):
                 assert results["before"] == results["after"] and results["after"]
             print("events-heavy p50 ms", " ".join(terms),
                   {name: round(statistics.median(values), 2) for name, values in timings.items()})
+
+            # Capture the actual search path, including event candidate selection
+            # and the subsequent uncapped event fetch (not just native SQL).
+            queries = []
+
+            class Capture:
+                def execute(self, sql, params=None):
+                    if sql.startswith(("WITH m AS", "SELECT session_id, MAX(h)",
+                                       "SELECT session_id, event_type, payload")):
+                        queries.append((sql, params))
+                    return cur.execute(sql, params)
+
+                def __getattr__(self, key):
+                    return getattr(cur, key)
+
+            class Connection:
+                def cursor(self):
+                    return Capture()
+
+            @contextmanager
+            def captured():
+                yield Connection()
+
+            with monkeypatch.context() as mp:
+                mp.setattr(recall, "_top_rows", optimized)
+                mp.setattr(recall, "get_db", captured)
+                assert recall._search_sync(terms, 5, "bench-remote-0")
+            assert len(queries) == 4  # native, delegated, event candidates, event fetch
+            for arm, (sql, params) in zip(("native", "delegated", "event_candidates", "event_fetch"), queries):
+                cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, params)
+                report = cur.fetchone()["QUERY PLAN"][0]
+                plan = report["Plan"]
+                print("events-heavy plan", text, arm, {
+                    "execution_ms": report["Execution Time"],
+                    **{key: plan.get(key, 0) for key in (
+                        "Actual Rows", "Shared Hit Blocks", "Shared Read Blocks",
+                        "Local Hit Blocks", "Local Read Blocks", "Temp Written Blocks")},
+                })
+                if arm == "native":
+                    assert plan["Actual Rows"] <= recall._SEARCH_PREFILTER_SESSIONS * recall._SEARCH_ROWS_PER_SESSION
+                    if text == "cpu_tuple_cost":
+                        def descendants(node):
+                            yield node
+                            for child in node.get("Plans", []):
+                                yield from descendants(child)
+
+                        # Protect the problematic shape: selective GIN still
+                        # admits large, nonmatching texts that need detoasting.
+                        assert any(n.get("Rows Removed by Index Recheck", 0) > 0
+                                   for n in descendants(plan)), plan
+                elif arm == "event_candidates":
+                    assert plan["Actual Rows"] <= recall._SEARCH_PREFILTER_SESSIONS
+                elif arm == "event_fetch":
+                    # Only the mirrored half's 12 textual rows per session.
+                    assert 0 < plan["Actual Rows"] <= recall._SEARCH_PREFILTER_SESSIONS * 12
 
         plans = {}
         for name, query in (("before", _case_top_rows), ("after", optimized)):
