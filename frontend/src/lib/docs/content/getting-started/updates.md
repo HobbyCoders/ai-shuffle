@@ -60,6 +60,8 @@ If the first start crashes, times out or is interrupted, the next launch restore
 
 If restoration fails, no older worker starts on the changed database. The recovery dialog offers **Go back to <previous version>** to retry the restoration, or **Quit**. Keep the restore point and logs. Older launchers and earlier failures without a verified restore point retain their migration fence: retry the affected build or install a verified newer release; never delete the fence or point older code at the database.
 
+Recovery also checks the operating-system start identity and executable of any leftover worker or database process before stopping it. A matching network response alone is not enough. If an older installation has no process-identity record, or the record does not match, recovery stops with a notice: close the original application/server normally and retry. Do not kill an unrelated process or delete identity records to force recovery.
+
 ## The Claude Code CLI
 
 If you use Claude, the Claude Code CLI keeps itself up to date, as on any computer. Updating AI Shuffle does not reinstall it.

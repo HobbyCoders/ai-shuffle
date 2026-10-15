@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const { PostgresSupervisor, resolvePostgresBinaries } = require('../../dist/main/postgres.js');
 const { SourceUpdates } = require('../../dist/main/source-updates.js');
 const { durableJson } = require('../../dist/main/database-restore.js');
+const { isProcessAlive, terminateProcessTree } = require('../../dist/main/worker.js');
 const A='a'.repeat(40), B='b'.repeat(40), KEY='c'.repeat(64);
 async function fixture(t) {
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-pg-rollback-'));
@@ -49,6 +50,18 @@ async function fixture(t) {
  updates=new SourceUpdates(options);await updates.load();
  return {root,pg,sql,sqlEnv,binaries,options,updates};
 }
+test('real PostgreSQL responder does not authorize stopping an unrelated PID in postmaster.pid',{timeout:120_000},async t=>{
+ const f=await fixture(t);
+ const victim=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:process.platform!=='win32',stdio:'ignore'});
+ const file=path.join(f.root,'postgres/data/postmaster.pid');const original=await fs.readFile(file,'utf8');
+ t.after(()=>terminateProcessTree(victim.pid));
+ try{
+  await fs.writeFile(file,original.replace(/^\d+/,String(victim.pid)));
+  await assert.rejects(f.pg.quiesce(),/identity|cluster|disagrees/i);
+  assert.equal(isProcessAlive(victim.pid),true);
+  assert.equal(f.sql('SELECT value FROM rollback_probe'),'before update','the separate real PostgreSQL responder remains alive');
+ }finally{await fs.writeFile(file,original);}
+});
 for(const failure of ['crash','readiness-timeout','power-loss-during-restore']) test(`real PostgreSQL: ${failure} restores schema, rows, floor and previous executable`,{timeout:600_000},async t=>{
  const f=await fixture(t), database=async()=>f.pg.updateRestorePoint();
  await f.updates.prepareRollback(database);

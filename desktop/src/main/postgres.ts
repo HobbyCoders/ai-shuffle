@@ -26,7 +26,8 @@ import path from 'node:path';
 import type { PostgresConfig } from './settings';
 import { privateDirectory } from './private-file';
 import { isPortFree, isProcessAlive } from './worker';
-import { ColdClusterCopy } from './database-restore';
+import { ColdClusterCopy, durableJson } from './database-restore';
+import { readProcessIdentity, sameProcess, isProcessIdentity, execWithIdentity, type ProcessIdentity } from './process-identity';
 
 export const POSTGRES_HOST = '127.0.0.1';
 export const POSTGRES_USER = 'ai_shuffle';
@@ -141,6 +142,7 @@ export function chooseSocketDir(platform: NodeJS.Platform, preferred: string, tm
 export interface PidFileInfo {
 	pid: number;
 	dataDir: string | null;
+	startTime: number | null;
 	port: number | null;
 }
 
@@ -150,17 +152,16 @@ export function parsePidFile(text: string): PidFileInfo | null {
 	const pid = Number(lines[0]?.trim());
 	if (!Number.isInteger(pid) || pid <= 0) return null;
 	const port = Number(lines[3]?.trim());
-	return { pid, dataDir: lines[1]?.trim() || null, port: Number.isInteger(port) && port > 0 ? port : null };
+	const startTime = Number(lines[2]?.trim());
+	return { pid, dataDir: lines[1]?.trim() || null, startTime: Number.isSafeInteger(startTime) && startTime > 0 ? startTime : null, port: Number.isInteger(port) && port > 0 ? port : null };
 }
 
 export type PidFileAction = 'none' | 'remove' | 'stop' | 'fail';
 
 /**
- * What to do about a postmaster.pid left in the data directory. A dead pid
- * is a crashed run: the file goes. A live pid that answers as PostgreSQL on
- * the recorded port is a server an earlier run of the app left behind, which
- * `pg_ctl stop` can take down. A live pid that does not answer may be an
- * unrelated process that got the same number; nothing here may kill it.
+ * Preliminary plan only. A protocol response is NOT PID ownership. Before a
+ * live PID can be signalled, stopVerified also checks the OS identity captured
+ * at launch, executable, cluster directory and postmaster start timestamp.
  */
 export function planPidFile(info: PidFileInfo | null, pidAlive: boolean, serverAnswers: boolean): PidFileAction {
 	if (info === null) return 'remove';
@@ -181,6 +182,7 @@ export function sameConnection(a: PostgresConfig | null, b: PostgresConfig): boo
 // ---- Runtime ----------------------------------------------------------------
 
 export interface ExecOptions {
+	identity?: ProcessIdentity;
 	env?: NodeJS.ProcessEnv;
 	input?: string;
 	timeoutMs?: number;
@@ -205,6 +207,9 @@ export interface PostgresRuntime {
 	remove(target: string): Promise<void>;
 	exec(file: string, args: string[], opts?: ExecOptions): Promise<ExecResult>;
 	pidAlive(pid: number): boolean;
+	processIdentity(pid: number): Promise<ProcessIdentity>;
+	realpath(file: string): Promise<string>;
+	saveIdentity(file: string, value: unknown): Promise<void>;
 	/** A free loopback port: the preferred one when it is still free, otherwise an ephemeral one. */
 	freePort(preferred: number | null): Promise<number>;
 	randomPassword(): string;
@@ -212,6 +217,7 @@ export interface PostgresRuntime {
 
 /** Runs a program to completion with its output captured. Never throws; a spawn failure is reported as code -2. */
 export function execCapture(file: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
+	if (opts.identity) return execWithIdentity(opts.identity, file, args, opts);
 	return new Promise((resolve) => {
 		let stdout = '';
 		let stderr = '';
@@ -259,6 +265,9 @@ export const nodeRuntime: PostgresRuntime = {
 	remove: (target) => fs.rm(target, { recursive: true, force: true }),
 	exec: execCapture,
 	pidAlive: isProcessAlive,
+	processIdentity: readProcessIdentity,
+	realpath: file => fs.realpath(file),
+	saveIdentity: durableJson,
 	freePort: pickPort,
 	// Hex keeps the password safe in the managed descriptor and in a connection URL.
 	randomPassword: () => randomBytes(20).toString('hex')
@@ -396,14 +405,17 @@ export class PostgresSupervisor extends EventEmitter {
 	}
 
 	private async doStop(): Promise<void> {
+		await this.assertPidFileMatchesRecordedProcess();
 		if (this._state.phase === 'idle' || this._state.phase === 'stopped') return;
 		this.conn = null;
 		// A start that failed before launching (for example over a pid file held
 		// by an unrelated process) has nothing of ours to stop; pg_ctl would
 		// signal whatever pid that file names.
 		if (this.launched && this.rt.existsSync(this.pidFile)) {
-			const result = await this.exec(this.opts.binaries.pgCtl, pgCtlStopArgs(this.dataDir));
-			if (result.code !== 0) this.log(`pg_ctl stop exited with ${result.code}`);
+			const info = parsePidFile(await this.rt.readFile(this.pidFile));
+			if (!info) throw new Error('Invalid PostgreSQL process record; no process was signalled');
+			if (this.rt.pidAlive(info.pid)) await this.stopVerified(info);
+			else await this.rt.remove(this.pidFile);
 		}
 		this.launched = false;
 		this.set({ phase: 'stopped', pid: null });
@@ -451,7 +463,47 @@ export class PostgresSupervisor extends EventEmitter {
 		return password;
 	}
 
+	private get identityFile(): string { return path.join(this.opts.root, 'postmaster-identity.json'); }
+	private async captureIdentity(): Promise<void> {
+		const info = parsePidFile(await this.rt.readFile(this.pidFile));
+		if (!info?.startTime || !info.dataDir || await this.rt.realpath(info.dataDir) !== await this.rt.realpath(this.dataDir)) throw new Error('PostgreSQL did not record the expected cluster identity');
+		const identity = await this.rt.processIdentity(info.pid);
+		const executable = await this.rt.realpath(this.opts.binaries.postgres);
+		if (!isProcessIdentity(identity) || identity.pid !== info.pid || !this.sameExecutable(identity.executable, executable) || Math.abs(identity.startedAt - info.startTime) > 2) throw new Error('PostgreSQL OS process identity does not match its cluster start');
+		await this.rt.saveIdentity(this.identityFile, { schemaVersion: 1, identity, dataDir: await this.rt.realpath(this.dataDir), startTime: info.startTime });
+	}
+	private sameExecutable(a: string, b: string): boolean {
+		return this.rt.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+	}
+	private async stopVerified(info: PidFileInfo): Promise<void> {
+		// A port response can belong to another server. Require the kernel identity
+		// captured at launch AND this cluster's exact postmaster.pid provenance.
+		if (!this.rt.existsSync(this.identityFile)) throw new Error('PostgreSQL has no recorded OS process identity; close the original server normally before recovery. No process was signalled.');
+		const saved = JSON.parse(await this.rt.readFile(this.identityFile));
+		if (saved.schemaVersion !== 1 || !isProcessIdentity(saved.identity) || saved.identity.pid !== info.pid || !info.startTime ||
+			saved.startTime !== info.startTime || !info.dataDir ||
+			saved.dataDir !== await this.rt.realpath(this.dataDir) || saved.dataDir !== await this.rt.realpath(info.dataDir) ||
+			!sameProcess(saved.identity, await this.rt.processIdentity(info.pid))) {
+			throw new Error('PostgreSQL process identity or cluster mismatch; no process was signalled');
+		}
+		// execCapture revalidates at the signal boundary and holds a Windows process
+		// handle throughout pg_ctl, preventing PID reuse between check and signal.
+		const result = await this.exec(this.opts.binaries.pgCtl, pgCtlStopArgs(this.dataDir), { identity: saved.identity });
+		if (result.code !== 0) throw new Error(`Verified PostgreSQL did not stop (exit ${result.code})`);
+		if (!this.rt.existsSync(this.pidFile)) await this.rt.remove(this.identityFile);
+	}
+
+	private async assertPidFileMatchesRecordedProcess(): Promise<void> {
+		if (!this.rt.existsSync(this.identityFile)) return;
+		const saved = JSON.parse(await this.rt.readFile(this.identityFile));
+		if (!isProcessIdentity(saved.identity)) throw new Error('Invalid PostgreSQL OS identity record; recovery is blocked');
+		if (this.rt.pidAlive(saved.identity.pid)) {
+			const info = this.rt.existsSync(this.pidFile) ? parsePidFile(await this.rt.readFile(this.pidFile)) : null;
+			if (!info || info.pid !== saved.identity.pid) throw new Error('PostgreSQL PID file disagrees with its recorded live process; no process was signalled');
+		}
+	}
 	private async clearPidFile(): Promise<void> {
+		await this.assertPidFileMatchesRecordedProcess();
 		if (!this.rt.existsSync(this.pidFile)) return;
 		const info = parsePidFile(await this.rt.readFile(this.pidFile));
 		const alive = info !== null && this.rt.pidAlive(info.pid);
@@ -463,7 +515,7 @@ export class PostgresSupervisor extends EventEmitter {
 				return;
 			case 'stop': {
 				this.log(`stopping a PostgreSQL an earlier run left behind (process ${info?.pid})`);
-				await this.exec(this.opts.binaries.pgCtl, pgCtlStopArgs(this.dataDir));
+				await this.stopVerified(info!);
 				if (!this.rt.existsSync(this.pidFile)) return;
 				if (info && !this.rt.pidAlive(info.pid)) {
 					await this.rt.remove(this.pidFile);
@@ -497,6 +549,7 @@ export class PostgresSupervisor extends EventEmitter {
 		if (result.code !== 0) {
 			throw new Error(`PostgreSQL did not start (pg_ctl exit code ${result.code}).\n${lastLines(result)}${await this.serverLogTail()}`);
 		}
+		await this.captureIdentity();
 	}
 
 	private async readPid(): Promise<number | null> {
