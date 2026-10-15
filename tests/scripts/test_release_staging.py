@@ -517,7 +517,7 @@ def test_release_inline_shell_is_valid():
     for name, job in wf["jobs"].items():
         for step in job.get("steps", []):
             if "run" in step:
-                result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
+                result = subprocess.run(["bash", "-n"], input=step["run"].encode("utf-8"), capture_output=True)
                 assert result.returncode == 0, (name, step.get("name"), result.stderr)
 
 
