@@ -23,7 +23,38 @@ def test_prompt_catalog_budget():
 
 
 def test_delegated_append_budget():
-    assert measure(native=False)["totals"]["compiled_eager"] <= MEASURED_DELEGATED_APPEND * 101 // 100
+    size = measure(native=False)["totals"]["compiled_eager"]
+    ceiling = MEASURED_DELEGATED_APPEND * 101 // 100
+    assert size <= ceiling, (
+        f"Delegated append: {size:,} chars exceeds {ceiling:,}. "
+        "Run PYTHONPATH=fluid python scripts/measure_prompt_catalog.py --delegated; "
+        "tighten wording without dropping rules or raising the budget."
+    )
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
+def test_private_access_guidance_has_one_owner(native):
+    from app.mcp.chat_access_sdk import GUIDANCE
+
+    compiled, catalog, _ = compile_fixture(native=native)
+    system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
+              if native else compiled.text)
+    combined = system + "\n\n" + "\n\n".join(text for text, _ in catalog)
+    assert system.count(GUIDANCE.strip()) == 1
+    assert combined.count("# Private resource access") == 1
+    # Saved-entry discovery must not crowd out privacy or per-session approval.
+    for rule in (
+        "saved IDs, kinds and owner-chosen labels, never addresses or",
+        "Reuse via saved_id; each session needs its own grant",
+        "Never ask for addresses, passwords, private keys, API keys, tokens",
+        "Never reveal private inputs or put secrets in tool arguments",
+        "Initial access requires card approval",
+        "Grants expire and are lost on restart",
+        "scope, expiry and revocation apply in every permission mode",
+        "skip confirmation only in bypass",
+        "otherwise each needs a one-shot card decision",
+    ):
+        assert rule in system
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native-code", "delegated-cli"])
