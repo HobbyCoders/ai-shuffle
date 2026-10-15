@@ -49,10 +49,10 @@ def test_native_project_license_notices():
 def test_public_readme_order_and_install():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     assert re.findall(r"^## (.+)$", text, re.M) == [
-        "What it is", "What you can do with it", "Install", "Free and Cloud",
-        "How it compares", "Contributing", "Security", "License", "Not affiliated",
+        "Why AI Shuffle", "Install", "What you can do", "Fluid: our own agent harness",
+        "Free and Cloud", "Contributing, security and license",
     ]
-    assert text.index("[Watch the tour]") < text.index("## What it is")
+    assert text.index("[Watch the tour]") < text.index("## Why AI Shuffle")
     block = re.search(r"```sh\n(.*?)```", text, re.S).group(1)
     commands = [line.strip() for line in block.splitlines() if line.strip()]
     assert len(commands) == 3
@@ -74,7 +74,7 @@ def test_public_readme_order_and_install():
         assert image.is_file(), path
         assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), path
         assert image.stat().st_size < 500_000, path
-        assert text.index("[Watch the tour]") < text.index(f"![{alt}]") < text.index("## Install")
+        assert text.index("[Watch the tour]") < text.index(f"![{alt}]") < text.index("## Fluid")
 
 
 @pytest.mark.parametrize("name", [
@@ -83,7 +83,7 @@ def test_public_readme_order_and_install():
 def test_public_relative_links_exist(name):
     text = (ROOT / name).read_text(encoding="utf-8")
     for link in re.findall(r"\[[^]]*\]\(([^)]+)\)", text):
-        if "://" not in link and not link.startswith("mailto:"):
+        if "://" not in link and not link.startswith(("mailto:", "#")):
             assert (ROOT / link.split("#", 1)[0]).is_file(), (name, link)
 
 
