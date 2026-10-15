@@ -608,12 +608,30 @@ def machine() -> str:
     return f"{platform.node()} ({platform.system()})"
 
 
+def warn_attestation_main_moved(revision: str, state: str) -> None:
+    """A moved branch does not invalidate the tested tree or imply publication."""
+    try:
+        current = subprocess.check_output(
+            ["gh", "api", f"repos/{REPOSITORY}/branches/main", "--jq", ".commit.sha"],
+            cwd=ROOT, text=True, timeout=20).strip()
+    except (OSError, subprocess.SubprocessError):
+        print("WARNING: could not recheck main after attestation; publication will recheck it.")
+        return
+    if current != revision:
+        print(f"WARNING: main moved from {revision[:9]} to {current[:9]}; posted {state} "
+              f"{ATTEST_CONTEXT} only for the tested revision. A successful first-parent ancestor "
+              "can publish at the next schedule/owner dispatch if it is newer than the published "
+              "pointer and no newer attestation wins. Later commits still need their own full "
+              "attestation; failed/pending or older revisions will not publish.")
+
+
 def attest(state: str, description: str, revision: str) -> None:
     contexts = [ATTEST_CONTEXT] + ([WINDOWS_CONTEXT] if os.name == "nt" else [])
     for context in contexts:
         subprocess.run(["gh", "api", f"repos/{REPOSITORY}/statuses/{revision}", "-f", f"state={state}",
                         "-f", f"context={context}", "-f", f"description={description[:139]}"],
                        cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+    warn_attestation_main_moved(revision, state)
 
 
 def security_check(python: str, strict: bool = False, *, audit: bool = True) -> None:
@@ -673,7 +691,7 @@ def cmd_check(args) -> int:
     if args.attest:
         known = " (known Windows failures skipped, #2215)" if os.name == "nt" else ""
         attest("success", f"{', '.join(ran)} passed on {machine()}{known}", revision)
-        print(f"Posted {ATTEST_CONTEXT} on {revision[:9]}; edge publication can proceed.")
+        print(f"Posted {ATTEST_CONTEXT} on {revision[:9]}; scheduled publication will recheck eligibility.")
     return 0
 
 

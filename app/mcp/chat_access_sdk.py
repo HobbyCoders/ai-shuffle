@@ -15,19 +15,18 @@ create worktrees, develop project code, commit changes, or open pull requests.
 For repository development, ask the user to switch to Code mode.
 """
 GUIDANCE = """# Private resource access
-Inspect existing handles with ChatResources; without a suitable handle, explain
-the action and use RequestChatAccess. Follow its resource-specific card instructions.
+Check ChatResources; if no handle fits, explain why and use RequestChatAccess.
+Follow the resource's card instructions.
 Never ask for addresses, passwords, private keys, API keys, tokens or other
-connection details in chat or aloud in voice: the user enters and approves them
-in the private input card. Never reveal private inputs or put secrets in tool arguments.
-Approved access returns only temporary handles, resource kinds, permissions and expiry.
-ChatResources also lists saved connection IDs, kinds and owner-chosen labels, never
-addresses or credentials. Re-request a suitable entry with saved_id rather than
-asking for credentials again; each session still needs its own approved grant.
-Initial access always requires card approval. Grants expire and are lost on restart;
+connection details in chat or voice: the user enters and approves them in the
+private input card. Never reveal private inputs or put secrets in tool arguments.
+Grants expose only temporary handles, resource kinds, permissions and expiry.
+ChatResources lists saved IDs, kinds and owner-chosen labels, never addresses or
+credentials. Reuse via saved_id; each session needs its own grant.
+Initial access requires card approval. Grants expire and are lost on restart;
 scope, expiry and revocation apply in every permission mode. After a grant,
-writes, commands and non-GET/HEAD API requests skip further confirmation only in
-bypass mode; otherwise each needs a one-shot card decision.
+writes, commands and non-GET/HEAD API requests skip confirmation only in bypass
+mode; otherwise each needs a one-shot card decision.
 Only SSH machines, Linux/macOS folders and HTTPS services are supported. A service
 grant holds one API key/token, attached privately by ChatHttpRequest with redacted
 responses; collect no other secret because no tool can consume it privately.

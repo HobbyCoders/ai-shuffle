@@ -769,3 +769,135 @@ def test_ws_follow_up_carries_the_agent(ws_stub):
     assert client.send("again", session_id="new1", model="sonnet", profile="coding") == "new1"
     assert frames[0]["session_id"] == "new1" and frames[0]["profile"] == "coding"
 
+# Harness facts must not be inferred from the model's wording or tool choices.
+class HarnessWorker(FakeWorker):
+    def __init__(self, *, receipt="consumed", tools=("Swarm", "MessageSession"), **kw):
+        super().__init__(answer=lambda _p: ("Arbitrary prose, no tool calls.", []), **kw)
+        self.receipt = receipt
+        self.tools = tools
+        self.deliveries = []
+
+    def tool_surface(self):
+        return {"groups": [{"id": "harness", "available": True,
+                            "tools": [{"name": t} for t in self.tools]}], "errors": []}
+
+    def peer_message(self, sender_id, session_id, message, request_id):
+        self.deliveries.append((sender_id, session_id, message, request_id))
+        return {"session_id": session_id, "turn_id": "peer-turn-1", "delivery_status": self.receipt}
+
+
+def _harness_rows(*ids):
+    return _data(*(r for r in scenarios.rows(scenarios.load()) if r["id"] in ids))
+
+
+def test_harness_rows_ignore_model_wording_and_tool_choice(tmp_path):
+    worker = HarnessWorker()
+    result, _ = _run(worker, _harness_rows("two-worker-smoke.2", "two-worker-smoke.9", "harness-basics.3"), tmp_path)
+    assert all(r["status"] == "pass" for r in result["rows"])
+    assert worker.deliveries == [("s3", "s2", "Live smoke r1: delivery probe; no reply required.", "r1-9")]
+    evidence = result["rows"][1]["evidence"]["peer_delivery"]
+    assert evidence["turn_id"] == "peer-turn-1" and evidence["delivery_status"] == "consumed"
+    assert len(worker.archived) == 3
+
+
+@pytest.mark.parametrize("receipt", ["queued", "begun", "stopped", "unknown"])
+def test_peer_delivery_requires_consumed_receipt(tmp_path, receipt):
+    data = _harness_rows("two-worker-smoke.9")
+    data["suites"][0]["rows"][0]["steps"][-1]["within_s"] = 0
+    result, _ = _run(HarnessWorker(receipt=receipt), data, tmp_path)
+    assert result["rows"][0]["status"] == "fail"
+    assert result["rows"][0]["evidence"]["peer_delivery"]["delivery_status"] == receipt
+
+
+def test_catalog_requires_actual_available_tool_not_description(tmp_path):
+    class BrokenCatalog(HarnessWorker):
+        def tool_surface(self):
+            return {"groups": [{"available": False, "tools": [{"name": "Swarm"}]},
+                               {"available": True, "tools": [{"name": "Read", "description": "Swarm"}]}]}
+    result, _ = _run(BrokenCatalog(), _harness_rows("harness-basics.3"), tmp_path)
+    assert result["rows"][0]["status"] == "fail"
+    assert "Swarm" in result["rows"][0]["reason"]
+
+
+def test_harness_client_wire_contract():
+    seen = []
+    def handle(req):
+        seen.append((req.method, req.url.path, json.loads(req.content) if req.content else None))
+        return httpx.Response(200, json={"groups": []} if req.method == "GET" else {
+            "session_id": "receiver", "turn_id": "turn", "delivery_status": "consumed"})
+    client = HttpWorkerClient(transport=httpx.MockTransport(handle))
+    try:
+        assert client.tool_surface() == {"groups": []}
+        assert client.peer_message("sender", "receiver", "probe", "stable-id")["delivery_status"] == "consumed"
+    finally:
+        client.close()
+    assert seen == [("GET", "/api/v1/tools/surface", None),
+                    ("POST", "/api/v1/tools/sessions/sender/peer-message",
+                     {"session_id": "receiver", "message": "probe", "request_id": "stable-id"})]
+
+
+@pytest.mark.parametrize("failure", ["missing_reply", "wrong_owner"])
+def test_remote_start_checks_transcript_and_owner_not_wording(tmp_path, failure):
+    class BrokenPeer(HarnessWorker):
+        def session(self, sid):
+            snapshot = super().session(sid)
+            if failure == "missing_reply":
+                snapshot["messages"] = [m for m in snapshot["messages"] if m["role"] == "user"]
+            else:
+                snapshot.update(is_remote=False, device_name="ServerWorker", instance_id="dev_self")
+            return snapshot
+    data = _harness_rows("two-worker-smoke.2")
+    data["suites"][0]["rows"][0]["steps"][0]["within_s"] = 1
+    result, _ = _run(BrokenPeer(), data, tmp_path)
+    assert result["rows"][0]["status"] == "fail"
+
+
+def test_catalog_only_row_needs_no_agent_or_model_turn(tmp_path):
+    worker = HarnessWorker(default_agent=None, tools=("mcp__builtins__Swarm",))
+    result, _ = _run(worker, _harness_rows("harness-basics.3"), tmp_path)
+    assert result["rows"][0]["status"] == "pass"
+    assert worker.sent == []
+
+
+@pytest.mark.parametrize("bad_receipt", [
+    {"session_id": "wrong", "turn_id": "turn", "delivery_status": "consumed"},
+    {"session_id": "s1", "delivery_status": "consumed"},
+    {"session_id": "s1", "turn_id": "changed", "delivery_status": "consumed"},
+])
+def test_peer_delivery_rejects_unrelated_or_unstable_receipts(tmp_path, bad_receipt):
+    class BadReceipt(HarnessWorker):
+        def peer_message(self, *args):
+            self.deliveries.append(args)
+            if len(self.deliveries) == 1:
+                return {"session_id": "s1", "turn_id": "original", "delivery_status": "queued"}
+            return bad_receipt
+    worker = BadReceipt()
+    result, _ = _run(worker, _harness_rows("two-worker-smoke.9"), tmp_path)
+    assert result["rows"][0]["status"] == "fail"
+    assert worker.deliveries[0] == worker.deliveries[1]
+
+
+@pytest.mark.parametrize("missing_revision", [False, True])
+def test_presence_row_records_and_requires_peer_revision(tmp_path, missing_revision):
+    class PresenceWorker(HarnessWorker):
+        def deploy_status(self):
+            status = super().deploy_status()
+            if missing_revision:
+                status["workers"][1]["revision"] = None
+            return status
+    result, _ = _run(PresenceWorker(), _harness_rows("two-worker-smoke.1"), tmp_path)
+    row = result["rows"][0]
+    assert row["status"] == ("fail" if missing_revision else "pass")
+    assert row["evidence"]["workers"][1]["revision"] == (None if missing_revision else PEER_REV)
+
+
+@pytest.mark.parametrize("step", [
+    {"op": "tool_catalog", "tools": []},
+    {"op": "peer_delivery", "sender": "missing", "session": "a", "message": "probe", "request_id": "r"},
+    {"op": "peer_delivery", "sender": "a", "session": "a", "request_id": "r"},
+])
+def test_new_harness_steps_validate_required_inputs(step):
+    row = _script("t.1")
+    row["steps"].append(step)
+    with pytest.raises(scenarios.ScenarioError):
+        scenarios.validate(_data(row))

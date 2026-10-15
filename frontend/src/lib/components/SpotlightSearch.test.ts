@@ -56,6 +56,17 @@ describe('universal search', () => {
   await fireEvent.click(screen.getByText('Unrelated title'));
   expect(p.onSelectSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'session' }));
  });
+ it('keeps backend highlight snippets readable without rendering marker HTML', async () => {
+  mocks.sessions.mockResolvedValue({ items: [{ id: 'old-session', title: 'Historical result',
+   match_type: 'content', match_snippet: 'Earlier <b>orchid</b> and **orchid** <img src=x onerror=alert(1)>' }] });
+  const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');
+  const result = screen.getByText('Historical result').closest('button')!;
+  expect(result.textContent).toContain('Earlier orchid and orchid <img src=x onerror=alert(1)>');
+  expect(result.querySelector('b, img, script')).toBeNull();
+  expect(result.textContent).not.toContain('**');
+  await fireEvent.click(result);
+  expect(p.onSelectSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'old-session' }));
+ });
  it('debounces and searches all sessions, not just the current project', async () => {
   render(SpotlightSearch, { props: { ...props(), currentProjectId: 'project' } });
   for (const value of ['o', 'or', 'orchid']) await fireEvent.input(screen.getByRole('textbox'), { target: { value } });

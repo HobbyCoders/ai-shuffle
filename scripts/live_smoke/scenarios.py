@@ -14,10 +14,12 @@ SCENARIOS_JSON = Path(__file__).with_name("scenarios.json")
 SCENARIOS_MD = ROOT / "docs" / "internal" / "live-smoke-scenarios.md"
 
 KINDS = ("script", "browser", "owner")
-OPS = ("workers", "start", "message", "await", "compact")
+OPS = ("workers", "start", "message", "await", "compact", "tool_catalog", "peer_delivery")
 EXPECT_KEYS = ("expect_reply", "expect_tool", "expect_owner", "expect_files", "user_messages", "replies")
 STEP_KEYS = {
     "workers": set(),
+    "tool_catalog": {"tools"},
+    "peer_delivery": {"sender", "session", "message", "request_id", "within_s"},
     "start": {"as", "on", "prompt", "wait", "within_s", *EXPECT_KEYS},
     "message": {"session", "prompt", "when", "wait", "within_s", *EXPECT_KEYS},
     "await": {"session", "within_s", *EXPECT_KEYS},
@@ -64,6 +66,14 @@ def validate(data: dict) -> None:
                     if step.get("on", "self") not in ("self", "peer"):
                         raise ScenarioError(f"{rid}: on must be self or peer")
                     aliases.add(step.get("as", "a"))
+                elif op == "tool_catalog":
+                    if not step.get("tools"):
+                        raise ScenarioError(f"{rid}: tool_catalog needs tools")
+                elif op == "peer_delivery":
+                    if step.get("sender") not in aliases or step.get("session") not in aliases:
+                        raise ScenarioError(f"{rid}: peer_delivery needs earlier sender and receiver sessions")
+                    if not step.get("message") or not step.get("request_id"):
+                        raise ScenarioError(f"{rid}: peer_delivery needs message and request_id")
                 elif op in ("message", "await", "compact"):
                     if step.get("session", "a") not in aliases:
                         raise ScenarioError(f"{rid}: {op} names a session no earlier step started")

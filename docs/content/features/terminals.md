@@ -41,7 +41,7 @@ Signing out disconnects every terminal. The shells keep running, and you can rec
 
 ## Where a terminal opens
 
-A terminal opened from a chat starts in the chat's own working copy, its project folder, or your workspace folder, in that order. You can also choose any folder on the worker. If the folder does not exist, you get a clear message and no terminal opens.
+A terminal opened from a chat starts in the chat's own working copy, its project folder, or your workspace folder, in that order. You can also choose an existing folder within the Files workspace. Folders outside that root, including symlinks that lead outside it, are refused. If the folder does not exist, you get a clear message and no terminal opens.
 
 ## Pasting
 

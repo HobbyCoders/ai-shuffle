@@ -34,7 +34,9 @@ import sys
 import threading
 import time
 from collections import deque
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 from fluid.tools import agent_runner
@@ -124,6 +126,80 @@ class TerminalError(Exception):
         self.code = code
         self.message = message
         self.status = status
+
+
+# Start in a stable, non-user cwd, then select the directory by descriptor.
+# This runs AFTER exec in a new interpreter, so it is safe in a threaded host.
+# Verify inode ancestry again in the child: an ancestor could have been moved
+# out of the workspace after the no-follow walk in the parent.
+_CWD_TRAMPOLINE = """
+import os, sys
+folder, root = map(int, sys.argv[1:3])
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+identity = lambda fd: (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
+expected = identity(root)
+current = os.dup(folder)
+try:
+    while identity(current) != expected:
+        parent = os.open("..", flags, dir_fd=current)
+        if identity(parent) == identity(current):
+            os.close(parent)
+            raise RuntimeError("Terminal folder moved outside the Files root")
+        os.close(current)
+        current = parent
+finally:
+    os.close(current)
+os.fchdir(folder)
+os.close(folder)
+os.close(root)
+os.execv(sys.argv[3], sys.argv[3:])
+"""
+
+
+@contextmanager
+def _pin_folder(path: str, root: Optional[str]):
+    """Revalidate and hold an explicit Files folder until the child owns it.
+
+    No pathname lookup of the selected cwd happens after the POSIX walk.
+    Windows cannot fchdir, so pin *all* ancestors without delete sharing:
+    they cannot be renamed/replaced until ConPTY CreateProcess has returned.
+    """
+    if root is None:
+        yield path, ()
+        return
+    with ExitStack() as stack:
+        try:
+            base, target = Path(root), Path(path)
+            names = target.relative_to(base).parts
+            if not base.is_absolute() or ".." in names:
+                raise ValueError("Folder is outside the Files root")
+            if sys.platform == "win32":
+                from app.core.confined_files import _windows_directory
+
+                held = stack.enter_context(_windows_directory(base, list(names)))
+                # Every component is now pinned and reparse-point-free; this
+                # final name check cannot race a rename before CreateProcess.
+                if held.resolve(strict=True) != target:
+                    raise ValueError("Folder changed while opening")
+                fds = ()
+            else:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+                def opened(name, parent=None):
+                    fd = os.open(name, flags, dir_fd=parent)
+                    stack.callback(os.close, fd)
+                    return fd
+
+                root_fd = opened(base.anchor)
+                for name in base.parts[1:]:
+                    root_fd = opened(name, root_fd)
+                folder_fd = opened(".", root_fd)
+                for name in names:
+                    folder_fd = opened(name, folder_fd)
+                fds = (folder_fd, root_fd)
+        except (OSError, ValueError) as exc:
+            raise TerminalError("bad_folder", "The Files folder changed or is no longer accessible.", 400) from exc
+        yield path, fds
 
 
 def _now_iso() -> str:
@@ -471,6 +547,9 @@ class Terminal:
         self.shell = shell["name"]
         self.shell_path = shell["path"]
         self.cwd = cwd
+        # Only explicit Files-authorized folders carry a root. Defaults keep
+        # their existing project/worktree/home policy, including on restart.
+        self.cwd_root: Optional[str] = None
         self.folder_source = folder_source
         self.session_id = session_id
         self.created_by = created_by
@@ -511,11 +590,19 @@ class Terminal:
             # the agent account, through the spawn runner.
             argv, cwd, env = agent_runner.wrap(
                 [sys.executable, "-I", "-S", "-c", _TRAMPOLINE, self.shell_path, "-i"], self.cwd, env)
-            proc = subprocess.Popen(
-                argv,
-                stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
-                start_new_session=True, close_fds=True,
-            )
+            with _pin_folder(cwd, self.cwd_root) as (cwd, fds):
+                if fds:
+                    # A fresh exec, NOT preexec_fn in the threaded parent.
+                    # fchdir runs before the isolation runner, which still
+                    # checks the cwd and drops ids before launching the shell.
+                    argv = [sys.executable, "-I", "-S", "-c", _CWD_TRAMPOLINE,
+                            *(str(fd) for fd in fds), *argv]
+                    cwd = "/"  # never re-resolve the user-controlled pathname
+                proc = subprocess.Popen(
+                    argv,
+                    stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
+                    start_new_session=True, close_fds=True, pass_fds=fds,
+                )
         except BaseException:
             os.close(master)
             raise
@@ -785,10 +872,11 @@ class WindowsTerminal(Terminal):
 
     def spawn(self) -> None:
         self._loop = asyncio.get_running_loop()
-        proc = windows_conpty.ConPTYProcess(
-            self.shell_path, self.cwd, shell_environment(self.shell, self.shell_path),
-            self.cols, self.rows,
-        )
+        with _pin_folder(self.cwd, self.cwd_root) as (cwd, _fds):
+            proc = windows_conpty.ConPTYProcess(
+                self.shell_path, cwd, shell_environment(self.shell, self.shell_path),
+                self.cols, self.rows,
+            )
         self._start_reader(proc, None, self._read_windows)
 
     def _read_windows(self, proc, _fd) -> None:
@@ -1046,7 +1134,8 @@ class TerminalRegistry:
 
     async def create(self, *, created_by: str, session_id: Optional[str] = None,
                      cwd: Optional[str] = None, shell: Optional[str] = None,
-                     cols: Optional[int] = None, rows: Optional[int] = None) -> Terminal:
+                     cols: Optional[int] = None, rows: Optional[int] = None,
+                     cwd_root: Optional[str] = None) -> Terminal:
         self._require_supported()
         shells = available_shells()
         if shell:
@@ -1071,6 +1160,7 @@ class TerminalRegistry:
             created_by=created_by, worker_id=worker["id"],
             cols=_clamp(cols, COLS_RANGE, DEFAULT_COLS), rows=_clamp(rows, ROWS_RANGE, DEFAULT_ROWS),
         )
+        terminal.cwd_root = cwd_root
         try:
             terminal.spawn()
         except OSError as exc:

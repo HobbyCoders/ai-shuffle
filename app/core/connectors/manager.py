@@ -198,6 +198,9 @@ class ConnectorManager:
 
             # Decrypt sensitive configuration fields
             config = self._decrypt_config(config, connector_type)
+            if connector_type == "msteams":
+                from app.core.connector_service import teams_runtime_config
+                config = teams_runtime_config(connector_id, config)
 
             # Look up the implementation class from the registry
             try:

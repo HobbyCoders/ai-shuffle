@@ -69,7 +69,7 @@ def promote_nightly(root, digest):
     verify_image(root, digest)
     # Reuse the exact owner/status/current-protected-main gate, not a new notion
     # of green. Recheck after the image pull, immediately before moving nightly.
-    ready, _ = gate.publication_readiness(gate.GitHub(), revision)
+    ready, _ = gate.exact_main_readiness(gate.GitHub(), revision)
     if not ready:
         raise ValueError("Nightly promotion requires a successful owner exact-main attestation")
     move_aliases(digest, ["nightly"])
