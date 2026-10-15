@@ -98,6 +98,81 @@ async def test_deferred_handoff_returns_before_work_finishes_and_scopes_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("refused", [False, True])
+async def test_two_peer_deferred_handoff_finishes_as_soon_as_source_is_ready(monkeypatch, refused):
+    """Both peers long-poll concurrently; receive -> begin is not a call loop.
+
+    Only Git/export work is replaced with a barrier. The deferred receipts,
+    reverse control dispatch, status waits and terminal error handling are real.
+    Full checkout/history transfer is covered by the pair tests below.
+    """
+    import asyncio
+    from collections import Counter
+    from contextvars import ContextVar
+    from types import SimpleNamespace
+    from app.network import runners
+
+    current = ContextVar("handoff_peer", default="source")
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(engine, "require_context", lambda: SimpleNamespace(member=lambda peer: member))
+    monkeypatch.setattr(runners, "find", lambda device: {"capabilities": {"handoff_poll": 1}})
+    monkeypatch.setattr(handoff, "_operations", {})
+    # Force at least one pending receipt on BOTH sides, without a ten-second test.
+    monkeypatch.setattr(handoff, "_POLL_WAIT_S", 0.01)
+    ready, both_polled = asyncio.Event(), asyncio.Event()
+    phases, polls = [], Counter()
+
+    async def work(payload, peer):
+        if payload["phase"] == "receive":
+            assert current.get() == "target" and peer == "source"
+            await handoff._call("source", {"session_id": "s1", "phase": "begin"}, timeout=600)
+            return {"moved": True}
+        assert payload["phase"] == "begin"
+        assert current.get() == "source" and peer == "target"
+        await ready.wait()
+        if refused:
+            raise ValueError(handoff.UNVERIFIED_CHECKOUT + " Reason: missing local checkout")
+        return {"exported": True}
+
+    async def call(device, action, body, **kwargs):
+        caller = current.get()
+        assert caller != device and action == "handoff"
+        phases.append((caller, device, body["phase"]))
+        token = current.set(device)
+        try:
+            result = await control.handle(action, body, from_device=caller)
+            if body["phase"] == "status" and result.get("operation"):
+                polls[device] += 1
+                if polls["source"] and polls["target"]:
+                    both_polled.set()
+            return result
+        finally:
+            current.reset(token)
+
+    monkeypatch.setattr(handoff, "_handle", work)
+    monkeypatch.setattr(control, "call", call)
+    move = asyncio.create_task(handoff._call("target", {"session_id": "s1", "phase": "receive"}, timeout=900))
+    try:
+        await asyncio.wait_for(both_polled.wait(), 2)
+        # Production wait is an upper bound, not a minimum latency per hop.
+        monkeypatch.setattr(handoff, "_POLL_WAIT_S", 10.0)
+        ready.set()
+        if refused:
+            with pytest.raises(ValueError, match="Reason: missing local checkout"):
+                await asyncio.wait_for(move, 2)
+        else:
+            assert await asyncio.wait_for(move, 2) == {"moved": True}
+        mutations = [phase for phase in phases if phase[2] != "status"]
+        assert mutations == [("source", "target", "receive"), ("target", "source", "begin")]
+        assert all(task.done() for task in handoff._operations.values())
+    finally:
+        tasks = [move, *handoff._operations.values()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_deferred_client_retries_only_status_and_surfaces_terminal_failure(monkeypatch):
     from unittest.mock import AsyncMock
     from app.network import runners

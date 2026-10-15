@@ -20,7 +20,9 @@ DIRECTORY = {"runners": [
 
 
 @pytest.fixture(autouse=True)
-def _clean(tmp_path):
+async def _clean(tmp_path, mock_db):
+    import asyncio
+
     sh._pending.clear()
     sh._running.clear()
     sh._waiting.clear()
@@ -31,10 +33,23 @@ def _clean(tmp_path):
             patch.object(sh, "_store_path", lambda: store, create=True), \
             patch.object(sh, "_queue_changed", AsyncMock()), \
             patch("app.core.turn_manager._kick"):
-        yield
-    sh._pending.clear()
-    sh._waiting.clear()
-    sh._moving.clear()
+        try:
+            yield
+        finally:
+            # Drain runners before their loop/DB closes or another test reuses
+            # s1. An old run_pending finally used to pop the NEW test's waiting
+            # move when GC collected its closed loop, making cancel return False.
+            sh._pending.clear()  # Prevent finally -> schedule from spawning more.
+            tasks = list(sh._tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            assert not sh._tasks
+            sh._waiting.clear()
+            sh._moving.clear()
+            sh._running.clear()
+            sh._delivering.clear()
+            sh._cancelling.clear()
 
 
 @pytest.mark.parametrize("error", [
@@ -640,6 +655,33 @@ async def test_rule2_held_messages_are_retried_while_the_new_worker_is_unreachab
         await sh.deliver_held("s1", "dev-gaming", "DesktopWorker")
     assert record.await_args.args[1] == ("Could not send 1 of your messages to DesktopWorker (it did not answer for "
                                          "1 minute): “two”. Send them again there.")
+
+
+async def test_scheduled_move_is_retained_while_waiting(monkeypatch):
+    """A runner must survive GC even when only its awaited future refers to it."""
+    import asyncio
+    import gc
+    import weakref
+
+    entered = asyncio.Event()
+    runners = []
+
+    async def wait_idle(sid, pending):
+        runners.append(weakref.ref(asyncio.current_task()))
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(sh, "_wait_idle", wait_idle)
+    with patch.object(sh, "busy_state", _Busy()), patch.object(sh, "_record", AsyncMock()):
+        await sh.queue_move("s1", "DesktopWorker")
+        await asyncio.wait_for(entered.wait(), 2)
+        gc.collect()
+        assert runners[0]() is not None
+        assert sh.pending_for("s1") is not None
+        assert (await sh.cancel_move("s1"))["cancelled"] is True
+        task = runners[0]()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_rule2_held_messages_are_sent_here_when_the_move_is_cancelled():
