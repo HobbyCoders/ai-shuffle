@@ -1489,6 +1489,18 @@ class HarnessAdapter(ProviderAdapter):
             if not task_id:
                 continue
             status = status_map.get(str(frame.get("status") or "completed"), "failed")
+            opts = self._options
+            session_id = (opts.extra or {}).get("app_session_id") if opts is not None else None
+            incarnation = frame.get("task_incarnation")
+            guard = None
+            if session_id and incarnation:
+                from app.core.task_registry import task_registry
+
+                guard = lambda sid=session_id, tid=str(task_id), token=incarnation: (
+                    task_registry.matches_task_incarnation(sid, tid, token)
+                )
+                if not guard():
+                    continue
             await self._engine.submit(BackgroundTaskFinished(
                 task_id=str(task_id),
                 status=status,
@@ -1496,6 +1508,7 @@ class HarnessAdapter(ProviderAdapter):
                 worker_session_id=str(task_id),
                 wake=False,
                 report_path=self._frame_report_path(str(task_id), frame),
+                is_current=guard,
             ))
 
     def _frame_report_path(

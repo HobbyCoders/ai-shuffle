@@ -921,6 +921,8 @@ class TurnRecorder:
                     description=frame.get("description"),
                     summary=frame.get("summary"),
                     tool_use_id=tool_use_id,
+                    extra_payload=({"task_incarnation": frame["task_incarnation"]}
+                                   if frame.get("task_incarnation") else None),
                     **kind,
                     **_registry_worker(self.session_id, task_id),
                 ))
@@ -1386,16 +1388,26 @@ class TurnRecorder:
             self._superseded_dropped += len(events)
             return
         try:
-            if self.run_id is not None and self.fence_token is not None:
-                await asyncio.to_thread(
-                    session_events_db.append_events,
-                    self.session_id, events,
-                    run_id=self.run_id, fence_token=self.fence_token,
-                )
-            else:
-                await asyncio.to_thread(
-                    session_events_db.append_events, self.session_id, events
-                )
+            def append_current_events():
+                from app.core.task_registry import task_registry
+
+                # The recorder lock and executor admission can both yield.
+                # Recheck HERE, immediately before the synchronous card append,
+                # not against the snapshot taken before either wait.
+                current = []
+                for event in events:
+                    payload = event.get("payload") or {}
+                    if task_registry.matches_task_incarnation(
+                        self.session_id, payload.get("task_id"), payload.get("task_incarnation"),
+                    ):
+                        current.append(event)
+                if not current:
+                    return
+                fence = ({"run_id": self.run_id, "fence_token": self.fence_token}
+                         if self.run_id is not None and self.fence_token is not None else {})
+                session_events_db.append_events(self.session_id, current, **fence)
+
+            await asyncio.to_thread(append_current_events)
             self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))

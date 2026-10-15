@@ -218,12 +218,16 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
 
         async with self._background_lock:
             await self._rehydrate_background_lifecycle_unlocked()
+            if op.is_current is not None and not op.is_current():
+                return
             if op.task_id not in self._background_terminal:
                 if op.task_id in self._background_pending:
                     await self._finalize_background_task_unlocked(op)
                 elif op.task_id not in self._background_early:
-                    self._background_early[op.task_id] = op
                     meta = await self._ensure_session()
+                    if op.is_current is not None and not op.is_current():
+                        return
+                    self._background_early[op.task_id] = op
                     await self._emit(SubagentEvent(
                         session_id=meta.session_id,
                         turn_id=self._active_turn_id,
@@ -246,6 +250,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self, op: BackgroundTaskFinished
     ) -> None:
         meta = await self._ensure_session()
+        if op.is_current is not None and not op.is_current():
+            return
         receipt = self._background_pending.pop(op.task_id, None)
         worker_session_id = op.worker_session_id or (
             receipt.worker_session_id if receipt is not None else None

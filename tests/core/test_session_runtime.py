@@ -2273,7 +2273,7 @@ async def test_task_notification_receipt_settles_the_card_and_latches(mock_db):
         )
 
     recorder.record_task_terminal.assert_awaited_once_with(frames)
-    delivered.assert_called_once_with("sn3", ["bg-1"])
+    delivered.assert_called_once_with("sn3", ["bg-1"], frames=frames)
     assert rt._task_steers == {}
 
 
@@ -2450,7 +2450,7 @@ async def test_wake_turn_latches_terminal_notified(mock_db):
             outcome = await session_runtime.SessionRuntime(turn).execute()
 
     assert outcome == "completed"
-    delivered.assert_called_once_with("sn5", ["shell-5"])
+    delivered.assert_called_once_with("sn5", ["shell-5"], frames=frames)
 
 
 async def test_plain_turn_latches_nothing(mock_db):

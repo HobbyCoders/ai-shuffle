@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 def _op_id() -> str:
@@ -139,6 +139,9 @@ class BackgroundTaskFinished(Op):
     # summary costs HistoryExpand round-trips to recover something that was
     # never in history to begin with.
     report_path: str | None = None
+    # In-process host fence. Rechecked after lock/session awaits immediately
+    # before terminal mutation; never persisted as part of an event.
+    is_current: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(kw_only=True)
