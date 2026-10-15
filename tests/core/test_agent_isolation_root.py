@@ -93,6 +93,11 @@ async def main():
         out["monitor"][path] = await monitor(command)
     out["control_bash"] = await bash("cat " + os.path.join(data, "notes", "todo.md"))
     out["control_monitor"] = await monitor("cat " + os.path.join(data, "notes", "todo.md"))
+    if os.path.exists(os.path.join(os.path.dirname(runner), "workload.py")):
+        import shlex
+        command = shlex.join([sys.executable, os.path.join(os.path.dirname(runner), "workload.py")])
+        out["workflow_bash"] = await bash(command)
+        out["workflow_monitor"] = await monitor(command)
     out["status"] = await bash("grep -E '^(Uid|Gid|Groups|NoNewPrivs):' /proc/self/status")
     with private_storage.service_files():
         out["app_reads"] = open(os.path.join(data, "managed-postgres.json")).read()
@@ -170,7 +175,15 @@ def _protected(data):
         [data / name / inner for name, inner in DIRS.items()]
 
 
-def test_agent_shells_are_denied_every_protected_entry(fixture):
+@pytest.mark.parametrize("workflows", [False, True], ids=["security", "workflows"])
+def test_agent_shells_are_denied_every_protected_entry(fixture, workflows):
+    if workflows:
+        for command in ("git", "npm", "node"):
+            if not shutil.which(command):
+                pytest.skip(f"root workflow smoke requires {command}")
+        workload = fixture / "workload.py"
+        shutil.copyfile(REPO / "scripts/ci/agent_isolation_workload.py", workload)
+        workload.chmod(0o644)
     iso = _load_isolation()
     ident = iso.Identity(PUID, PGID, SUID, SGID)
     data = fixture / "data"
@@ -188,7 +201,9 @@ def test_agent_shells_are_denied_every_protected_entry(fixture):
          str(PUID), str(PGID), str(SUID), str(SGID), json.dumps(paths)],
         cwd=fixture, capture_output=True, text=True, timeout=300,
         env={"PATH": os.environ.get("PATH", os.defpath), "HOME": str(fixture / "home"),
-             "DATA_DIR": str(fixture / "work" / "appdata"), "LANG": "C.UTF-8"})
+             "DATA_DIR": str(fixture / "work" / "appdata"), "LANG": "C.UTF-8",
+             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
     lines = [line for line in result.stdout.splitlines() if line.startswith("RESULT ")]
     assert lines, result.stdout[-4000:] + result.stderr[-4000:]
     out = json.loads(lines[-1][len("RESULT "):])
@@ -198,6 +213,9 @@ def test_agent_shells_are_denied_every_protected_entry(fixture):
         assert "Permission denied" in out["monitor"][path], (path, out["monitor"][path])
         assert "fixture" not in out["bash"][path] and "fixture" not in out["monitor"][path]
     assert "agent-readable" in out["control_bash"] and "agent-readable" in out["control_monitor"]
+    if (fixture / "workload.py").exists():
+        for tool in ("bash", "monitor"):
+            assert "ISOLATION_WORKFLOW_OK" in out[f"workflow_{tool}"], out[f"workflow_{tool}"]
     status = out["status"]
     assert f"Uid:\t{PUID}\t{PUID}\t{PUID}\t{PUID}" in status
     assert f"Gid:\t{PGID}\t{PGID}\t{PGID}\t{PGID}" in status

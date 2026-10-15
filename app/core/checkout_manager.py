@@ -1256,7 +1256,9 @@ def sever_runtime_links(dest_root: str) -> Dict[str, List[str]]:
             with os.scandir(directory) as entries:
                 for entry in entries:
                     candidate = Path(entry.path)
-                    info = entry.stat(follow_symlinks=False)
+                    # Windows DirEntry.stat() reports st_dev=0; compare lstat
+                    # metadata on both sides without following junctions.
+                    info = candidate.lstat()
                     if _is_directory_link(candidate, info):
                         _remove_directory_link(candidate)
                         summary["severed"].append(str(candidate.relative_to(dest)))
