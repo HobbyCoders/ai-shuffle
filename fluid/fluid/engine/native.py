@@ -2797,9 +2797,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._emit_pre_compact(sid, turn_id, promotions)
             tail = self._note_rewrite_tail(self._compactor.view(nodes), promotions)
             for promo in promotions:
-                await self._emit_compaction(sid, turn_id, promo, rewrite_tail_tokens_est=tail, batch_final=False)
+                await self._emit_compaction(
+                    sid, turn_id, promo, node_id=nodes[-1].node_id if nodes else None,
+                    rewrite_tail_tokens_est=tail, batch_final=False,
+                )
             await self._emit(ContextCompaction(
                 session_id=sid, turn_id=turn_id,
+                node_id=nodes[-1].node_id if nodes else None,
                 tier=max(p.tier for p in promotions),
                 reason=MANUAL_COMPACT_REASON,
                 context_window=self.context_window or 0,
@@ -3348,9 +3352,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         rewrite_tail_tokens_est: int | None = None,
         batch_final: bool = True,
         batch_before_tokens: int = 0,
+        node_id: str | None = None,
     ) -> None:
         await self._emit(ContextCompaction(
-            session_id=sid, turn_id=turn_id,
+            session_id=sid, turn_id=turn_id, node_id=node_id,
             tier=promo.tier, reason=promo.reason,
             trimmed=[list(p) for p in promo.trimmed],
             spans=[list(s) for s in promo.spans],
@@ -3584,7 +3589,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             tail = self._note_rewrite_tail(rendered, promotions) if promotions else None
             for index, promo in enumerate(promotions):
                 await self._emit_compaction(
-                    sid, turn_id, promo,
+                    sid, turn_id, promo, node_id=nodes[-1].node_id if nodes else None,
                     schedule=schedule_fields, rewrite_tail_tokens_est=tail,
                     batch_final=index == len(promotions) - 1,
                     batch_before_tokens=promotions[0].before_tokens,
@@ -3926,6 +3931,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         for index, promo in enumerate(consumed):
                             await self._emit_compaction(
                                 sid, turn_id, promo, rewrite_tail_tokens_est=tail,
+                                node_id=nodes[-1].node_id if nodes else None,
                                 batch_final=index == len(consumed) - 1,
                                 batch_before_tokens=consumed[0].before_tokens,
                             )
@@ -3964,6 +3970,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         for index, promo in enumerate(escalations):
                             await self._emit_compaction(
                                 sid, turn_id, promo, rewrite_tail_tokens_est=tail,
+                                node_id=nodes[-1].node_id if nodes else None,
                                 batch_final=index == len(escalations) - 1,
                                 batch_before_tokens=escalations[0].before_tokens,
                             )

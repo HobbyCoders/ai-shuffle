@@ -226,6 +226,10 @@ async def test_multi_promotion_batch_records_one_card(mock_db, monkeypatch):
         [row] = [r for r in session_events.get_events(sid)
                  if r["event_type"] == "system.compaction_boundary"]
         assert row["payload"]["data"] == card.data
+        query = (await loop.store.load_path(loop.session_id))[-2]
+        assert query.message.text() == "next question"
+        assert all(e.node_id == query.node_id for e in promotions)
+        assert card.data["compaction_after_node_id"] == query.node_id
         assert card.data["compact_metadata"] == {
             "trigger": "auto", "pre_tokens": promotions[0].before_tokens,
             "post_tokens": promotions[-1].after_tokens, "context_window": 100_000,

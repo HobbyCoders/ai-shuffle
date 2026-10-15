@@ -338,7 +338,12 @@ class ContextCompaction(Event):
     """A batch promotion in the mechanical eviction ladder (view-level; the
     stored tree keeps full fidelity). Carries the DECISIONS, not the digest
     text — rendering is deterministic, so replaying these events rehydrates a
-    byte-identical view after a restart."""
+    byte-identical view after a restart.
+
+    ``node_id`` anchors this boundary AFTER the last transcript node present
+    when compaction ran. Older native events have no anchor; their timestamps
+    remain a best-effort display fallback. No transcript node is added or edited.
+    """
 
     tier: int  # highest rung this batch reached: 1 trim | 2 digest | 3 epoch
     # "trigger" (crossed the size threshold) | "overflow" (provider rejected the
@@ -368,8 +373,8 @@ class ContextCompaction(Event):
     # ``before_tokens`` is only what the previous rung left. 0 when unknown.
     batch_before_tokens: int = 0
     # The delegated leg only: the summary the claude CLI wrote for this
-    # compaction, read back from its transcript, and ``node_id`` names the
-    # last node the CLI had seen before it (``None`` between turns). The CLI's
+    # compaction, read back from its transcript. Its ``node_id`` follows the
+    # same boundary convention (``None`` between turns). The CLI's
     # transcript lives on one worker; these are what let a CLI elsewhere be
     # re-seeded from the compacted context instead of the whole tree. "" when
     # the summary could not be read, and on every older event.

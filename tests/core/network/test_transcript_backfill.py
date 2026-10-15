@@ -141,6 +141,32 @@ async def test_backfill_copies_every_transcript_newest_first(workers, monkeypatc
         assert transcripts.serve(a.device_id, [{"id": "new", "after": 0}])["parts"]
 
 
+@pytest.mark.parametrize("anchored", [False, True])
+async def test_compaction_card_fields_survive_live_sync_and_backfill(workers, monkeypatch, anchored):
+    a, b = joining(workers)
+    data = {"compact_metadata": {"trigger": "auto", "pre_tokens": 5000},
+            "compaction_event_id": "fluid-session:12", "compaction_event_ts": 1000.0}
+    if anchored:
+        data["compaction_after_node_id"] = "query-node"
+    payload = {"type": "system", "subtype": "compact_boundary", "data": data}
+    with a.active():
+        events_db.append_events("new", [{"type": "system.compaction_boundary", "payload": payload}])
+        catalog.publish_events(recent_only=False, limit=100_000)
+    served = ServedBy(a, "https://a.example.com")
+    await first_copy(a, b, served)
+    assert await backfill(b, served, monkeypatch)
+    assert transcript(b, "new") == transcript(a, "new")
+    assert transcript(b, "new")[-1][1]["data"] == data
+    # The ordinary live stream carries the same optional field, without a new
+    # protocol version. Old cards remain valid and old peers preserve the JSON.
+    with a.active():
+        events_db.append_events("new", [{"type": "system.compaction_boundary", "payload": payload}])
+        catalog.publish_events(recent_only=False, limit=100_000)
+    exchange(a, b)
+    assert transcript(b, "new") == transcript(a, "new")
+    assert transcript(b, "new")[-1][1]["data"] == data
+
+
 async def test_an_opened_session_is_copied_next(workers):
     a, b = joining(workers)
     served = ServedBy(a, "https://a.example.com")

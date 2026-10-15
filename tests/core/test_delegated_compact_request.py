@@ -198,7 +198,8 @@ async def test_compact_reaches_the_cli_bare_and_shows_its_card(monkeypatch, tmp_
         # No /context breakdown seen: the count is labelled as history only.
         "post_tokens_basis": "history",
     }, "compaction_event_id": f"{boundary.session_id}:{boundary.seq}",
-        "compaction_event_ts": boundary.ts}]
+        "compaction_event_ts": boundary.ts,
+        "compaction_after_node_id": boundary.node_id}]
     assert _system(messages, "compact_failed") == []
 
 

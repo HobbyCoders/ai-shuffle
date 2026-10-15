@@ -432,6 +432,9 @@ async def test_context_overflow_escalates_the_ladder() -> None:
     overflow = [e for e in events if isinstance(e, ContextCompaction)
                 and e.reason == "overflow"]
     assert [e.tier for e in overflow] == [1, 2, 3]  # the full ladder, in order
+    query = (await loop.store.load_path(loop.session_id))[-1]
+    assert query.message.text() == "doomed turn"
+    assert all(e.node_id == query.node_id for e in overflow)
     assert any(isinstance(e, ErrorEvent) for e in events)  # 4th overflow surfaces
     # Retry 2 saw digests; retry 3 saw the epoch stub.
     def _flat(request) -> str:

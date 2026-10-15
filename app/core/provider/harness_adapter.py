@@ -3987,6 +3987,9 @@ class HarnessAdapter(ProviderAdapter):
         stamp = getattr(event, "ts", 0)
         if stamp:
             data["compaction_event_ts"] = stamp
+        node_id = getattr(event, "node_id", None)
+        if isinstance(node_id, str) and node_id:
+            data["compaction_after_node_id"] = node_id
         return [SystemMessage(subtype="compact_boundary", data=data)]
 
     # ─── Per-turn usage roll-up (ErrorEvent billing backstop) ─────────

@@ -871,6 +871,12 @@ async def test_engine_compacts_emits_event_and_rehydrates(tmp_path) -> None:
     events = loop.bus.log(sid)
     compactions = [e for e in events if isinstance(e, ContextCompaction)]
     assert compactions and all(e.reason == "trigger" for e in compactions)
+    nodes = {n.node_id: n for n in await store.load_path(sid)}
+    assert all(e.node_id in nodes and nodes[e.node_id].message.role == "user"
+               for e in compactions)
+    persisted = [e for e in await JsonlStore(tmp_path).events_since(sid, 0)
+                 if isinstance(e, ContextCompaction)]
+    assert [e.node_id for e in persisted] == [e.node_id for e in compactions]
     last_request = provider.requests[-1]
     assert "compacted turn" in _request_texts(last_request)
 

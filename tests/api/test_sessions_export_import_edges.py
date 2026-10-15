@@ -66,6 +66,17 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
     from tests.core.test_native_compact_adapter import _multi_promotion_turn
     from app.core.provider.fluid_transcript import fluid_transcript_entries
 
+    from types import SimpleNamespace
+    from fluid.engine import native
+    from fluid.events import bus
+    from fluid.events.model import ContextCompaction
+    from fluid.store.base import SessionNode
+
+    # Freeze the producing clocks, not persisted nodes: coarse clocks can give
+    # the new query, every promotion, and its answer exactly the same instant.
+    stamp = 1_800_000_000.0
+    monkeypatch.setattr(native, "SessionNode", lambda **kw: SessionNode(ts=stamp, **kw))
+    monkeypatch.setattr(bus, "time", SimpleNamespace(time=lambda: stamp))
     _key()
     sid, adapter, loop, _ = await _multi_promotion_turn(mock_db, monkeypatch, profile_id="agent-a")
     try:
@@ -73,6 +84,13 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
         from app.db import session_events
         [record] = [r for r in session_events.get_events(sid)
                     if r["event_type"] == "system.compaction_boundary"]
+        query, answer = nodes[-2:]
+        assert query.message.text() == "next question"
+        assert query.ts == answer.ts == record["payload"]["data"]["compaction_event_ts"] == stamp
+        assert record["payload"]["data"]["compaction_after_node_id"] == query.node_id
+        promotions = [e for e in await loop.store.events_since(loop.session_id, -1)
+                      if isinstance(e, ContextCompaction)]
+        assert promotions and all(e.node_id == query.node_id and e.ts == stamp for e in promotions)
         # Prove export whitelisting excludes future/legacy summary additions,
         # not just that today's producer happens to omit them.
         record["payload"]["data"]["summary"] = "summary-must-not-appear"

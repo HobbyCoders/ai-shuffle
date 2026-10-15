@@ -93,6 +93,38 @@ def _seed(session_id="ses_fixture"):
     return session_id
 
 
+@pytest.mark.parametrize("anchor", ["u2", None, "missing", ["malformed"]])
+@pytest.mark.parametrize("card_stamp", [1000.0, 2000.0])
+def test_splice_compaction_uses_node_anchor_then_legacy_tie_fallback(mock_db, anchor, card_stamp):
+    from app.core.provider.fluid_transcript import _splice_compaction_cards
+    from app.db import database, session_events
+
+    database.create_session("cards", "default")
+    database.update_session("cards", sdk_session_id="fluid-cards")
+    data = {"compact_metadata": {"trigger": "auto"}, "compaction_event_ts": card_stamp}
+    if anchor is not None:
+        data["compaction_after_node_id"] = anchor
+    session_events.append_events("cards", [
+        {"type": "system.compaction_boundary", "payload": {
+            "subtype": "compact_boundary", "data": data}},
+        {"type": "system.compaction_boundary", "payload": {
+            "subtype": "compact_boundary", "data": data}},
+    ])
+    # Two different queries at the same instant: sorting after the first tied
+    # user is insufficient. Anchors must also override a misleading clock.
+    entries = [{"uuid": uuid, "type": role, "timestamp": "1970-01-01T00:16:40+00:00"}
+               for uuid, role in [("u1", "user"), ("a1", "assistant"),
+                                  ("u2", "user"), ("a2", "assistant")]]
+    before = [dict(e) for e in entries]
+    result = _splice_compaction_cards(entries, "fluid-cards")
+    cards = [e for e in result if e.get("subtype") == "compact_boundary"]
+    assert [e["uuid"] for e in cards] == [r["id"] for r in session_events.get_events("cards")]
+    slot = 3 if anchor == "u2" else (1 if card_stamp == 1000.0 else 4)
+    assert result == entries[:slot] + cards + entries[slot:]
+    assert entries == before
+    assert all(set(card["data"]) == {"compact_metadata"} for card in cards)
+
+
 def test_fixture_matches_real_fluid_serialization():
     """The hand-written fixture JSON must equal what fluid actually persists."""
     pytest.importorskip("fluid")
