@@ -4,6 +4,7 @@ import path from 'node:path';
 import { SourceUpdates, type RestoreDatabaseFactory } from './source-updates';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
 import { quiesceRecordedWorker } from './worker';
+import { ColdClusterCopy } from './database-restore';
 import { saveInstalledHost, launchInstalledSource, installedLaunchArgs, installedExecutable, requireInstalledElectron, InstallerRequired } from './installed-host';
 import { countLauncherStart, launcherTrial, parseLauncher, restoreLauncher, LAUNCHER_FILE } from './launcher-swap';
 
@@ -55,21 +56,18 @@ async function startWith(root: string, userData: string, baseline: { revision: s
     bootstrapNode: path.join(process.resourcesPath, process.platform === 'win32' ? 'worker/node/node.exe' : 'worker/node/bin/node'),
   });
   await updates.load();
-  const database: RestoreDatabaseFactory = async previous => {
-    // Never use the failed update's native runtime to open the previous cluster.
+  // Copy validation and committed cleanup only use fixed filesystem paths. A
+  // replacement installer may have removed the bundled version that made them.
+  const database: RestoreDatabaseFactory = async previous => new ColdClusterCopy(path.join(userData, 'postgres'), async snapshot => {
+    // Resolve binaries ONLY for a real snapshot/restore, never for cleanup.
     const resources = previous === baseline.revision ? process.resourcesPath : (await updates.application(previous)).resources;
     const binaries = resolvePostgresBinaries({ packaged: true, resourcesPath: resources });
     if ('error' in binaries) throw new Error(binaries.error);
     const postgres = new PostgresSupervisor({ binaries, root: path.join(userData, 'postgres'), logDir: path.join(userData, 'logs'),
       credentials: { load: () => null, save: async () => { throw new Error('Rollback must never change database credentials'); } } });
-    const copy = postgres.updateRestorePoint();
-    return {
-      validate: () => copy.validate(),
-      snapshot: async () => { await quiesceRecordedWorker(path.join(userData, 'worker')); await copy.snapshot(); },
-      restore: async () => { await quiesceRecordedWorker(path.join(userData, 'worker')); await copy.restore(); },
-      discard: () => copy.discard(),
-    };
-  };
+    await quiesceRecordedWorker(path.join(userData, 'worker'));
+    await postgres.quiesce(snapshot);
+  });
   try { await updates.recoverRollback(database); }
   catch (error) {
     // Keep the journal and migration fence. The owner can retry restoration, never a source-only rollback.

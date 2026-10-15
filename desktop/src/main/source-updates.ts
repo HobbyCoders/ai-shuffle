@@ -750,6 +750,13 @@ export class SourceUpdates {
     if (!revision || this.blocked || this.hasMigrationRisk) return;
     const existing = await this.journal();
     if (existing) {
+      if (existing.phase === 'committed' || (existing.phase === 'ready' && this.state.active === existing.revision && !this.state.booting)) {
+        // Cleanup failed last time. Keep running the healthy build; do not
+        // overwrite its retained point or activate an update without a new one.
+        this.state.staged = revision; delete this.state.pending; await this.save();
+        console.warn('Database restore point cleanup is pending; update activation deferred');
+        return;
+      }
       if (existing.phase === 'ready' && existing.revision === revision) {
         await (await database(existing.previous)).validate();
         return;
@@ -801,10 +808,16 @@ export class SourceUpdates {
       if (j.phase !== 'ready' || this.state.active !== j.revision || this.state.booting) {
         throw new Error('Restore point does not belong to the confirmed healthy build; cleanup refused');
       }
-      j.phase = 'committed'; await durableJson(this.journalFile, j);
     }
-    await (await database(j.previous)).discard();
-    await fs.rm(this.journalFile); await syncDirectory(this.options.root);
+    try {
+      if (j.phase !== 'committed') { j.phase = 'committed'; await durableJson(this.journalFile, j); }
+      await (await database(j.previous)).discard();
+      await fs.rm(this.journalFile); await syncDirectory(this.options.root);
+    } catch (error) {
+      // The data and build are already promoted. A locked file or missing old
+      // runtime must not turn garbage collection into a startup failure.
+      console.warn('Database restore point cleanup deferred until the next launch:', error);
+    }
   }
   private async assertRestoreProvenance(j: RestoreJournal): Promise<void> {
     // Refresh the durable fence: another lifecycle step may have advanced it
@@ -858,7 +871,7 @@ export class SourceUpdates {
       await this.save();
       await this.readMigrationFloor();
       j.phase = 'committed'; await durableJson(this.journalFile, j);
-      await db.discard(); await fs.rm(this.journalFile); await syncDirectory(this.options.root);
+      await this.finishRollback(database);
       return true;
     }
     return false;

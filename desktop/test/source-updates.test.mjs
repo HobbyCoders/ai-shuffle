@@ -59,7 +59,8 @@ async function installedLauncher(f, rejectRevision = null, {baseline={revision:A
   if(id==='node:path')return path;
   if(id==='node:fs')return {promises:{...fs,readFile:async file=>file.endsWith('desktop-build.json')?JSON.stringify(baseline):file.endsWith('application-update-key.pem')?f.options.publicKey:fs.readFile(file,'utf8')}};
   if(id==='./source-updates')return {SourceUpdates:InstalledUpdates};
-  if(id==='./postgres')return {resolvePostgresBinaries:()=>({}),PostgresSupervisor:class {updateRestorePoint(){return {validate:async()=>{},snapshot:async()=>events.push('snapshot'),restore:async()=>events.push('restore'),discard:async()=>events.push('discard')};}}};
+  if(id==='./postgres')return {resolvePostgresBinaries:()=>({}),PostgresSupervisor:class {async quiesce(){}}};
+  if(id==='./database-restore')return {ColdClusterCopy:class {constructor(_root,quiesce){this.quiesce=quiesce;}async validate(){}async snapshot(){await this.quiesce(true);events.push('snapshot');}async restore(){await this.quiesce(false);events.push('restore');}async discard(){events.push('discard');}}};
   if(id==='./worker')return {quiesceRecordedWorker:async()=>events.push('quiesce')};
   if(id==='./launcher-swap')return require('../dist/main/launcher-swap.js');
   if(id==='./installed-host')return {InstallerRequired,installedExecutable:()=>'/test/AI Shuffle.AppImage',saveInstalledHost:async()=>{},requireInstalledElectron:async()=>{}};
@@ -100,6 +101,30 @@ test('restore journal: baseline C supersedes unused A-to-B snapshot without ever
  assert.deepEqual(calls,['snapshot','discard']);
  assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
  assert.equal(installed.version,C);
+});
+test('restore journal: bundled A cleanup survives replacement by C and does not need A files or binaries',async t=>{
+ const {f,u,factory}=await rollbackFixture(t,{baseline:true});await u.prepareRollback(factory);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',A,'release.json')),{code:'ENOENT'});
+ f.options.baseline={revision:C,sequence:300};const installer=f.create();await installer.load();await installer.useNewerBaseline();
+ const pgroot=path.join(f.root,'pg');await fs.mkdir(path.join(pgroot,'update-snapshot'),{recursive:true});
+ const {ColdClusterCopy}=require('../dist/main/database-restore.js');let runtimeReads=0;
+ const cleanup=async()=>new ColdClusterCopy(pgroot,async()=>{runtimeReads++;throw Error('bundled A no longer exists');});
+ const restart=f.create();await restart.load();await restart.recoverRollback(cleanup);
+ assert.equal(runtimeReads,0);assert.equal(restart.version,C);assert.equal(restart.blocked,false);
+ await assert.rejects(fs.stat(path.join(f.root,'restore-point.json')),{code:'ENOENT'});
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+});
+test('restore journal: failed committed cleanup never blocks healthy startup and defers another activation',async t=>{
+ const {f,u,factory,db,journal}=await rollbackFixture(t,{baseline:true});await u.prepareRollback(factory);
+ f.options.baseline={revision:C,sequence:300};const installer=f.create();await installer.load();await installer.useNewerBaseline();
+ db.discard=async()=>{throw Error('locked snapshot');};
+ const restart=f.create();await restart.load();await restart.recoverRollback(factory);
+ assert.equal(restart.version,C);assert.equal(restart.blocked,false);assert.equal((await journal()).phase,'committed');
+ // Even a factory itself failing is cleanup-only and may not block startup.
+ await restart.recoverRollback(async()=>{throw Error('unavailable cleanup');});
+ const next=f.create();await next.load();const newer='d'.repeat(40);await f.release(newer,null,{sequence:400});await next.download();await next.prepareRollback(factory);
+ assert.equal(next.version,C);const deferred=JSON.parse(await fs.readFile(path.join(f.root,'state.json')));assert.equal(deferred.pending,undefined);assert.equal(deferred.staged,newer);
+ db.discard=async()=>{};await next.recoverRollback(factory);await assert.rejects(fs.stat(path.join(f.root,'restore-point.json')),{code:'ENOENT'});
 });
 test('restore journal: stale snapshot cannot lower newer baseline floor, even via forced recovery or healthy callback',async t=>{
  const {f,u,factory,calls}=await rollbackFixture(t);await u.prepareRollback(factory);await u.select();await u.databaseStarting();await u.failed();
@@ -210,7 +235,7 @@ test('restore journal: healthy promotion and cleanup interruption keep the new b
  const {f,u,db,factory,calls,journal}=await rollbackFixture(t);
  await u.prepareRollback(factory); await u.select(); await u.databaseStarting(); await u.healthy();
  db.discard=async()=>{throw Error('file locked');};
- await assert.rejects(u.recoverRollback(factory),/file locked/); assert.equal((await journal()).phase,'committed');
+ await u.recoverRollback(factory); assert.equal((await journal()).phase,'committed');
  db.discard=async()=>calls.push('discard');
  const restart=f.create(); await restart.load(); await restart.recoverRollback(factory);
  assert.equal((await restart.select()).revision,B); assert.deepEqual(calls,['snapshot','discard']);

@@ -27,6 +27,7 @@ function fixture({restoreVersion=null,restoreAlwaysFails=false,locked=true,sourc
   if(id==='./source-updates')return {SourceUpdates};if(id==='./installed-host')return host;
   if(id==='./postgres')return {};
   if(id==='./worker')return {};
+  if(id==='./database-restore')return {};
   if(id==='./installer-updates')return {installerPlatform:()=>platform==='linux'?'linux':null,InstallerUpdates:class {
    constructor(options){events.push(['installer-options',options]);}async check(){events.push('installer-check');if(installerError)throw Error('Offline');return {kind:'available'};}async download(){events.push('installer-download');return {file:'verified-installer.AppImage',version:'0.9.2'};}
   }};
