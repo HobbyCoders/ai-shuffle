@@ -172,8 +172,12 @@ publication. Every executable helper and Wrangler's install/lockfile comes from
 the workflow-main control checkout, with a trusted working directory. Candidate
 root and revision are explicit data arguments to an isolated Python reader; it
 uses trusted archive/version/sequence logic and parses runtime capability
-literals without executing candidate Python. Signing credentials never reach
-these readers. The archive and runtime declarations still come from the selected
+literals without executing candidate Python. Optional `OVERLAYS` declarations
+use the same bounded blob/AST reader, strict descriptor validation and trusted
+runtime-hash logic. Nonempty overlays add `runtime-overlays-v1` before signing;
+the descriptors are included in the signed container contract and image record,
+not counted as runtimes baked into the image. With no overlays, the contract is
+unchanged. Signing credentials never reach these readers. The archive and runtime declarations still come from the selected
 exact revision, not the control tree. The publisher compares the
 verified feed to the actual database lane and atomically compares-and-swaps that
 lane on insert, in addition to requiring a signed sequence above every prior

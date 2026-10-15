@@ -13,12 +13,14 @@ Every action prints one JSON value:
   sequence      integer: committed candidate container sequence
   signing-floor object: {floor: integer, old_repository_id: integer|null}
   contract      object: {runtime: string, requires: string[], recommends: string[]}
-                Candidate REQUIRES/RECOMMENDS are read as literal AST data;
-                the runtime hash algorithm is trusted control code.
+                Candidate REQUIRES/RECOMMENDS and optional OVERLAYS are bounded
+                literal AST data. Validated overlays add runtime-overlays-v1 to
+                requires before trusted control code derives the runtime hash.
   image-record  object: {format: 2, revision: string, sequence: integer,
                 runtime: string, provides: string[], source_tree: string}; reads
                 candidate PROVIDES literals, committed sequence and Git tree,
-                deriving runtime with the trusted image-record algorithm.
+                deriving runtime with the trusted image-record algorithm. Includes
+                validated candidate overlays when present (not baked capabilities).
 No candidate module is imported, including the candidate's archive/sequence code.
 The Node publisher selects the same candidate with:
   node <control>/desktop/scripts/publish-source.mjs --source-root <candidate>
@@ -31,7 +33,8 @@ import argparse
 import ast
 import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 import re
 import subprocess
 
@@ -64,7 +67,7 @@ def capability_source(root, revision):
     return raw
 
 
-def capability_literals(root, revision, fields):
+def capability_literals(root, revision, fields, *, include_overlays=False):
     # Capability declarations are data. In particular do NOT exec the
     # candidate's update_contract.py (even under an empty globals dictionary).
     raw = capability_source(root, revision)
@@ -76,27 +79,88 @@ def capability_literals(root, revision, fields):
         if count > MAX_CAPABILITY_AST_NODES:
             raise ValueError("Candidate capability module exceeds the AST node limit")
     values = {}
+    wanted = set(fields) | ({"OVERLAYS"} if include_overlays else set())
     for node in tree.body:
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name) and node.target.id in wanted:
+            raise ValueError("Candidate needs a plain literal capability assignment")
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in fields:
+                if isinstance(target, ast.Name) and target.id in wanted:
                     if target.id in values:
                         raise ValueError("Duplicate container capability declaration")
                     names = ast.literal_eval(node.value)
+                    if target.id == "OVERLAYS":
+                        values[target.id] = names
+                        continue
                     if (not isinstance(names, (tuple, list)) or len(names) > 32
                             or any(not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,39}", name) for name in names)):
                         raise ValueError("Invalid container capability declaration")
                     values[target.id] = sorted(set(names))
-    if set(values) != set(fields):
+    if not set(fields) <= set(values):
         raise ValueError("Candidate needs literal declarations: " + ", ".join(fields))
+    if include_overlays:
+        values["OVERLAYS"] = validate_overlays(values.get("OVERLAYS", ()), values.get("REQUIRES", []))
     return values
 
 
-def contract(root, revision):
-    values = capability_literals(root, revision, ("REQUIRES", "RECOMMENDS"))
+def validate_overlays(overlays, requires):
+    """Stdlib-only trust boundary; do not import the candidate or its updater."""
+    if not isinstance(overlays, (tuple, list)) or len(overlays) > 16:
+        raise ValueError("Invalid overlay declaration count/type")
+    required = {"kind", "capability", "platform", "url", "sha256", "size", "unpacked_size", "executable"}
+    seen = set()
+    for item in overlays:
+        if not isinstance(item, dict) or not required <= item.keys() or item.keys() - required - {"library_path"}:
+            raise ValueError("Invalid overlay fields")
+        if item["kind"] not in ("python", "node", "chromium", "tools"):
+            raise ValueError("Invalid overlay runtime kind")
+        capability = item["capability"]
+        if (not isinstance(capability, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,39}", capability)
+                or not capability.startswith(item["kind"] + "-") or capability not in requires):
+            raise ValueError("Overlay must provide a required namespaced capability")
+        if item["platform"] not in ("linux-x86_64", "linux-aarch64"):
+            raise ValueError("Invalid overlay architecture")
+        identity = (item["platform"], item["kind"])
+        if identity in seen:
+            raise ValueError("Duplicate overlay runtime/architecture")
+        seen.add(identity)
+        if not isinstance(item["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"]):
+            raise ValueError("Invalid overlay SHA-256")
+        for name, maximum in (("size", 512 * 1024**2), ("unpacked_size", 2 * 1024**3)):
+            if type(item[name]) is not int or not 0 < item[name] <= maximum:
+                raise ValueError("Invalid overlay size bound")
+        url = item["url"]
+        if not isinstance(url, str) or not 0 < len(url) <= 2048 or any(ord(c) <= 32 for c in url):
+            raise ValueError("Invalid overlay URL")
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment
+                or (parsed.port is not None and parsed.port == 0)):
+            raise ValueError("Overlay URL must be credential-free HTTPS with a valid port")
+        for field in ("executable", "library_path"):
+            if field not in item:
+                continue
+            value = item[field]
+            if (not isinstance(value, str) or not 0 < len(value) <= 1024 or "\\" in value or "\0" in value
+                    or PurePosixPath(value).is_absolute() or ".." in PurePosixPath(value).parts
+                    or str(PurePosixPath(value)) == "."):
+                raise ValueError("Invalid overlay relative path")
+    return list(overlays)
+
+
+def contract_fields(values):
+    requires = sorted(set(values["REQUIRES"]) | ({"runtime-overlays-v1"} if values["OVERLAYS"] else set()))
+    if len(requires) > 32:
+        raise ValueError("Overlay bootstrap requirement exceeds capability count bound")
     trusted = load("docker/update_contract.py")
-    return {"runtime": trusted.runtime(values["REQUIRES"]),
-            "requires": values["REQUIRES"], "recommends": values["RECOMMENDS"]}
+    result = {"runtime": trusted.runtime(requires), "requires": requires, "recommends": values["RECOMMENDS"]}
+    if values["OVERLAYS"]:
+        result["overlays"] = values["OVERLAYS"]
+    return result
+
+
+def contract(root, revision):
+    values = capability_literals(root, revision, ("REQUIRES", "RECOMMENDS"), include_overlays=True)
+    return contract_fields(values)
 
 
 def read_source(command, root, revision, output=None):
@@ -120,10 +184,13 @@ def read_source(command, root, revision, output=None):
     if command == "sequence":
         return cutover.container_sequence(root, revision)
     if command == "image-record":
-        provides = capability_literals(root, revision, ("PROVIDES",))["PROVIDES"]
+        values = capability_literals(root, revision, ("PROVIDES", "REQUIRES", "RECOMMENDS"), include_overlays=True)
+        contract_fields(values)  # apply the same validation and bootstrap count bound
+        provides = values["PROVIDES"]
         trusted = load("docker/update_contract.py")
         # Use only trusted executable logic with candidate literal data.
         trusted.PROVIDES = provides
+        trusted.OVERLAYS = values["OVERLAYS"]
         record = trusted.image_record(revision, cutover.container_sequence(root, revision))
         record["source_tree"] = git(root, "rev-parse", f"{revision}^{{tree}}")
         return record

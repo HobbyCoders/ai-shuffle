@@ -105,9 +105,12 @@ def manifest_fields():
 def image_record(revision, sequence):
     """/app/docker/image.json. ``runtime`` keeps updates published before
     capabilities (which carry no ``requires``) working on new images."""
-    return {"format": 2, "revision": revision, "sequence": int(sequence),
-            "runtime": runtime(LEGACY_PROVIDES) if set(LEGACY_PROVIDES) <= set(PROVIDES) else runtime(PROVIDES),
-            "provides": sorted(PROVIDES)}
+    record = {"format": 2, "revision": revision, "sequence": int(sequence),
+              "runtime": runtime(LEGACY_PROVIDES) if set(LEGACY_PROVIDES) <= set(PROVIDES) else runtime(PROVIDES),
+              "provides": sorted(PROVIDES)}
+    if OVERLAYS:
+        record["overlays"] = list(OVERLAYS)
+    return record
 
 
 def normalized(name, data):

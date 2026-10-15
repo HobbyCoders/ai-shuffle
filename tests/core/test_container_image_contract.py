@@ -97,6 +97,9 @@ def test_overlay_publication_requires_both_architectures_and_bootstrap(monkeypat
     assert contract.validate() == []
     fields = contract.manifest_fields()
     assert fields["overlays"] == overlays
+    record = contract.image_record("a" * 40, 1)
+    assert record["overlays"] == overlays
+    assert "node-24" not in record["provides"], "delivery metadata must not pretend the image baked the runtime"
     assert fields["requires"] == ["base-1", "node-24", "runtime-overlays-v1"]
     assert fields["runtime"] != contract.LEGACY_RUNTIME
 
