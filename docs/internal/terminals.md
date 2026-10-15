@@ -142,6 +142,15 @@ Files' workspace root. Missing paths and files return `400 bad_folder`;
 paths outside the root return `400` with the Files boundary error. The Files
 validator resolves symlinks before checking confinement, so traversal and
 symlinks cannot select a folder outside that root. There is no silent fallback.
+The resolved name is not used as spawn authority: create and restart reopen it
+without following links and hold directory handles through process creation.
+On POSIX a fresh exec trampoline checks the held folder's inode ancestry and
+uses `fchdir` before the isolation runner or shell; it never passes the mutable
+folder pathname as the subprocess cwd. On Windows every directory component
+is pinned without delete sharing and reparse points are refused through ConPTY
+creation. A substitution detected before spawn returns `400 bad_folder`; a
+folder moved outside the held root during process creation makes the child
+exit without launching the shell. Restart retains this Files-root policy.
 
 `POST /api/v1/terminals/from-files` accepts `{"path": "relative/folder"}`
 (empty path means the Files root), resolves it with the same Files validator,

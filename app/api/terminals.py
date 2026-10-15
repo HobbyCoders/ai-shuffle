@@ -231,9 +231,9 @@ async def create_terminal(body: CreateTerminal, who: str = Depends(require_termi
     try:
         if body.target is not None:
             _check_target(body.target, await run_sync(service.worker_identity))
-        cwd = await run_sync(_validated_terminal_cwd, body.cwd)
+        cwd, cwd_root = await run_sync(_validated_terminal_cwd, body.cwd)
         terminal = await registry.create(
-            created_by=who, session_id=body.session_id, cwd=cwd, shell=body.shell,
+            created_by=who, session_id=body.session_id, cwd=cwd, cwd_root=cwd_root, shell=body.shell,
             cols=body.cols, rows=body.rows,
         )
     except TerminalError as exc:
@@ -245,15 +245,15 @@ class FromFilesBody(BaseModel):
     path: str = Field("", max_length=4096)
 
 
-def _validated_terminal_cwd(cwd: Optional[str]) -> Optional[str]:
+def _validated_terminal_cwd(cwd: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     if cwd is None:
-        return None
+        return None, None
     from app.api.workspace_files import validate_workspace_path
 
-    # Preserve the terminal API's absolute/existing-directory errors, then
-    # apply Files' resolved-path confinement (including symlink traversal).
+    # This is name resolution, not spawn authorization: the service reopens
+    # the result without following links and pins it through create/restart.
     path, _ = service.resolve_folder(None, cwd)
-    return str(validate_workspace_path(path))
+    return str(validate_workspace_path(path)), str(validate_workspace_path(""))
 
 
 @router.post("/from-files", status_code=201)
