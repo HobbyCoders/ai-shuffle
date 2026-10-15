@@ -520,14 +520,16 @@ def _splice_inner_calls(
 
 
 def _splice_compaction_cards(
-    entries: List[Dict[str, Any]], sdk_session_id: str
+    entries: List[Dict[str, Any]], sdk_session_id: str, *, node_ids: set[str]
 ) -> List[Dict[str, Any]]:
     """Read-only audit projection; never add cards to rewind's node indexes.
 
     Use recorder rows (not engine summaries). Whitelist the display metadata
     even for private exports, so sharing cannot pick up a delegated summary or
     internal recovery fields. A persisted node anchor places each boundary
-    after the node the engine had reached, even when clocks tie or go backwards.
+    after the full projected group of the node the engine had reached, even
+    when clocks tie or go backwards. ``node_ids`` identifies the original path;
+    entries spliced after each node (steers, inner calls) belong to that group.
     Older/missing anchors fall back to engine time (after tied user entries),
     not the time recovery appended the recorder row.
     """
@@ -545,7 +547,13 @@ def _splice_compaction_cards(
         )
         rows = cursor.fetchall()
     cards: List[Dict[str, Any]] = []
-    node_indexes = {entry.get("uuid"): i for i, entry in enumerate(entries)}
+    node_indexes: Dict[str, int] = {}
+    source_node = None
+    for i, entry in enumerate(entries):
+        if entry.get("uuid") in node_ids:
+            source_node = entry["uuid"]
+        if source_node is not None:
+            node_indexes[source_node] = i
     anchored: Dict[int, List[Dict[str, Any]]] = {}
     for row in rows:
         payload = _as_dict(row["payload"])
@@ -674,7 +682,8 @@ def fluid_transcript_entries(
         return entries
     entries = _splice_delivered_steers(entries, nodes, sdk_session_id)
     return _splice_compaction_cards(
-        _splice_inner_calls(entries, sdk_session_id), sdk_session_id
+        _splice_inner_calls(entries, sdk_session_id), sdk_session_id,
+        node_ids={node["node_id"] for node in nodes},
     )
 
 
