@@ -32,6 +32,36 @@ def test_changes_reach_their_suites():
     assert suites_for(["README.md"]) == set()
 
 
+@pytest.mark.parametrize("path", [
+    "Dockerfile", "entrypoint.sh", "docker/update_contract.py", "requirements.txt",
+    "desktop/src/main/installed-entry.ts", "desktop/scripts/publish-source.mjs",
+    "desktop/build/installer.nsh", "desktop/electron-builder.yml",
+    "scripts/source_archive.py", "scripts/ci/update_reach.py",
+])
+def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
+    ctx = context([path])
+    suite = next(suite for suite in local_ci.SUITES if suite.name == "update-reach")
+    assert ctx.changed(suite.paths)
+    commands = []
+    verdicts = []
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append((argv, kwargs)))
+    monkeypatch.setattr(local_ci, "pytest_args", lambda python: ["-q"])
+    monkeypatch.setattr(local_ci, "update_reach", verdicts.append)
+
+    suite.run(ctx)
+
+    assert len(commands) == 1
+    argv, kwargs = commands[0]
+    assert argv[:3] == [ctx.python, "-m", "pytest"]
+    assert set(arg for arg in argv[3:] if arg.endswith(".py")) == {
+        "tests/test_update_reach.py",
+        "tests/scripts/test_local_ci.py",
+        "tests/scripts/test_edge_publication_gate.py",
+    }
+    assert kwargs["env"] == local_ci.python_env()
+    assert verdicts == [ctx]
+
+
 def test_cloud_split_keeps_android_bridge_and_app_docs_independent():
     assert suites_for(["android/app/src/test/js/chat-downloads.test.cjs"]) >= {"android-bridge"}
     assert not {"hub", "site", "license", "uptime"} & {s.name for s in local_ci.SUITES}

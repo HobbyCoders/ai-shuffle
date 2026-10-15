@@ -387,6 +387,14 @@ def update_reach(ctx: Context, *, head: str = "HEAD", branch: str | None = None)
          *(["--draft"] if draft else [])])
 
 
+def update_reach_checks(ctx: Context) -> None:
+    # Non-Python launcher/image changes do not reach backend's name selector.
+    run([ctx.python, "-m", "pytest", "tests/test_update_reach.py",
+         "tests/scripts/test_local_ci.py", "tests/scripts/test_edge_publication_gate.py",
+         *pytest_args(ctx.python)], env=python_env())
+    update_reach(ctx)
+
+
 def android_app(ctx: Context) -> None:
     gradlew = "gradlew.bat" if os.name == "nt" else "./gradlew"
     run([str(ROOT / "android" / gradlew), "testDebugUnitTest", "--max-workers=2"], cwd=ROOT / "android")
@@ -427,7 +435,7 @@ SUITES = [
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
                            "desktop/scripts/*", "desktop/build/*", "desktop/electron-builder.yml",
                            "scripts/source_archive.py", "scripts/ci/update_reach.py"],
-          update_reach, "Can installed apps take this change through the in-app update?"),
+          update_reach_checks, "Update-reach regression tests and installed-app update verdict"),
 ]
 
 # Covered only at release time or by hand: no hardware here, or a full image build.
