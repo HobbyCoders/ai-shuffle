@@ -207,7 +207,7 @@ if labels are removed later; the existing publisher consumes the owner's status.
 
 ## Full suite on main, and nightly publication
 
-Nightly publication waits for a full local pass on the exact `main` revision.
+Nightly publication waits for a full local pass on the exact revision it ships.
 On a clean checkout of the current public `main` (resolved by repository URL), on any worker:
 
 ```bash
@@ -217,15 +217,40 @@ python scripts/local_ci.py full --attest
 This runs every suite, rebuilds the backend test map that later selections
 use, and posts the commit status `local/full-suite` (pending while it runs,
 then success or failure) through `gh`. "Publish desktop source update"
-runs at 06:00 UTC or on owner dispatch, and skips main revisions already
-published. It publishes only when the status comes from the owner's
-account, says success, and names the current head of protected `main`
-(`scripts/ci/edge_publication_gate.py`). One pass covers every PR merged up
-to that revision. Until then the gate adds an "Edge publication refused"
-warning naming the command, and DeployStatus repeats it.
+runs at 06:00 UTC or on owner dispatch. It selects the newest owner-authored
+successful status on protected main's **first-parent** history, strictly newer
+than the verified published revision (`scripts/ci/edge_publication_gate.py`).
+A merge during a full run no longer wastes the ancestor's pass: that exact tree
+can ship, but later untested commits wait for their own attestation. One pass
+covers every PR merged up to its revision, never subsequent changes. A newer
+attested candidate takes precedence over an older run finishing late. Missing,
+pending or failed evidence leaves the existing nightly unchanged.
+
+The gate rechecks eligibility before signing and writing; the publisher also
+atomically checks the database pointer and enforces increasing signed sequences.
+An older revision cannot become a newer update merely by finishing later. See
+[release channels](release-channels.md) for the selection and cutover rules.
+`local_ci.py` warns when main has moved when it posts pending/success/failure,
+and explains that only an eligible ancestor may ship at the next scheduled run.
+This does not block bare `gh pr merge`, start publication, or waive update-reach.
+Until an eligible pass exists the gate adds an "Edge publication refused"
+warning, and DeployStatus repeats it.
 
 Run it before a nightly update is wanted, not after every merge. A status
 change does not start publication; the next schedule or owner dispatch reads it.
+
+For a coordinated merge, use the optional read-only preflight first:
+
+```bash
+python scripts/ci/edge_publication_gate.py --merge-check && gh pr merge N --merge
+```
+
+It refuses a recent owner-created pending full-suite marker on current main,
+unknown marker age, or main movement during the check. Markers over two hours
+old warn instead of indefinitely blocking merges after a crashed run. Foreign
+statuses are ignored. This is not a GitHub merge lock: direct merges and a
+merge immediately after the check remain possible, which is why publication
+also independently supports safe ancestors and rechecks its own pointer.
 
 ## Before a stable release
 

@@ -150,17 +150,37 @@ protected `main`, with an owner-only manual dispatch for retries. Pushes and
 status events do not publish. Before setting up dependencies, the workflow
 compares main's revision with the published manifest and exits if unchanged.
 
-Publication still requires the owner's successful `local/full-suite` commit
-status on that exact current main revision, posted by
-`python scripts/local_ci.py full --attest` on a clean checkout. GitHub Actions
-runs no tests. A pass on an older revision, a pending or failed status, or a
-successful-but-skipped publication workflow is not permission to publish.
-If the pass is missing, the previous nightly stays available.
+Publication requires the owner's successful `local/full-suite` commit status
+on the **exact revision being published**, posted by
+`python scripts/local_ci.py full --attest` starting on a clean current-main
+checkout. If main moves during that run, the tested first-parent ancestor can
+still publish. The schedule selects the newest successful first-parent revision
+strictly newer than the verified signed pointer, not necessarily today's tip.
+A newer attestation takes precedence even if an older suite finishes last.
+Pending/failed statuses, side-branch commits and already-published or older
+revisions cannot advance the pointer. With no eligible pass, nightly stays put.
 
-Only the current `main` revision can publish. The read-only gate runs before
-signing secrets are available and is repeated immediately before publication.
-The publisher checks `main` again before writing the signed pointer. These
-checks use trusted main code, not PR artifacts or a PR checkout.
+Later main changes are **not** bundled into an ancestor's archive or covered by
+its status. They wait for their own exact-revision full pass (which covers all
+changes through that later revision). The existing update-reach/owner-label
+checks still run before and after each attestation; ancestor selection never
+waives them. A successful-but-skipped workflow is not publication evidence.
+
+The read-only gate selects before signing secrets are available, then rechecks
+first-parent membership, newer attestations and the signed pointer before
+publication. Every executable helper and Wrangler's install/lockfile comes from
+the workflow-main control checkout, with a trusted working directory. Candidate
+root and revision are explicit data arguments to an isolated Python reader; it
+uses trusted archive/version/sequence logic and parses runtime capability
+literals without executing candidate Python. Signing credentials never reach
+these readers. The archive and runtime declarations still come from the selected
+exact revision, not the control tree. The publisher compares the
+verified feed to the actual database lane and atomically compares-and-swaps that
+lane on insert, in addition to requiring a signed sequence above every prior
+sequence. A stale feed or losing concurrent writer refuses rather than moving
+backwards. Only the frozen, verified public-root cutover may bridge histories.
+Selection scans at most 100 unpublished main commits; without a pass in that
+window it fails closed and needs a fresh tip attestation. GitHub runs no tests.
 
 Stable releases still require an owner-created release tag. Existing workers
 stay on their selected channel: publication never switches, installs or restarts

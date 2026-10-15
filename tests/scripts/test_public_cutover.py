@@ -111,6 +111,24 @@ def test_bridge_adversarial_evidence(transition,change):
     with pytest.raises(ValueError):bridge(t,github=api)
 
 
+@pytest.mark.parametrize("tampered", [False, True])
+def test_publication_baseline_only_accepts_the_frozen_signed_cutover(transition, monkeypatch, tmp_path, tampered):
+    t = transition
+    candidate = commit(t.new, "later", "new public change")
+    monkeypatch.chdir(t.new)
+    envelope = tmp_path / "manifest.json"
+    envelope.write_bytes(t.envelope + (b"tampered" if tampered else b""))
+    monkeypatch.setattr(gate, "edge_cache_path", lambda: envelope)
+    # Signature validation itself is covered by the existing manifest tests;
+    # this test drives the producer's real mapping and exact-envelope hash.
+    monkeypatch.setattr(gate, "verify_edge_manifest", lambda raw: t.published)
+    if tampered:
+        with pytest.raises(ValueError, match="frozen cutover"):
+            gate.unpublished_history([candidate, t.initial], t.published)
+    else:
+        assert gate.unpublished_history([candidate, t.initial], t.published) == [candidate, t.initial]
+
+
 def test_private_walk_cannot_be_replaced_by_tree_equality(transition):
     t=transition
     calls=[]
