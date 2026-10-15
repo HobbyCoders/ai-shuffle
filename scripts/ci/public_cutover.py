@@ -20,6 +20,10 @@ OLD_REPO = "HobbyCoders/ai-shuffle-private"
 NEW_REPO = "HobbyCoders/ai-shuffle"
 
 
+class PrivateCheckoutRequired(ValueError):
+    """The cutover bridge needs a separate, complete private checkout."""
+
+
 def git(root, *args):
     return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
@@ -99,10 +103,11 @@ def verify_bridge(root, revision, published, envelope, *, private_root=None, git
         raise ValueError("Published envelope does not match the frozen cutover baseline")
     # Caller verifies the signature with the current trust key before calling.
     private_root = Path(private_root or os.environ.get("AI_SHUFFLE_PRIVATE_CHECKOUT", ""))
-    if not private_root.is_absolute() or private_root.resolve() == Path(root).resolve():
-        raise ValueError("A separate AI_SHUFFLE_PRIVATE_CHECKOUT is required")
+    if (not private_root.is_absolute() or private_root.resolve() == Path(root).resolve()
+            or not private_root.is_dir()):
+        raise PrivateCheckoutRequired("A separate AI_SHUFFLE_PRIVATE_CHECKOUT is required")
     if git(private_root, "rev-parse", "--is-shallow-repository") != "false":
-        raise ValueError("Complete private history required")
+        raise PrivateCheckoutRequired("Complete private history required")
     identity = github(OLD_REPO, "")
     if identity.get("id") != record["old_repository_id"] or identity.get("full_name") != OLD_REPO or identity.get("private") is not True:
         raise ValueError("Private repository identity mismatch")

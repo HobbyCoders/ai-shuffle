@@ -1,4 +1,5 @@
 """Edge publication waits for the owner's local full-suite pass on main."""
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -376,6 +377,65 @@ def signed_feed(monkeypatch):
                                       "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
         return response["raw"]
     return publish, response
+
+
+@pytest.fixture
+def cutover_history(tmp_path, signed_feed):
+    """Produce a public root mapping pinned to a real signed edge envelope."""
+    publish, _ = signed_feed
+    envelope = publish(OTHER)
+    root = tmp_path / "public"
+    root.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+    git("init", "-q")
+    git("config", "user.name", "Cutover fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "commit.gpgsign", "false")
+    git("config", "core.hooksPath", str(root / "disabled-hooks"))
+    record = {"format": 1, "old_repository": "HobbyCoders/ai-shuffle-private",
+              "new_repository": gate.REPOSITORY, "old_repository_id": 42, "export_pr": 9,
+              "maximum_shipped_sequence": 1000, "maximum_desktop_sequence": 10000,
+              "published_revision": OTHER, "envelope_sha256": hashlib.sha256(envelope).hexdigest()}
+    (root / "release").mkdir()
+    (root / "release/public-cutover.json").write_text(json.dumps(record))
+    git("add", ".")
+    git("commit", "-qm", "Cutover fixture")
+    return root, git("rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("checkout", ["unset", "missing", "shallow"])
+def test_cutover_private_checkout_setup_has_fixed_hint(cutover_history, tmp_path, monkeypatch, checkout):
+    root, head = cutover_history
+    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
+    if checkout != "unset":
+        private = tmp_path / "private"
+        if checkout == "shallow":
+            subprocess.run(["git", "clone", "--depth=1", root.as_uri(), str(private)],
+                           check=True, capture_output=True)
+        monkeypatch.setenv("AI_SHUFFLE_PRIVATE_CHECKOUT", str(private))
+    ready, reason = gate.update_reach_readiness(head, root=root)
+    assert not ready
+    assert reason == ("Update reach refused: set AI_SHUFFLE_PRIVATE_CHECKOUT to a complete, "
+                      "non-shallow clone of HobbyCoders/ai-shuffle-private "
+                      "(see docs/ci/release-channels.md).")
+    assert str(tmp_path) not in reason
+
+
+@pytest.mark.parametrize("error", [ValueError("sensitive response body"),
+                                   subprocess.CalledProcessError(1, "sensitive command", output="secret"),
+                                   FileNotFoundError("sensitive path")])
+def test_other_cutover_errors_keep_generic_refusal(cutover_history, monkeypatch, error):
+    root, head = cutover_history
+    cutover = gate.load_cutover()
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(cutover, "verify_bridge", fail)
+    monkeypatch.setattr(gate, "load_cutover", lambda: cutover)
+    ready, reason = gate.update_reach_readiness(head, root=root)
+    assert not ready
+    assert reason == ("Update reach refused: could not verify published edge/merged PR evidence "
+                      f"({type(error).__name__}).")
 
 
 @pytest.mark.parametrize("signed_channel", ["edge", "nightly"])
