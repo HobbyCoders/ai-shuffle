@@ -125,7 +125,7 @@ test('restore journal: snapshot errors never select the update and retain a clea
 });
 test('restore journal: compatibility rejection discards an unused copy without blacklisting the staged update',async t=>{
  const {f,u,factory,calls}=await rollbackFixture(t);await u.prepareRollback(factory);
- await u.cancelPreparedRollback(factory);await u.cancelInstall();
+ await u.cancelPreparedRollback(factory);u.stageDownloads();await u.cancelInstall();
  const restart=f.create();await restart.load();assert.equal(await restart.recoverRollback(factory),false);
  assert.deepEqual(calls,['snapshot','discard']);assert.equal((await restart.select()).revision,A);
  assert.equal((await restart.check()).kind,'ready');
