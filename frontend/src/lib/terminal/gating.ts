@@ -8,6 +8,7 @@
  * buttons.
  */
 import type { CommandBlock } from './commands';
+import type { TerminalTarget } from '$lib/api/terminals';
 
 export type ProbeState =
 	| { status: 'idle' | 'loading' }
@@ -15,7 +16,7 @@ export type ProbeState =
 	| { status: 'denied' }
 	/** The probe answered with an error code (for example chat_on_other_worker). */
 	| { status: 'error'; code: string; message: string }
-	| { status: 'ready'; supported: boolean; reason: string | null; worker: string; shells: string[];
+	| { status: 'ready'; targets?: TerminalTarget[]; supported: boolean; reason: string | null; worker: string; shells: string[];
 		defaultShell: string | null; folder: string | null; folderSource: string | null; open: number; limit: number };
 
 export type Access =

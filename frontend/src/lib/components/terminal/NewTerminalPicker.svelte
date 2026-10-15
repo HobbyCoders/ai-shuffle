@@ -2,6 +2,7 @@
 	/** Folder and shell for a new terminal. Used as the "+" popover and as the empty state. */
 	import { Folder, TerminalSquare } from 'lucide-svelte';
 	import { cwdProblem, type ProbeState } from '$lib/terminal/gating';
+	import type { CreateTerminal, TerminalTarget } from '$lib/api/terminals';
 
 	let {
 		probe,
@@ -19,7 +20,7 @@
 		inline?: boolean;
 		/** The empty state's line under the title. */
 		blurb?: string;
-		onOpen: (choice: { cwd: string | null; shell: string | null }) => void;
+		onOpen: (choice: CreateTerminal & { cwd: string | null; shell: string | null }) => void;
 		onCancel?: () => void;
 	} = $props();
 
@@ -35,6 +36,13 @@
 	let folder = $state(probe.folder ?? '');
 	// svelte-ignore state_referenced_locally
 	let shell = $state(probe.defaultShell ?? probe.shells[0] ?? '');
+	let selected = $state('');
+	const targetKey = (target: TerminalTarget) => `${target.kind}:${target.worker_id ?? target.grant_id}`;
+	const destinations = $derived(probe.targets ?? []);
+	const destination = $derived(selected ? destinations.find((target) => targetKey(target) === selected) : destinations[0]);
+	const remote = $derived(!!selected);
+	const unavailable = $derived(destination?.available === false || (remote && !destination));
+	const ssh = $derived(destination?.kind === 'ssh');
 	let input = $state<HTMLInputElement>();
 	const folderError = $derived(folder.trim() ? cwdProblem(folder.trim()) ?? '' : '');
 
@@ -42,9 +50,11 @@
 
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
-		if (busy || disabledReason || folderError) return;
+		if (busy || disabledReason || folderError || unavailable) return;
 		const cwd = folder.trim();
-		onOpen({ cwd: cwd && cwd !== probe.folder ? cwd : null, shell: shell || null });
+		onOpen({ cwd: ssh ? null : cwd && (remote || cwd !== probe.folder) ? cwd : null,
+			shell: remote ? null : shell || null,
+			...(destination ? { target: { kind: destination.kind, worker_id: destination.worker_id, grant_id: destination.grant_id } } : {}) });
 	}
 </script>
 
@@ -55,11 +65,22 @@
 		<div class="lede">
 			<span class="glyph" aria-hidden="true"><TerminalSquare size={20} /></span>
 			<div>
-				<h3>Open a terminal on {probe.worker}</h3>
+				<h3>Open a terminal on {destination?.name ?? probe.worker}</h3>
 				<p>{blurb}</p>
 			</div>
 		</div>
 	{/if}
+	{#if destinations.length > 1}
+		<label class="field">
+			<span class="label">Target</span>
+			<select bind:value={selected} onchange={() => { folder = selected ? '' : probe.folder ?? ''; }}>
+				{#each destinations as target, index}
+					<option value={index === 0 ? '' : targetKey(target)} disabled={!target.available}>{target.name}{target.kind === 'ssh' ? ' (SSH grant)' : ''}</option>
+				{/each}
+			</select>
+		</label>
+	{/if}
+	{#if ssh}<p class="note">Uses this chat's approved SSH grant, login shell and home folder. Revoking the grant closes the terminal.</p>{:else}
 	<label class="field">
 		<span class="label">Folder</span>
 		<span class="input-wrap" class:invalid={!!folderError}>
@@ -68,10 +89,11 @@
 				placeholder="/workspace/my-project" aria-describedby="terminal-folder-note" aria-invalid={!!folderError} />
 		</span>
 		<span class="note" id="terminal-folder-note">
-			{#if folderError}{folderError}{:else if probe.folderSource && folder.trim() === probe.folder}{SOURCE[probe.folderSource] ?? 'Default folder'}{:else}On {probe.worker}{/if}
+			{#if folderError}{folderError}{:else if probe.folderSource && folder.trim() === probe.folder}{SOURCE[probe.folderSource] ?? 'Default folder'}{:else}On {destination?.name ?? probe.worker}{/if}
 		</span>
 	</label>
-	{#if probe.shells.length > 1}
+	{/if}
+	{#if !remote && probe.shells.length > 1}
 		<fieldset class="field">
 			<legend class="label">Shell</legend>
 			<div class="seg">
@@ -84,7 +106,7 @@
 	{#if disabledReason}<p class="cap" role="alert">{disabledReason}</p>{/if}
 	<div class="actions">
 		{#if onCancel}<button type="button" class="ghost" onclick={onCancel}>Cancel</button>{/if}
-		<button type="submit" class="go" disabled={busy || !!disabledReason || !!folderError}>
+		<button type="submit" class="go" disabled={busy || !!disabledReason || !!folderError || unavailable}>
 			{busy ? 'Opening…' : 'Open terminal'}
 		</button>
 	</div>
@@ -103,6 +125,7 @@
 	h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--foreground); }
 	.lede p { margin: 3px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--muted-foreground); }
 	.field { display: grid; gap: 5px; margin: 0; padding: 0; border: 0; min-width: 0; }
+	select { min-width: 0; width: 100%; min-height: 34px; padding: 0 8px; border: 1px solid var(--input); border-radius: calc(var(--radius) - 4px); background: var(--code-bg); color: var(--foreground); }
 	.label { padding: 0; font: 600 10.5px/1 var(--font-sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--subtle-foreground); }
 	.input-wrap { display: flex; align-items: center; gap: 8px; padding: 0 10px; min-height: 34px; border: 1px solid var(--input);
 		border-radius: calc(var(--radius) - 4px); background: var(--code-bg); color: var(--muted-foreground); transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }

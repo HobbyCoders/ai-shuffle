@@ -6,22 +6,36 @@ client that shows a terminal (the web UI, desktop, Android). Code:
 authorization). Tests: `tests/core/test_terminals.py`,
 `tests/api/test_terminals_api.py`.
 
-Phase 1 covers interactive shells on **this worker only**, on a Unix PTY. Not
-covered yet: the ServerWorker host over SSH, terminals on other workers, Windows,
-watching an agent's background command, and "Open terminal here" from Files.
-The later Files-open and read-only Monitor APIs are documented below.
-Ids and payloads already carry a `target` so those can be added without
-breaking clients.
+Terminals support local Unix PTYs and Windows ConPTY, online enrolled peer
+workers, and explicitly selected private-access SSH machine grants. Peer
+input/output uses the authenticated control transport, with a target-bound
+opaque lease checked back against the initiating owner's credential on every
+operation. A lost relay expires and kills its peer shell within 60 seconds.
+The source holds the original credential only in memory, never in the wire
+payload, UI response, or an agent-facing tool.
+
+SSH targets require an active, writable machine grant for this chat (including
+grants approved from saved connections). They reuse the private-access SSH
+client and its pinned host-key validation; there is no new credential store.
+SSH opens the approved account's login shell/home, with no supplied command,
+folder, environment or forwarding. Expiry, revocation or ownership change ends
+the connection. Remote terminals require a new explicit target selection after
+exit rather than the local Restart action. Multi-line remote paste is refused:
+remote output alone cannot prove that a line editor will hold it unexecuted.
+
+The Files-open and read-only Monitor APIs are documented below.
 
 ## Capability
 
 | Where | Field | Values |
 | --- | --- | --- |
-| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `1` = phase-1 PTY terminals, `0` = none |
+| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `2` = owner-checked peer relay, `1` = local-only legacy, `0` = none |
 | `GET /api/v1/terminals/targets` | `supported` | `true` / `false` |
 
-`terminal` is `0` (and `supported` is `false`) on Windows and on any worker
-with no usable shell. Creating a terminal there returns `501 not_supported`
+`terminal` is `0` on a worker with no usable PTY/shell. `/targets` lists only
+online peers advertising version 2 or later, plus approved SSH grants; legacy
+peers remain local-only. `supported` is true when any target is usable.
+Creating a local terminal on an unsupported worker returns `501 not_supported`
 with the message "Terminals are not supported on this worker yet." Clients
 should hide or disable the terminal button when the flag is off and show
 `unsupported_reason`.
@@ -107,7 +121,7 @@ agent's Bash tool alike; the owner session itself is only stored as a hash.
 | Field | Meaning |
 | --- | --- |
 | `id` | `term_` + 16 hex. Unique on this worker for its lifetime. |
-| `target` | Where it runs. Phase 1 is always `{"kind": "worker", "worker_id": <this worker>}`. Later kinds (for example a host over SSH) and other workers' ids will use the same shape. |
+| `target` | `{"kind": "worker", "worker_id": <local or peer worker>}` or `{"kind": "ssh", "grant_id": <active machine handle>}`. |
 | `shell` | `bash` or `sh`. |
 | `cwd` | The folder the shell started in (not its current directory). |
 | `folder_source` | `requested`, `worktree`, `project`, `workspace` or `home`. |
@@ -490,7 +504,7 @@ text and output are never logged.
 | `bad_folder` | 400 | The folder must be a full path, for example /workspace/my-project. / The folder <path> doesn't exist on this worker. / <path> is a file, not a folder. / The folder <path> doesn't exist on this worker anymore. (restart) |
 | `chat_not_found` | 404 | That chat doesn't exist. |
 | `chat_on_other_worker` | 409 | That chat runs on another worker. Terminals open on this worker only for now. |
-| `target_unavailable` | 400 | Terminals can open on this worker only for now. |
+| `target_unavailable` | 400 | Choose an online terminal worker or an approved SSH grant. |
 | `limit_reached` | 409 | 8 terminals are open on <worker>. Close one to open another. |
 | `start_failed` | 500 | The shell couldn't start on this worker. |
 | `not_found` | 404 | That terminal is closed or never existed. |
@@ -504,16 +518,16 @@ text and output are never logged.
 | (auth) | 403 | Agent previews can't use terminals. |
 | (auth) | 401/403 | Owner access required (from `require_admin`). |
 
-## Later phases (notes for implementers)
+## Remote implementation
 
-- **Other workers.** `target.worker_id` names the worker. The peer relay from
-  PR #1917 (`app/network/browser_panel.py`, `relay`/`forward_websocket`) can
-  carry this socket's frames unchanged. It authenticates the calling *worker*,
-  though, so it must also carry and check the owner's authority for
-  terminals; otherwise any paired worker would get a shell on its peers.
-- **Windows.** Needs ConPTY (pywinpty in the worker, or node-pty in the
-  desktop shell), Job Objects in place of process sessions for "close kills
-  everything", and a PowerShell/cmd shell list. Until then the capability is
-  `0`.
-- **ServerWorker host over SSH.** A new `target.kind` backed by a granted SSH
-  machine; the same socket protocol applies.
+`app/network/terminal_relay.py` handles the `terminal` and `terminal-owner`
+control actions. Membership alone cannot open a shell: an opaque lease is
+issued only after the UI owner check, bound to one target worker, and checked
+back at the source against the still-valid original credential. Bounded
+viewer output is base64-encoded for the JSON control transport; the UI still
+receives binary WebSocket output. A missing/old capability never enables a
+relay optimistically. No credentials or connections are replicated.
+
+`app/core/terminal_targets.py` adapts peer/SSH streams to the existing bounded
+terminal registry. SSH tasks belong to the private-access grant and close the
+connection on revocation, even if cancellation precedes the reader's start.

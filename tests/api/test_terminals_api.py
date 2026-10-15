@@ -288,7 +288,7 @@ def test_bad_shell_and_other_target_are_refused(ctx):
     assert response.status_code == 400 and response.json()["code"] == "bad_shell"
     response = tc.post("/api/v1/terminals", json={"target": {"kind": "worker", "worker_id": "dev_other"}})
     assert response.status_code == 400 and response.json() == {
-        "detail": "Terminals can open on this worker only for now.", "code": "target_unavailable"}
+        "detail": "Choose an online terminal worker or an approved SSH grant.", "code": "target_unavailable"}
     response = tc.post("/api/v1/terminals", json={"target": {"kind": "host-ssh"}})
     assert response.json()["code"] == "target_unavailable" and ctx.reg.count == 0
 
@@ -671,9 +671,11 @@ def test_shell_environment_has_no_app_secrets(ctx, monkeypatch):
         read_until(ws, b"CLEAN_42")
 
 
-TERMINAL_MODULES = {"app.core.terminals", "app.api.terminals"}
+TERMINAL_MODULES = {"app.core.terminals", "app.api.terminals",
+                    "app.core.terminal_targets", "app.network.terminal_relay"}
 TERMINAL_WIRING = {"app/api/terminals.py", "app/main.py", "app/core/runner_capabilities.py",
-                   "app/core/terminals.py"}
+                   "app/core/terminals.py", "app/core/terminal_targets.py",
+                   "app/network/terminal_relay.py", "app/network/control.py"}
 
 
 def _module_name(rel: str) -> str:

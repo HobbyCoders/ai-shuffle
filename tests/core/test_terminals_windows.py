@@ -134,7 +134,7 @@ async def test_environment_unicode_and_safe_paste(reg, tmp_path, monkeypatch):
 
 
 def test_shell_preference_and_fallback(monkeypatch):
-    assert T.pty_supported() and T.supported() and T.capability_version() == 1
+    assert T.pty_supported() and T.supported() and T.capability_version() == 2
     shells = T.available_shells()
     assert shells[0]["default"]
     assert all(os.path.isabs(shell["path"]) for shell in shells)

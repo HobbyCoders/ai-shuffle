@@ -242,10 +242,9 @@ def supported() -> bool:
 
 
 def capability_version() -> int:
-    """The ``terminal`` capability a worker advertises: 1 = phase-1 PTY
-    terminals, 0 = none (no PTY support or no shell)."""
+    """Terminal protocol: 2 = owner-checked peer relay, 1 = local only, 0 = none."""
     try:
-        return 1 if supported() else 0
+        return 2 if supported() else 0
     except Exception:  # noqa: BLE001 — capability detection never raises
         return 0
 
@@ -1177,6 +1176,8 @@ class TerminalRegistry:
         terminal = self.get(terminal_id)
         if terminal.state != STATE_EXITED:
             raise TerminalError("not_exited", "This terminal is still running. Close it or wait for it to exit.", 409)
+        if type(terminal) not in (Terminal, WindowsTerminal):
+            raise TerminalError("target_pick_required", "Choose the target again to open a new remote terminal.", 409)
         self._require_supported()
         if not os.path.isdir(terminal.cwd):
             raise TerminalError("bad_folder", f"The folder {terminal.cwd} doesn't exist on this worker anymore.", 400)

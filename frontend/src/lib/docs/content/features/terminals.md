@@ -43,6 +43,19 @@ Signing out disconnects every terminal. The shells keep running, and you can rec
 
 A terminal opened from a chat starts in the chat's own working copy, its project folder, or your workspace folder, in that order. You can also choose an existing folder within the Files workspace. Folders outside that root, including symlinks that lead outside it, are refused. If the folder does not exist, you get a clear message and no terminal opens.
 
+### Choose another target
+
+Use **+ → Target** to explicitly choose an online enrolled worker with terminal
+relay support, or an approved writable SSH machine grant for this chat. Approve
+SSH access through the existing private-access card first; saved connections
+still require a fresh grant. SSH starts in that account's home and login shell.
+Credentials stay in the private-access broker and host keys are verified there.
+
+Signing out or losing owner authority closes peer relays; a disconnected relay
+ends its remote shell within a minute. Revoking or expiring an SSH grant ends
+its SSH connection. After a remote shell exits, choose its target again to open
+a new one. Remote terminals accept single-line paste only, without pressing Enter.
+
 ## Pasting
 
 Pasting puts the text at the prompt **without running it**. Press Enter when you are ready.
@@ -67,7 +80,5 @@ Terminals keep running when you reload the page or close the tab. When you come 
 
 ## Not available yet
 
-- Terminals on Windows workers.
-- Terminals on another of your workers, or directly on the machine that runs Docker.
 - Watching a command an agent started in the background.
 - Terminal buttons for PowerShell and cmd code blocks.
