@@ -197,4 +197,3 @@ def test_actual_publisher_sql_never_overwrites_a_newer_revision(tmp_path, race):
         latest = db.execute("SELECT revision FROM source_releases WHERE channel='edge' ORDER BY sequence DESC LIMIT 1").fetchone()[0]
         assert latest == ("c" if race else "a") * 40
         assert db.execute("SELECT COUNT(*) FROM source_releases WHERE revision=?", ("a" * 40,)).fetchone()[0] == (0 if race else 1)
-
