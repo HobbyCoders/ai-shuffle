@@ -49,7 +49,11 @@ class Surface:
 
 @pytest.fixture
 def ctx(mock_db, tmp_path, monkeypatch):
+    from app.core import config
+
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", tmp_path)
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     monkeypatch.setattr(settings, "cookie_secure", False)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
@@ -518,6 +522,9 @@ def _refused(response, detail=None):
 ROUTES = [
     ("get", "/api/v1/terminals", None),
     ("get", "/api/v1/terminals/targets", None),
+    ("post", "/api/v1/terminals/from-files", {"path": ""}),
+    ("get", "/api/v1/terminals/monitor?session_id=s1", None),
+    ("get", "/api/v1/terminals/monitor/task?session_id=s1", None),
     ("post", "/api/v1/terminals", {}),
     ("get", "/api/v1/terminals/{id}", None),
     ("delete", "/api/v1/terminals/{id}", None),
@@ -534,6 +541,8 @@ def _every_route_refused(c, tc, detail=None):
         _refused(getattr(tc, method)(path.format(id=tid), **kwargs), detail)
     assert c.reg.count == before  # nothing was opened or closed
     with wsc(tc, ws_url(tid)) as ws:
+        assert close_code(ws) == 4001
+    with wsc(tc, "/api/v1/ws/terminals/monitor/task?session_id=s1") as ws:
         assert close_code(ws) == 4001
 
 
@@ -780,11 +789,13 @@ def test_every_terminal_route_in_the_app_requires_the_owner():
             assert api.require_terminal_owner in set(deps(original.dependant)), path
             http.append(path)
         else:
-            assert endpoint is api.terminal_socket, path
+            assert endpoint in (api.terminal_socket, api.monitor_socket), path
             sockets.append(path)
-    assert len(http) == 7, http
-    assert sockets in ([], ["/api/v1/ws/terminals/{terminal_id}"]), sockets
-    assert [r.endpoint for r in api.ws_router.routes] == [api.terminal_socket]
+    assert len(http) == 10, http
+    expected_sockets = {"/api/v1/ws/terminals/{terminal_id}",
+                        "/api/v1/ws/terminals/monitor/{task_id}"}
+    assert not sockets or set(sockets) == expected_sockets, sockets
+    assert {r.endpoint for r in api.ws_router.routes} == {api.terminal_socket, api.monitor_socket}
 
 
 def _close_within(ws, seconds=6.0):

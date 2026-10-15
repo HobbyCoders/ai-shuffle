@@ -286,7 +286,7 @@ def _monitor_info(task) -> dict:
     record = task_registry.get_task(task.session_id, task.task_id) or {}
     return {
         "id": task.task_id, "session_id": task.session_id,
-        "subject": record.get("description") or task.command,
+        "subject": record.get("subject") or task.command,
         "status": record.get("status") or (
             "running" if task.is_running() else "completed" if task.exit_code == 0 else "error"
         ),
