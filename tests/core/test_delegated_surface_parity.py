@@ -92,6 +92,32 @@ def _loop(options, registry=None):
     )
 
 
+@pytest.mark.parametrize("surface,blocked,expected", [
+    (["Read", "Bash"], [], True),
+    (["Read", "mcp__builtins__Bash"], [], True),
+    (["Read"], [], False),
+    (["mcp__external__Bash"], [], False),
+    (["Bash"], ["Bash"], False),
+    (["Bash"], ["Monitor"], False),
+    (["Bash"], ["mcp__builtins__Mon*"], False),
+    (["Bash"], ["*"], False),
+])
+def test_shell_agents_get_monitor_on_both_legs_unless_blocked(tmp_path, surface, blocked, expected):
+    options = _options(tmp_path, surface=surface, disallowed_tools=blocked)
+    assert ("Monitor" in ha._tool_allowlist(options)) is expected
+    assert ("Monitor" in ha._delegated_allowed(options)) is expected
+    if expected:
+        assert {"TaskGet", "TaskList", "TaskOutput", "TaskStop"} <= set(ha._tool_allowlist(options))
+    assert options.tool_allowlist == surface  # never mutate the saved choice
+    assert "Monitor" not in (ha._delegated_permission_grants(options) or [])
+
+
+def test_shell_companions_keep_individual_owner_blocks(tmp_path):
+    options = _options(tmp_path, surface=["Bash"], disallowed_tools=["TaskStop"])
+    assert "Monitor" in ha._tool_allowlist(options)
+    assert "TaskStop" not in ha._tool_allowlist(options)
+
+
 def _flag(argv, name):
     return argv[argv.index(name) + 1].split(",") if name in argv else []
 
@@ -100,10 +126,12 @@ def _flag(argv, name):
 
 
 @pytest.mark.asyncio
-async def test_picker_names_reach_the_bridged_app_tools(tmp_path, builtins_server):
+@pytest.mark.parametrize("explicit_monitor", [True, False])
+async def test_picker_names_reach_the_bridged_app_tools(tmp_path, builtins_server, explicit_monitor):
     from fluid.tools.mcp.bundled_server import _answer
 
-    options = _options(tmp_path, {"builtins": builtins_server}, surface=PICKED)
+    picked = PICKED if explicit_monitor else [name for name in PICKED if name != "Monitor"]
+    options = _options(tmp_path, {"builtins": builtins_server}, surface=picked)
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
     loop = _loop(options, registry)
     try:

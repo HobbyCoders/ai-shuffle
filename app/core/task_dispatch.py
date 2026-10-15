@@ -1578,6 +1578,13 @@ async def _dispatch_task_tool(
         resolve_subagent,
     )
 
+    base_commit = args.get("base_commit")
+    if base_commit is not None:
+        from app.core.worker_checkout import _SHA
+        if not isinstance(base_commit, str) or not _SHA.fullmatch(base_commit):
+            return {"ok": False, "error": "base_commit must be a full local commit SHA."}
+        if args.get("worker") is not None:
+            return {"ok": False, "error": "base_commit is supported only for local Task checkouts."}
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return {"ok": False, "error": "Task requires a prompt."}
@@ -1907,6 +1914,8 @@ async def _dispatch_task_tool(
         roster_name=roster_name,
         launch_tool_use_id=launch_tool_use_id,
     )
+    if base_commit is not None:
+        kwargs["base_commit"] = base_commit
     if system_prompt_append:
         kwargs["system_prompt_append"] = system_prompt_append
     if tool_allowlist:

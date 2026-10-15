@@ -13,6 +13,170 @@ from app.db import checkouts, database, projects_v2
 from tests.shared_fixtures import clean_task_registry, foreign_keys_off, pin_runner  # noqa: F401
 
 
+
+def test_explicit_review_base_is_materialized_not_parsed_from_prompt(repo, worker_runtime):
+    row, parent, base, tip = repo
+    review_sha = git(base, "rev-parse", "HEAD")
+    outcome = dispatch(base_commit=review_sha)
+    assert outcome.ok, outcome.error
+    assert worker_runtime[0]["head"] == review_sha != tip
+    assert git(parent, "rev-parse", "HEAD") == tip
+
+
+@pytest.mark.parametrize("value", ["HEAD", "--help", "abc123", "f" * 40, 123])
+def test_invalid_or_missing_review_commit_refuses_before_branch_creation(repo, value):
+    row, parent, *_ = repo
+    with pytest.raises(worker_checkout.WorkerCheckoutError):
+        worker_checkout.prepare_worker_checkout(row, "bad-ref", "coder", base_commit=value)
+    assert not git(parent, "branch", "--list", "task/bad-ref")
+
+
+def test_python_and_frontend_receipt_uses_local_checkout_without_copying(repo):
+    import json
+    row, parent, base, tip = repo
+    interpreter = parent / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("interpreter presence canary")
+    frontend = parent / "frontend"
+    frontend.mkdir()
+    (frontend / "package-lock.json").write_text("{}")
+    (frontend / "package.json").write_text(json.dumps({"devDependencies": {"@sveltejs/kit": "*"}}))
+    git(parent, "add", "frontend")
+    git(parent, "commit", "-m", "frontend manifests")
+    checkout = worker_checkout.prepare_worker_checkout(row, "runtime-receipt", "coder")
+    assert checkout.runtime["python"] == str(interpreter)
+    assert not (Path(checkout.path) / ".venv").exists()
+    assert checkout.runtime["frontend_monitor_inputs"] == [{
+        "command": "npm ci && npx svelte-kit sync", "cwd": str(Path(checkout.path) / "frontend"),
+    }]
+    assert not (Path(checkout.path) / "frontend" / "node_modules").exists()
+    assert str(interpreter) in checkout.instructions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_real_setup_shell_is_tracked_in_worker_and_reports_completion(repo, monkeypatch, exit_code):
+    import sys
+    import shlex
+    from app.core import worker_runtime as runtime, monitor_spawn, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.mcp import builtin_tools
+
+    row, parent, *_ = repo
+    sid = "real-setup-" + str(exit_code)
+    checkout = worker_checkout.prepare_worker_checkout(row, sid, "coder")
+    database.create_session(sid, "coder", project_v2_id=row["project_v2_id"])
+    database.set_session_branch(sid, checkout.branch, checkout.project_v2_id)
+    argv = [sys.executable, "-m", "venv", "--without-pip", ".venv"]
+    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    command += f" && exit {exit_code}"
+    git(parent, "config", "--local", "fluid.workerSetupCommand", command)
+    done = asyncio.Event()
+    frames = []
+
+    async def terminal(session_id, frame):
+        assert session_id == sid
+        frames.append(frame)
+        done.set()
+
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
+    monkeypatch.setattr(builtin_tools, "_emit_shell_start_frame", AsyncMock())
+    monkeypatch.setattr(builtin_tools, "_emit_shell_settle_frame", AsyncMock())
+    monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.01)
+    await runtime.start_worker_runtime(checkout, sid, "coder")
+    task_id = checkout.runtime["setup_task_id"]
+    assert task_registry.get_task(sid, task_id)["kind"] == "shell"
+    try:
+        await asyncio.wait_for(done.wait(), 20)
+        assert frames[0]["status"] == ("completed" if exit_code == 0 else "error")
+        assert frames[0]["task_id"] == task_id
+        assert (Path(checkout.path) / ".venv" / "pyvenv.cfg").is_file()
+        assert not (parent / ".venv").exists()
+        assert builtin_tools._background_tasks[task_id].exit_code == exit_code
+    finally:
+        task = builtin_tools._background_tasks[task_id]
+        if task.is_running():
+            await builtin_tools.stop_background_shell_task(task_id, session_id=sid)
+        builtin_tools._background_tasks.pop(task_id, None)
+        task_registry.clear_session(sid)
+
+
+def test_explicit_review_commit_requires_a_project(repo):
+    with pytest.raises(worker_checkout.WorkerCheckoutError, match="requires a Git project"):
+        worker_checkout.prepare_worker_checkout({}, "no-project", "coder", base_commit="a" * 40)
+
+
+def test_setup_spawn_failure_reports_status_without_leaking_command(repo, monkeypatch):
+    from app.core import worker_runtime as runtime, monitor_spawn
+    row, parent, *_ = repo
+    git(parent, "config", "--local", "fluid.workerSetupCommand", "private-command-canary")
+    checkout = worker_checkout.prepare_worker_checkout(row, "setup-failed", "coder")
+
+    def fail(*args, **kwargs):
+        raise OSError("private-command-canary")
+
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", fail)
+    asyncio.run(runtime.start_worker_runtime(checkout, "setup-failed", "coder"))
+    assert checkout.runtime["setup_status"].startswith("failed to start")
+    assert "private-command-canary" not in checkout.instructions()
+
+
+def test_local_setting_read_failure_is_nonfatal(monkeypatch):
+    from app.core.worker_runtime import _local_setting
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("git", 5)
+
+    monkeypatch.setattr(git_service, "_run_git", timeout)
+    assert _local_setting("unused", "fluid.workerSetupCommand") == ""
+
+
+def test_configured_python_wins_without_running_it(repo):
+    row, parent, *_ = repo
+    python = parent / "project-python"
+    python.write_text("not executable")
+    git(parent, "config", "--local", "fluid.workerPython", str(python))
+    checkout = worker_checkout.prepare_worker_checkout(row, "configured-python", "coder")
+    assert checkout.runtime["python"] == str(python)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_dispatch_starts_opted_in_runtime_without_joining(repo, worker_runtime, monkeypatch, enabled):
+    from types import SimpleNamespace
+    from app.core import monitor_spawn
+    row, parent, *_ = repo
+    calls = []
+    if enabled:
+        git(parent, "config", "--local", "fluid.workerSetupCommand", "project-setup-command")
+
+    def factory(sid, **kwargs):
+        assert kwargs == {"max_budget_seconds": 600}
+        async def spawn(inputs, ctx):
+            assert database.get_session(sid) is not None
+            calls.append((sid, inputs))
+            return SimpleNamespace(background_task=SimpleNamespace(task_id="setup-task"))
+        return spawn
+
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", factory)
+    outcome = dispatch()
+    assert outcome.ok, outcome.error
+    assert bool(calls) == enabled
+    if enabled:
+        assert calls[0][1] == {"command": "project-setup-command", "cwd": worker_runtime[0]["overrides"]["cwd"]}
+        assert "setup-task" in worker_runtime[0]["overrides"]["system_prompt_append"]
+
+
+@pytest.mark.parametrize("tools,blocked", [(["Read"], []), (["Bash"], ["Monitor"]), (["Bash"], ["mcp__builtins__Mon*"])])
+def test_runtime_respects_shell_restrictions(repo, monkeypatch, tools, blocked):
+    from app.core import worker_runtime as runtime, monitor_spawn
+    row, parent, *_ = repo
+    git(parent, "config", "--local", "fluid.workerSetupCommand", "must-not-run")
+    checkout = worker_checkout.prepare_worker_checkout(row, "restricted-runtime", "coder")
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", lambda *a, **kw: pytest.fail("restricted"))
+    asyncio.run(runtime.start_worker_runtime(checkout, "restricted-runtime", "coder", tools, blocked))
+    assert checkout.runtime["setup_status"].startswith("skipped")
+
+
 def git(path, *args):
     return subprocess.run(["git", *args], cwd=path, check=True,
                           capture_output=True, text=True).stdout.strip()

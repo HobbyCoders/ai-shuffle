@@ -261,6 +261,31 @@ def _resolve_tool_selection(config: Dict[str, Any]) -> ToolAccess:
     return ToolAccess(allowed=None, disallowed=None)
 
 
+def shell_companion_tools(allowed, disallowed=None):
+    """Bash also offers tracked shells, unless the owner explicitly blocks them.
+
+    This expands a surface, never permission grants. Normalize only our own
+    builtin aliases; an external server called Bash grants nothing here.
+    """
+    if not allowed:
+        return allowed
+
+    def bare(name):
+        return str(name).removeprefix("mcp__fluid_bundled__").removeprefix("mcp__builtins__")
+
+    names = list(allowed)
+    surface = [bare(name) for name in names]
+    blocked = [bare(name) for name in disallowed or ()]
+    if not tool_permitted("Bash", surface, blocked):
+        return names
+    if matches_any("Monitor", blocked):
+        return names
+    for name in ("Monitor", "TaskGet", "TaskList", "TaskOutput", "TaskStop"):
+        if not matches_any(name, blocked) and name not in surface:
+            names.append(name)
+    return names
+
+
 def tool_permitted(
     name: str,
     allowed: Optional[Iterable[str]] = None,

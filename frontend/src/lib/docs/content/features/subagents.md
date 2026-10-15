@@ -21,6 +21,22 @@ Ask in plain words, for example "have a reviewer check this change while you wri
 
 A subagent working on code gets its own copy of the project on its own branch, so it never edits the files you are working on. Its commits come back for you or the main agent to review.
 
+## Checkout setup and review commits
+
+Local coding workers receive a receipt with their actual base commit, an existing Python interpreter (the project's `.venv`/`venv`, otherwise the worker interpreter), and ready-to-run `Monitor` inputs for `npm ci` in each checkout-local package folder with a lockfile. SvelteKit packages also run `npx svelte-kit sync`. Dependencies and credentials are never copied or linked. An interpreter's presence is not proof that every test dependency is installed; do not install packages into the parent's environment.
+
+For automatic setup, the project owner can opt in once in that repository's **local Git config**:
+
+```sh
+git config --local fluid.workerSetupCommand 'python -m venv .venv && .venv/bin/python -m pip install -r requirements.txt'
+```
+
+Use the project's documented provisioning command instead where appropriate (including its development requirements). The example uses POSIX paths; on Windows use the project's shell-compatible setup command and `.venv/Scripts/python.exe`. `fluid.workerPython` may record an absolute existing interpreter path for the receipt. These settings are local to the repository, not accepted from tracked files or the task brief. Setting a setup command authorizes running it, including project install hooks, in future local worker checkouts; enable it only for trusted code. Remove the opt-in with `git config --local --unset fluid.workerSetupCommand`.
+
+Setup runs in that worker's own checkout as a tracked Monitor task with a ten-minute maximum, not a minutes-long dispatch wait. Its task ID and launch status appear in the receipt; completion or failure arrives through the normal Monitor wake. Wait for completion before using the environment or starting another install. Automatic setup is skipped when the agent's shell tools are restricted. Agents with Bash also receive Monitor and its task-management tools unless explicitly blocked; file-read-only agents keep their existing tools. Tool availability does not pre-approve shell commands.
+
+For a local review of a different commit, the delegating agent can supply Task's `base_commit`: a full commit SHA already fetched into the caller's repository. The host validates it and checks the resulting checkout SHA before launching. It never guesses a SHA from prose. Omit it to use the caller's committed HEAD. This explicit override is not supported with a remote `worker` request.
+
 ## Choosing the model
 
 A subagent runs on the model set in its agent's **Models** section. If that is empty, it uses your subagent default. The first time an agent starts a subagent with no default set, AI Shuffle asks **Which model should subagents use?** Your answer becomes the default, which you can change on the **Agents** page.

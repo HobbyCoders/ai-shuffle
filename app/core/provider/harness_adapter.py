@@ -5537,13 +5537,17 @@ def _tool_allowlist(options: SessionOptions) -> Optional[list]:
     ``allowed_tools``, which carries the SDK's permission vocabulary (see the
     field docs in ``provider/types.py``). Blank entries are dropped and an empty
     result degrades to None, so an accidental ``[]`` never blanks a session's
-    toolset — CE12's "restriction is exactly the list" only applies to a list
-    that actually names something.
+    toolset. A shell-capable surface also offers Monitor and task management,
+    subject to the owner's explicit blocks. This never expands permission grants.
     """
     raw = getattr(options, "tool_allowlist", None)
     if not raw:
         return None
-    names = [str(t).strip() for t in raw if str(t).strip()]
+    from app.core.tool_access import shell_companion_tools
+
+    names = shell_companion_tools(
+        [str(t).strip() for t in raw if str(t).strip()], options.disallowed_tools,
+    )
     if _session_mode(options) == "chat" and "Read" in names:
         from app.core.attachment_read import DELEGATED_READ
         if DELEGATED_READ not in names:
