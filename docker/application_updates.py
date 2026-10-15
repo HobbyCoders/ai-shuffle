@@ -313,9 +313,13 @@ class BoundedTarStream:
 
     @staticmethod
     def validate_pax(payload):
-        # PAX can reinterpret an ordinary file body as an unbounded GNU sparse
-        # map. Inspect every bounded record before tarfile sees its full body;
-        # neither local nor global headers may enable any sparse format.
+        # Keep framing identical to the raw ustar headers: PAX size overrides
+        # (including inherited global ones) can make tarfile seek into what this
+        # guard considers payload. No size override is needed below our 2 GiB cap.
+        # Allow only metadata that cannot change byte offsets or enable sparse
+        # maps, rather than trying to enumerate every vendor extension.
+        allowed = {b"path", b"linkpath", b"mtime", b"atime", b"ctime", b"uid", b"gid",
+                   b"uname", b"gname", b"comment", b"hdrcharset"}
         offset = 0
         while offset < len(payload):
             space = payload.find(b" ", offset)
@@ -330,6 +334,8 @@ class BoundedTarStream:
                 raise UpdateError("Runtime archive has malformed PAX metadata")
             if key.startswith(b"GNU.sparse"):
                 raise UpdateError("Runtime archive sparse files are not supported")
+            if bytes(key) not in allowed:
+                raise UpdateError("Runtime archive has an unsupported PAX key (size/offset overrides are forbidden)")
             offset = end
 
     def read(self, size=-1):

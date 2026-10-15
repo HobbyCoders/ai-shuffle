@@ -138,6 +138,85 @@ def test_runtime_bounds_precede_tar_metadata_parsing(feed, kind, monkeypatch):
     assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
 
 
+@pytest.mark.parametrize("global_size", [False, True], ids=["local", "global-inherited"])
+@pytest.mark.parametrize("hidden_kind", ["sparse", "longname", "both"])
+def test_pax_size_cannot_hide_unbounded_metadata(feed, monkeypatch, global_size, hidden_kind):
+    import gzip
+    import tarfile
+    updater = feed[0]
+    item, _ = runtime_artifact()
+
+    def pax_block(fields, kind=tarfile.XHDTYPE):
+        records = []
+        for key, value in fields.items():
+            text = (key + "=" + value + "\n").encode()
+            length = len(text) + 2
+            while len(str(length)) + 1 + len(text) != length:
+                length = len(str(length)) + 1 + len(text)
+            records.append(str(length).encode() + b" " + text)
+        payload = b"".join(records)
+        header = tarfile.TarInfo("PaxHeaders/runtime")
+        header.type, header.size = kind, len(payload)
+        return header.tobuf() + payload + bytes(-len(payload) % 512)
+
+    # Model the reviewer's probes: ustar says 'cover' contains all of these
+    # bytes, but PAX size=0 makes tarfile reinterpret them as more headers.
+    hidden = b""
+    if hidden_kind in ("longname", "both"):
+        header = tarfile.TarInfo("././@LongLink")
+        name = b"a" * 200000 + b"\0"
+        header.type, header.size = tarfile.GNUTYPE_LONGNAME, len(name)
+        hidden += header.tobuf(format=tarfile.GNU_FORMAT) + name + bytes(-len(name) % 512)
+        hidden += tarfile.TarInfo("ordinary").tobuf()
+    if hidden_kind in ("sparse", "both"):
+        hidden += pax_block({"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.realsize": "1"})
+        sparse_map = b"20001\n" + b"0\n0\n" * 20000 + b"0\n1\n"
+        sparse_map += bytes(-len(sparse_map) % 512)
+        header = tarfile.TarInfo(item["executable"])
+        header.mode, header.size = 0o755, len(sparse_map) + 512
+        hidden += header.tobuf(format=tarfile.GNU_FORMAT) + sparse_map + b"x" + bytes(511)
+    cover = tarfile.TarInfo("cover")
+    cover.size = len(hidden)
+    if global_size:
+        prefix = pax_block({"size": "0"}, tarfile.XGLTYPE) + pax_block({"comment": "harmless"})
+    else:
+        prefix = pax_block({"size": "0"})
+    raw = prefix + cover.tobuf(format=tarfile.USTAR_FORMAT) + hidden + bytes(1024)
+    data = gzip.compress(raw)
+    assert len(data) < 4096
+    item.update(size=len(data), sha256=hashlib.sha256(data).hexdigest(), unpacked_size=len(raw))
+    offer_runtimes(feed, [(item, data)])
+
+    def no_unbounded_parser(*args, **kwargs):
+        pytest.fail("PAX size override reached a hidden metadata allocation routine")
+
+    for name in ("_proc_gnulong", "_proc_sparse", "_proc_gnusparse_00", "_proc_gnusparse_01", "_proc_gnusparse_10"):
+        monkeypatch.setattr(tarfile.TarInfo, name, no_unbounded_parser)
+    with pytest.raises(UpdateError, match="unsupported PAX key"):
+        updater.check(download=True)
+    assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
+    # Re-reading a cache from the old updater is subject to exactly the same
+    # framing check, before sparse parsing or filesystem content verification.
+    directory = updater.overlays.directory(item)
+    directory.mkdir()
+    (directory / "runtime.tar").write_bytes(data)
+    (directory / "payload").mkdir()
+    with pytest.raises(UpdateError, match="unsupported PAX key"):
+        updater.overlays.installed(item)
+
+
+@pytest.mark.parametrize("key", ["size", "offset", "GNU.sparse.realsize", "GNU.sparse.size",
+                                  "SCHILY.realsize", "SCHILY.offset", "future.extension"])
+def test_pax_nonallowlisted_keys_fail_closed(key):
+    from docker import application_updates as module
+    record = (key + "=0\n").encode()
+    length = len(record) + 2
+    while len(str(length)) + 1 + len(record) != length:
+        length = len(str(length)) + 1 + len(record)
+    with pytest.raises(UpdateError, match="unsupported PAX key|sparse files"):
+        module.BoundedTarStream.validate_pax(str(length).encode() + b" " + record)
+
+
 @pytest.mark.parametrize("sparse_format,header_type", [
     ("0.0", b"x"), ("0.1", b"x"), ("1.0", b"x"),
     ("0.0", b"g"), ("0.1", b"g"), ("1.0", b"g"), ("S", None),
