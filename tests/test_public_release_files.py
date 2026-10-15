@@ -49,8 +49,8 @@ def test_native_project_license_notices():
 def test_public_readme_order_and_install():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     assert re.findall(r"^## (.+)$", text, re.M) == [
-        "What it is", "What you can do with it", "Install", "Free and Cloud",
-        "How it compares", "Contributing", "Security", "License", "Not affiliated",
+        "What it is", "Fluid: our own agent harness", "What you can do with it", "Install",
+        "Free and Cloud", "Contributing", "Security", "License", "Not affiliated",
     ]
     assert text.index("[Watch the tour]") < text.index("## What it is")
     block = re.search(r"```sh\n(.*?)```", text, re.S).group(1)
@@ -83,7 +83,7 @@ def test_public_readme_order_and_install():
 def test_public_relative_links_exist(name):
     text = (ROOT / name).read_text(encoding="utf-8")
     for link in re.findall(r"\[[^]]*\]\(([^)]+)\)", text):
-        if "://" not in link and not link.startswith("mailto:"):
+        if "://" not in link and not link.startswith(("mailto:", "#")):
             assert (ROOT / link.split("#", 1)[0]).is_file(), (name, link)
 
 

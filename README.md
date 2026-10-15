@@ -2,7 +2,7 @@
 
 **Your AI agents, on your own machines, from anywhere.**
 
-AI Shuffle is a free, open-source workspace for running AI agents. Install it on your PC, home server or NAS, sign in with the AI account you already have, and put agents to work: writing code, running jobs on a schedule, answering your messages, or handling chores across your machines. Everything stays on your hardware, and you can check in from your phone.
+AI Shuffle is a free, open-source workspace for running AI agents. Install it on your PC, home server or NAS (macOS coming soon), sign in with the AI account you already have, and put agents to work: writing code, running jobs on a schedule, answering your messages, or handling chores across your machines. Everything stays on your hardware, and you can check in from your phone.
 
 [Watch the tour](https://hobbycoders.com/ai-shuffle) · [Download](https://hobbycoders.com/ai-shuffle/downloads) · [Docs](docs/content/getting-started/_index.md) · [Discord](https://hobbycoders.com/discord)
 
@@ -10,12 +10,30 @@ AI Shuffle is a free, open-source workspace for running AI agents. Install it on
 
 ## What it is
 
-If you use Claude Code or Codex in a terminal, AI Shuffle is the workspace around them. You get the same kind of agent, plus a place to keep every chat, project and job, on every machine you own.
+If you use Claude Code or Codex in a terminal, AI Shuffle is the workspace around them, running on its own agent harness called Fluid. You get the same kind of agent, plus a place to keep every chat, project and job, on every machine you own.
 
 - **Use the AI you already pay for.** Sign in with a Claude, ChatGPT or SuperGrok subscription, or add an API key for Claude, OpenAI, OpenRouter, xAI or a local model. Your provider bills you directly. AI Shuffle adds no markup and never sees your prompts.
 - **It runs at home.** Your code, chats and keys stay on your computer or server. No account is needed to use it.
 - **Pick up anywhere.** Start a job at your desk, check on it from the Android app, and approve the next step from the couch.
 - **Free and open source.** AGPL-3.0, with no license key, trial or usage cap on the app.
+- **Every session runs on Fluid.** Fluid is the agent layer of AI Shuffle, so every provider gets the same tools and features. Claude subscriptions are the one exception: they run through Claude Code itself ([why](#fluid-our-own-agent-harness)).
+
+## Fluid: our own agent harness
+
+Fluid is the engine that actually runs your agents: it talks to the model, runs tools, asks for approval, manages context and memory, and keeps long sessions cheap through prompt caching. It lives in [`fluid/`](fluid/README.md) in this repository, and you can also run it on its own from the command line.
+
+**Why we built our own instead of wrapping each provider's app.** The easy way to support many providers is to bundle each one's own coding agent, Claude Code for Claude and Codex for OpenAI, and put a UI on top. Every one of those works differently: its own tools, permission rules, memory, context handling and limits. Features would land for one provider and not another, switching models would change how your agent behaves, and we could not fix problems inside someone else's harness. With Fluid, an agent works the same way whichever model you choose: the same tools, approvals, hooks, memory, subagents, worktrees and connectors.
+
+**The one exception: Claude subscriptions.** Anthropic only allows Claude Pro and Max subscriptions to be used through its own Claude Code. So when you sign in with a Claude subscription, Fluid drives the official Claude Code CLI on your machine instead of calling the model itself, and it never reuses your subscription sign-in anywhere else. That keeps you within Anthropic's terms. It also means those sessions use Claude Code's own agent loop and tools. If you want Claude inside Fluid like every other provider, use an Anthropic API key.
+
+| Provider | How Fluid runs it | Sign-in |
+| --- | --- | --- |
+| Anthropic (Claude) API | Fluid's own loop | API key |
+| OpenAI | Fluid's own loop | API key or ChatGPT subscription |
+| xAI | Fluid's own loop | API key or SuperGrok subscription |
+| OpenRouter and OpenAI-compatible gateways | Fluid's own loop | API key |
+| Local models (llama.cpp, Ollama and similar) | Fluid's own loop | Optional key |
+| Claude Pro or Max subscription | Official Claude Code CLI, driven by Fluid | Claude Code's own sign-in |
 
 ## What you can do with it
 
@@ -50,31 +68,15 @@ Pick whichever fits how you work. Every download is free and needs no account or
 
   Compose pulls the public image `ghcr.io/hobbycoders/ai-shuffle-server`. Open `http://localhost:8000` on that machine. The [Docker Compose guide](docs/content/getting-started/install-docker-compose.md) covers network access and storage.
 - **Android:** the phone app connects to one of your workers; it does not run agents itself. Get the APK from the [downloads page](https://hobbycoders.com/ai-shuffle/downloads). [Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) availability depends on your access to the testing track.
+- **macOS and iOS:** coming soon.
 
-Then follow [first run](docs/content/getting-started/first-run.md) to connect your AI account. If you choose Claude, setup can install Claude Code using Anthropic's installer; you sign in yourself, and no Claude Code binary is bundled.
+Then follow [first run](docs/content/getting-started/first-run.md) to connect your AI account. If you choose a Claude subscription, setup can install Claude Code using Anthropic's installer; you sign in yourself, and no Claude Code binary is bundled.
 
 ## Free and Cloud
 
 The app is free. Run it on your own hardware with your own AI account, on your home network or your own VPN, and you never need a HobbyCoders account. Updates and worker sync on the same network are free too.
 
 [AI Shuffle Cloud](docs/content/getting-started/cloud.md) is the optional paid part, for reaching your workers from anywhere without setting up a VPN: remote access, sync across networks, public endpoints for connectors, sign-in relays for plugins, and in-app support. A free account includes one remote worker with no card needed. Ending a plan never disables the local app. AI usage is always between you and your provider.
-
-## How it compares
-
-The products below cover different jobs. Coder manages development environments as well as agents; OpenHands supports several agent backends. "—" means not verified, not necessarily unavailable. "Any provider" means configurable providers or compatible endpoints, not a promise that every model works.
-
-| Capability | AI Shuffle | [Claude Code](https://code.claude.com/docs/en/overview) | [Codex CLI](https://learn.chatgpt.com/codex/cli) | [OpenHands](https://docs.openhands.dev/overview/introduction) | [Coder](https://coder.com/docs/about) |
-| --- | --- | --- | --- | --- | --- |
-| Runs on your own hardware | Yes | Yes | Yes | Yes | Yes |
-| Several machines in one place | Worker network and hand-off | — | — | Multiple backends | Managed workspaces |
-| Phone app | Android | Claude mobile app | — | — | — |
-| Any provider | Supported providers and local models | — | Custom providers and local endpoints | LiteLLM and local models | Multiple providers and self-hosted endpoints |
-| Subscription sign-in (not only API keys) | Claude and ChatGPT | Claude | ChatGPT | Via external agent CLIs | — |
-| Automations | Schedules and events | Schedules and CLI | CLI scripting | Schedules and events | API and CI workflows |
-| Connectors | Built-in connectors and MCP | MCP | Plugins and MCP | MCP | MCP |
-| Open source | AGPL-3.0-only | — | Yes | Yes | AGPL-3.0 |
-
-Comparison checked against the linked products' documentation on 2026-10-11. Features and plan requirements can change.
 
 ## Contributing
 
