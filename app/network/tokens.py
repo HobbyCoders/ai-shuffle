@@ -36,6 +36,7 @@ from app.network import crypto, engine, membership
 from app.core.config import settings
 from app.db import network as store
 
+ENDPOINT_NOT_ADVERTISED = "endpoint_not_advertised"
 TOKEN_TTL_SECONDS = 300
 CHALLENGE_TTL_SECONDS = 120
 # Outstanding challenges per (requester address, member device). A member
@@ -310,13 +311,20 @@ def issue_token(*, device_id: str, challenge: str, signature: str,
                     allowed.add(canonical_endpoint(advertised))
                 except ValueError:
                     continue
-            ok = canonical in allowed and crypto.verify(
+            ok = crypto.verify(
                 member.signing_public, bound_challenge_message(challenge, ctx.device_id, canonical),
                 crypto.b64u_decode(bound_signature))
         except (crypto.CryptoError, ValueError, TypeError):
             ok = False
         if not ok:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Endpoint binding is invalid")
+        if canonical not in allowed:
+            # Only distinguish this after verifying the proof. Do not disclose
+            # our other addresses, the challenge, signatures or any token.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, {
+                "code": ENDPOINT_NOT_ADVERTISED,
+                "message": "The signed endpoint is not advertised by this worker",
+            })
         store.pin_token_binding(device_id, crypto.b64u_encode(member.signing_public))
     elif settings.network_require_token_binding or (store.get_member(device_id) or {}).get("token_binding_required"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Endpoint binding is required")

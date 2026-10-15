@@ -63,6 +63,11 @@ The server checks the endpoint against its current locally advertised tunnel and
 LAN addresses, never against HTTP Host or forwarded headers. Tunnel rotation
 accepts the new advertisement immediately and rejects the removed address,
 including challenges issued before rotation; peers must refresh discovery.
+A valid proof for an unadvertised address receives HTTP 403 with
+`detail.code="endpoint_not_advertised"`. The response reveals no other server
+addresses. The dialing worker records an actionable message in its peer status,
+shows it in the worker's Devices detail and logs a warning at most once per five
+minutes per peer. Invalid signatures still receive the generic binding refusal.
 
 Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
 IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames

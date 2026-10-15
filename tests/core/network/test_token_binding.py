@@ -44,6 +44,84 @@ def post(client, body, **kw):
     return client.post("/api/v1/network/peer/auth/token", json=body, **kw)
 
 
+def test_mismatch_code_discloses_no_addresses_and_requires_valid_proof(pair):
+    server, peer, endpoints, client = pair
+    with server.active():
+        body = request_body(client, server, peer, "https://alias.example")
+        response = post(client, body)
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == tokens.ENDPOINT_NOT_ADVERTISED
+        assert all(url not in response.text for url in endpoints)
+        assert body["challenge"] not in response.text
+        assert body["signature"] not in response.text
+        body = request_body(client, server, peer, "https://alias.example")
+        body["bound_signature"] = body["signature"]
+        assert post(client, body).json()["detail"] == "Endpoint binding is invalid"
+
+
+@pytest.mark.asyncio
+async def test_mismatch_reason_reaches_peer_status_and_rate_limited_logs(pair, caplog):
+    server, peer, _, server_client = pair
+    alias = "https://alias.example"
+    replies = []
+    def handler(request):
+        if request.url.host == "offline.example":
+            raise httpx.ConnectError("offline", request=request)
+        with server.active():
+            reply = server_client.post(request.url.path, json=json.loads(request.content))
+        replies.append(reply.json())
+        return httpx.Response(reply.status_code, json=reply.json())
+    with peer.active():
+        link = transport.PeerLink(server.device_id, [alias, "https://offline.example"])
+        transport._links[server.device_id] = link
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            for _ in range(2):
+                with pytest.raises(transport.PeerEndpointNotAdvertised) as exc:
+                    await link.authenticate(client, engine.context())
+                assert exc.value.code == tokens.ENDPOINT_NOT_ADVERTISED
+        status = transport.link_status()[0]
+        assert alias in status["last_error"]
+        assert "Advertised addresses" in status["last_error"]
+        assert "CLUSTER_ADVERTISE_URL" in status["last_error"]
+    warnings = [r.message for r in caplog.records if "does not advertise" in r.message]
+    assert len(warnings) == 1
+    assert alias in warnings[0] and server.device_id in warnings[0]
+    for reply in replies:
+        if "challenge" in reply:
+            assert reply["challenge"] not in warnings[0]
+
+
+def test_owner_configured_alias_repairs_unadvertised_direct_endpoint(workers, monkeypatch):
+    from app.core import managed_connection
+    from app.network import lan
+
+    monkeypatch.setattr(managed_connection, "status", lambda: {})
+    monkeypatch.setattr(lan, "owner_addresses", lambda: [])
+    monkeypatch.setattr(settings, "cluster_advertise_url", "http://192.168.50.20:8000")
+    monkeypatch.setattr(settings, "network_require_token_binding", False)
+    server, peer = workers("server"), workers("peer")
+    with server.active():
+        engine.create_network("Test network")
+    join(server, peer)
+    app = FastAPI()
+    app.include_router(api.router)
+    client = TestClient(app)
+    alias = "https://proxy.example/worker"
+    with server.active():
+        # Real advertisement producer, not an injected allowlist: an external
+        # reverse-proxy URL was reachable before but is not yet advertised.
+        assert engine._own_endpoints() == ["http://192.168.50.20:8000"]
+        assert post(client, request_body(client, server, peer)).status_code == 200
+        assert post(client, request_body(client, server, peer, alias)).status_code == 403
+        assert not store.get_member(peer.device_id)["token_binding_required"]
+        # Existing trusted owner configuration repairs the topology without
+        # deriving an alias from Host/forwarded headers or weakening binding.
+        monkeypatch.setattr(settings, "cluster_advertise_url", alias)
+        assert engine._own_endpoints() == [alias]
+        assert post(client, request_body(client, server, peer, alias)).status_code == 200
+        assert store.get_member(peer.device_id)["token_binding_required"]
+
+
 def test_legacy_then_bound_then_stripped_and_relay_refused(pair):
     server, peer, endpoints, client = pair
     with server.active():

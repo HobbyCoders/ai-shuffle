@@ -166,6 +166,15 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+	it('shows the actionable peer refusal in the worker detail', async () => {
+		const error = 'Worker laptop refused https://alias.example because it does not advertise that address. Add Advertised addresses or set CLUSTER_ADVERTISE_URL.';
+		status.sync = { records: {}, ops: 0, holes: [], conflicts: 0, peers: [{ device_id: 'laptop', base_url: null,
+			endpoints: ['https://alias.example'], last_error: error, seconds_since_contact: null, online: false }] };
+		await model.loadStatus();
+		show('member:laptop');
+		expect(screen.getByRole('alert').textContent).toBe(error);
+	});
+
 	it('shows a desktop revision beside its bare version in the list and detail', async () => {
 		status.members![1] = member('laptop', { platform: 'windows', version: '0.9.1', revision: '04d9a0cfb' });
 		await model.loadStatus();

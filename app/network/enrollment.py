@@ -427,10 +427,11 @@ def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, devi
 
 def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpoints: list) -> None:
     """Synchronous snapshot copy (runs in a worker thread)."""
-    from app.network import tokens
+    from app.network import tokens, transport
     if not issuer_id:
         raise EnrollmentError("Join response names no issuer to copy from")
     last_error = "unreachable"
+    binding_refusal = None
     with httpx.Client(follow_redirects=False, timeout=60.0) as client:
         for base in endpoints:
             base = base.rstrip("/")
@@ -445,6 +446,11 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                         ctx.identity.signing_private, challenge, issuer_id, base),
                     "incarnation": ctx.identity.incarnation, "endpoints": engine._own_endpoints(),
                     "version": settings.version, "platform": identity_mod.platform_name()})
+                if token_response.status_code == 403:
+                    detail = token_response.json().get("detail")
+                    if isinstance(detail, dict) and detail.get("code") == tokens.ENDPOINT_NOT_ADVERTISED:
+                        binding_refusal = str(transport.PeerEndpointNotAdvertised(issuer_id, base))
+                        raise EnrollmentError(binding_refusal)
                 if token_response.status_code >= 400:
                     raise EnrollmentError(f"token HTTP {token_response.status_code}")
                 headers = {"Authorization": "Bearer " + token_response.json()["token"]}
@@ -492,7 +498,7 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
             except (httpx.HTTPError, KeyError, ValueError, EnrollmentError, engine.ApplyError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"[:200]
                 continue
-    raise EnrollmentError("Snapshot copy failed: " + last_error)
+    raise EnrollmentError("Snapshot copy failed: " + (binding_refusal or last_error))
 
 
 def resume_enrollment() -> bool:
