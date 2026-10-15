@@ -16,6 +16,8 @@ No account or Docker login is needed to download the public image.
 
 Many NAS and home server systems have a Docker or "Container" app with a Compose or "Project" screen. Paste the two files below there, or use a terminal on the machine.
 
+> **Before enabling agent shells:** by default an agent can read this install's own database password and credential keys. Consider the [optional agent/service account split](#keep-agents-away-from-ai-shuffles-own-keys-optional) on a disposable install first. It is separate from the code-mode sandbox below and is not fail-closed; setting it to `on` alone does not prove that it is active.
+
 ## Install with Docker Compose
 
 ### 1. Create the two files

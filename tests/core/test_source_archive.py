@@ -136,7 +136,11 @@ def test_update_archive_supplies_every_verified_connector_without_repo_access(re
     bundled.mkdir(parents=True)
     for name in files | {"catalog.json"}:
         (bundled / name).write_bytes((sources / name).read_bytes())
-    git(repo, "add", "app/core/connectors")
+    # git archive applies checkout conversion. Keep the real LF attributes
+    # that protect digest-pinned connector sources, even with autocrlf enabled.
+    (repo / ".gitattributes").write_bytes((source_archive.ROOT / ".gitattributes").read_bytes())
+    git(repo, "config", "core.autocrlf", "true")
+    git(repo, "add", ".gitattributes", "app/core/connectors")
     git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "ship connector snapshots")
     revision = git(repo, "rev-parse", "HEAD")
     archive = tmp_path / "application-update.zip"

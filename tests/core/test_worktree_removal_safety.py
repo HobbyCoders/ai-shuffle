@@ -2,6 +2,7 @@
 
 import os
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,28 @@ def worktree(tmp_path, monkeypatch):
     wt = tmp_path / "wt"
     git(main, "worktree", "add", "-q", "-b", "feature", str(wt))
     return main, wt
+
+
+def test_preflight_uses_real_device_metadata_not_direntry_cache(tmp_path, monkeypatch):
+    wt = tmp_path / "wt"
+    (wt / "ordinary").mkdir(parents=True)
+    marker = wt / "ordinary" / "keep.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+    scandir = os.scandir
+
+    @contextmanager
+    def windows_scandir(path):
+        with scandir(path) as entries:
+            # On Windows the cached DirEntry metadata has st_dev=0, unlike
+            # lstat. Emulate that on every host to catch false mount refusals.
+            yield [SimpleNamespace(
+                path=entry.path, name=entry.name,
+                stat=lambda **kwargs: SimpleNamespace(st_dev=0, st_mode=stat.S_IFDIR),
+            ) for entry in entries]
+
+    monkeypatch.setattr(os, "scandir", windows_scandir)
+    assert cm.sever_runtime_links(str(wt)) == {"severed": [], "errors": []}
+    assert marker.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_linked_root_is_neither_recoverable_nor_detached(tmp_path):
