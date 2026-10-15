@@ -203,3 +203,61 @@ def test_park_recovery_rechecks_admission_before_settlement(mock_db, monkeypatch
     monkeypatch.setattr(turns, "settle_parked_turns", racing_settle)
     assert pa._worker_still_working(sid) is True
     assert turns.get_turn(turn["id"])["state"] == "parked"
+
+
+@pytest.mark.parametrize("new_work", [True, False])
+def test_park_recovery_does_not_settle_a_new_incarnation(mock_db, monkeypatch, new_work):
+    """The same logical turn can resume and repark while recovery waits."""
+    sid = "repark-race"
+    reg = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", reg)
+    first = turns.enqueue_turn(sid, "user", prompt="checks")
+    turns.start_turn(first["id"], run_id="old-run")
+    turns.park_turn(first["id"], ["retired"])
+    settle = turns.settle_parked_turns
+    repaired = []
+
+    def racing_settle(*args, **kwargs):
+        queued = turns.enqueue_turn(sid, "user", prompt="more checks")
+        resumed = turns.start_turn(queued["id"], run_id="new-run", can_resume=lambda *a: True)
+        assert resumed["id"] == first["id"]
+        if new_work:
+            reg.start_task(sid, "new-monitor", "shell", "new checks")
+            reg.mark_monitor_shell_task(sid, "new-monitor")
+        turns.park_turn(first["id"], ["new-monitor"])
+        repaired.append(settle(*args, **kwargs))
+
+    monkeypatch.setattr(turns, "settle_parked_turns", racing_settle)
+    still_working = pa._worker_still_working(sid)
+    assert repaired == [0], "recovery must compare the observed park incarnation"
+    assert still_working is True, "changed park must be retried, not dispatched as finished"
+    row = turns.get_turn(first["id"])
+    assert row["state"] == "parked"
+    assert row["payload"]["task_ids"] == ["new-monitor"]
+    if new_work:
+        assert [r["id"] for r in reg.get_active(sid)] == ["new-monitor"]
+
+
+
+def test_park_recovery_rechecks_new_registry_work_under_admission(mock_db, monkeypatch):
+    """Late registration must veto repair even if the park interval is unchanged."""
+    sid = "late-monitor-registration"
+    reg = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", reg)
+    turn = turns.enqueue_turn(sid, "user", prompt="checks")
+    turns.start_turn(turn["id"], run_id="same-run")
+    parked = turns.park_turn(turn["id"], ["retired"])
+    settle = turns.settle_parked_turns
+    repaired = []
+
+    def racing_settle(*args, **kwargs):
+        reg.start_task(sid, "new-monitor", "shell", "new checks")
+        reg.mark_monitor_shell_task(sid, "new-monitor")
+        repaired.append(settle(*args, **kwargs))
+
+    monkeypatch.setattr(turns, "settle_parked_turns", racing_settle)
+    assert pa._worker_still_working(sid) is True
+    assert repaired == [0]
+    assert turns.get_turn(turn["id"])["state"] == "parked"
+    assert turns.get_turn(turn["id"])["ended_at"] == parked["ended_at"]
+    assert reg.get_task(sid, "new-monitor")["status"] == "running"

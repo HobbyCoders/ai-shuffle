@@ -1266,12 +1266,18 @@ def _worker_still_working(worker_session_id: str) -> bool:
             # behind. With no live work or unpublished wake, there is nothing
             # left to await. Repair the row before the ordinary dispatch tail
             # reads its report, completes the task and notifies the parent.
-            # Admission is rechecked under the same lock as enqueue/start so
-            # a racing wake cannot have its continued turn settled underneath it.
-            turns_db.settle_parked_turns(
+            # A continuation reuses the turn id and may already have parked
+            # AGAIN before recovery acquires admission. Compare the observed
+            # run/park timestamp atomically, and recheck work under that lock.
+            repaired = turns_db.settle_parked_turns(
                 worker_session_id, turn_ids=[row["id"]], only_if_idle=True,
+                observed_park=row,
+                can_settle=lambda: not _active_worker_background_work(worker_session_id),
             )
-            return turns_db.session_has_unsettled_turns(worker_session_id)
+            if not repaired:
+                return True  # Changed while probing: retry, never drain/kill it.
+            return bool(_active_worker_background_work(worker_session_id)
+                        or turns_db.session_has_unsettled_turns(worker_session_id))
         return False
     except DB_POLL_ERRORS:
         raise
