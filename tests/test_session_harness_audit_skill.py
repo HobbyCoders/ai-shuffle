@@ -8,6 +8,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / ".fluid/skills/session-harness-audit"
+# Maintainer skills are per-checkout and intentionally absent from the public
+# repository. Keep these optional regressions runnable where the skill exists;
+# generic discovery/loading coverage lives in core/test_repo_skills.py.
+if not (SKILL / "scripts/metrics.py").is_file():
+    pytest.skip("optional maintainer audit skill is not installed", allow_module_level=True)
+
 spec = importlib.util.spec_from_file_location("audit_metrics", SKILL / "scripts/metrics.py")
 metrics = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(metrics)
