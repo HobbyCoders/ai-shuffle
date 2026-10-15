@@ -17,6 +17,7 @@ via an Adaptive Card (see ``MSTeamsConnector.request_action_approval``).
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
@@ -142,12 +143,7 @@ async def _bf_call(
     json_body: Optional[Dict[str, Any]] = None,
 ) -> httpx.Response:
     """Make an authenticated Bot Framework REST call."""
-    token = await conn._ensure_token()
-    url = f"{service_url.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        return await client.request(
-            method, url, headers=conn._auth_headers(token), json=json_body,
-        )
+    return await conn._bot_request(method, service_url, path, json_body)
 
 
 Handler = Callable[[Any, Dict[str, Any], Dict[str, Any]], Awaitable[Dict[str, Any]]]
@@ -211,7 +207,7 @@ async def _update_message(conn, params, ctx):
         return err
     resp = await _bf_call(
         conn, "PUT", ref.get("service_url", DEFAULT_SERVICE_URL),
-        f"/v3/conversations/{conv_id}/activities/{activity_id}",
+        f"/v3/conversations/{quote(conv_id, safe='')}/activities/{quote(activity_id, safe='')}",
         {"type": "message", "text": text},
     )
     if not (200 <= resp.status_code < 300):
@@ -229,7 +225,7 @@ async def _delete_message(conn, params, ctx):
         return err
     resp = await _bf_call(
         conn, "DELETE", ref.get("service_url", DEFAULT_SERVICE_URL),
-        f"/v3/conversations/{conv_id}/activities/{activity_id}",
+        f"/v3/conversations/{quote(conv_id, safe='')}/activities/{quote(activity_id, safe='')}",
     )
     if not (200 <= resp.status_code < 300):
         return _err(f"Bot Framework returned {resp.status_code}: {resp.text[:200]}")
@@ -256,7 +252,7 @@ async def _list_members(conn, params, ctx):
         return err
     resp = await _bf_call(
         conn, "GET", ref.get("service_url", DEFAULT_SERVICE_URL),
-        f"/v3/conversations/{conv_id}/members",
+        f"/v3/conversations/{quote(conv_id, safe='')}/members",
     )
     if resp.status_code != 200:
         return _err(f"Bot Framework returned {resp.status_code}: {resp.text[:200]}")

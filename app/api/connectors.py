@@ -164,6 +164,48 @@ async def discover_discord_resources(
         )
 
 
+# ---- Microsoft Teams: independently authenticated public channel endpoint ----
+
+@router.post("/msteams/{connector_id}/messages")
+async def teams_activity(connector_id: str, request: Request):
+    from app.core.connector_packages import is_offered
+    from app.core.connector_service import receive_teams_activity
+    from app.core.connectors.manager import connector_manager
+    from app.core.msteams_auth import InvalidBotToken
+
+    if not is_offered("msteams"):
+        raise HTTPException(status_code=404, detail="Teams is not enabled")
+    connector = next((instance for cid, instance in
+                      connector_manager.get_running_connectors("msteams")
+                      if cid == connector_id), None)
+    row = await run_sync(database.get_connector, connector_id)
+    if (connector is None or not row or row["type"] != "msteams"
+            or not row.get("is_active")):
+        raise HTTPException(status_code=404, detail="Active Teams connector not found")
+    # Bound the body while streaming; Content-Length is not trusted.
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 256_000:
+            raise HTTPException(status_code=413, detail="Activity too large")
+    import json
+    try:
+        activity = json.loads(body)
+        if not isinstance(activity, dict):
+            raise ValueError("Expected object")
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid activity JSON") from None
+    try:
+        await receive_teams_activity(connector, request.headers.get("authorization", ""), activity)
+    except InvalidBotToken:
+        raise HTTPException(status_code=401, detail="Invalid Bot Framework authentication") from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Teams activity") from None
+    # Bot Framework expects an empty successful response for ordinary activities.
+    from fastapi import Response
+    return Response(status_code=200)
+
+
 # ---- Generic Inbound Webhook ----
 #
 # NOTE: declared BEFORE the ``/{connector_id}/...`` routes. POST

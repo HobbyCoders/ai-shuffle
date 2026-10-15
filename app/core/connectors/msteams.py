@@ -4,6 +4,10 @@ import asyncio
 import json
 import logging
 import uuid
+import os
+import tempfile
+from pathlib import Path
+from urllib.parse import quote, urlsplit
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -30,6 +34,17 @@ BF_LOGIN_URL = "https://login.microsoftonline.com"
 BF_API_URL = "https://smba.trafficmanager.net/teams"
 
 
+def validate_service_url(url: str) -> None:
+    """Only public-cloud Teams Connector endpoints may receive bot tokens."""
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or parsed.hostname not in {
+            "smba.trafficmanager.net", "smba.infra.teams.microsoft.com"}
+            or parsed.username or parsed.password or parsed.port not in (None, 443)
+            or parsed.query or parsed.fragment or "\\" in url
+            or any(ord(char) < 33 for char in url)):
+        raise ValueError("Unsupported Teams service URL")
+
+
 class MSTeamsConnector(BaseConnector):
     """
     Connector for Microsoft Teams using the Bot Framework REST API.
@@ -43,8 +58,7 @@ class MSTeamsConnector(BaseConnector):
         app_id (str): Azure Bot / App Registration Application (Client) ID.
         app_password (str): Azure App Registration Client Secret.
         tenant_id (str, optional): Azure Tenant ID. Defaults to "botframework.com".
-        webhook_port (int, optional): Port for the incoming webhook server.
-            Defaults to 3978.
+        _state_path (str, internal): Host-provided reference store, not user config.
         allowed_user_ids (list[str], optional): If set, only messages from
             these AAD user IDs will be processed.
     """
@@ -101,6 +115,27 @@ class MSTeamsConnector(BaseConnector):
         self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
         # conversation_id -> ConversationReference (service_url, conversation, bot, etc.)
         self._conversation_refs: Dict[str, Dict[str, Any]] = {}
+        self._token_lock = asyncio.Lock()
+        self._reference_lock = asyncio.Lock()
+        self._state_path = Path(config["_state_path"]) if config.get("_state_path") else None
+        if self._state_path and self._state_path.exists():
+            state = json.loads(self._state_path.read_text(encoding="utf-8"))
+            if state.get("app_id") == self._app_id and state.get("tenant_id") == self._tenant_id:
+                self._conversation_refs = state["references"]
+
+    def _save_references(self) -> None:
+        if not self._state_path:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=self._state_path.parent, delete=False) as stream:
+            scratch = Path(stream.name)
+            json.dump({"app_id": self._app_id, "tenant_id": self._tenant_id,
+                       "references": self._conversation_refs}, stream)
+        try:
+            os.replace(scratch, self._state_path)
+        finally:
+            scratch.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -116,15 +151,22 @@ class MSTeamsConnector(BaseConnector):
 
     @property
     def _tenant_id(self) -> str:
-        return self.config.get("tenant_id", "botframework.com")
+        return self.config.get("tenant_id") or "botframework.com"
 
     async def _ensure_token(self) -> str:
+        """Serialize refreshes so simultaneous replies share the same token."""
+        async with self._token_lock:
+            return await self._refresh_token()
+
+    async def _refresh_token(self) -> str:
         """Obtain or refresh the Bot Framework OAuth2 access token."""
         import time
 
         if self._access_token and time.time() < self._token_expires_at - 60:
             return self._access_token
 
+        if self._tenant_id != "botframework.com":
+            uuid.UUID(self._tenant_id)  # Tenant must not alter the token URL path.
         url = f"{BF_LOGIN_URL}/{self._tenant_id}/oauth2/v2.0/token"
         data = {
             "grant_type": "client_credentials",
@@ -138,7 +180,7 @@ class MSTeamsConnector(BaseConnector):
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Failed to get Bot Framework token: {response.status_code} {response.text[:200]}"
+                f"Failed to get Bot Framework token: HTTP {response.status_code}"
             )
 
         token_data = response.json()
@@ -172,30 +214,44 @@ class MSTeamsConnector(BaseConnector):
     # Outgoing
     # ------------------------------------------------------------------
 
+    async def _bot_request(self, method: str, service_url: str, path: str,
+                           json_body: Optional[Dict[str, Any]] = None) -> httpx.Response:
+        validate_service_url(service_url)
+        token = await self._ensure_token()
+        url = f"{service_url.rstrip('/')}{path}"
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            for attempt in range(4):
+                response = await client.request(method, url, headers=self._auth_headers(token), json=json_body)
+                if response.status_code == 401 and attempt == 0:
+                    self._access_token = None
+                    token = await self._ensure_token()
+                    continue
+                if response.status_code != 429 and not 500 <= response.status_code < 600:
+                    return response
+                if attempt == 3:
+                    return response
+                try:
+                    delay = max(0, min(30, float(response.headers.get("Retry-After", 2 ** attempt))))
+                except ValueError:
+                    delay = 2 ** attempt
+                await asyncio.sleep(delay)
+        return response
+
     async def _send_activity(
         self, service_url: str, conversation_id: str, activity: Dict[str, Any]
     ) -> bool:
         """Send an activity to a Teams conversation via Bot Framework."""
         try:
-            token = await self._ensure_token()
-            url = (
-                f"{service_url.rstrip('/')}/v3/conversations"
-                f"/{conversation_id}/activities"
-            )
-
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url,
-                    headers=self._auth_headers(token),
-                    json=activity,
-                )
+            path = f"/v3/conversations/{quote(conversation_id, safe='')}/activities"
+            if activity.get("replyToId"):
+                path += f"/{quote(activity['replyToId'], safe='')}"
+            response = await self._bot_request("POST", service_url, path, activity)
 
             if 200 <= response.status_code < 300:
                 return True
 
             logger.error(
-                "Teams send_activity failed (%s): %s",
-                response.status_code, response.text[:200],
+                "Teams send_activity failed (HTTP %s)", response.status_code,
             )
             return False
 
@@ -224,6 +280,10 @@ class MSTeamsConnector(BaseConnector):
             activity = {
                 "type": "message",
                 "text": text,
+                "conversation": ref["conversation"],
+                "from": ref.get("bot"),
+                "recipient": ref.get("user"),
+                "replyToId": ref.get("activity_id"),
             }
             if not await self._send_activity(
                 service_url, message.platform_chat_id, activity
@@ -352,33 +412,37 @@ class MSTeamsConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     async def handle_webhook_activity(self, activity: Dict[str, Any]) -> None:
+        """Internal RPC: caller MUST validate the channel JWT before dispatch.
+
+        The public /api/v1/connectors/msteams/{id}/messages route is the sole
+        ingress. Sender checks cover invokes too, before persisting references.
         """
-        Process an incoming Bot Framework activity from the webhook endpoint.
-
-        Call this from the route that receives POST requests from the
-        Bot Framework on ``/api/messages``.
-        """
-        try:
-            activity_type = activity.get("type", "")
-
-            # Store conversation reference for proactive messaging
-            conversation = activity.get("conversation", {})
-            conversation_id = conversation.get("id", "")
-            if conversation_id:
-                self._conversation_refs[conversation_id] = {
-                    "service_url": activity.get("serviceUrl", BF_API_URL),
-                    "conversation": conversation,
-                    "bot": activity.get("recipient"),
-                    "user": activity.get("from"),
-                }
-
-            if activity_type == "message":
-                await self._handle_message_activity(activity)
-            elif activity_type == "invoke":
-                await self._handle_invoke_activity(activity)
-
-        except Exception as exc:
-            logger.exception("Error processing Teams webhook activity: %s", exc)
+        sender = activity.get("from", {})
+        user_id = sender.get("aadObjectId") or sender.get("id", "")
+        allowed = self.config.get("allowed_user_ids") or []
+        if not user_id or user_id not in [str(user) for user in allowed]:
+            return
+        service_url = activity["serviceUrl"]
+        validate_service_url(service_url)
+        conversation = activity.get("conversation", {})
+        conversation_id = conversation.get("id")
+        if not isinstance(conversation_id, str) or not conversation_id:
+            raise ValueError("Missing conversation id")
+        async with self._reference_lock:
+            self._conversation_refs[conversation_id] = {
+                "service_url": service_url,
+                "conversation": conversation,
+                "bot": activity.get("recipient"),
+                "user": sender,
+                "activity_id": activity.get("id"),
+            }
+            # Persist before allowing an agent callback to reply, including after
+            # worker/process restarts. Small atomic writes stay off the event loop.
+            await asyncio.to_thread(self._save_references)
+        if activity.get("type") == "invoke" or activity.get("value", {}).get("action", "").startswith(("perm:", "actreq:")):
+            await self._handle_invoke_activity(activity)
+        elif activity.get("type") == "message":
+            await self._handle_message_activity(activity)
 
     async def _handle_message_activity(self, activity: Dict[str, Any]) -> None:
         """Process an incoming Teams message activity."""
@@ -567,26 +631,8 @@ class MSTeamsConnector(BaseConnector):
     async def test_connection(self) -> Dict[str, Any]:
         """Validate the app credentials by obtaining a Bot Framework token."""
         try:
-            url = f"{BF_LOGIN_URL}/{self._tenant_id}/oauth2/v2.0/token"
-            data = {
-                "grant_type": "client_credentials",
-                "client_id": self._app_id,
-                "client_secret": self._app_password,
-                "scope": "https://api.botframework.com/.default",
-            }
-
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, data=data)
-
-            if response.status_code == 200:
-                return {
-                    "success": True,
-                    "message": f"Authenticated (app_id: {self._app_id[:8]}...)",
-                }
-
-            return {
-                "success": False,
-                "message": f"Auth failed ({response.status_code}): {response.text[:200]}",
-            }
-        except Exception as exc:
-            return {"success": False, "message": str(exc)}
+            self._access_token = None
+            await self._ensure_token()
+            return {"success": True, "message": "Bot credentials accepted; send a Teams message to test delivery."}
+        except Exception:
+            return {"success": False, "message": "Bot authentication failed; check app ID, tenant and client secret."}

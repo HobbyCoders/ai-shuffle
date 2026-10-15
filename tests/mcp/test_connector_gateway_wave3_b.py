@@ -97,7 +97,7 @@ def make_msteams(config=None):
         on_permission_response=AsyncMock(),
     )
     conn._conversation_refs[BOUND_CHAT] = {
-        "service_url": "https://smba.example.com/teams",
+        "service_url": "https://smba.trafficmanager.net/teams",
         "conversation": {"id": BOUND_CHAT},
     }
     conn._ensure_token = AsyncMock(return_value="tok")
