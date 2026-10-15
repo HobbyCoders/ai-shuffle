@@ -267,6 +267,9 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             task_registry.start_task(
                 session_id, message.task_id, kind, getattr(message, "description", None),
                 tool_use_id=getattr(message, "tool_use_id", None),
+                # The host already registered this launch. A delayed mirror is
+                # not authority to restart a completed Monitor incarnation.
+                receipt_only=task_registry.is_monitor_shell_task(session_id, message.task_id),
             )
             if kind == "shell":
                 tuid = getattr(message, "tool_use_id", None)

@@ -944,7 +944,17 @@ def _frame_is_richer(incoming: Dict[str, Any], stored: Dict[str, Any]) -> bool:
 
 
 def _completion_key(frame: Dict[str, Any]) -> tuple:
-    return (frame.get("task_id"), frame.get("agent_message_turn_id"))
+    return (frame.get("task_id"), frame.get("agent_message_turn_id"),
+            frame.get("task_incarnation"))
+
+
+def current_task_frames(session_id: str, frames: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop receipts for a replaced start, before engine/card/model-delivery writes."""
+    from app.core.task_registry import task_registry
+
+    return [frame for frame in frames if task_registry.matches_task_incarnation(
+        session_id, frame.get("task_id"), frame.get("task_incarnation"),
+    )]
 
 
 def _dedupe_frames_by_task_id(
@@ -1675,10 +1685,10 @@ async def retire_task_terminals(
     pending set) or a non-fluid backend simply answers False — the app's park
     state is authoritative and is untouched either way.
     """
-    frames = [
+    frames = current_task_frames(session_id, [
         f for f in (frames or [])
         if isinstance(f, dict) and f.get("task_id")
-    ]
+    ])
     if not session_id or not frames:
         return False
     try:
@@ -1830,12 +1840,17 @@ async def _try_steer_terminal_notification(
     return bool(steered)
 
 
-def on_task_notification_delivered(session_id: str, task_ids: List[str]) -> None:
+def on_task_notification_delivered(
+    session_id: str, task_ids: List[str], *, frames: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """Receipt callback: fluid folded a steered ``<task-notification>`` into the
     live turn, so the model has the words. Latch ``terminal_notified``.
 
     Called from ``session_runtime._on_steer_delivered`` — the same receipt that
     retires a steered user message's queue row. SYNC and never raises."""
+    if frames is not None:
+        current_ids = {f.get("task_id") for f in current_task_frames(session_id, frames)}
+        task_ids = [tid for tid in task_ids if tid in current_ids]
     _mark_terminal_notified(session_id, list(task_ids or []))
     logger.info(
         "turn_scheduler: mid-turn task notification delivered to %s (tasks=%s)",
@@ -1865,9 +1880,10 @@ async def on_task_notification_stranded(
     wake enqueued here carries them."""
     if held_peer_messages:
         _restore_held_peer_messages(session_id, held_peer_messages)
-    frames = [f for f in (frames or []) if isinstance(f, dict)]
+    frames = current_task_frames(session_id, [f for f in (frames or []) if isinstance(f, dict)])
     if not frames:
         return
+    task_ids = [f.get("task_id") for f in frames if f.get("task_id")]
     try:
         prompt = await asyncio.to_thread(_build_task_notification_prompt, frames)
         async with _terminal_delivery_lock(session_id):
@@ -1892,6 +1908,14 @@ _terminal_delivery_locks: WeakValueDictionary = WeakValueDictionary()
 
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
     """Serialize delivery without spending the delivered latch on failed enqueue."""
+    from app.core.task_registry import task_registry
+
+    # Capture before any await: a restart while waiting on admission must not
+    # rebind this completion to the newer run of the same job id.
+    frame = dict(frame)  # One producer may fan out to differently scoped registries.
+    incarnation = task_registry.task_incarnation(session_id, frame.get("task_id"))
+    if incarnation:
+        frame.setdefault("task_incarnation", incarnation)
     async with _terminal_delivery_lock(session_id):
         return await _on_task_terminal_locked(session_id, frame)
 
@@ -1964,6 +1988,8 @@ async def _on_task_terminal_locked(
     empty notification is never enqueued."""
     try:
         task_id = frame.get("task_id")
+        if not current_task_frames(session_id, [frame]):
+            return
         if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
             return
         # Suppress the failed wake's fanout, not distinct successful reports
@@ -2109,7 +2135,8 @@ async def _on_task_terminal_locked(
                     if updated is not None:
                         # Record the merged task woke so a later late frame
                         # for it can't re-enqueue.
-                        task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
+                        task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
+                                                 incarnation=frame.get("task_incarnation"))
                         logger.info(
                             "turn_scheduler: unpark for %s — task %s terminal (%s) "
                             "merged into wake turn %s (%d pending)",
@@ -2145,7 +2172,8 @@ async def _on_task_terminal_locked(
             if await _try_steer_terminal_notification(
                 session_id, prompt, [frame], wake_task_ids, carry_held=True,
             ):
-                task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
+                task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
+                                                 incarnation=frame.get("task_incarnation"))
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s terminal (%s) "
                     "steered into the live turn",
@@ -2157,7 +2185,8 @@ async def _on_task_terminal_locked(
             )
             if not turn.get("id"):
                 return  # no delivery identity is spent on a refused enqueue
-            task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
+            task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
+                                                 incarnation=frame.get("task_incarnation"))
             logger.info(
                 "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
                 session_id, task_id, frame.get("status"), turn["id"],

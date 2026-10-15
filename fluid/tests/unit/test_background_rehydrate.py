@@ -287,6 +287,36 @@ async def test_finish_rejects_a_non_terminal_status() -> None:
         await loop._finish_background_task(BackgroundTaskFinished(task_id="t", status="running"))
 
 
+
+
+@pytest.mark.parametrize("pending", [True, False])
+@pytest.mark.parametrize("boundary", ["rehydrate", "session"])
+async def test_host_completion_guard_rechecks_at_mutation(monkeypatch, pending, boundary):
+    store = await _store_with(*([_sub("job", "started")] if pending else []))
+    loop = _loop(store)
+    await _rehydrate(loop)
+    valid = True
+    name = ("_rehydrate_background_lifecycle_unlocked" if boundary == "rehydrate"
+            else "_ensure_session")
+    original = getattr(loop, name)
+
+    async def restart_during_await():
+        nonlocal valid
+        result = await original()
+        valid = False
+        return result
+
+    monkeypatch.setattr(loop, name, restart_during_await)
+    await loop.submit(BackgroundTaskFinished(
+        task_id="job", wake=False, is_current=lambda: valid,
+    ))
+    assert ("job" in loop._background_pending) is pending
+    assert "job" not in loop._background_terminal
+    assert "job" not in loop._background_early
+    assert not [e for e in _emitted(loop, "job") if e.kind in {"finished", "completion_pending"}]
+    await loop.aclose()
+
+
 async def test_retry_timer_fires_a_new_wake_attempt() -> None:
     loop = _loop(await _store_with())
     await _rehydrate(loop)

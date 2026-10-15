@@ -1257,7 +1257,28 @@ def _worker_still_working(worker_session_id: str) -> bool:
         if turns_db.session_has_unsettled_turns(worker_session_id):
             return True
         pending = _unpublished_monitor_wakes(worker_session_id, row)
-        return any(age < PENDING_WAKE_LIMIT_SECONDS for age in pending.values())
+        if pending:
+            # Do not hide lost wakes by converting their park to completed:
+            # _lost_monitor_wakes must still diagnose them after the grace.
+            return any(age < PENDING_WAKE_LIMIT_SECONDS for age in pending.values())
+        if row.get("id") and (row.get("payload") or {}).get("task_ids"):
+            # A delivered mid-turn completion may leave an old parked row
+            # behind. With no live work or unpublished wake, there is nothing
+            # left to await. Repair the row before the ordinary dispatch tail
+            # reads its report, completes the task and notifies the parent.
+            # A continuation reuses the turn id and may already have parked
+            # AGAIN before recovery acquires admission. Compare the observed
+            # run/park timestamp atomically, and recheck work under that lock.
+            repaired = turns_db.settle_parked_turns(
+                worker_session_id, turn_ids=[row["id"]], only_if_idle=True,
+                observed_park=row,
+                can_settle=lambda: not _active_worker_background_work(worker_session_id),
+            )
+            if not repaired:
+                return True  # Changed while probing: retry, never drain/kill it.
+            return bool(_active_worker_background_work(worker_session_id)
+                        or turns_db.session_has_unsettled_turns(worker_session_id))
+        return False
     except DB_POLL_ERRORS:
         raise
     except Exception:

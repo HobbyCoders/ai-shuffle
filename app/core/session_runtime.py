@@ -1342,14 +1342,29 @@ class SessionRuntime:
             from app.core.assistant_service import assert_proactive_allowed
             await asyncio.to_thread(assert_proactive_allowed, proactive, self.session_id)
             turn_overrides["_assistant_proactive"] = proactive
-        completion_frames = list(
-            ((self.turn.get("payload") or {}).get("pending_frames") or [])
-        )
-        if completion_frames:
-            # The app turn queue owns wake admission and exactly-once execution.
-            # Carry the claimed completions to HarnessAdapter so Fluid can clear
-            # its durable pending-task state without starting a second wake turn.
-            turn_overrides["background_task_completions"] = completion_frames
+        from app.core.turn_scheduler import current_task_frames
+
+        original_frames = list((self.turn.get("payload") or {}).get("pending_frames") or [])
+
+        async def refresh_completion_prompt():
+            from app.core.turn_scheduler import _build_task_notification_prompt, held_peer_block
+
+            frames = current_task_frames(self.session_id, original_frames)
+            if frames == original_frames:
+                return frames, self.turn.get("prompt") or ""
+            # Each failed recheck removes at least one original frame, so this
+            # converges even when jobs restart while report rendering yields.
+            while True:
+                text = await asyncio.to_thread(_build_task_notification_prompt, frames) if frames else ""
+                current = current_task_frames(self.session_id, frames)
+                if current == frames:
+                    carried = (self.turn.get("payload") or {}).get("held_peer_messages")
+                    if carried:
+                        text = "\n\n".join(filter(None, (text, held_peer_block(carried))))
+                    return frames, text
+                frames = current
+
+        completion_frames, prompt = await refresh_completion_prompt()
         # Fluid records what started the turn on its TurnStarted event; the
         # adapter maps this app source onto fluid's vocabulary. A failover
         # retry records the source of the turn it retries, so a retried wake
@@ -1402,6 +1417,7 @@ class SessionRuntime:
             )
             if self._abort_reason == "recording_failed":
                 return
+            completion_frames, prompt = await refresh_completion_prompt()
             if completion_frames:
                 # The wake turn is the claimed completions' delivery point, so this
                 # is where the event log — and with it the frontend card — learns
@@ -1429,9 +1445,8 @@ class SessionRuntime:
 
                     turn_scheduler.on_task_notification_delivered(
                         self.session_id,
-                        (self.turn.get("payload") or {}).get("task_ids")
-                        or [f.get("task_id") for f in completion_frames
-                            if isinstance(f, dict)],
+                        [f.get("task_id") for f in completion_frames if isinstance(f, dict)],
+                        frames=completion_frames,
                     )
                 except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
                     logger.warning(
@@ -1468,6 +1483,22 @@ class SessionRuntime:
                     engine_prompt = (
                         f"{engine_prompt}\n\n{block}" if engine_prompt else block
                     )
+            if original_frames:
+                completion_frames, prompt = await refresh_completion_prompt()
+                turn_overrides.pop("background_task_completions", None)
+                if completion_frames:
+                    turn_overrides["background_task_completions"] = completion_frames
+                engine_prompt = prompt
+                if (self.turn.get("payload") or {}).get("steer_already_delivered") and prompt:
+                    engine_prompt = f"{_REDELIVERY_NOTE}\n\n{prompt}"
+                engine_prompt = _with_voice_note(engine_prompt, self.turn.get("payload")) if prompt else ""
+                if held_peer:
+                    engine_prompt = "\n\n".join(filter(None, (
+                        engine_prompt, turn_scheduler.held_peer_block(held_peer),
+                    )))
+                if not engine_prompt:
+                    self._terminal = "done"
+                    return  # All completions superseded; no unrelated message to deliver.
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -2287,8 +2318,14 @@ class SessionRuntime:
         durable park state is untouched: it is the authority, and it already
         moved on.
         """
-        frames = entry.get("frames") or []
+        from app.core.turn_scheduler import current_task_frames
+
+        original_frames = entry.get("frames") or []
+        frames = current_task_frames(self.session_id, original_frames)
         task_ids = entry.get("task_ids") or []
+        if original_frames:
+            current_ids = {f.get("task_id") for f in frames}
+            task_ids = [tid for tid in task_ids if tid in current_ids]
         if frames:
             try:
                 await recorder.record_task_terminal(frames)
@@ -2307,7 +2344,10 @@ class SessionRuntime:
             from app.core import turn_scheduler
 
             await turn_scheduler.retire_task_terminals(self.session_id, frames)
-            turn_scheduler.on_task_notification_delivered(self.session_id, task_ids)
+            turn_scheduler.on_task_notification_delivered(
+                self.session_id, task_ids,
+                **({"frames": frames} if original_frames else {}),
+            )
         except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
             logger.warning(
                 "SessionRuntime: task-notification delivery callback failed "

@@ -160,7 +160,7 @@ class TestMidTurnDeliveryRetires:
             )
 
         retire.assert_awaited_once_with("sess-1", frames)
-        latch.assert_called_once_with("sess-1", ["t-1"])
+        latch.assert_called_once_with("sess-1", ["t-1"], frames=frames)
         recorder.record_task_terminal.assert_awaited_once_with(frames)
 
 

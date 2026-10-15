@@ -24,7 +24,7 @@ guard against missing keys so a stray update can never raise.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -600,6 +600,19 @@ class TaskRegistry:
         for the parent's OWN background work. ``None`` deregisters."""
         self._terminal_notification_callback = callback
 
+    def task_incarnation(self, session_id: str, task_id: str) -> Optional[str]:
+        """Stable per-start token, already mirrored durably as started_at."""
+        record = self._tasks.get(session_id, {}).get(task_id)
+        return record.get("started_at") if record else None
+
+    def matches_task_incarnation(
+        self, session_id: str, task_id: str, incarnation: Optional[str],
+    ) -> bool:
+        # Older peers/queued frames have no token. Preserve their compatibility;
+        # a stamped receipt must never acknowledge a different known start.
+        current = self.task_incarnation(session_id, task_id)
+        return not incarnation or not current or incarnation == current
+
     def mark_terminal_notified(self, session_id: str, task_id: str) -> bool:
         """One-shot latch: True only the FIRST time a task's terminal
         notification callback fires. Defensive: missing ids never latch."""
@@ -611,7 +624,8 @@ class TaskRegistry:
         seen.add(task_id)
         return True
 
-    def mark_woken(self, session_id: str, task_id: str, *, completion_id: str | None = None) -> bool:
+    def mark_woken(self, session_id: str, task_id: str, *, completion_id: str | None = None,
+                   incarnation: Optional[str] = None) -> bool:
         """One-shot late-frame latch: each completion drives at most one wake.
 
         Returns ``True`` only the FIRST time ``task_id`` is latched for
@@ -625,6 +639,8 @@ class TaskRegistry:
         and use their own completion ID. Missing ids never latch.
         """
         if not session_id or not task_id:
+            return False
+        if not self.matches_task_incarnation(session_id, task_id, incarnation):
             return False
         seen = self._woken.setdefault(session_id, set())
         key = (task_id, completion_id) if completion_id else task_id
@@ -991,6 +1007,7 @@ class TaskRegistry:
         name: Optional[str] = None,
         remote_device_id: Optional[str] = None,
         worker_name: Optional[str] = None,
+        receipt_only: bool = False,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
@@ -1012,6 +1029,10 @@ class TaskRegistry:
         completed snapshot in ``_recent_terminal`` is also dropped so the row
         can't double-count or resurrect as "completed".
 
+        ``receipt_only`` is for a host-owned Monitor's mirrored start event,
+        not a new launch. It cannot mutate an existing incarnation. Explicit
+        starts still revive completed jobs and reset their delivery latches.
+
         A FAILURE terminal status ("error"/"killed") is NOT revived: a re-emitted
         start for such a task is the force-cleanup / dead-pooled-client stale
         leak (see ``_recent_terminal`` / ``test_reaped_failure_resnapshots_status``),
@@ -1023,6 +1044,8 @@ class TaskRegistry:
         bucket = self._tasks.setdefault(session_id, {})
         existing = bucket.get(task_id)
         if existing is not None:
+            if receipt_only:
+                return
             # Treat as an update — refresh mutable fields, keep started_at.
             if title is not None:
                 existing["title"] = title
@@ -1044,10 +1067,15 @@ class TaskRegistry:
                 existing["remote_device_id"] = remote_device_id
             if worker_name:
                 existing["worker_name"] = worker_name
-            # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
-            # back to running (failures stay terminal — that's a stale leak).
+            # An explicit new start rearms every job, including a host Monitor.
+            # Mirrored start receipts returned above and cannot revive it.
             if existing.get("status") == "completed":
                 existing["status"] = "running"
+                # started_at is also the durable receipt-incarnation token.
+                # Clock resolution/rollback must not reuse the prior token.
+                previous_start = existing.get("started_at")
+                if previous_start and now <= previous_start:
+                    now = (datetime.fromisoformat(previous_start) + timedelta(microseconds=1)).isoformat()
                 existing["started_at"] = now
                 existing.pop("notification_delivered", None)
                 retained = self._recent_terminal.get(session_id)
