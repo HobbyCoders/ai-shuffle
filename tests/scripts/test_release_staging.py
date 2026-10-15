@@ -510,3 +510,13 @@ def test_obsolete_source_version_cannot_be_resigned_forward(candidate):
         p.activate(envelope(candidate), fake)
     assert not fake.writes
 
+
+def test_release_inline_shell_is_valid():
+    import subprocess
+    wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    for name, job in wf["jobs"].items():
+        for step in job.get("steps", []):
+            if "run" in step:
+                result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
+                assert result.returncode == 0, (name, step.get("name"), result.stderr)
+
