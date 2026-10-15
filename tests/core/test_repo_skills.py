@@ -1,62 +1,94 @@
-"""Repo-level prose skills under ``.fluid/skills`` (round-9 audit, item 3).
+"""Per-checkout skill discovery works without private maintainer files.
 
-fluid discovers ``<dir>/.fluid/skills/<name>/SKILL.md`` walking up from the
-session cwd, so a skill committed at the checkout root is visible from every
-worktree the app provisions under it (the container keeps worktrees at
-``<checkout>/.fluid/worktrees/<name>``) and on every worker that checks the
-project out. The public skills must parse and be findable; owner-infrastructure
-skills belong in the owner's global skill directory, not the publication tree.
+The public tree intentionally ships no .fluid/skills. Exercise the same
+checkout and nested-worktree layouts with disposable prose skills instead.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from fluid.context.instructions import discover_skills, parse_frontmatter
 
-REPO = Path(__file__).resolve().parents[2]
-SKILLS = REPO / ".fluid" / "skills"
+SKILL_TEXT = """---
+name: example-skill
+description: A disposable project skill for discovery and loading tests.
+---
+# Example skill
+
+Use this synthetic body to test project skill loading.
+"""
 
 
-def _names(cwd):
-    return {s.name for s in discover_skills(cwd, include_global=False, include_plugins=False)}
-
-
-def test_public_skills_are_committed_with_valid_frontmatter():
-    for name in ("preview-branch", "session-harness-audit"):
-        path = SKILLS / name / "SKILL.md"
-        assert path.is_file(), f"{path} missing"
-        fields, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-        assert fields["name"] == name
-        assert len(fields["description"]) > 40
-        assert len(body.strip()) > 500
-
-
-def test_preview_skill_carries_the_real_commands():
-    text = (SKILLS / "preview-branch" / "SKILL.md").read_text(encoding="utf-8")
-    for needle in ("python -m app.preview stamp", "AI_SHUFFLE_PREVIEW=1", "0.0.0.0",
-                   "preview-access", "scope_ref", "browser_screenshot", ":8000"):
-        assert needle in text, needle
-
-
-def test_owner_infrastructure_skills_are_not_published():
-    for name in ("live-test", "ship-release", "play-internal-release"):
-        assert not (SKILLS / name).exists(), name
-
-
-def test_skills_are_discovered_from_the_checkout_and_from_a_nested_worktree(tmp_path):
-    """Mirror the two layouts the workers use: the checkout root itself, and a
-    worktree provisioned INSIDE it (``.fluid/worktrees/<name>`` on the
-    container, ``.claude/worktrees/<name>`` on the desktop)."""
-    checkout = tmp_path / "ai-shuffle"
-    skill = checkout / ".fluid" / "skills" / "preview-branch" / "SKILL.md"
+def _write_skill(checkout, text=SKILL_TEXT):
+    skill = checkout / ".fluid" / "skills" / "example-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
-    skill.write_text((SKILLS / "preview-branch" / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
-    assert "preview-branch" in _names(checkout)
-    for nested in (".fluid/worktrees/feat-x", ".claude/worktrees/feat-y"):
-        wt = checkout / nested
-        wt.mkdir(parents=True)
-        assert "preview-branch" in _names(wt), nested
+    skill.write_text(text, encoding="utf-8")
+    return skill
 
 
-def test_the_real_checkout_exposes_them_to_fluid():
-    assert {"preview-branch", "session-harness-audit"} <= _names(REPO)
+def _skills(cwd):
+    return discover_skills(cwd, include_global=False, include_plugins=False)
+
+
+def test_checkout_without_local_skills_is_supported(tmp_path):
+    assert _skills(tmp_path) == []
+
+
+def test_project_skill_frontmatter_is_discovered_without_loading_body(tmp_path):
+    path = _write_skill(tmp_path)
+    fields, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    found, = _skills(tmp_path)
+    assert found.name == fields["name"] == "example-skill"
+    assert found.description == fields["description"]
+    assert found.scope == "project" and not found.body_loaded
+    assert Path(found.path) == path
+    assert "synthetic body" in body
+
+
+@pytest.mark.parametrize("nested", [".fluid/worktrees/feat-x", ".claude/worktrees/feat-y"])
+def test_skills_are_discovered_from_checkout_and_nested_worktree(tmp_path, nested):
+    checkout = tmp_path / "checkout"
+    path = _write_skill(checkout)
+    worktree = checkout / nested
+    worktree.mkdir(parents=True)
+    for cwd in (checkout, worktree):
+        found, = _skills(cwd)
+        assert found.name == "example-skill"
+        assert Path(found.path) == path
+
+
+def test_nested_worktree_skill_takes_precedence(tmp_path):
+    _write_skill(tmp_path)
+    worktree = tmp_path / ".fluid" / "worktrees" / "feat-x"
+    local = _write_skill(worktree, SKILL_TEXT.replace("A disposable project skill", "A worktree-local skill"))
+    found, = _skills(worktree)
+    assert Path(found.path) == local
+    assert found.description.startswith("A worktree-local skill")
+
+
+@pytest.mark.asyncio
+async def test_project_skill_tool_loads_body_with_scope_gates(tmp_path, monkeypatch):
+    from fluid.tools.builtins import skill
+    from fluid.tools.registry import ToolCtx
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    checkout = tmp_path / "checkout"
+    path = _write_skill(checkout)
+    outcome = await skill.handler(
+        {"name": "example-skill"},
+        ToolCtx(cwd=str(checkout), extra={"setting_sources": ["project"]}),
+    )
+    assert not outcome.is_error
+    assert "synthetic body" in outcome.text
+    usage = json.loads((home / ".fluid/skills/.usage.json").read_text())
+    assert usage[str(path)]["loads"] == 1
+    blocked = await skill.handler(
+        {"name": "example-skill"},
+        ToolCtx(cwd=str(checkout), extra={"setting_sources": []}),
+    )
+    assert blocked.is_error and "disabled by setting_sources" in blocked.text
