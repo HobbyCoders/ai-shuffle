@@ -80,12 +80,19 @@ describe('MessageArea reading position', () => {
 		expect(harness).toContain('const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));');
 	});
 
-	it('restores a reader who had scrolled up, over the full transcript, instead of jumping to the bottom', () => {
+	it('restores a reader using their bounded slice instead of mounting the full transcript', () => {
 		const mount = block('const wasAutoScrolling = autoScrollCache.get(cacheKey);', '} else if ($activeSession.messages.length > 0) {');
 		expect(mount).toContain('const userScrolledUp = wasAutoScrolling === false;');
 		expect(mount).toContain('scrollPositionCache.get(cacheKey)');
-		// The saved offset is measured against the whole transcript.
-		expect(mount).toContain('mountedStart = 0;');
+		// Scroll offsets are local to the cached bounded range.
+		expect(mount).not.toContain('mountedStart = 0;');
+		expect(moduleScript).toContain('const mountedRangeCache = new Map<');
+		expect(instanceScript).toContain('mountedRangeCache.get(sessionKey)');
+		expect(instanceScript).toContain('displayItems.slice(mountedStart, mountedEnd)');
+		expect(instanceScript).not.toContain('createWindowBackfill(');
+		// Estimated heights must not change after keyed-anchor compensation.
+		expect(source).not.toContain('content-visibility: auto;');
+		expect(source).toContain('anchor.getBoundingClientRect().top - anchorTop');
 		expect(mount).toContain('shouldAutoScroll = false;');
 		expect(mount).toContain('containerRef.scrollTop = storedPosition;');
 	});
