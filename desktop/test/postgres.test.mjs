@@ -504,6 +504,10 @@ test('generated supervisor connection is handed off atomically BEFORE worker spa
 			return request;
 		} }
 	};
+	// worker.js takes its port and health probes from worker-process.js; give it the same fakes.
+	const processFile = new URL('../dist/main/worker-process.js', import.meta.url); const processModule = { exports: {} };
+	vm.runInNewContext(readFileSync(processFile, 'utf8'), { module: processModule, exports: processModule.exports, Buffer, process, setTimeout, clearTimeout, console, require: (id) => id in replacements ? replacements[id] : createRequire(processFile)(id) });
+	replacements['./worker-process'] = processModule.exports;
 	vm.runInNewContext(readFileSync(codeFile, 'utf8'), { module, exports: module.exports, Buffer, process, setTimeout, clearTimeout, console, require: (id) => id in replacements ? replacements[id] : localRequire(id) });
 	try {
 		await writeFile(envFile, 'MODEL=kept\nPOSTGRES_PASSWORD=old-test\nDATABASE_URL=old-test\n'.replaceAll('\\n', '\n'));
