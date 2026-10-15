@@ -80,6 +80,10 @@ def cloud(monkeypatch, signing_keys):
     async def handle(path: str, request: Request):
         if request.method == "GET":
             state["gets"].append(str(request.url))
+            if path.endswith(state.get("failure_path", "no-failure")):
+                if state["failure"] == "timeout":
+                    raise httpx.ReadTimeout("test-sensitive-body")
+                return JSONResponse({"error": "test-sensitive-body"}, status_code=503)
             if path.endswith("openidconfiguration"):
                 return state["metadata"]
             if path.endswith("/keys"):
@@ -162,6 +166,46 @@ async def test_unknown_kid_refresh_and_bounded_misses(cloud, sign, activity, sig
         with pytest.raises(msteams_auth.InvalidBotToken):
             await auth.validate(sign(kid="unknown"), activity, APP_ID)
     assert len(cloud["gets"]) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache", ["cold", "expired", "warm"])
+@pytest.mark.parametrize("failure_path", ["openidconfiguration", "/keys"])
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+async def test_key_fetch_outage_cools_down(cloud, sign, activity, monkeypatch, caplog,
+                                         cache, failure_path, failure):
+    from types import SimpleNamespace
+    clock = [time.monotonic()]
+    monkeypatch.setattr(msteams_auth, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], time=time.time,
+    ))
+    auth = cloud["validator"]
+    if cache != "cold":
+        await auth.validate(sign(), activity, APP_ID)
+        if cache == "expired":
+            auth._expires = 0
+    cloud["gets"].clear()
+    cloud.update(failure_path=failure_path, failure=failure)
+    for index in range(5):
+        with pytest.raises(msteams_auth.InvalidBotToken):
+            await auth.validate(sign(kid=f"forged-{index}"), activity, APP_ID)
+    # One attempt per endpoint, not one attempt per forged token.
+    assert sum(url.endswith(failure_path) for url in cloud["gets"]) == 1
+    assert len(cloud["gets"]) == (1 if failure_path == "openidconfiguration" else 2)
+    assert "signing-key fetch failed" in caplog.text
+    assert "test-sensitive-body" not in caplog.text
+    if cache == "warm":
+        await auth.validate(sign(), activity, APP_ID)  # Unexpired keys still work.
+    else:
+        with pytest.raises(msteams_auth.InvalidBotToken):
+            await auth.validate(sign(), activity, APP_ID)  # No stale-key fallback.
+    clock[0] += 31
+    with pytest.raises(msteams_auth.InvalidBotToken):
+        await auth.validate(sign(kid="forged-again"), activity, APP_ID)
+    assert sum(url.endswith(failure_path) for url in cloud["gets"]) == 2
+    clock[0] += 31
+    del cloud["failure_path"]
+    await auth.validate(sign(kid="key-1"), activity, APP_ID)
 
 
 @pytest.mark.asyncio
@@ -285,6 +329,11 @@ async def test_public_route_checks_enabled_type_and_auth_before_rpc(cloud, sign,
         assert (await client.post(url, content=b"x" * 256001, headers=auth)).status_code == 413
         invalid = {**activity, "value": {"action": 123}}
         assert (await client.post(url, json=invalid, headers=auth)).status_code == 400
+        conn.handle_webhook_activity.assert_awaited_once()
+        cloud.update(failure_path="openidconfiguration", failure="http")
+        response = await client.post(url, json=activity, headers={"Authorization": sign(kid="forged")})
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid Bot Framework authentication"}
         conn.handle_webhook_activity.assert_awaited_once()
         for field, value in (("is_active", False), ("type", "webhook")):
             original = row[field]

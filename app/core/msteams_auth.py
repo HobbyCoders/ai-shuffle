@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import math
 import time
 from urllib.parse import urlsplit
@@ -16,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 OPENID_URL = "https://login.botframework.com/v1/.well-known/openidconfiguration"
 ISSUER = "https://api.botframework.com"
 CLOCK_SKEW = 60
+logger = logging.getLogger(__name__)
 
 
 class InvalidBotToken(ValueError):
@@ -32,6 +34,7 @@ class BotFrameworkAuth:
         self._keys = {}
         self._expires = 0.0
         self._unknown_refresh = 0.0
+        self._retry_after = 0.0
         self._lock = asyncio.Lock()
 
     async def _key(self, kid: str) -> dict:
@@ -42,23 +45,34 @@ class BotFrameworkAuth:
             # Unknown key IDs trigger refresh, but untrusted tokens cannot force
             # an unbounded stream of requests to Microsoft's metadata service.
             if expired or (unknown and now >= self._unknown_refresh):
+                if now < self._retry_after:
+                    raise InvalidBotToken("Signing-key fetch cooling down")
+                # Set before I/O, including cold/expired caches. Failed fetches
+                # must not let each forged kid trigger another upstream request.
+                self._retry_after = now + 30
                 if unknown and not expired:
                     self._unknown_refresh = now + 30
-                async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                    response = await client.get(OPENID_URL)
-                    response.raise_for_status()
-                    metadata = response.json()
-                    uri = urlsplit(metadata["jwks_uri"])
-                    if (metadata.get("issuer") != ISSUER or uri.scheme != "https"
-                            or uri.hostname != "login.botframework.com"
-                            or uri.username or uri.password or uri.port not in (None, 443)
-                            or uri.query or uri.fragment):
-                        raise InvalidBotToken("Invalid trust metadata")
-                    response = await client.get(metadata["jwks_uri"])
-                    response.raise_for_status()
-                    keys = response.json()["keys"]
+                try:
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+                        response = await client.get(OPENID_URL)
+                        response.raise_for_status()
+                        metadata = response.json()
+                        uri = urlsplit(metadata["jwks_uri"])
+                        if (metadata.get("issuer") != ISSUER or uri.scheme != "https"
+                                or uri.hostname != "login.botframework.com"
+                                or uri.username or uri.password or uri.port not in (None, 443)
+                                or uri.query or uri.fragment):
+                            raise InvalidBotToken("Invalid trust metadata")
+                        response = await client.get(metadata["jwks_uri"])
+                        response.raise_for_status()
+                        keys = response.json()["keys"]
+                except httpx.HTTPError as exc:
+                    # Never log exception text, response bodies or bearer tokens.
+                    logger.warning("Bot Framework signing-key fetch failed (%s)", type(exc).__name__)
+                    raise InvalidBotToken("Signing keys unavailable") from None
                 self._keys = {key["kid"]: key for key in keys if key.get("kty") == "RSA"}
                 self._expires = now + self.ttl
+                self._retry_after = 0.0
             if kid not in self._keys:
                 raise InvalidBotToken("Unknown signing key")
             return self._keys[kid]
