@@ -33,6 +33,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.api.auth import require_auth
@@ -213,9 +214,11 @@ async def browser_rpc(request: Request):
     except (ValueError, TypeError, RecursionError):
         raise HTTPException(422, "Invalid browser tool call") from None
     except browser_runtime.RuntimeUnavailable as exc:
-        raise HTTPException(
-            503, str(exc) or "Browser runtime unavailable; outcome unknown"
-        ) from None
+        # Proxies consume only the closed reason code, never this detail text.
+        return JSONResponse(status_code=503, content={
+            "detail": str(exc) or "Browser runtime unavailable; outcome unknown",
+            "reason": exc.reason,
+        })
 
 
 @router.get("/api/v1/sessions/{session_id}/browser/panel")

@@ -56,6 +56,37 @@ describe("shared runtime proxy", () => {
     expect(JSON.stringify(result)).not.toContain("private-token");
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("reports an allow-listed checkout reason using only proxy-owned text", async () => {
+    const transport = vi.fn(async () => new Response(JSON.stringify({
+      reason: "checkout_branch_mismatch", detail: "secret body private-token",
+    }), { status: 503 }));
+    const result = await forwardTool("browser_status", {}, env, transport);
+    expect(result).toEqual(errorResult("Browser unavailable: this session's checkout is not on its branch (detached or switched HEAD). Switch the worktree back to the session's branch. (HTTP 503); outcome unknown, not replayed"));
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("ignores even known reasons on non-runtime error statuses", async () => {
+    const transport = vi.fn(async () => new Response(JSON.stringify({
+      reason: "checkout_branch_mismatch", detail: "private-token",
+    }), { status: 403 }));
+    expect(await forwardTool("browser_status", {}, env, transport)).toEqual(errorResult(
+      "Browser runtime unavailable (HTTP 403); outcome unknown, not replayed",
+    ));
+  });
+  it.each([
+    '{"reason":"unknown private-token","detail":"secret"}',
+    '{"reason":["checkout_branch_mismatch"]}',
+    '{"reason":{"value":"checkout_branch_mismatch"}}',
+    '{"detail":"checkout_branch_mismatch"}',
+    '{"reason":"__proto__"}',
+    '[]', 'null', 'secret private-token',
+    JSON.stringify({ reason: "checkout_branch_mismatch", padding: "x".repeat(4096) }),
+  ])("drops unknown, malformed and oversized reason bodies: %s", async (body) => {
+    const transport = vi.fn(async () => new Response(body, { status: 503 }));
+    expect(await forwardTool("browser_status", {}, env, transport)).toEqual(errorResult(
+      "Browser runtime unavailable (HTTP 503); outcome unknown, not replayed",
+    ));
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("bounds response bytes", async () => {
     const transport = vi.fn(async () => new Response("x".repeat(16 * 1024 * 1024 + 1)));
     expect((await forwardTool("browser_screenshot", {}, env, transport)).isError).toBe(true);

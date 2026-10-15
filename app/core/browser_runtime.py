@@ -65,8 +65,35 @@ def call_timeout():
     return value if math.isfinite(value) and value > 0 else DEFAULT_CALL_TIMEOUT
 
 
+CHECKOUT_MISMATCH_DETAIL = (
+    "Browser unavailable: this session's checkout is not on its branch (detached "
+    "or switched HEAD). Switch the worktree back to the session's branch."
+)
+
+# Closed wire codes; unknown exception text never becomes a reason.
+_UNAVAILABLE_REASONS = {
+    CHECKOUT_MISMATCH_DETAIL: 'checkout_branch_mismatch',
+    'Session unavailable': 'session_unavailable',
+    'Session profile unavailable': 'profile_unavailable',
+    'Session project is not checked out on this device': 'project_not_checked_out',
+    'Browser runtime unavailable': 'runtime_unavailable',
+    'An existing browser runtime already owns this session': 'runtime_owned',
+    'Browser runtime closed': 'runtime_closed',
+    'Browser runtime did not report its expected identity': 'runtime_identity_mismatch',
+    'Browser could not open its initial tab': 'initial_tab_failed',
+    'Browser runtime expired': 'runtime_expired',
+    'Browser runtime disconnected': 'runtime_disconnected',
+    'Browser runtime busy': 'runtime_busy',
+    'Browser runtime disconnected; outcome unknown': 'outcome_unknown',
+    'Browser runtime could not start': 'start_failed',
+    STALE_BUILD_DETAIL: "stale_build",
+}
+
+
 class RuntimeUnavailable(RuntimeError):
-    pass
+    def __init__(self, message):
+        super().__init__(message)
+        self.reason = _UNAVAILABLE_REASONS.get(message, "runtime_unavailable")
 
 
 def timeout_result(tool, seconds):
@@ -104,7 +131,9 @@ def resolve_config(session_id):
     from app.core.environment import _build_env_with_ai_tools, apply_provider_env
     from app.core.mcp_config import _build_mcp_servers_dict
     from app.core.profiles import get_profile
-    from app.core.project_resolver import resolve_cwd, resolve_project_v2
+    from app.core.project_resolver import (
+        describe_checkout_mismatch, resolve_cwd, resolve_project_v2,
+    )
     from app.db import database
 
     row = database.get_session(session_id)
@@ -116,6 +145,8 @@ def resolve_config(session_id):
     config = profile.get("config", {})
     cwd = resolve_cwd(row)
     if cwd is None and resolve_project_v2(row):
+        if describe_checkout_mismatch(row):
+            raise RuntimeUnavailable(CHECKOUT_MISMATCH_DETAIL)
         raise RuntimeUnavailable("Session project is not checked out on this device")
     cwd = cwd or config.get("cwd") or str(settings.effective_workspace_dir)
     provider = row.get("provider_id")
@@ -261,14 +292,16 @@ class Runtime:
             return await self.client.call_tool(tool, arguments)
         except Exception as exc:
             # Unknown outcomes are never replayed. The next request may restart.
-            # The caller only ever sees the generic reason below, so record the
-            # real one here; RuntimeUnavailable texts are fixed, safe constants.
+            # Preserve app-authored failures; unexpected transport errors still
+            # get a generic unknown-outcome response without their details.
             reason = str(exc) if isinstance(exc, RuntimeUnavailable) else ""
             logger.warning(
                 "Browser tool %s failed for session %s (%s%s)", tool, self.session_id,
                 type(exc).__name__, f": {reason}" if reason else "",
             )
             await self.close()
+            if isinstance(exc, RuntimeUnavailable):
+                raise
             raise RuntimeUnavailable("Browser runtime disconnected; outcome unknown") from None
         finally:
             self.active -= 1

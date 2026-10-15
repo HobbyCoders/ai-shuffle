@@ -277,7 +277,7 @@ async def test_forwarding_preserves_routing_origin_and_mcp_result(monkeypatch, o
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [302, 403, 404, 500])
+@pytest.mark.parametrize("status", [302, 403, 404, 500, 503])
 async def test_failed_rpc_is_never_replayed_or_leaked(monkeypatch, status):
     requests = []
 
@@ -299,6 +299,60 @@ async def test_failed_rpc_is_never_replayed_or_leaked(monkeypatch, status):
     text = json.dumps(result)
     assert "secret response" not in text and "other.example" not in text
     assert "private-test-token" not in text
+    assert len(requests) == 1
+
+
+def test_every_runtime_reason_has_a_proxy_owned_message():
+    from app.core import browser_runtime
+
+    assert set(browser_runtime._UNAVAILABLE_REASONS.values()) == set(proxy._UNAVAILABLE_MESSAGES)
+    assert browser_runtime.RuntimeUnavailable("untrusted private detail").reason == "runtime_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason,message", list(proxy._UNAVAILABLE_MESSAGES.items()))
+async def test_known_unavailable_reason_uses_only_proxy_owned_text(monkeypatch, reason, message):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503, json={"reason": reason, "detail": "secret private-test-token"})
+
+    mock_transport(monkeypatch, handler)
+    result = await proxy.forward_tool("browser_status", {}, ENV)
+    assert result == proxy._error(f"{message} (HTTP 503); outcome unknown, not replayed")
+    assert "private-test-token" not in json.dumps(result)
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_known_reason_is_ignored_on_non_runtime_error(monkeypatch):
+    mock_transport(monkeypatch, lambda request: httpx.Response(403, json={
+        "reason": "checkout_branch_mismatch", "detail": "private-test-token",
+    }))
+    assert await proxy.forward_tool("browser_status", {}, ENV) == proxy._error(proxy._unavailable(403))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    '{"reason":"unknown private-test-token","detail":"secret"}',
+    '{"reason":["checkout_branch_mismatch"]}',
+    '{"reason":{"value":"checkout_branch_mismatch"}}',
+    '{"detail":"checkout_branch_mismatch"}',
+    '{"reason":"__proto__"}',
+    '[]', 'null', 'secret private-test-token',
+    '{"reason":"checkout_branch_mismatch","padding":"' + 'x' * 4096 + '"}',
+])
+async def test_unavailable_reason_is_closed_and_bounded(monkeypatch, body):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503, text=body)
+
+    mock_transport(monkeypatch, handler)
+    result = await proxy.forward_tool("browser_status", {}, ENV)
+    assert result == proxy._error(proxy._unavailable(503))
     assert len(requests) == 1
 
 
