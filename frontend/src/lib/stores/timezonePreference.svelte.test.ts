@@ -37,9 +37,20 @@ beforeEach(() => {
 
 describe('timezonePreference', () => {
 	it('defaults to "local" and resolves it to the browser zone', async () => {
-		const tz = await load();
-		expect(tz.current).toBe('local');
-		expect(tz.resolveTimezone()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+		// Pin the detected zone: a host with an empty TZ reports "Etc/Unknown".
+		const real = Intl.DateTimeFormat.prototype.resolvedOptions;
+		const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (
+			this: Intl.DateTimeFormat
+		) {
+			return { ...real.call(this), timeZone: 'Asia/Tokyo' };
+		});
+		try {
+			const tz = await load();
+			expect(tz.current).toBe('local');
+			expect(tz.resolveTimezone()).toBe('Asia/Tokyo');
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	it('falls back to UTC when the browser zone is undetectable', async () => {
