@@ -38,6 +38,16 @@ const source = (command, revision, ...args) => JSON.parse(execFileSync('python',
  ['-I', controlPath('scripts/ci/publication_source.py'), command, '--source-root', sourceRoot, '--revision', revision, ...args],
  { encoding: 'utf8', cwd: controlRoot, env: readEnv }));
 const releaseTag = process.env.RELEASE_TAG ?? '';
+// Whole-release staging exports the exact signed row, but never activates it.
+// This is separate from current(): both edge and the default stable path keep
+// their existing publication policy.
+const stageFile = process.env.SOURCE_STAGE_FILE;
+if (stageFile && channel !== 'stable') throw Error('Whole-release staging requires stable');
+async function stageSource(manifest, asset) {
+ await writeFile(stageFile, JSON.stringify({ manifest, asset: {
+  id: asset.id, name: asset.name, size: asset.size, digest: asset.digest,
+ } }), { flag: 'wx' });
+}
 let revision, version, notes = '';
 if (channel === 'stable') {
  if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(releaseTag)) throw new Error('RELEASE_TAG must be a final vX.Y.Z for a stable publish');
@@ -156,6 +166,7 @@ try {
       !trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, Buffer.from(signed.signature, 'base64')))) {
    throw new Error('Existing source publication is invalid; refusing to overwrite it');
   }
+  if (stageFile) await stageSource(published.manifest, asset);
   console.log(`Already published ${channel} ${revision}; leaving the signed update sequence unchanged.`);
  } else {
   // git archive is reproducible, so a retry rebuilds identical bytes and the
@@ -200,7 +211,8 @@ try {
    asset = await uploaded.json();
   }
   if (!Number.isSafeInteger(asset.id) || asset.id <= 0 || asset.state !== 'uploaded' || asset.size !== size || asset.digest !== `sha256:${sha256}`) throw new Error('GitHub source asset checksum or size did not match');
-  if (!(await current())) { console.log('Source stored, but a newer attestation/publication won; pointer unchanged.'); }
+  if (stageFile) { await stageSource(signed, asset); }
+  else if (!(await current())) { console.log('Source stored, but a newer attestation/publication won; pointer unchanged.'); }
   else {
    publishSourcePointer(wrangler, { revision, channel: storageChannel, version, assetId: asset.id,
     size, signed, sequence, repository: repo, repositoryId, expectedRevision: expectedEdge });

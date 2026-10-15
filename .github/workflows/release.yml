@@ -7,6 +7,16 @@ on:
         description: 'Existing tag to release (select that same tag as the workflow ref, e.g. v0.8.19)'
         required: true
         type: string
+      stage_only:
+        description: Build and seal a whole-release candidate; hold all moving pointers and Play
+        required: false
+        type: boolean
+        default: false
+      promote:
+        description: Promote a sealed tag (also select it as version and workflow ref); never rebuild or resign
+        required: false
+        type: string
+        default: ''
       image_digest:
         description: 'Verified candidate sha256 digest to reuse without rebuilding'
         required: false
@@ -71,6 +81,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Validate opt-in two-phase request
+        if: inputs.stage_only || inputs.promote != ''
+        env:
+          STAGE_ONLY: ${{ inputs.stage_only }}
+          PROMOTE_TAG: ${{ inputs.promote }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if [ "$STAGE_ONLY" = true ] && [ -n "$PROMOTE_TAG" ]; then
+            echo '::error::Choose staging or promotion, not both'; exit 1
+          fi
+          if [ -n "$PROMOTE_TAG" ] && [ "$PROMOTE_TAG" != "$RELEASE_TAG" ]; then
+            echo '::error::Promotion must use the exact version and workflow tag'; exit 1
+          fi
       - name: Check protected release source and connector bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -79,7 +102,7 @@ jobs:
 
   create-release:
     if: >-
-      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') && !inputs.stage_only && inputs.promote == ''
     needs: preflight
     environment: release-signing
     timeout-minutes: 10
@@ -370,6 +393,7 @@ jobs:
 
   linux-build:
     name: Linux desktop for the exact release tag
+    if: ${{ !inputs.stage_only && inputs.promote == '' }}
     needs: preflight
     uses: ./.github/workflows/desktop-linux-artifact.yml
     with:
@@ -422,3 +446,314 @@ jobs:
     with:
       release_tag: ${{ needs.create-release.outputs.release_tag }}
     secrets: inherit
+
+
+  # Opt-in graph. The live graph above is unchanged when both inputs are off.
+  stage-begin:
+    if: inputs.stage_only && inputs.promote == ''
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==46.0.3
+      - name: Create only a draft candidate after current gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+        run: python scripts/ci/release_staging_github.py begin --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/stage"
+
+  stage-docker:
+    needs: [preflight, stage-begin]
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      promote_latest: false
+      image_digest: ${{ inputs.image_digest }}
+    secrets: inherit
+
+  stage-buyer:
+    needs: [preflight, stage-docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the staged image on a clean buyer runner
+        env:
+          IMAGE: ${{ needs.stage-docker.outputs.image }}
+          DIGEST: ${{ needs.stage-docker.outputs.digest }}
+        run: |
+          docker pull "$IMAGE@$DIGEST"
+          python3 scripts/ci/verify_buyer_compose.py --image "$IMAGE@$DIGEST" --artifacts "$RUNNER_TEMP/stage-buyer"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: staged-buyer-failure
+          path: ${{ runner.temp }}/stage-buyer
+          retention-days: 7
+          if-no-files-found: ignore
+
+  stage-source:
+    needs: [preflight, stage-buyer]
+    runs-on: ubuntu-latest
+    environment: release-signing
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund
+        working-directory: scripts/source-publisher
+      - name: Sign and retain source bytes without a D1 activation
+        env:
+          SOURCE_CHANNEL: stable
+          SOURCE_STAGE_FILE: ${{ runner.temp }}/source-evidence.json
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+          RELEASE_GITHUB_REPO: ${{ vars.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle' }}
+          RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+        run: node desktop/scripts/publish-source.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staged-source-evidence
+          path: ${{ runner.temp }}/source-evidence.json
+          retention-days: 7
+          if-no-files-found: error
+
+  stage-android:
+    needs: [preflight, stage-begin]
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/android-play.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      publish_to_play: false
+      workers_ready: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
+    secrets: inherit
+
+  stage-apk:
+    needs: [preflight, stage-begin]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/android.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      publish_download: false
+    secrets: inherit
+
+  stage-linux:
+    needs: [preflight, stage-begin]
+    uses: ./.github/workflows/desktop-linux-artifact.yml
+    with:
+      version: ${{ needs.preflight.outputs.release_version }}
+
+  stage-desktop:
+    if: inputs.stage_only && inputs.build_desktop
+    needs: [preflight, stage-begin]
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/desktop-installer.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      stage_only: true
+    secrets: inherit
+
+  stage-record:
+    needs: [preflight, stage-begin, stage-docker, stage-buyer, stage-source, stage-android, stage-apk, stage-linux, stage-desktop]
+    if: >-
+      always() && !failure() && !cancelled() && inputs.stage_only &&
+      needs.stage-begin.result == 'success' && needs.stage-docker.result == 'success' &&
+      needs.stage-buyer.result == 'success' && needs.stage-source.result == 'success' &&
+      needs.stage-android.result == 'success' && needs.stage-apk.result == 'success' &&
+      needs.stage-linux.result == 'success' &&
+      (needs.stage-desktop.result == 'success' || (!inputs.build_desktop && needs.stage-desktop.result == 'skipped'))
+    runs-on: ubuntu-latest
+    environment: release-signing
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: read
+      pull-requests: read
+      id-token: write
+      attestations: write
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+      RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==46.0.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund
+        working-directory: scripts/source-publisher
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged-source-evidence
+          path: ${{ runner.temp }}/stage-artifacts/source
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-shuffle-play-bundle
+          path: ${{ runner.temp }}/stage-artifacts/play
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-download
+          path: ${{ runner.temp }}/stage-artifacts/apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-desktop-${{ needs.preflight.outputs.release_version }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stage-artifacts/linux
+      - name: Retain immutable assets and sign the complete staging record
+        env:
+          DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          IMAGE_DIGEST: ${{ needs.stage-docker.outputs.digest }}
+          PLAY_CODE: ${{ needs.stage-android.outputs.version_code }}
+          WINDOWS: ${{ inputs.build_desktop }}
+          STAGING_JOB_RESULTS: >-
+            {"docker":"${{ needs.stage-docker.result }}","buyer":"${{ needs.stage-buyer.result }}",
+            "source":"${{ needs.stage-source.result }}","linux":"${{ needs.stage-linux.result }}",
+            "apk":"${{ needs.stage-apk.result }}","play":"${{ needs.stage-android.result }}",
+            "windows":"${{ needs.stage-desktop.result }}"}
+        run: |
+          options=()
+          if [ "$WINDOWS" = true ]; then options+=(--windows); fi
+          python scripts/ci/release_staging_github.py stage --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/stage" --artifacts "$RUNNER_TEMP/stage-artifacts" --image-digest "$IMAGE_DIGEST" --play-code "$PLAY_CODE" "${options[@]}"
+      - name: Attest the signed record and all transitively bound artifact hashes
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/stage/whole-release-stage.json
+      - name: Verify attestation and seal the durable candidate
+        run: python scripts/ci/release_staging_github.py seal --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/stage"
+
+  promotion:
+    if: inputs.promote != '' && !inputs.stage_only
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-signing
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: read
+      attestations: read
+    concurrency:
+      group: desktop-source-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.promote }}
+      RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==46.0.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund
+        working-directory: scripts/source-publisher
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify sealed bytes and resume activation without signing or building
+        run: python scripts/ci/release_staging_github.py promote --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/promote"
+
+  promotion-play:
+    if: inputs.promote != '' && !inputs.stage_only
+    needs: [preflight, promotion]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: google-play-internal
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: read
+      attestations: read
+    concurrency:
+      group: android-play-internal
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.promote }}
+      RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
+      PLAY_SIGNING_READY: ${{ vars.PLAY_SIGNING_READY }}
+      ANDROID_WORKERS_READY: ${{ vars.ANDROID_WORKERS_READY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==46.0.3 google-auth==2.40.3 requests==2.32.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund
+        working-directory: scripts/source-publisher
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read Play state and activate only the original signed bundle
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: python scripts/ci/release_staging_github.py play --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/promote-play"

@@ -43,7 +43,8 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
     """
     inputs = dict(publish_download=True, publish_to_play=True, workers_ready=True,
                   confirm_existing_key_export=True, build_macos=True,
-                  release_tag="v0.8.19", candidate_run_id="", launcher_acceptance=False)
+                  release_tag="v0.8.19", candidate_run_id="", launcher_acceptance=False,
+                  stage_only=False, promote="")
     inputs.update(input_changes)
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")

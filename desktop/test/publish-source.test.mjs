@@ -64,3 +64,27 @@ for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regr
  }
  for(const name of ['desktop-source-d1.json','a'.repeat(40)+'-runtime.zip'])await assert.rejects(fs.stat(path.join(root,name)),{code:'ENOENT'});
 });
+
+test('whole-release staging signs source bytes but never writes a D1 pointer', async t => {
+ const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-stage-source-'));
+ t.after(() => fs.rm(root, { recursive: true, force: true }));
+ const stage = path.join(root, 'source-evidence.json');
+ const env = { ...process.env, RUNNER_TEMP: root, GITHUB_SHA: 'a'.repeat(40), GH_TOKEN: 'fixture',
+  RELEASE_GITHUB_REPO_ID: '42', ACCOUNT_HUB_DATABASE_ID: '11111111-1111-1111-1111-111111111111',
+  PUBLISH_TEST_CASE: 'stable', SOURCE_CHANNEL: 'stable', RELEASE_TAG: 'v1.2.3', SOURCE_STAGE_FILE: stage };
+ const result = spawnSync(process.execPath, ['--import', preload, script], { encoding: 'utf8', env });
+ assert.equal(result.status, 0, result.stderr);
+ const evidence = JSON.parse(await fs.readFile(stage, 'utf8'));
+ const signed = JSON.parse(evidence.manifest);
+ const payload = Buffer.from(signed.payload, 'base64');
+ assert(verify(null, payload, await fs.readFile(path.join(root, 'public.pem')), Buffer.from(signed.signature, 'base64')));
+ const manifest = JSON.parse(payload);
+ assert.equal(manifest.revision, 'a'.repeat(40));
+ assert.equal(manifest.channel, 'stable');
+ assert.equal(evidence.asset.id, 123);
+ assert.equal(evidence.asset.digest, `sha256:${manifest.sha256}`);
+ const events = JSON.parse(await fs.readFile(path.join(root, 'events.json')));
+ assert(events.includes('archive'));
+ assert(!events.includes('publish'));
+ await assert.rejects(fs.stat(path.join(root, 'record.json')), { code: 'ENOENT' });
+});
