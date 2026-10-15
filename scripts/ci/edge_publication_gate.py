@@ -159,8 +159,14 @@ def update_reach_readiness(revision, *, api=None, base=None, root=None, reposito
             envelope = edge_cache_path().read_bytes()
             if verify_edge_manifest(envelope) != base:
                 raise ValueError("Cutover requires the exact reverified signed publication")
-            base, _ = load_cutover().verify_bridge(
-                root or reach.ROOT, revision, base, envelope, walk=update_reach_readiness)
+            cutover = load_cutover()
+            try:
+                base, _ = cutover.verify_bridge(
+                    root or reach.ROOT, revision, base, envelope, walk=update_reach_readiness)
+            except cutover.PrivateCheckoutRequired:
+                return False, ("Update reach refused: set AI_SHUFFLE_PRIVATE_CHECKOUT to a complete, "
+                               "non-shallow clone of HobbyCoders/ai-shuffle-private "
+                               "(see docs/ci/release-channels.md).")
 
         commits = git("rev-list", "--first-parent", "--reverse", f"{base}..{revision}").splitlines()
         refusals = []
