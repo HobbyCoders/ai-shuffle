@@ -4,6 +4,13 @@ from app.db import mobile_tool_identity as store, pairing, mobile, mobile_hub
 from app.core import account_hub
 
 
+CONTROLLER_RECOVERY = (
+    'The paired controller credential bound to this chat expired, was logged out, '
+    'rotated without a current binding, or was revoked. Reconnect the original '
+    'paired device and reopen/continue this chat to refresh its binding; if the '
+    'device was revoked, the owner must pair it again first.')
+
+
 def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -25,7 +32,7 @@ def live_client(value):
     client = pairing.get_paired_client_by_session_hash(value['credential_hash'])
     if (not client or client['id'] != value['principal_id']
             or (client.get('scopes') is not None and 'controller' not in client['scopes'])):
-        raise PermissionError('Controller expired or revoked')
+        raise PermissionError(CONTROLLER_RECOVERY)
     account_hub.check_paired_client(client)
     return client
 
@@ -101,13 +108,21 @@ def record_creator(session_id, request, *, conn=None):
     """
     value = request_principal(request)
     if value:
-        store.bind(session_id, value, new=True, conn=conn)
+        _bind_current(session_id, value, new=True, conn=conn)
     return value
+
+
+def _bind_current(session_id, value, *, new=False, claim=False, conn=None):
+    if conn is None:
+        with store.get_db() as connection:
+            return _bind_current(session_id, value, new=new, claim=claim, conn=connection)
+    store.lock_paired_credential(conn.cursor(), value)
+    return store.bind(session_id, value, new=new, claim=claim, conn=conn)
 
 
 def bind_session(session_id, value, *, new=False, claim=False, conn=None):
     validate(value)
-    return store.bind(session_id, value, new=new, claim=claim, conn=conn)
+    return _bind_current(session_id, value, new=new, claim=claim, conn=conn)
 
 
 def _network_mirror(session):

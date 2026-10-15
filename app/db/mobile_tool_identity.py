@@ -38,6 +38,28 @@ def admin_active(digest):
         return c.fetchone() is not None
 
 
+def lock_paired_credential(cursor, principal):
+    """Serialize a checked principal with renewal/logout, using this transaction.
+
+    Callers validate account membership before taking DB locks. Recheck only
+    the credential here so concurrent binds cannot overwrite a renewed hash,
+    without nested connection checkouts or network requests under the lock.
+    """
+    if not principal or principal['kind'] != 'paired':
+        return
+    cursor.execute('SELECT id FROM paired_clients WHERE id=%s FOR SHARE',
+                   (principal['principal_id'],))
+    cursor.execute("""SELECT id FROM paired_clients p WHERE p.id=%s
+        AND p.revoked_at IS NULL AND (
+            (p.session_token_hash=%s AND p.session_expires_at>NOW()) OR EXISTS (
+                SELECT 1 FROM paired_client_native_sessions n WHERE n.client_id=p.id
+                AND n.token_hash=%s AND n.expires_at>NOW()))""",
+        (principal['principal_id'], principal['credential_hash'], principal['credential_hash']))
+    if cursor.fetchone() is None:
+        from app.core.mobile_tool_identity import CONTROLLER_RECOVERY
+        raise PermissionError(CONTROLLER_RECOVERY)
+
+
 def bind(session_id, principal, *, new=False, claim=False, conn=None):
     if conn is None:
         with get_db() as connection:
