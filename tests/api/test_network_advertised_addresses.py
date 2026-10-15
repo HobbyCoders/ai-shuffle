@@ -10,7 +10,7 @@ from app.core import managed_connection
 from app.core.config import settings
 from app.db import database
 from app.db import network as store
-from app.network import advertisements, engine, lan, policy, tokens
+from app.network import advertisements, engine, lan, policy, tokens, transport
 from tests.core.network.conftest import workers  # noqa: F401
 from tests.core.network.harness import exchange, join
 from tests.core.network.test_token_binding import post, request_body
@@ -32,8 +32,10 @@ def setup(workers, monkeypatch):
     return server, peer, TestClient(app)
 
 
-def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(setup):
+def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(setup, monkeypatch):
     server, peer, client = setup
+    capabilities = {"platform": "linux", "docker": True, "browser": True}
+    monkeypatch.setattr(transport, "_capabilities", lambda: capabilities)
     alias = "https://proxy.example:8443/base"
     with server.active():
         assert post(client, request_body(client, server, peer, alias)).json()["detail"]["code"] == tokens.ENDPOINT_NOT_ADVERTISED
@@ -52,6 +54,7 @@ def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(se
     assert not applied.rejected
     with peer.active():
         assert alias in engine.presence_of(server.device_id)["endpoints"]
+        assert engine.presence_of(server.device_id)["capabilities"] == capabilities
         assert advertisements.owner_urls() == []  # another worker's local config is not imported
     with server.active():
         assert client.get("/api/v1/network/advertised-addresses").json()["addresses"] == [alias]
@@ -63,6 +66,8 @@ def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(se
     "https://example.com/#fragment", "https://faß.example", "https://K.example", "https://a..example",
     "https://example.com/%2e/", "https://[fe80::1%eth0]", "https://example.com:99999",
     "http://169.254.1.1:8000", "http://[fe80::1]:8000",
+    "http://2852039166:8000", "http://0xa9.0xfe.0xa9.0xfe", "http://0251.0376.0251.0376",
+    "http://169.254.43518",
     "https://example.com/" + "x" * 512, "https://example.com/a\\b", "https://example.com/ with space"])
 def test_invalid_alias_is_rejected_atomically_without_echoing_input(setup, url):
     server, _, client = setup
@@ -89,6 +94,25 @@ def test_bound_count_and_canonicalization_keep_previous_wire_limit(setup, monkey
                                     signature="x" * 86, endpoints=engine._own_endpoints()).endpoints) == 8
         database.set_system_setting(advertisements.SETTING, json.dumps(["https://faß.example"]))
         assert advertisements.owner_urls() == []
+
+
+def test_preview_cookie_can_read_but_cannot_put_advertised_addresses(setup, monkeypatch):
+    from app.core import preview_access
+    server, _, client = setup
+    client.app.dependency_overrides.clear()
+    monkeypatch.setattr(auth.owner_auth, "local_access", lambda *a: False)
+    monkeypatch.setattr(auth.owner_auth, "owner_session", lambda *a: False)
+    monkeypatch.setattr(preview_access, "_private_peer", lambda request: True)
+    monkeypatch.setattr(preview_access, "verify", lambda token:
+        preview_access.Grant(session_id="preview-session", expires_at=2**40) if token == "preview-token" else None)
+    client.cookies.set(preview_access.COOKIE_NAME, "preview-token")
+    with server.active():
+        advertisements.set_owner_urls(["https://saved.example"])
+        assert client.get("/api/v1/network/advertised-addresses").json()["addresses"] == ["https://saved.example"]
+        response = client.put("/api/v1/network/advertised-addresses", json={"addresses": ["https://changed.example"]})
+        assert response.status_code == 403
+        assert response.json()["detail"].startswith("Agent previews cannot change")
+        assert advertisements.owner_urls() == ["https://saved.example"]
 
 
 @pytest.mark.parametrize("method", ["get", "put"])

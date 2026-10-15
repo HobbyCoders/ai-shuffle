@@ -64,6 +64,60 @@ def test_enrollment_preserves_the_actionable_refusal(pair, monkeypatch):
         assert "CLUSTER_ADVERTISE_URL" in enrollment._join_error(exc.value)
 
 
+@pytest.mark.parametrize("body", [b'[]', b'"forbidden"', b'<html>Forbidden</html>'], ids=["list", "string", "html"])
+@pytest.mark.parametrize("retry", [False, True], ids=["only-refusal", "next-endpoint"])
+def test_enrollment_handles_unexpected_forbidden_bodies(pair, monkeypatch, body, retry):
+    from app.network import enrollment
+    server, peer, _, server_client = pair
+    real_client = httpx.Client
+    attempted = []
+    def handler(request):
+        if request.url.path.endswith("/peer/state"):
+            return httpx.Response(404)
+        if request.url.path.endswith("/peer/snapshot"):
+            return httpx.Response(200, json={"collections": [], "watermarks": {}})
+        if request.url.path.endswith("/auth/token"):
+            attempted.append(request.url.host)
+            if request.url.host == "malformed.example":
+                return httpx.Response(403, content=body)
+        with server.active():
+            response = server_client.post(request.url.path, json=json.loads(request.content))
+        return httpx.Response(response.status_code, json=response.json())
+    monkeypatch.setattr(enrollment.httpx, "Client", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(handler), **kwargs))
+    urls = ["https://malformed.example"] + (["https://server.example"] if retry else [])
+    with peer.active():
+        if retry:
+            enrollment._copy_snapshot_sync(engine.context(), server.device_id, urls)
+        else:
+            with pytest.raises(enrollment.EnrollmentError, match="^Snapshot copy failed: EnrollmentError: token HTTP 403$"):
+                enrollment._copy_snapshot_sync(engine.context(), server.device_id, urls)
+    assert attempted == (["malformed.example", "server.example"] if retry else ["malformed.example"])
+
+
+@pytest.mark.asyncio
+async def test_warning_limit_spans_fresh_peer_links_and_expires(monkeypatch, caplog):
+    monkeypatch.setattr(transport, "_binding_warning_at", {})
+    def handler(request):
+        return httpx.Response(403, json={"detail": {"code": tokens.ENDPOINT_NOT_ADVERTISED}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async def refused(device_id):
+            # Control/browser calls each construct a fresh link instance.
+            link = transport.PeerLink(device_id, ["https://alias.example"])
+            with pytest.raises(transport.PeerEndpointNotAdvertised):
+                await link._request(client, "POST", "/api/v1/network/peer/auth/token",
+                                    auth=False, base="https://alias.example")
+        await refused("peer-a")
+        await refused("peer-a")
+        await refused("peer-b")
+        assert len([r for r in caplog.records if "does not advertise" in r.message]) == 2
+        transport._binding_warning_at["peer-a"] -= 301
+        transport._binding_warning_at["expired-peer"] = transport._binding_warning_at["peer-a"]
+        await refused("peer-a")
+        assert len([r for r in caplog.records if "does not advertise" in r.message]) == 3
+        assert "expired-peer" not in transport._binding_warning_at
+
+
 def test_mismatch_code_discloses_no_addresses_and_requires_valid_proof(pair):
     server, peer, endpoints, client = pair
     with server.active():

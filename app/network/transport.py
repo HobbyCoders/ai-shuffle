@@ -90,6 +90,9 @@ _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _links_generation: Optional[int] = None
 _last_contact: Dict[str, float] = {}
+# Control/browser callers create short-lived PeerLinks: warning throttling must
+# span instances. Expired entries are pruned when a new warning is emitted.
+_binding_warning_at: Dict[str, float] = {}
 # Authenticated peer frontiers, retained across failed/retried pulls. A failed
 # request does not make a known backlog disappear. Only committed watermarks do.
 _peer_watermarks: Dict[str, dict] = {}
@@ -339,7 +342,6 @@ class PeerLink:
         self.token: str | None = None
         self.token_expires = 0.0
         self.last_error: str | None = None
-        self._binding_warning_at: float | None = None
         self.backoff_until = 0.0
         self.failures = 0
         # Set once an inbound contact has cut a failure streak's backoff short;
@@ -554,9 +556,13 @@ class PeerLink:
                 error = PeerEndpointNotAdvertised(self.device_id, base)
                 self.last_error = str(error)
                 now = time.monotonic()
-                if self._binding_warning_at is None or now - self._binding_warning_at >= 300:
+                last_warning = _binding_warning_at.get(self.device_id)
+                if last_warning is None or now - last_warning >= 300:
+                    for device_id, warned_at in list(_binding_warning_at.items()):
+                        if now - warned_at >= 300:
+                            _binding_warning_at.pop(device_id, None)
+                    _binding_warning_at[self.device_id] = now
                     logger.warning("%s", error)
-                    self._binding_warning_at = now
                 raise error
             raise _peer_error(response.status_code, str(detail)[:ERROR_DETAIL_LIMIT])
         return response.json()

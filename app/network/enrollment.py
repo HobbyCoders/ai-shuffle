@@ -457,7 +457,11 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                     "incarnation": ctx.identity.incarnation, "endpoints": engine._own_endpoints(),
                     "version": settings.version, "platform": identity_mod.platform_name()})
                 if token_response.status_code == 403:
-                    detail = token_response.json().get("detail")
+                    try:
+                        payload = token_response.json()
+                    except ValueError:
+                        payload = None
+                    detail = payload.get("detail") if isinstance(payload, dict) else None
                     if isinstance(detail, dict) and detail.get("code") == tokens.ENDPOINT_NOT_ADVERTISED:
                         binding_refusal = str(transport.PeerEndpointNotAdvertised(issuer_id, base))
                         raise EnrollmentError(binding_refusal)

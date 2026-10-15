@@ -943,7 +943,7 @@ async def put_advertised_addresses(body: AdvertisedAddresses, _: str = Depends(r
         advertisements.set_owner_urls(body.addresses)
         # The local setting is not replicated. Only this worker's ordinary
         # signed presence publishes its resolved URLs to the other members.
-        engine.publish_presence(version=settings.version)
+        engine.publish_presence(capabilities=transport._capabilities(), version=settings.version)
         return _advertised_addresses()
 
     try:

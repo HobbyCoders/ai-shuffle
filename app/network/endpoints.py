@@ -50,6 +50,7 @@ address the peer withdrew stops being dialed: a session at it is dropped.
 from __future__ import annotations
 
 import ipaddress
+import socket
 from typing import Iterable, List, Mapping, Optional
 from urllib.parse import urlsplit
 
@@ -84,7 +85,17 @@ def is_valid_endpoint(url: object) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return True  # a name; resolution happens at dial time
+        # getaddrinfo accepts legacy IPv4 forms that ipaddress does not:
+        # integer, hex/octal and shortened dotted addresses. Classify these
+        # locally, without DNS, before applying the link-local restriction.
+        numeric_host = host.rstrip(".")
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(numeric_host))
+        except OSError:
+            last_label = numeric_host.rsplit(".", 1)[-1].lower()
+            if last_label.isdigit() or last_label.startswith("0x"):
+                return False  # numeric-looking but invalid IPv4, not a DNS name
+            return True  # a name; resolution happens at dial time
     return not embedded_ipv4(address).is_link_local
 
 
