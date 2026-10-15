@@ -73,6 +73,11 @@ def is_valid_endpoint(url: object) -> bool:
         return False
     if parts.scheme not in ("http", "https"):
         return False
+    # Match the binding transcript's ASCII/A-label rule before any HTTP dial.
+    # HTTPX maps Unicode dot variants to ASCII dots; classifying the original
+    # spelling as a DNS name would otherwise bypass the link-local check.
+    if not parts.netloc.isascii():
+        return False
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
         return False
     try:
@@ -119,6 +124,8 @@ def embedded_ipv4(address: ipaddress.IPv4Address | ipaddress.IPv6Address):
     """
     if address.version != 6:
         return address
+    if address.sixtofour is not None:
+        return address.sixtofour  # 2002::/16 carries IPv4 in bits 16–48
     embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     if any(address in net for net in _IPV4_CARRYING_PREFIXES):
         return embedded
