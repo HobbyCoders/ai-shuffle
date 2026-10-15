@@ -44,6 +44,26 @@ def post(client, body, **kw):
     return client.post("/api/v1/network/peer/auth/token", json=body, **kw)
 
 
+def test_enrollment_preserves_the_actionable_refusal(pair, monkeypatch):
+    from app.network import enrollment
+    server, peer, _, server_client = pair
+    real_client = httpx.Client
+    def handler(request):
+        if request.url.host == "offline.example":
+            raise httpx.ConnectError("offline", request=request)
+        with server.active():
+            response = server_client.post(request.url.path, json=json.loads(request.content))
+        return httpx.Response(response.status_code, json=response.json())
+    monkeypatch.setattr(enrollment.httpx, "Client", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(handler), **kwargs))
+    with peer.active():
+        with pytest.raises(enrollment.EndpointEnrollmentError) as exc:
+            enrollment._copy_snapshot_sync(engine.context(), server.device_id,
+                                           ["https://alias.example", "https://offline.example"])
+        assert "https://alias.example" in enrollment._join_error(exc.value)
+        assert "CLUSTER_ADVERTISE_URL" in enrollment._join_error(exc.value)
+
+
 def test_mismatch_code_discloses_no_addresses_and_requires_valid_proof(pair):
     server, peer, endpoints, client = pair
     with server.active():

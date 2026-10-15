@@ -163,6 +163,12 @@ class LanSessionRequest(BaseModel):
     # and platform arrive only in the sealed exchange (extra fields are ignored).
 
 
+class AdvertisedAddresses(BaseModel):
+    # Two additional aliases keep the full advertisement compatible with the
+    # previous release's eight-endpoint limit (tunnel + primary + four LAN).
+    addresses: List[str] = Field(max_length=2)
+
+
 class LanSettings(BaseModel):
     enabled: Optional[bool] = None
     addresses: Optional[List[str]] = Field(default=None, max_length=lan.MAX_OWNER_ADDRESSES)
@@ -917,6 +923,35 @@ async def peer_lan_call(request: Request) -> Response:
         raise HTTPException(401, "LAN session refused") from exc
     status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
     return Response(lan.seal_reply(session, seq, status_code, media_type, raw), media_type="application/octet-stream")
+
+
+def _advertised_addresses() -> dict:
+    from app.network import advertisements
+    return {"addresses": advertisements.owner_urls(), "advertised": engine._own_endpoints()}
+
+
+@router.get("/advertised-addresses")
+async def get_advertised_addresses(_: str = Depends(require_admin)) -> dict:
+    return await run_sync(_advertised_addresses)
+
+
+@router.put("/advertised-addresses")
+async def put_advertised_addresses(body: AdvertisedAddresses, _: str = Depends(require_admin)) -> dict:
+    from app.network import advertisements
+
+    def _save():
+        advertisements.set_owner_urls(body.addresses)
+        # The local setting is not replicated. Only this worker's ordinary
+        # signed presence publishes its resolved URLs to the other members.
+        engine.publish_presence(version=settings.version)
+        return _advertised_addresses()
+
+    try:
+        result = await run_sync(_save)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    engine.kick()
+    return result
 
 
 def _lan_settings() -> dict:

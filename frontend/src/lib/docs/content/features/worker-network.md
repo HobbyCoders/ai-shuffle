@@ -69,6 +69,40 @@ addresses. The dialing worker records an actionable message in its peer status,
 shows it in the worker's Devices detail and logs a warning at most once per five
 minutes per peer. Invalid signatures still receive the generic binding refusal.
 
+Before upgrading, make sure the URL peers actually dial is advertised. An invite,
+manual address or cached URL may differ from the worker's advertised address
+(Docker port mappings, reverse proxies and hostname/IP aliases are common examples).
+New clients send a bound proof even before pinning, so an unadvertised alias is
+refused even with `NETWORK_REQUIRE_TOKEN_BINDING=false`.
+
+On the worker being dialed, open **Settings → Devices → This worker → Network →
+Advertised addresses** and enter the additional base URLs, separated by commas.
+These are explicit owner-approved aliases, including public reverse proxies,
+hostnames and mapped ports. They remain advertised alongside a managed tunnel and
+do not depend on the LAN-direct switch. Configure only URLs you control that
+actually reach this worker; they are shared with your network, not secrets.
+HTTPS is recommended: adding an HTTP alias does not encrypt bearer tokens.
+
+At most **two additional URLs**, each at most **512 characters**, are accepted.
+Use `http://` or `https://`, ASCII (punycode) hostnames, and an optional base path;
+credentials, queries, fragments, Unicode hosts and ambiguous paths are refused.
+Saving replaces the alias list, immediately updates the binding allowlist, and
+publishes the same signed presence used for primary addresses. Removing an alias
+makes new token requests to it fail; existing short-lived tokens are not revoked.
+The configuration is local to this worker and persists across restarts.
+
+The owner-only `GET /api/v1/network/advertised-addresses` API returns
+`addresses` (the additional URLs) and `advertised` (the complete dial list).
+`PUT` with `{"addresses":["https://proxy.example/worker"]}` replaces the extras;
+`{"addresses":[]}` clears them. Peer device tokens cannot read or change this
+setting. Previous-release peers still receive the ordinary endpoint list, bounded
+to their eight-address protocol limit; there is no membership migration.
+
+For direct workers without a managed tunnel, the existing `CLUSTER_ADVERTISE_URL`
+or owner-only `PUT /api/v1/cluster/advertise` API can also set the primary address.
+The separate **Extra LAN addresses** control accepts private literal HTTP LAN
+addresses while LAN-direct is on; use **Advertised addresses** for public aliases.
+
 Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
 IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames
 must be supplied as ASCII A-labels (punycode); Unicode hosts are rejected in both
