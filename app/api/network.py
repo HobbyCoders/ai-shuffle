@@ -105,6 +105,9 @@ class TokenRequest(BaseModel):
     device_id: str = Field(min_length=4, max_length=64)
     challenge: str = Field(min_length=16, max_length=128)
     signature: str = Field(min_length=64, max_length=128)
+    endpoint: Optional[str] = Field(default=None, max_length=2048)
+    bound_signature: Optional[str] = Field(default=None, max_length=128)
+    token_binding_proof: Optional[str] = Field(default=None, max_length=128)
     incarnation: int = Field(default=1, ge=1)
     endpoints: List[str] = Field(default_factory=list, max_length=8)
     capabilities: Dict[str, Any] = Field(default_factory=dict)
@@ -121,6 +124,7 @@ class TokenRequest(BaseModel):
 
 
 class ExchangeRequest(BaseModel):
+    token_binding_proof: Optional[str] = Field(default=None, max_length=128)
     flush: bool = False
     catalog_backlog: bool = False
     watermarks: Dict[str, Dict[str, int]] = Field(default_factory=dict)
@@ -543,12 +547,15 @@ async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
         row = await run_sync(store.get_member, body.device_id)
         member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
     return {"challenge": tokens.new_challenge(body.device_id, requester, member_address=member_address),
-            "expires_in": tokens.CHALLENGE_TTL_SECONDS}
+            "expires_in": tokens.CHALLENGE_TTL_SECONDS, "token_binding": 1}
 
 
 @router.post("/peer/auth/token")
 async def peer_token(body: TokenRequest) -> dict:
-    result = tokens.issue_token(device_id=body.device_id, challenge=body.challenge, signature=body.signature)
+    result = await run_sync(tokens.issue_token, device_id=body.device_id, challenge=body.challenge,
+                            signature=body.signature, endpoint=body.endpoint, bound_signature=body.bound_signature,
+                            token_binding_proof=body.token_binding_proof,
+                            binding_present=bool({"endpoint", "bound_signature"} & body.model_fields_set))
     await run_sync(store.touch_member, body.device_id, capabilities=body.capabilities or None,
                    endpoints=body.endpoints or None, version=body.version, incarnation=body.incarnation,
                    platform=body.platform)
@@ -581,6 +588,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
             engine.scan_all(strict=True)
         elif released:
             catalog.publish_owned()
+        tokens.remember_binding_support(device_id, body.token_binding_proof)
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
                            version=body.version, incarnation=body.incarnation, platform=body.platform)
         ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
@@ -590,6 +598,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                 "version": settings.version, "snapshot_required": snapshot,
                 "peer_state": 1, "flushed": body.flush,
+                "token_binding_proof": tokens.binding_support_proof(ctx),
                 "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),
                 "catalog_backlog": catalog.has_events_backlog(ctx=ctx)}
 

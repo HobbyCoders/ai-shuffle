@@ -53,6 +53,43 @@ Remove a worker, phone or browser from **Settings → Devices**. A removed worke
 
 If you remove a worker you no longer trust, also change the provider keys it had, in **Settings → Providers**.
 
+## Device-token upgrade protection
+
+This compatibility release sends both the legacy device-key proof and a versioned
+endpoint-bound proof on every token request; rejection never retries legacy-only.
+The bound transcript is the canonical JSON array
+`["shuffle-device-token-bound-v1", challenge, server_device_id, canonical_base_endpoint]`.
+The server checks the endpoint against its current locally advertised tunnel and
+LAN addresses, never against HTTP Host or forwarded headers. Tunnel rotation
+accepts the new advertisement immediately and rejects the removed address,
+including challenges issued before rotation; peers must refresh discovery.
+
+Canonical bases use lowercase HTTP(S) schemes and IDNA hosts, compressed bracketed
+IPv6, omitted default ports (80/443), and no trailing slashes. Path case and interior
+slashes remain significant; unreserved percent escapes are decoded and other
+escapes use uppercase hex. A DNS trailing dot remains significant. Credentials,
+queries, fragments, scoped IPv6, whitespace, backslashes, dot path segments and
+non-ASCII paths are rejected rather than guessed.
+
+A successful bound proof, or a device-key-signed binding-support statement in an
+authenticated exchange, permanently pins that peer to binding on the receiving
+worker. Mutable version/capability fields cannot set or clear this local database
+pin. It survives restarts, membership generation changes and re-admission of the
+same identity. A new signing identity (new device id), a fresh network or recovery
+onto a fresh database starts without those local pins. Downgrading a pinned peer
+to an old release will fail token authentication; upgrade it again rather than
+clearing security evidence.
+
+Old peers still work **before pinning**. During this rollout an intermediary that
+can redirect a peer's first connection can strip both the new proof and capability
+statement and relay legacy authentication. Old servers have the same exposure.
+Once all peers are upgraded, set `NETWORK_REQUIRE_TOKEN_BINDING=true` on each
+worker to reject even unpinned legacy requests (default: `false`). The follow-up
+protocol release must remove legacy acceptance after the rolling-upgrade window;
+this compatibility release does not claim complete first-contact relay protection.
+Binding also does not encrypt plain-HTTP bearer tokens: use HTTPS or the sealed
+LAN transport, and keep advertised endpoint provenance protected.
+
 ## Your account's network wins
 
 A worker with separate settings that later signs in to your account joins your account's network. Settings your account already has replace the worker's own, and anything only that worker had is added.

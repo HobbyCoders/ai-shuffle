@@ -1,0 +1,224 @@
+"""Compatibility rollout and relay resistance of endpoint-bound device tokens."""
+import json
+
+import httpx
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+
+from app.api import network as api
+from app.core.config import settings
+from app.db import network as store
+from app.network import crypto, engine, tokens, transport
+from tests.core.network.harness import join
+
+
+@pytest.fixture
+def pair(workers, monkeypatch):
+    server, peer = workers("server"), workers("peer")
+    with server.active():
+        engine.create_network("Test network")
+    join(server, peer)
+    endpoints = ["https://server.example", "http://192.168.50.20:8000"]
+    monkeypatch.setattr(engine, "_own_endpoints", lambda: list(endpoints))
+    monkeypatch.setattr(settings, "network_require_token_binding", False)
+    app = FastAPI()
+    app.include_router(api.router)
+    return server, peer, endpoints, TestClient(app)
+
+
+def request_body(client, server, peer, endpoint=None):
+    challenge = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": peer.device_id})
+    assert challenge.status_code == 200
+    assert challenge.json()["token_binding"] == 1
+    nonce = challenge.json()["challenge"]
+    body = {"device_id": peer.device_id, "challenge": nonce,
+            "signature": tokens.sign_challenge(peer.identity.signing_private, nonce, server.device_id)}
+    if endpoint is not None:
+        body.update(endpoint=endpoint, bound_signature=tokens.sign_bound_challenge(
+            peer.identity.signing_private, nonce, server.device_id, endpoint))
+    return body
+
+
+def post(client, body, **kw):
+    return client.post("/api/v1/network/peer/auth/token", json=body, **kw)
+
+
+def test_legacy_then_bound_then_stripped_and_relay_refused(pair):
+    server, peer, endpoints, client = pair
+    with server.active():
+        # Transitional first contact remains vulnerable to stripping by design.
+        body = request_body(client, server, peer, endpoints[0])
+        body.pop("endpoint")
+        body.pop("bound_signature")
+        assert post(client, body).status_code == 200
+        assert not store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer, endpoints[0])).status_code == 200
+        assert store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer)).status_code == 403
+        relay = request_body(client, server, peer, "https://relay.example")
+        assert post(client, relay, headers={"host": "relay.example", "x-forwarded-host": "relay.example"}).status_code == 403
+        assert post(client, request_body(client, server, peer, endpoints[1])).status_code == 200
+
+
+@pytest.mark.parametrize("damage", ["foreign", "endpoint", "signature", "audience", "nonce", "null", "empty", "missing_endpoint"])
+def test_present_binding_fails_closed_even_before_pin(pair, damage):
+    server, peer, endpoints, client = pair
+    with server.active():
+        body = request_body(client, server, peer, endpoints[0])
+        if damage == "foreign":
+            body = request_body(client, server, peer, "https://relay.example")
+        elif damage == "endpoint":
+            body["endpoint"] = endpoints[1]  # even another legitimate endpoint needs its own proof
+        elif damage == "signature":
+            body["bound_signature"] = body["signature"]
+        elif damage in ("audience", "nonce"):
+            body["bound_signature"] = tokens.sign_bound_challenge(
+                peer.identity.signing_private, "other" if damage == "nonce" else body["challenge"],
+                "other" if damage == "audience" else server.device_id, endpoints[0])
+        elif damage == "null":
+            body["endpoint"] = body["bound_signature"] = None
+        elif damage == "empty":
+            body["bound_signature"] = ""
+        else:
+            body.pop("endpoint")
+        assert post(client, body).status_code == 403
+        assert not store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer)).status_code == 200
+
+
+def test_replay_rotation_restart_and_membership_updates_preserve_pin(pair):
+    server, peer, endpoints, client = pair
+    with server.active():
+        body = request_body(client, server, peer, endpoints[0])
+        assert post(client, body).status_code == 200
+        assert post(client, body).status_code == 400
+        old = request_body(client, server, peer, endpoints[0])
+        endpoints[0] = "https://rotated.example/base"
+        assert post(client, old).status_code == 403
+        assert post(client, request_body(client, server, peer, endpoints[0])).status_code == 200
+        tokens.reset_for_tests()
+        engine.reset_for_tests()
+        assert engine.context() is not None  # reload context from the same durable store
+        row = store.get_member(peer.device_id)
+        for status in ("revoked", "active"):
+            store.upsert_member(device_id=peer.device_id, name=row["name"], kind=row["kind"],
+                                signing_public=row["signing_public"], encryption_public=row["encryption_public"],
+                                generation=row["generation"] + 1, status=status)
+        store.touch_member(peer.device_id, version="old", capabilities={"token_binding_required": False})
+        assert store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer)).status_code == 403
+
+
+def test_global_requirement_and_unsigned_description_cannot_pin(pair, monkeypatch):
+    server, peer, endpoints, client = pair
+    with server.active():
+        body = request_body(client, server, peer)
+        body.update(version="999", capabilities={"token_binding_required": True}, token_binding_required=True)
+        assert post(client, body).status_code == 200
+        assert not store.get_member(peer.device_id)["token_binding_required"]
+        monkeypatch.setattr(settings, "network_require_token_binding", True)
+        assert post(client, request_body(client, server, peer)).status_code == 403
+        assert post(client, request_body(client, server, peer, endpoints[0])).status_code == 200
+
+
+def test_signed_description_producer_pins_before_first_bound_request(pair):
+    server, peer, endpoints, client = pair
+    with peer.active():
+        description = transport._description()  # actual producer, not a seeded capability field
+    with server.active():
+        token = post(client, request_body(client, server, peer)).json()["token"]
+        response = client.post("/api/v1/network/peer/exchange", json=description,
+                               headers={"Authorization": "Bearer " + token})
+        assert response.status_code == 200
+        assert store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer)).status_code == 403
+        reply_proof = response.json()["token_binding_proof"]
+    with peer.active():
+        tokens.remember_binding_support(server.device_id, reply_proof)
+        assert store.get_member(server.device_id)["token_binding_required"]
+
+
+def test_token_description_is_authenticated_before_capability_pin(pair):
+    server, peer, endpoints, client = pair
+    with peer.active():
+        description = transport._description()
+    with server.active():
+        body = {**request_body(client, server, peer), **description}
+        body["signature"] = "x" * 86
+        assert post(client, body).status_code == 403
+        assert not store.get_member(peer.device_id)["token_binding_required"]
+        # Stripping just the bound proof cannot bypass the signed capability.
+        body = {**request_body(client, server, peer), **description}
+        assert post(client, body).status_code == 403
+        assert store.get_member(peer.device_id)["token_binding_required"]
+        assert post(client, request_body(client, server, peer, endpoints[0])).status_code == 200
+
+
+def test_unsigned_or_wrong_key_capability_cannot_pin(pair):
+    server, peer, _, _ = pair
+    with server.active():
+        for proof in ("", tokens.binding_support_proof(engine.context())):
+            with pytest.raises(HTTPException):
+                tokens.remember_binding_support(peer.device_id, proof)
+        assert not store.get_member(peer.device_id)["token_binding_required"]
+
+
+@pytest.mark.parametrize("raw,canonical", [
+    ("HTTPS://EXAMPLE.COM:443/", "https://example.com"),
+    ("http://EXAMPLE.COM:80///", "http://example.com"),
+    ("https://example.com:8443/base/", "https://example.com:8443/base"),
+    ("http://[2001:0DB8:0:0::1]:80/", "http://[2001:db8::1]"),
+    ("https://[2001:db8::1]:8443/A//B/", "https://[2001:db8::1]:8443/A//B"),
+    ("https://example.com/%7euser/%2f/", "https://example.com/~user/%2F"),
+    ("https://example.com./Case/", "https://example.com./Case"),
+    ("https://bücher.example/", "https://xn--bcher-kva.example"),
+])
+def test_normalization(raw, canonical):
+    assert tokens.canonical_endpoint(raw) == canonical
+    assert tokens.canonical_endpoint(canonical) == canonical
+
+
+@pytest.mark.parametrize("raw", ["ftp://example.com", "https://u:p@example.com", "https://example.com?x=1",
+    "https://example.com/#fragment", "https://example.com:99999", "https://[fe80::1%eth0]", "https://example.com/a/../b",
+    "https://example.com/%2e/", "https://example.com/a\\b", " https://example.com", "https://example.com/%zz", "https://example.com/é"])
+def test_ambiguous_endpoints_rejected(raw):
+    with pytest.raises(ValueError):
+        tokens.canonical_endpoint(raw)
+
+
+def test_transcript_is_versioned_and_unambiguous():
+    message = tokens.bound_challenge_message("nonce", "device|id", "HTTPS://EXAMPLE.COM:443/")
+    assert json.loads(message) == ["shuffle-device-token-bound-v1", "nonce", "device|id", "https://example.com"]
+    assert message != tokens.bound_challenge_message("nonce|device", "id", "https://example.com")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject", [False, True])
+async def test_client_always_sends_both_proofs_to_old_server_without_downgrade(pair, reject):
+    server, peer, endpoints, _ = pair
+    seen = []
+    nonce = "legacy-challenge-123456789"
+    def handler(request):
+        body = json.loads(request.content)
+        if request.url.path.endswith("/challenge"):
+            return httpx.Response(200, json={"challenge": nonce})  # no support flag from an old server
+        seen.append(body)
+        assert body["endpoint"] == endpoints[0]
+        assert crypto.verify(peer.identity.signing_public,
+                             tokens.challenge_message(nonce, server.device_id), crypto.b64u_decode(body["signature"]))
+        assert crypto.verify(peer.identity.signing_public,
+                             tokens.bound_challenge_message(nonce, server.device_id, endpoints[0]),
+                             crypto.b64u_decode(body["bound_signature"]))
+        return httpx.Response(403 if reject else 200, json={
+            "token": "legacy-token", "device_id": server.device_id, "network_id": server.context.network_id})
+    with peer.active():
+        link = transport.PeerLink(server.device_id, endpoints[:1])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            if reject:
+                with pytest.raises(transport.PeerError):
+                    await link._issue_token(client, engine.context(), endpoints[0])
+            else:
+                token, _ = await link._issue_token(client, engine.context(), endpoints[0])
+                assert token == "legacy-token"
+    assert len(seen) == 1

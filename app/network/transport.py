@@ -592,6 +592,9 @@ class PeerLink:
             "device_id": ctx.device_id,
             "challenge": challenge["challenge"],
             "signature": signature,
+            "endpoint": tokens.canonical_endpoint(endpoint),
+            "bound_signature": tokens.sign_bound_challenge(
+                ctx.identity.signing_private, challenge["challenge"], self.device_id, endpoint),
             "incarnation": ctx.identity.incarnation,
             **(await asyncio.to_thread(_description)),
             "version": settings.version,
@@ -626,6 +629,7 @@ class PeerLink:
                 **(await asyncio.to_thread(_description)), "version": settings.version,
                 "platform": identity_mod.platform_name(),
             })
+            await asyncio.to_thread(tokens.remember_binding_support, self.device_id, exchange.get("token_binding_proof"))
             note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             theirs = exchange.get("watermarks") or {}
             note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")))
@@ -942,7 +946,9 @@ def _decode_answer(status: int, raw: bytes) -> Any:
 
 def _description() -> dict:
     # Both probes can read the database, PATH and the filesystem.
-    return {"endpoints": engine._own_endpoints(), "capabilities": _capabilities()}
+    ctx = engine.context()
+    return {"endpoints": engine._own_endpoints(), "capabilities": _capabilities(),
+            **({"token_binding_proof": tokens.binding_support_proof(ctx)} if ctx else {})}
 
 
 def _capabilities() -> dict:

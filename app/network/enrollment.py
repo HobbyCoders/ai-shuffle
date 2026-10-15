@@ -440,6 +440,9 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                 signature = tokens.sign_challenge(ctx.identity.signing_private, challenge, issuer_id)
                 token_response = client.post(base + "/api/v1/network/peer/auth/token", json={
                     "device_id": ctx.device_id, "challenge": challenge, "signature": signature,
+                    "endpoint": tokens.canonical_endpoint(base),
+                    "bound_signature": tokens.sign_bound_challenge(
+                        ctx.identity.signing_private, challenge, issuer_id, base),
                     "incarnation": ctx.identity.incarnation, "endpoints": engine._own_endpoints(),
                     "version": settings.version, "platform": identity_mod.platform_name()})
                 if token_response.status_code >= 400:
