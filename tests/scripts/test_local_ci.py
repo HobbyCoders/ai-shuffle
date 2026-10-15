@@ -493,6 +493,34 @@ def test_attestation_requires_reach_acceptance(monkeypatch, accepted):
     assert posted == (["pending", "success"] if accepted else [])
 
 
+@pytest.mark.parametrize("state", ["pending", "success", "failure"])
+def test_attestation_warns_after_main_moves(monkeypatch, capsys, state):
+    posted = []
+    monkeypatch.setattr(local_ci.subprocess, "run", lambda argv, **kw: posted.append(argv))
+    monkeypatch.setattr(local_ci.subprocess, "check_output", lambda *a, **kw: "b" * 40)
+    local_ci.attest(state, "Full suite result", "a" * 40)
+    assert posted and f"state={state}" in posted[0]
+    output = capsys.readouterr().out
+    assert "WARNING: main moved" in output
+    assert f"posted {state}" in output
+    assert "first-parent ancestor" in output and "no newer attestation wins" in output
+    assert "Later commits still need their own full attestation" in output
+
+
+def test_attestation_main_recheck_unavailable_warns(monkeypatch, capsys):
+    def unavailable(*args, **kwargs):
+        raise OSError("offline")
+    monkeypatch.setattr(local_ci.subprocess, "check_output", unavailable)
+    local_ci.warn_attestation_main_moved("a" * 40, "success")
+    assert "could not recheck main" in capsys.readouterr().out
+
+
+def test_attestation_unchanged_main_does_not_warn(monkeypatch, capsys):
+    monkeypatch.setattr(local_ci.subprocess, "check_output", lambda *a, **kw: "a" * 40)
+    local_ci.warn_attestation_main_moved("a" * 40, "success")
+    assert not capsys.readouterr().out
+
+
 def test_attestation_rechecks_labels_before_success(monkeypatch):
     from ci import edge_publication_gate
 

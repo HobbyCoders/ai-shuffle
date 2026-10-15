@@ -3,8 +3,9 @@
 CI does not test code. A worker runs every suite on the exact main revision
 (``python scripts/local_ci.py full --attest``) and posts the commit status
 ``local/full-suite``. Edge publication waits for that status, created by the
-owner's account, in state success, on the current head of protected main.
-One pass covers every PR merged up to that revision.
+owner's account, in state success, on the first-parent history of protected main.
+Only the newest attested unpublished revision is eligible; later untested changes
+wait for their own exact-revision attestation. One pass covers its ancestors.
 
 Run only from a checkout of protected main. This script reads GitHub
 metadata; it does not receive signing or Cloudflare keys.
@@ -211,7 +212,7 @@ def owner_status(api, revision):
     raise ValueError("Too many statuses; refusing partial evidence")
 
 
-def publication_readiness(api, revision):
+def exact_main_readiness(api, revision):
     branch = api("branches/main")
     if not branch.get("protected"):
         return False, "main is not protected; refusing publication"
@@ -226,6 +227,64 @@ def publication_readiness(api, revision):
     # Recheck after the API reads. The publisher also checks main before writing its pointer.
     if api("branches/main")["commit"]["sha"] != revision:
         return False, "main moved during verification; skipping superseded revision"
+    return True, f"Local full suite passed on {revision[:9]}: {status.get('description', '')}"
+
+
+def main_history(api):
+    """Refresh objects, then walk protected main's first parents (not merged PR heads)."""
+    subprocess.check_output(["git", "fetch", "--quiet", "origin", "main"], timeout=60)
+    branch = api("branches/main")
+    if not branch.get("protected"):
+        raise ValueError("main is not protected; refusing publication")
+    return subprocess.check_output(
+        ["git", "rev-list", "--first-parent", branch["commit"]["sha"]],
+        text=True, timeout=20).splitlines()
+
+
+def unpublished_history(history, published):
+    if published in history:
+        return history[:history.index(published)]
+    # The only permitted unrelated-history baseline is the frozen signed public
+    # cutover. Its owner's success already certifies the private exact-tree/reach
+    # bridge; a public runner must not need credentials for the archived repo.
+    import hashlib
+    initial, record = load_cutover().mapping(Path.cwd(), history[0])
+    envelope = edge_cache_path().read_bytes()
+    if (record and initial == history[-1] and published == record["published_revision"]
+            and verify_edge_manifest(envelope) == published
+            and hashlib.sha256(envelope).hexdigest() == record["envelope_sha256"]):
+        return history
+    raise ValueError("Published revision is not on main or the frozen cutover baseline")
+
+
+def newest_attested(api, history):
+    # Bound API cost and fail closed, never silently choose a candidate after an
+    # unchecked newer commit. A large backlog needs a fresh tip attestation.
+    for revision in history[:100]:
+        status = owner_status(api, revision)
+        if status and status.get("state") == "success":
+            return revision, status
+    return None, None
+
+
+def publication_readiness(api, revision, *, published=None):
+    published = published if published is not None else published_edge_revision()
+    # Repeat the complete decision: main or a newer attestation may change while
+    # statuses are read. The writer repeats this and CASes the actual D1 pointer.
+    for _ in range(2):
+        history = main_history(api)
+        if revision not in history:
+            return False, "Revision is not on protected main's first-parent history"
+        candidates = unpublished_history(history, published)
+        if revision not in candidates:
+            return False, "Revision is already published or older than the published revision"
+        newest, status = newest_attested(api, candidates)
+        if newest != revision:
+            if newest:
+                return False, f"Newer attested revision {newest[:9]} takes precedence"
+            return False, f"{MAIN_SUITE_REFUSAL}. Run on a clean checkout of main:\n{COMMAND}"
+    if published_edge_revision() != published:
+        return False, "Published pointer moved during verification; retry selection"
     return True, f"Local full suite passed on {revision[:9]}: {status.get('description', '')}"
 
 
@@ -247,28 +306,69 @@ def event_allowed(env, event):
     return False
 
 
-def main():
+def merge_readiness(api, *, now=None):
+    """Optional merge preflight: refuse a recent owner pending marker, not a stale crash."""
+    from datetime import datetime, timezone
+
+    head = api("branches/main")["commit"]["sha"]
+    status = owner_status(api, head)
+    if api("branches/main")["commit"]["sha"] != head:
+        return False, "main moved during merge preflight; run the check again"
+    if not status or status.get("state") != "pending":
+        return True, "No owner full-suite run is pending on current main."
+    try:
+        started = datetime.fromisoformat(status["created_at"].replace("Z", "+00:00"))
+        age = ((now or datetime.now(timezone.utc)) - started).total_seconds()
+    except (KeyError, ValueError, TypeError):
+        return False, "Owner full-suite is pending with unknown age; inspect the run before merging."
+    if age > 2 * 60 * 60:
+        return True, "WARNING: owner pending marker is over two hours old; inspect a possibly crashed run."
+    return False, (f"Owner full-suite is pending on {head[:9]}; defer the merge until it finishes. "
+                   "If main moves anyway, an eligible attested ancestor can still publish.")
+
+
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--select", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--merge-check", action="store_true", help="read-only preflight before gh pr merge")
+    args = parser.parse_args(argv)
+    if args.merge_check:
+        if args.select or args.json:
+            parser.error("--merge-check cannot select or publish")
+        ready, reason = merge_readiness(GitHub())
+        print(reason)
+        return 0 if ready else 1
     env = os.environ
     event = json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     if not event_allowed(env, event):
         raise ValueError("Event is not authorized for edge publication")
-    revision = env["GITHUB_SHA"]
+    revision = env.get("SOURCE_REVISION") or env["GITHUB_SHA"]
     if not re.fullmatch(r"[a-f0-9]{40}", revision):
         raise ValueError("Invalid source revision")
     checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if checkout != revision:
-        raise ValueError("Checkout does not match the main revision")
-    ready, reason = publication_readiness(GitHub(), revision)
+        raise ValueError("Checkout does not match the exact source revision")
+    api = GitHub()
+    published = published_edge_revision()
+    if args.select:
+        revision, _ = newest_attested(api, unpublished_history(main_history(api), published))
+    ready, reason = (publication_readiness(api, revision, published=published) if revision else
+                     (False, f"{MAIN_SUITE_REFUSAL}. {COMMAND}"))
+    result = {"ready": ready, "revision": revision or "", "published": published, "reason": reason}
+    if args.json:
+        print(json.dumps(result))
+        return
     print(reason)
-    if not ready and reason.startswith(MAIN_SUITE_REFUSAL):
-        # The gate job still succeeds; this is what makes the refusal visible.
+    if not ready:
         print(warning_annotation(reason))
     with Path(env["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-        output.write(f"ready={str(ready).lower()}\n")
+        output.write(f"ready={str(ready).lower()}\nrevision={revision or ''}\n")
     if env.get("GITHUB_STEP_SUMMARY"):
         with Path(env["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
             summary.write(reason.replace("\n", "  \n") + "\n")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

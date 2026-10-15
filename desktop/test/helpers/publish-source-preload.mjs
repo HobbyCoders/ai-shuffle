@@ -19,19 +19,25 @@ let saved=fs.existsSync(path.join(root,'record.json'))?JSON.parse(fs.readFileSyn
 const events=[];
 const sha256=createHash('sha256').update(bytes).digest('hex');
 const asset={id:123,name:revision+'-runtime.zip',size:bytes.length,state:'uploaded',digest:'sha256:'+sha256};
-cp.execFileSync=(exe,args)=>{
+cp.execFileSync=(exe,args,options={})=>{
  if(exe==='git'){
   if(args[0]==='rev-parse'&&args[1]==='HEAD')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='refs/tags/v1.2.3^{commit}')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='--is-shallow-repository')return 'false\n';
   if(args[0]==='rev-list')return '42\n';
   if(args[0]==='show'&&args.includes('--format=%ct'))return '1\n';
+  if(args[0]==='show'&&args[1]===`${revision}:desktop/launcher.json`)return fs.readFileSync(new URL('../../launcher.json',import.meta.url),'utf8');
   if(args[0]==='fetch'){events.push('fetch-main');return '';}
   if(args[0]==='merge-base'){events.push('on-main');if(scenario==='offmain')throw Error('not an ancestor');return '';}
   if(args[0]==='cat-file')return 'tag\n';
   if(args[0]==='tag'&&args[1]==='--list')return 'v1.2.3\nv6-phase2\nv1.2.4-rc.1\n'+(scenario==='older'?'v1.2.4\n':'');
   if(args[0]==='tag'&&args[2]==='--format=%(contents:body)')return 'Faster startup.\n-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n';
   throw Error('Unexpected git command '+args.join(' '));
+ }
+ if(exe==='python'&&args[0].endsWith('/scripts/ci/edge_publication_gate.py')) {
+  if(options.env.DESKTOP_APPLICATION_SIGNING_KEY||options.env.CLOUDFLARE_API_TOKEN)throw Error('Read-only gate received publishing secrets');
+  events.push('ancestor-gate');
+  return JSON.stringify({ready:!(scenario==='newer-attested'&&++mainCalls>1),revision,published:'b'.repeat(40)});
  }
  if(exe==='python'&&args[0]==='scripts/release/sequence_offset.py')return args[1]==='signing-floor'?JSON.stringify({floor:1,old_repository_id:null}):'42\n';
  if(exe==='python'&&args[0]==='docker/update_contract.py')return JSON.stringify({runtime:'b'.repeat(64),requires:['base-1'],recommends:[]})+'\n';
@@ -46,8 +52,11 @@ cp.execFileSync=(exe,args)=>{
  if(!args.includes('--command'))throw Error('Expected D1 query command');
  const sql=args[args.indexOf('--command')+1];
  if(sql.startsWith('SELECT revision,release_repository_id'))return JSON.stringify([{results:[]}]);
+ if(sql.startsWith('SELECT revision,sequence'))return JSON.stringify([{results:[{revision:(scenario==='stale-feed'?'c':'b').repeat(40),sequence:1}]}]);
  if(sql.startsWith('SELECT MAX(sequence)'))return JSON.stringify([{results:[{maximum:scenario==='clock-regression'?Number.MAX_SAFE_INTEGER:1}]}]);
  if(sql.startsWith('INSERT')) {
+  fs.writeFileSync(path.join(root,'insert.sql'),sql);
+  if(scenario==='pointer-race')return '';
   events.push('publish');const match=sql.match(/INTO source_releases\(revision,channel,version,asset_id,size,manifest,sequence,release_repository,release_repository_id\) SELECT '([a-f0-9]{40})','(stable|edge)','([^']+)',(\d+),(\d+),'(.*?)',(\d+),'([^']+)',(\d+) WHERE/);
   if(!match)throw Error('Invalid publisher SQL');
   saved={channel:match[2],version:match[3],manifest:match[6],asset_id:Number(match[4]),release_repository:match[8],release_repository_id:Number(match[9])};fs.writeFileSync(path.join(root,'record.json'),JSON.stringify(saved));return '';
