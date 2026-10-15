@@ -107,6 +107,84 @@ async def test_rpc_session_token_passes_desktop_gate(monkeypatch, desktop_rpc_ap
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("head", ["detached", "switched"])
+@pytest.mark.parametrize("native", [False, True])
+async def test_checkout_head_mismatch_reaches_rpc_and_native_proxy(
+    monkeypatch, desktop_rpc_app, tmp_path, head, native,
+):
+    """Real git HEAD changes drive the resolver -> actor -> RPC -> proxy path."""
+    import subprocess
+    from app.core import checkout_manager, native_browser_proxy, native_chrome, profiles
+    from app.db import checkouts, projects_v2
+
+    def git(path, *args):
+        return subprocess.run(
+            ["git", *args], cwd=path, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    base = tmp_path / "repo"
+    base.mkdir()
+    git(base, "init")
+    git(base, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "--allow-empty", "-m", "Initial")
+    checkout = tmp_path / "checkout"
+    git(base, "worktree", "add", "-b", "session-branch", str(checkout))
+    if head == "detached":
+        git(checkout, "switch", "--detach", "HEAD")
+    else:
+        git(checkout, "switch", "-c", "other-branch")
+    session_id = f"rpc-{head}-{native}"
+    session = {"id": session_id, "profile_id": "p", "project_v2_id": "project",
+               "branch": "session-branch"}
+    monkeypatch.setattr(panel.database, "get_session", lambda sid: session)
+    monkeypatch.setattr(profiles, "get_profile", lambda pid: {"config": {}})
+    monkeypatch.setattr(projects_v2, "get_project_v2", lambda pid: {"id": "project"})
+    branch_row = {"path": str(checkout), "status": "active"}
+    monkeypatch.setattr(checkouts, "get_checkout", lambda *a, **kw: branch_row)
+    def local_checkouts(*args, branch=None):
+        return [branch_row] if branch else [{"path": str(base), "status": "active"}]
+
+    monkeypatch.setattr(checkouts, "list_checkouts_with_legacy_fallback", local_checkouts)
+    chrome = AsyncMock()
+    monkeypatch.setattr(native_chrome, "ensure_started", chrome)
+    token = registry.issue_token(session_id)
+    original_client = httpx.AsyncClient
+    transport = httpx.ASGITransport(app=desktop_rpc_app)
+    try:
+        if native:
+            monkeypatch.setattr(native_browser_proxy.httpx, "AsyncClient",
+                                lambda **kw: original_client(transport=transport, **kw))
+            result = await native_browser_proxy.forward_tool("browser_status", {}, {
+                "AIS_SESSION_ID": session_id, "AIS_PANEL_TOKEN": token,
+                "AIS_PANEL_REGISTER_URL": "http://test/api/v1/browser/panel/register",
+            })
+            assert result["isError"] is True
+            text = result["content"][0]["text"]
+            assert "checkout is not on its branch" in text
+            assert "Switch the worktree back" in text
+            assert str(checkout) not in text
+        else:
+            async with original_client(transport=transport, base_url="http://test") as client:
+                response = await client.post("/api/v1/browser/panel/rpc", json={
+                    "session_id": session_id, "token": token,
+                    "tool": "browser_status", "arguments": {},
+                })
+            assert response.status_code == 503
+            assert response.json() == {
+                "reason": "checkout_branch_mismatch", "detail": runtime.CHECKOUT_MISMATCH_DETAIL,
+            }
+        # Diagnosis never switches HEAD or changes the recorded branch binding.
+        if head == "switched":
+            assert git(checkout, "symbolic-ref", "--quiet", "--short", "HEAD") == "other-branch"
+        else:
+            assert git(checkout, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+        assert checkout_manager.ensure_checkout({"id": "project"}, "session-branch") is None
+    finally:
+        await runtime.close_session(session_id)
+        registry.clear(session_id)
+
+
+@pytest.mark.asyncio
 async def test_rpc_local_owner_requires_origin_and_session_token(monkeypatch):
     from app.core import owner_auth
     from app.middleware.csrf import CSRFProtectionMiddleware

@@ -189,13 +189,15 @@ async def test_failure_not_replayed_then_recovers(fake):
 
 
 @pytest.mark.asyncio
-async def test_failed_call_logs_its_real_reason(fake, caplog):
-    """The caller only sees "outcome unknown"; the log must keep why."""
+async def test_failed_call_logs_and_preserves_its_app_authored_reason(fake, caplog):
+    """The caller and log both keep a known runtime failure, not just an outage."""
     await runtime.start("runtime-test")
     await control.get("runtime-test").retire()
     with caplog.at_level("WARNING", logger=runtime.logger.name):
-        with pytest.raises(runtime.RuntimeUnavailable, match="outcome unknown"):
+        with pytest.raises(runtime.RuntimeUnavailable, match="Browser runtime expired") as error:
             await runtime.call("runtime-test", "browser_status", {})
+    assert error.value.reason == "runtime_expired"
+    assert fake[0].closed
     messages = [r.getMessage() for r in caplog.records if r.name == runtime.logger.name]
     assert any(
         "browser_status" in m and "runtime-test" in m

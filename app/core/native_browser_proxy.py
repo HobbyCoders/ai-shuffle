@@ -25,7 +25,42 @@ TIMEOUT_SECONDS = 90
 _UNAVAILABLE = "Browser runtime unavailable; outcome unknown, not replayed"
 
 
-def _unavailable(status: int) -> str:
+# Kept in sync with browser-mcp/src/proxy.ts. Only proxy-owned text is shown.
+_UNAVAILABLE_MESSAGES = {
+    "checkout_branch_mismatch": (
+        "Browser unavailable: this session's checkout is not on its branch (detached "
+        "or switched HEAD). Switch the worktree back to the session's branch."
+    ),
+    'session_unavailable': 'Session unavailable',
+    'profile_unavailable': 'Session profile unavailable',
+    'project_not_checked_out': 'Session project is not checked out on this device',
+    'runtime_unavailable': 'Browser runtime unavailable',
+    'runtime_owned': 'An existing browser runtime already owns this session',
+    'runtime_closed': 'Browser runtime closed',
+    'runtime_identity_mismatch': 'Browser runtime did not report its expected identity',
+    'initial_tab_failed': 'Browser could not open its initial tab',
+    'runtime_expired': 'Browser runtime expired',
+    'runtime_disconnected': 'Browser runtime disconnected',
+    'runtime_busy': 'Browser runtime busy',
+    'outcome_unknown': 'Browser runtime disconnected; outcome unknown',
+    'start_failed': 'Browser runtime could not start',
+    "stale_build": (
+        "The browser tool build is out of date. Rebuild browser-mcp or redeploy "
+        "the app image, then try again."
+    ),
+}
+
+
+def _unavailable(status: int, raw: bytes = b"") -> str:
+    if status == 503:
+        try:
+            body = json.loads(raw)
+            reason = body.get("reason") if isinstance(body, dict) else None
+            message = _UNAVAILABLE_MESSAGES.get(reason) if isinstance(reason, str) else None
+            if message:
+                return f"{message} (HTTP 503); outcome unknown, not replayed"
+        except (ValueError, UnicodeError, RecursionError):
+            pass
     return f"Browser runtime unavailable (HTTP {int(status)}); outcome unknown, not replayed"
 
 
@@ -105,9 +140,18 @@ async def forward_tool(name: str, arguments: dict, env: dict):
             ) as response,
         ):
             if not response.is_success:
-                # The status alone is safe to show and tells a refused token
-                # (403), a gone session (404) and a failed runtime (503) apart.
-                return _error(_unavailable(response.status_code))
+                # Only 503's closed reason code is trusted, never arbitrary text.
+                # Bound error bodies separately; do not buffer a large error page.
+                raw = bytearray()
+                if response.status_code == 503:
+                    try:
+                        async for chunk in response.aiter_bytes():
+                            if len(raw) + len(chunk) > 4096:
+                                return _error(_unavailable(response.status_code))
+                            raw.extend(chunk)
+                    except Exception:  # noqa: BLE001 -- retain status, never leak body errors
+                        return _error(_unavailable(response.status_code))
+                return _error(_unavailable(response.status_code, raw))
             raw = bytearray()
             async for chunk in response.aiter_bytes():
                 if len(raw) + len(chunk) > MAX_RESPONSE:
