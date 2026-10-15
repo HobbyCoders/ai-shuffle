@@ -37,9 +37,44 @@ beforeEach(() => {
 
 describe('timezonePreference', () => {
 	it('defaults to "local" and resolves it to the browser zone', async () => {
+		// Pin the detected zone: a host with an empty TZ reports "Etc/Unknown".
+		const real = Intl.DateTimeFormat.prototype.resolvedOptions;
+		const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (
+			this: Intl.DateTimeFormat
+		) {
+			return { ...real.call(this), timeZone: 'Asia/Tokyo' };
+		});
+		try {
+			const tz = await load();
+			expect(tz.current).toBe('local');
+			expect(tz.resolveTimezone()).toBe('Asia/Tokyo');
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it('falls back to UTC when the browser zone is undetectable', async () => {
+		// An empty TZ makes ICU report "Etc/Unknown", which toLocaleString rejects.
+		const real = Intl.DateTimeFormat.prototype.resolvedOptions;
+		const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (
+			this: Intl.DateTimeFormat
+		) {
+			return { ...real.call(this), timeZone: 'Etc/Unknown' };
+		});
+		try {
+			const tz = await load();
+			expect(tz.resolveTimezone()).toBe('UTC');
+			expect(() => new Date().toLocaleString(undefined, { timeZone: tz.resolveTimezone() })).not.toThrow();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it('falls back to UTC for a cached zone this browser cannot use', async () => {
+		localStorage.setItem(STORAGE_KEY, 'Mars/Olympus_Mons');
 		const tz = await load();
-		expect(tz.current).toBe('local');
-		expect(tz.resolveTimezone()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+		expect(tz.current).toBe('Mars/Olympus_Mons');
+		expect(tz.resolveTimezone()).toBe('UTC');
 	});
 
 	it('starts from the cached value', async () => {
