@@ -204,7 +204,10 @@ reinstall, because database migrations do not run backwards.
    image: a source-only update cannot replace their supervisor. Images with
    that capability hand over to the updated supervisor after a restart.
 2. After the affected workers have that code, change the workflow's one
-   `SOURCE_CHANNEL` value to `nightly`. This PR deliberately leaves it `edge`.
+   `SOURCE_CHANNEL` value to `nightly`. Done for 1.0.0: every release from
+   0.9.6 on recognizes both names, so `desktop-source.yml` now signs `nightly`.
+   A worker still on an older release with the `edge` channel rejects the
+   nightly manifest and keeps its current version; update it to stable 1.0.0.
    `/v1/desktop/manifest/nightly` and `/v1/desktop/manifest/edge` serve identical
    signed bytes from the existing D1 `edge` lane; the publisher keeps that
    storage key even when it signs `nightly`. The hub never rewrites a signature.

@@ -316,4 +316,4 @@ def test_stable_update_is_signed_only_after_verification_in_a_protected_environm
     assert job["concurrency"]["group"] == "desktop-source-publish"
     # Automatic main publication cannot overwrite the stable release feed.
     edge = yaml.safe_load((ROOT / ".github/workflows/desktop-source.yml").read_text())
-    assert edge["env"]["SOURCE_CHANNEL"] == "edge"
+    assert edge["env"]["SOURCE_CHANNEL"] == "nightly"

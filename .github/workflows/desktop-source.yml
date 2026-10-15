@@ -5,10 +5,10 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
-# Transition step 1: ship alias-aware workers signed edge. Change only this
-# value to nightly after those workers have installed the compatibility build.
+# Transition step 2: workers from 0.9.6 on accept both names, so the daily
+# build is signed nightly. It is still stored in, and served from, the edge lane.
 env:
-  SOURCE_CHANNEL: edge
+  SOURCE_CHANNEL: nightly
 
 permissions:
   contents: read

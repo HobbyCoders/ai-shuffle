@@ -4,7 +4,6 @@
 //
 // SOURCE_CHANNEL=nightly (desktop-source.yml, daily after a local full pass):
 //   newest attested first-parent main revision, served at /nightly and /edge.
-// The workflow keeps SOURCE_CHANNEL=edge for the first compatibility release.
 // SOURCE_CHANNEL=stable (release.yml, after the release image passed container
 //   verification): the commit of RELEASE_TAG, which must be on main. Served at
 //   /v1/desktop/manifest, the address every customer install follows.
