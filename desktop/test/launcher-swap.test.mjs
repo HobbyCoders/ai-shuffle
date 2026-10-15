@@ -108,7 +108,10 @@ test('the archive writer produces what @electron/asar (Electron\'s own format) r
  const plain = path.join(dir, 'plain'); write(plain, Object.fromEntries(members.map(m => [m.name, m.data])));
  const theirs = path.join(dir, 'theirs.asar');
  return asar.createPackage(plain, theirs).then(() => {
-  for (const { name } of members) assert.deepEqual(asar.statFile(file, name).integrity, asar.statFile(theirs, name).integrity, name);
+  for (const { name } of members) {
+   const nativeName = name.split('/').join(path.sep);
+   assert.deepEqual(asar.statFile(file, nativeName).integrity, asar.statFile(theirs, nativeName).integrity, name);
+  }
   // And ours reads theirs.
   assert.deepEqual(readAsarMember(fs, theirs, 'node_modules/@s/p/big.bin'), big);
  });
