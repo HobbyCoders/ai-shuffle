@@ -1306,4 +1306,4 @@ async def on_boot() -> None:
 def schedule(session_id: str) -> None:
     """Turn-end hook: start a queued hand-off in the background (never blocks)."""
     if session_id in _pending and session_id not in _running:
-        asyncio.get_running_loop().create_task(run_pending(session_id))
+        _spawn(run_pending(session_id))

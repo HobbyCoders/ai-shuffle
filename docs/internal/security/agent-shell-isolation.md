@@ -150,6 +150,50 @@ and streams the dump (`container_runtime.py dump --file -`), as
 `tools/backup-db.sh` already does. Run backups from the host with
 `docker exec` as root, never from an agent shell.
 
+## Validation before changing the default
+
+Do not enable the split on a live worker merely to test it. Use disposable
+volumes and synthetic credentials. The opt-in still fails open on migration or
+identity errors and is ignored with `--user`; a default environment variable is
+not a substitute for a required/fail-closed mode or visible actual-state reporting.
+
+Run these checks from the repository root:
+
+```sh
+# Ordinary Linux account: real Bash and Monitor, git/worktrees, project edits,
+# offline npm script and pytest. This does NOT prove separation from a service uid.
+PYTHONPATH=fluid python -m pytest tests/core/test_agent_isolation_workflows.py -q
+# Root in a disposable test environment: real migration, saved-id drop,
+# denial on all six protected entries, service reads, cancellation and rollback.
+AGENT_ISOLATION_ROOT_REQUIRED=1 PYTHONPATH=fluid python -m pytest tests/core/test_agent_isolation_root.py -q
+# Built image, disposable containers/volumes; requires a Docker-capable test host.
+python scripts/ci/verify_agent_isolation.py --image ai-shuffle:local --artifacts /tmp/isolation-results
+```
+
+The root fixture has a separate offline workflow case requiring git, npm and
+node. Both workflow tests report missing prerequisites as skips. The image
+check uses real Bash and Monitor producers before and after restart: all six
+paths must raise permission errors, passwordless TCP app authentication and the
+administrative socket must be refused, while authenticated SQL and service file
+reads succeed. A skipped root test or an unrun image check is **not** a security pass.
+Keep the build-image check's results with the review; a runner-only smoke cannot
+prove that a production entrypoint enabled the split.
+
+Before recommending a default change, additionally exercise real chat-started
+MCP servers, delegated CLI sign-ins, owner sign-in, terminals, isolated previews,
+backup/restore, update/restart/rollback and supported PUID/PGID and mount variants.
+Audit every privileged import, plugin/configuration load, inherited descriptor
+and credential backup/copy. The cwd allowlist only checks the starting directory;
+it does not restrict the files a shell can reach afterwards. Database authentication
+must reject the agent both over TCP and through the local administrative socket;
+a missing/unreachable database is not evidence of authentication denial.
+
+If any prerequisite is unavailable, report exactly what ran and what did not.
+Do not infer an owner's acceptance of same-user access from documentation alone.
+After previously exposed data is migrated, review and rotate potentially copied
+database, provider and owner credentials and signing/encryption keys using their
+supported recovery procedures; changing ownership does not invalidate copies.
+
 ## Recommended Windows split (not implemented)
 
 Run the backend and managed PostgreSQL under a dedicated non-administrator

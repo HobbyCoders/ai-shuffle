@@ -108,6 +108,11 @@ class IsolationCheck(Check):
         pg_ids = [ids for ids in self.process_ids(on, r"^(\S*/)?postgres[ :]") if ids]
         assert pg_ids and all(set(ids.split()) == {str(SERVICE_UID)} for ids in pg_ids), pg_ids
         assert b"agent_isolation_check" in self.dump(on)
+        probe = Path(__file__).with_name("agent_isolation_probe.py").read_text()
+        result = self.docker("exec", "--workdir", "/app", on, "python", "-c", probe, "--disposable")
+        assert b"BASH_MONITOR_FILES_DATABASE_DENIED_SERVICE_READ_OK" in result.stdout
+        self.passed("real Bash and Monitor deny all six paths, TCP passwordless app authentication "
+                    "and the administrative socket; service file reads and authenticated SQL work")
         self.passed("mode on: PUID gets Permission denied on every protected entry, directly and through the "
                     "spawn runner; the app holds the service account only as its saved uid; PostgreSQL runs as "
                     "it; a root dump works")
@@ -115,6 +120,8 @@ class IsolationCheck(Check):
         self.docker("restart", "--time", "90", on, timeout=100)
         self.ready(on)
         self.denied(on, ["cat", FILES[0]])
+        result = self.docker("exec", "--workdir", "/app", on, "python", "-c", probe, "--disposable")
+        assert b"BASH_MONITOR_FILES_DATABASE_DENIED_SERVICE_READ_OK" in result.stdout
         self.stop(on)
         record = self.inspect_volume(volume, "import os; r=os.lstat('/data/agent-isolation.json'); "
                                              "d=os.lstat('/data'); print(r.st_uid, d.st_uid, d.st_mode & 0o1770 == 0o1770)")
