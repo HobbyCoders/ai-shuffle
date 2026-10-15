@@ -2,11 +2,6 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
 	TRANSCRIPT_WINDOW_SIZE,
 	TRANSCRIPT_WINDOW_CAP,
-	initialWindowRange,
-	olderWindowRange,
-	newerWindowRange,
-	windowRangeForItem,
-	clampWindowRange,
 	clampWindowStart,
 	createWindowBackfill,
 	createTranscriptWindow,
@@ -26,32 +21,18 @@ import { resolveCurrentTurnIndex } from '$lib/utils/transcript-navigation';
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 
-describe('pure bounded ranges for reactive views', () => {
-	it('shifts, jumps, follows and clamps without mutating input', () => {
-		const tail = Object.freeze(initialWindowRange(2000));
+describe('bounded rows for giant groups', () => {
+	it('bounds the rows of one giant group through repeated navigation', () => {
 		expect(TRANSCRIPT_WINDOW_CAP).toBe(120);
-		expect(tail).toEqual({ start: 1880, end: 2000 });
-		const older = olderWindowRange(tail, 2000);
-		expect(older).toEqual({ start: 1850, end: 1970 });
-		expect(newerWindowRange(older, 2000)).toEqual(tail);
-		expect(clampWindowRange(older, 2100)).toBe(older);
-		expect(clampWindowRange(older, 2100, { followTail: true })).toEqual({ start: 1980, end: 2100 });
-		expect(windowRangeForItem(tail, 900, 2000)).toEqual({ start: 840, end: 960 });
-		expect(windowRangeForItem(tail, -1, 2000)).toBe(tail);
-		expect(windowRangeForItem(tail, 2000, 2000)).toBe(tail);
-		expect(clampWindowRange(tail, 20)).toEqual({ start: 0, end: 20 });
-		expect(clampWindowRange(tail, 0)).toEqual({ start: 0, end: 0 });
-	});
-
-	it('also bounds the rows of one giant group through repeated navigation', () => {
-		let range = initialWindowRange(2000, 30);
+		const window = createTranscriptWindow({ cap: 30, step: 10 });
+		window.setItemCount(2000);
 		for (let i = 0; i < 200; i++) {
-			range = olderWindowRange(range, 2000, 10, 30);
+			const range = window.extendOlder();
 			expect(range.end - range.start).toBe(30);
 		}
-		expect(range).toEqual({ start: 0, end: 30 });
-		for (let i = 0; i < 200; i++) range = newerWindowRange(range, 2000, 10, 30);
-		expect(range).toEqual({ start: 1970, end: 2000 });
+		expect(window.visibleRange).toEqual({ start: 0, end: 30 });
+		for (let i = 0; i < 200; i++) window.extendNewer();
+		expect(window.visibleRange).toEqual({ start: 1970, end: 2000 });
 	});
 });
 
