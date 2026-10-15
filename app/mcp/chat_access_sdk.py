@@ -19,7 +19,7 @@ Check ChatResources; if no handle fits, explain why and use RequestChatAccess.
 Follow the resource's card instructions.
 Never ask for addresses, passwords, private keys, API keys, tokens or other
 connection details in chat or voice: the user enters and approves them in the
-private card. Never reveal private inputs or put secrets in tool arguments.
+private input card. Never reveal private inputs or put secrets in tool arguments.
 Grants expose only temporary handles, resource kinds, permissions and expiry.
 ChatResources lists saved IDs, kinds and owner-chosen labels, never addresses or
 credentials. Reuse via saved_id; each session needs its own grant.
