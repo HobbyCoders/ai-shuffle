@@ -375,7 +375,7 @@ def test_run_probes_the_application_port(settings_factory, monkeypatch):
     monkeypatch.setenv("START_CHROME", "0")
     monkeypatch.setattr(runtime.subprocess, "Popen", lambda *args, **kwargs: Mock())
     seen = {}
-    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None: seen.update(url=monitor.url) or 0)
+    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None, chrome_current=None: seen.update(url=monitor.url) or 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
@@ -413,7 +413,7 @@ def test_run_publishes_private_descriptor_before_spawning_worker(settings_factor
         assert env["DATA_DIR"] == str(tmp_path)
         return Mock()
     monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
-    monkeypatch.setattr(runtime, "watch", lambda *args: 0)
+    monkeypatch.setattr(runtime, "watch", lambda *args, **kwargs: 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
@@ -475,6 +475,66 @@ def test_postgres_server_gets_only_its_own_environment(settings_factory, monkeyp
     assert env["LD_LIBRARY_PATH"] == client["LD_LIBRARY_PATH"] == "/opt/pg/lib"
 
 
+def test_runtime_selection_restarts_chromium_and_restores_it_with_application(settings_factory, image_here, tmp_path, monkeypatch):
+    cfg = settings_factory()
+    db = runtime.Database(cfg)
+    for name in ("open", "close", "publish_descriptor"):
+        monkeypatch.setattr(db, name, Mock())
+    monkeypatch.setattr(runtime, "Database", lambda settings: db)
+    monkeypatch.setenv("START_CHROME", "1")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    updates = Mock()
+    updates.root = tmp_path / "updates"
+    updates.state = {}
+    updates.lifecycle.side_effect = lambda action: {"active_sessions": 0, "stopped": True}
+    selections = []
+    original_path = os.environ.get("PATH")
+    original_library_path = os.environ.get("LD_LIBRARY_PATH")
+
+    def launch(env, activate=False):
+        chosen = "new" if activate else "old"
+        return ["python", "-m", "app.main"], None, dict(
+            env, PATH=f"/runtimes/{chosen}/bin", CHROME_EXECUTABLE=f"/runtimes/{chosen}/chrome",
+            LD_LIBRARY_PATH=f"/runtimes/{chosen}/lib", SHUFFLE_RUNTIME_OVERLAYS="1")
+
+    updates.launch.side_effect = launch
+    module = Mock(ContainerUpdates=Mock(return_value=updates), UpdateError=RuntimeError)
+    monkeypatch.setattr(runtime, "load_updater", lambda: module)
+    browsers = []
+
+    def spawn(command, *, env, **kwargs):
+        selections.append(env["CHROME_EXECUTABLE"])
+        process = Mock()
+        process.poll.return_value = None
+        browsers.append(process)
+        return process
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
+    monkeypatch.setattr(runtime, "start_app", Mock(side_effect=lambda *args: Mock()))
+    stopped = []
+    monkeypatch.setattr(runtime, "stop_group", lambda process, timeout: stopped.append(process))
+    monkeypatch.setattr(runtime, "shutdown", Mock())
+
+    def watch(app, db, chrome, monitor, updates, restart, relaunch, chrome_current=None):
+        assert chrome_current() is browsers[0]
+        app = restart(app)
+        assert chrome_current() is browsers[1]
+        relaunch(app)
+        assert chrome_current() is browsers[2]
+        return 0
+
+    monkeypatch.setattr(runtime, "watch", watch)
+    runtime.STOP.clear()
+    assert runtime.run(cfg, "run") == 0
+    assert selections == ["/runtimes/old/chrome", "/runtimes/new/chrome", "/runtimes/old/chrome"]
+    assert browsers[0] in stopped and browsers[1] in stopped
+    updates.activating.assert_called_once()
+    updates.failed.assert_called_once()
+    # The PostgreSQL supervisor's own environment was never changed.
+    assert os.environ.get("PATH") == original_path
+    assert os.environ.get("LD_LIBRARY_PATH") == original_library_path
+
+
 def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, monkeypatch):
     """R13-1: chrome-supervisor, start-chrome and Chromium inherited the app's
     secrets, and the lifecycle token that authorizes the internal desktop routes."""
@@ -500,7 +560,7 @@ def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, m
         return Mock()
 
     monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
-    monkeypatch.setattr(runtime, "watch", lambda *args: 0)
+    monkeypatch.setattr(runtime, "watch", lambda *args, **kwargs: 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
@@ -864,10 +924,13 @@ def test_real_pg_update_that_crashes_after_migrating_is_rolled_back(settings_fac
     marker = tmp_path / "started.log"
     programs = {
         # The previous version: records each start, then serves until stopped.
-        A: '#!/bin/sh\necho "$GIT_SHA" >> "$TEST_MARKER"\nexec sleep 600\n',
+        A: ('import os, time\nfrom pathlib import Path\n'
+            'with Path(os.environ["TEST_MARKER"]).open("a") as out: out.write(os.environ["GIT_SHA"] + "\\n")\n'
+            'time.sleep(600)\n'),
         # The new version: migrates the schema, then crashes before it is ready.
-        B: ('#!/bin/sh\npsql -X -q -v ON_ERROR_STOP=1 -c "CREATE TABLE migrated (value text);'
-            ' UPDATE kept SET value = \'after\';" || exit 9\nexit 3\n'),
+        B: ('import subprocess\nsubprocess.run(["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", '
+            '"CREATE TABLE migrated (value text); UPDATE kept SET value = \'after\';"], check=True)\n'
+            'raise SystemExit(3)\n'),
     }
 
     def build(directory, revision, version=None):
@@ -876,8 +939,10 @@ def test_real_pg_update_that_crashes_after_migrating_is_rolled_back(settings_fac
             (directory / name).write_text(revision)
         python = directory / "venv/bin/python"
         python.parent.mkdir(parents=True, exist_ok=True)
-        python.write_text(programs[revision])
-        python.chmod(0o755)
+        base = Path(module.IMAGE_PYTHON).resolve()
+        python.symlink_to(base)
+        (directory / "venv/pyvenv.cfg").write_text(f"home = {base.parent}\nexecutable = {base}\n")
+        (directory / "source/app/main.py").write_text(programs[revision])
 
     cfg = settings_factory()
     db = runtime.Database(cfg, port=pg_enabled)

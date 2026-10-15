@@ -87,6 +87,23 @@ def test_the_image_records_what_it_provides():
         "recommends": sorted(contract.RECOMMENDS)}
 
 
+def test_overlay_publication_requires_both_architectures_and_bootstrap(monkeypatch):
+    monkeypatch.setitem(contract.CAPABILITIES, "node-24", "Node 24")
+    monkeypatch.setattr(contract, "REQUIRES", ("base-1", "node-24"))
+    overlays = [{"capability": "node-24", "platform": "linux-x86_64"}]
+    monkeypatch.setattr(contract, "OVERLAYS", overlays)
+    assert any("both architectures" in error for error in contract.validate())
+    overlays.append({"capability": "node-24", "platform": "linux-aarch64"})
+    assert contract.validate() == []
+    fields = contract.manifest_fields()
+    assert fields["overlays"] == overlays
+    record = contract.image_record("a" * 40, 1)
+    assert record["overlays"] == overlays
+    assert "node-24" not in record["provides"], "delivery metadata must not pretend the image baked the runtime"
+    assert fields["requires"] == ["base-1", "node-24", "runtime-overlays-v1"]
+    assert fields["runtime"] != contract.LEGACY_RUNTIME
+
+
 def test_comments_and_blank_lines_never_need_a_new_pin():
     files = {name: (ROOT / name).read_bytes() for name in contract.IMAGE_INPUTS}
     pinned = contract.image_inputs_digest(files.get)

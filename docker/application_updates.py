@@ -10,9 +10,17 @@ rollback over migrated data.
 from __future__ import annotations
 
 import base64
+import bz2
+from contextlib import ExitStack
+import gzip
 import hashlib
+import lzma
 import json
 import os
+import platform
+import tarfile
+import tempfile
+from urllib.parse import urlsplit
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -36,6 +44,9 @@ def atomic_json(path, value):
 
     return write_json(path, value)
 
+# Immutable interpreter from the Dockerfile's python base image. A handed-over
+# supervisor's sys.executable may belong to an overlay or an older release venv.
+IMAGE_PYTHON = "/usr/local/bin/python3"
 ORIGIN = "https://hobbycoders.com"
 REVISION = re.compile(r"[a-f0-9]{40}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
@@ -162,6 +173,7 @@ def verify_manifest(text, public_key):
             if field in container and not (isinstance(container[field], list) and len(container[field]) <= 32
                                            and all(isinstance(n, str) and CAPABILITY.fullmatch(n) for n in container[field])):
                 raise ValueError("invalid container capabilities")
+        validate_overlays(container)
         return result
     except UpdateError:
         raise
@@ -180,6 +192,426 @@ def missing_capabilities(container, image):
     if requires is None or not isinstance(provides, list):
         return [] if container["runtime"] == image.get("runtime") else ["runtime"]
     return sorted(set(requires) - set(provides))
+
+
+# Runtime overlays are opt-in, content-addressed and selected by the signed release,
+# never by a global "current" symlink. Keeping selection with the source revision
+# makes the existing database/source rollback restore runtimes as well.
+MAX_RUNTIME_ARCHIVE = 512 * 1024**2
+MAX_RUNTIME_EXPANDED = 2 * 1024**3
+MAX_RUNTIME_STORE = 8 * 1024**3
+RUNTIME_RESERVE = 256 * 1024**2
+RUNTIME_KINDS = ("python", "node", "chromium", "tools")
+
+
+def runtime_platform():
+    return "linux-" + {"amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine().lower(), platform.machine().lower())
+
+
+def runtime_path(value):
+    if (not isinstance(value, str) or not value or "\\" in value
+            or PurePosixPath(value).is_absolute() or ".." in PurePosixPath(value).parts
+            or str(PurePosixPath(value)) in ("", ".")):
+        raise ValueError("invalid runtime path")
+    return value
+
+
+def runtime_url(value):
+    url = urlsplit(value)
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.fragment:
+        raise ValueError("runtime downloads require credential-free HTTPS URLs")
+    return value
+
+
+def validate_overlays(container):
+    overlays = container.get("overlays", [])
+    if not isinstance(overlays, list) or len(overlays) > 16:
+        raise ValueError("invalid runtime overlays")
+    if overlays and "runtime-overlays-v1" not in container.get("requires", []):
+        raise ValueError("runtime overlays require an overlay-aware image bootstrap")
+    seen = set()
+    for item in overlays:
+        if not isinstance(item, dict) or item.get("kind") not in RUNTIME_KINDS:
+            raise ValueError("unsupported runtime overlay (PostgreSQL and base OS stay in the image)")
+        capability = item.get("capability")
+        if (not isinstance(capability, str) or not CAPABILITY.fullmatch(capability)
+                or not capability.startswith(item["kind"] + "-")
+                or capability not in container.get("requires", [])):
+            raise ValueError("overlay must provide a required, namespaced capability")
+        if item.get("platform") not in ("linux-x86_64", "linux-aarch64"):
+            raise ValueError("unsupported runtime platform")
+        identity = (item["platform"], item["kind"])
+        if identity in seen:
+            raise ValueError("ambiguous runtime overlays")
+        seen.add(identity)
+        if (not isinstance(item.get("sha256"), str) or not DIGEST.fullmatch(item["sha256"])
+                or type(item.get("size")) is not int or not 0 < item["size"] <= MAX_RUNTIME_ARCHIVE
+                or type(item.get("unpacked_size")) is not int
+                or not 0 < item["unpacked_size"] <= MAX_RUNTIME_EXPANDED):
+            raise ValueError("invalid runtime checksum or size bounds")
+        runtime_url(item["url"])
+        runtime_path(item["executable"])
+        if "library_path" in item:
+            runtime_path(item["library_path"])
+
+
+def selected_overlays(container, image):
+    """Only supply missing capabilities; ordinary manifests keep the image path."""
+    missing = set(missing_capabilities(container, image))
+    return [item for item in container.get("overlays", [])
+            if item["platform"] == runtime_platform() and item["capability"] in missing]
+
+
+def unsatisfied_capabilities(container, image):
+    supplied = {item["capability"] for item in selected_overlays(container, image)}
+    return sorted(set(missing_capabilities(container, image)) - supplied)
+
+
+def venv_python_paths(directory):
+    """Read dependency paths without running an unverified interpreter."""
+    python = directory / "venv/bin/python"
+    config = directory / "venv/pyvenv.cfg"
+    if config.is_symlink() or not config.is_file():
+        raise UpdateError("Application Python environment has no valid configuration; rebuild the update")
+    values = dict(line.split(" = ", 1) for line in config.read_text().splitlines() if " = " in line)
+    if not values.get("home") or not values.get("executable"):
+        raise UpdateError("Application Python environment has no base interpreter; rebuild the update")
+    return python.resolve(), Path(values["home"]).resolve(), Path(values["executable"]).resolve()
+
+
+def verify_venv_python(directory, runtime_python=None):
+    """Every retained venv must use the base selected by its signed manifest."""
+    binary, home, executable = venv_python_paths(directory)
+    expected = Path(runtime_python or IMAGE_PYTHON).resolve()
+    if home != expected.parent or executable != expected:
+        raise UpdateError("Application Python interpreter differs from the signed runtime selection; rebuild the update")
+    if binary != expected and (not binary.is_file() or file_digest(binary) != file_digest(expected)):
+        raise UpdateError("Application Python executable differs from its verified base interpreter")
+
+
+# Signed unpacked_size bounds all decompressed bytes, with only this fixed
+# allowance for small archives' tar headers/padding. Large archives must include
+# structural overhead in their signed bound. Metadata has separate tighter caps.
+TAR_HEADER_ALLOWANCE = 64 * 1024
+MAX_TAR_METADATA = 16 * 1024
+MAX_TAR_METADATA_TOTAL = 64 * 1024
+MAX_TAR_HEADERS = 50000
+
+
+class BoundedTarStream:
+    """Validate raw tar records BEFORE tarfile can allocate extended metadata."""
+    def __init__(self, stream, unpacked_size, stop):
+        self.stream, self.stop = stream, stop
+        self.limit = unpacked_size + TAR_HEADER_ALLOWANCE
+        self.payload_limit = unpacked_size
+        self.total = self.payload = self.metadata = self.headers = self.padding = 0
+        self.body = 0
+        self.header = bytearray()
+        self.pax = None
+        self.pax_size = 0
+        self.ended = False
+
+    @staticmethod
+    def validate_pax(payload):
+        # Keep framing identical to the raw ustar headers: PAX size overrides
+        # (including inherited global ones) can make tarfile seek into what this
+        # guard considers payload. No size override is needed below our 2 GiB cap.
+        # Allow only metadata that cannot change byte offsets or enable sparse
+        # maps, rather than trying to enumerate every vendor extension.
+        allowed = {b"path", b"linkpath", b"mtime", b"atime", b"ctime", b"uid", b"gid",
+                   b"uname", b"gname", b"comment", b"hdrcharset"}
+        offset = 0
+        while offset < len(payload):
+            space = payload.find(b" ", offset)
+            digits = payload[offset:space] if space >= 0 else b""
+            if not re.fullmatch(rb"[1-9][0-9]{0,4}", digits):
+                raise UpdateError("Runtime archive has malformed PAX metadata")
+            end = offset + int(digits)
+            if end > len(payload) or end <= space + 2 or payload[end - 1:end] != b"\n":
+                raise UpdateError("Runtime archive has malformed PAX metadata")
+            key, separator, _ = payload[space + 1:end - 1].partition(b"=")
+            if not separator or not key or b"\n" in key or b"\0" in key:
+                raise UpdateError("Runtime archive has malformed PAX metadata")
+            if key.startswith(b"GNU.sparse"):
+                raise UpdateError("Runtime archive sparse files are not supported")
+            if bytes(key) not in allowed:
+                raise UpdateError("Runtime archive has an unsupported PAX key (size/offset overrides are forbidden)")
+            offset = end
+
+    def read(self, size=-1):
+        if self.stop.is_set():
+            raise UpdateError("Runtime archive interrupted")
+        request = min(64 * 1024, self.limit - self.total + 1)
+        if size >= 0:
+            request = min(request, size)
+        data = self.stream.read(request)
+        self.total += len(data)
+        if self.total > self.limit:
+            raise UpdateError("Runtime archive exceeds signed decompressed size")
+        offset = 0
+        while offset < len(data):
+            if self.ended:
+                tail = data[offset:]
+                self.padding += len(tail)
+                if any(tail) or self.padding > tarfile.RECORDSIZE:
+                    raise UpdateError("Runtime archive has excessive or nonzero trailing padding")
+                break
+            if self.body:
+                count = min(self.body, len(data) - offset)
+                if self.pax is not None:
+                    self.pax.extend(data[offset:offset + count])
+                    if count == self.body:
+                        # tarfile parses the padded block, not just member.size.
+                        # Reject hidden records in padding before handing it over.
+                        if any(self.pax[self.pax_size:]):
+                            raise UpdateError("Runtime archive has nonzero PAX padding")
+                        self.validate_pax(self.pax[:self.pax_size])
+                        self.pax = None
+                self.body -= count
+                offset += count
+                continue
+            count = min(512 - len(self.header), len(data) - offset)
+            self.header.extend(data[offset:offset + count])
+            offset += count
+            if len(self.header) != 512:
+                continue
+            header = bytes(self.header)
+            self.header.clear()
+            if header == bytes(512):
+                self.ended, self.padding = True, 512
+                continue
+            self.headers += 1
+            if self.headers > MAX_TAR_HEADERS:
+                raise UpdateError("Runtime archive has too many headers")
+            if header[156:157] == tarfile.GNUTYPE_SPARSE:
+                raise UpdateError("Runtime archive sparse files are not supported")
+            member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+            if member.size < 0:
+                raise UpdateError("Runtime archive has a negative size")
+            if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK):
+                self.metadata += member.size
+                if member.size > MAX_TAR_METADATA or self.metadata > MAX_TAR_METADATA_TOTAL:
+                    raise UpdateError("Runtime archive PAX/GNU metadata exceeds bounds")
+                if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE) and member.size:
+                    self.pax, self.pax_size = bytearray(), member.size
+            elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                self.payload += member.size
+                if self.payload > self.payload_limit:
+                    raise UpdateError("Runtime archive exceeds signed expanded size")
+            elif member.type not in (tarfile.DIRTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE) or member.size:
+                raise UpdateError("Runtime archive contains a special file or invalid header")
+            self.body = (member.size + 511) // 512 * 512
+        if not data and (self.body or self.header):
+            raise UpdateError("Runtime archive is truncated")
+        return data
+
+
+def runtime_tar_stream(stack, archive, item, stop):
+    raw = stack.enter_context(archive.open("rb"))
+    magic = raw.read(6)
+    raw.seek(0)
+    if magic.startswith(b"\x1f\x8b"):
+        stream = stack.enter_context(gzip.GzipFile(fileobj=raw))
+    elif magic.startswith(b"BZh"):
+        stream = stack.enter_context(bz2.BZ2File(raw))
+    elif magic.startswith(b"\xfd7zXZ\x00"):
+        stream = stack.enter_context(lzma.LZMAFile(raw))
+    else:
+        stream = raw
+    return BoundedTarStream(stream, item["unpacked_size"], stop)
+
+
+class RuntimeOverlays:
+    def __init__(self, root, stop=None):
+        self.root = Path(root) / "runtime-overlays"
+        self.stop = stop or threading.Event()
+
+    def directory(self, item):
+        path = self.root / item["sha256"]
+        if self.root.is_symlink() or path.is_symlink():
+            raise UpdateError("Linked runtime overlay directory is not supported")
+        return path
+
+    def installed(self, item):
+        directory = self.directory(item)
+        try:
+            # Verify the retained signed archive AND its extracted contents on
+            # reuse/launch. A local receipt alone is not a trust root.
+            archive = directory / "runtime.tar"
+            if archive.is_symlink() or (directory / "payload").is_symlink():
+                raise UpdateError("Linked runtime overlay payload is not supported")
+            if archive.stat().st_size != item["size"] or file_digest(archive) != item["sha256"]:
+                raise UpdateError("Runtime overlay checksum or size mismatch")
+            self.unpack(archive, directory / "payload", item, verify=True)
+            executable = directory / "payload" / item["executable"]
+            if not executable.is_file() or not os.access(executable, os.X_OK):
+                raise UpdateError("Runtime overlay executable is missing or not executable")
+            if "library_path" in item and not (directory / "payload" / item["library_path"]).is_dir():
+                raise UpdateError("Runtime overlay library directory is missing")
+        except (OSError, ValueError, tarfile.TarError) as exc:
+            raise UpdateError("Runtime overlay is incomplete; download the update again") from exc
+        return directory / "payload"
+
+    def download(self, item, target):
+        url = item["url"]
+        size, digest = 0, hashlib.sha256()
+        # Do not send the hub lease or inherited proxy credentials to artifact
+        # hosts. GitHub release URLs redirect to HTTPS object storage.
+        with httpx.Client(trust_env=False, follow_redirects=False, timeout=120) as client:
+            for redirects in range(6):
+                with client.stream("GET", url) as response:
+                    if response.status_code in (301, 302, 303, 307, 308) and redirects < 5:
+                        url = runtime_url(str(response.url.join(response.headers["location"])))
+                        continue
+                    if response.status_code != 200:
+                        raise UpdateError(f"Runtime download failed ({response.status_code})")
+                    with target.open("xb") as output:
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if self.stop.is_set() or size > item["size"]:
+                                raise UpdateError("Runtime download interrupted or exceeds signed size")
+                            digest.update(chunk)
+                            output.write(chunk)
+                    break
+        if size != item["size"] or digest.hexdigest() != item["sha256"]:
+            raise UpdateError("Runtime overlay checksum or size mismatch")
+
+    def unpack(self, archive, target, item, verify=False):
+        total, seen, links, expected = 0, set(), [], set()
+        with ExitStack() as stack:
+            bounded = runtime_tar_stream(stack, archive, item, self.stop)
+            tar = stack.enter_context(tarfile.open(fileobj=bounded, mode="r|"))
+            for member in tar:
+                if member.isdir() and str(PurePosixPath(member.name)) == ".":
+                    continue
+                name = str(PurePosixPath(runtime_path(member.name)))
+                if name in seen or len(seen) >= 50000 or self.stop.is_set():
+                    raise UpdateError("Runtime archive has duplicate paths, too many files or was interrupted")
+                seen.add(name)
+                expected.add(name)
+                expected.update(str(parent) for parent in PurePosixPath(name).parents if str(parent) != ".")
+                path = target / name
+                if not path.resolve().is_relative_to(target.resolve()):
+                    raise UpdateError("Runtime archive path escapes its directory")
+                if member.issym() or member.islnk():
+                    link = member.linkname
+                    if not link or PurePosixPath(link).is_absolute() or "\\" in link:
+                        raise UpdateError("Runtime archive has an unsafe link")
+                    destination = (path.parent if member.issym() else target) / link
+                    if not destination.resolve().is_relative_to(target.resolve()):
+                        raise UpdateError("Runtime archive link escapes its directory")
+                    links.append((path, destination, member))
+                elif member.isdir():
+                    if verify and (path.is_symlink() or not path.is_dir()):
+                        raise UpdateError("Installed runtime directory does not match signed archive")
+                    if not verify:
+                        path.mkdir(parents=True, exist_ok=True)
+                elif member.isfile():
+                    total += member.size
+                    if total > item["unpacked_size"]:
+                        raise UpdateError("Runtime archive exceeds signed expanded size")
+                    stream = tar.extractfile(member)
+                    if verify:
+                        if path.is_symlink() or not path.is_file() or file_digest(path) != hashlib.file_digest(stream, "sha256").hexdigest():
+                            raise UpdateError("Installed runtime file does not match signed archive")
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        with path.open("xb") as output:
+                            shutil.copyfileobj(stream, output, 1024 * 1024)
+                        path.chmod(0o755 if member.mode & 0o111 else 0o644)
+                else:
+                    raise UpdateError("Runtime archive contains a special file")
+            # tarfile stops at its end marker. Still consume the decompressor
+            # through the cap, rejecting padding bombs and concatenated data.
+            while bounded.read(64 * 1024):
+                pass
+        # Links are last: no file can be extracted through a symlink.
+        for path, destination, member in links:
+            destination = destination.resolve()
+            if (not destination.is_relative_to(target.resolve())
+                    or not path.parent.resolve().is_relative_to(target.resolve())):
+                raise UpdateError("Runtime archive has an escaping link")
+            if verify:
+                if member.issym():
+                    if not path.is_symlink() or os.readlink(path) != member.linkname:
+                        raise UpdateError("Installed runtime link does not match signed archive")
+                elif not path.is_file() or file_digest(path) != file_digest(destination):
+                    raise UpdateError("Installed runtime hard link does not match signed archive")
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if member.issym():
+                    path.symlink_to(member.linkname)
+                elif destination.is_file() and not destination.is_symlink():
+                    os.link(destination, path)
+                else:
+                    raise UpdateError("Runtime archive has an unsafe hard link")
+        # Resolve after all links exist: portable Python archives may carry a
+        # python -> python3 -> python3.x chain in either order.
+        for path, _, _ in links:
+            if not path.resolve().is_relative_to(target.resolve()) or not path.exists():
+                raise UpdateError("Runtime archive has a dangling or escaping link")
+        if verify and {str(path.relative_to(target)) for path in target.rglob("*")} != expected:
+            raise UpdateError("Installed runtime contains files absent from signed archive")
+
+    def prepare(self, items):
+        if not items:
+            return
+        if self.root.is_symlink():
+            raise UpdateError("Linked runtime overlay directory is not supported")
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o755)
+        self.root.chmod(0o755)  # public signed runtimes, read-only to the isolated agent
+        for item in items:
+            directory = self.directory(item)
+            if directory.exists():
+                self.installed(item)
+                continue
+            need = item["size"] + item["unpacked_size"]
+            used = sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
+            if used + need > MAX_RUNTIME_STORE or shutil.disk_usage(self.root).free < need + RUNTIME_RESERVE:
+                raise UpdateError("Not enough disk space for runtime overlays; current version is unchanged")
+            stage = Path(tempfile.mkdtemp(prefix=".staging-", dir=self.root))
+            try:
+                archive = stage / "runtime.tar"
+                self.download(item, archive)
+                payload = stage / "payload"
+                payload.mkdir()
+                self.unpack(archive, payload, item)
+                executable = payload / item["executable"]
+                if not executable.is_file() or not os.access(executable, os.X_OK):
+                    raise UpdateError("Runtime overlay executable is missing or not executable")
+                if "library_path" in item and not (payload / item["library_path"]).is_dir():
+                    raise UpdateError("Runtime overlay library directory is missing")
+                for path in [stage, payload, *payload.rglob("*")]:
+                    if path.is_dir() and not path.is_symlink():
+                        path.chmod(0o755)
+                stage.rename(directory)
+            finally:
+                if stage.exists():
+                    shutil.rmtree(stage)
+
+    def environment(self, items, env):
+        env = dict(env)
+        python = None
+        for item in items:
+            payload = self.installed(item)
+            executable = payload / item["executable"]
+            env["PATH"] = str(executable.parent) + os.pathsep + env.get("PATH", "")
+            if item["kind"] == "python":
+                python = str(executable)
+            elif item["kind"] == "chromium":
+                env["CHROME_EXECUTABLE"] = str(executable)
+            if "library_path" in item:
+                env["LD_LIBRARY_PATH"] = str(payload / item["library_path"]) + (
+                    os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+        return env, python
+
+    def prune(self, keep):
+        if not self.root.exists() or self.root.is_symlink():
+            return
+        for path in self.root.iterdir():
+            if (DIGEST.fullmatch(path.name) or path.name.startswith(".staging-")) and path.name not in keep:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
 
 
 # What a hand-over runs from the update's source (docker/container_runtime.py).
@@ -224,13 +656,15 @@ def handover_target(root, image, public_key):
     manifest = verify_manifest((directory / "release.json").read_bytes(), public_key)
     if manifest["revision"] != revision:
         raise UpdateError("Installed revision mismatch")
-    if image["sequence"] > manifest["container"]["sequence"] or missing_capabilities(manifest["container"], image):
+    if image["sequence"] > manifest["container"]["sequence"] or unsatisfied_capabilities(manifest["container"], image):
         return None
+    _, runtime_python = RuntimeOverlays(root).environment(selected_overlays(manifest["container"], image), {})
     source, python = directory / "source", directory / "venv/bin/python"
     script = source / "docker/container_runtime.py"
     if not (directory / "complete").is_file() or not python.is_file() or not script.is_file():
         return None
     verify_tree(directory, manifest)
+    verify_venv_python(directory, runtime_python)
     # verify_tree checks the files the signed listing names; what the image
     # will run must be among them, not merely present beside them.
     listed = {line.split("\0")[0] for line in (directory / "tree.txt").read_text().splitlines()}
@@ -323,6 +757,7 @@ class ContainerUpdates:
         self.lifecycle = lifecycle
         self.state = {}
         self.stop = threading.Event()
+        self.overlays = RuntimeOverlays(self.root, self.stop)
         self.thread = None
         self.install_requested = threading.Event()
         self.running = None
@@ -363,7 +798,7 @@ class ContainerUpdates:
         if pending:
             staged_manifest = self.manifest(pending)
             staged = staged_manifest["container"]
-            if (staged["sequence"] <= self.image["sequence"] or missing_capabilities(staged, self.image)
+            if (staged["sequence"] <= self.image["sequence"] or unsatisfied_capabilities(staged, self.image)
                     or normalize_channel(staged_manifest.get("channel")) != self.channel):
                 self.state.pop("pending")
                 self.save()
@@ -494,11 +929,40 @@ class ContainerUpdates:
             self.publish("idle", "Updated version is running.")
             self.prune()
 
+    def prune_overlays(self):
+        if not self.overlays.root.exists() or self.state.get("blocked"):
+            return
+        try:
+            keep = set()
+            revisions = {self.state.get(field) for field in ("active", "previous", "pending", "booting")}
+            revisions.add(os.environ.get("SHUFFLE_HANDED_OVER"))
+            revisions.update(self.state.get("failed", []))
+            for revision in revisions:
+                if revision:
+                    keep.update(item["sha256"] for item in selected_overlays(self.manifest(revision)["container"], self.image))
+                    directory = self.directory(revision)
+                    if (directory / "venv").exists():
+                        # Protect inherited dependencies from older updaters too.
+                        # Launch refuses a manifest/base mismatch, but cleanup
+                        # must not silently break a retained venv.
+                        for path in venv_python_paths(directory):
+                            if path.is_relative_to(self.overlays.root.resolve()):
+                                name = path.relative_to(self.overlays.root.resolve()).parts[0]
+                                if DIGEST.fullmatch(name):
+                                    keep.add(name)
+            self.overlays.prune(keep)
+        except (OSError, UpdateError):
+            # Never guess which runtimes are disposable when retained manifests
+            # are unreadable, or turn a successful boot into a cleanup failure.
+            _log("runtime overlay cleanup deferred; retained runtimes are kept")
+
     def prune(self):
+        self.prune_overlays()
         # Keep one prior build for diagnosis, never for automatic rollback.
         # Failed revisions are retained until superseded by a newer image.
         keep = {self.state.get(field) for field in ("active", "previous", "pending", "booting")}
         keep.update(self.state.get("failed", []))
+        keep.add(os.environ.get("SHUFFLE_HANDED_OVER"))
         try:
             for candidate in (self.root / "versions").iterdir():
                 if (REVISION.fullmatch(candidate.name) and candidate.name not in keep
@@ -518,9 +982,9 @@ class ContainerUpdates:
         if not revision:
             if not activate:
                 self.running = None  # the image's own code
-            return [sys.executable, "-m", "app.main"], None, env
+            return [IMAGE_PYTHON, "-m", "app.main"], None, env
         manifest = self.manifest(revision)
-        if missing_capabilities(manifest["container"], self.image):
+        if unsatisfied_capabilities(manifest["container"], self.image):
             raise UpdateError(self.runtime_mismatch(manifest))
         directory = self.directory(revision)
         source = directory / "source"
@@ -534,6 +998,12 @@ class ContainerUpdates:
             env["APP_VERSION"] = manifest["version"]
         for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
             env.pop(key, None)
+        selected = selected_overlays(manifest["container"], self.image)
+        env.pop("SHUFFLE_RUNTIME_OVERLAYS", None)
+        env, runtime_python = self.overlays.environment(selected, env)
+        verify_venv_python(directory, runtime_python)
+        if selected:
+            env["SHUFFLE_RUNTIME_OVERLAYS"] = "1"
         env["PATH"] = str(python.parent) + os.pathsep + env.get("PATH", "")
         if not activate:
             self.running = revision
@@ -654,7 +1124,10 @@ class ContainerUpdates:
         python = directory / "venv/bin/python"
         if not (source / "requirements.lock").is_file():
             raise UpdateError("This source update has no hash-pinned requirements.lock; install a newer image")
-        self.run_build([sys.executable, "-m", "venv", str(directory / "venv")], source, env)
+        manifest = self.manifest(revision)
+        env, runtime_python = self.overlays.environment(selected_overlays(manifest["container"], self.image), env)
+        self.run_build([runtime_python or IMAGE_PYTHON, "-m", "venv", str(directory / "venv")], source, env)
+        verify_venv_python(directory, runtime_python)
         # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
         # the Unraid host and failed the whole update; allow slow mirrors.
         # Every package, including fluid's build backend, must match a hash in
@@ -691,10 +1164,14 @@ class ContainerUpdates:
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
             self.publish("idle", "You are up to date.")
             return
-        if missing_capabilities(manifest["container"], self.image):
+        if unsatisfied_capabilities(manifest["container"], self.image):
             # The offered revision, not the running one: a status naming the
             # running revision reads as "Already up to date" (#1901).
-            self.publish("image-required", IMAGE_REQUIRED, version=revision)
+            missing = ", ".join(unsatisfied_capabilities(manifest["container"], self.image))
+            message = IMAGE_REQUIRED + " No compatible runtime overlay for: " + missing
+            if any(name.startswith("postgres") for name in manifest["container"].get("requires", [])):
+                message += ". PostgreSQL stays on the image version; major upgrades need a tested backup and migration plan."
+            self.publish("image-required", message, version=revision)
             return
         if revision in self.state.get("failed", []) and not download:
             # Rolled back once already: never offered on its own again. An
@@ -721,6 +1198,9 @@ class ContainerUpdates:
             if hashlib.sha256(listing).hexdigest() != manifest["tree"]:
                 raise UpdateError("Source files do not match the signed release")
             (directory / "tree.txt").write_bytes(listing)
+            (directory / "release.json").write_bytes(signed)
+            self.prune_overlays()
+            self.overlays.prepare(selected_overlays(manifest["container"], self.image))
             self.build(directory, revision, manifest.get("version"))
             verify_tree(directory, manifest)
             (directory / "release.json").write_bytes(signed)
@@ -731,6 +1211,7 @@ class ContainerUpdates:
             self.publish("ready", "Update ready. Choose Update and restart.")
         except Exception:
             shutil.rmtree(directory)
+            self.prune_overlays()
             raise
 
     def service(self):
