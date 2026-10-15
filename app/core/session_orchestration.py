@@ -864,6 +864,11 @@ def _recheck(cursor, snapshots, principals):
     """Recheck eligibility using THIS connection. Nested pool checkouts while
     holding the origin lock can deadlock under concurrent fanout. No model
     input can turn an archived/foreign/worker chat into a peer."""
+    from app.db.mobile_tool_identity import lock_paired_credential
+    # Deterministic device lock order; renewal cannot pass the recheck and then
+    # leave a newly started chat with the sender's retired credential.
+    for sid in sorted(principals, key=lambda sid: (principals[sid] or {}).get("principal_id", "")):
+        lock_paired_credential(cursor, principals[sid])
     for snapshot in snapshots:
         cursor.execute("SELECT * FROM sessions WHERE id=%s", (snapshot["id"],))
         current = cursor.fetchone()

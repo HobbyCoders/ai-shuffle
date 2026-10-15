@@ -10,6 +10,7 @@ over the chat WebSocket, are in
 tests/core/network/test_mirrored_chat_image_access.py.
 """
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI, Request
@@ -36,6 +37,14 @@ def _principal(owner, kind="paired", principal_id="device", account_id=None):
 
 @pytest.fixture
 def client(mock_db, monkeypatch):
+    # REST creation rechecks the authenticated credential in its transaction.
+    with mobile_tool_identity.get_db() as conn:
+        for name in PHONES:
+            conn.cursor().execute("""INSERT INTO paired_clients
+                (id, device_id, device_name, platform, session_token_hash, session_expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s)""",
+                (name, name, name, 'browser', identity.digest(name),
+                 (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()))
     database.create_session(session_id="owner-chat", profile_id="default", title="Owner desktop chat")
     mobile_tool_identity.bind("owner-chat", _principal("install-admin", kind="admin", principal_id="install"),
                               new=True)
@@ -84,6 +93,7 @@ def client(mock_db, monkeypatch):
             owner_admin = who == "owner-phone"
             request.state.is_admin = owner_admin
             request.state.paired_client = {"id": who, "account_owner_admin": owner_admin}
+            request.state.paired_credential_hash = identity.digest(who)
         return "fixture"
 
     app.dependency_overrides[require_auth] = authenticate

@@ -1,5 +1,6 @@
 """StartSession on another worker (#1682): caller receipt -> signed control -> owner DB."""
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -329,6 +330,14 @@ async def test_the_owners_paired_device_may_start_remotely(workers, monkeypatch,
     paired = {"kind": "paired", "owner": "account:owner-1", "principal_id": "pcl-1",
               "account_id": "owner-1", "credential_hash": "h"}
     with b.active():
+        # Persist the credential that authenticates this synthetic principal:
+        # the transaction recheck must not trust the mocked account verdict alone.
+        with get_db() as conn:
+            conn.cursor().execute("""INSERT INTO paired_clients
+                (id, device_id, device_name, platform, session_token_hash, session_expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s)""",
+                ('pcl-1', 'phone-1', 'Phone', 'browser', 'h',
+                 (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()))
         # The record the owner's phone or browser leaves on the caller's chat.
         store.bind("caller", paired, new=True)
     monkeypatch.setattr(orch, "_principal", store.read)  # the module default fakes none

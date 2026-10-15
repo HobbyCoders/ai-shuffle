@@ -36,6 +36,15 @@ def world(monkeypatch):
     def client_by_hash(h):
         return next((c for n, c in clients.items() if identity.digest('shc_' + n) == h and n not in revoked), None)
     monkeypatch.setattr(identity.pairing, 'get_paired_client_by_session_hash', client_by_hash)
+    # Persist the synthetic principals too: binding now rechecks their live
+    # credential under the device lock, independently of the account mocks.
+    with store.get_db() as conn:
+        for name in clients:
+            conn.cursor().execute('''INSERT INTO paired_clients
+                (id, device_id, device_name, platform, session_token_hash, session_expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s)''',
+                (name, name, name, 'browser', identity.digest('shc_' + name),
+                 (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()))
     monkeypatch.setattr(identity.pairing, 'get_paired_client', clients.get)
     monkeypatch.setattr(identity.mobile_hub, 'ownership', ownership)
     monkeypatch.setattr(identity.mobile_hub, 'confirmation', lambda owner: 'approved')
