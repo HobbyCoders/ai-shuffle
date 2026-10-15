@@ -29,8 +29,39 @@ def _write_skill(checkout, text=SKILL_TEXT):
     return skill
 
 
+@pytest.fixture(autouse=True)
+def _isolated_discovery_tree(tmp_path, monkeypatch):
+    # Discovery stops at the closest .git marker, not at Path.home(). Windows
+    # temp paths can be below a real home containing .fluid/.agents skills.
+    (tmp_path / ".git").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 def _skills(cwd):
-    return discover_skills(cwd, include_global=False, include_plugins=False)
+    return discover_skills(
+        cwd, include_global=False, include_plugins=False, include_builtin=False,
+    )
+
+
+def test_checkout_boundary_excludes_ancestor_home_skills(tmp_path, monkeypatch):
+    from fluid.context import instructions
+
+    home = tmp_path / "home"
+    _write_skill(home, SKILL_TEXT.replace("example-skill", "ancestor-skill"))
+    checkout = home / "AppData" / "Local" / "Temp" / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    read_skills = instructions._skills_in
+
+    def only_checkout_roots(root, scope):
+        # Fail before any ancestor skill is read, not just after filtering it.
+        assert root.is_relative_to(checkout)
+        return read_skills(root, scope)
+
+    monkeypatch.setattr(instructions, "_skills_in", only_checkout_roots)
+    assert _skills(checkout) == []
 
 
 def test_checkout_without_local_skills_is_supported(tmp_path):
