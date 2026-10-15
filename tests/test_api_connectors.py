@@ -17,8 +17,18 @@ class TestListConnectorTypes:
     def test_list_types(self, authenticated_client):
         response = authenticated_client.get("/api/v1/connectors/types")
         assert response.status_code == 200
+        from app.core import connector_packages
+
         types = response.json()
-        assert len(types) == 15
+        expected = {
+            kind for kind, spec in connector_packages.CATALOG["packages"].items()
+            if spec.get("offered", True)
+        }
+        assert {item["type"] for item in types} == expected
+        assert len(types) == len(expected)
+        # Hidden connectors remain cataloged for future implementation.
+        assert "msteams" in connector_packages.CATALOG["packages"]
+        assert "msteams" not in expected
 
     def test_list_types_structure(self, authenticated_client):
         response = authenticated_client.get("/api/v1/connectors/types")
