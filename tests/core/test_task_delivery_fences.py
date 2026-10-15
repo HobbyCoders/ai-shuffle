@@ -113,6 +113,91 @@ async def test_card_fence_survives_recorder_lock_wait(mock_db, monkeypatch, deli
     await recorder.close()
 
 
+@pytest.mark.parametrize("delivery", ["claimed", "drained"])
+async def test_card_fence_survives_database_admission(mock_db, monkeypatch, delivery):
+    """The old terminal has passed the recorder guard before DB admission stalls."""
+    import asyncio
+    import threading
+    from contextlib import contextmanager
+
+    from app.core import turn_recorder as tr
+    from app.db import session_events as se
+    from tests.core.test_turn_recorder import _mk_session, _recorder, _rows, SID
+
+    _mk_session()
+    reg = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", reg)
+    reg.start_task(SID, "A", "shell", "first")
+    await tr.record_task_start_frame(SID, "A", description="first")
+    token = reg.task_incarnation(SID, "A")
+    assert se.get_latest_task_updates(SID)[0]["task_incarnation"] == token
+    reg.complete_task(SID, "A", "completed")
+    recorder = await _recorder()
+    entered, release = threading.Event(), threading.Event()
+    original_get_db = se.get_db
+
+    @contextmanager
+    def blocked_admission():
+        # Block only the old terminal, inside append_events but before it gets
+        # a connection. The restarted task's running write must proceed first.
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10), "test did not release database admission"
+        with original_get_db() as conn:
+            yield conn
+
+    monkeypatch.setattr(se, "get_db", blocked_admission)
+    if delivery == "claimed":
+        pending = recorder.record_task_terminal([{
+            "task_id": "A", "status": "completed", "summary": "old terminal",
+            "task_incarnation": token,
+        }])
+    else:
+        pending = tr.record_task_settle_frame(SID, "A", "completed", "old terminal")
+    terminal = asyncio.create_task(pending)
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        reg.start_task(SID, "A", "shell", "second")
+        assert not reg.matches_task_incarnation(SID, "A", token)
+        await tr.record_task_start_frame(SID, "A", description="second")
+        current = se.get_latest_task_updates(SID)[0]
+        assert current["state"] == "running"
+        assert current["task_incarnation"] == reg.task_incarnation(SID, "A")
+    finally:
+        release.set()
+        await asyncio.wait_for(terminal, 5)
+        await recorder.close()
+
+    # The real durable projection AND raw replay/live input stay running.
+    assert se.get_latest_task_updates(SID)[0] == current
+    updates = [r["payload"] for r in _rows() if r["event_type"] == "task.updated"]
+    assert [r["state"] for r in updates] == ["running", "running"]
+    assert reg.get_task(SID, "A")["status"] == "running"
+
+
+@pytest.mark.parametrize("system_frame", [True, False])
+async def test_translation_preserves_receipt_incarnation(mock_db, monkeypatch, system_frame):
+    from app.core import turn_recorder as tr
+    from app.db import session_events as se
+    from tests.core.test_turn_recorder import _mk_session, SID
+
+    _mk_session()
+    reg = TaskRegistry()
+    monkeypatch.setattr("app.core.task_registry.task_registry", reg)
+    reg.start_task(SID, "A", "shell", "first")
+    token = reg.task_incarnation(SID, "A")
+    reg.complete_task(SID, "A", "completed")
+    reg.start_task(SID, "A", "shell", "second")
+    await tr.record_task_start_frame(SID, "A", description="second")
+    data = {"task_id": "A", "status": "completed", "task_incarnation": token}
+    frame = ({"type": "system", "subtype": "task_updated", "data": data}
+             if system_frame else {"type": "task_notification", **data})
+    # Do not stamp the new registry token over a delayed, already-tagged frame.
+    assert tr._translate_shared(frame, SID)[0]["payload"]["task_incarnation"] == token
+    await tr.record_drained_event(SID, frame)
+    assert se.get_latest_task_updates(SID)[0]["state"] == "running"
+
+
 async def test_adapter_engine_fence_rechecks_after_session_await(mock_db, monkeypatch):
     from app.core.provider.harness_adapter import HarnessAdapter
     from fluid.engine.background import BackgroundLifecycleMixin

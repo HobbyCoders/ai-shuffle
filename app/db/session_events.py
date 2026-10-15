@@ -102,7 +102,11 @@ def append_events(
 
     An optional stable ``id`` makes replay inserts idempotent. Duplicate IDs
     still reserve sequence slots; the returned range is the allocation, not
-    a guarantee of one new row per slot (replay cursors allow gaps).
+    a guarantee of one new row per slot (replay cursors allow gaps). Task updates
+    stamped with an older incarnation than the durable card are also omitted.
+    That check holds the counter lock through insertion, so a restart cannot
+    race it, even when admission to the database blocked after a caller's check.
+    Legacy updates without a token remain unfenced.
     """
     if not events:
         raise ValueError("events must be non-empty")
@@ -177,6 +181,25 @@ def append_events(
         inserted_other = False
         activity_seq = completion_seq = 0
         for values in other_params:
+            if values[5] == "task.updated":
+                payload = _parse_payload(values[6])
+                incarnation = payload.get("task_incarnation")
+                if incarnation and payload.get("task_id"):
+                    # The counter UPDATE above serializes every event writer.
+                    # Read AFTER that lock, and retain it through the INSERT.
+                    # Per-start tokens are monotonically increasing UTC ISO
+                    # timestamps (TaskRegistry.start_task), including on clock
+                    # rollback. MAX also tolerates older out-of-order history;
+                    # untagged legacy events neither fence nor erase the fence.
+                    cursor.execute(
+                        "SELECT MAX(payload->>'task_incarnation') AS incarnation "
+                        "FROM session_events WHERE session_id = %s "
+                        "AND event_type = 'task.updated' AND payload->>'task_id' = %s",
+                        (session_id, payload["task_id"]),
+                    )
+                    current = cursor.fetchone()["incarnation"]
+                    if current and incarnation < current:
+                        continue
             cursor.execute(insert_sql + " RETURNING seq", values)
             inserted = cursor.fetchone()
             if inserted is not None:

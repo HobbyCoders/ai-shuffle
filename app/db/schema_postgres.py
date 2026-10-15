@@ -1848,6 +1848,11 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(session_id, seq)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_events_task_incarnation "
+        "ON session_events (session_id, (payload->>'task_id'), (payload->>'task_incarnation')) "
+        "WHERE event_type = 'task.updated'"
+    )
     create_session_events_recall_index(cursor)
 
     cursor.execute("""

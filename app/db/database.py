@@ -1617,6 +1617,15 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_session_events_session_seq "
         "ON session_events(session_id, seq)"
     )
+    # Keep the incarnation MAX lookup index-backed while append_events holds
+    # the session counter lock. The migration fingerprint installs this on
+    # existing databases without a schema-version bump. First creation scans
+    # the event table once; subsequent starts keep the partial index as-is.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_events_task_incarnation "
+        "ON session_events (session_id, (payload->>'task_id'), (payload->>'task_incarnation')) "
+        "WHERE event_type = 'task.updated'"
+    )
 
     if not table_exists(cursor, "session_event_counters"):
         cursor.execute("""

@@ -349,6 +349,18 @@ def _registry_worker(session_id: str, task_id: Any) -> Dict[str, Any]:
         return {}
 
 
+def _task_incarnation_payload(
+    session_id: str, task_id: Any, frame: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Stamp at translation, never after an executor/DB wait or over a receipt."""
+    from app.core.task_registry import task_registry
+
+    incarnation = frame.get("task_incarnation") or task_registry.task_incarnation(
+        session_id, str(task_id),
+    )
+    return {"task_incarnation": incarnation} if incarnation else None
+
+
 def _registry_tool_use_id(session_id: str, task_id: Any) -> Optional[str]:
     """The launch ``tool_use_id`` the registry bound to ``task_id``, if any.
 
@@ -512,6 +524,7 @@ def _translate_shared(
             description=event.get("description"),
             summary=event.get("summary"),
             tool_use_id=tool_use_id,
+            extra_payload=_task_incarnation_payload(session_id, task_id, event),
             **_registry_kind(session_id, task_id),
             **_registry_worker(session_id, task_id),
             **kw,
@@ -547,6 +560,7 @@ def _translate_shared(
                     description=data.get("description"),
                     summary=data.get("summary"),
                     tool_use_id=tool_use_id,
+                    extra_payload=_task_incarnation_payload(session_id, task_id, data),
                     **_registry_kind(session_id, str(task_id)),
                     **_registry_worker(session_id, str(task_id)),
                     **kw,
@@ -1392,8 +1406,10 @@ class TurnRecorder:
                 from app.core.task_registry import task_registry
 
                 # The recorder lock and executor admission can both yield.
-                # Recheck HERE, immediately before the synchronous card append,
-                # not against the snapshot taken before either wait.
+                # Recheck HERE, not against the snapshot before either wait.
+                # append_events also fences against durable task incarnations
+                # under its counter lock: DB admission/SQL can still block after
+                # this advisory registry check.
                 current = []
                 for event in events:
                     payload = event.get("payload") or {}

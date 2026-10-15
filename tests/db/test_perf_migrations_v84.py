@@ -317,6 +317,22 @@ def _stored_fingerprint(conn):
 # Fresh-install shape
 # ---------------------------------------------------------------------------
 
+def test_task_incarnation_index_bootstrap_and_upgrade(mock_db):
+    """The partial index lands on both fresh and fingerprint-gated upgrades."""
+    from app.db import base
+
+    name = "idx_session_events_task_incarnation"
+    assert _index_exists(mock_db, name)
+    mock_db.execute(f"DROP INDEX {name}")
+    mock_db.commit()
+    with base.get_db() as conn:
+        database._set_marker(conn.cursor(), database.MIGRATIONS_FINGERPRINT_KEY, "before-task-index")
+    database.init_database()
+    assert _index_exists(mock_db, name)
+    database.init_database()
+    assert _index_exists(mock_db, name)
+
+
 def test_fresh_db_carries_the_v84_index_and_columns(mock_db):
     conn = mock_db
     assert _index_exists(conn, "idx_usage_log_session")  # B3
