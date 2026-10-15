@@ -6,6 +6,7 @@ registry, cancellation, bounded deadline and completion wake machinery.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import sys
@@ -73,10 +74,10 @@ async def start_worker_runtime(checkout, session_id, profile_id, tool_allowlist=
 
     if checkout is None or checkout.runtime is None:
         return
-    command = _local_setting(checkout.path, "fluid.workerSetupCommand")
+    command = await asyncio.to_thread(_local_setting, checkout.path, "fluid.workerSetupCommand")
     if not command:
         return
-    profile = database.get_profile(profile_id) or {}
+    profile = await asyncio.to_thread(database.get_profile, profile_id) or {}
     access = resolve_tool_access(profile.get("config") or {})
     blocked = list(access.disallowed or ()) + list(tool_denylist or ())
     allowed = shell_companion_tools(tool_allowlist or access.allowed, blocked)

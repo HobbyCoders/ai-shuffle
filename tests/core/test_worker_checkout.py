@@ -131,6 +131,38 @@ def test_local_setting_read_failure_is_nonfatal(monkeypatch):
     assert _local_setting("unused", "fluid.workerSetupCommand") == ""
 
 
+@pytest.mark.asyncio
+async def test_runtime_setup_reads_run_off_the_event_loop(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from app.core import worker_runtime as runtime, monitor_spawn
+
+    loop_thread = threading.get_ident()
+    reads = []
+
+    def setting(path, key):
+        assert threading.get_ident() != loop_thread
+        reads.append("config")
+        return "setup-command"
+
+    def profile(profile_id):
+        assert threading.get_ident() != loop_thread
+        reads.append("profile")
+        return {"config": {}}
+
+    async def spawn(inputs, ctx):
+        assert threading.get_ident() == loop_thread
+        return SimpleNamespace(background_task=SimpleNamespace(task_id="setup-task"))
+
+    monkeypatch.setattr(runtime, "_local_setting", setting)
+    monkeypatch.setattr(database, "get_profile", profile)
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", lambda *a, **kw: spawn)
+    checkout = SimpleNamespace(path="unused", runtime={})
+    await runtime.start_worker_runtime(checkout, "worker", "coder")
+    assert reads == ["config", "profile"]
+    assert checkout.runtime["setup_task_id"] == "setup-task"
+
+
 def test_configured_python_wins_without_running_it(repo):
     row, parent, *_ = repo
     python = parent / "project-python"
