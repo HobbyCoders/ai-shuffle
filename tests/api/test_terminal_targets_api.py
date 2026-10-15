@@ -56,4 +56,3 @@ def test_owner_open_dispatches_to_selected_remote_target(ctx, monkeypatch):
     registry, body, who, request = create.await_args.args
     assert registry is ctx.reg and who == "owner" and body.target.worker_id == "peer"
     assert request.cookies["session"] == ctx.owner
-

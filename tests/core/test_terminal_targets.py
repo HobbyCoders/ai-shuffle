@@ -238,4 +238,3 @@ async def test_revoked_peer_owner_closes_stream_and_refuses_new_input(peers):
         await asyncio.gather(entry[3], return_exceptions=True)
     await peers[0].shutdown()
     await source.shutdown()
-
