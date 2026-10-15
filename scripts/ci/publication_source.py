@@ -36,6 +36,8 @@ import re
 import subprocess
 
 CONTROL = Path(__file__).resolve().parents[2]
+MAX_CAPABILITY_BYTES = 256 * 1024
+MAX_CAPABILITY_AST_NODES = 10000
 
 
 def load(relative):
@@ -49,10 +51,30 @@ def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], text=True, timeout=30).strip()
 
 
+def capability_source(root, revision):
+    # Resolve once: the size check and read must refer to the same immutable
+    # blob, not a symbolic ref which could move between the two Git calls.
+    blob = git(root, "rev-parse", f"{revision}:docker/update_contract.py")
+    size = int(git(root, "cat-file", "-s", blob))
+    if not 0 <= size <= MAX_CAPABILITY_BYTES:
+        raise ValueError("Candidate capability module exceeds the 256 KiB size limit")
+    raw = subprocess.check_output(["git", "-C", str(root), "cat-file", "blob", blob], timeout=30)
+    if len(raw) != size or len(raw) > MAX_CAPABILITY_BYTES:
+        raise ValueError("Candidate capability blob size changed or exceeds the 256 KiB limit")
+    return raw
+
+
 def capability_literals(root, revision, fields):
     # Capability declarations are data. In particular do NOT exec the
     # candidate's update_contract.py (even under an empty globals dictionary).
-    tree = ast.parse(git(root, "show", f"{revision}:docker/update_contract.py"))
+    raw = capability_source(root, revision)
+    try:
+        tree = ast.parse(raw)
+    except (SyntaxError, RecursionError) as error:
+        raise ValueError("Candidate capability module has invalid or excessively nested syntax") from error
+    for count, _ in enumerate(ast.walk(tree), start=1):
+        if count > MAX_CAPABILITY_AST_NODES:
+            raise ValueError("Candidate capability module exceeds the AST node limit")
     values = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):

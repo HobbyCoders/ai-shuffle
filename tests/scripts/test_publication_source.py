@@ -117,6 +117,37 @@ def test_two_checkouts_publish_without_executing_candidate_helpers(tmp_path):
 
 @pytest.mark.parametrize("declaration", ["REQUIRES = dangerous()", "REQUIRES = ('base-1',)\nREQUIRES = ('other',)", "REQUIRES = 'base-1'"])
 def test_contract_reader_refuses_nonliteral_ambiguous_or_invalid_data(monkeypatch, declaration):
-    monkeypatch.setattr(reader, "git", lambda *args: declaration + "\nRECOMMENDS = ()")
+    monkeypatch.setattr(reader, "capability_source", lambda *args: declaration + "\nRECOMMENDS = ()")
     with pytest.raises((ValueError, TypeError)):
+        reader.contract(Path.cwd(), "a" * 40)
+
+@pytest.mark.parametrize("action", ["contract", "image-record"])
+def test_oversized_capability_blob_is_rejected_before_read_or_parse(tmp_path, monkeypatch, action):
+    candidate = tmp_path / "candidate"
+    init(candidate)
+    put(candidate, "docker/update_contract.py", "#" * (reader.MAX_CAPABILITY_BYTES + 1))
+    revision = commit(candidate)
+    actual = reader.subprocess.check_output
+    def bounded_command(argv, **kwargs):
+        assert not ("cat-file" in argv and "blob" in argv), "oversized blob must not be read"
+        return actual(argv, **kwargs)
+    monkeypatch.setattr(reader.subprocess, "check_output", bounded_command)
+    with pytest.raises(ValueError, match="256 KiB size limit"):
+        reader.read_source(action, candidate, revision)
+
+
+def test_capability_ast_node_budget_is_enforced_before_literals(monkeypatch):
+    # Under the byte limit but many small AST nodes; the tail is deliberately
+    # valid so acceptance would be possible without the complexity guard.
+    source = b"x = 0\n" * reader.MAX_CAPABILITY_AST_NODES + b"REQUIRES = ('base-1',)\nRECOMMENDS = ()\n"
+    assert len(source) < reader.MAX_CAPABILITY_BYTES
+    monkeypatch.setattr(reader, "capability_source", lambda *args: source)
+    with pytest.raises(ValueError, match="AST node limit"):
+        reader.contract(Path.cwd(), "a" * 40)
+
+
+def test_excessive_capability_nesting_has_clear_refusal(monkeypatch):
+    source = "x = " + "[" * 300 + "0" + "]" * 300
+    monkeypatch.setattr(reader, "capability_source", lambda *args: source)
+    with pytest.raises(ValueError, match="invalid or excessively nested syntax"):
         reader.contract(Path.cwd(), "a" * 40)
