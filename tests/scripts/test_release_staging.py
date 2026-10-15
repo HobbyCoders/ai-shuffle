@@ -641,4 +641,3 @@ def test_release_publication_credentials_are_step_scoped():
                     assert step["env"]["CLOUDFLARE_API_TOKEN"] == "${{ secrets.CLOUDFLARE_API_TOKEN }}"
             if step.get("uses") == "actions/checkout@v4":
                 assert step["with"]["persist-credentials"] == "false"
-
