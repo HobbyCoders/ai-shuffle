@@ -246,3 +246,16 @@ def test_credential_recheck_takes_device_lock_before_reading_slot(bound):
         store.lock_paired_credential(RecordingCursor(), bound[3])
     assert 'paired_clients' in statements[0] and 'FOR SHARE' in statements[0]
     assert 'session_token_hash' in statements[1]
+
+
+def test_revoked_controller_has_short_socket_reason_and_detailed_tool_guidance(bound):
+    assert pairing.revoke_paired_client(bound[0]['id'])
+    with pytest.raises(PermissionError) as tool_error:
+        identity.validate(bound[3])
+    assert 'reopen/continue this chat' in str(tool_error.value)
+    with pytest.raises(PermissionError) as socket_error:
+        identity.revalidate(bound[3])
+    reason = str(socket_error.value)
+    assert 'revoked' in reason
+    assert len(reason.encode('utf-8')) <= 123
+    assert 'reopen/continue this chat' not in reason

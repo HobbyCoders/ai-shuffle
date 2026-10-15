@@ -11,6 +11,10 @@ CONTROLLER_RECOVERY = (
     'device was revoked, the owner must pair it again first.')
 
 
+class ControllerCredentialError(PermissionError):
+    """A controller refusal with tool guidance, shortened for WebSocket closes."""
+
+
 def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -32,7 +36,7 @@ def live_client(value):
     client = pairing.get_paired_client_by_session_hash(value['credential_hash'])
     if (not client or client['id'] != value['principal_id']
             or (client.get('scopes') is not None and 'controller' not in client['scopes'])):
-        raise PermissionError(CONTROLLER_RECOVERY)
+        raise ControllerCredentialError(CONTROLLER_RECOVERY)
     account_hub.check_paired_client(client)
     return client
 
@@ -73,6 +77,11 @@ def revalidate(value):
     from fastapi import HTTPException
     try:
         validate(value)
+    except ControllerCredentialError as exc:
+        # Close frames allow only 123 UTF-8 bytes. Keep the refusal categories
+        # intact instead of truncating the tool/HTTP recovery instructions.
+        raise PermissionError(
+            'Paired controller credential expired, logged out, rotated or revoked. Reconnect to authenticate.') from exc
     except HTTPException as exc:
         if exc.status_code in (401, 403):
             raise PermissionError(str(exc.detail)) from exc

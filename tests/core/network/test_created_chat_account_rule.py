@@ -13,6 +13,7 @@ Every check runs the real creation code on in-process workers and publishes
 through the real catalog path.
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -33,6 +34,14 @@ CREATORS = pytest.mark.parametrize("creator", ["member-phone", "direct-phone"])
 
 def _creator_request(who):
     """A REST request from a paired controller, as ``require_auth`` leaves it."""
+    # Authentication requires a persisted slot, not just a synthetic request
+    # label. Creation/fork recheck this credential inside their transaction.
+    with mobile_tool_identity.get_db() as conn:
+        conn.cursor().execute("""INSERT INTO paired_clients
+            (id, device_id, device_name, platform, session_token_hash, session_expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING""",
+            (who, who, who, 'browser', who + '-session-hash',
+             (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()))
     return SimpleNamespace(state=SimpleNamespace(
         api_user=None, is_admin=False, paired_client={"id": who, "account_owner_admin": False},
         paired_credential_hash=who + "-session-hash"))
