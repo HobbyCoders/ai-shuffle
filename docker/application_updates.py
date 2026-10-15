@@ -10,7 +10,11 @@ rollback over migrated data.
 from __future__ import annotations
 
 import base64
+import bz2
+from contextlib import ExitStack
+import gzip
 import hashlib
+import lzma
 import json
 import os
 import platform
@@ -40,6 +44,9 @@ def atomic_json(path, value):
 
     return write_json(path, value)
 
+# Immutable interpreter from the Dockerfile's python base image. A handed-over
+# supervisor's sys.executable may belong to an overlay or an older release venv.
+IMAGE_PYTHON = "/usr/local/bin/python3"
 ORIGIN = "https://hobbycoders.com"
 REVISION = re.compile(r"[a-f0-9]{40}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
@@ -260,6 +267,118 @@ def unsatisfied_capabilities(container, image):
     return sorted(set(missing_capabilities(container, image)) - supplied)
 
 
+def venv_python_paths(directory):
+    """Read dependency paths without running an unverified interpreter."""
+    python = directory / "venv/bin/python"
+    config = directory / "venv/pyvenv.cfg"
+    if config.is_symlink() or not config.is_file():
+        raise UpdateError("Application Python environment has no valid configuration; rebuild the update")
+    values = dict(line.split(" = ", 1) for line in config.read_text().splitlines() if " = " in line)
+    if not values.get("home") or not values.get("executable"):
+        raise UpdateError("Application Python environment has no base interpreter; rebuild the update")
+    return python.resolve(), Path(values["home"]).resolve(), Path(values["executable"]).resolve()
+
+
+def verify_venv_python(directory, runtime_python=None):
+    """Every retained venv must use the base selected by its signed manifest."""
+    binary, home, executable = venv_python_paths(directory)
+    expected = Path(runtime_python or IMAGE_PYTHON).resolve()
+    if home != expected.parent or executable != expected:
+        raise UpdateError("Application Python interpreter differs from the signed runtime selection; rebuild the update")
+    if binary != expected and (not binary.is_file() or file_digest(binary) != file_digest(expected)):
+        raise UpdateError("Application Python executable differs from its verified base interpreter")
+
+
+# Signed unpacked_size bounds all decompressed bytes, with only this fixed
+# allowance for small archives' tar headers/padding. Large archives must include
+# structural overhead in their signed bound. Metadata has separate tighter caps.
+TAR_HEADER_ALLOWANCE = 64 * 1024
+MAX_TAR_METADATA = 16 * 1024
+MAX_TAR_METADATA_TOTAL = 64 * 1024
+MAX_TAR_HEADERS = 50000
+
+
+class BoundedTarStream:
+    """Validate raw tar records BEFORE tarfile can allocate extended metadata."""
+    def __init__(self, stream, unpacked_size, stop):
+        self.stream, self.stop = stream, stop
+        self.limit = unpacked_size + TAR_HEADER_ALLOWANCE
+        self.payload_limit = unpacked_size
+        self.total = self.payload = self.metadata = self.headers = self.padding = 0
+        self.body = 0
+        self.header = bytearray()
+        self.ended = False
+
+    def read(self, size=-1):
+        if self.stop.is_set():
+            raise UpdateError("Runtime archive interrupted")
+        request = min(64 * 1024, self.limit - self.total + 1)
+        if size >= 0:
+            request = min(request, size)
+        data = self.stream.read(request)
+        self.total += len(data)
+        if self.total > self.limit:
+            raise UpdateError("Runtime archive exceeds signed decompressed size")
+        offset = 0
+        while offset < len(data):
+            if self.ended:
+                tail = data[offset:]
+                self.padding += len(tail)
+                if any(tail) or self.padding > tarfile.RECORDSIZE:
+                    raise UpdateError("Runtime archive has excessive or nonzero trailing padding")
+                break
+            if self.body:
+                count = min(self.body, len(data) - offset)
+                self.body -= count
+                offset += count
+                continue
+            count = min(512 - len(self.header), len(data) - offset)
+            self.header.extend(data[offset:offset + count])
+            offset += count
+            if len(self.header) != 512:
+                continue
+            header = bytes(self.header)
+            self.header.clear()
+            if header == bytes(512):
+                self.ended, self.padding = True, 512
+                continue
+            self.headers += 1
+            if self.headers > MAX_TAR_HEADERS:
+                raise UpdateError("Runtime archive has too many headers")
+            member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+            if member.size < 0:
+                raise UpdateError("Runtime archive has a negative size")
+            if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK):
+                self.metadata += member.size
+                if member.size > MAX_TAR_METADATA or self.metadata > MAX_TAR_METADATA_TOTAL:
+                    raise UpdateError("Runtime archive PAX/GNU metadata exceeds bounds")
+            elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                self.payload += member.size
+                if self.payload > self.payload_limit:
+                    raise UpdateError("Runtime archive exceeds signed expanded size")
+            elif member.type not in (tarfile.DIRTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE) or member.size:
+                raise UpdateError("Runtime archive contains a special file or invalid header")
+            self.body = (member.size + 511) // 512 * 512
+        if not data and (self.body or self.header):
+            raise UpdateError("Runtime archive is truncated")
+        return data
+
+
+def runtime_tar_stream(stack, archive, item, stop):
+    raw = stack.enter_context(archive.open("rb"))
+    magic = raw.read(6)
+    raw.seek(0)
+    if magic.startswith(b"\x1f\x8b"):
+        stream = stack.enter_context(gzip.GzipFile(fileobj=raw))
+    elif magic.startswith(b"BZh"):
+        stream = stack.enter_context(bz2.BZ2File(raw))
+    elif magic.startswith(b"\xfd7zXZ\x00"):
+        stream = stack.enter_context(lzma.LZMAFile(raw))
+    else:
+        stream = raw
+    return BoundedTarStream(stream, item["unpacked_size"], stop)
+
+
 class RuntimeOverlays:
     def __init__(self, root, stop=None):
         self.root = Path(root) / "runtime-overlays"
@@ -317,7 +436,9 @@ class RuntimeOverlays:
 
     def unpack(self, archive, target, item, verify=False):
         total, seen, links, expected = 0, set(), [], set()
-        with tarfile.open(archive, "r|*") as tar:
+        with ExitStack() as stack:
+            bounded = runtime_tar_stream(stack, archive, item, self.stop)
+            tar = stack.enter_context(tarfile.open(fileobj=bounded, mode="r|"))
             for member in tar:
                 if member.isdir() and str(PurePosixPath(member.name)) == ".":
                     continue
@@ -358,6 +479,10 @@ class RuntimeOverlays:
                         path.chmod(0o755 if member.mode & 0o111 else 0o644)
                 else:
                     raise UpdateError("Runtime archive contains a special file")
+            # tarfile stops at its end marker. Still consume the decompressor
+            # through the cap, rejecting padding bombs and concatenated data.
+            while bounded.read(64 * 1024):
+                pass
         # Links are last: no file can be extracted through a symlink.
         for path, destination, member in links:
             destination = destination.resolve()
@@ -491,12 +616,13 @@ def handover_target(root, image, public_key):
         raise UpdateError("Installed revision mismatch")
     if image["sequence"] > manifest["container"]["sequence"] or unsatisfied_capabilities(manifest["container"], image):
         return None
-    RuntimeOverlays(root).environment(selected_overlays(manifest["container"], image), {})
+    _, runtime_python = RuntimeOverlays(root).environment(selected_overlays(manifest["container"], image), {})
     source, python = directory / "source", directory / "venv/bin/python"
     script = source / "docker/container_runtime.py"
     if not (directory / "complete").is_file() or not python.is_file() or not script.is_file():
         return None
     verify_tree(directory, manifest)
+    verify_venv_python(directory, runtime_python)
     # verify_tree checks the files the signed listing names; what the image
     # will run must be among them, not merely present beside them.
     listed = {line.split("\0")[0] for line in (directory / "tree.txt").read_text().splitlines()}
@@ -768,9 +894,20 @@ class ContainerUpdates:
             keep = set()
             revisions = {self.state.get(field) for field in ("active", "previous", "pending", "booting")}
             revisions.add(os.environ.get("SHUFFLE_HANDED_OVER"))
+            revisions.update(self.state.get("failed", []))
             for revision in revisions:
                 if revision:
                     keep.update(item["sha256"] for item in selected_overlays(self.manifest(revision)["container"], self.image))
+                    directory = self.directory(revision)
+                    if (directory / "venv").exists():
+                        # Protect inherited dependencies from older updaters too.
+                        # Launch refuses a manifest/base mismatch, but cleanup
+                        # must not silently break a retained venv.
+                        for path in venv_python_paths(directory):
+                            if path.is_relative_to(self.overlays.root.resolve()):
+                                name = path.relative_to(self.overlays.root.resolve()).parts[0]
+                                if DIGEST.fullmatch(name):
+                                    keep.add(name)
             self.overlays.prune(keep)
         except (OSError, UpdateError):
             # Never guess which runtimes are disposable when retained manifests
@@ -803,7 +940,7 @@ class ContainerUpdates:
         if not revision:
             if not activate:
                 self.running = None  # the image's own code
-            return [sys.executable, "-m", "app.main"], None, env
+            return [IMAGE_PYTHON, "-m", "app.main"], None, env
         manifest = self.manifest(revision)
         if unsatisfied_capabilities(manifest["container"], self.image):
             raise UpdateError(self.runtime_mismatch(manifest))
@@ -821,7 +958,8 @@ class ContainerUpdates:
             env.pop(key, None)
         selected = selected_overlays(manifest["container"], self.image)
         env.pop("SHUFFLE_RUNTIME_OVERLAYS", None)
-        env, _ = self.overlays.environment(selected, env)
+        env, runtime_python = self.overlays.environment(selected, env)
+        verify_venv_python(directory, runtime_python)
         if selected:
             env["SHUFFLE_RUNTIME_OVERLAYS"] = "1"
         env["PATH"] = str(python.parent) + os.pathsep + env.get("PATH", "")
@@ -946,7 +1084,8 @@ class ContainerUpdates:
             raise UpdateError("This source update has no hash-pinned requirements.lock; install a newer image")
         manifest = self.manifest(revision)
         env, runtime_python = self.overlays.environment(selected_overlays(manifest["container"], self.image), env)
-        self.run_build([runtime_python or sys.executable, "-m", "venv", str(directory / "venv")], source, env)
+        self.run_build([runtime_python or IMAGE_PYTHON, "-m", "venv", str(directory / "venv")], source, env)
+        verify_venv_python(directory, runtime_python)
         # pip's 15-second read timeout dropped an 85 MB wheel mid-download on
         # the Unraid host and failed the whole update; allow slow mirrors.
         # Every package, including fluid's build backend, must match a hash in

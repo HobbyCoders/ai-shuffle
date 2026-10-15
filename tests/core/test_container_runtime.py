@@ -924,10 +924,13 @@ def test_real_pg_update_that_crashes_after_migrating_is_rolled_back(settings_fac
     marker = tmp_path / "started.log"
     programs = {
         # The previous version: records each start, then serves until stopped.
-        A: '#!/bin/sh\necho "$GIT_SHA" >> "$TEST_MARKER"\nexec sleep 600\n',
+        A: ('import os, time\nfrom pathlib import Path\n'
+            'with Path(os.environ["TEST_MARKER"]).open("a") as out: out.write(os.environ["GIT_SHA"] + "\\n")\n'
+            'time.sleep(600)\n'),
         # The new version: migrates the schema, then crashes before it is ready.
-        B: ('#!/bin/sh\npsql -X -q -v ON_ERROR_STOP=1 -c "CREATE TABLE migrated (value text);'
-            ' UPDATE kept SET value = \'after\';" || exit 9\nexit 3\n'),
+        B: ('import subprocess\nsubprocess.run(["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", '
+            '"CREATE TABLE migrated (value text); UPDATE kept SET value = \'after\';"], check=True)\n'
+            'raise SystemExit(3)\n'),
     }
 
     def build(directory, revision, version=None):
@@ -936,8 +939,10 @@ def test_real_pg_update_that_crashes_after_migrating_is_rolled_back(settings_fac
             (directory / name).write_text(revision)
         python = directory / "venv/bin/python"
         python.parent.mkdir(parents=True, exist_ok=True)
-        python.write_text(programs[revision])
-        python.chmod(0o755)
+        base = Path(module.IMAGE_PYTHON).resolve()
+        python.symlink_to(base)
+        (directory / "venv/pyvenv.cfg").write_text(f"home = {base.parent}\nexecutable = {base}\n")
+        (directory / "source/app/main.py").write_text(programs[revision])
 
     cfg = settings_factory()
     db = runtime.Database(cfg, port=pg_enabled)

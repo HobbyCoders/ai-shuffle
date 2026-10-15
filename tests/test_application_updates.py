@@ -22,6 +22,134 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
 
 
+def test_real_venvs_after_overlay_handover_use_image_python_and_survive_cleanup(feed, monkeypatch):
+    from docker import application_updates as module
+    updater, publish, *_ = feed
+    base = Path(module.IMAGE_PYTHON).resolve()
+    # A small real interpreter binary, using this test host's stdlib. No runtime
+    # download or pip/npm install: only venv creation and interpreter execution.
+    artifact = runtime_artifact("python", "test", executable="python/bin/python3",
+                                entries={"python/bin/python3": base.read_bytes()})
+    entries = {f"ai-shuffle-{B}/requirements.lock": "# fixture", **{
+        f"ai-shuffle-{B}/{name}": "# verified" for name in module.HANDOVER_FILES}}
+    offer_runtimes(feed, [artifact], entries=entries)
+    monkeypatch.setattr(updater, "build", ContainerUpdates.build.__get__(updater))
+    interpreters = []
+
+    def run(command, cwd, env):
+        if command[1:3] == ["-m", "venv"]:
+            interpreters.append(command[0])
+            subprocess.run([*command, "--without-pip"], env=env, check=True, capture_output=True)
+        if command == ["npm", "run", "build"] and cwd.name == "frontend":
+            (cwd / "build").mkdir(parents=True)
+            (cwd / "build/index.html").write_text("built")
+
+    monkeypatch.setattr(updater, "run_build", run)
+
+    def activate():
+        updater.check(download=True)
+        updater.launch({}, activate=True)
+        updater.activating()
+        updater.healthy()
+
+    activate()
+    _, supervisor, _ = module.handover_target(updater.root, updater.image, updater.public_key)
+    actual_base = subprocess.check_output([str(supervisor), "-c", "import sys; print(sys._base_executable)"], text=True).strip()
+    assert artifact[0]["sha256"] in actual_base
+    monkeypatch.setattr(module.sys, "executable", str(supervisor))
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", B)
+    for sequence, revision in ((3, C), (4, "d" * 40)):
+        publish(revision=revision, sequence=sequence, container={"requires": ["base-1"]},
+                entries={f"ai-shuffle-{revision}/requirements.lock": "# fixture"})
+        activate()
+    assert interpreters[1:] == [module.IMAGE_PYTHON, module.IMAGE_PYTHON]
+    # A subsequent cold start no longer uses the old supervisor. Its overlay
+    # and source can now leave retention without dangling either retained venv.
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", C)
+    monkeypatch.setattr(module.sys, "executable", str(updater.directory(C) / "venv/bin/python"))
+    updater.prune()
+    assert not updater.overlays.directory(artifact[0]).exists()
+    for revision in (C, "d" * 40):
+        python = updater.directory(revision) / "venv/bin/python"
+        assert python.resolve() == base
+        assert subprocess.check_output([str(python), "-c", "print('still works')"], text=True).strip() == "still works"
+    updater.launch({})  # the actual active venv also passes the launch verifier
+
+
+def test_inherited_overlay_is_retained_but_not_executed_without_signed_selection(feed):
+    from docker import application_updates as module
+    updater, publish, *_ = feed
+    artifact = runtime_artifact("python", "test")
+    signed = offer_runtimes(feed, [artifact], revision=B)
+    updater.overlays.prepare([artifact[0]])
+    # Model an already-built no-overlay release made by the buggy updater.
+    signed = publish(revision=C, sequence=3, container={"requires": ["base-1"]})
+    directory = updater.directory(C)
+    directory.mkdir(parents=True)
+    (directory / "release.json").write_bytes(signed)
+    executable = updater.overlays.directory(artifact[0]) / "payload" / artifact[0]["executable"]
+    stub_venv(directory, executable)
+    updater.state = {"active": C}
+    updater.prune_overlays()
+    assert executable.exists(), "retained venv dependencies must not be deleted"
+    with pytest.raises(UpdateError, match="signed runtime selection"):
+        module.verify_venv_python(directory)
+
+
+@pytest.mark.parametrize("kind", ["pax", "gnu-longname", "file", "padding", "headers", "pax-total"])
+def test_runtime_bounds_precede_tar_metadata_parsing(feed, kind, monkeypatch):
+    import gzip
+    import tarfile
+    from docker import application_updates as module
+    updater = feed[0]
+    item, _ = runtime_artifact()
+    if kind in ("pax", "gnu-longname", "file"):
+        member = tarfile.TarInfo("extended")
+        member.type = {"pax": tarfile.XHDTYPE, "gnu-longname": tarfile.GNUTYPE_LONGNAME,
+                       "file": tarfile.REGTYPE}[kind]
+        member.size = 4 * 1024**2
+        raw = member.tobuf() + b"x" * member.size + bytes(1024)
+    elif kind == "padding":
+        raw = bytes(4 * 1024**2)
+    elif kind == "headers":
+        monkeypatch.setattr(module, "MAX_TAR_HEADERS", 2)
+        raw = b"".join(tarfile.TarInfo(str(i)).tobuf() for i in range(3)) + bytes(1024)
+    else:
+        # Valid, individually-small PAX records must also obey the aggregate cap.
+        records = []
+        for index in range(6):
+            member = tarfile.TarInfo(f"entry-{index}")
+            member.pax_headers = {"comment": "x" * 12000}
+            records.append(member.tobuf(format=tarfile.PAX_FORMAT))
+        raw = b"".join(records) + bytes(1024)
+    data = gzip.compress(raw)
+    item.update(size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                unpacked_size=1024**2 if kind == "pax-total" else 1)
+    offer_runtimes(feed, [(item, data)])
+    # Guard tarfile's allocation points: our raw-stream validator must reject
+    # oversized metadata without allowing the parser to read its body at all.
+    def no_large_metadata(member, *args, **kwargs):
+        assert member.size <= module.MAX_TAR_METADATA
+        return original_pax(member, *args, **kwargs)
+    original_pax = tarfile.TarInfo._proc_pax
+    monkeypatch.setattr(tarfile.TarInfo, "_proc_pax", no_large_metadata)
+    with pytest.raises(UpdateError, match="metadata|expanded size|decompressed size|padding|headers"):
+        updater.check(download=True)
+    assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
+
+
+def stub_venv(directory, executable=None):
+    """Model the base-interpreter links/config that real venv writes."""
+    from docker.application_updates import IMAGE_PYTHON
+    base = Path(executable or IMAGE_PYTHON).resolve()
+    python = directory / "venv/bin/python"
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.symlink_to(base)
+    (directory / "venv/pyvenv.cfg").write_text(f"home = {base.parent}\nexecutable = {base}\n")
+
+
+
+
 
 
 def test_runtime_bootstrap_gate_and_signed_handover(feed):
@@ -248,9 +376,7 @@ def test_runtime_build_uses_selected_python_node_chromium_and_libraries(feed, mo
     def run(command, cwd, env):
         commands.append((command, dict(env)))
         if "venv" in command:
-            path = Path(command[-1]) / "bin/python"
-            path.parent.mkdir(parents=True)
-            path.write_text("python")
+            stub_venv(Path(command[-1]).parent, command[0])
         if command == ["npm", "run", "build"] and cwd.name == "frontend":
             (cwd / "build").mkdir(parents=True)
             (cwd / "build/index.html").write_text("built")
@@ -291,6 +417,9 @@ def test_runtime_rollback_restores_prior_selection_offline_and_prunes_unused(fee
     assert restored.launch({"PATH": "/image/bin"})[2] == original
     updater.prune_overlays()
     assert updater.overlays.directory(first[0]).exists()
+    assert updater.overlays.directory(second[0]).exists(), "failed builds retained for diagnosis keep their interpreter"
+    updater.state.pop("failed")
+    updater.prune_overlays()
     assert not updater.overlays.directory(second[0]).exists()
 
 
@@ -431,7 +560,8 @@ def feed(tmp_path, monkeypatch):
     updater = ContainerUpdates(tmp_path / "updates", image, public, lambda: enabled[0], lambda action: {})
     def build(directory, revision, version=None):
         assert (directory / "source/source.txt").read_text() == "content"
-        for name in ("venv/bin/python", "source/app/static/index.html", "complete"):
+        stub_venv(directory)
+        for name in ("source/app/static/index.html", "complete"):
             path = directory / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(revision)
