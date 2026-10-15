@@ -141,7 +141,7 @@ def test_entrypoint_writes_output_and_annotates_refusal(statuses, ready, monkeyp
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(gate, "GitHub", lambda: FakeGitHub(statuses))
     monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: REVISION + "\n")
-    monkeypatch.setattr(gate, "main_history", lambda api: [REVISION, OTHER])
+    monkeypatch.setattr(gate, "main_history", lambda api, **kw: [REVISION, OTHER])
     monkeypatch.setattr(gate, "published_edge_revision", lambda: OTHER)
     gate.main([])
     assert output.read_text() == f"ready={str(ready).lower()}\nrevision={REVISION}\n"
@@ -209,7 +209,24 @@ def test_workflow_wiring_matches_the_gate():
     assert publish["steps"][0]["with"]["ref"] == "${{ needs.gate.outputs.revision }}"
     assert publish["steps"][1]["with"]["ref"] == "${{ github.sha }}"
     assert publish["steps"][1]["with"]["path"] == ".publication-control"
-    assert publish["steps"][-1]["run"] == "node .publication-control/desktop/scripts/publish-source.mjs"
+    assert publish["defaults"]["run"]["working-directory"] == ".publication-control"
+    assert publish["steps"][-1]["run"] == 'node desktop/scripts/publish-source.mjs --source-root "$GITHUB_WORKSPACE"'
+    for step in publish["steps"]:
+        if "edge_publication_gate.py" in step.get("run", ""):
+            assert step["run"] == 'python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"'
+        if "npm ci" in step.get("run", ""):
+            assert step["working-directory"] == ".publication-control/scripts/source-publisher"
+        if step.get("uses", "").startswith("actions/setup-node"):
+            assert step["with"]["cache-dependency-path"] == ".publication-control/scripts/source-publisher/package-lock.json"
+    publisher = (ROOT / "desktop/scripts/publish-source.mjs").read_text()
+    assert "controlPath('scripts/ci/publication_source.py')" in publisher
+    assert "controlPath('scripts/source-publisher/node_modules/wrangler/bin/wrangler.js')" in publisher
+    assert "['-I', gate, '--json', '--source-root', sourceRoot]" in publisher
+    assert "cwd: controlRoot" in publisher
+    for action in ("version", "archive", "signing-floor", "sequence", "contract"):
+        assert f"source('{action}', revision" in publisher
+    for candidate_helper in ("android/ci/resolve-version-name.py", "scripts/release/sequence_offset.py", "docker/update_contract.py"):
+        assert f"['{candidate_helper}'" not in publisher
     assert publish["concurrency"]["cancel-in-progress"] == "false"
     text = (ROOT / "scripts/local_ci.py").read_text(encoding="utf-8")
     assert f'ATTEST_CONTEXT = "{gate.CONTEXT}"' in text

@@ -4,8 +4,12 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const realExec = cp.execFileSync;
+const controlRoot = path.resolve(process.env.PUBLISH_TEST_CONTROL || fileURLToPath(new URL('../../../', import.meta.url)));
 const root=process.env.RUNNER_TEMP, scenario=process.env.PUBLISH_TEST_CASE;
-const bytes=Buffer.from('immutable runtime source ZIP fixture'), revision='a'.repeat(40);
+let bytes=Buffer.from('immutable runtime source ZIP fixture');
+const revision=process.env.PUBLISH_TEST_REVISION || 'a'.repeat(40);
 const keyFile=path.join(root,'private.pem');
 const pair=fs.existsSync(keyFile)?{privateKey:createPrivateKey(fs.readFileSync(keyFile))}:generateKeyPairSync('ed25519');
 pair.publicKey=createPublicKey(pair.privateKey);
@@ -17,10 +21,15 @@ const readFile=fs.promises.readFile;
 fs.promises.readFile=async(file,...args)=>String(file).endsWith('application-update-key.pem')?publicKey:readFile(file,...args);
 let saved=fs.existsSync(path.join(root,'record.json'))?JSON.parse(fs.readFileSync(path.join(root,'record.json'),'utf8')):undefined,mainCalls=0;
 const events=[];
-const sha256=createHash('sha256').update(bytes).digest('hex');
+let sha256=createHash('sha256').update(bytes).digest('hex');
 const asset={id:123,name:revision+'-runtime.zip',size:bytes.length,state:'uploaded',digest:'sha256:'+sha256};
 cp.execFileSync=(exe,args,options={})=>{
+ if(path.resolve(options.cwd || '.')!==controlRoot)throw Error('Executable cwd is not the trusted control checkout');
+ if(options.env?.DESKTOP_APPLICATION_SIGNING_KEY)throw Error('Subprocess received signing key');
  if(exe==='git'){
+  if(args[0]!=='-C'||!path.isAbsolute(args[1]))throw Error('Git source root must be explicit data');
+  if(scenario==='two-checkout')return realExec(exe,args,options);
+  args=args.slice(2);
   if(args[0]==='rev-parse'&&args[1]==='HEAD')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='refs/tags/v1.2.3^{commit}')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='--is-shallow-repository')return 'false\n';
@@ -34,19 +43,38 @@ cp.execFileSync=(exe,args,options={})=>{
   if(args[0]==='tag'&&args[2]==='--format=%(contents:body)')return 'Faster startup.\n-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n';
   throw Error('Unexpected git command '+args.join(' '));
  }
- if(exe==='python'&&args[0].endsWith('/scripts/ci/edge_publication_gate.py')) {
-  if(options.env.DESKTOP_APPLICATION_SIGNING_KEY||options.env.CLOUDFLARE_API_TOKEN)throw Error('Read-only gate received publishing secrets');
-  events.push('ancestor-gate');
-  return JSON.stringify({ready:!(scenario==='newer-attested'&&++mainCalls>1),revision,published:'b'.repeat(40)});
+ if(exe==='python') {
+  if(args[0]!=='-I'||!args.includes('--source-root')||!path.isAbsolute(args[args.indexOf('--source-root')+1]))throw Error('Python must be isolated with an explicit source root');
+  if(options.env.CLOUDFLARE_API_TOKEN)throw Error('Python received publishing credentials');
+  if(args[1]===path.join(controlRoot,'scripts/ci/edge_publication_gate.py')) {
+   events.push('ancestor-gate');
+   return JSON.stringify({ready:!(scenario==='newer-attested'&&++mainCalls>1),revision,published:'b'.repeat(40)});
+  }
+  if(args[1]!==path.join(controlRoot,'scripts/ci/publication_source.py'))throw Error('Executed candidate or unexpected Python helper');
+  if(args[args.indexOf('--revision')+1]!==revision)throw Error('Wrong source revision');
+  if(options.env.GH_TOKEN)throw Error('Source reader received GitHub credentials');
+  const command=args[2],output=args[args.indexOf('--output')+1];
+  events.push('source:'+command);
+  if(scenario==='two-checkout') {
+   const result=realExec(exe,args,options);
+   if(command==='archive') {
+    bytes=fs.readFileSync(output);sha256=createHash('sha256').update(bytes).digest('hex');
+    Object.assign(asset,{size:bytes.length,digest:'sha256:'+sha256});events.push('archive');
+   }
+   return result;
+  }
+  if(command==='signing-floor')return JSON.stringify({floor:1,old_repository_id:null});
+  if(command==='sequence')return '42';
+  if(command==='contract')return JSON.stringify({runtime:'b'.repeat(64),requires:['base-1'],recommends:[]});
+  if(command==='version')return JSON.stringify('0.8.18-dev.4+gaaaaaaa');
+  if(command==='archive'){
+   events.push('archive');fs.writeFileSync(output,bytes);
+   return JSON.stringify({sha256,size:bytes.length,tree:'c'.repeat(64),files:3});
+  }
+  throw Error('Unexpected source operation');
  }
- if(exe==='python'&&args[0]==='scripts/release/sequence_offset.py')return args[1]==='signing-floor'?JSON.stringify({floor:1,old_repository_id:null}):'42\n';
- if(exe==='python'&&args[0]==='docker/update_contract.py')return JSON.stringify({runtime:'b'.repeat(64),requires:['base-1'],recommends:[]})+'\n';
- if(exe==='python'&&args[0]==='android/ci/resolve-version-name.py')return '0.8.18-dev.4+gaaaaaaa\n';
- if(exe==='python'&&args[0]==='scripts/source_archive.py'){
-  if(args[1]!==revision)throw Error('Archive built for the wrong revision');
-  events.push('archive');fs.writeFileSync(args[2],bytes);
-  return JSON.stringify({sha256,size:bytes.length,tree:'c'.repeat(64),files:3});
- }
+ if(args[0]!==path.join(controlRoot,'scripts/source-publisher/node_modules/wrangler/bin/wrangler.js'))throw Error('Executed candidate Wrangler');
+ if(scenario==='two-checkout')return realExec(exe,args,options);
  if(!args.includes('d1')||!args.includes('--remote'))throw Error('Unexpected external command');
  if(args.includes('--file'))throw Error('Bulk file imports emit progress outside JSON and must not be used for small publisher queries');
  if(!args.includes('--command'))throw Error('Expected D1 query command');

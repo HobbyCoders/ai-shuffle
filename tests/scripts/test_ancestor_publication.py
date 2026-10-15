@@ -128,7 +128,8 @@ def test_cli_selects_and_rechecks_exact_ancestor(lane, monkeypatch, tmp_path, ca
     if args == ["--json"]:
         git("switch", "--detach", first)
         monkeypatch.setenv("SOURCE_REVISION", first)
-    gate.main(args)
+    monkeypatch.chdir(ROOT)  # control cwd must not change which Git tree is checked
+    gate.main([*args, "--source-root", str(tmp_path)])
     result = capsys.readouterr().out
     if args == ["--select"]:
         assert output.read_text() == f"ready=true\nrevision={first}\n"

@@ -62,6 +62,9 @@ jobs:
       contents: write
       statuses: read
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .publication-control
     env:
       SOURCE_REVISION: ${{ needs.gate.outputs.revision }}
     steps:
@@ -85,22 +88,22 @@ jobs:
         id: settled
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python .publication-control/scripts/ci/edge_publication_gate.py
+        run: python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"
       - uses: actions/setup-node@v4
         if: steps.settled.outputs.ready == 'true'
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: scripts/source-publisher/package-lock.json
+          cache-dependency-path: .publication-control/scripts/source-publisher/package-lock.json
       - run: npm ci --no-audit --no-fund
         if: steps.settled.outputs.ready == 'true'
-        working-directory: scripts/source-publisher
+        working-directory: .publication-control/scripts/source-publisher
       - name: Recheck the pass and main immediately before signing
         if: steps.settled.outputs.ready == 'true'
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python .publication-control/scripts/ci/edge_publication_gate.py
+        run: python -I scripts/ci/edge_publication_gate.py --source-root "$GITHUB_WORKSPACE"
       - name: Publish signed source revision
         if: steps.ci.outputs.ready == 'true'
         env:
@@ -111,4 +114,4 @@ jobs:
           ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
           RELEASE_GITHUB_REPO: ${{ vars.RELEASE_GITHUB_REPO || 'HobbyCoders/ai-shuffle' }}
           RELEASE_GITHUB_REPO_ID: ${{ vars.RELEASE_GITHUB_REPO_ID }}
-        run: node .publication-control/desktop/scripts/publish-source.mjs
+        run: node desktop/scripts/publish-source.mjs --source-root "$GITHUB_WORKSPACE"

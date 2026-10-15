@@ -168,8 +168,13 @@ waives them. A successful-but-skipped workflow is not publication evidence.
 
 The read-only gate selects before signing secrets are available, then rechecks
 first-parent membership, newer attestations and the signed pointer before
-publication. Control scripts come from workflow main; the archive and runtime
-contracts come from the selected exact checkout. The publisher compares the
+publication. Every executable helper and Wrangler's install/lockfile comes from
+the workflow-main control checkout, with a trusted working directory. Candidate
+root and revision are explicit data arguments to an isolated Python reader; it
+uses trusted archive/version/sequence logic and parses runtime capability
+literals without executing candidate Python. Signing credentials never reach
+these readers. The archive and runtime declarations still come from the selected
+exact revision, not the control tree. The publisher compares the
 verified feed to the actual database lane and atomically compares-and-swaps that
 lane on insert, in addition to requiring a signed sequence above every prior
 sequence. A stale feed or losing concurrent writer refuses rather than moving

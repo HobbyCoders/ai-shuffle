@@ -19,6 +19,7 @@ import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { readLauncher } from './launcher-contract.mjs';
 import { releaseRepository } from './release-repository.mjs';
 const { repository: repo, id: repositoryId } = await releaseRepository(process.env.GH_TOKEN);
@@ -26,7 +27,16 @@ const channel = process.env.SOURCE_CHANNEL || 'edge';
 if (!['stable', 'nightly', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or nightly (edge is a transition alias)');
 // Both public aliases share the existing D1 lane; never relabel signed bytes.
 const storageChannel = channel === 'nightly' ? 'edge' : channel;
-const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+const controlRoot = fileURLToPath(new URL('../../', import.meta.url));
+const { values: cli } = parseArgs({ options: { 'source-root': { type: 'string' } } });
+const sourceRoot = path.resolve(cli['source-root'] || controlRoot);
+const controlPath = relative => path.join(controlRoot, relative);
+const readEnv = { ...process.env };
+for (const name of ['DESKTOP_APPLICATION_SIGNING_KEY', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID', 'ACCOUNT_HUB_DATABASE_ID', 'GH_TOKEN', 'GITHUB_TOKEN']) delete readEnv[name];
+const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8', cwd: controlRoot, env: readEnv }).trim();
+const source = (command, revision, ...args) => JSON.parse(execFileSync('python',
+ ['-I', controlPath('scripts/ci/publication_source.py'), command, '--source-root', sourceRoot, '--revision', revision, ...args],
+ { encoding: 'utf8', cwd: controlRoot, env: readEnv }));
 const releaseTag = process.env.RELEASE_TAG ?? '';
 let revision, version, notes = '';
 if (channel === 'stable') {
@@ -45,7 +55,7 @@ if (channel === 'stable') {
  if (notes.length > 4000) notes = `${notes.slice(0, 3990).trimEnd()}\n…`;
 } else {
  revision = process.env.SOURCE_REVISION || process.env.GITHUB_SHA;
- version = execFileSync('python', ['android/ci/resolve-version-name.py'], { encoding: 'utf8' }).trim();
+ version = source('version', revision);
 }
 if (!/^[a-f0-9]{40}$/.test(revision ?? '')) throw new Error('Invalid source revision');
 // The runtime contract and this script are read from the checkout, so it must be the revision itself.
@@ -99,9 +109,8 @@ async function current() {
   });
  }
  const gate = fileURLToPath(new URL('../../scripts/ci/edge_publication_gate.py', import.meta.url));
- const gateEnv = { ...process.env, SOURCE_REVISION: revision };
- for (const name of ['DESKTOP_APPLICATION_SIGNING_KEY', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID', 'ACCOUNT_HUB_DATABASE_ID']) delete gateEnv[name];
- const verdict = JSON.parse(execFileSync('python', [gate, '--json'], { encoding: 'utf8', env: gateEnv }));
+ const gateEnv = { ...readEnv, GH_TOKEN: token, SOURCE_REVISION: revision };
+ const verdict = JSON.parse(execFileSync('python', ['-I', gate, '--json', '--source-root', sourceRoot], { encoding: 'utf8', cwd: controlRoot, env: gateEnv }));
  if (!/^[a-f0-9]{40}$/.test(verdict.published ?? '')) throw Error('Invalid published baseline');
  expectedEdge = verdict.published;
  return verdict.ready === true && verdict.revision === revision;
@@ -131,8 +140,8 @@ const configFile = path.join(process.env.RUNNER_TEMP, 'desktop-source-d1.json');
 try {
  await writeFile(configFile, JSON.stringify({ d1_databases: [{ binding: 'DB', database_name: 'shuffle-account-hub', database_id: databaseId }] }));
  const quote = value => `'${value.replaceAll("'", "''")}'`;
- const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
- const wrangler = (...args) => execFileSync(process.execPath, ['scripts/source-publisher/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
+ const env = { ...readEnv, CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID };
+ const wrangler = (...args) => execFileSync(process.execPath, [controlPath('scripts/source-publisher/node_modules/wrangler/bin/wrangler.js'), 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, cwd: controlRoot, encoding: 'utf8' });
  // Several CI completions can authorize the same revision. Preserve its original
  // signed sequence rather than turning each completion into another update.
  const existing = JSON.parse(wrangler('--command', `SELECT manifest,asset_id,release_repository,release_repository_id FROM source_releases WHERE revision=${quote(revision)} AND channel=${quote(storageChannel)};`, '--json'));
@@ -151,12 +160,12 @@ try {
  } else {
   // git archive is reproducible, so a retry rebuilds identical bytes and the
   // existing asset must match them exactly; bytes behind an asset ID never change.
-  const built = JSON.parse(execFileSync('python', ['scripts/source_archive.py', revision, archive], { encoding: 'utf8' }));
+  const built = source('archive', revision, '--output', archive);
   const { sha256, size, tree } = built;
   if (!/^[a-f0-9]{64}$/.test(sha256) || !/^[a-f0-9]{64}$/.test(tree) || !Number.isSafeInteger(size) || size <= 0 || size > 512 * 1024 ** 2) throw new Error('Invalid runtime source archive');
   const sequence = Date.now();
   const history = JSON.parse(wrangler('--command', 'SELECT MAX(sequence) AS maximum FROM source_releases;', '--json')).flatMap(item => item.results ?? [])[0];
-  const inventory = JSON.parse(execFileSync('python', ['scripts/release/sequence_offset.py', 'signing-floor', '--revision', revision], { encoding: 'utf8' }));
+  const inventory = source('signing-floor', revision);
   let installerFloor = Math.max(Number(inventory.floor), Number(git('show', '-s', '--format=%ct', revision)) * 1000);
   const installers = JSON.parse(wrangler('--command', 'SELECT revision,release_repository_id FROM desktop_installers UNION SELECT revision,release_repository_id FROM desktop_platform_installers;', '--json')).flatMap(item => item.results ?? []);
   for (const installer of installers) {
@@ -165,11 +174,11 @@ try {
    installerFloor = Math.max(installerFloor, Number(git('show', '-s', '--format=%ct', installer.revision)) * 1000);
   }
   if (!history || !Number.isSafeInteger(sequence) || !Number.isSafeInteger(installerFloor) || sequence <= Number(history.maximum || 0) || sequence <= installerFloor) throw Error('Source signing clock did not exceed historical sequence/installer baseline');
-  const containerSequence = Number(execFileSync('python', ['scripts/release/sequence_offset.py', 'show', '--revision', revision], { encoding: 'utf8' }).trim());
+  const containerSequence = source('sequence', revision);
   if (!Number.isSafeInteger(containerSequence) || containerSequence <= 0) throw Error('Invalid committed container sequence');
   // What the revision needs from the Docker image (docker/update_contract.py,
   // #1821). runtime is all that images built before capabilities compare.
-  const contract = JSON.parse(execFileSync('python', ['docker/update_contract.py', '--manifest'], { encoding: 'utf8' }));
+  const contract = source('contract', revision);
   const { runtime, requires, recommends } = contract;
   const capabilities = list => Array.isArray(list) && list.length <= 32 && list.every(name => typeof name === 'string' && /^[a-z0-9][a-z0-9.-]{0,39}$/.test(name));
   if (!/^[a-f0-9]{64}$/.test(runtime) || !capabilities(requires) || !capabilities(recommends)) throw Error('Invalid container runtime contract');

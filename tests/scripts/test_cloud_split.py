@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_publishers_install_their_own_pinned_cli(workflow, job, script):
     config = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)
     steps = config["jobs"][job]["steps"]
-    assert any(s.get("working-directory") == "scripts/source-publisher" and "npm ci" in s.get("run", "") for s in steps)
+    cli_dir = ".publication-control/scripts/source-publisher" if workflow == "desktop-source.yml" else "scripts/source-publisher"
+    assert any(s.get("working-directory") == cli_dir and "npm ci" in s.get("run", "") for s in steps)
     source = (ROOT / "desktop/scripts" / script).read_text()
     assert "scripts/source-publisher/node_modules/wrangler/bin/wrangler.js" in source
     assert "android/hub" not in source
