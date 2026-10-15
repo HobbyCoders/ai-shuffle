@@ -307,7 +307,30 @@ class BoundedTarStream:
         self.total = self.payload = self.metadata = self.headers = self.padding = 0
         self.body = 0
         self.header = bytearray()
+        self.pax = None
+        self.pax_size = 0
         self.ended = False
+
+    @staticmethod
+    def validate_pax(payload):
+        # PAX can reinterpret an ordinary file body as an unbounded GNU sparse
+        # map. Inspect every bounded record before tarfile sees its full body;
+        # neither local nor global headers may enable any sparse format.
+        offset = 0
+        while offset < len(payload):
+            space = payload.find(b" ", offset)
+            digits = payload[offset:space] if space >= 0 else b""
+            if not re.fullmatch(rb"[1-9][0-9]{0,4}", digits):
+                raise UpdateError("Runtime archive has malformed PAX metadata")
+            end = offset + int(digits)
+            if end > len(payload) or end <= space + 2 or payload[end - 1:end] != b"\n":
+                raise UpdateError("Runtime archive has malformed PAX metadata")
+            key, separator, _ = payload[space + 1:end - 1].partition(b"=")
+            if not separator or not key or b"\n" in key or b"\0" in key:
+                raise UpdateError("Runtime archive has malformed PAX metadata")
+            if key.startswith(b"GNU.sparse"):
+                raise UpdateError("Runtime archive sparse files are not supported")
+            offset = end
 
     def read(self, size=-1):
         if self.stop.is_set():
@@ -329,6 +352,15 @@ class BoundedTarStream:
                 break
             if self.body:
                 count = min(self.body, len(data) - offset)
+                if self.pax is not None:
+                    self.pax.extend(data[offset:offset + count])
+                    if count == self.body:
+                        # tarfile parses the padded block, not just member.size.
+                        # Reject hidden records in padding before handing it over.
+                        if any(self.pax[self.pax_size:]):
+                            raise UpdateError("Runtime archive has nonzero PAX padding")
+                        self.validate_pax(self.pax[:self.pax_size])
+                        self.pax = None
                 self.body -= count
                 offset += count
                 continue
@@ -345,6 +377,8 @@ class BoundedTarStream:
             self.headers += 1
             if self.headers > MAX_TAR_HEADERS:
                 raise UpdateError("Runtime archive has too many headers")
+            if header[156:157] == tarfile.GNUTYPE_SPARSE:
+                raise UpdateError("Runtime archive sparse files are not supported")
             member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
             if member.size < 0:
                 raise UpdateError("Runtime archive has a negative size")
@@ -352,6 +386,8 @@ class BoundedTarStream:
                 self.metadata += member.size
                 if member.size > MAX_TAR_METADATA or self.metadata > MAX_TAR_METADATA_TOTAL:
                     raise UpdateError("Runtime archive PAX/GNU metadata exceeds bounds")
+                if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE) and member.size:
+                    self.pax, self.pax_size = bytearray(), member.size
             elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
                 self.payload += member.size
                 if self.payload > self.payload_limit:

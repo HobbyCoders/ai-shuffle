@@ -138,6 +138,128 @@ def test_runtime_bounds_precede_tar_metadata_parsing(feed, kind, monkeypatch):
     assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
 
 
+@pytest.mark.parametrize("sparse_format,header_type", [
+    ("0.0", b"x"), ("0.1", b"x"), ("1.0", b"x"),
+    ("0.0", b"g"), ("0.1", b"g"), ("1.0", b"g"), ("S", None),
+])
+def test_sparse_runtime_archives_rejected_before_sparse_parser(feed, monkeypatch, sparse_format, header_type):
+    import gzip
+    import tarfile
+    from docker import application_updates as module
+    updater = feed[0]
+    item, _ = runtime_artifact()
+    body = b"x"
+    fields = {}
+    if sparse_format == "0.0":
+        fields = {"GNU.sparse.size": "1", "GNU.sparse.numblocks": "1",
+                  "GNU.sparse.offset": "0", "GNU.sparse.numbytes": "1"}
+    elif sparse_format == "0.1":
+        fields = {"GNU.sparse.size": "1", "GNU.sparse.numblocks": "1", "GNU.sparse.map": "0,1"}
+    elif sparse_format == "1.0":
+        fields = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.realsize": "1"}
+        # This large allocation was previously disguised as regular-file data
+        # by a tiny PAX header. It exceeds the aggregate metadata cap, while the
+        # gzip and PAX header themselves are small and inside their limits.
+        sparse_map = b"20001\n" + b"0\n0\n" * 20000 + b"0\n1\n"
+        sparse_map += bytes(-len(sparse_map) % 512)
+        assert len(sparse_map) > module.MAX_TAR_METADATA_TOTAL
+        body = sparse_map + body
+    file = tarfile.TarInfo(item["executable"])
+    file.mode, file.size = 0o755, len(body)
+    if header_type is None:
+        file.type = tarfile.GNUTYPE_SPARSE
+        prefix = b""
+    else:
+        records = []
+        for key, value in fields.items():
+            text = (key + "=" + value + "\n").encode()
+            length = len(text) + 2
+            while len(str(length)) + 1 + len(text) != length:
+                length = len(str(length)) + 1 + len(text)
+            records.append(str(length).encode() + b" " + text)
+        pax = b"".join(records)
+        assert len(pax) < module.MAX_TAR_METADATA
+        header = tarfile.TarInfo("PaxHeaders/runtime")
+        header.type, header.size = header_type, len(pax)
+        prefix = header.tobuf() + pax + bytes(-len(pax) % 512)
+    raw = prefix + file.tobuf(format=tarfile.GNU_FORMAT) + body + bytes(-len(body) % 512) + bytes(1024)
+    data = gzip.compress(raw)
+    assert len(data) < 4096
+    item.update(size=len(data), sha256=hashlib.sha256(data).hexdigest(), unpacked_size=len(raw))
+    offer_runtimes(feed, [(item, data)])
+
+    def must_not_parse_sparse(*args, **kwargs):
+        pytest.fail("tarfile reached a sparse-map allocation routine")
+
+    for method in ("_proc_sparse", "_proc_gnusparse_00", "_proc_gnusparse_01", "_proc_gnusparse_10"):
+        monkeypatch.setattr(tarfile.TarInfo, method, must_not_parse_sparse)
+    with pytest.raises(UpdateError, match="sparse files are not supported"):
+        updater.check(download=True)
+    assert updater.state == {} and list(updater.overlays.root.iterdir()) == []
+
+    # Model a cache installed by the old updater. Re-verification must reject
+    # it too, before interpreting sparse metadata or reading payload files.
+    directory = updater.overlays.directory(item)
+    directory.mkdir()
+    (directory / "runtime.tar").write_bytes(data)
+    (directory / "payload").mkdir()
+    with pytest.raises(UpdateError, match="sparse files are not supported"):
+        updater.overlays.installed(item)
+
+
+@pytest.mark.parametrize("chunk", [1, 127, 10240])
+def test_pax_sparse_detection_spans_stream_reads(chunk):
+    import tarfile
+    import threading
+    from docker import application_updates as module
+    member = tarfile.TarInfo("node/bin/node")
+    member.pax_headers = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0"}
+    raw = member.tobuf(format=tarfile.PAX_FORMAT) + bytes(1024)
+    stream = module.BoundedTarStream(io.BytesIO(raw), len(raw), threading.Event())
+    with pytest.raises(UpdateError, match="sparse files are not supported"):
+        while stream.read(chunk):
+            pass
+
+
+@pytest.mark.parametrize("chunk", [1, 127, 10240])
+def test_small_nonsparse_pax_remains_supported(chunk):
+    import tarfile
+    import threading
+    from docker import application_updates as module
+    member = tarfile.TarInfo("node/bin/node")
+    member.pax_headers = {"path": "node/bin/node", "comment": "ordinary metadata", "mtime": "1.25"}
+    raw = member.tobuf(format=tarfile.PAX_FORMAT) + bytes(1024)
+    stream = module.BoundedTarStream(io.BytesIO(raw), len(raw), threading.Event())
+    result = bytearray()
+    while data := stream.read(chunk):
+        result.extend(data)
+    assert result == raw
+    with tarfile.open(fileobj=io.BytesIO(result)) as archive:
+        assert archive.getnames() == ["node/bin/node"]
+
+
+def test_pax_padding_cannot_smuggle_sparse_metadata(monkeypatch, tmp_path):
+    import tarfile
+    import threading
+    from docker import application_updates as module
+    member = tarfile.TarInfo("node/bin/node")
+    member.pax_headers = {"comment": "ordinary", "GNU.sparse.major": "1", "GNU.sparse.minor": "0"}
+    raw = member.tobuf(format=tarfile.PAX_FORMAT) + bytes(1024)
+    # Declare only the first, benign record; leave sparse records in padding.
+    # tarfile consumes that entire block as metadata, so our guard must too.
+    first_record_size = int(raw[512:].split(b" ", 1)[0])
+    header = tarfile.TarInfo("PaxHeaders/runtime")
+    header.type, header.size = tarfile.XHDTYPE, first_record_size
+    raw = header.tobuf() + raw[512:]
+    def must_not_parse_sparse(*args, **kwargs):
+        pytest.fail("sparse metadata escaped through PAX padding")
+    monkeypatch.setattr(tarfile.TarInfo, "_proc_gnusparse_10", must_not_parse_sparse)
+    stream = module.BoundedTarStream(io.BytesIO(raw), len(raw), threading.Event())
+    with pytest.raises(UpdateError, match="nonzero PAX padding"):
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
+            list(archive)
+
+
 def stub_venv(directory, executable=None):
     """Model the base-interpreter links/config that real venv writes."""
     from docker.application_updates import IMAGE_PYTHON
