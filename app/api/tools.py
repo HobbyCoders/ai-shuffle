@@ -48,8 +48,10 @@ async def send_peer_message(
     request: Request,
     token: str = Depends(require_admin),
 ):
-    """Local owner's deterministic MessageSession dispatch/receipt bridge.
+    """Deterministic MessageSession bridge: owner authority on local ingress.
 
+    require_admin retains existing owner privileges, including managed paired
+    devices with account_owner_admin and forwarded requests with owner Bearers.
     Repeating the same request reads its durable queued/begun/consumed/stopped
     receipt. This is NOT a generic tool executor: the normal orchestration
     owner, project, top-level, stop, chain-budget and dedupe checks still apply.

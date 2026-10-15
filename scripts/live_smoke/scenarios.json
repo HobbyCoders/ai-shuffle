@@ -95,7 +95,7 @@
           "id": "two-worker-smoke.9",
           "check": "Peer message delivery",
           "kind": "script",
-          "how": "start two throwaway chats, then dispatch a peer message through the local-owner API with a stable request id and poll its durable receipt",
+          "how": "start two throwaway chats, then dispatch a peer message with owner authority on local ingress (require_admin), using a stable request id, and poll its durable receipt",
           "pass_when": "MessageSession is in the available tool catalog; the same receiver turn id reaches consumed (queued, begun or stopped alone never pass); no model wording or tool-choice requirement",
           "past_bug": "message only delivered after session fully completed",
           "steps": [
