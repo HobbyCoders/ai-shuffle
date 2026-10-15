@@ -665,7 +665,6 @@ class PeerLink:
                 **(await asyncio.to_thread(_description)), "version": settings.version,
                 "platform": identity_mod.platform_name(),
             })
-            await asyncio.to_thread(tokens.remember_binding_support, self.device_id, exchange.get("token_binding_proof"))
             note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             theirs = exchange.get("watermarks") or {}
             note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")))
@@ -693,6 +692,13 @@ class PeerLink:
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
                 self.batches += 1
+            # A newly admitted peer's certificate may arrive in this exchange.
+            # Until membership knows its key, its support statement is not
+            # authenticated evidence. Keep syncing to learn the certificate;
+            # never pin an unknown identity or reject bootstrap for lacking it.
+            if engine.require_context().member(self.device_id) is not None:
+                await asyncio.to_thread(tokens.remember_binding_support, self.device_id,
+                                        exchange.get("token_binding_proof"))
             if not catch_up:
                 # A backlog drains in one pass instead of one batch per
                 # SYNC_ACTIVE_SECONDS; the time budget keeps the push below
