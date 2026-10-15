@@ -102,18 +102,24 @@ def _loop(options, registry=None):
     (["Bash"], ["mcp__builtins__Mon*"], False),
     (["Bash"], ["*"], False),
 ])
-def test_shell_agents_get_monitor_on_both_legs_unless_blocked(tmp_path, surface, blocked, expected):
+@pytest.mark.parametrize("worker", [False, True])
+def test_shell_agents_get_monitor_on_both_legs_unless_blocked(tmp_path, surface, blocked, expected, worker):
     options = _options(tmp_path, surface=surface, disallowed_tools=blocked)
+    options.extra["worker_run"] = worker
+    expected = expected and worker
     assert ("Monitor" in ha._tool_allowlist(options)) is expected
     assert ("Monitor" in ha._delegated_allowed(options)) is expected
     if expected:
         assert {"TaskGet", "TaskList", "TaskOutput", "TaskStop"} <= set(ha._tool_allowlist(options))
+    if not worker:
+        assert ha._tool_allowlist(options) == surface  # no schema/cache-prefix expansion
     assert options.tool_allowlist == surface  # never mutate the saved choice
     assert "Monitor" not in (ha._delegated_permission_grants(options) or [])
 
 
 def test_shell_companions_keep_individual_owner_blocks(tmp_path):
     options = _options(tmp_path, surface=["Bash"], disallowed_tools=["TaskStop"])
+    options.extra["worker_run"] = True
     assert "Monitor" in ha._tool_allowlist(options)
     assert "TaskStop" not in ha._tool_allowlist(options)
 
@@ -132,6 +138,7 @@ async def test_picker_names_reach_the_bridged_app_tools(tmp_path, builtins_serve
 
     picked = PICKED if explicit_monitor else [name for name in PICKED if name != "Monitor"]
     options = _options(tmp_path, {"builtins": builtins_server}, surface=picked)
+    options.extra["worker_run"] = True
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
     loop = _loop(options, registry)
     try:

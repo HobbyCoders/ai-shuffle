@@ -153,6 +153,7 @@ def test_dispatch_starts_opted_in_runtime_without_joining(repo, worker_runtime, 
         assert kwargs == {"max_budget_seconds": 600}
         async def spawn(inputs, ctx):
             assert database.get_session(sid) is not None
+            assert worker_runtime, "setup must follow initial submission"
             calls.append((sid, inputs))
             return SimpleNamespace(background_task=SimpleNamespace(task_id="setup-task"))
         return spawn
@@ -163,7 +164,7 @@ def test_dispatch_starts_opted_in_runtime_without_joining(repo, worker_runtime, 
     assert bool(calls) == enabled
     if enabled:
         assert calls[0][1] == {"command": "project-setup-command", "cwd": worker_runtime[0]["overrides"]["cwd"]}
-        assert "setup-task" in worker_runtime[0]["overrides"]["system_prompt_append"]
+        assert "scheduled after initial turn submission" in worker_runtime[0]["overrides"]["system_prompt_append"]
 
 
 @pytest.mark.parametrize("tools,blocked", [(["Read"], []), (["Bash"], ["Monitor"]), (["Bash"], ["mcp__builtins__Mon*"])])
@@ -389,6 +390,120 @@ def test_bound_caller_without_a_local_checkout_still_refuses(repo, monkeypatch):
     monkeypatch.setattr(project_resolver, "resolve_local_checkout", lambda row: None)
     with pytest.raises(worker_checkout.WorkerCheckoutError, match="unavailable"):
         worker_checkout.prepare_worker_checkout(row, "orphan", "coder")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submission", ["queued", "running", "failed", "cancelled"])
+async def test_setup_completion_waits_for_initial_dispatch_context(
+    repo, monkeypatch, clean_task_registry, submission,
+):
+    """Real setup shell + real terminal scheduler, not a mocked terminal hook.
+
+    Keep the first turn queued (or running) deliberately, so a quick setup
+    cannot borrow a broad saved profile while waiting for an engine slot.
+    """
+    import shlex
+    import sys
+    from app.core import turn_manager, turn_scheduler, monitor_spawn
+    from app.core.provider_agent_feed import WorkerFeed
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    from app.mcp import builtin_tools
+
+    row, parent, *_ = repo
+    sid = "setup-race-" + submission
+    argv = [sys.executable, "-c", "pass"]
+    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    git(parent, "config", "--local", "fluid.workerSetupCommand", command)
+    initial = []
+    wakes = []
+    wake_ready = asyncio.Event()
+    real_enqueue = turn_scheduler._enqueue
+    original_tasks = set(builtin_tools._background_tasks)
+
+    async def started(_feed):
+        # Dispatch can await event recording here. Setup must not exist yet.
+        await asyncio.sleep(0)
+        assert set(builtin_tools._background_tasks) == original_tasks
+        assert turns.get_queued_turns(sid) == []
+
+    async def submit(session_id, source, **kwargs):
+        assert source == provider_agent.WORKER_TURN_SOURCE
+        if submission == "failed":
+            raise RuntimeError("initial submission refused")
+        if submission == "cancelled":
+            raise asyncio.CancelledError()
+        turn = turns.enqueue_turn(session_id, source, **kwargs)
+        initial.append(turn)
+        if submission == "running":
+            turns.start_turn(turn["id"], None, "test-runner")
+        return turn["id"]
+
+    def enqueue(session_id, source, **kwargs):
+        turn = real_enqueue(session_id, source, **kwargs)
+        if session_id == sid and source == "unpark":
+            wakes.append((len(initial), turn))
+        return turn
+
+    def kick(session_id):
+        if session_id == sid:
+            wake_ready.set()
+
+    async def idle(*args, **kwargs):
+        await asyncio.wait_for(wake_ready.wait(), 10)
+        # Simulate the provider completing after receiving the setup result;
+        # the terminal scheduler and the actual wake rows were not stubbed.
+        for turn in [*initial, *(turn for _, turn in wakes)]:
+            turns.settle_turn(turn["id"], "completed", stop_reason="end_turn")
+        return True
+
+    monkeypatch.setattr(WorkerFeed, "started", started)
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    monkeypatch.setattr(turn_manager, "wait_session_idle", idle)
+    monkeypatch.setattr(turn_scheduler, "_enqueue", enqueue)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", kick)
+    monkeypatch.setattr(builtin_tools, "_emit_shell_start_frame", AsyncMock())
+    monkeypatch.setattr(builtin_tools, "_emit_shell_settle_frame", AsyncMock())
+    monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda _sid: {
+        "terminal_found": True, "error": None, "interrupted": False, "usage": {},
+    })
+    monkeypatch.setattr(provider_agent, "final_assistant_text", lambda _sid: "completed")
+    try:
+        call = provider_agent.dispatch_worker(
+            parent_session_id="parent", profile_id="coder", worker_session_id=sid,
+            prompt="review the assigned commit", system_prompt_append="REVIEW ROLE",
+            tool_allowlist=["Bash", "Read"], tool_denylist=["TaskStop"],
+        )
+        if submission == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            outcome = await call
+            assert outcome.ok is (submission != "failed"), outcome.error
+        if submission in ("failed", "cancelled"):
+            assert not initial and not wakes
+            assert set(builtin_tools._background_tasks) == original_tasks
+            assert turns.get_queued_turns(sid) == []
+        else:
+            assert len(wakes) == 1
+            submitted_count, wake = wakes[0]
+            assert submitted_count == 1
+            assert wake["overrides"] == initial[0]["overrides"]
+            assert wake["parent_turn_id"] == initial[0]["id"]
+            assert initial[0]["prompt"] == "review the assigned commit"
+            assert wake["overrides"]["tool_allowlist"] == ["Bash", "Read"]
+            assert wake["overrides"]["tool_denylist"] == ["TaskStop"]
+            assert "REVIEW ROLE" in wake["overrides"]["system_prompt_append"]
+            assert "Host-provisioned worker checkout" in wake["overrides"]["system_prompt_append"]
+            assert wake["overrides"]["cwd"] != str(parent)
+    finally:
+        for task_id in set(builtin_tools._background_tasks) - original_tasks:
+            task = builtin_tools._background_tasks[task_id]
+            if task.is_running():
+                await builtin_tools.stop_background_shell_task(task_id, session_id=sid)
+            builtin_tools._background_tasks.pop(task_id, None)
+        task_registry.clear_session(sid)
 
 
 @pytest.fixture

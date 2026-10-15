@@ -2488,10 +2488,6 @@ async def dispatch_worker(
     )
     # --- end approval routing ----------------------------------------------
 
-    from app.core.worker_runtime import start_worker_runtime
-    await start_worker_runtime(worker_checkout, worker_session_id, profile_id,
-                               tool_allowlist, tool_denylist)
-
     # Permission inheritance: the worker runs at the CALLER's effective
     # permission level, so a bypassPermissions parent (e.g. a voice call on a
     # bypass profile) never has its workers stall on approval prompts.
@@ -2665,6 +2661,13 @@ async def dispatch_worker(
             # worker never depends on that fallback.
             payload=worker_payload or None,
         )
+
+        # Setup may finish immediately. Its wake must inherit this durable
+        # initial turn's full overrides, never launch a profile-only worker.
+        # A failed/cancelled submission never reaches this launch point.
+        from app.core.worker_runtime import start_worker_runtime
+        await start_worker_runtime(worker_checkout, worker_session_id, profile_id,
+                                   tool_allowlist, tool_denylist)
 
         # Tail the worker's durable log from here on — its rows only start
         # existing once the turn is submitted.

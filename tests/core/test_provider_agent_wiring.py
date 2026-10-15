@@ -60,6 +60,7 @@ def test_worker_sessions_keep_the_task_tool():
     """Depth gating happens in task_dispatch — a worker still sees the tool."""
     pa.register_worker_session("worker-1")
     opts = _build(session_id="worker-1")
+    assert opts.aih_worker_run is True
     assert "mcp__builtins__Task" in set(opts.allowed_tools or [])
 
 
@@ -76,6 +77,7 @@ def test_worker_cannot_ask_user_questions():
 
 def test_non_worker_session_keeps_ask_user_question():
     opts = _build(session_id="parent-1")
+    assert opts.aih_worker_run is False
     assert qo.WORKER_DISALLOWED_TOOLS[0] not in (opts.disallowed_tools or [])
 
 

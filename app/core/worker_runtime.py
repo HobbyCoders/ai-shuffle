@@ -55,7 +55,12 @@ def runtime_receipt(source: str, checkout: str) -> dict:
     return {
         "python": python,
         "python_note": "Existing interpreter, not a dependency compatibility check; never pip install into the parent's environment.",
-        "setup_status": "not started; automatic setup requires local git config fluid.workerSetupCommand",
+        "setup_status": (
+            "configured; scheduled after initial turn submission if shell tools permit. "
+            "Find the task ID in TaskList or its completion wake; do not race setup."
+            if _local_setting(source, "fluid.workerSetupCommand") else
+            "not configured; automatic setup requires local git config fluid.workerSetupCommand"
+        ),
         "frontend_monitor_inputs": commands,
     }
 
