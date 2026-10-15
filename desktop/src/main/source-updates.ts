@@ -189,10 +189,22 @@ export class SourceUpdates {
   }
   private checking = false;
   private explicitActivation = false;
+  private rollbackDatabase: RestoreDatabaseFactory | null = null;
+  private cleanupFailure: string | null = null;
+  get cleanupError(): string | null { return this.cleanupFailure; }
+  /** A check retries only garbage collection, never database restoration. */
+  async retryCleanup(): Promise<void> {
+    const j = await this.journal();
+    if (!j) { this.cleanupFailure = null; return; }
+    if (j.phase !== 'committed' && !(j.phase === 'ready' && this.state.active === j.revision && !this.state.booting)) return;
+    await this.finishRollback(this.rollbackDatabase ?? (async () => { throw new Error('Database cleanup is not initialized yet; retry after the worker starts'); }));
+    if (this.cleanupFailure) throw new Error(this.cleanupFailure);
+  }
   /** UI downloads must not activate on ordinary exits, including older EXE launchers. */
   stageDownloads(): void { this.explicitActivation = true; }
   async prepareInstall(): Promise<void> {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
+    await this.retryCleanup();
     if (!this.state.staged) return;
     await this.assertCanRun(this.state.staged);
     this.state.pending = this.state.staged;
@@ -627,6 +639,7 @@ export class SourceUpdates {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     if (this.checking) throw new Error('An application update is already running');
     if (this.state.booting) return { kind: 'current' };
+    await this.retryCleanup();
     if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12), ...await this.releaseInfo(this.pendingVersion) };
     this.checking = true;
     let unlock: (() => Promise<void>) | undefined;
@@ -745,6 +758,7 @@ export class SourceUpdates {
   }
   /** Fail closed before selecting code, even when the snapshot is out of space or interrupted. */
   async prepareRollback(database: RestoreDatabaseFactory): Promise<void> {
+    this.rollbackDatabase = database;
     const revision = this.state.pending;
     // Existing fenced recovery (legacy failures) keeps its same/newer-build path, never a source-only rollback.
     if (!revision || this.blocked || this.hasMigrationRisk) return;
@@ -802,6 +816,7 @@ export class SourceUpdates {
   }
   /** Healthy callbacks may only dispose of a point, never restore a database. */
   async finishRollback(database: RestoreDatabaseFactory): Promise<void> {
+    this.rollbackDatabase = database;
     const j = await this.journal();
     if (!j) return;
     if (j.phase !== 'committed') {
@@ -812,8 +827,10 @@ export class SourceUpdates {
     try {
       if (j.phase !== 'committed') { j.phase = 'committed'; await durableJson(this.journalFile, j); }
       await (await database(j.previous)).discard();
-      await fs.rm(this.journalFile); await syncDirectory(this.options.root);
+      await fs.rm(this.journalFile, { force: true }); await syncDirectory(this.options.root);
+      this.cleanupFailure = null;
     } catch (error) {
+      this.cleanupFailure = `An earlier update's cleanup could not finish (${String(error)}; journal: ${this.journalFile}). Close other AI Shuffle windows or programs using that folder, check its permissions, then choose Retry. You can also update by installing the latest version from hobbycoders.com.`;
       // The data and build are already promoted. A locked file or missing old
       // runtime must not turn garbage collection into a startup failure.
       console.warn('Database restore point cleanup deferred until the next launch:', error);
@@ -839,6 +856,7 @@ export class SourceUpdates {
   }
   /** Resume at every write/rename boundary; the migration fence is lowered ONLY after a validated restore. */
   async recoverRollback(database: RestoreDatabaseFactory, force = false): Promise<boolean> {
+    this.rollbackDatabase = database;
     const j = await this.journal();
     if (!j) return false;
     if (j.phase === 'committed' || (j.phase === 'ready' && this.state.active === j.revision && !this.state.booting)) {

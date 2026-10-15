@@ -114,17 +114,38 @@ test('restore journal: bundled A cleanup survives replacement by C and does not 
  await assert.rejects(fs.stat(path.join(f.root,'restore-point.json')),{code:'ENOENT'});
  assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
 });
-test('restore journal: failed committed cleanup never blocks healthy startup and defers another activation',async t=>{
- const {f,u,factory,db,journal}=await rollbackFixture(t,{baseline:true});await u.prepareRollback(factory);
- f.options.baseline={revision:C,sequence:300};const installer=f.create();await installer.load();await installer.useNewerBaseline();
- db.discard=async()=>{throw Error('locked snapshot');};
- const restart=f.create();await restart.load();await restart.recoverRollback(factory);
- assert.equal(restart.version,C);assert.equal(restart.blocked,false);assert.equal((await journal()).phase,'committed');
- // Even a factory itself failing is cleanup-only and may not block startup.
- await restart.recoverRollback(async()=>{throw Error('unavailable cleanup');});
- const next=f.create();await next.load();const newer='d'.repeat(40);await f.release(newer,null,{sequence:400});await next.download();await next.prepareRollback(factory);
- assert.equal(next.version,C);const deferred=JSON.parse(await fs.readFile(path.join(f.root,'state.json')));assert.equal(deferred.pending,undefined);assert.equal(deferred.staged,newer);
- db.discard=async()=>{};await next.recoverRollback(factory);await assert.rejects(fs.stat(path.join(f.root,'restore-point.json')),{code:'ENOENT'});
+test('restore journal: persistent cleanup lock reports actionable error, then Retry enables activation without a futile restart',async t=>{
+ const {f,u,factory,db,journal}=await rollbackFixture(t,{baseline:true});u.stageDownloads();await u.prepareRollback(factory);
+ let retries=0;db.discard=async()=>{retries++;throw Error('EACCES: locked snapshot');};
+ await u.cancelPreparedRollback(factory);await u.cancelInstall();
+ assert.equal((await journal()).phase,'committed');assert.equal(u.version,A);assert.equal(u.blocked,false);
+ for(let i=0;i<2;i++)await assert.rejects(u.check(),/cleanup could not finish.*EACCES.*restore-point.json.*Retry.*hobbycoders.com/);
+ await assert.rejects(u.prepareInstall(),/cleanup could not finish/);
+ assert.ok(retries>=3);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'))).pending,undefined);
+ const events=[],states=[],module={exports:{}};
+ vm.runInNewContext(await fs.readFile(new URL('../dist/main/updater.js',import.meta.url),'utf8'),{
+  module,exports:module.exports,process:{env:{}},Date,setTimeout,clearTimeout,setInterval,clearInterval,
+  require:id=>id==='electron'?{app:{relaunch:()=>events.push('restart'),quit:()=>events.push('quit')}}:path,
+ });
+ const updater=new module.exports.Updater();updater.onBeforeInstall(async()=>events.push('stop'));
+ const reported=new Promise(resolve=>updater.subscribe(state=>{states.push(state.phase);if(state.phase==='error')resolve();}));
+ updater.useApplications(u,'/test/launcher');await reported;
+ assert.equal(states.includes('ready'),false);assert.match(updater.current.error,/EACCES.*Retry/);
+ await updater.install();assert.deepEqual(events,[],'no futile restart or service stop');
+ db.discard=async()=>{};await updater.check();assert.equal(updater.current.phase,'ready');assert.equal(u.cleanupError,null);
+ await updater.install();assert.deepEqual(events,['stop','restart','quit']);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'))).pending,B);
+ await u.prepareRollback(factory);assert.equal((await journal()).phase,'ready','a new point is taken only after cleanup');
+});
+test('restore journal: a newer bundled installer escapes locked cleanup and removes the obsolete update offer',async t=>{
+ const {f,u,factory,db}=await rollbackFixture(t,{baseline:true});u.stageDownloads();await u.prepareRollback(factory);
+ db.discard=async()=>{throw Error('locked snapshot');};await u.cancelPreparedRollback(factory);await u.cancelInstall();
+ f.options.baseline={revision:C,sequence:300};const installer=f.create();await installer.load();await installer.recoverRollback(factory);await installer.useNewerBaseline();
+ assert.equal(installer.version,C);assert.equal(installer.pendingVersion,null);assert.equal(installer.hasSourceState,false);assert.equal(installer.blocked,false);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+ // Cleanup still cannot bypass a real filesystem lock, but cannot prevent C starting.
+ await installer.finishRollback(async()=>{throw Error('unavailable cleanup');});assert.equal(installer.version,C);
+ db.discard=async()=>{};await installer.recoverRollback(factory);assert.equal(installer.cleanupError,null);
 });
 test('restore journal: stale snapshot cannot lower newer baseline floor, even via forced recovery or healthy callback',async t=>{
  const {f,u,factory,calls}=await rollbackFixture(t);await u.prepareRollback(factory);await u.select();await u.databaseStarting();await u.failed();
