@@ -179,3 +179,31 @@ async def test_input_timeout_closes_writer_and_keeps_error_contract(reg, tmp_pat
     assert error.value.code == "terminal_unresponsive"
     assert terminal.state == T.STATE_EXITED
     assert not terminal._thread.is_alive()
+
+
+@pytest.mark.parametrize("component", ["directory", "ancestor"])
+async def test_files_folder_and_ancestors_are_pinned_through_create_and_restart(reg, tmp_path, monkeypatch, component):
+    parent = tmp_path / "parent"
+    selected = parent / "selected"
+    selected.mkdir(parents=True)
+    victim = parent if component == "ancestor" else selected
+    moved = victim.with_name(victim.name + "-moved")
+    original = T.windows_conpty.ConPTYProcess
+    attempts = []
+
+    def create(*args, **kwargs):
+        # Without the held no-delete-sharing handles an attacker can rename
+        # this directory, then install a junction before CreateProcessW.
+        with pytest.raises(OSError):
+            victim.rename(moved)
+        attempts.append(component)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(T.windows_conpty, "ConPTYProcess", create)
+    terminal = await reg.create(created_by="owner", cwd=str(selected), cwd_root=str(tmp_path))
+    await ready(terminal)
+    await terminal.write(b"exit\r")
+    assert await terminal.wait_exited(12)
+    await reg.restart(terminal.id, by="owner")
+    await ready(terminal)
+    assert attempts == [component, component]

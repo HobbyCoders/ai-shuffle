@@ -12,6 +12,7 @@
 	import { onMount, onDestroy, tick, untrack, type Snippet } from 'svelte';
 	import { Plus, X, Search, Copy, Check, Eraser, Square, ChevronUp, ChevronDown, LoaderCircle } from 'lucide-svelte';
 	import TerminalView from './TerminalView.svelte';
+	import MonitorWatch from './MonitorWatch.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
 	import TerminalKeyBar from './TerminalKeyBar.svelte';
 	import { terminals, WORKER_TERMINALS, type TerminalRequest } from '$lib/stores/terminals.svelte';
@@ -30,6 +31,7 @@
 	type View = ReturnType<typeof TerminalView>;
 	let views = $state<Record<string, View | undefined>>({});
 	let pickerOpen = $state(false);
+	let watching = $state(false);
 	let creating = $state(false);
 	let searchOpen = $state(false);
 	let query = $state('');
@@ -119,6 +121,7 @@
 		const taken = terminals.takeRequest(sessionId, request.seq);
 		if (!taken || !ready) return;
 		requestOrigin = origin;
+		watching = false;
 		try {
 			const gate = blockAccess(taken.block, ready);
 			if (gate.kind !== 'ready') {
@@ -271,7 +274,7 @@
 
 <section class="tpanel" class:mobile aria-label="Terminal" bind:this={panelEl}>
 	<header class="bar">
-		{#if ready && tabState.ids.length}
+		{#if ready && tabState.ids.length && !watching}
 			<div class="tabs" role="tablist" aria-label={chatless ? 'Terminals on this worker' : 'Terminals in this chat'} bind:this={tabsEl}>
 				{#each tabState.ids as id, index (id)}
 					{@const info = terminals.terminal(id)}
@@ -291,7 +294,7 @@
 		{:else}
 			<div class="title"><span class="title-mark" aria-hidden="true">&gt;_</span>Terminal</div>
 		{/if}
-		{#if ready}
+		{#if ready && !watching}
 			<div class="plus-wrap" bind:this={plusWrap}>
 				<button class="tool" aria-label="New terminal" aria-haspopup="dialog" aria-expanded={pickerOpen}
 					title={`New terminal (${openCount} of ${limit} open on ${ready.worker})`}
@@ -309,7 +312,7 @@
 			</div>
 		{/if}
 		<div class="spacer"></div>
-		{#if ready && activeId}
+		{#if ready && activeId && !watching}
 			<div class="tools">
 				<button class="tool" aria-label="Search output" title="Search output" aria-pressed={searchOpen} onclick={toggleSearch}><Search size={15} /></button>
 				<button class="tool" aria-label="Copy output" title="Copy output (the selection, or everything)" onclick={copyOutput}>
@@ -319,6 +322,9 @@
 				<button class="tool stop" aria-label="Stop" title="Stop the running command (Ctrl+C)" disabled={!activeInfo?.busy || !canType}
 					onclick={() => activeId && views[activeId]?.type('\x03')}><Square size={13} /></button>
 			</div>
+		{/if}
+		{#if !chatless && probe.status !== 'denied'}
+			<button class="watch-toggle" aria-pressed={watching} onclick={() => { watching = !watching; pickerOpen = false; searchOpen = false; confirm = null; }}>{watching ? 'Back to shells' : 'Watch command'}</button>
 		{/if}
 		{@render panelActions?.()}
 	</header>
@@ -340,7 +346,8 @@
 		</div>
 	{/if}
 
-	<div class="stage">
+	{#if watching}<MonitorWatch {sessionId} />{/if}
+	<div class="stage" class:watch-hidden={watching}>
 		{#if probe.status === 'idle' || probe.status === 'loading' || (ready && !tabState.loaded)}
 			<div class="state" aria-busy="true"><LoaderCircle size={18} class="spin" /><span>Loading terminals…</span></div>
 		{:else if probe.status === 'denied'}
@@ -358,7 +365,7 @@
 		{/if}
 		{#if ready}
 			{#each tabState.ids as id (id)}
-				<TerminalView bind:this={views[id]} {id} {sessionId} active={id === activeId}
+				<TerminalView bind:this={views[id]} {id} {sessionId} active={id === activeId && !watching}
 					ctrlArmed={ctrl} onCtrlUsed={() => (ctrl = false)}
 					onPasteRequest={(text) => void queuePaste(id, text)} mayFocus={focusAllowed} />
 			{/each}
@@ -390,20 +397,25 @@
 			<button class="tool" aria-label="Dismiss" onclick={() => terminals.setNotice(sessionId, null)}><X size={13} /></button></div>
 	{/if}
 
-	{#if ready && activeInfo && statusLabel}
+	{#if ready && activeInfo && statusLabel && !watching}
 		<footer class="status" aria-live="polite">
 			<span class="state-pill" data-tone={statusLabel.tone}><span class="dot" data-tone={statusLabel.tone} aria-hidden="true"></span>{statusLabel.text}</span>
 			<span class="meta" title={activeInfo.cwd}>{activeInfo.shell} · {folderName(activeInfo.cwd)} · {ready.worker}</span>
 		</footer>
 	{/if}
 
-	{#if mobile && ready && activeId}
+	{#if mobile && ready && activeId && !watching}
 		<TerminalKeyBar {ctrl} disabled={!canType} onCtrl={() => (ctrl = !ctrl)}
 			onKey={(data) => { ctrl = false; if (activeId) views[activeId]?.type(data); }} />
 	{/if}
 </section>
 
 <style>
+	.stage.watch-hidden { display: none; }
+	.watch-toggle { flex-shrink: 0; min-height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--foreground); font-size: .75rem; cursor: pointer; }
+	.watch-toggle:hover, .watch-toggle[aria-pressed="true"] { background: var(--hover-overlay); }
+	.watch-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.watch-toggle:active { transform: translateY(1px); }
 	.tpanel { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--background); container-type: inline-size; font-family: var(--font-sans); }
 
 	/* ── Header: tabs, +, tools, panel actions ── */
