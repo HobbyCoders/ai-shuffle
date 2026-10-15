@@ -7,6 +7,7 @@ import { extractSource, type ExtractedFile } from './source-archive';
 import { isLeaseValue, isLicenseKeyValue, LEASE_HEADER, LICENSE_KEY_HEADER, publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
 import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
+import { durableJson, syncDirectory, type RollbackDatabase } from './database-restore';
 
 const REVISION = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -142,6 +143,17 @@ export function treeDigest(files: ExtractedFile[]): string {
   return hash.digest('hex');
 }
 
+interface RestoreJournal {
+  schemaVersion: 1;
+  phase: 'preparing' | 'ready' | 'restoring' | 'restored' | 'committed';
+  revision: string;
+  previous: string;
+  state: SourceState;
+  floor: { revision: string; sequence: number; uncertain?: true } | null;
+  reason?: string;
+}
+export type RestoreDatabaseFactory = (previous: string) => Promise<RollbackDatabase>;
+
 export class SourceUpdates {
   private state: SourceState = {};
   private running: string | null = null;
@@ -172,24 +184,27 @@ export class SourceUpdates {
     if (floor && floor.sequence > sequence) throw new Error('Cannot lower the database migration floor');
     const file = path.join(this.options.root, 'database-floor.json');
     if (floor === null) await fs.rename(file, file + `.corrupt-${Date.now()}-${randomUUID()}`);
-    const handle = await fs.open(file + '.tmp', 'w', 0o600);
-    try { await handle.writeFile(JSON.stringify({ schemaVersion: 1, revision, sequence, ...(uncertain ? { uncertain } : {}) })); await handle.sync(); }
-    finally { await handle.close(); }
-    await fs.rename(file + '.tmp', file);
-    // PostgreSQL must not start until the marker is durable, including the
-    // directory entry. Windows does not support opening directories for fsync.
-    if (process.platform !== 'win32') {
-      const directory = await fs.open(this.options.root, 'r');
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
+    await durableJson(file, { schemaVersion: 1, revision, sequence, ...(uncertain ? { uncertain } : {}) });
     this.migrationFloor = { revision, sequence, ...(uncertain ? { uncertain } : {}) };
   }
   private checking = false;
   private explicitActivation = false;
+  private rollbackDatabase: RestoreDatabaseFactory | null = null;
+  private cleanupFailure: string | null = null;
+  get cleanupError(): string | null { return this.cleanupFailure; }
+  /** A check retries only garbage collection, never database restoration. */
+  async retryCleanup(): Promise<void> {
+    const j = await this.journal();
+    if (!j) { this.cleanupFailure = null; return; }
+    if (j.phase !== 'committed' && !(j.phase === 'ready' && this.state.active === j.revision && !this.state.booting)) return;
+    await this.finishRollback(this.rollbackDatabase ?? (async () => { throw new Error('Database cleanup is not initialized yet; retry after the worker starts'); }));
+    if (this.cleanupFailure) throw new Error(this.cleanupFailure);
+  }
   /** UI downloads must not activate on ordinary exits, including older EXE launchers. */
   stageDownloads(): void { this.explicitActivation = true; }
   async prepareInstall(): Promise<void> {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
+    await this.retryCleanup();
     if (!this.state.staged) return;
     await this.assertCanRun(this.state.staged);
     this.state.pending = this.state.staged;
@@ -370,7 +385,7 @@ export class SourceUpdates {
     const file = path.join(this.options.root, 'state.json');
     this.state.schemaVersion = 1;
     const text = this.stateText();
-    const write = this.writes.then(async () => { await fs.writeFile(file + '.tmp', text, { mode: 0o600 }); await fs.rename(file + '.tmp', file); });
+    const write = this.writes.then(() => durableJson(file, JSON.parse(text)));
     this.writes = write.catch(() => {}); await write;
     this.trackedWrite = true;
   }
@@ -545,6 +560,16 @@ export class SourceUpdates {
   }
   private async finishBaselineRecovery(): Promise<void> {
     const baseline = this.options.baseline!;
+    // An unused snapshot must be irrevocably cancelled BEFORE a newer installer
+    // can open the database. A crash between these writes can only leave cleanup.
+    const journal = await this.journal();
+    if (journal && journal.phase !== 'committed') {
+      if (journal.phase !== 'ready' || this.state.booting || this.state.pending !== journal.revision ||
+          this.state.failed?.includes(journal.revision) || this.state.mayHaveMigrated?.[journal.revision] !== undefined) {
+        throw new Error('Finish database restoration before changing the installed baseline');
+      }
+      journal.phase = 'committed'; await durableJson(this.journalFile, journal);
+    }
     // Write ahead of clearing the block: a crash cannot erase the known floor.
     await this.writeMigrationFloor(baseline.revision, baseline.sequence);
     this.state.supersededFailed = [...new Set([...(this.state.supersededFailed ?? []), ...(this.state.failed ?? [])])];
@@ -614,6 +639,7 @@ export class SourceUpdates {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     if (this.checking) throw new Error('An application update is already running');
     if (this.state.booting) return { kind: 'current' };
+    await this.retryCleanup();
     if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12), ...await this.releaseInfo(this.pendingVersion) };
     this.checking = true;
     let unlock: (() => Promise<void>) | undefined;
@@ -703,6 +729,170 @@ export class SourceUpdates {
       if (!(await fs.stat(file)).isFile()) throw new Error('Application build is incomplete');
     }
     return { revision, directory: dir, desktopDir, serverDir: path.join(dir, 'server'), resources, python, node: path.join(resources, windows ? 'worker/node/node.exe' : 'worker/node/bin/node'), electron };
+  }
+  private get journalFile(): string { return path.join(this.options.root, 'restore-point.json'); }
+  private async journal(): Promise<RestoreJournal | null> {
+    let text: string;
+    try { text = await fs.readFile(this.journalFile, 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    const j = JSON.parse(text) as RestoreJournal;
+    if (!j || j.schemaVersion !== 1 || !['preparing', 'ready', 'restoring', 'restored', 'committed'].includes(j.phase) ||
+        !REVISION.test(j.revision) || !REVISION.test(j.previous) || j.previous === j.revision) throw new Error('Invalid database restore journal; no worker was started');
+    parseSourceState(JSON.stringify(j.state));
+    if (j.state.active && j.state.active !== j.previous) throw new Error('Restore point does not match previous application');
+    if (j.state.booting || j.state.pending || j.state.waiting || j.state.blocked || j.state.recoveryRequired || Object.keys(j.state.mayHaveMigrated ?? {}).length) throw new Error('Restore point contains unsafe application state');
+    if (j.floor !== null && (!j.floor || j.floor.revision !== j.previous || !Number.isSafeInteger(j.floor.sequence) || j.floor.sequence <= 0 || j.floor.uncertain)) throw new Error('Invalid restore point migration floor');
+    return j;
+  }
+  async rollbackNotice(): Promise<string | null> {
+    try { return JSON.parse(await fs.readFile(path.join(this.options.root, 'rollback-notice.json'), 'utf8')).message; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  }
+  async rollbackVersion(): Promise<string | null> {
+    const j = await this.journal();
+    return j && j.phase !== 'committed' ? this.releaseName(j.previous) : null;
+  }
+  private async releaseName(revision: string): Promise<string> {
+    try { return (await this.release(revision)).version ?? revision.slice(0, 12); }
+    catch { return revision.slice(0, 12); }
+  }
+  /** Fail closed before selecting code, even when the snapshot is out of space or interrupted. */
+  async prepareRollback(database: RestoreDatabaseFactory): Promise<void> {
+    this.rollbackDatabase = database;
+    const revision = this.state.pending;
+    // Existing fenced recovery (legacy failures) keeps its same/newer-build path, never a source-only rollback.
+    if (!revision || this.blocked || this.hasMigrationRisk) return;
+    const existing = await this.journal();
+    if (existing) {
+      if (existing.phase === 'committed' || (existing.phase === 'ready' && this.state.active === existing.revision && !this.state.booting)) {
+        // Cleanup failed last time. Keep running the healthy build; do not
+        // overwrite its retained point or activate an update without a new one.
+        this.state.staged = revision; delete this.state.pending; await this.save();
+        console.warn('Database restore point cleanup is pending; update activation deferred');
+        return;
+      }
+      if (existing.phase === 'ready' && existing.revision === revision) {
+        await (await database(existing.previous)).validate();
+        return;
+      }
+      throw new Error('An unfinished database restore point must be recovered first');
+    }
+    const previous = this.state.active ?? this.options.baseline?.revision;
+    if (!previous) throw new Error('Cannot prove the previous application for a database restore point');
+    await this.assertCanRun(previous);
+    if (this.migrationFloor?.uncertain) throw new Error('Cannot snapshot a database with uncertain migration provenance');
+    const state = { ...this.state };
+    delete state.pending; delete state.staged;
+    const j: RestoreJournal = { schemaVersion: 1, phase: 'preparing', revision, previous, state, floor: this.migrationFloor ?? null };
+    await durableJson(this.journalFile, j);
+    try {
+      await (await database(previous)).snapshot();
+      j.phase = 'ready'; await durableJson(this.journalFile, j);
+    } catch (error) {
+      j.phase = 'preparing';
+      j.reason = `The update was not started because its database restore point failed: ${error instanceof Error ? error.message : String(error)}`;
+      await durableJson(this.journalFile, j);
+      await this.recoverRollback(database);
+    }
+  }
+  /** A compatibility preflight rejected the build before select handed it the database. */
+  async cancelPreparedRollback(database: RestoreDatabaseFactory): Promise<void> {
+    const j = await this.journal();
+    if (!j) return;
+    if (j.phase !== 'ready' || this.state.booting || this.state.pending !== j.revision) throw new Error('Cannot discard a restore point after the update started');
+    j.phase = 'committed'; await durableJson(this.journalFile, j);
+    await this.recoverRollback(database);
+  }
+  /** Called before any first database start, including a launch delegated by an older launcher. */
+  async requireRestorePoint(database?: Pick<RollbackDatabase, 'validate'>): Promise<void> {
+    if (!this.state.booting) return;
+    // A legacy failed/retried revision (or its newer recovery build) must remain
+    // runnable behind its existing fence. A baseline marker alone is NOT that proof.
+    const migrated = this.state.mayHaveMigrated ?? {};
+    if (migrated[this.state.booting] !== undefined || this.state.failed?.some(revision => migrated[revision] !== undefined)) return;
+    const j = await this.journal();
+    if (!j || j.phase !== 'ready' || j.revision !== this.state.booting) throw new Error('No verified database restore point exists. Install the latest desktop launcher before starting this update.');
+    await database?.validate();
+  }
+  /** Healthy callbacks may only dispose of a point, never restore a database. */
+  async finishRollback(database: RestoreDatabaseFactory): Promise<void> {
+    this.rollbackDatabase = database;
+    const j = await this.journal();
+    if (!j) return;
+    if (j.phase !== 'committed') {
+      if (j.phase !== 'ready' || this.state.active !== j.revision || this.state.booting) {
+        throw new Error('Restore point does not belong to the confirmed healthy build; cleanup refused');
+      }
+    }
+    try {
+      if (j.phase !== 'committed') { j.phase = 'committed'; await durableJson(this.journalFile, j); }
+      await (await database(j.previous)).discard();
+      await fs.rm(this.journalFile, { force: true }); await syncDirectory(this.options.root);
+      this.cleanupFailure = null;
+    } catch (error) {
+      this.cleanupFailure = `An earlier update's cleanup could not finish (${String(error)}; journal: ${this.journalFile}). Close other AI Shuffle windows or programs using that folder, check its permissions, then choose Retry. You can also update by installing the latest version from hobbycoders.com.`;
+      // The data and build are already promoted. A locked file or missing old
+      // runtime must not turn garbage collection into a startup failure.
+      console.warn('Database restore point cleanup deferred until the next launch:', error);
+    }
+  }
+  private async assertRestoreProvenance(j: RestoreJournal): Promise<void> {
+    // Refresh the durable fence: another lifecycle step may have advanced it
+    // since this manager loaded. Never let an obsolete snapshot lower that floor.
+    await this.readMigrationFloor();
+    const floor = this.migrationFloor;
+    if (floor === null || (floor && floor.revision !== j.previous && floor.revision !== j.revision) ||
+        (floor?.revision === j.previous && floor.sequence !== j.floor?.sequence) ||
+        (floor?.revision === j.revision && floor.sequence !== await this.sequence(j.revision)) ||
+        (this.state.active && this.state.active !== j.previous) ||
+        (this.state.pending && this.state.pending !== j.revision) ||
+        Object.keys(this.state.mayHaveMigrated ?? {}).some(revision => revision !== j.previous && revision !== j.revision)) {
+      throw new Error('Database restore point no longer matches this database or the failed build; restoration refused');
+    }
+    if (j.phase !== 'preparing' && this.state.booting !== j.revision && this.state.staged !== j.revision &&
+        this.state.pending !== j.revision && !this.state.failed?.includes(j.revision)) {
+      throw new Error('Database restore point has no matching interrupted first start; restoration refused');
+    }
+  }
+  /** Resume at every write/rename boundary; the migration fence is lowered ONLY after a validated restore. */
+  async recoverRollback(database: RestoreDatabaseFactory, force = false): Promise<boolean> {
+    this.rollbackDatabase = database;
+    const j = await this.journal();
+    if (!j) return false;
+    if (j.phase === 'committed' || (j.phase === 'ready' && this.state.active === j.revision && !this.state.booting)) {
+      await this.finishRollback(database);
+      return false;
+    }
+    if (j.phase === 'ready' && !force && this.state.pending === j.revision && !this.state.booting && !this.state.failed?.includes(j.revision)) return false;
+    await this.assertRestoreProvenance(j);
+    // Before using old code or its database tools, verify that exact code still exists.
+    if (j.state.active) await this.application(j.previous);
+    else if (this.options.baseline?.revision !== j.previous) throw new Error('The bundled previous version is no longer installed; restore is blocked');
+    const db = await database(j.previous);
+    if (j.phase === 'ready') { j.phase = 'restoring'; await durableJson(this.journalFile, j); }
+    if (j.phase === 'restoring') {
+      await db.restore();
+      j.phase = 'restored'; await durableJson(this.journalFile, j);
+    }
+    // preparing means no update was ever handed the database. Only that phase can skip restore.
+    if (j.phase === 'preparing' || j.phase === 'restored') {
+      const floorFile = path.join(this.options.root, 'database-floor.json');
+      if (j.floor) await durableJson(floorFile, { schemaVersion: 1, ...j.floor });
+      else { await fs.rm(floorFile, { force: true }); await syncDirectory(this.options.root); }
+      const notice = j.reason ?? (j.phase === 'preparing'
+        ? `Update ${await this.releaseName(j.revision)} was not started: its database restore point was interrupted. Kept ${await this.releaseName(j.previous)}.`
+        : `Update ${await this.releaseName(j.revision)} failed to start. Restored the database and went back to ${await this.releaseName(j.previous)}. Your data is as it was before the update.`);
+      this.state = { ...j.state, failed: [...new Set([...(j.state.failed ?? []), j.revision])],
+        supersededFailed: [...new Set([...(j.state.supersededFailed ?? []), j.revision])] };
+      await durableJson(path.join(this.options.root, 'rollback-notice.json'), { message: notice });
+      this.running = null;
+      await this.save();
+      await this.readMigrationFloor();
+      j.phase = 'committed'; await durableJson(this.journalFile, j);
+      await this.finishRollback(database);
+      return true;
+    }
+    return false;
   }
   async select(preflight?: (application: SourceApplication) => Promise<void>): Promise<SourceApplication> {
     const revision = this.state.pending ?? this.state.active;

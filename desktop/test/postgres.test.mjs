@@ -24,6 +24,8 @@ const {
 const ROOT = '/data/postgres';
 const DATA = path.join(ROOT, 'data');
 const PID_FILE = path.join(DATA, 'postmaster.pid');
+const IDENTITY_FILE = path.join(ROOT, 'postmaster-identity.json');
+const identityRecord = (pid=4242) => JSON.stringify({schemaVersion:1,dataDir:DATA,startTime:1700000000,identity:{pid,executable:'/opt/pg/bin/postgres',started:`linux:boot:${pid}`,startedAt:1700000000}});
 const LOGS = '/data/logs';
 
 const bin = (name) => `/opt/pg/bin/${name}`;
@@ -69,9 +71,17 @@ function fakeRuntime({ files = {}, dirs = [], alive = [], results = {}, platform
 			const name = path.basename(file);
 			const reply = results[name];
 			const result = typeof reply === 'function' ? reply(args, opts, rt) : reply;
+			if (name === 'pg_ctl' && (result?.code ?? 0) === 0 && args.at(-1) === 'start') {
+				if (!fs.has(PID_FILE)) pgCtlWritingPid(fs)(args);
+				alive.push(parsePidFile(fs.get(PID_FILE)).pid);
+			}
 			return { code: 0, stdout: '', stderr: '', ...(result ?? {}) };
 		},
 		pidAlive: (pid) => alive.includes(pid),
+		signal: async (identity,signal) => {calls.push({op:'signal',identity,signal});fs.delete(PID_FILE);alive.splice(0);},
+		processIdentity: async pid => ({pid,executable:binaries.postgres,started:`linux:boot:${pid}`,startedAt:1700000000}),
+		realpath: async file => file,
+		saveIdentity: async (file,value) => fs.set(file,JSON.stringify(value)),
 		freePort: async (preferred) => {
 			calls.push({ op: 'freePort', preferred });
 			return preferred === 55555 ? preferred : freePort;
@@ -106,6 +116,29 @@ function supervisor(rt, credentials, extra = {}) {
 	return new PostgresSupervisor({ binaries, root: ROOT, logDir: LOGS, credentials, runtime: rt, ...extra });
 }
 
+test('update snapshot requires a stopped cluster and a clean control file; restore tolerates crash recovery state', async () => {
+ const {rt,execs}=fakeRuntime({files:{[path.join(DATA,'PG_VERSION')]:'16'},results:{pg_ctl:{code:3},pg_controldata:{stdout:'Database cluster state:               shut down\n'}}});
+ const pg=supervisor(rt,credentialsStore().credentials);
+ await pg.quiesce(true);
+ assert.equal(execs('pg_controldata').length,1);
+ assert.equal(execs('pg_controldata')[0].env.LC_ALL,'C');
+ assert.equal(execs('pg_controldata')[0].env.PGHOST,undefined);
+ await pg.quiesce(false); assert.equal(execs('pg_controldata').length,1);
+});
+test('update snapshot refuses live PostgreSQL, unclean shutdown and missing control tools',async()=>{
+ for(const results of [{pg_ctl:{code:0}},{pg_ctl:{code:3},pg_controldata:{stdout:'Database cluster state: in production'}},{pg_ctl:{code:3},pg_controldata:{code:-2}}]){
+  const {rt}=fakeRuntime({files:{[path.join(DATA,'PG_VERSION')]:'16'},results});
+  await assert.rejects(supervisor(rt,credentialsStore().credentials).quiesce(true),/PostgreSQL/);
+ }
+});
+test('update quiescence reaps an authenticated PostgreSQL orphan before accepting the cluster',async()=>{
+ const {rt,fs,execs,calls}=fakeRuntime({files:{[IDENTITY_FILE]:identityRecord(),[PID_FILE]:`4242\n${DATA}\n1700000000\n54321\n`,[path.join(DATA,'PG_VERSION')]:'16'},alive:[4242],results:{pg_isready:{code:0},pg_ctl:args=>{
+  if(args.at(-1)==='stop'){fs.delete(PID_FILE);return {code:0};}return {code:3};
+ },pg_controldata:{stdout:'Database cluster state: shut down\n'}}});
+ await supervisor(rt,credentialsStore().credentials).quiesce(true);
+ assert.equal(execs('pg_ctl').some(call=>call.args.at(-1)==='stop'),false);assert.equal(calls.find(call=>call.op==='signal').signal,'SIGINT');
+ assert.equal(fs.has(PID_FILE),false);
+});
 test('a fresh data directory gets initdb with a generated password, then a start, the database and saved managed settings', async () => {
 	const { rt, calls, fs, execs } = fakeRuntime({ results: { pg_ctl: null } });
 	rt.exec = ((original) => async (file, args, opts) => {
@@ -238,9 +271,10 @@ test('a stale postmaster.pid whose process is gone is removed before starting', 
 	assert.equal(execs('pg_ctl').filter((c) => c.args.at(-1) === 'stop').length, 0);
 });
 
-test('a live pid that answers as PostgreSQL is stopped through pg_ctl, never by hand', async () => {
+test('a live pid with matching OS and cluster identity is stopped through pg_ctl', async () => {
 	const { rt, fs, calls, execs } = fakeRuntime({
-		files: { [path.join(DATA, 'PG_VERSION')]: '16\n', [PID_FILE]: `4321\n${DATA}\n1700000000\n50000\n/tmp\n127.0.0.1\n` },
+		platform: 'win32',
+		files: { [IDENTITY_FILE]:identityRecord(4321), [path.join(DATA, 'PG_VERSION')]: '16\n', [PID_FILE]: `4321\n${DATA}\n1700000000\n50000\n/tmp\n127.0.0.1\n` },
 		dirs: [DATA],
 		alive: [4321],
 		results: { pg_isready: { code: 0 } }
@@ -259,6 +293,15 @@ test('a live pid that answers as PostgreSQL is stopped through pg_ctl, never by 
 	assert.ok(!calls.some((c) => c.op === 'remove' && c.target === PID_FILE), 'the postmaster removes its own pid file');
 });
 
+for(const mismatch of ['start','executable','cluster','pid-time','missing']) test(`a responding PG port cannot authorize stopping a mismatched ${mismatch} identity`,async()=>{
+ const saved=JSON.parse(identityRecord(4321));
+ const {rt,execs}=fakeRuntime({files:{[IDENTITY_FILE]:identityRecord(4321),[PID_FILE]:`4321\n${mismatch==='cluster'?'/other-cluster':DATA}\n${mismatch==='pid-time'?1700000001:1700000000}\n50000\n`,[path.join(DATA,'PG_VERSION')]:'16'},alive:[4321],results:{pg_isready:{code:0}}});
+ if(mismatch==='missing')await rt.remove(IDENTITY_FILE);
+ const identity=await rt.processIdentity(4321);rt.processIdentity=async()=>({...identity,...(mismatch==='start'?{started:'reused-pid'}:{}),...(mismatch==='executable'?{executable:'/unrelated/program'}:{})});
+ const pg=supervisor(rt,credentialsStore().credentials);await assert.rejects(pg.quiesce(),/identity|cluster/i);
+ assert.equal(execs('pg_ctl').filter(c=>c.args.at(-1)==='stop').length,0);
+ assert.equal(rt.existsSync(PID_FILE),true);
+});
 test('a live pid that is not PostgreSQL is left alone and reported', async () => {
 	const { rt, calls, execs } = fakeRuntime({
 		files: { [path.join(DATA, 'PG_VERSION')]: '16\n', [PID_FILE]: `4321\n${DATA}\n1700000000\n50000\n/tmp\n127.0.0.1\n` },
@@ -305,11 +348,12 @@ test('a failed pg_ctl start reports the server log tail and stop cleans up', asy
 	assert.equal(pg.connection(), null);
 	await pg.stop();
 	assert.equal(pg.state.phase, 'stopped');
-	assert.equal(execs('pg_ctl').filter((c) => c.args.at(-1) === 'stop').length, 1);
+	assert.equal(execs('pg_ctl').filter((c) => c.args.at(-1) === 'stop').length, 0, 'an unverified PID from a failed start is never signalled');
+	assert.equal(fs.has(PID_FILE), false, 'a dead PID file is removed without signalling');
 });
 
-test('stop is a no-op before the first start and uses fast shutdown afterwards', async () => {
-	const { rt, fs, execs } = fakeRuntime();
+test('Windows stop is a no-op before the first start and uses fast shutdown afterwards', async () => {
+	const { rt, fs, execs } = fakeRuntime({platform:'win32'});
 	rt.exec = ((original) => async (file, args, opts) => {
 		if (path.basename(file) === 'pg_ctl') pgCtlWritingPid(fs)(args);
 		return original(file, args, opts);
@@ -354,8 +398,8 @@ test('pure helpers: pg_ctl arguments, socket directory, pid file, plans', () => 
 	assert.equal(chooseSocketDir('darwin', '/Users/me/Library/Application Support/AI Shuffle/postgres', '/var/tmp'), '/Users/me/Library/Application Support/AI Shuffle/postgres');
 	assert.equal(chooseSocketDir('linux', `/${'x'.repeat(120)}`, '/tmp'), '/tmp');
 
-	assert.deepEqual(parsePidFile('123\n/d\n1\n5433\n/tmp\n127.0.0.1\n'), { pid: 123, dataDir: '/d', port: 5433 });
-	assert.deepEqual(parsePidFile('123\r\n'), { pid: 123, dataDir: null, port: null });
+	assert.deepEqual(parsePidFile('123\n/d\n1\n5433\n/tmp\n127.0.0.1\n'), { pid: 123, dataDir: '/d', startTime: 1, port: 5433 });
+	assert.deepEqual(parsePidFile('123\r\n'), { pid: 123, dataDir: null, startTime: null, port: null });
 	assert.equal(parsePidFile(''), null);
 	assert.equal(parsePidFile('abc\n'), null);
 
@@ -431,8 +475,9 @@ test('generated supervisor connection is handed off atomically BEFORE worker spa
 	const envFile = path.join(dir, 'worker.env'); const descriptor = path.join(dir, 'managed-postgres.json');
 	const codeFile = new URL('../dist/main/worker.js', import.meta.url); const localRequire = createRequire(codeFile);
 	const module = { exports: {} }; let spawns = 0;
-	const child = new EventEmitter(); child.pid = 424242; child.exitCode = null; child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+	const child = new EventEmitter(); child.pid = 424242; child.exitCode = null; child.signalCode = null; child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
 	const replacements = {
+		'./process-identity': { readProcessIdentity: async pid => ({pid,executable:'/fake/python',started:'fixture-child',startedAt:1700000000}) },
 		'node:child_process': { spawn: (_file, _args, options) => {
 			spawns++;
 			const actual = JSON.parse(readFileSync(descriptor, 'utf8'));

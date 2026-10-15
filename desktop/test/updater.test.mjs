@@ -25,6 +25,15 @@ function source(overrides = {}) { return {
 }; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
+test('cleanup failing after ready refuses before stopping services and Retry re-enables installation',async()=>{
+ const {updater,calls}=fixture();let locked=false;
+ const manager=source({check:async()=>ready,cleanupError:null,retryCleanup:async()=>{if(locked){manager.cleanupError='Cleanup locked: close programs, then Retry';throw Error(manager.cleanupError);}manager.cleanupError=null;}});
+ updater.useApplications(manager);await updater.check();assert.equal(updater.current.phase,'ready');
+ updater.onBeforeInstall(async()=>calls.push('stop'));locked=true;await updater.install();
+ assert.equal(updater.current.phase,'error');assert.match(updater.current.error,/Cleanup locked/);assert.deepEqual(calls,[]);
+ locked=false;await updater.check();await updater.install();assert.equal(calls[0],'stop');assert.equal(calls.at(-1),'quit');
+});
+
 test('worker bridge performs one-shot downloads and refuses expired or busy restarts', async () => {
  const {updater,calls}=fixture();let request={};const seen=[];
  updater.useApplications(source());

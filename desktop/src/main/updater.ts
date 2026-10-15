@@ -114,7 +114,12 @@ export class Updater {
     this.installedExecutable = installedExecutable;
     this.restartArgs = restartArgs;
     const pending = applications.pendingVersion !== applications.version ? applications.pendingVersion : null;
-    this.set({ phase: pending ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: null, message: null, percent: null, release: null, notes: null });
+    const cleanupError = applications.cleanupError ?? null;
+    // Modern managers must validate cleanup before advertising another restart.
+    // Legacy managers retain their existing synchronous pending-update behavior.
+    const needsCheck = !!pending && !!applications.retryCleanup;
+    this.set({ phase: cleanupError ? 'error' : pending && !needsCheck ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: cleanupError, message: null, percent: null, release: null, notes: null });
+    if (needsCheck && !cleanupError) void this.check();
     // Older source managers have no releaseInfo; the prompt then shows no notes.
     if (pending) void applications.releaseInfo?.(pending).then(info => {
       if (this.state.phase === 'ready' && this.state.version === pending.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
@@ -154,7 +159,7 @@ export class Updater {
   }
   stop(): void { if (this.bridgeTimer) clearInterval(this.bridgeTimer); this.bridgeTimer = null; if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
   async check(interactive = false): Promise<void> {
-    if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || this.state.phase === 'ready') return;
+    if ((!this.applications && !this.installers) || this.checking || this.downloading || this.installing || (this.state.phase === 'ready' && !this.applications?.retryCleanup)) return;
     this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking for updates…', installer: null });
     try {
       if (!await this.permitted()) { this.set({ phase: 'idle' }); return; }
@@ -194,6 +199,8 @@ export class Updater {
       if (!await this.permitted()) { this.installing = false; return; }
       const refused = await this.installGuard();
       if (refused) { this.set({ error: refused }); this.installing = false; return; }
+      // A lock can appear after a ready check. Refuse before stopping services.
+      await this.applications.retryCleanup?.();
       stopping = true;
       await this.beforeInstall();
       await this.applications.prepareInstall?.();
@@ -221,7 +228,7 @@ export class Updater {
       app.quit();
     } catch (error) {
       try { await this.applications.cancelInstall?.(); } catch (failure) { error = failure; }
-      this.set({ phase: 'ready', error: String(error), message: null });
+      this.set({ phase: this.applications.cleanupError ? 'error' : 'ready', error: String(error), message: null });
       if (stopping) {
         try { await this.installFailed(error); }
         catch (failure) { this.set({ error: `${String(error)}\nRestart failed: ${String(failure)}` }); }

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { resolveRuntime, buildWorkerEnv, claudeCliSetupMessage, isPortFree, fetchHealth, HEALTH_TOTAL_TIMEOUT_MS, attachTokenHash, readWorkerProcessRecord, requestBrowserHandoff, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
 const { writePrivateFile } = require('../dist/main/private-file.js');
+const { readProcessIdentity } = require('../dist/main/process-identity.js');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const postgres = { host: 'db', port: 5432, user: 'u', password: 'pw', database: 'd' };
@@ -441,7 +442,7 @@ test('DESK-04: an orphaned worker from a previous run is stopped by pid and a fr
 	const orphanExit = new Promise((resolve) => orphan.once('exit', resolve));
 	for (let i = 0; i < 50 && !(await fetchHealth(f.port)).ok; i++) await sleep(100);
 	assert.equal((await fetchHealth(f.port)).attach, attachTokenHash(token));
-	await writePrivateFile(f.processFile, JSON.stringify({ version: 1, pid: orphan.pid, token, port: f.port }));
+	await writePrivateFile(f.processFile, JSON.stringify({ version: 1, pid: orphan.pid, token, port: f.port, identity: await readProcessIdentity(orphan.pid) }));
 	const state = await f.supervisor.start();
 	assert.equal(state.phase, 'ready');
 	assert.equal(state.external, false, 'the orphan is not adopted');
@@ -467,7 +468,7 @@ test('DESK-04: a preview build also reclaims its own orphan but still never atta
 	t.after(() => { try { process.kill(-orphan.pid, 'SIGKILL'); } catch { /* gone */ } });
 	const orphanExit = new Promise((resolve) => orphan.once('exit', resolve));
 	for (let i = 0; i < 50 && !(await fetchHealth(f.port)).ok; i++) await sleep(100);
-	await writePrivateFile(f.processFile, JSON.stringify({ version: 1, pid: orphan.pid, token, port: f.port }));
+	await writePrivateFile(f.processFile, JSON.stringify({ version: 1, pid: orphan.pid, token, port: f.port, identity: await readProcessIdentity(orphan.pid) }));
 	const state = await f.supervisor.start();
 	assert.equal(state.phase, 'ready');
 	assert.equal(state.external, false);

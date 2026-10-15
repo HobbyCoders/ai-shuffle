@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { afterRename } from './helpers/crash-rename.mjs';
 const require = createRequire(import.meta.url);
 const { SourceUpdates, verifySourceManifest, treeDigest, requiredLauncher } = require('../dist/main/source-updates.js');
 const { buildEnvironment, removeSourceDirectory } = require('../dist/main/source-build.js');
@@ -56,8 +57,11 @@ async function installedLauncher(f, rejectRevision = null, {baseline={revision:A
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/installed-entry.js',import.meta.url),'utf8'),{module,exports:module.exports,process:{platform:'linux',env:{},versions:{electron:'44.2.0'},resourcesPath:f.root,argv:[]},require:id=>{
   if(id==='electron')return {app,dialog:{showMessageBox:async options=>{events.push(options.title);dialogs.push(options);return {response:answer};}}};
   if(id==='node:path')return path;
-  if(id==='node:fs')return {promises:{readFile:async file=>file.endsWith('desktop-build.json')?JSON.stringify(baseline):f.options.publicKey}};
+  if(id==='node:fs')return {promises:{...fs,readFile:async file=>file.endsWith('desktop-build.json')?JSON.stringify(baseline):file.endsWith('application-update-key.pem')?f.options.publicKey:fs.readFile(file,'utf8')}};
   if(id==='./source-updates')return {SourceUpdates:InstalledUpdates};
+  if(id==='./postgres')return {resolvePostgresBinaries:()=>({}),PostgresSupervisor:class {async quiesce(){}}};
+  if(id==='./database-restore')return {ColdClusterCopy:class {constructor(_root,quiesce){this.quiesce=quiesce;}async validate(){}async snapshot(){await this.quiesce(true);events.push('snapshot');}async restore(){await this.quiesce(false);events.push('restore');}async discard(){events.push('discard');}}};
+  if(id==='./worker')return {quiesceRecordedWorker:async()=>events.push('quiesce')};
   if(id==='./launcher-swap')return require('../dist/main/launcher-swap.js');
   if(id==='./installed-host')return {InstallerRequired,installedExecutable:()=>'/test/AI Shuffle.AppImage',saveInstalledHost:async()=>{},requireInstalledElectron:async()=>{}};
   if(id==='./index'){events.push('bundled');return {};}
@@ -69,6 +73,209 @@ async function installedLauncher(f, rejectRevision = null, {baseline={revision:A
  }});
  return {start:()=>module.exports.startInstalled(),events,dialogs,get manager(){return manager;}};
 }
+async function rollbackFixture(t, { baseline = false } = {}) {
+ const f = await fixture(t);
+ if (baseline) f.options.baseline = { revision: A, sequence: 50 };
+ const u = f.create(); await u.load();
+ if (!baseline) { await f.release(A); await u.download(); await u.select(); await u.databaseStarting(); await u.healthy(); }
+ else await u.databaseStarting();
+ await f.release(B); await u.download();
+ const phases = [], calls = [];
+ const journal = async () => JSON.parse(await fs.readFile(path.join(f.root, 'restore-point.json'), 'utf8'));
+ const db = {
+  validate: async () => {},
+  snapshot: async () => { phases.push((await journal()).phase); calls.push('snapshot'); },
+  restore: async () => { phases.push((await journal()).phase); calls.push('restore'); },
+  discard: async () => { phases.push((await journal()).phase); calls.push('discard'); },
+ };
+ return { f, u, db, calls, phases, journal, factory: async previous => { assert.equal(previous, A); return db; } };
+}
+test('restore journal: baseline C supersedes unused A-to-B snapshot without ever restoring it',async t=>{
+ const {f,u,factory,calls,journal}=await rollbackFixture(t);await u.prepareRollback(factory);
+ f.options.baseline={revision:C,sequence:300};
+ const installed=f.create();await installed.load();await installed.recoverRollback(factory);
+ assert.equal((await journal()).phase,'ready');
+ await installed.useNewerBaseline();
+ assert.equal((await journal()).phase,'committed','cancel is durable before C can start');
+ await installed.databaseStarting();await installed.healthy();await installed.finishRollback(factory);
+ assert.deepEqual(calls,['snapshot','discard']);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+ assert.equal(installed.version,C);
+});
+test('restore journal: bundled A cleanup survives replacement by C and does not need A files or binaries',async t=>{
+ const {f,u,factory}=await rollbackFixture(t,{baseline:true});await u.prepareRollback(factory);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',A,'release.json')),{code:'ENOENT'});
+ f.options.baseline={revision:C,sequence:300};const installer=f.create();await installer.load();await installer.useNewerBaseline();
+ const pgroot=path.join(f.root,'pg');await fs.mkdir(path.join(pgroot,'update-snapshot'),{recursive:true});
+ const {ColdClusterCopy}=require('../dist/main/database-restore.js');let runtimeReads=0;
+ const cleanup=async()=>new ColdClusterCopy(pgroot,async()=>{runtimeReads++;throw Error('bundled A no longer exists');});
+ const restart=f.create();await restart.load();await restart.recoverRollback(cleanup);
+ assert.equal(runtimeReads,0);assert.equal(restart.version,C);assert.equal(restart.blocked,false);
+ await assert.rejects(fs.stat(path.join(f.root,'restore-point.json')),{code:'ENOENT'});
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+});
+test('restore journal: persistent cleanup lock reports actionable error, then Retry enables activation without a futile restart',async t=>{
+ const {f,u,factory,db,journal}=await rollbackFixture(t,{baseline:true});u.stageDownloads();await u.prepareRollback(factory);
+ let retries=0;db.discard=async()=>{retries++;throw Error('EACCES: locked snapshot');};
+ await u.cancelPreparedRollback(factory);await u.cancelInstall();
+ assert.equal((await journal()).phase,'committed');assert.equal(u.version,A);assert.equal(u.blocked,false);
+ for(let i=0;i<2;i++)await assert.rejects(u.check(),/cleanup could not finish.*EACCES.*restore-point.json.*Retry.*hobbycoders.com/);
+ await assert.rejects(u.prepareInstall(),/cleanup could not finish/);
+ assert.ok(retries>=3);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'))).pending,undefined);
+ const events=[],states=[],module={exports:{}};
+ vm.runInNewContext(await fs.readFile(new URL('../dist/main/updater.js',import.meta.url),'utf8'),{
+  module,exports:module.exports,process:{env:{}},Date,setTimeout,clearTimeout,setInterval,clearInterval,
+  require:id=>id==='electron'?{app:{relaunch:()=>events.push('restart'),quit:()=>events.push('quit')}}:path,
+ });
+ const updater=new module.exports.Updater();updater.onBeforeInstall(async()=>events.push('stop'));
+ const reported=new Promise(resolve=>updater.subscribe(state=>{states.push(state.phase);if(state.phase==='error')resolve();}));
+ updater.useApplications(u,'/test/launcher');await reported;
+ assert.equal(states.includes('ready'),false);assert.match(updater.current.error,/EACCES.*Retry/);
+ await updater.install();assert.deepEqual(events,[],'no futile restart or service stop');
+ db.discard=async()=>{};await updater.check();assert.equal(updater.current.phase,'ready');assert.equal(u.cleanupError,null);
+ await updater.install();assert.deepEqual(events,['stop','restart','quit']);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'))).pending,B);
+ await u.prepareRollback(factory);assert.equal((await journal()).phase,'ready','a new point is taken only after cleanup');
+});
+test('restore journal: a newer bundled installer escapes locked cleanup and removes the obsolete update offer',async t=>{
+ const {f,u,factory,db}=await rollbackFixture(t,{baseline:true});u.stageDownloads();await u.prepareRollback(factory);
+ db.discard=async()=>{throw Error('locked snapshot');};await u.cancelPreparedRollback(factory);await u.cancelInstall();
+ f.options.baseline={revision:C,sequence:300};const installer=f.create();await installer.load();await installer.recoverRollback(factory);await installer.useNewerBaseline();
+ assert.equal(installer.version,C);assert.equal(installer.pendingVersion,null);assert.equal(installer.hasSourceState,false);assert.equal(installer.blocked,false);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+ // Cleanup still cannot bypass a real filesystem lock, but cannot prevent C starting.
+ await installer.finishRollback(async()=>{throw Error('unavailable cleanup');});assert.equal(installer.version,C);
+ db.discard=async()=>{};await installer.recoverRollback(factory);assert.equal(installer.cleanupError,null);
+});
+test('restore journal: stale snapshot cannot lower newer baseline floor, even via forced recovery or healthy callback',async t=>{
+ const {f,u,factory,calls}=await rollbackFixture(t);await u.prepareRollback(factory);await u.select();await u.databaseStarting();await u.failed();
+ await fs.writeFile(path.join(f.root,'database-floor.json'),JSON.stringify({schemaVersion:1,revision:C,sequence:300}));
+ const installed=f.create();await installed.load();
+ await assert.rejects(installed.recoverRollback(factory,true),/no longer matches/);
+ await assert.rejects(installed.finishRollback(factory),/cleanup refused/);
+ assert.deepEqual(calls,['snapshot']);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).sequence,300);
+});
+test('restore journal: interruption before baseline floor promotion leaves cleanup-only journal',async t=>{
+ const {f,u,factory,calls,journal}=await rollbackFixture(t);await u.prepareRollback(factory);f.options.baseline={revision:C,sequence:300};
+ const installed=f.create();await installed.load();
+ const undo=afterRename(async(from,to)=>{if(to.endsWith('restore-point.json'))throw Error('power loss');});
+ try{await assert.rejects(installed.useNewerBaseline(),/power loss/);}finally{undo();}
+ assert.equal((await journal()).phase,'committed');
+ const restart=f.create();await restart.load();await restart.recoverRollback(factory);await restart.useNewerBaseline();
+ assert.deepEqual(calls,['snapshot','discard']);assert.equal(restart.version,C);
+});
+test('restore journal: signed download to snapshot to migrated crash to previous source and floor', async t => {
+ const { f, u, db, calls, phases, journal, factory } = await rollbackFixture(t);
+ await u.prepareRollback(factory); assert.equal((await journal()).phase, 'ready');
+ await u.select(); const child=f.create(); await child.attach(B); await child.requireRestorePoint(); await child.databaseStarting();
+ const restart=f.create(); await restart.load(); assert.equal(restart.blocked,true);
+ await restart.recoverRollback(factory);
+ assert.deepEqual(calls,['snapshot','restore','discard']); assert.deepEqual(phases,['preparing','restoring','committed']);
+ assert.equal((await restart.select()).revision,A); assert.equal(restart.hasMigrationRisk,false);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).revision,A);
+ assert.match(await restart.rollbackNotice(), /0.9.2.*went back to 0.9.1/);
+ await assert.rejects(restart.check(), /This revision failed to start/);
+ const again=f.create(); await again.load(); assert.equal((await again.select()).revision,A);
+});
+test('restore journal: no unprotected first database start, including an older-launcher bundled handoff',async t=>{
+ for(const baseline of [false,true]){
+  const {f,u}=await rollbackFixture(t,{baseline});await u.select();
+  const child=f.create();await child.attach(B);
+  await assert.rejects(child.requireRestorePoint(),/No verified database restore point/);
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).revision,A);
+ }
+});
+test('restore journal: legacy same-build retry retains its migration fence without inventing an old restore point',async t=>{
+ const {f,u}=await rollbackFixture(t);await u.select();await u.databaseStarting();await u.failed();
+ await u.retryFailed();await u.select();const child=f.create();await child.attach(B);
+ await child.requireRestorePoint();assert.equal(child.hasMigrationRisk,true);
+});
+test('restore journal: snapshot errors never select the update and retain a clear failure reason', async t => {
+ const { f, u, db, calls, factory } = await rollbackFixture(t);
+ db.snapshot=async()=>{throw Error('disk full');};
+ await u.prepareRollback(factory);
+ assert.equal((await u.select()).revision,A); assert.deepEqual(calls,['discard']);
+ assert.match(await u.rollbackNotice(),/restore point failed: disk full/);
+ await assert.rejects(u.check(), /This revision failed to start/);
+});
+test('restore journal: compatibility rejection discards an unused copy without blacklisting the staged update',async t=>{
+ const {f,u,factory,calls}=await rollbackFixture(t);await u.prepareRollback(factory);
+ await u.cancelPreparedRollback(factory);u.stageDownloads();await u.cancelInstall();
+ const restart=f.create();await restart.load();assert.equal(await restart.recoverRollback(factory),false);
+ assert.deepEqual(calls,['snapshot','discard']);assert.equal((await restart.select()).revision,A);
+ assert.equal((await restart.check()).kind,'ready');
+});
+test('restore journal: a copy cannot be discarded as a preflight rejection after selection',async t=>{
+ const {u,factory}=await rollbackFixture(t);await u.prepareRollback(factory);await u.select();
+ await assert.rejects(u.cancelPreparedRollback(factory),/after the update started/);
+});
+test('restore journal: interrupted snapshot cancels before first start, bundled baseline remains selectable', async t => {
+ const { f, u, db, factory } = await rollbackFixture(t,{baseline:true});
+ let entered; const started=new Promise(resolve=>entered=resolve);
+ db.snapshot=async()=>{entered(); await new Promise(()=>{});};
+ void u.prepareRollback(factory); await started; // process died with the preparing journal durable
+ const restart=f.create(); await restart.load(); await restart.recoverRollback(factory);
+ assert.equal(restart.version,A); assert.equal(restart.hasSourceState,false); assert.equal(restart.hasMigrationRisk,false);
+ assert.match(await restart.rollbackNotice(),/interrupted/);
+});
+test('restore journal: ready before selection can resume; a crash during handoff restores even before databaseStarting', async t => {
+ const { f, u, calls, factory } = await rollbackFixture(t);
+ await u.prepareRollback(factory);
+ const restart=f.create(); await restart.load(); assert.equal(await restart.recoverRollback(factory),false);
+ await restart.prepareRollback(factory); assert.deepEqual(calls,['snapshot']);
+ await restart.select();
+ const crash=f.create(); await crash.load(); await crash.recoverRollback(factory);
+ assert.equal((await crash.select()).revision,A); assert.deepEqual(calls,['snapshot','restore','discard']);
+});
+for(const boundary of ['restoring','restored','floor','state','committed']) test(`restore journal resumes power loss at ${boundary} without lowering the fence early`,async t=>{
+ const { f,u,db,factory,journal }=await rollbackFixture(t);
+ await u.prepareRollback(factory); await u.select(); await u.databaseStarting(); await u.failed();
+ let crashed=false;
+ const undo=afterRename(async(from,to)=>{
+  const phase=to.endsWith('restore-point.json') ? JSON.parse(await fs.readFile(to,'utf8')).phase : null;
+  const match=phase===boundary || (boundary==='floor'&&to.endsWith('database-floor.json')) || (boundary==='state'&&to.endsWith('state.json'));
+  if(match&&!crashed){crashed=true;throw Error('power loss');}
+ });
+ try { await assert.rejects(u.recoverRollback(factory),/power loss/); } finally { undo(); }
+ assert.equal(crashed,true);
+ if(boundary==='restoring') assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).revision,B);
+ const restart=f.create(); await restart.load(); await restart.recoverRollback(factory);
+ assert.equal((await restart.select()).revision,A); assert.equal(restart.hasMigrationRisk,false);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'))).revision,A);
+});
+test('restore journal: restore failure retains snapshot and fence; explicit Go back retries it',async t=>{
+ const {f,u,db,factory,journal}=await rollbackFixture(t);
+ await u.prepareRollback(factory); await u.select(); await u.databaseStarting(); await u.failed();
+ const restore=db.restore; db.restore=async()=>{throw Error('file locked');};
+ await assert.rejects(u.recoverRollback(factory),/file locked/);
+ assert.equal((await journal()).phase,'restoring'); assert.equal(u.blocked,true);
+ await assert.rejects(u.select(),/healthy/); assert.equal(await u.rollbackVersion(),'0.9.1');
+ db.restore=restore; await u.recoverRollback(factory,true); assert.equal((await u.select()).revision,A);
+});
+test('restore journal: healthy promotion and cleanup interruption keep the new build, never restore old data',async t=>{
+ const {f,u,db,factory,calls,journal}=await rollbackFixture(t);
+ await u.prepareRollback(factory); await u.select(); await u.databaseStarting(); await u.healthy();
+ db.discard=async()=>{throw Error('file locked');};
+ await u.recoverRollback(factory); assert.equal((await journal()).phase,'committed');
+ db.discard=async()=>calls.push('discard');
+ const restart=f.create(); await restart.load(); await restart.recoverRollback(factory);
+ assert.equal((await restart.select()).revision,B); assert.deepEqual(calls,['snapshot','discard']);
+});
+test('restore journal: a corrupt journal or missing previous build never clears the migration fence',async t=>{
+ const {f,u,factory}=await rollbackFixture(t);
+ await u.prepareRollback(factory); await u.select(); await u.databaseStarting(); await u.failed();
+ await fs.rm(path.join(f.root,'versions',A,'build.json'));
+ await assert.rejects(u.recoverRollback(factory)); assert.equal(u.hasMigrationRisk,true);
+ await fs.writeFile(path.join(f.root,'restore-point.json'),'{}');
+ await assert.rejects(u.recoverRollback(factory),/Invalid database restore journal/); assert.equal(u.hasMigrationRisk,true);
+});
+test('restore journal: bundled-baseline first-start failure returns to the bundled code, never a fake source directory',async t=>{
+ const {f,u,factory}=await rollbackFixture(t,{baseline:true});
+ await u.prepareRollback(factory); await u.select(); await u.databaseStarting();
+ const restart=f.create(); await restart.load(); await restart.recoverRollback(factory);
+ assert.equal(restart.version,A); assert.equal(restart.hasSourceState,false); assert.equal(restart.hasMigrationRisk,false);
+ const launcher=await installedLauncher(f); await launcher.start(); assert.ok(launcher.events.includes('bundled')); assert.ok(!launcher.events.includes(B));
+});
 test('Linux startup drops only incomplete unselected downloads, validates healthy code and permits a real re-download',async t=>{
  for(const active of [false,true])for(const missing of ['build.json','release.json']){
   const f=await fixture(t);const seed=f.create();await seed.load();

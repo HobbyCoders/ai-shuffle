@@ -27,6 +27,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync, renameSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import { readProcessIdentity, assertProcessIdentity, isProcessIdentity, execWithIdentity, signalVerifiedProcess, type ProcessIdentity } from './process-identity';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -338,6 +339,8 @@ export interface WorkerProcessRecord {
 	port: number;
 	/** The listener token the worker was started with; absent in records from older app versions. */
 	listener?: string;
+	/** Captured from the spawned process, not from its HTTP responder. Legacy records have no proof. */
+	identity?: ProcessIdentity;
 }
 
 export async function readWorkerProcessRecord(file: string): Promise<WorkerProcessRecord | null> {
@@ -346,7 +349,8 @@ export async function readWorkerProcessRecord(file: string): Promise<WorkerProce
 		if (record.version !== 1 || typeof record.token !== 'string' || !/^[a-f0-9]{64}$/.test(record.token)) return null;
 		const pid = Number.isSafeInteger(record.pid) && (record.pid as number) > 0 ? (record.pid as number) : null;
 		const port = Number.isSafeInteger(record.port) ? (record.port as number) : 0;
-		return { version: 1, pid, token: record.token, port, ...(isListenerToken(record.listener) ? { listener: record.listener } : {}) };
+		return { version: 1, pid, token: record.token, port, ...(isListenerToken(record.listener) ? { listener: record.listener } : {}),
+			...(isProcessIdentity(record.identity) && record.identity.pid === pid ? { identity: record.identity } : {}) };
 	} catch {
 		return null;
 	}
@@ -362,11 +366,14 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 /** Stop a worker we started earlier and its children; waits until the pid is gone. */
-export async function terminateProcessTree(pid: number, timeoutMs = 10_000): Promise<boolean> {
+export async function terminateProcessTree(pid: number, timeoutMs = 10_000, identity?: ProcessIdentity): Promise<boolean> {
+	if (identity) await assertProcessIdentity(identity);
 	if (process.platform === 'win32') {
-		spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+		if (identity) await execWithIdentity(identity, 'taskkill.exe', ['/PID', String(pid), '/T', '/F']);
+		else spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
 	} else {
-		try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+		if (identity) await signalVerifiedProcess(identity, 'SIGTERM', true);
+		else try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
 	}
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -374,10 +381,30 @@ export async function terminateProcessTree(pid: number, timeoutMs = 10_000): Pro
 		await sleep(100);
 	}
 	if (process.platform !== 'win32') {
-		try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+		if (identity) await signalVerifiedProcess(identity, 'SIGKILL', true);
+		else try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
 		await sleep(200);
 	}
 	return !isProcessAlive(pid);
+}
+
+/** Before touching a restore point, reap only an authenticated worker from this profile. */
+export async function quiesceRecordedWorker(stateDir: string): Promise<void> {
+	const file = path.join(stateDir, 'worker-process.json');
+	const previous = await readWorkerProcessRecord(file);
+	if (!previous) {
+		if (existsSync(file)) throw new Error('The worker process record is unreadable; database recovery is blocked');
+		return;
+	}
+	if (!previous.pid) {
+		if (!previous.port || !await isPortFree(previous.port)) throw new Error('Cannot prove the previous worker is stopped; database recovery is blocked');
+		return;
+	}
+	if (!isProcessAlive(previous.pid)) return;
+	const health = await fetchHealth(previous.port);
+	if (!health.ok || health.service !== 'ai-shuffle' || health.attach !== attachTokenHash(previous.token)) throw new Error('Cannot verify the previous worker is stopped; database restore is blocked');
+	if (!previous.identity) throw new Error('The previous worker has no verified OS process identity; close it normally before database recovery');
+	if (!await terminateProcessTree(previous.pid, 10_000, previous.identity)) throw new Error('The previous worker could not be reaped; database restore is blocked');
 }
 
 /** Owner-only launch barrier, also used when attaching to a running local worker. */
@@ -606,7 +633,8 @@ export class WorkerSupervisor extends EventEmitter {
 				// Our own orphan from a run that did not shut down: stop it and start
 				// fresh on the current database rather than adopting it as external.
 				this.log(`stopping worker ${previous!.pid} left behind by a previous run`);
-				if (!(await terminateProcessTree(previous!.pid!)) || !(await this.waitForFreePorts([port, protectedPort]))) {
+				if (!previous!.identity) throw new Error('The previous worker has no verified OS process identity; close it normally before restarting');
+				if (!(await terminateProcessTree(previous!.pid!, 10_000, previous!.identity)) || !(await this.waitForFreePorts([port, protectedPort]))) {
 					this.set({ phase: 'failed', error: `A worker from a previous run (pid ${previous!.pid}) is still holding port ${port} and could not be stopped.` });
 					return this.state;
 				}
@@ -695,10 +723,19 @@ export class WorkerSupervisor extends EventEmitter {
 		void exited.then((code) => this.onExit(code, child));
 		this.set({ pid: child.pid ?? null, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 		try {
-			const record: WorkerProcessRecord = { version: 1, pid: child.pid ?? null, token: attachToken, port, listener };
+			const identity = child.pid ? await readProcessIdentity(child.pid) : undefined;
+			// Capture the actual image of our child (venv/script launchers may exec a
+			// different image). Never turn a PID read after child exit into ownership.
+			if (this.child !== child || child.exitCode !== null || child.signalCode !== null) throw new Error('Worker exited before its OS identity could be recorded');
+			const record: WorkerProcessRecord = { version: 1, pid: child.pid ?? null, token: attachToken, port, listener, identity };
 			await writePrivateFile(this.processFile, JSON.stringify(record));
 		} catch (error) {
 			this.log(`could not record the worker process: ${(error as Error).message}`);
+			if (this.child === child && child.exitCode === null && child.signalCode === null) {
+				await this.stop({ force: true });
+				this.set({ phase: 'failed', error: 'Could not persist the worker OS process identity; startup stopped safely' });
+				return this.state;
+			}
 		}
 
 		const deadline = Date.now() + (this.opts.readyTimeoutMs ?? 180_000);
@@ -706,6 +743,11 @@ export class WorkerSupervisor extends EventEmitter {
 			if (this.child !== child || this.state.phase !== 'starting') return this.state;
 			const ready = await fetchHealth(port, '/health/ready', 2000, this.opts.healthTotalMs);
 			if (ready.ok) {
+				// A script/venv launcher may exec its interpreter after spawn. Refresh
+				// from the still-owned child before publishing readiness.
+				const identity = await readProcessIdentity(child.pid!);
+				if (this.child !== child || child.exitCode !== null || child.signalCode !== null) throw new Error('Worker exited before its identity could be confirmed');
+				await writePrivateFile(this.processFile, JSON.stringify({ version: 1, pid: child.pid, token: attachToken, port, listener, identity }));
 				await this.finishStartup(port);
 				return this.state;
 			}
@@ -870,6 +912,7 @@ export class WorkerSupervisor extends EventEmitter {
 			}
 			await Promise.race([exited, sleep(3000)]);
 		}
+		if (child.pid && isProcessAlive(child.pid)) throw new Error('The worker could not be reaped; database recovery is blocked');
 	}
 
 	/** Called only after the worker and database have stopped on app exit. */
