@@ -520,14 +520,18 @@ def _splice_inner_calls(
 
 
 def _splice_compaction_cards(
-    entries: List[Dict[str, Any]], sdk_session_id: str
+    entries: List[Dict[str, Any]], sdk_session_id: str, *, node_ids: set[str]
 ) -> List[Dict[str, Any]]:
     """Read-only audit projection; never add cards to rewind's node indexes.
 
     Use recorder rows (not engine summaries). Whitelist the display metadata
     even for private exports, so sharing cannot pick up a delegated summary or
-    internal recovery fields. The engine timestamp keeps late replay appends
-    at the original boundary, rather than at the time recovery ran.
+    internal recovery fields. A persisted node anchor places each boundary
+    after the full projected group of the node the engine had reached, even
+    when clocks tie or go backwards. ``node_ids`` identifies the original path;
+    entries spliced after each node (steers, inner calls) belong to that group.
+    Older/missing anchors fall back to engine time (after tied user entries),
+    not the time recovery appended the recorder row.
     """
     from app.db.base import get_cursor, get_db
     from app.db.compat import ph
@@ -543,6 +547,14 @@ def _splice_compaction_cards(
         )
         rows = cursor.fetchall()
     cards: List[Dict[str, Any]] = []
+    node_indexes: Dict[str, int] = {}
+    source_node = None
+    for i, entry in enumerate(entries):
+        if entry.get("uuid") in node_ids:
+            source_node = entry["uuid"]
+        if source_node is not None:
+            node_indexes[source_node] = i
+    anchored: Dict[int, List[Dict[str, Any]]] = {}
     for row in rows:
         payload = _as_dict(row["payload"])
         if payload.get("subtype") != "compact_boundary":
@@ -554,25 +566,32 @@ def _splice_compaction_cards(
             "requested_by", "context_post_tokens", "post_tokens_basis",
         ) if k in metadata}
         stamp = _iso(data.get("compaction_event_ts")) or str(row["created_at"])
-        cards.append({
+        card = {
             "uuid": row["id"], "type": "system", "subtype": "compact_boundary",
             "timestamp": stamp, "content": "",
             "data": {"compact_metadata": safe},
-        })
-    if not cards:
+        }
+        anchor = data.get("compaction_after_node_id")
+        if isinstance(anchor, str) and anchor in node_indexes:
+            # Recorder sequence orders multiple boundaries at the same node.
+            anchored.setdefault(node_indexes[anchor], []).append(card)
+        else:
+            cards.append(card)
+    if not cards and not anchored:
         return entries
     cards.sort(key=lambda e: _entry_epoch(e) or 0)
     out: List[Dict[str, Any]] = []
     index = 0
-    for entry in entries:
+    for entry_index, entry in enumerate(entries):
         stamp = _entry_epoch(entry)
-        while (
-            index < len(cards) and stamp is not None
-            and (_entry_epoch(cards[index]) or 0) <= stamp
-        ):
+        while index < len(cards) and stamp is not None:
+            card_stamp = _entry_epoch(cards[index]) or 0
+            if card_stamp > stamp or (card_stamp == stamp and entry.get("type") == "user"):
+                break
             out.append(cards[index])
             index += 1
         out.append(entry)
+        out.extend(anchored.get(entry_index, []))
     out.extend(cards[index:])
     return out
 
@@ -663,7 +682,8 @@ def fluid_transcript_entries(
         return entries
     entries = _splice_delivered_steers(entries, nodes, sdk_session_id)
     return _splice_compaction_cards(
-        _splice_inner_calls(entries, sdk_session_id), sdk_session_id
+        _splice_inner_calls(entries, sdk_session_id), sdk_session_id,
+        node_ids={node["node_id"] for node in nodes},
     )
 
 

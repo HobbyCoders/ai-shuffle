@@ -86,6 +86,10 @@ async def test_compact_now_reduces_the_view_without_a_model_call(tmp_path) -> No
     assert summary[0].trimmed == [] and summary[0].spans == []
     decisions = [e for e in events if isinstance(e, ContextCompaction) and e.reason != MANUAL_COMPACT_REASON]
     assert decisions and all(e.decision_reason == "manual" for e in decisions)
+    assert all(e.node_id == nodes_before[-1].node_id for e in decisions + summary)
+    persisted = [e for e in await JsonlStore(tmp_path).events_since(sid, 0)
+                 if isinstance(e, ContextCompaction)]
+    assert all(e.node_id == nodes_before[-1].node_id for e in persisted)
     assert loop._compactor.estimate_view_tokens(nodes_after) < view_before
     terminal = [e for e in events if isinstance(e, TurnComplete)][-1]
     assert terminal.num_model_calls == 0

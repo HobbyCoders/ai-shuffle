@@ -93,6 +93,40 @@ def _seed(session_id="ses_fixture"):
     return session_id
 
 
+@pytest.mark.parametrize("anchor", ["u2", None, "missing", ["malformed"]])
+@pytest.mark.parametrize("card_stamp", [1000.0, 2000.0])
+def test_splice_compaction_uses_node_anchor_then_legacy_tie_fallback(mock_db, anchor, card_stamp):
+    from app.core.provider.fluid_transcript import _splice_compaction_cards
+    from app.db import database, session_events
+
+    database.create_session("cards", "default")
+    database.update_session("cards", sdk_session_id="fluid-cards")
+    data = {"compact_metadata": {"trigger": "auto"}, "compaction_event_ts": card_stamp}
+    if anchor is not None:
+        data["compaction_after_node_id"] = anchor
+    session_events.append_events("cards", [
+        {"type": "system.compaction_boundary", "payload": {
+            "subtype": "compact_boundary", "data": data}},
+        {"type": "system.compaction_boundary", "payload": {
+            "subtype": "compact_boundary", "data": data}},
+    ])
+    # Two different queries at the same instant: sorting after the first tied
+    # user is insufficient. Anchors must also override a misleading clock.
+    entries = [{"uuid": uuid, "type": role, "timestamp": "1970-01-01T00:16:40+00:00"}
+               for uuid, role in [("u1", "user"), ("a1", "assistant"),
+                                  ("u2", "user"), ("a2", "assistant")]]
+    before = [dict(e) for e in entries]
+    result = _splice_compaction_cards(
+        entries, "fluid-cards", node_ids={entry["uuid"] for entry in entries},
+    )
+    cards = [e for e in result if e.get("subtype") == "compact_boundary"]
+    assert [e["uuid"] for e in cards] == [r["id"] for r in session_events.get_events("cards")]
+    slot = 3 if anchor == "u2" else (1 if card_stamp == 1000.0 else 4)
+    assert result == entries[:slot] + cards + entries[slot:]
+    assert entries == before
+    assert all(set(card["data"]) == {"compact_metadata"} for card in cards)
+
+
 def test_fixture_matches_real_fluid_serialization():
     """The hand-written fixture JSON must equal what fluid actually persists."""
     pytest.importorskip("fluid")
@@ -465,6 +499,43 @@ def test_live_messages_show_a_mid_turn_steer_in_order(mock_db):
     assert [m["checkpoint_backed"] for m in users] == [True, False, True]
     order = [m["content"] for m in messages if m["type"] in (None, "text")]
     assert order.index("also end with STEERED") < order.index("done STEERED")
+
+
+@pytest.mark.parametrize("anchored", [False, True])
+@pytest.mark.parametrize("projection", ["delivered_steer", "inner_calls"])
+def test_compaction_follows_complete_projected_node_group(mock_db, anchored, projection):
+    from app.db import database, session_events
+    from tests.core.test_fluid_transcript_code_mode import _seed_cell
+
+    if projection == "delivered_steer":
+        session_id = _seed_steered()
+        anchor, stamp = "n3", 1002.0  # tied with the result and its interjection
+        expected_group = ["n3", "n3_steer_0"]
+    else:
+        session_id = _seed_cell()
+        anchor, stamp = "n2", 1001.5
+        expected_group = ["n2", "evt_c1", "evt_c1_result", "evt_c2", "evt_c2_result"]
+    nodes_before = load_fluid_path(session_id)
+    projected_before = fluid_transcript_entries(session_id, include_inner_calls=True)
+    uuids = [entry["uuid"] for entry in projected_before]
+    start = uuids.index(anchor)
+    assert uuids[start:start + len(expected_group)] == expected_group
+    database.create_session("group-cards", "default")
+    database.update_session("group-cards", sdk_session_id=session_id)
+    data = {"compact_metadata": {"trigger": "auto"}, "compaction_event_ts": stamp}
+    if anchored:
+        data["compaction_after_node_id"] = anchor
+    session_events.append_events("group-cards", [{
+        "type": "system.compaction_boundary",
+        "payload": {"subtype": "compact_boundary", "data": data},
+    }])
+
+    entries = fluid_transcript_entries(session_id, include_inner_calls=True)
+    [card] = [entry for entry in entries if entry.get("subtype") == "compact_boundary"]
+    end = start + len(expected_group)
+    assert entries == projected_before[:end] + [card] + projected_before[end:]
+    assert load_fluid_path(session_id) == nodes_before
+    assert len(fluid_transcript_entries(session_id)) == len(nodes_before)
 
 
 def test_steers_never_shift_the_rewind_checkpoints(mock_db):

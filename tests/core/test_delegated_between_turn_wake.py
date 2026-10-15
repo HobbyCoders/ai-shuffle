@@ -299,17 +299,22 @@ _CARD = {"compact_metadata": {"trigger": "auto", "pre_tokens": 150000, "post_tok
 
 
 async def _expected_card(adapter) -> dict:
-    """The card plus its replay identity and original time, both taken from
-    the one persisted engine boundary: the recorder derives its row id from
-    the identity (a replay cannot add a second row), and exports place the
-    card at the timestamp. Neither field is display metadata."""
+    """The card's identity, time and optional anchor from its persisted event.
+
+    The recorder derives its row id from the identity (replay cannot add a
+    second row); exports place the card after the anchored node's full group,
+    with timestamps as the legacy fallback. These are not display metadata.
+    """
     from fluid.events import ContextCompaction
 
     loop = adapter._engine
     [boundary] = [e for e in await loop.store.events_since(loop.session_id, -1)
                   if isinstance(e, ContextCompaction)]
-    return {**_CARD, "compaction_event_id": f"{boundary.session_id}:{boundary.seq}",
+    card = {**_CARD, "compaction_event_id": f"{boundary.session_id}:{boundary.seq}",
             "compaction_event_ts": boundary.ts}
+    if boundary.node_id:
+        card["compaction_after_node_id"] = boundary.node_id
+    return card
 
 
 @pytest.mark.asyncio
@@ -318,8 +323,10 @@ async def test_a_mid_turn_compaction_reaches_the_chat_as_its_card(monkeypatch, t
     gives no card in the parent chat."""
     adapter = await _adapter(monkeypatch, tmp_path, "midturn")
     try:
-        assert _compaction_cards(await _turn_messages(adapter, "first")) == [
-            await _expected_card(adapter)]
+        cards = _compaction_cards(await _turn_messages(adapter, "first"))
+        expected = await _expected_card(adapter)
+        assert expected["compaction_after_node_id"]
+        assert cards == [expected]
         assert _compaction_cards(await _turn_messages(adapter, "second")) == []
     finally:
         await adapter.disconnect()
