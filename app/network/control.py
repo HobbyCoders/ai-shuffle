@@ -506,7 +506,19 @@ def _chat_access_changed_handler():
     return handle_changed
 
 
+def _terminal_handler():
+    from app.network.terminal_relay import handle
+    return handle
+
+
+def _terminal_owner_handler():
+    from app.network.terminal_relay import handle_owner
+    return handle_owner
+
+
 _LAZY_HANDLERS = {
+    "terminal": _terminal_handler,
+    "terminal-owner": _terminal_owner_handler,
     "app-logs": _app_logs_handler,
     "chat-access": _chat_access_handler,
     "chat-access-changed": _chat_access_changed_handler,

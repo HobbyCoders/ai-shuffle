@@ -7,7 +7,7 @@
  * come back from `GET /terminals?session_id=`. Terminal input and output never
  * enter this store; each tab's socket feeds its emulator directly.
  */
-import { terminalsApi, TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
+import { terminalsApi, TerminalApiError, type TerminalInfo, type TerminalTargets, type CreateTerminal } from '$lib/api/terminals';
 import { sidePanel, sessionPanelKey } from './side-panel.svelte';
 import type { ProbeState } from '$lib/terminal/gating';
 import type { CommandBlock } from '$lib/terminal/commands';
@@ -65,6 +65,7 @@ function clearRequestTimer(sessionId: string) {
 export function probeFromTargets(result: TerminalTargets): ProbeState {
 	return {
 		status: 'ready',
+		targets: result.targets,
 		supported: result.supported,
 		reason: result.unsupported_reason,
 		worker: result.worker?.name || 'this worker',
@@ -181,7 +182,7 @@ export const terminals = {
 	},
 
 	/** Open a terminal for the chat. Returns null and sets a notice on refusal. */
-	async create(sessionId: string, options: { cwd?: string | null; shell?: string | null; cols?: number; rows?: number } = {}): Promise<TerminalInfo | null> {
+	async create(sessionId: string, options: CreateTerminal = {}): Promise<TerminalInfo | null> {
 		notices[sessionId] = null;
 		try {
 			const info = await terminalsApi.create({ session_id: chatFor(sessionId), ...options });

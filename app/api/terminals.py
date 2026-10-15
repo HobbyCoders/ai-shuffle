@@ -158,6 +158,7 @@ def _error(exc: TerminalError) -> JSONResponse:
 class TargetRef(BaseModel):
     kind: str = Field("worker", max_length=32)
     worker_id: Optional[str] = Field(None, max_length=200)
+    grant_id: Optional[str] = Field(None, max_length=200)
 
 
 class CreateTerminal(BaseModel):
@@ -173,12 +174,9 @@ class PasteBody(BaseModel):
     text: str = Field(..., max_length=service.PASTE_MAX_CHARS * 2)
 
 
-def _check_target(target: Optional[TargetRef], worker: Dict[str, Any]) -> None:
-    if target is None:
-        return
-    if target.kind != service.TARGET_WORKER or (target.worker_id and target.worker_id != worker["id"]):
-        raise TerminalError("target_unavailable",
-                            "Terminals can open on this worker only for now.", 400)
+def _remote_target(target: Optional[TargetRef], worker: Dict[str, Any]) -> bool:
+    return target is not None and (target.kind != service.TARGET_WORKER
+                                   or bool(target.worker_id and target.worker_id != worker["id"]))
 
 
 def _listing(worker: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
@@ -202,7 +200,10 @@ async def list_terminals(session_id: Optional[str] = Query(None, max_length=200)
 @router.get("/targets")
 async def terminal_targets(session_id: Optional[str] = Query(None, max_length=200),
                            who: str = Depends(require_terminal_owner)):
+    from app.core.terminal_targets import targets
+
     worker = await run_sync(service.worker_identity)
+    other_targets = await targets(session_id)
     is_supported = service.supported()
     shells = service.available_shells() if service.pty_supported() else []
     default_folder = None
@@ -211,13 +212,17 @@ async def terminal_targets(session_id: Optional[str] = Query(None, max_length=20
             path, source = await run_sync(service.resolve_folder, session_id, None)
             default_folder = {"path": path, "source": source}
         except TerminalError as exc:
-            return _error(exc)
+            if exc.code != "chat_on_other_worker" or not other_targets:
+                return _error(exc)
+            # Do not let a mirrored chat's local-folder refusal hide peer targets.
+            is_supported = False
+            shells = []
     return {
         "worker": worker,
-        "supported": is_supported,
-        "unsupported_reason": None if is_supported else "Terminals are not supported on this worker yet.",
+        "supported": is_supported or bool(other_targets),
+        "unsupported_reason": None if is_supported or other_targets else "Terminals are not supported on this worker yet.",
         "targets": [{"kind": service.TARGET_WORKER, "worker_id": worker["id"], "name": worker["name"],
-                     "available": is_supported}],
+                     "available": is_supported}, *other_targets],
         "shells": [{"name": s["name"], "default": s["default"]} for s in shells],
         "default_shell": shells[0]["name"] if shells else None,
         "default_folder": default_folder,
@@ -227,15 +232,17 @@ async def terminal_targets(session_id: Optional[str] = Query(None, max_length=20
 
 
 @router.post("", status_code=201)
-async def create_terminal(body: CreateTerminal, who: str = Depends(require_terminal_owner)):
+async def create_terminal(body: CreateTerminal, request: Request, who: str = Depends(require_terminal_owner)):
     try:
-        if body.target is not None:
-            _check_target(body.target, await run_sync(service.worker_identity))
-        cwd, cwd_root = await run_sync(_validated_terminal_cwd, body.cwd)
-        terminal = await registry.create(
-            created_by=who, session_id=body.session_id, cwd=cwd, cwd_root=cwd_root, shell=body.shell,
-            cols=body.cols, rows=body.rows,
-        )
+        if _remote_target(body.target, await run_sync(service.worker_identity)):
+            from app.core.terminal_targets import create
+            terminal = await create(registry, body, who, request)
+        else:
+            cwd, cwd_root = await run_sync(_validated_terminal_cwd, body.cwd)
+            terminal = await registry.create(
+                created_by=who, session_id=body.session_id, cwd=cwd, cwd_root=cwd_root, shell=body.shell,
+                cols=body.cols, rows=body.rows,
+            )
     except TerminalError as exc:
         return _error(exc)
     return JSONResponse({"terminal": terminal.to_dict()}, status_code=201)

@@ -195,6 +195,11 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
+    # Release safety: recipient-side kill switch. Enabling this alone does not
+    # enable peer terminals: independent recipient-verified owner grants are
+    # still required and are not implemented yet. SSH grants are unaffected.
+    network_peer_terminals: bool = False
+
     # Persistent on-disk logging (app.core.file_logging). Survives an app crash
     # and container recreation, unlike the in-memory ring buffer behind
     # /api/v1/logs (lost on crash) and docker stdout (lost on container

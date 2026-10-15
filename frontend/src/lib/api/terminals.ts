@@ -33,11 +33,13 @@ export interface TerminalWorker { id: string; name: string; platform: string; co
 
 export interface TerminalList { terminals: TerminalInfo[]; open: number; running: number; limit: number; worker: TerminalWorker }
 
+export interface TerminalTarget { kind: string; worker_id?: string; grant_id?: string; name: string; available: boolean }
+
 export interface TerminalTargets {
 	worker: TerminalWorker;
 	supported: boolean;
 	unsupported_reason: string | null;
-	targets: { kind: string; worker_id: string; name: string; available: boolean }[];
+	targets: TerminalTarget[];
 	shells: { name: string; default: boolean }[];
 	default_shell: string | null;
 	default_folder: { path: string; source: string } | null;
@@ -45,7 +47,7 @@ export interface TerminalTargets {
 	open: number;
 }
 
-export interface CreateTerminal { session_id?: string | null; cwd?: string | null; shell?: string | null; cols?: number; rows?: number }
+export interface CreateTerminal { target?: Pick<TerminalTarget, 'kind' | 'worker_id' | 'grant_id'>; session_id?: string | null; cwd?: string | null; shell?: string | null; cols?: number; rows?: number }
 
 /** A refused request. `code` is the service code, or `http_<status>` for auth and other errors. */
 export class TerminalApiError extends Error {
