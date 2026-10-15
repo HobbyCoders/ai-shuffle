@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import tempfile
 import threading
@@ -51,6 +52,8 @@ def is_offered(kind: str) -> bool:
     """Keep unfinished runtimes in source without advertising or installing them."""
     if kind not in CATALOG["packages"]:
         raise ValueError("Unknown connector plugin")
+    if kind == "msteams" and os.environ.get("AI_SHUFFLE_EXPERIMENTAL_MSTEAMS") == "1":
+        return True
     return CATALOG["packages"][kind].get("offered", True)
 
 

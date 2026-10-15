@@ -26,6 +26,19 @@ def test_catalog_installs_verified_sources(local_package):
     with pytest.raises(ValueError, match="Unknown connector plugin"):
         packages.require_installed("unknown")
 
+def test_teams_experimental_opt_in(local_package, monkeypatch):
+    from app.core.connector_service import get_connector_type_info
+
+    monkeypatch.setenv("AI_SHUFFLE_EXPERIMENTAL_MSTEAMS", "true")
+    assert not packages.is_offered("msteams")
+    monkeypatch.setenv("AI_SHUFFLE_EXPERIMENTAL_MSTEAMS", "1")
+    assert packages.is_offered("msteams")
+    assert "msteams" in {p.connector_type for p in packages.available()}
+    assert "msteams" in {t["type"] for t in get_connector_type_info()}
+    assert packages.install("msteams").id == packages.require_installed("msteams")
+    assert packages.CATALOG["packages"]["msteams"]["offered"] is False
+
+
 def test_teams_is_retained_but_not_offered_or_installable(local_package):
     from app.core.connector_service import get_connector_type_info
 
