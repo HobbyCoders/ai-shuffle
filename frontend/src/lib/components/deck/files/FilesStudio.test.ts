@@ -46,6 +46,49 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const sent = (method: string, path: string) => calls.filter((c) => c.method === method && c.url.pathname.endsWith(path));
 const list = () => screen.getByRole('region', { name: 'File list' });
 
+describe('FilesStudio local terminal actions', () => {
+	it.each([
+		['Open terminal here', ''],
+		['Open terminal in docs', 'docs'],
+		['Open terminal in parent folder of notes.md', ''],
+	])('sends the Files path from %s and displays a refusal without opening a shell', async (label, path) => {
+		const original = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+			if (String(input).endsWith('/terminals/from-files')) {
+				calls.push({ url: new URL(input, 'http://localhost'), method: init.method ?? 'GET', body: init.body });
+				return json({ detail: 'Only the owner can use terminals.' }, 403);
+			}
+			return original(input, init);
+		}));
+		await mount();
+		await fireEvent.click(screen.getByRole('button', { name: label }));
+		expect(await screen.findByRole('complementary', { name: 'Terminal on this worker' })).toBeTruthy();
+		expect(await screen.findByText('Only the owner can use terminals.')).toBeTruthy();
+		const posts = sent('POST', '/terminals/from-files');
+		expect(posts).toHaveLength(1);
+		expect(JSON.parse(String(posts[0].body))).toEqual({ path });
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide terminal panel' }));
+		expect(screen.queryByRole('complementary', { name: 'Terminal on this worker' })).toBeNull();
+	});
+
+	it('uses the current folder for a nested file, rather than the filename', async () => {
+		const original = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+			if (String(input).endsWith('/terminals/from-files')) {
+				calls.push({ url: new URL(input, 'http://localhost'), method: init.method ?? 'GET', body: init.body });
+				return json({ detail: 'Folder is unavailable.' }, 400);
+			}
+			return original(input, init);
+		}));
+		await mount();
+		await fireEvent.click(within(list()).getByText('docs'));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open terminal in parent folder of guide.md' }));
+		expect(await screen.findByText('Folder is unavailable.')).toBeTruthy();
+		expect(JSON.parse(String(sent('POST', '/terminals/from-files')[0].body))).toEqual({ path: 'docs' });
+	});
+});
+
+
 async function mount() {
 	render(FilesStudio);
 	await within(list()).findByText('notes.md');
