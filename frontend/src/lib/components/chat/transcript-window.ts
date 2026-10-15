@@ -19,6 +19,76 @@
  * visibility and idle-budget decisions can be tested independently.
  */
 
+/** A bounded, half-open slice. Capture a keyed DOM anchor before moving it and
+ * restore that anchor after rendering; bottom-distance compensation is not safe
+ * when a shift also unmounts rows at the opposite edge. */
+export interface TranscriptRange { readonly start: number; readonly end: number }
+
+/** Pure per-view range controller. No timers or idle expansion: only explicit
+ * navigation moves into history. Apply the same controller to rows inside a
+ * large group: an outer-item cap alone cannot bound nested mounted rows. */
+export function createTranscriptWindow({ cap = 120, step = 30 }: { cap?: number; step?: number } = {}) {
+	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1) {
+		throw new RangeError('Transcript cap and step must be positive integers');
+	}
+	// Keep overlap for a keyed DOM anchor whenever the cap permits it.
+	step = Math.min(step, Math.max(1, cap - 1));
+	let count = 0;
+	let range: TranscriptRange = { start: 0, end: 0 };
+	let followsTail = true;
+	let hidden = false;
+	let streaming = false;
+	function move(start: number): TranscriptRange {
+		start = Math.max(0, Math.min(Math.floor(start), Math.max(0, count - cap)));
+		const end = Math.min(count, start + cap);
+		if (start !== range.start || end !== range.end) range = { start, end };
+		return range;
+	}
+	function toTail(): TranscriptRange {
+		followsTail = true;
+		return move(count - cap);
+	}
+	function extendOlder(): TranscriptRange {
+		followsTail = false;
+		return move(range.start - step);
+	}
+	return {
+		cap,
+		get visibleRange() { return range; },
+		get followsTail() { return followsTail; },
+		get isStreaming() { return streaming; },
+		setItemCount(next: number, options: { followTail?: boolean } = {}): TranscriptRange {
+			if (!Number.isInteger(next) || next < 0) throw new RangeError('Item count must be a non-negative integer');
+			count = next;
+			followsTail = options.followTail ?? followsTail;
+			// Hidden appends do not grow the mounted slice. Shrinks must still clamp.
+			if (hidden && count >= range.end) return range;
+			return move(followsTail ? count - cap : range.start);
+		},
+		extendOlder,
+		loadOlder: extendOlder,
+		extendNewer(): TranscriptRange {
+			const next = move(range.start + step);
+			followsTail = next.end === count;
+			return next;
+		},
+		windowAround(index: number): TranscriptRange {
+			if (!Number.isInteger(index) || index < 0 || index >= count) return range;
+			followsTail = false;
+			return move(index - Math.floor(cap / 2));
+		},
+		toTail,
+		onStreamingChange(value: boolean): TranscriptRange {
+			streaming = value;
+			return range;
+		},
+		pauseWhenHidden(value: boolean): TranscriptRange {
+			hidden = value;
+			return hidden ? range : move(followsTail ? count - cap : range.start);
+		}
+	};
+}
+
 /** Schedule optional history mounting only when the view can use it. Explicit
  * scroll/search/turn navigation stays outside this background scheduler. */
 export function createWindowBackfill(canRun: () => boolean, expand: () => void) {
