@@ -78,6 +78,7 @@ function fakeRuntime({ files = {}, dirs = [], alive = [], results = {}, platform
 			return { code: 0, stdout: '', stderr: '', ...(result ?? {}) };
 		},
 		pidAlive: (pid) => alive.includes(pid),
+		signal: async (identity,signal) => {calls.push({op:'signal',identity,signal});fs.delete(PID_FILE);alive.splice(0);},
 		processIdentity: async pid => ({pid,executable:binaries.postgres,started:`linux:boot:${pid}`,startedAt:1700000000}),
 		realpath: async file => file,
 		saveIdentity: async (file,value) => fs.set(file,JSON.stringify(value)),
@@ -131,11 +132,11 @@ test('update snapshot refuses live PostgreSQL, unclean shutdown and missing cont
  }
 });
 test('update quiescence reaps an authenticated PostgreSQL orphan before accepting the cluster',async()=>{
- const {rt,fs,execs}=fakeRuntime({files:{[IDENTITY_FILE]:identityRecord(),[PID_FILE]:`4242\n${DATA}\n1700000000\n54321\n`,[path.join(DATA,'PG_VERSION')]:'16'},alive:[4242],results:{pg_isready:{code:0},pg_ctl:args=>{
+ const {rt,fs,execs,calls}=fakeRuntime({files:{[IDENTITY_FILE]:identityRecord(),[PID_FILE]:`4242\n${DATA}\n1700000000\n54321\n`,[path.join(DATA,'PG_VERSION')]:'16'},alive:[4242],results:{pg_isready:{code:0},pg_ctl:args=>{
   if(args.at(-1)==='stop'){fs.delete(PID_FILE);return {code:0};}return {code:3};
  },pg_controldata:{stdout:'Database cluster state: shut down\n'}}});
  await supervisor(rt,credentialsStore().credentials).quiesce(true);
- assert.ok(execs('pg_ctl').some(call=>call.args.at(-1)==='stop'));
+ assert.equal(execs('pg_ctl').some(call=>call.args.at(-1)==='stop'),false);assert.equal(calls.find(call=>call.op==='signal').signal,'SIGINT');
  assert.equal(fs.has(PID_FILE),false);
 });
 test('a fresh data directory gets initdb with a generated password, then a start, the database and saved managed settings', async () => {
@@ -272,6 +273,7 @@ test('a stale postmaster.pid whose process is gone is removed before starting', 
 
 test('a live pid with matching OS and cluster identity is stopped through pg_ctl', async () => {
 	const { rt, fs, calls, execs } = fakeRuntime({
+		platform: 'win32',
 		files: { [IDENTITY_FILE]:identityRecord(4321), [path.join(DATA, 'PG_VERSION')]: '16\n', [PID_FILE]: `4321\n${DATA}\n1700000000\n50000\n/tmp\n127.0.0.1\n` },
 		dirs: [DATA],
 		alive: [4321],
@@ -350,8 +352,8 @@ test('a failed pg_ctl start reports the server log tail and stop cleans up', asy
 	assert.equal(fs.has(PID_FILE), false, 'a dead PID file is removed without signalling');
 });
 
-test('stop is a no-op before the first start and uses fast shutdown afterwards', async () => {
-	const { rt, fs, execs } = fakeRuntime();
+test('Windows stop is a no-op before the first start and uses fast shutdown afterwards', async () => {
+	const { rt, fs, execs } = fakeRuntime({platform:'win32'});
 	rt.exec = ((original) => async (file, args, opts) => {
 		if (path.basename(file) === 'pg_ctl') pgCtlWritingPid(fs)(args);
 		return original(file, args, opts);

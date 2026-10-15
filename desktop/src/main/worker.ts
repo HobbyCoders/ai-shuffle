@@ -27,7 +27,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync, renameSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { readProcessIdentity, assertProcessIdentity, isProcessIdentity, execWithIdentity, type ProcessIdentity } from './process-identity';
+import { readProcessIdentity, assertProcessIdentity, isProcessIdentity, execWithIdentity, signalVerifiedProcess, type ProcessIdentity } from './process-identity';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -372,7 +372,8 @@ export async function terminateProcessTree(pid: number, timeoutMs = 10_000, iden
 		if (identity) await execWithIdentity(identity, 'taskkill.exe', ['/PID', String(pid), '/T', '/F']);
 		else spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
 	} else {
-		try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+		if (identity) await signalVerifiedProcess(identity, 'SIGTERM', true);
+		else try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
 	}
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -380,8 +381,8 @@ export async function terminateProcessTree(pid: number, timeoutMs = 10_000, iden
 		await sleep(100);
 	}
 	if (process.platform !== 'win32') {
-		if (identity) await assertProcessIdentity(identity);
-		try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+		if (identity) await signalVerifiedProcess(identity, 'SIGKILL', true);
+		else try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
 		await sleep(200);
 	}
 	return !isProcessAlive(pid);

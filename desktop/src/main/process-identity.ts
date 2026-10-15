@@ -64,7 +64,9 @@ export async function readProcessIdentity(pid: number): Promise<ProcessIdentity>
   if (process.platform === 'linux') {
     const stat = () => fs.readFile(`/proc/${pid}/stat`, 'utf8');
     const start = (text: string) => text.slice(text.lastIndexOf(')') + 2).split(' ')[19]; // field 22; comm can contain spaces/parentheses
-    const before = start(await stat());
+    const first = await stat();
+    if (first.slice(first.lastIndexOf(')') + 2).startsWith('Z ')) throw Object.assign(new Error('Process has exited'), { code: 'ESRCH' });
+    const before = start(first);
     const executable = await fs.readlink(`/proc/${pid}/exe`);
     const boot = (await fs.readFile('/proc/stat', 'utf8')).match(/^btime (\d+)$/m)?.[1];
     clockTicks ??= run('getconf', ['CLK_TCK']).then(result => Number(result.stdout.trim()));
@@ -80,6 +82,36 @@ export async function readProcessIdentity(pid: number): Promise<ProcessIdentity>
 }
 export async function assertProcessIdentity(expected: ProcessIdentity): Promise<void> {
   if (!isProcessIdentity(expected) || !sameProcess(expected, await readProcessIdentity(expected.pid))) throw new Error('Process identity mismatch; no process was signalled');
+}
+/**
+ * POSIX has no kernel-bound pidfd API in Node. Re-read identity immediately
+ * before process.kill, without launching pg_ctl/kill between check and signal.
+ * A microsecond-scale PID-reuse window remains: this is NOT an atomic identity
+ * guarantee. A native pidfd helper would be needed to eliminate it. Post-signal
+ * checks diagnose a change and prevent any follow-up signal to the replacement.
+ */
+export async function signalVerifiedProcess(expected: ProcessIdentity, signal: NodeJS.Signals, group = false, log: (message: string) => void = console.warn): Promise<void> {
+  if (process.platform === 'win32') throw new Error('Windows must use handle-bound process signalling');
+  await assertProcessIdentity(expected);
+  try { process.kill(group ? -expected.pid : expected.pid, signal); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    if (group) {
+      // No group: verify again immediately before signalling the individual PID.
+      await assertProcessIdentity(expected);
+      try { process.kill(expected.pid, signal); }
+      catch (failure) { if ((failure as NodeJS.ErrnoException).code !== 'ESRCH') throw failure; }
+    }
+  }
+  try { await assertProcessIdentity(expected); }
+  catch (error) {
+    if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      log(`Verified process ${expected.pid} exited after ${signal}`);
+      return;
+    }
+    log(`Process ${expected.pid} identity could not be confirmed after ${signal}; no follow-up signal is safe`);
+    throw error;
+  }
 }
 /** On Windows keep the queried handle open while invoking the signal command, preventing PID reuse. */
 export async function execWithIdentity(expected: ProcessIdentity, file: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<{code:number|null;stdout:string;stderr:string}> {

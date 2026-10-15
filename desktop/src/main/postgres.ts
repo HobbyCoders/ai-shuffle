@@ -27,7 +27,7 @@ import type { PostgresConfig } from './settings';
 import { privateDirectory } from './private-file';
 import { isPortFree, isProcessAlive } from './worker';
 import { ColdClusterCopy, durableJson } from './database-restore';
-import { readProcessIdentity, sameProcess, isProcessIdentity, execWithIdentity, type ProcessIdentity } from './process-identity';
+import { readProcessIdentity, sameProcess, isProcessIdentity, execWithIdentity, signalVerifiedProcess, type ProcessIdentity } from './process-identity';
 
 export const POSTGRES_HOST = '127.0.0.1';
 export const POSTGRES_USER = 'ai_shuffle';
@@ -208,6 +208,7 @@ export interface PostgresRuntime {
 	exec(file: string, args: string[], opts?: ExecOptions): Promise<ExecResult>;
 	pidAlive(pid: number): boolean;
 	processIdentity(pid: number): Promise<ProcessIdentity>;
+	signal(identity: ProcessIdentity, signal: NodeJS.Signals, group: boolean, log: (message: string) => void): Promise<void>;
 	realpath(file: string): Promise<string>;
 	saveIdentity(file: string, value: unknown): Promise<void>;
 	/** A free loopback port: the preferred one when it is still free, otherwise an ephemeral one. */
@@ -266,6 +267,7 @@ export const nodeRuntime: PostgresRuntime = {
 	exec: execCapture,
 	pidAlive: isProcessAlive,
 	processIdentity: readProcessIdentity,
+	signal: signalVerifiedProcess,
 	realpath: file => fs.realpath(file),
 	saveIdentity: durableJson,
 	freePort: pickPort,
@@ -486,10 +488,21 @@ export class PostgresSupervisor extends EventEmitter {
 			!sameProcess(saved.identity, await this.rt.processIdentity(info.pid))) {
 			throw new Error('PostgreSQL process identity or cluster mismatch; no process was signalled');
 		}
-		// execCapture revalidates at the signal boundary and holds a Windows process
-		// handle throughout pg_ctl, preventing PID reuse between check and signal.
-		const result = await this.exec(this.opts.binaries.pgCtl, pgCtlStopArgs(this.dataDir), { identity: saved.identity });
-		if (result.code !== 0) throw new Error(`Verified PostgreSQL did not stop (exit ${result.code})`);
+		if (this.rt.platform === 'win32') {
+			// Hold the verified Windows process handle throughout pg_ctl.
+			const result = await this.exec(this.opts.binaries.pgCtl, pgCtlStopArgs(this.dataDir), { identity: saved.identity });
+			if (result.code !== 0) throw new Error(`Verified PostgreSQL did not stop (exit ${result.code})`);
+		} else {
+			// SIGINT is PostgreSQL fast shutdown (the same mode as pg_ctl -m fast).
+			// No intermediate process or second pid-file read between identity check
+			// and signal. The remaining POSIX reuse window is documented in the helper.
+			await this.rt.signal(saved.identity, 'SIGINT', false, message => this.log(message));
+			const deadline = Date.now() + 30_000;
+			while (this.rt.existsSync(this.pidFile)) {
+				if (Date.now() >= deadline) throw new Error('Verified PostgreSQL did not finish fast shutdown in 30 seconds');
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+		}
 		if (!this.rt.existsSync(this.pidFile)) await this.rt.remove(this.identityFile);
 	}
 
