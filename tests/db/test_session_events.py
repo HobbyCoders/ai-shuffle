@@ -19,6 +19,39 @@ def test_seqs_start_at_one_and_are_contiguous(mock_db):
     assert [e["event_type"] for e in events] == ["a", "b", "c", "d", "e"]
 
 
+@pytest.mark.parametrize("same_batch", [True, False])
+@pytest.mark.parametrize("stale_state", ["running", "completed"])
+def test_task_incarnation_fence_preserves_legacy_and_other_events(mock_db, same_batch, stale_state):
+    old = "2026-10-15T10:00:00.000001+00:00"
+    new = "2026-10-15T10:00:00.000002+00:00"
+
+    def task(task_id, state, token=None):
+        payload = {"task_id": task_id, "state": state}
+        if token:
+            payload["task_incarnation"] = token
+        return {"type": "task.updated", "payload": payload}
+
+    events = [
+        task("A", "running", new),
+        task("A", "completed"),  # Legacy frames remain unfenced.
+        task("A", stale_state, old),  # Legacy did not erase the newer fence.
+        {"type": "system.note", "payload": {"content": "keep"}},
+        task("B", "completed", old),  # The fence is per task, not per session.
+        task("A", "completed", new),  # Current completion must still land.
+    ]
+    if same_batch:
+        assert se.append_events("s1", events) == (1, 6)
+    else:
+        for event in events:
+            se.append_events("s1", [event])
+    rows = se.get_events("s1")
+    assert [row["seq"] for row in rows] == [1, 2, 4, 5, 6]
+    assert [row["payload"] for row in rows] == [e["payload"] for e in events if e is not events[2]]
+    # The same task id in another session has no newer incarnation.
+    se.append_events("s2", [task("A", "completed", old)])
+    assert se.get_events("s2")[0]["payload"]["state"] == "completed"
+
+
 def test_compaction_prefix_keeps_newest_100_at_boundary(mock_db):
     se.append_events("s1", [{"type": "system.compaction_boundary", "payload": {"index": i}}
                              for i in range(102)])
