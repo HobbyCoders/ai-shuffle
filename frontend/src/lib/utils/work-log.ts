@@ -1061,6 +1061,11 @@ export function createTranscriptModelBuilder() {
 			&& messages.every((message, i) => i === messages.length - 1 || message === old.messages[i])
 			&& Object.keys(tail).length === Object.keys(oldTail).length
 			&& Object.keys(tail).every(key => key === 'content'
+				// Native text deltas advance their log position as well as content.
+				// It is carried on the replaced row, not used for grouping; an epoch
+				// change or rewind still invalidates this fast path.
+				|| (key === 'seq' && typeof tail.seq === 'number' && typeof oldTail.seq === 'number'
+					&& tail.seq >= oldTail.seq)
 				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage]);
 		// A streaming row never ends a live run and never folds, so its growing
 		// text cannot change the runs: only the row itself is swapped.

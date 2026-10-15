@@ -73,6 +73,19 @@ describe('streaming model reuse', () => {
 		expect(build(metadata, options)).toEqual(buildTranscriptModel(metadata, options));
 		expect(build(metadata, options).lastAssistantMetadata).toEqual({input_tokens:123});
 	});
+	it.each([{ seq: 9, epoch: 'one' }, { seq: 11, epoch: 'two' }])(
+		'rebuilds when a stream rewinds or changes epoch: %o', patch => {
+			const build = createTranscriptModelBuilder();
+			const prompt = user('Question');
+			const tail = msg({ type: 'text', content: 'Hello', streaming: true, seq: 10, epoch: 'one' });
+			const options = { isStreaming: true, groupingEnabled: true };
+			const before = build([prompt, tail], options);
+			const next = [prompt, { ...tail, content: 'Updated', ...patch }];
+			const after = build(next, options);
+			expect(after.promptOccurrence).not.toBe(before.promptOccurrence);
+			expect(after).toEqual(buildTranscriptModel(next, options));
+		}
+	);
 	it('rebuilds when a streaming text replacement becomes a hidden placeholder', () => {
 		const build = createTranscriptModelBuilder();
 		const prompt = user('Question');
