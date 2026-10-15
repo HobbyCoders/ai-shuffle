@@ -1069,6 +1069,7 @@ def settle_parked_turns(
     session_id: str, exclude_turn_id: Optional[str] = None,
     *, resolved_before: Optional[datetime] = None,
     turn_ids: Optional[List[str]] = None, _conn: Any = None,
+    only_if_idle: bool = False,
 ) -> int:
     """Settle every ``parked`` turn row for ``session_id`` to ``completed``.
 
@@ -1087,7 +1088,10 @@ def settle_parked_turns(
     reconcile mode, take the session admission lock and recheck ownership,
     successor completion and absence of busy/newer parked turns in the UPDATE
     itself; a queued wake starting or a handoff after candidate selection must
-    not let the sweep settle its predecessor. Returns the row count.
+    not let the sweep settle its predecessor. ``only_if_idle`` uses that same
+    admission lock and rejects a concurrent queued/live turn; worker dispatch
+    recovery uses it after proving the parked tasks have drained.
+    Returns the row count.
     """
     sql = (
         "UPDATE turns SET state='completed', "
@@ -1120,9 +1124,16 @@ def settle_parked_turns(
         # parked row (a session may have a long completed-turn history).
         params += (resolved_before, session_id, settings.effective_instance_id,
                    resolved_before, session_id, resolved_before)
+    if only_if_idle:
+        sql += (
+            "AND NOT EXISTS (SELECT 1 FROM turns busy "
+            "WHERE busy.session_id=%s "
+            "AND busy.state IN ('queued','running','interrupting','draining')) "
+        )
+        params += (session_id,)
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
-        if resolved_before is not None:
+        if resolved_before is not None or only_if_idle:
             # enqueue_turn/start_turn use this same lock. The UPDATE gets a
             # fresh snapshot after any admission/handoff we waited behind.
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))

@@ -1012,6 +1012,9 @@ class TaskRegistry:
         completed snapshot in ``_recent_terminal`` is also dropped so the row
         can't double-count or resurrect as "completed".
 
+        App-managed Monitor ids identify one process, never a resumable agent:
+        their delayed start receipts preserve terminal status and delivery latches.
+
         A FAILURE terminal status ("error"/"killed") is NOT revived: a re-emitted
         start for such a task is the force-cleanup / dead-pooled-client stale
         leak (see ``_recent_terminal`` / ``test_reaped_failure_resnapshots_status``),
@@ -1044,9 +1047,13 @@ class TaskRegistry:
                 existing["remote_device_id"] = remote_device_id
             if worker_name:
                 existing["worker_name"] = worker_name
-            # Resume revival: a fresh start for a CLEANLY-COMPLETED task flips it
-            # back to running (failures stay terminal — that's a stale leak).
-            if existing.get("status") == "completed":
+            # Monitor processes cannot resume under the same id. The host
+            # registers them before Fluid emits its start receipt; the stream
+            # may consume that receipt AFTER the watcher delivered completion.
+            # Reviving it here re-arms a park with no process left to wake it.
+            # CLI agents still support genuine same-id SendMessage resumes.
+            if (existing.get("status") == "completed"
+                    and not self.is_monitor_shell_task(session_id, task_id)):
                 existing["status"] = "running"
                 existing["started_at"] = now
                 existing.pop("notification_delivered", None)
