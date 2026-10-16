@@ -96,7 +96,11 @@ try{
  const unpacked=path.join(temporary,'old-launcher');
  asar.extractAll(appAsar,unpacked);
  assert(await exists(path.join(unpacked,'build/application-update-key.pem')));
- assert(!await exists(path.join(unpacked,'launcher.json')),'The installed launcher already carries launcher.json');
+ // Launchers since 1.0 carry launcher.json; it must name an older launcher than the target.
+ if(await exists(path.join(unpacked,'launcher.json'))){
+  const installed=readLauncher(await fs.readFile(path.join(unpacked,'launcher.json'),'utf8')).version;
+  assert(installed<target,`The installed launcher is already version ${installed}; nothing to replace`);
+ }
  await fs.writeFile(path.join(unpacked,'build/application-update-key.pem'),pem);
  await fs.rm(appAsar);await asar.createPackage(unpacked,appAsar);
  const oldHash=await fileHash(appAsar);

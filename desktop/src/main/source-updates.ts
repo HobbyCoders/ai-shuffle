@@ -151,8 +151,18 @@ interface RestoreJournal {
   state: SourceState;
   floor: { revision: string; sequence: number; uncertain?: true } | null;
   reason?: string;
+  /** Made by the booting build itself because its launcher made none (lateRestorePoint). Launchers ignore it. */
+  late?: true;
 }
 export type RestoreDatabaseFactory = (previous: string) => Promise<RollbackDatabase>;
+/** A late restore point could not be made. The message is written for the owner and shown as it is. */
+export class RestorePointError extends Error {}
+/** How the booting build makes its own restore point when its launcher made none (requireRestorePoint). */
+export interface LateRestorePoint {
+  database: RestoreDatabaseFactory;
+  /** Called once, just before the copy starts, so the window can say what is happening. */
+  preparing?: () => void;
+}
 
 export class SourceUpdates {
   private state: SourceState = {};
@@ -737,7 +747,7 @@ export class SourceUpdates {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
     const j = JSON.parse(text) as RestoreJournal;
     if (!j || j.schemaVersion !== 1 || !['preparing', 'ready', 'restoring', 'restored', 'committed'].includes(j.phase) ||
-        !REVISION.test(j.revision) || !REVISION.test(j.previous) || j.previous === j.revision) throw new Error('Invalid database restore journal; no worker was started');
+        !REVISION.test(j.revision) || !REVISION.test(j.previous) || j.previous === j.revision || (j.late !== undefined && j.late !== true)) throw new Error('Invalid database restore journal; no worker was started');
     parseSourceState(JSON.stringify(j.state));
     if (j.state.active && j.state.active !== j.previous) throw new Error('Restore point does not match previous application');
     if (j.state.booting || j.state.pending || j.state.waiting || j.state.blocked || j.state.recoveryRequired || Object.keys(j.state.mayHaveMigrated ?? {}).length) throw new Error('Restore point contains unsafe application state');
@@ -803,23 +813,142 @@ export class SourceUpdates {
     j.phase = 'committed'; await durableJson(this.journalFile, j);
     await this.recoverRollback(database);
   }
-  /** Called before any first database start, including a launch delegated by an older launcher. */
-  async requireRestorePoint(database?: Pick<RollbackDatabase, 'validate'>): Promise<void> {
+  /**
+   * Called before any first database start, including a launch delegated by an older launcher.
+   * With `late`, a build whose launcher predates restore points makes its own first (lateRestorePoint).
+   */
+  async requireRestorePoint(database?: Pick<RollbackDatabase, 'validate'>, late?: LateRestorePoint): Promise<void> {
     if (!this.state.booting) return;
+    if (late && await this.finishLateRestorePoint(late)) return;
     // A legacy failed/retried revision (or its newer recovery build) must remain
     // runnable behind its existing fence. A baseline marker alone is NOT that proof.
     const migrated = this.state.mayHaveMigrated ?? {};
     if (migrated[this.state.booting] !== undefined || this.state.failed?.some(revision => migrated[revision] !== undefined)) return;
     const j = await this.journal();
-    if (!j || j.phase !== 'ready' || j.revision !== this.state.booting) throw new Error('No verified database restore point exists. Install the latest desktop launcher before starting this update.');
-    await database?.validate();
+    if (j?.phase === 'ready' && j.revision === this.state.booting && !j.late) { await database?.validate(); return; }
+    if (late && await this.lateRestorePoint(late, j)) return;
+    throw new Error('No verified database restore point exists. Install the latest desktop launcher before starting this update.');
+  }
+  /**
+   * Launchers from before restore points (0.9.6 and older, desktop/LAUNCHER.md)
+   * select a pending build without calling prepareRollback. The build makes the
+   * point itself, before its first database start, the way prepareRollback would
+   * have. True when the start may go on; false for any state this cannot prove
+   * safe (the caller then refuses as before). A failed copy throws
+   * RestorePointError and the build does not start.
+   *
+   * Order: copy, fence this build (databaseStarting), then mark the point ready.
+   * An old launcher runs the previous build again after an unstarted first start;
+   * a ready point must never outlive that, or a later launcher would restore a
+   * copy older than the data the previous build wrote since.
+   */
+  private async lateRestorePoint(late: LateRestorePoint, existing: RestoreJournal | null): Promise<boolean> {
+    const revision = this.state.booting!;
+    // Only the booting build's own process (attach wrote waiting), before it started the database.
+    if (this.running !== revision || this.state.waiting !== revision) return false;
+    if (existing) {
+      // Leftovers no build was handed the database with: a committed point whose
+      // cleanup failed, or an unfenced late copy of this build (possibly stale).
+      if (existing.phase !== 'committed' && !(existing.late && existing.revision === revision && ['preparing', 'ready'].includes(existing.phase))) return false;
+      try { await this.dropRestorePoint(existing, late.database); }
+      catch (error) { throw this.restorePointError(error, false); }
+    }
+    const floor = this.migrationFloor;
+    if (this.recoveryRequired || floor === null) return false;
+    const previous = this.state.active;
+    if (!previous) {
+      // The previous version is the installer's bundled build. Only a launcher
+      // bundling that same build can restore to it, and that launcher (0.9.6 or
+      // older) never restores: a point would only block a newer installer's
+      // recovery. Start under the migration fence, as these launchers always did.
+      // attach (without the installer's baseline) fences that build's own floor;
+      // any other fence, or a block it does not explain, is refused.
+      const fences = Object.entries(this.state.mayHaveMigrated ?? {});
+      if (fences.some(([fenced, sequence]) => !floor || fenced !== floor.revision || sequence === null || sequence > floor.sequence) ||
+          (this.state.blocked && !fences.length)) return false;
+      console.warn('This launcher makes no database restore point; the update starts under its migration fence');
+      return true;
+    }
+    await this.assertCanRun(previous);
+    // select() marks the floor uncertain because it hands the database to code
+    // that might not record it. waiting proves nothing has started it since, so
+    // the previous build's own floor still holds; any other floor is refused.
+    if (floor && (floor.revision !== previous || floor.sequence !== await this.sequence(previous))) return false;
+    const state = { ...this.state };
+    delete state.pending; delete state.staged; delete state.booting; delete state.waiting;
+    if (state.blocked || state.recoveryRequired || Object.keys(state.mayHaveMigrated ?? {}).length) return false;
+    const j: RestoreJournal = { schemaVersion: 1, phase: 'preparing', revision, previous, state, floor: floor ? { revision: floor.revision, sequence: floor.sequence } : null, late: true };
+    late.preparing?.();
+    await durableJson(this.journalFile, j);
+    try { await (await late.database(previous)).snapshot(); }
+    catch (error) {
+      // Nothing was handed the database: remove the partial copy so Try again starts clean.
+      try { await this.dropRestorePoint(j, late.database); }
+      catch (cleanup) { console.error('Could not remove the incomplete database restore point', cleanup); }
+      throw this.restorePointError(error, false);
+    }
+    // A failure here keeps the complete copy: unfenced it is made again, fenced it is finished.
+    await this.databaseStarting();
+    try { j.phase = 'ready'; await durableJson(this.journalFile, j); }
+    catch (error) { throw this.restorePointError(error, true); }
+    return true;
+  }
+  /**
+   * This build was fenced after its late copy but stopped before marking it
+   * ready. It has not started the database since (that needs a ready point), and
+   * the fence kept every older build off it, so the database is still the one
+   * the copy was taken from: check the copy, or take it again, then finish.
+   */
+  private async finishLateRestorePoint(late: LateRestorePoint): Promise<boolean> {
+    const revision = this.state.booting!;
+    if (this.running !== revision || this.state.mayHaveMigrated?.[revision] === undefined) return false;
+    const j = await this.journal();
+    if (!j?.late || j.phase !== 'preparing' || j.revision !== revision) return false;
+    late.preparing?.();
+    try {
+      const db = await late.database(j.previous);
+      try { await db.validate(); }
+      catch { await db.discard(); await db.snapshot(); }
+      j.phase = 'ready'; await durableJson(this.journalFile, j);
+    } catch (error) { throw this.restorePointError(error, true); }
+    return true;
+  }
+  /**
+   * Plain advice by cause. `fenced`: this build already holds the database, so
+   * closing the app makes an old launcher ask to finish it, not run the previous version.
+   */
+  private restorePointError(error: unknown, fenced: boolean): RestorePointError {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(/\.\s*$/, '');
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? '';
+    const advice = code === 'ENOSPC' || /\bENOSPC\b|no space|disk (is )?full|not enough space/i.test(reason)
+      ? 'There is not enough free disk space for a copy of your database. Free some disk space, then choose Try again.'
+      : code === 'EACCES' || /\bEACCES\b|permission denied/i.test(reason)
+        ? 'AI Shuffle is not allowed to read or write a file in its data folder. Check that folder\'s permissions and any security software that may block it, then choose Try again.'
+      : ['EBUSY', 'EPERM'].includes(code) || /\b(EBUSY|EPERM)\b|locked|in use/i.test(reason)
+        ? 'A file in the AI Shuffle data folder is in use. Close other programs that may be using it, such as a backup or an antivirus scan, then choose Try again.'
+        : /failed validation|changed while/i.test(reason)
+          ? 'The copy did not match your database. Choose Try again to make a new copy.'
+          : 'Choose Try again.';
+    const after = fenced
+      ? ' If you close AI Shuffle instead, it will say the last update did not finish starting: choose Try Again there to finish this update.'
+      : ' If it keeps failing, close AI Shuffle and open it again: the previous version opens and the update stays ready to install.';
+    return new RestorePointError(`Could not prepare the update's database restore point: ${reason}. ${advice}${after}`);
+  }
+  /** Cancel a point no build was handed (committed first, so a crash can only leave cleanup), then remove it. */
+  private async dropRestorePoint(j: RestoreJournal, database: RestoreDatabaseFactory): Promise<void> {
+    if (j.phase !== 'committed') { j.phase = 'committed'; await durableJson(this.journalFile, j); }
+    await (await database(j.previous)).discard();
+    await fs.rm(this.journalFile, { force: true }); await syncDirectory(this.options.root);
   }
   /** Healthy callbacks may only dispose of a point, never restore a database. */
   async finishRollback(database: RestoreDatabaseFactory): Promise<void> {
     this.rollbackDatabase = database;
     const j = await this.journal();
     if (!j) return;
-    if (j.phase !== 'committed') {
+    // A late copy whose build never got the database (closed or killed before
+    // its fence, so its launcher ran this build): only space to give back.
+    const abandoned = j.late && j.revision !== this.state.active && j.revision !== this.state.booting && this.state.mayHaveMigrated?.[j.revision] === undefined;
+    if (j.phase !== 'committed' && !abandoned) {
       if (j.phase !== 'ready' || this.state.active !== j.revision || this.state.booting) {
         throw new Error('Restore point does not belong to the confirmed healthy build; cleanup refused');
       }
