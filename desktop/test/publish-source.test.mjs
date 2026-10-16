@@ -31,7 +31,9 @@ for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regr
   assert.equal(row.asset_id,123);assert(verify(null,Buffer.from(signed.payload,'base64'),await fs.readFile(path.join(root,'public.pem'),'utf8'),Buffer.from(signed.signature,'base64')));
   const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64),requires:scenario==='overlays'?['base-1','node-24','runtime-overlays-v1']:['base-1'],recommends:[],...(scenario==='overlays'?{overlays:[{kind:'node',capability:'node-24',platform:'linux-x86_64',url:'https://runtimes.example/node.tar.gz',sha256:'d'.repeat(64),size:1024,unpacked_size:2048,executable:'node/bin/node'}]}:{})});
   // #1821 D5: the minimum launcher from desktop/launcher.json is signed with the release.
-  assert.deepEqual(manifest.desktop,{launcher:JSON.parse(readFileSync(new URL('../launcher.json',import.meta.url),'utf8')).minimum});assert(events.includes('publish'));
+  // #97: desktop.start, the oldest launcher that can start the release, is signed beside it.
+  const contract=JSON.parse(readFileSync(new URL('../launcher.json',import.meta.url),'utf8'));
+  assert.deepEqual(manifest.desktop,{launcher:contract.minimum,start:contract.start});assert(events.includes('publish'));
   assert.equal(manifest.tree,'c'.repeat(64));assert(events.includes('archive'));
   if(stable(scenario)){
    assert.equal(row.channel,'stable');assert.equal(manifest.channel,'stable');assert.equal(manifest.version,'1.2.3');assert.equal(manifest.notes,'Faster startup.');
