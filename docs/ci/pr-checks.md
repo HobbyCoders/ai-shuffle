@@ -64,6 +64,54 @@ checks would not test what is being pushed. Never skip the hook with
 Agents run `local_ci.py` through the Monitor tool before pushing, so the hook
 finds a recorded pass instead of running a long check inside a shell call.
 
+The selected Python is checked **before suites or commit statuses**: all required
+`requirements-dev.txt` imports (including distlib, xdist and PyYAML) must work.
+An installed `claude_agent_sdk`, an external `docker` package shadowing the
+checkout namespace, or inherited `PYTHONPATH` entries outside this checkout
+refuse the run. Use a fresh `.venv`, install `requirements.txt` and
+`requirements-dev.txt`, clear external `PYTHONPATH`, and set `LOCAL_CI_PYTHON`
+to that environment's Python. Dependency directories and provisioned symlinks
+(`.venv`, `venv`, `node_modules`) are ignored; force-added files still undergo
+the secret scan.
+
+### Full gates longer than one Monitor budget
+
+On a slower machine, including Windows, use the supported checkpointed path:
+
+```bash
+python scripts/local_ci.py full --step --attest
+```
+
+Run **one invocation per Monitor job**, inspect its completion, then repeat the
+same command until it prints `COMPLETE`. An intermediate exit 0 means only that
+stage passed, not a full pass or successful attestation. Do not wrap the commands
+in one long Monitor loop, detach processes, use `serves=true`, or increase the
+two-worker limit. Without publication, omit `--attest` on every invocation.
+
+Stages cover the same suites and backend tests as `full`: security, backend
+batches of 20 files using the original directory collection and exclusions,
+each remaining suite, then final security/release checks and test-map merge.
+No tests are dropped to meet the time budget. Backend map hits accumulate across
+batches. Other suites keep their original commands and platform availability.
+Native Windows timing still needs measurement; if an individual stage exceeds
+45 minutes, report it rather than treating an interrupted run as a pass.
+
+Receipts live beside `passes.json` in `full-stages.json` in this worktree's Git
+directory. Only a successfully completed stage gets a receipt; an interrupted
+or failed stage is rerun. Every invocation requires a clean unchanged checkout
+and runs the Python preflight. Revision/tree, interpreter path, machine, worker
+count, audit/attestation mode and stage plan must match to reuse receipts.
+Changing any of those starts a new run. Run only one staged gate per worktree
+at a time. If dependencies or external tools change in place, use
+`full --step --restart` (plus `--attest` if applicable) once, then omit `--restart`
+for subsequent stages. `--only` cannot attest or supply full-stage receipts.
+
+`--attest` retains the clean current-public-main and update-reach requirements.
+Partial work posts only pending/failure statuses. Only after **all** stages pass
+does the final stage write the full pass and post success (including
+`local/windows-suite` on Windows). If main advances mid-run, update to it and
+start over; old receipts cannot authorize the new revision.
+
 The last lines of each run list what this machine did not cover:
 
 - Windows, when the run is not on a Windows worker. Edge publication does not

@@ -13,6 +13,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import local_ci  # noqa: E402  pyright: ignore[reportMissingImports]
 
 
+@pytest.fixture(autouse=True)
+def isolated_python_preflight(monkeypatch):
+    # Environment validation is exercised with real subprocesses in test_local_ci_preflight.
+    monkeypatch.setattr(local_ci, "python_preflight", lambda python: None)
+
+
 def context(files):
     return local_ci.Context(mode="changed", base="base", files=files, python=sys.executable)
 
