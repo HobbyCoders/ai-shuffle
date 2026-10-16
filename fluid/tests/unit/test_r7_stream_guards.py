@@ -307,6 +307,7 @@ async def test_a_whitespace_runaway_is_abandoned_and_the_call_retried() -> None:
     )
     assert aborted.output_tokens > 0
     assert "whitespace" in aborted.raw["tool_arg_stream_aborted"]
+    assert aborted.raw["partial_usage_reason"] == "argument_guard"
 
 
 async def test_an_unclosed_object_padded_with_whitespace_also_trips() -> None:
@@ -521,6 +522,7 @@ async def test_an_interrupt_mid_stream_bills_an_estimate_not_zero() -> None:
     billed = next(e for e in events if isinstance(e, Usage))
     assert billed.raw["output_tokens_estimated"] is True
     assert billed.raw["input_tokens_estimated"] is True
+    assert billed.raw["partial_usage_reason"] == "stop"
 
 
 # ─── whole-stream deadline ───────────────────────────────────────────────────

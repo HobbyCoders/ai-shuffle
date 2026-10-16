@@ -526,7 +526,9 @@ class HarnessAdapter(ProviderAdapter):
         options.permission_mode = effective_permission_mode(
             options.permission_mode, delegated=self._is_delegated
         )
-        options.effort = await asyncio.to_thread(_effective_effort, options, options.effort, kind)
+        options.effort = await asyncio.to_thread(
+            _effective_effort, options, options.effort, kind, fit=True
+        )
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
 
@@ -813,7 +815,8 @@ class HarnessAdapter(ProviderAdapter):
             # matches the pricing table. The other native kinds run provider-native
             # ids that must pass through untouched.
             native_model = (
-                resolve_api_model_id(options.model) if kind == "anthropic" else options.model
+                _native_api_model(options.model, options)
+                if kind == "anthropic" else options.model
             )
             # The delegation catalog (CE6 + the app's own DB agents) — one
             # name+description index for the prompt, plus the matching
@@ -3026,7 +3029,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._provider_kind == "anthropic":
             # Mid-session hot swap lands on NativeLoop's raw model attribute —
             # same verbatim-to-API path as connect, same canonicalization.
-            model = resolve_api_model_id(model) or model
+            model = _native_api_model(model, self._options) or model
         try:
             await self._engine.submit(SetModel(model=model))
         except NotImplementedError:
@@ -5004,7 +5007,20 @@ def _fluid_setting_sources(options: Any) -> Optional[tuple]:
     return valid
 
 
-def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] = None) -> Optional[str]:
+def _native_api_model(model: Optional[str], options: Optional[SessionOptions]) -> Optional[str]:
+    # A concrete id selected from a bound API catalog is not a legacy preset.
+    # Upgrading Opus 4.6 to the current "opus" alias also bypasses its effort
+    # clamp. Keep preset migration only on the unbound/short-alias path.
+    if (options is not None and options.extra.get("provider_id")
+            and (model or "").startswith("claude-")):
+        # Stored profiles may still carry the legacy context-window marker;
+        # Messages accepts the version pin, not the app-only [1m] suffix.
+        return model.removesuffix("[1m]")
+    return resolve_api_model_id(model)
+
+
+def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] = None,
+                      *, fit: bool = False) -> Optional[str]:
     from app.core.model_effort import normalize_effort
 
     # The assistant's home always runs at its model's own default effort,
@@ -5015,7 +5031,14 @@ def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] 
     row = _lookup_provider_row(provider_id) if provider_id else None
     if provider_id and row is None:
         return None
-    return normalize_effort(value, options.model, row, route=route or _decide_provider_kind(options))
+    route = route or _decide_provider_kind(options)
+    # Fit remembered Claude picks before metadata validation can drop them;
+    # the CLI has no serializer to provide the native API's safety clamp.
+    # Other routes and live explicit setting changes retain strict validation.
+    if fit and route in ("anthropic", "delegated") and value in ("low", "medium", "high", "xhigh", "max"):
+        from fluid.providers.anthropic.thinking import clamp_effort
+        value = clamp_effort(options.model, value)
+    return normalize_effort(value, options.model, row, route=route)
 
 
 def model_default_effort(options: SessionOptions, route: Optional[str] = None) -> Optional[str]:

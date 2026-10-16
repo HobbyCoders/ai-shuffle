@@ -4,6 +4,24 @@ from unittest.mock import AsyncMock
 import pytest
 from app.core.model_effort import EFFORT_LEVELS, OPENROUTER_EFFORT_LEVELS, effort_capabilities, normalize_effort, sanitize_effort_metadata
 
+def test_benchmarked_default_is_subscription_sol_only_and_does_not_invent_support():
+    entry = {"id": "gpt-6.1-sol", "reasoning_capabilities": {"version": 1,
+             "effort_levels": ["low", "high"], "default_effort": "low"}}
+    row = {"provider_type": "chatgpt", "models_json": [entry]}
+    cap = effort_capabilities("gpt-6.1-sol", row)
+    assert cap["default_effort"] == "low"
+    assert cap["initial_effort"] == "high"
+    assert entry["reasoning_capabilities"]["default_effort"] == "low"  # raw vendor evidence retained
+    for kind in ("openrouter", "openai", "custom"):
+        other = effort_capabilities("gpt-6.1-sol", {**row, "provider_type": kind})
+        assert other["default_effort"] == "low"
+        assert "initial_effort" not in other
+    assert "initial_effort" not in effort_capabilities("other-model", row)
+    for levels in (None, [], ["low"]):
+        no_high = {**entry, "reasoning_capabilities": {"version": 1, "effort_levels": levels}}
+        assert "initial_effort" not in effort_capabilities("gpt-6.1-sol", row, no_high)
+
+
 # https://openrouter.ai/api/v1/models (public catalog, 2026-09-05)
 OR_FIXTURES = [
     ("openai/gpt-6-astra", ["max", "xhigh", "high", "medium", "low"], "medium", True),

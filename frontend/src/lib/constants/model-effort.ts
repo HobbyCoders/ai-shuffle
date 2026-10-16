@@ -51,8 +51,9 @@ export function resolveModelEffort(value: string | null | undefined) {
 	const known = Array.isArray(levels);
 	const options = EFFORT_OPTIONS.filter(option => levels?.includes(option.value));
 	const defaultValue = options.find(option => option.value === model?.default_effort)?.value ?? null;
+	const initialValue = options.find(option => option.value === model?.initial_effort)?.value ?? null;
 	return {
-		options, defaultValue, known, ready: isRegistryHydrated(),
+		options, defaultValue, initialValue, known, ready: isRegistryHydrated(),
 		explanation: !known ? UNKNOWN_EFFORT : options.length ? undefined : NO_ADJUSTABLE_EFFORT
 	};
 }
