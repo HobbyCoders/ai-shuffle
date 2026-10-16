@@ -943,7 +943,10 @@ export class SourceUpdates {
     this.rollbackDatabase = database;
     const j = await this.journal();
     if (!j) return;
-    if (j.phase !== 'committed') {
+    // A late copy whose build never got the database (closed or killed before
+    // its fence, so its launcher ran this build): only space to give back.
+    const abandoned = j.late && j.revision !== this.state.active && j.revision !== this.state.booting && this.state.mayHaveMigrated?.[j.revision] === undefined;
+    if (j.phase !== 'committed' && !abandoned) {
       if (j.phase !== 'ready' || this.state.active !== j.revision || this.state.booting) {
         throw new Error('Restore point does not belong to the confirmed healthy build; cleanup refused');
       }

@@ -310,6 +310,14 @@ test('older launcher: leftovers of an earlier late copy are removed before a new
   await (await o.child()).requireRestorePoint(undefined,o.late);
   assert.deepEqual(o.calls,['discard','snapshot'],'the possibly stale copy is replaced');assert.equal((await o.journal()).phase,'ready');
  });
+ await t.test('the previous build runs instead (killed during the copy) and removes the abandoned copy once healthy',async t=>{
+  const o=await oldLauncherUpdate(t);await o.child();await fs.writeFile(o.journalFile,JSON.stringify(latePoint('preparing')));
+  const launcher=new OldUpdates(o.f.options);await launcher.load();assert.equal((await launcher.select()).revision,A,'0.9.6 runs A after an unstarted first start');
+  const a=new SourceUpdates({...o.f.options,baseline:undefined});await a.attach(A);await a.healthy();
+  await a.finishRollback(o.late.database);
+  assert.deepEqual(o.calls,['discard']);await assert.rejects(fs.stat(o.journalFile),{code:'ENOENT'});
+  assert.equal(JSON.parse(await fs.readFile(path.join(o.f.root,'state.json'),'utf8')).staged,B,'B stays ready to install');
+ });
  for(const valid of [true,false])await t.test(`fenced but not yet ready, copy ${valid?'intact':'damaged'}`,async t=>{
   const o=await oldLauncherUpdate(t);await (await o.child()).requireRestorePoint(undefined,o.late);
   await fs.writeFile(o.journalFile,JSON.stringify({...await o.journal(),phase:'preparing'}));

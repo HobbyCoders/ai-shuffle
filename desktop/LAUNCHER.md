@@ -131,7 +131,10 @@ launcher would have:
   and Linux; it does not relaunch, because a relaunch goes through the old
   launcher.
 - Closing the app instead: before the fence, the old launcher runs the
-  previous version and the update stays ready to install. After the fence (the
+  previous version and the update stays ready to install. A late copy left
+  behind by such a start (the app was killed during the copy) is removed by
+  the previous version once it is healthy, when it has this change, or else
+  replaced when the update starts again. After the fence (the
   copy was made but could not be marked ready), the old launcher says "The
   last update did not finish starting" and offers **Try Again**, which runs the
   update again and finishes the copy, or **Quit**.
@@ -162,6 +165,12 @@ change, started by a 0.9.6 launcher): the refused build is left staged, and
 installs never receive this change in-app; nothing in a newer release runs
 there. Installing a current installer recovers them: its launcher makes the
 restore point and starts the staged update.
+
+Acceptance against the real 0.9.6 installer runs in Windows Sandbox:
+`desktop/scripts/late-restore-acceptance.ps1` (see its header) drives
+`desktop/scripts/verify-late-restore-point.mjs` through a bundled previous
+build, a failed copy with Try again, a kill during the copy and a kill after
+PostgreSQL started, then the launcher swap.
 
 ## Replacing an older launcher
 

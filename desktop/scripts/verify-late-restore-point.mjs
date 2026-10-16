@@ -1,0 +1,390 @@
+// Late restore point acceptance (desktop/LAUNCHER.md, "Launchers without
+// restore points") on a throwaway Windows machine: install an installer whose
+// launcher makes no restore point (0.9.6), then update it through builds of
+// this checkout and check the late copy end to end with the real launcher,
+// the real PostgreSQL cluster and real process kills.
+//
+//   P  (launcher 3)  bundled previous build: starts with no copy.
+//   N1 (launcher 3)  a failed copy (a database file held open): the reason
+//                    shows, closing keeps P with N1 ready, Try again in the
+//                    window copies and starts N1.
+//   N2 (launcher 3)  killed during the copy, before the fence: reopening runs
+//                    N1, which removes the partial copy; installing N2 again
+//                    makes a new one.
+//   N3 (launcher 4)  killed after PostgreSQL started: the old launcher offers
+//                    only Try Again, which makes no second copy; once healthy
+//                    the launcher is swapped to 4 and confirmed.
+//
+// Publishes nothing and uses no secret. The release key is ephemeral: its
+// public half replaces the key in the installed app.asar and in each staged
+// source. Two modes:
+//
+//   prepare <folder>   (any machine with git and python, in this checkout)
+//     the ephemeral key and four source archives of HEAD, each changed only
+//     by that key, as the update feed would serve them.
+//   run <installer.exe> <prepared folder> <output folder>   (Windows, isolated)
+//     installs the app, stages each revision from a local feed, drives the
+//     app and writes summary.txt and acceptance.json to the output folder.
+//
+// `run` installs an app and kills its processes: use it only through
+// late-restore-acceptance.ps1 (Windows Sandbox) or on a machine you will
+// throw away. It refuses an existing install, profile or worker data.
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, createPrivateKey, sign } from 'node:crypto';
+import fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { spawn, execFileSync } from 'node:child_process';
+import { installPreview } from './install-preview.mjs';
+import { readLauncher } from './launcher-contract.mjs';
+
+const [mode, ...args] = process.argv.slice(2);
+const desktop = path.resolve(import.meta.dirname, '..'), repo = path.resolve(desktop, '..');
+const NAMES = ['P', 'N1', 'N2', 'N3'];
+// Added to the cluster so a copy takes long enough to be killed part way.
+const FILLER_GB = Number(process.env.SHUFFLE_ACCEPTANCE_FILLER_GB ?? 3);
+if (mode === 'prepare') {
+  assert(args[0], 'usage: verify-late-restore-point.mjs prepare <folder>');
+  const out = path.resolve(args[0]);
+  await fs.mkdir(out, { recursive: true });
+  assert.equal((await fs.readdir(out)).length, 0, 'The prepare folder must be empty');
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const pem = publicKey.export({ type: 'spki', format: 'pem' });
+  // Per-command config: never change the checkout's own git settings. No CRLF
+  // conversion, so the archive is what the feed would serve.
+  const gitEnv = { ...process.env, GIT_INDEX_FILE: path.join(out, 'acceptance.index'), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.autocrlf', GIT_CONFIG_VALUE_0: 'false',
+    GIT_AUTHOR_NAME: 'acceptance', GIT_AUTHOR_EMAIL: 'acceptance@invalid', GIT_COMMITTER_NAME: 'acceptance', GIT_COMMITTER_EMAIL: 'acceptance@invalid' };
+  const git = (argv, input) => execFileSync('git', argv, { cwd: repo, env: gitEnv, input, encoding: 'utf8' }).trim();
+  const head = git(['rev-parse', 'HEAD']);
+  const revisions = {};
+  for (const name of NAMES) {
+    git(['read-tree', head]);
+    git(['update-index', '--cacheinfo', `100644,${git(['hash-object', '-w', '--no-filters', '--stdin'], pem)},desktop/build/application-update-key.pem`]);
+    const revision = git(['commit-tree', git(['write-tree']), '-p', head, '-m', `Late restore point acceptance ${name}`]);
+    const zip = path.join(out, name + '.zip');
+    const archive = JSON.parse(execFileSync('python', ['scripts/source_archive.py', revision, zip], { cwd: repo, env: gitEnv, encoding: 'utf8' }));
+    revisions[name] = { revision, zip: name + '.zip', sha256: archive.sha256, size: archive.size, tree: archive.tree };
+    console.log(`${name} ${revision}`);
+  }
+  await fs.rm(path.join(out, 'acceptance.index'), { force: true });
+  await fs.writeFile(path.join(out, 'public.pem'), pem);
+  // Ephemeral: trusted only by the throwaway install this run makes.
+  await fs.writeFile(path.join(out, 'private.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }));
+  await fs.writeFile(path.join(out, 'revisions.json'), JSON.stringify({ head, revisions }, null, 2));
+  console.log('Prepared ' + out);
+  process.exit(0);
+}
+assert.equal(mode, 'run', 'usage: verify-late-restore-point.mjs prepare <folder> | run <installer.exe> <prepared folder> <output folder>');
+assert(process.platform === 'win32', 'Windows only');
+assert(process.env.SHUFFLE_ACCEPTANCE_SANDBOX === '1', 'Run through late-restore-acceptance.ps1, or set SHUFFLE_ACCEPTANCE_SANDBOX=1 on a machine you will throw away');
+process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS = '1';
+const require = createRequire(import.meta.url);
+// This checkout's built launcher code (npm run build), the code being accepted.
+const { SourceUpdates } = require('../dist/main/source-updates.js');
+const { SOURCE_ORIGIN } = require('../dist/main/source-auth.js');
+const { readAsarMember } = require('../dist/main/asar.js');
+const asar = require('@electron/asar');
+
+const [installerArg, preparedArg, outputArg] = args;
+assert(installerArg && preparedArg && outputArg, 'usage: verify-late-restore-point.mjs run <installer.exe> <prepared folder> <output folder>');
+const installer = path.resolve(installerArg), prepared = path.resolve(preparedArg), output = path.resolve(outputArg);
+const work = path.join(process.env.LOCALAPPDATA, 'shuffle-late-acceptance');
+const install = path.join(work, 'app'), profile = path.join(process.env.APPDATA, 'ai-shuffle-desktop');
+const sourceRoot = path.join(profile, 'updates'), exe = path.join(install, 'AI Shuffle.exe'), resources = path.join(install, 'resources');
+const appAsar = path.join(resources, 'app.asar');
+const pgRoot = path.join(profile, 'postgres'), pgData = path.join(pgRoot, 'data'), snapshotDir = path.join(pgRoot, 'update-snapshot');
+const journalFile = path.join(sourceRoot, 'restore-point.json'), stateFile = path.join(sourceRoot, 'state.json');
+const floorFile = path.join(sourceRoot, 'database-floor.json'), markerFile = path.join(sourceRoot, 'launcher-swap.json');
+
+const exists = p => fs.stat(p).then(() => true, e => { if (e.code === 'ENOENT') return false; throw e; });
+const readJson = async p => { try { return JSON.parse(await fs.readFile(p, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function until(fn, message, timeout = 300000, every = 250) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { const value = await fn(); if (value) return value; await sleep(every); }
+  throw Error(message);
+}
+
+assert(!await exists(install) && !await exists(profile), 'Refusing to use an existing installation or profile');
+assert(!await exists(path.join(process.env.USERPROFILE, '.ai-shuffle')), 'Fresh worker data required');
+await fs.mkdir(output, { recursive: true });
+const report = { success: false, steps: [] };
+let current = null;
+const step = name => { current = { name, checks: [], result: 'running' }; report.steps.push(current); console.log(`\n== ${name}`); };
+const pass = message => { current.checks.push(message); console.log('PASS: ' + message); };
+const note = message => { (current.notes ??= []).push(message); console.log('NOTE: ' + message); };
+const log = await fs.open(path.join(output, 'launch-output.log'), 'a');
+
+// --- The running app, driven over the Chromium debugger like verify-launcher-swap.mjs.
+let chromium, browser;
+async function debuggerPages() {
+  const port = (await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split(/\r?\n/)[0];
+  assert.match(port, /^[1-9]\d{0,4}$/);
+  if (browser) await browser.close().catch(() => {});
+  browser = await chromium.connectOverCDP('http://127.0.0.1:' + port, { timeout: 1500 });
+  return browser.contexts().flatMap(c => c.pages());
+}
+/** The worker UI once it answers, else null. */
+async function workerPage() {
+  try {
+    for (const page of await debuggerPages()) if (page.url().startsWith('http://127.0.0.1:8000/') && await page.evaluate(() => !!window.shuffleDesktop)) return page;
+  } catch { /* not up yet */ }
+  return null;
+}
+/** The startup status page (pages/worker.html), else null. */
+async function statusPage() {
+  try {
+    for (const page of await debuggerPages()) if (await page.evaluate(() => !!window.shuffleDesktopWorker).catch(() => false)) return page;
+  } catch { /* not up yet */ }
+  return null;
+}
+const statusText = page => page.evaluate(() => ({
+  heading: document.getElementById('status-heading')?.textContent ?? '',
+  detail: document.getElementById('status-detail')?.textContent ?? '',
+  error: document.getElementById('status-error')?.textContent ?? '',
+}));
+function launch() {
+  return fs.rm(path.join(profile, 'DevToolsActivePort'), { force: true }).then(() => {
+    const child = spawn(exe, ['--remote-debugging-port=0'], { windowsHide: true, stdio: ['ignore', log.fd, log.fd] });
+    child.on('error', e => console.error(e));
+  });
+}
+async function ready(revision) {
+  const page = await until(workerPage, 'The worker UI did not open', 900000, 1000);
+  if (revision) assert.equal(await page.evaluate(() => window.shuffleDesktop.version), 'main@' + revision.slice(0, 12));
+  return page;
+}
+const healthy = async () => { try { return (await fetch('http://127.0.0.1:8000/health/ready', { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } };
+/** Close through the window, as a person would. */
+async function close() {
+  const page = (await workerPage()) ?? (await statusPage());
+  if (page) await page.evaluate(() => window.shuffleDesktop.window.close()).catch(() => {});
+  await until(async () => !await healthy(), 'The worker did not stop', 120000);
+  await until(async () => !appRunning(), 'AI Shuffle did not exit after its window closed', 120000, 1000);
+  await settle();
+}
+const appRunning = () => /AI Shuffle\.exe/i.test(execFileSync('tasklist.exe', ['/FI', 'IMAGENAME eq AI Shuffle.exe', '/NH'], { encoding: 'utf8' }));
+/** Hard kill: the app's process tree at once, then anything else running from the install or the profile (worker, PostgreSQL). */
+async function kill() {
+  try { execFileSync('taskkill.exe', ['/F', '/T', '/IM', 'AI Shuffle.exe'], { stdio: 'ignore' }); } catch { /* none running */ }
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "Get-Process | Where-Object { $_.Path -and ($_.Path.StartsWith($env:KILL_A, 'OrdinalIgnoreCase') -or $_.Path.StartsWith($env:KILL_B, 'OrdinalIgnoreCase')) } | Stop-Process -Force -ErrorAction SilentlyContinue"],
+  { env: { ...process.env, KILL_A: install, KILL_B: profile }, stdio: 'inherit' });
+  await settle();
+}
+async function settle() {
+  if (browser) await browser.close().catch(() => {}); browser = null;
+  // The single-instance lock is held until the previous process has exited.
+  await sleep(5000);
+}
+/** Answer an Electron message box with its default button (Enter). */
+function pressDefault(title) {
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "$w = New-Object -ComObject WScript.Shell; if (-not $w.AppActivate($env:BOX_TITLE)) { exit 3 }; Start-Sleep -Milliseconds 500; $w.SendKeys('~')"],
+  { env: { ...process.env, BOX_TITLE: title }, stdio: 'inherit' });
+}
+const holders = new Set();
+/** Hold `file` open with no sharing, as a backup or antivirus scan might; resolves to its release. */
+async function lock(file) {
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "$f = [IO.File]::Open($env:LOCK_FILE, 'Open', 'ReadWrite', 'None'); [Console]::Out.WriteLine('locked'); [void][Console]::In.ReadLine(); $f.Close()"],
+  { env: { ...process.env, LOCK_FILE: file }, stdio: ['pipe', 'pipe', 'inherit'] });
+  await new Promise((resolve, reject) => {
+    holder.on('exit', code => reject(Error('The file lock ended early: ' + code)));
+    holder.stdout.on('data', data => { if (/locked/.test(String(data))) resolve(); });
+  });
+  holder.removeAllListeners('exit'); holders.add(holder);
+  return () => new Promise(resolve => { holder.on('exit', resolve); holder.stdin.end('\n'); });
+}
+/** Samples of the update files while the app starts. */
+function watch() {
+  const samples = []; let stopped = false;
+  const loop = (async () => {
+    while (!stopped) {
+      try {
+        const [journal, state, floor, pg, manifest] = await Promise.all([readJson(journalFile), readJson(stateFile), readJson(floorFile),
+          exists(path.join(pgData, 'postmaster.pid')), fs.stat(path.join(snapshotDir, 'manifest.json')).then(s => s.mtimeMs, () => null)]);
+        samples.push({ at: Date.now(), journal, state, floor, pg, manifest });
+      } catch { /* a file mid-rename; sample again */ }
+      await sleep(100);
+    }
+  })();
+  return { samples, stop: async () => { stopped = true; await loop; } };
+}
+
+// --- The prepared revisions, signed under the ephemeral key as the feed would serve them.
+const plan = JSON.parse(await fs.readFile(path.join(prepared, 'revisions.json'), 'utf8'));
+const pem = await fs.readFile(path.join(prepared, 'public.pem'), 'utf8');
+const privateKey = createPrivateKey(await fs.readFile(path.join(prepared, 'private.pem'), 'utf8'));
+let build, sequence;
+const updater = feed => new SourceUpdates({ root: sourceRoot, channel: 'stable', publicKey: pem, baseline: { revision: build.revision, sequence: build.sequence },
+  bootstrapNode: path.join(resources, 'worker/node/node.exe'), fetch: async url => feed[String(url)]?.() ?? new Response('not found', { status: 404 }) });
+/** Download and build a revision with this checkout's updater from a local feed; it becomes pending. */
+async function stage(name, launcher) {
+  const { revision: rev, zip, sha256, size, tree } = plan.revisions[name];
+  const manifest = { format: 2, revision: rev, sequence: ++sequence, sha256, size, channel: 'stable', tree, desktop: { launcher } };
+  const payload = Buffer.from(JSON.stringify(manifest));
+  const signed = JSON.stringify({ payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') });
+  const updates = updater({ [SOURCE_ORIGIN + '/v1/desktop/manifest']: async () => new Response(signed),
+    [SOURCE_ORIGIN + '/v1/desktop/sources/' + rev]: async () => new Response(await fs.readFile(path.join(prepared, zip))) });
+  await updates.load();
+  let last = '';
+  console.log(`Building ${name} (${rev.slice(0, 12)}, launcher ${launcher})…`);
+  assert.equal((await updates.download((_, text) => { if (text && text !== last) console.log(last = text); })).kind, 'ready');
+  assert.equal((await readJson(stateFile)).pending, rev);
+  return rev;
+}
+/** What choosing "Restart to update" does for a staged build. */
+async function install_(rev) {
+  const updates = updater({}); await updates.load(); updates.stageDownloads(); await updates.prepareInstall();
+  assert.equal((await readJson(stateFile)).pending, rev);
+}
+
+try {
+  step('Install the 0.9.6 installer and start its bundled app');
+  await installPreview(installer, install, () => console.log('Installing…'));
+  assert(await exists(exe));
+  build = await readJson(path.join(resources, 'worker/desktop-build.json'));
+  sequence = build.sequence;
+  report.installer = { revision: build.revision, sequence: build.sequence, launcher: build.launcher ?? 0 };
+  assert((build.launcher ?? 0) <= 3, 'This needs an installer whose launcher predates restore points (0.9.6)');
+  const unpacked = path.join(work, 'old-launcher'); asar.extractAll(appAsar, unpacked);
+  assert(!/prepareRollback/.test(await fs.readFile(path.join(unpacked, 'dist/main/installed-entry.js'), 'utf8')), 'This installer\'s launcher already makes restore points');
+  await fs.writeFile(path.join(unpacked, 'build/application-update-key.pem'), pem);
+  await fs.rm(appAsar); await asar.createPackage(unpacked, appAsar);
+  ({ chromium } = await import(pathToFileURL(path.join(resources, 'worker/server/browser-mcp/node_modules/playwright-core/index.mjs')).href));
+  await launch(); await ready(); await close();
+  pass(`Installer ${report.installer.revision.slice(0, 12)} (launcher ${report.installer.launcher}, no restore points) starts with the ephemeral key`);
+  current.result = 'pass';
+
+  const target = readLauncher(await fs.readFile(path.join(desktop, 'launcher.json'), 'utf8')).version;
+  const [P, N1, N2, N3] = NAMES.map(name => plan.revisions[name].revision);
+  report.revisions = { head: plan.head, P, N1, N2, N3 };
+
+  step('P: an update over the bundled build starts with no copy');
+  await stage('P', 3);
+  let w = watch(); await launch(); await ready(P); await w.stop();
+  await until(async () => (await readJson(stateFile)).active === P, 'P did not become healthy', 120000);
+  assert(!w.samples.some(s => s.journal), 'A restore point was made for a bundled previous build');
+  pass('P started healthy; no restore-point.json at any time');
+  await close();
+  // A database large enough that the copy can be watched and interrupted.
+  const filler = await fs.open(path.join(pgData, 'zz-acceptance-filler.bin'), 'w'); await filler.truncate(FILLER_GB * 1024 ** 3); await filler.close();
+  pass(`Added a ${FILLER_GB} GB file to the stopped cluster so a copy takes long enough to interrupt`);
+  current.result = 'pass';
+
+  step('N1: a failed copy shows its reason; closing keeps P with N1 ready; Try again starts N1');
+  await stage('N1', 3);
+  const fillerFile = path.join(pgData, 'zz-acceptance-filler.bin');
+  let unlock = await lock(fillerFile);
+  await launch();
+  const failurePage = message => until(async () => { const p = await statusPage(); return p && /restore point/.test((await statusText(p)).error) ? p : null; }, message, 600000, 1000);
+  let page = await failurePage('The copy failure was not shown');
+  let text = await statusText(page);
+  report.failurePage = text;
+  assert.equal(text.heading, 'The update could not start yet');
+  assert.match(text.error, /^Could not prepare the update's database restore point: .*EBUSY.*\. A file in the AI Shuffle data folder is in use\. .* choose Try again\. If it keeps failing, close AI Shuffle and open it again/);
+  let state = await readJson(stateFile);
+  assert.equal(state.booting, N1); assert.equal(state.waiting, N1); assert.equal(state.mayHaveMigrated?.[N1], undefined);
+  assert(!await exists(journalFile)); assert(!await exists(snapshotDir)); assert(!await exists(path.join(pgData, 'postmaster.pid')));
+  pass('A locked database file: the failure page names the cause; no journal, no partial copy, no fence, PostgreSQL not started');
+  await close(); await launch(); await ready(P);
+  assert.equal((await readJson(stateFile)).staged, N1);
+  pass('Closing and reopening runs P, with N1 still ready to install');
+  await close(); await install_(N1);
+  await launch();
+  page = await failurePage('The copy failure was not shown again');
+  await unlock();
+  w = watch();
+  let sawPreparing = false;
+  const progress = (async () => { for (let i = 0; i < 600 && !sawPreparing; i++) { try { sawPreparing = /Preparing the update's database restore point/.test((await statusText(page)).detail); } catch { break; } await sleep(100); } })();
+  await page.click('#restart');
+  await ready(N1); await w.stop(); await progress;
+  const readyBeforeStart = w.samples.find(s => s.journal?.late && s.journal.phase === 'ready' && s.journal.revision === N1);
+  assert(readyBeforeStart, 'No ready late restore point was seen');
+  assert.equal(readyBeforeStart.floor?.revision, N1, 'The point became ready before N1 was fenced');
+  assert.notEqual(readyBeforeStart.state?.mayHaveMigrated?.[N1], undefined);
+  if (readyBeforeStart.pg) note('PostgreSQL was already running at the first sample of the ready point (sampling is every 100 ms)');
+  else pass('The ready late point was seen with N1 fenced (floor N1) before PostgreSQL started');
+  if (sawPreparing) pass('The status page showed "Preparing the update\'s database restore point…"'); else note('The progress text was not caught on the status page');
+  await until(async () => (await readJson(stateFile)).active === N1 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was not removed after the healthy start', 120000);
+  pass('With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy');
+  assert.equal(await readJson(markerFile), null, 'Launcher 3 releases must not swap the launcher');
+  await close();
+  current.result = 'pass';
+
+  step('N2: killed during the copy, before the fence; reopening runs N1; installing N2 again replaces the stale copy');
+  await stage('N2', 3);
+  await launch();
+  await until(async () => { const j = await readJson(journalFile).catch(() => null); return j?.late && j.phase === 'preparing' && j.revision === N2; }, 'The copy did not start', 600000, 50);
+  await kill();
+  state = await readJson(stateFile);
+  assert.equal(state.waiting, N2, 'N2 was fenced before the kill; the copy was too fast to interrupt');
+  assert.equal((await readJson(journalFile)).phase, 'preparing');
+  pass('Killed N2 mid-copy: journal preparing, N2 not fenced');
+  await launch(); await ready(N1);
+  assert.equal((await readJson(stateFile)).staged, N2);
+  pass('Reopening ran N1 (the previous version), N2 staged');
+  await until(async () => !await exists(journalFile) && !await exists(snapshotDir), 'N1 did not remove the abandoned copy', 120000);
+  pass('N1 removed the abandoned partial copy once healthy');
+  await close(); await install_(N2);
+  const reinstalled = Date.now();
+  w = watch(); await launch(); await ready(N2); await w.stop();
+  const fresh = w.samples.find(s => s.journal?.late && s.journal.phase === 'ready' && s.journal.revision === N2);
+  assert(fresh && fresh.manifest > reinstalled, 'The stale copy was not replaced by a new one');
+  await until(async () => (await readJson(stateFile)).active === N2 && !await exists(journalFile), 'N2 did not finish', 120000);
+  pass('Installing N2 again made a new copy and started N2');
+  await close();
+  current.result = 'pass';
+
+  step('N3: killed after PostgreSQL started; the old launcher offers only Try Again, which makes no second copy; then the swap');
+  await stage('N3', target);
+  await launch();
+  const fenced = await until(async () => {
+    const [j, s, pg] = await Promise.all([readJson(journalFile).catch(() => null), readJson(stateFile).catch(() => null), exists(path.join(pgData, 'postmaster.pid'))]);
+    return j?.late && j.phase === 'ready' && j.revision === N3 && s?.mayHaveMigrated?.[N3] !== undefined && pg ? j : null;
+  }, 'N3 did not reach a started database', 600000, 50);
+  const copied = (await fs.stat(path.join(snapshotDir, 'manifest.json'))).mtimeMs;
+  await kill();
+  assert.equal(fenced.revision, N3);
+  pass('Killed N3 after PostgreSQL started, with a ready late point');
+  await launch();
+  await sleep(20000);
+  assert(!await healthy(), 'A worker started after the failed first start');
+  state = await readJson(stateFile);
+  assert(state.failed?.includes(N3) && state.blocked === true, 'The old launcher did not fence the failed start');
+  pass('The old launcher did not run P, N1 or N2: N3 failed and fenced');
+  await until(async () => { try { pressDefault('AI Shuffle'); return true; } catch { return false; } }, 'The "did not finish starting" dialog did not appear', 120000, 2000);
+  w = watch(); await ready(N3); await w.stop();
+  assert(w.samples.every(s => s.manifest === null || s.manifest === copied), 'Try Again made a second copy');
+  await until(async () => (await readJson(stateFile)).active === N3 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was not removed after the healthy retry', 120000);
+  pass('Try Again (the dialog\'s default button) ran N3 without a second copy; the point was removed once healthy');
+  const swap = await until(async () => { const m = await readMarker(); if (m?.phase === 'rejected') throw Error('Self-test rejected the new launcher: ' + m.reason); return m?.phase === 'trial' ? m : null; }, 'The launcher was not replaced', 300000);
+  assert.deepEqual([swap.revision, swap.to], [N3, target]);
+  assert.equal(readLauncher(readAsarMember(require('node:fs'), appAsar, 'launcher.json').toString('utf8')).version, target);
+  pass(`The launcher was swapped to ${target} after the healthy start`);
+  await close(); await launch(); await ready(N3);
+  await until(async () => (await readMarker())?.phase === 'confirmed', 'The new launcher was not confirmed', 60000);
+  pass(`Launcher ${target} started N3 and was confirmed`);
+  await close();
+  current.result = 'pass';
+  report.success = true;
+} catch (error) {
+  if (current) { current.result = 'fail'; current.error = String(error?.stack ?? error); }
+  console.error(error); process.exitCode = 1;
+  try { report.state = await readJson(stateFile); report.journal = await readJson(journalFile); report.floor = await readJson(floorFile); report.marker = await readMarker(); } catch { /* best effort */ }
+} finally {
+  for (const holder of holders) holder.kill();
+  await kill().catch(() => {});
+  await log.close();
+  for (const [folder, name] of [['logs', 'worker.log'], ['logs', 'postgres.log'], ['updates', 'build.log'], ['updates', 'launch.log']]) {
+    await fs.copyFile(path.join(profile, folder, name), path.join(output, name)).catch(() => {});
+  }
+  await fs.writeFile(path.join(output, 'acceptance.json'), JSON.stringify(report, null, 2));
+  const lines = report.steps.map(s => `${s.result.toUpperCase().padEnd(7)} ${s.name}${s.error ? '\n        ' + s.error.split('\n')[0] : ''}`);
+  const summary = [`Late restore point acceptance: ${report.success ? 'PASS' : 'FAIL'}`, ...lines].join('\n');
+  await fs.writeFile(path.join(output, 'summary.txt'), summary + '\n');
+  console.log('\n' + summary);
+}
+function readMarker() { return readJson(markerFile); }
