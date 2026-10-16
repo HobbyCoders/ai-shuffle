@@ -8,11 +8,37 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
-## Next release
+## 1.0.1
 
-### Agents and providers
+Fixes from the first day of public use, plus a built-in Android emulator.
 
-- Android emulator: AI Shuffle can run an Android phone emulator on Linux x86_64 workers with KVM. Install it once from the new Phone panel (about 2 GB from Google, after you accept the Android SDK License), then watch and use the phone live in the panel. Agents can install, open and test the apps they build with the new Emulator and EmulatorScreenshot tools. Docker installs need `--device /dev/kvm`. See [Android emulator](/docs/features/android-emulator).
+### Phone apps
+
+- New Phone panel: AI Shuffle can run an Android phone emulator on Linux x86_64 workers with KVM. Install it once from the panel (about 2 GB from Google, after you accept the Android SDK License), then watch the screen live and tap, type and use Back, Home and Recents yourself.
+- Agents can boot the emulator, install an APK, open it, tap and type, read the screen layout and take screenshots with the new Emulator and EmulatorScreenshot tools, so they can test the phone apps they build.
+- Docker installs need `--device /dev/kvm`; without it the panel explains what is missing. iOS is not supported yet. See [Android emulator](/docs/features/android-emulator).
+
+### Browser
+
+- Split one-time-code boxes (one box per digit) now take typing from the Browser panel, including Backspace.
+- Copy text from the page to the device you are using: select it and press Ctrl+C or Cmd+C, or use the new Copy button. Password fields are never copied.
+- A session keeps its browser after it switches its own checkout to another branch during a turn.
+- When a site refuses to show its captcha to the shared browser, the agent and the panel both say the step needs your own browser instead of waiting on an empty box.
+
+### Sessions and agents
+
+- Answering an agent's question resets the peer-chat budget, so a long, supervised run of chats no longer stops partway.
+- Settling a session can no longer be undone by an older write that arrives late.
+- Logging and disk work no longer pause the server when the disk is slow.
+- A session whose checkout was left on a detached commit is reattached instead of refusing every message.
+
+### Android app
+
+- The Google Play build leaves out on-device app control, which Play does not allow; the APK from the downloads page keeps it.
+
+### Settings
+
+- Hidden settings pages stop polling in the background.
 
 ## 1.0.0
 
