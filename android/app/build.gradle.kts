@@ -8,6 +8,13 @@ plugins {
 
 extra["license"] = "AGPL-3.0-only"
 
+// The Google Play bundle leaves out app control (the AccessibilityService):
+// Play's Accessibility API policy does not cover AI-planned actions. Builds
+// for the website APK and local development keep it. android-play.yml sets
+// ANDROID_PLAY_STORE_BUILD=true; `-PplayStoreBuild=true` does the same locally.
+val playStoreBuild = System.getenv("ANDROID_PLAY_STORE_BUILD") == "true" ||
+    project.findProperty("playStoreBuild")?.toString() == "true"
+
 android {
     namespace = "com.hobbycoders.aishuffle"
     compileSdk = 36
@@ -21,6 +28,12 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appAuthRedirectScheme"] = "com.hobbycoders.aishuffle"
+        buildConfigField("boolean", "APP_CONTROL", (!playStoreBuild).toString())
+    }
+
+    if (playStoreBuild) {
+        // Overlays the release manifest and removes the AccessibilityService.
+        sourceSets.getByName("release").manifest.srcFile("src/playStore/AndroidManifest.xml")
     }
 
     signingConfigs {
@@ -62,6 +75,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     testOptions {

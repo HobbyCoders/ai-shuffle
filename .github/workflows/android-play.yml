@@ -149,9 +149,12 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          # Play's bundle leaves out app control (the AccessibilityService).
+          ANDROID_PLAY_STORE_BUILD: "true"
         run: |
           bash gradlew testDebugUnitTest lintDebug bundleRelease --no-daemon --stacktrace
           python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
+          python3 ci/check-play-manifest.py app/build/outputs/bundle/release/app-release.aab
           # Export only the public certificate so the owner can compare Play's
           # app-signing identity before enabling uploads. Password stays in env.
           keytool -exportcert -rfc -keystore "$KEYSTORE_PATH" -storepass:env KEYSTORE_PASSWORD \
