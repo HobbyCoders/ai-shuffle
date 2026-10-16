@@ -342,11 +342,37 @@ class FactStore:
             day = int(time.time() // 86400)
             budget = doc.get("inference_budget", {})
             calls = budget.get("calls", 0) if budget.get("day") == day else 0
-            if calls >= MAX_INFERENCE_CALLS_PER_DAY - max(0, reserve):
+            share = MAX_INFERENCE_CALLS_PER_DAY - max(0, reserve)
+            if calls >= share:
+                if self._note_budget_spent(doc, day):
+                    self._write(doc)
                 return False
-            doc["inference_budget"] = {"day": day, "calls": calls + 1}
+            doc["inference_budget"] = {"day": day, "calls": calls + 1, "last_at": time.time()}
+            if calls + 1 >= share:
+                self._note_budget_spent(doc, day)
             self._write(doc)
             return True
+
+    @staticmethod
+    def _note_budget_spent(doc, day):
+        """Record ``day`` as one whose budget (or synthesis share) ran out;
+        False when it was already recorded. The last 8 days are kept."""
+        days = [d for d in doc.get("inference_budget_spent_days") or [] if isinstance(d, int)]
+        if day in days:
+            return False
+        doc["inference_budget_spent_days"] = sorted(days + [day])[-8:]
+        return True
+
+    def inference_budget(self):
+        """``{"day", "calls", "last_at"}`` of the day's claims so far, read
+        without the lock (the document is replaced atomically); {} when none."""
+        budget = self._load().get("inference_budget")
+        return dict(budget) if isinstance(budget, dict) else {}
+
+    def inference_budget_spent_days(self):
+        """UTC days (``time // 86400``) on which the call budget ran out."""
+        days = self._load().get("inference_budget_spent_days")
+        return [d for d in days if isinstance(d, int)] if isinstance(days, list) else []
 
     def snapshot(self):
         with file_transaction(self.lock):

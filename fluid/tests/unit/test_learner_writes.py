@@ -38,6 +38,14 @@ PROJECT = "project:p1"
 REQUEST_CHARS = 32_000
 
 
+@pytest.fixture
+def unpaced(monkeypatch):
+    """Take the daily pacing out of a test about another gate (backoff, the
+    cursor): its passes run back to back, at any time of the UTC day."""
+    monkeypatch.setattr(continual_mod, "MIN_PASS_INTERVAL", 0.0)
+    monkeypatch.setattr(continual_mod, "PACE_BURST_CALLS", 48)
+
+
 # ─── a fake inference client with realistic replies ──────────────────────────
 
 
@@ -187,7 +195,7 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_memories_json(tmp_
 
 
 async def test_provider_rejection_is_logged_backs_off_and_skips_consolidation(
-    tmp_path, caplog,
+    tmp_path, caplog, unpaced,
 ) -> None:
     store = SkillStore(tmp_path)
     for i in range(10):  # enough inferred facts that consolidation is due
@@ -327,7 +335,10 @@ async def test_full_unconsumed_journal_drops_oldest_and_keeps_learning(
 async def test_oversized_slice_consumes_only_what_the_prompt_showed(tmp_path) -> None:
     store = SkillStore(tmp_path)
     store.journal_context(session_id="ses_1", project=PROJECT)
-    for i in range(40):
+    # Each cell renders at about 1,300 chars (a working cell's code is
+    # clipped), so this many cannot fit one prompt.
+    n = min(continual_mod.MAX_ENTRIES_PER_PASS, continual_mod.PROMPT_CHAR_LIMIT // 500)
+    for i in range(n):
         store.journal_append({
             "kind": "cell", "code": f"# step {i}\n" + "x = compute()\n" * 80,
             "stdout": "ok", "host_calls": 1,
@@ -337,7 +348,7 @@ async def test_oversized_slice_consumes_only_what_the_prompt_showed(tmp_path) ->
     await synth.run()
     first = log_rows(store)[-1]
     shown = first["consumed"]
-    assert 0 < shown < 40 and first["deferred"] == 40 - shown
+    assert 0 < shown < n and first["deferred"] == n - shown
     assert store.synth_cursor() == shown
     prompt = prompt_of(provider.requests[0])
     assert "# step 0" in prompt and f"# step {shown}\n" not in prompt
@@ -455,7 +466,7 @@ def _cells(store: SkillStore, n: int, start: int = 0) -> None:
         store.journal_append({"kind": "cell", "code": f"x = {i}", "host_calls": 0})
 
 
-async def test_learner_delete_keeps_journal_and_cursor(tmp_path) -> None:
+async def test_learner_delete_keeps_journal_and_cursor(tmp_path, unpaced) -> None:
     """A learner <delete-memory> used to run as a user Forget: it purged every
     journal line older than now (the unsynthesized backlog included) and the
     pass then wrote its pre-purge cursor back, 40 lines past the empty
@@ -465,7 +476,9 @@ async def test_learner_delete_keeps_journal_and_cursor(tmp_path) -> None:
     store.journal_context(session_id="ses_1", project=PROJECT)
     _cells(store, 45)
     provider = FakeInference(reply_text(f'<delete-memory id="{fact.id}"/>'))
-    synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, min_new_entries=10)
+    # A slice smaller than the backlog, as when the pass cap was 40 lines.
+    synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, min_new_entries=10,
+                        max_entries=40)
     assert await synth.run() == [f"-memory:{fact.id}"]
 
     assert fact.id not in [m.id for m in store.memories()]
