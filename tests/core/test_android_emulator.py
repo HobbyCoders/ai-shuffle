@@ -428,10 +428,11 @@ class FakeAdb:
 
 
 class FakeGrpc:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, port=8554, token=""):
         self.calls = []
         self.fail = fail
-        self.target = "127.0.0.1:8554"
+        self.port, self.token = port, token
+        self.target = f"127.0.0.1:{port}"
 
     async def touch(self, x, y, pressure, ident=0, timeout=3.0):
         if self.fail:
@@ -491,7 +492,7 @@ async def test_status_contract(manager, layout, monkeypatch):
         "available": True, "reason": "ready", "message": "", "install": None,
         "license_url": "https://developer.android.com/studio/terms",
         "devices": [{"id": "pixel", "name": "Pixel", "state": "stopped", "api": 35,
-                     "width": 1080, "height": 2400}],
+                     "width": 1080, "height": 2400, "frame_source": ""}],
     }
     monkeypatch.setattr(manager_mod, "check_host",
                         lambda: host.HostSupport("no_kvm", host.NO_KVM, "linux", "x64"))
@@ -564,9 +565,14 @@ async def test_start_spawns_a_headless_emulator_and_waits_for_boot(manager, fake
 
     monkeypatch.setattr(manager_mod.asyncio, "create_subprocess_exec", fake_exec)
     tokens = []
-    monkeypatch.setattr(manager_mod, "GrpcControl", lambda port, token: tokens.append(token) or FakeGrpc())
+    monkeypatch.setattr(manager_mod, "GrpcControl",
+                        lambda port, token: tokens.append(token) or FakeGrpc(port=port, token=token))
     monkeypatch.setattr(manager_mod, "_port_free", lambda port: True)
     fake_adb.reply("getprop sys.boot_completed", b"1\n")
+    # The emulator advertises the gRPC token it expects; that one is used.
+    running = manager.layout.runtime_dir / "avd" / "running"
+    running.mkdir(parents=True)
+    (running / "pid_4242.ini").write_text("port.serial=5554\ngrpc.port=8554\ngrpc.token=advertised\n")
 
     async def fake_status(self, timeout=3.0):
         return {}
@@ -585,9 +591,12 @@ async def test_start_spawns_a_headless_emulator_and_waits_for_boot(manager, fake
     # The token keeps gRPC on loopback and authenticated; the client sends it.
     assert "-grpc-use-token" in argv
     token_file = manager.layout.console_token_path
-    assert tokens == [token_file.read_text()] and len(tokens[0]) >= 16
+    assert tokens == [token_file.read_text(), "advertised"] and len(tokens[0]) >= 16
     assert stat.S_IMODE(os.stat(token_file).st_mode) == 0o600
+    assert dev.grpc.token == "advertised" and dev.frame_source == "grpc"
+    assert dev.to_dict()["frame_source"] == "grpc"
     assert spawned["env"]["HOME"] == str(manager.layout.user_home)
+    assert spawned["env"]["XDG_RUNTIME_DIR"] == str(manager.layout.runtime_dir)
     assert "start-server" in fake_adb.calls[0]
     assert any("svc power stayon true" in call for call in fake_adb.calls)
     assert (manager.layout.avd_home / "pixel.avd" / "config.ini").is_file()
@@ -605,6 +614,55 @@ async def test_start_spawns_a_headless_emulator_and_waits_for_boot(manager, fake
     await manager.stop("pixel")
     assert dev.state == "stopped" and dev.proc is None
     assert any(call.endswith("emu kill") for call in fake_adb.calls)
+
+
+async def test_grpc_that_does_not_answer_falls_back_to_adb_loudly(manager, monkeypatch, caplog):
+    from app.core.android_emulator import manager as manager_mod
+
+    class Down(FakeGrpc):
+        async def status(self, timeout=3.0):
+            raise RuntimeError("UNAVAILABLE: GOAWAY")
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(manager_mod.asyncio, "sleep", no_sleep)
+    dev = manager.device("pixel")
+    dev.grpc = Down()
+    with caplog.at_level("WARNING", logger=manager_mod.__name__):
+        await manager._connect_grpc(dev)
+    assert dev.grpc is None and dev.frame_source == "adb"
+    assert "GOAWAY" in dev.grpc_error
+    assert any("127.0.0.1:8554" in r.getMessage() and "use adb" in r.getMessage() for r in caplog.records)
+    dev.state = "running"
+    assert dev.to_dict()["frame_source"] == "adb"
+
+
+def test_grpc_client_dials_ipv4_loopback_without_a_proxy(monkeypatch):
+    """The emulator's token server binds 127.0.0.1 only: never ``localhost``
+    (it may resolve to ::1 and be refused), never through an http proxy."""
+    import grpc
+
+    seen = {}
+
+    def fake_channel(target, options=None):
+        seen["target"], seen["options"] = target, dict(options or [])
+        return object()
+
+    monkeypatch.setattr(grpc.aio, "insecure_channel", fake_channel)
+    control = grpc_control.GrpcControl(8556, "tok")
+    control._chan()
+    assert seen["target"] == "127.0.0.1:8556"
+    assert seen["options"]["grpc.enable_http_proxy"] == 0
+    assert control._metadata == (("authorization", "Bearer tok"),)
+
+
+def test_discovery_file_is_read_from_the_runtime_folder(layout):
+    assert layout.discovery(99) == {}
+    folder = layout.runtime_dir / "avd" / "running"
+    folder.mkdir(parents=True)
+    (folder / "pid_99.ini").write_text("grpc.port=8554\ngrpc.token = abc \nnoise\n")
+    assert layout.discovery(99) == {"grpc.port": "8554", "grpc.token": "abc"}
 
 
 async def test_start_is_refused_when_unavailable_or_full(manager, monkeypatch):

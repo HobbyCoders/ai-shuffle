@@ -90,6 +90,18 @@ def _port_free(port: int) -> bool:
     return True
 
 
+def _grpc_error_text(exc: BaseException) -> str:
+    """A short reason from a gRPC failure (status code and details)."""
+    code = getattr(exc, "code", None)
+    details = getattr(exc, "details", None)
+    try:
+        if callable(code) and callable(details):
+            return f"{code().name}: {details()}"[:300]
+    except Exception:  # noqa: BLE001
+        pass
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
 @dataclass
 class Device:
     profile: avd.DeviceProfile
@@ -100,6 +112,10 @@ class Device:
     console_port: int = 0
     proc: Optional[asyncio.subprocess.Process] = None
     grpc: Optional[GrpcControl] = None
+    #: Where screen frames and input go: "grpc", "adb" (gRPC unavailable), or
+    #: "" while not running. ``grpc_error`` says why gRPC is not used.
+    frame_source: str = ""
+    grpc_error: str = ""
     #: Current orientation's size in device pixels.
     width: int = 0
     height: int = 0
@@ -145,7 +161,8 @@ class Device:
 
     def to_dict(self) -> Dict[str, Any]:
         return {"id": self.id, "name": self.profile.name, "state": self.state, "api": self.api,
-                "width": self.width, "height": self.height}
+                "width": self.width, "height": self.height,
+                "frame_source": self.frame_source if self.state == "running" else ""}
 
     def set_state(self, state: str, message: str = "") -> None:
         changed = (state, message) != (self.state, self.message)
@@ -349,6 +366,7 @@ class EmulatorManager:
         def prepare() -> None:
             for folder in (layout.avd_home, layout.user_home, layout.logs):
                 folder.mkdir(parents=True, exist_ok=True)
+            layout.runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             avd.write_avd(layout, dev.profile, image)
             avd.clear_locks(layout, dev.profile)
             return layout.console_token()
@@ -377,6 +395,7 @@ class EmulatorManager:
             log.close()
         dev.console_port = port
         dev.grpc = GrpcControl(grpc_port, token) if grpc_port else None
+        dev.frame_source, dev.grpc_error = "", "" if grpc_port else "no free gRPC port"
         dev.width, dev.height = dev.profile.width, dev.profile.height
         dev.rotation = 0
         dev.stopping = False
@@ -462,18 +481,43 @@ class EmulatorManager:
             "settings put global transition_animation_scale 0; "
             "settings put global animator_duration_scale 0; input keyevent KEYCODE_WAKEUP; "
             "wm dismiss-keyguard", timeout=20)
-        if dev.grpc is not None:
-            for _ in range(10):
-                try:
-                    await dev.grpc.status()
-                    break
-                except Exception:  # noqa: BLE001 — gRPC comes up a little after adb
-                    await asyncio.sleep(1.0)
-            else:
-                logger.warning("Emulator %s: gRPC is not answering; using adb for input and frames", dev.id)
-                await dev.grpc.close()
-                dev.grpc = None
+        await self._connect_grpc(dev)
         await self.refresh_rotation(dev)
+
+    async def _connect_grpc(self, dev: Device) -> None:
+        """Check the gRPC control answers, with the token the emulator expects.
+
+        The emulator writes its gRPC port and token to a discovery file; that
+        token wins over the console token it was started with. When gRPC does
+        not answer, frames and input fall back to adb (about 2 fps instead of
+        10+): that is logged as a warning and shown as ``frame_source``.
+        """
+        grpc = dev.grpc
+        if grpc is None:
+            dev.frame_source = "adb"
+            if dev.grpc_error:
+                logger.warning("Emulator %s: no gRPC (%s); frames and input use adb", dev.id, dev.grpc_error)
+            return
+        error = ""
+        for _ in range(10):
+            found = await asyncio.to_thread(self.layout.discovery, dev.proc.pid) if dev.proc else {}
+            token, port = found.get("grpc.token", ""), found.get("grpc.port", "")
+            if token and token != grpc.token or port.isdigit() and int(port) != grpc.port:
+                await grpc.close()
+                grpc = dev.grpc = GrpcControl(int(port) if port.isdigit() else grpc.port,
+                                              token or grpc.token)
+            try:
+                await grpc.status()
+                dev.frame_source, dev.grpc_error = "grpc", ""
+                return
+            except Exception as exc:  # noqa: BLE001 — gRPC comes up a little after adb
+                error = _grpc_error_text(exc)
+                await asyncio.sleep(1.0)
+        logger.warning("Emulator %s: gRPC at %s is not answering (%s); frames and input use adb",
+                       dev.id, grpc.target, error)
+        await grpc.close()
+        dev.grpc = None
+        dev.frame_source, dev.grpc_error = "adb", error
 
     async def stop(self, device_id: str) -> Device:
         dev = self.device(device_id)

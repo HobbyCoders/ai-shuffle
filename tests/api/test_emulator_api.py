@@ -73,7 +73,7 @@ def test_status_shape(client):
     assert set(body) == {"available", "reason", "message", "install", "license_url", "devices"}
     assert body["available"] is True and body["reason"] == "ready" and body["install"] is None
     assert body["devices"] == [{"id": "pixel", "name": "Pixel", "state": "stopped", "api": 35,
-                                "width": 1080, "height": 2400}]
+                                "width": 1080, "height": 2400, "frame_source": ""}]
 
 
 def test_setup_requires_accepting_the_license(client, manager, monkeypatch):

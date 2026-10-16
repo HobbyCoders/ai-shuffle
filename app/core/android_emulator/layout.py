@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,31 @@ class SdkLayout:
                 fh.write(token)
         return token
 
+    @property
+    def runtime_dir(self) -> Path:
+        """XDG_RUNTIME_DIR for the emulator: its discovery files land here."""
+        return self.user_home / "run"
+
+    def discovery_dirs(self) -> List[Path]:
+        """Where a running emulator may write ``pid_<pid>.ini`` (by version)."""
+        return [self.runtime_dir / "avd" / "running", self.user_home / "avd" / "running",
+                self.user_home / ".android" / "avd" / "running"]
+
+    def discovery(self, pid: int) -> Dict[str, str]:
+        """A running emulator's discovery file (``grpc.port``, ``grpc.token``...), or {}."""
+        for folder in self.discovery_dirs():
+            try:
+                text = (folder / f"pid_{pid}.ini").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            values: Dict[str, str] = {}
+            for line in text.splitlines():
+                key, sep, value = line.partition("=")
+                if sep:
+                    values[key.strip()] = value.strip()
+            return values
+        return {}
+
     def env(self) -> Dict[str, str]:
         """The environment every emulator and adb process runs with.
 
@@ -140,5 +165,8 @@ class SdkLayout:
             "ANDROID_AVD_HOME": str(self.avd_home),
             "ANDROID_USER_HOME": str(self.user_home),
             "ANDROID_EMULATOR_HOME": str(self.user_home),
+            # The emulator's discovery file (with its gRPC token) goes here,
+            # not into the app user's own runtime folder.
+            "XDG_RUNTIME_DIR": str(self.runtime_dir),
         })
         return env

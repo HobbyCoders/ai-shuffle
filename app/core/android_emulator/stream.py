@@ -67,6 +67,7 @@ class StreamHub:
         self.seq = 0
         self.last_frame: Optional[Dict[str, Any]] = None
         self._task: Optional[asyncio.Task] = None
+        self._warned = False
         dev.listeners.append(self._on_state)
 
     def attach(self) -> Viewer:
@@ -88,6 +89,7 @@ class StreamHub:
     def _on_state(self, dev: Device) -> None:
         if dev.state != "running":
             self.last_frame = None
+            self._warned = False
         message = state_message(dev)
         for viewer in list(self.viewers):
             viewer.send(message)
@@ -122,9 +124,14 @@ class StreamHub:
                     return
                 except asyncio.CancelledError:
                     raise
-                except Exception:  # noqa: BLE001
-                    logger.info("Emulator %s: gRPC frame stream failed; polling adb instead", dev.id,
-                                exc_info=True)
+                except Exception as exc:  # noqa: BLE001
+                    # Loud once per device run: adb polling is ~2 fps, not 10+.
+                    if not self._warned:
+                        self._warned = True
+                        logger.warning("Emulator %s: gRPC frame stream failed (%s); polling adb instead",
+                                       dev.id, exc)
+                    else:
+                        logger.debug("gRPC frame stream failed again", exc_info=True)
             while self._active():
                 try:
                     latest["frame"] = await self.manager.capture(dev, STREAM_LONG_EDGE)

@@ -34,7 +34,8 @@ Refusals return a JSON error body, shown to the owner as is:
  "install": {"state": "idle"|"downloading"|"extracting"|"done"|"error", "progress": 0..1, "message": str} | null,
  "license_url": str,
  "devices": [{"id": str, "name": str, "state": "stopped"|"booting"|"running"|"error",
-              "api": int, "width": int, "height": int}]}
+              "api": int, "width": int, "height": int,
+              "frame_source": ""|"grpc"|"adb"}]}
 ```
 
 - When more than one reason applies, `reason` is the first match in this order:
@@ -46,6 +47,10 @@ Refusals return a JSON error body, shown to the owner as is:
   `pixel`, which is `stopped` until it is started for the first time.
 - `width` and `height` are in device pixels and follow the current
   orientation (1080×2400 portrait, 2400×1080 after a rotate).
+- `frame_source` is `""` unless the device is `running`. `grpc` is the normal
+  fast path (10+ fps, sub-millisecond input). `adb` means the emulator's gRPC
+  control did not answer: frames drop to about 2 fps and input is slower. The
+  panel may show a quiet "slow mode" hint; nothing else changes.
 - When a device is `error`, the reason is in the device's stream `state`
   message (see below).
 

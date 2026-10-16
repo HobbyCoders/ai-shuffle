@@ -107,6 +107,8 @@ async def run_emulator(args: Dict[str, Any], *, cwd: Optional[str] = None) -> Di
                     dev["serial"] = live.serial
                     scale = live.agent_scale()
                     dev["screenshot_size"] = [round(live.width * scale), round(live.height * scale)]
+                    if live.grpc_error:
+                        dev["grpc_error"] = live.grpc_error
             return _text(status)
         if action == "setup":
             status = await manager.setup(args.get("accept_license") is True)

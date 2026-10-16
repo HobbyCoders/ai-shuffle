@@ -158,10 +158,16 @@ class GrpcControl:
 
     The emulator runs with ``-grpc-use-token``: it then listens on loopback
     only (without it the port is open on every interface) and every call must
-    carry its console token as ``authorization: Bearer <token>``.
+    carry its token as ``authorization: Bearer <token>``. The token the server
+    expects is the ``grpc.token`` it writes to its discovery file (see
+    ``layout.discovery_file``), falling back to the console token.
+
+    The server binds IPv4 loopback only, so the target is always the literal
+    ``127.0.0.1``: ``localhost`` can resolve to ``::1`` and be refused.
     """
 
     def __init__(self, port: int, token: str = "", host: str = "127.0.0.1") -> None:
+        self.port, self.token = port, token
         self.target = f"{host}:{port}"
         self._metadata = (("authorization", f"Bearer {token}"),) if token else None
         self._channel = None
@@ -172,6 +178,9 @@ class GrpcControl:
 
             self._channel = grpc.aio.insecure_channel(self.target, options=[
                 ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                # Loopback only: an http(s)_proxy in the app's environment
+                # must never carry the emulator's control channel.
+                ("grpc.enable_http_proxy", 0),
             ])
         return self._channel
 
