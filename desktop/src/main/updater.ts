@@ -188,7 +188,16 @@ export class Updater {
       }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
       this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null });
-    } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
+    } catch (error) {
+      // A newer release failed to download over a staged one: that one stays ready to install (#98).
+      const staged = this.applications?.pendingVersion;
+      if (staged && staged !== this.applications!.version && !this.applications!.cleanupError) {
+        this.set({ phase: 'ready', version: staged.slice(0, 12), error: String(error), percent: null, message: null, release: null, notes: null });
+        void this.applications!.releaseInfo?.(staged).then(info => {
+          if (this.state.phase === 'ready' && this.state.version === staged.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
+        }).catch(() => {});
+      } else this.set({ phase: 'error', error: String(error), percent: null, message: null });
+    }
     finally { this.downloading = false; }
   }
   async install(): Promise<void> {

@@ -931,6 +931,94 @@ def test_withdrawn_release_fallback_is_never_applied_backwards(feed):
     assert status["phase"] == "idle" and status["message"] == "You are up to date."
 
 
+def test_a_staged_build_does_not_hide_a_newer_release(feed):
+    """#98: Update re-offered a staged build forever without reading the feed."""
+    updater, publish, _, requests, _ = feed
+    publish(revision=B, sequence=2, version="1.0.0")
+    updater.check(download=True)
+    assert updater.state == {"pending": B}
+    publish(revision=C, sequence=3, version="1.0.1")
+    requests.clear()
+    updater.check()
+    status = status_of(updater)
+    assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
+    assert status["phase"] == "available" and status["version"] == C[:12] and status["release"] == "1.0.1"
+    assert updater.state == {"pending": B}, "a check downloads nothing; B can still be installed"
+    updater.check(download=True)
+    assert updater.state == {"pending": C}
+    assert not updater.directory(B).exists(), "the replaced build's files are removed"
+    status = status_of(updater)
+    assert status["phase"] == "ready" and status["version"] == C[:12] and status["release"] == "1.0.1"
+    command, _, env = updater.launch({}, activate=True)
+    assert env["GIT_SHA"] == C
+
+
+def test_a_failed_download_of_a_newer_release_keeps_the_staged_build(feed):
+    updater, publish, _, _, responses = feed
+    publish(revision=B, sequence=2, version="1.0.0")
+    updater.check(download=True)
+    publish(revision=C, sequence=3, version="1.0.1")
+    responses["/v1/desktop/sources/" + C] = b"not the signed archive"
+    (updater.root / "request.json").write_text(json.dumps({"action": "download", "expires_at": 2**40}))
+    updater.service()
+    assert updater.state == {"pending": B}
+    assert updater.directory(B).is_dir() and not updater.directory(C).exists()
+    status = status_of(updater)
+    assert status["phase"] == "ready" and status["version"] == B[:12] and status["release"] == "1.0.0"
+    assert "checksum" in status["error"]
+    assert updater.launch({}, activate=True)[2]["GIT_SHA"] == B
+
+
+def test_a_failed_check_after_a_newer_offer_names_the_staged_build(feed):
+    """Review of #98: A staged, B offered, then a check fails: "ready" must not name B."""
+    updater, publish, _, _, responses = feed
+    publish(revision=B, sequence=2, version="1.0.0", notes="A notes")
+    updater.check(download=True)
+    publish(revision=C, sequence=3, version="1.0.1", notes="B notes")
+    updater.check()
+    assert status_of(updater)["release"] == "1.0.1"
+    responses["/v1/desktop/manifest"] = b"not a signed manifest"
+    (updater.root / "request.json").write_text(json.dumps({"action": "check", "expires_at": 2**40}))
+    updater.service()
+    status = status_of(updater)
+    assert status["phase"] == "ready" and status["version"] == B[:12]
+    assert (status["release"], status["notes"]) == ("1.0.0", "A notes"), "the build Update and restart installs"
+    assert status["error"]
+    assert updater.state == {"pending": B}
+
+
+def test_a_staged_build_stays_when_the_feed_has_nothing_newer_it_can_run(feed):
+    updater, publish, _, requests, _ = feed
+    publish(revision=C, sequence=3)
+    updater.check(download=True)
+    for revision, sequence, runtime in ((C, 3, RUNTIME), (B, 2, RUNTIME), ("d" * 40, 4, "e" * 64)):
+        publish(revision=revision, sequence=sequence, runtime=runtime)
+        requests.clear()
+        updater.check(download=True)
+        assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
+        assert updater.state == {"pending": C} and updater.directory(C).is_dir()
+        assert status_of(updater)["phase"] == "ready" and status_of(updater)["version"] == C[:12]
+
+
+@pytest.mark.parametrize("moment", ["install-requested", "first-start"])
+def test_a_staged_build_being_installed_is_never_replaced(feed, moment):
+    updater, publish, _, requests, _ = feed
+    publish(revision=B, sequence=2)
+    updater.check(download=True)
+    if moment == "install-requested":
+        updater.install_requested.set()
+    else:
+        updater.launch({}, activate=True)
+        updater.activating()
+    state = dict(updater.state)
+    publish(revision=C, sequence=3)
+    requests.clear()
+    updater.check(download=True)
+    assert requests == [] and updater.state == state
+    assert not updater.directory(C).exists() and updater.directory(B).is_dir()
+    assert status_of(updater)["phase"] == "ready"
+
+
 def test_cleanup_retains_active_previous_staged_and_failed_revisions(feed):
     updater, _, _, _, _ = feed
     for revision in (A, B, C, "e" * 40, "f" * 40):

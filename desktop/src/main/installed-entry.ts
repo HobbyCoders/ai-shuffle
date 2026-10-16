@@ -51,7 +51,7 @@ export async function startInstalled(): Promise<void> {
 }
 
 async function startWith(root: string, userData: string, baseline: { revision: string; sequence: number }, launcher: number, trial: boolean): Promise<void> {
-  const updates = new SourceUpdates({ root, baseline: { revision: baseline.revision, sequence: baseline.sequence },
+  const updates = new SourceUpdates({ root, baseline: { revision: baseline.revision, sequence: baseline.sequence }, launcher,
     publicKey: await fs.readFile(path.join(app.getAppPath(), 'build/application-update-key.pem'), 'utf8'),
     bootstrapNode: path.join(process.resourcesPath, process.platform === 'win32' ? 'worker/node/node.exe' : 'worker/node/bin/node'),
   });

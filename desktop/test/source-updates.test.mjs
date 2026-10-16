@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { afterRename } from './helpers/crash-rename.mjs';
 const require = createRequire(import.meta.url);
-const { SourceUpdates, RestorePointError, verifySourceManifest, treeDigest, requiredLauncher } = require('../dist/main/source-updates.js');
+const { SourceUpdates, RestorePointError, InstallerRequiredError, verifySourceManifest, treeDigest, requiredLauncher, startLauncher } = require('../dist/main/source-updates.js');
 const { buildEnvironment, removeSourceDirectory } = require('../dist/main/source-build.js');
 const extractor = fileURLToPath(new URL('./helpers/source-archive.py', import.meta.url));
 const repoScripts = fileURLToPath(new URL('../../scripts', import.meta.url));
@@ -910,7 +910,7 @@ test('bootstrap first launch still downloads and selects an application; older s
  const legacy={load:async()=>{},select:async()=>{if(!legacyCalls)throw Error('No application');return {revision:A};},check:async(_progress,interactive)=>{assert.equal(interactive,true);legacyCalls++;}};
  assert.equal((await run(legacy)).revision,A);assert.equal(legacyCalls,1);
 });
-test('checks verify metadata only; explicit download stages the signed release and pending survives checks',async t=>{
+test('checks verify metadata only; explicit download stages the signed release and a newer release replaces it',async t=>{
  const f=await fixture(t);await f.release(A);const u=f.create();await u.load();
  await u.download();await u.select();await u.healthy();const old=await f.release(B);
  f.requests.length=0;const builds=f.builds;const progress=[];
@@ -920,10 +920,16 @@ test('checks verify metadata only; explicit download stages the signed release a
  assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.equal(f.requests.filter(url=>url===old.url).length,1);assert.equal(f.builds,builds+1);
  assert.equal(await fs.readFile(path.join(f.root,'versions',B,'release.json'),'utf8'),old.signed);
- await f.release(C);f.requests.length=0;
- assert.equal((await u.check()).version,B.slice(0,12));assert.equal((await u.download()).version,B.slice(0,12));
- const restarted=f.create();await restarted.load();assert.equal((await restarted.check()).kind,'ready');
- assert.deepEqual(f.requests,[]);assert.equal(f.builds,builds+1);
+ // #98: a pending download that never ran (no stageDownloads) no longer hides a newer release.
+ const newer=await f.release(C);f.requests.length=0;
+ assert.deepEqual(await u.check(),{kind:'available',version:C.slice(0,12),release:newer.manifest.version,notes:newer.manifest.notes});
+ assert.equal(u.pendingVersion,B,'a check downloads nothing');assert.equal(f.builds,builds+1);
+ assert.equal((await u.download()).version,C.slice(0,12));assert.equal(u.pendingVersion,C);
+ const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(state.pending,C);assert.equal(state.staged,undefined);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ const restarted=f.create();await restarted.load();f.requests.length=0;
+ assert.equal((await restarted.check()).kind,'ready');assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+ assert.equal(f.builds,builds+2);assert.equal((await restarted.select()).revision,C);
 });
 test('invalid check metadata fails before any archive request and can be retried',async t=>{
  const f=await fixture(t);const release=await f.release(A);const u=f.create();await u.load();
@@ -1268,4 +1274,84 @@ test('the update lock: a live holder refuses, a dead holder is reclaimed, fresh 
  await assert.rejects(fs.stat(lock),/ENOENT/);
  f.signed=release.signed;assert.equal((await u.download()).kind,'ready');
  await assert.rejects(fs.stat(lock),/ENOENT/);
+});
+
+test('#97: a release the running launcher cannot start is refused before it is offered or downloaded',async t=>{
+ const f=await fixture(t);f.options.launcher=3;
+ const u=f.create();await u.load();
+ // desktop.launcher alone (the swap after a healthy start) never refuses: PR #89's 3 -> 4 path.
+ await f.release(A,undefined,{desktop:{launcher:4,start:3}});
+ assert.equal((await u.check()).kind,'available');
+ await f.release(B,undefined,{version:'1.1.0',desktop:{launcher:5,start:4}});f.requests.length=0;
+ for(const run of [()=>u.check(),()=>u.download()]){
+  await assert.rejects(run(),error=>error instanceof InstallerRequiredError&&error.code==='installer_required'&&
+   /AI Shuffle 1\.1\.0 needs a newer desktop launcher.*launcher 3; it needs 4.*Install the latest AI Shuffle installer.*Your files and data have been kept.*No update was downloaded/.test(error.message));
+ }
+ assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest'],'no archive was requested');
+ assert.equal(f.builds,0);assert.equal(u.pendingVersion,null);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ // The launcher is never compared without one (profile and development builds), or for releases without desktop.start.
+ delete f.options.launcher;assert.equal((await f.create().check()).kind,'available');
+ f.options.launcher=0;await f.release(C,undefined,{desktop:{launcher:4}});assert.equal((await f.create().check()).kind,'available');
+});
+test('#97: desktop.start is validated like desktop.launcher and is absent from older manifests',async()=>{
+ const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
+ const signed=fields=>{const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,...fields}));return JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});};
+ assert.equal(startLauncher(verifySourceManifest(signed({}),publicKey)),0);
+ assert.equal(startLauncher(verifySourceManifest(signed({desktop:{launcher:4}}),publicKey)),0);
+ assert.equal(startLauncher(verifySourceManifest(signed({desktop:{launcher:4,start:3}}),publicKey)),3);
+ for(const start of [-1,1.5,'3',null])assert.throws(()=>verifySourceManifest(signed({desktop:{launcher:4,start}}),publicKey),/release fields/,String(start));
+});
+async function stagedOver(t){
+ const f=await fixture(t);await f.release(A);const u=f.create();await u.load();await u.download();await u.select();await u.databaseStarting();await u.healthy();
+ u.stageDownloads();const b=await f.release(B,undefined,{version:'1.0.0'});assert.equal((await u.download()).kind,'ready');
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).staged,B);
+ return {f,u,b};
+}
+test('#98: a staged build does not hide a newer release; a download replaces it and removes its files',async t=>{
+ const {f,u}=await stagedOver(t);
+ await f.release(C,undefined,{version:'1.0.1'});f.requests.length=0;const builds=f.builds;
+ assert.deepEqual(await u.check(),{kind:'available',version:C.slice(0,12),release:'1.0.1',notes:'Notes for cccc'});
+ assert.equal(u.pendingVersion,B,'a check downloads nothing; B stays installable');assert.equal(f.builds,builds);
+ assert.deepEqual(await u.download(),{kind:'ready',version:C.slice(0,12),release:'1.0.1',notes:'Notes for cccc'});
+ const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.equal(state.staged,C);assert.equal(state.pending,undefined);assert.equal(u.pendingVersion,C);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ assert((await fs.stat(path.join(f.root,'versions',A))).isDirectory(),'the running build stays');
+ await u.prepareInstall();const restarted=f.create();await restarted.load();assert.equal((await restarted.select()).revision,C);
+});
+test('#98: when the newer download fails, the staged build stays ready; an unreachable feed keeps it too',async t=>{
+ const {f,u}=await stagedOver(t);
+ await f.release(C);f.fail=true;
+ await assert.rejects(u.download(),/Local build failed/);
+ // The same holds without stageDownloads (a pending download): it stays pending.
+ {const g=await fixture(t);await g.release(A);const p=g.create();await p.load();await p.download();await p.select();await p.databaseStarting();await p.healthy();
+  await g.release(B);await p.download();await g.release(C);g.fail=true;await assert.rejects(p.download(),/Local build failed/);
+  assert.equal(JSON.parse(await fs.readFile(path.join(g.root,'state.json'),'utf8')).pending,B);
+  assert((await fs.stat(path.join(g.root,'versions',B,'release.json'))).isFile());}
+ assert.equal(u.pendingVersion,B);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).staged,B);
+ assert((await fs.stat(path.join(f.root,'versions',B,'release.json'))).isFile());
+ await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});
+ f.signed='{}';assert.deepEqual(await u.check(),{kind:'ready',version:B.slice(0,12),release:'1.0.0',notes:'Notes for bbbb'});
+ // Nothing newer, or nothing this launcher can start: B stays the offer.
+ f.fail=false;await f.release(E,undefined,{desktop:{launcher:9,start:9}});f.options.launcher=3;
+ assert.equal((await u.check()).version,B.slice(0,12));
+});
+test('#98: a build selected to install or fenced is never replaced and the feed is not read',async t=>{
+ for(const step of ['selected','fenced']){
+  const {f,u,b}=await stagedOver(t);let manager=u;
+  if(step==='selected')await u.prepareInstall();
+  else{
+   // A staged retry of a build that may already have migrated the database (its fence survives).
+   const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+   await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({...state,mayHaveMigrated:{[B]:b.manifest.sequence},blocked:true}));
+   manager=f.create();await manager.load();manager.stageDownloads();assert.equal(manager.pendingVersion,B);
+  }
+  await f.release(C);f.requests.length=0;
+  assert.equal((await manager.check()).kind,'ready',step);
+  assert.equal((await manager.download()).version,B.slice(0,12),step);
+  assert.deepEqual(f.requests,[],step);
+  await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});
+  assert((await fs.stat(path.join(f.root,'versions',B))).isDirectory(),step);
+ }
 });

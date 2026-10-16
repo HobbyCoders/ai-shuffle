@@ -25,6 +25,8 @@ Most releases install from inside AI Shuffle:
 1. When a new release is out, the update button appears in the sidebar with its release notes.
 2. Choose **Download update**, then **Update and restart**. Agents stop, the update installs, and AI Shuffle starts again.
 
+On a Docker worker, a downloaded update that is waiting for **Update and restart** does not hide a newer release. Checking for updates still reads the feed: when a newer release is out, the button offers it, and **Download update** replaces the waiting one and removes its files. If that download fails, the earlier update stays ready to install. Nothing is replaced while an update is installing or starting.
+
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
 ### Runtime overlays
@@ -53,6 +55,10 @@ Updating the image always works, even when an in-app update would have, and it i
 ## The desktop app
 
 The desktop app checks for new releases when it starts and once a day, and offers to install them.
+
+A downloaded update that is waiting for **Update and restart** does not hide a newer release: a check still reads the feed, and **Download update** replaces the waiting update with the newer one. If that download fails, the earlier update stays ready. An update that is installing, starting or held back after a failed start is never replaced.
+
+If a release cannot start on this install's desktop launcher, the app says so before it downloads anything: install the latest AI Shuffle installer from hobbycoders.com. Your data is kept.
 
 Before a source update first starts, a current desktop launcher stops the worker and managed PostgreSQL and saves one validated database restore point. If the copy fails (for example, the disk is full), the update does not start and the previous version is kept. Leave room for a database copy and temporary restore files.
 

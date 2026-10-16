@@ -1,6 +1,7 @@
 """scripts/ci/update_reach.py: which changes the in-app update cannot deliver (no git calls)."""
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import re
 
@@ -77,7 +78,7 @@ def test_supervisor_and_chrome_script_changes_are_reported_not_failed():
     groups = groups_for({"docker/start-chrome.sh": "#!/bin/sh\nexit 0\n", "docker/application_updates.py": "x = 1\n"})
     assert groups["image-supervisor"] == ["docker/application_updates.py", "docker/start-chrome.sh"]
     assert groups["docker-image"] == [] and groups["docker-image-copy"] == []
-    assert groups["macos-linux-desktop"] == []
+    assert groups["macos-desktop"] == []
     assert reach.verdict(groups) == []
 
 
@@ -123,16 +124,76 @@ def test_application_code_reaches_docker_and_windows_installs():
     assert reach.verdict(groups) == []
     # The full desktop app (index.ts and below) runs from the updated source.
     assert groups["windows-launcher"] == []
-    # macOS and Linux have no in-place update at all, so it is still reported.
-    assert groups["macos-linux-desktop"] == ["app/main.py", "desktop/src/main/index.ts",
-                                             "desktop/src/main/worker.ts", "frontend/src/app.html"]
+    # Only macOS has no in-place update at all, so it is still reported.
+    assert groups["macos-desktop"] == ["app/main.py", "desktop/src/main/index.ts",
+                                       "desktop/src/main/worker.ts", "frontend/src/app.html"]
+    assert groups["launcher-version"] == []
 
 
-def test_installed_launcher_code_never_reaches_installed_windows_apps():
+def raised_launcher(by=1):
+    """desktop/launcher.json with its version raised, as a launcher change must do."""
+    value = json.loads((ROOT / reach.LAUNCHER_JSON).read_text())
+    return json.dumps({**value, "version": value["version"] + by})
+
+
+def test_installed_launcher_code_never_reaches_installed_desktop_apps():
     groups = groups_for({"desktop/src/main/installed-host.ts": "changed",
-                         "desktop/src/main/source-updates.ts": "changed"})
+                         "desktop/src/main/source-updates.ts": "changed",
+                         reach.LAUNCHER_JSON: raised_launcher()})
     assert groups["windows-launcher"] == ["desktop/src/main/installed-host.ts", "desktop/src/main/source-updates.ts"]
+    assert groups["launcher-version"] == []
     assert reach.verdict(groups) == ["windows-launcher"]
+    # A deliberate launcher change with its version raised: the owner's label accepts it.
+    assert reach.verdict(groups, reach.allowed_by_labels("update-reach:windows-launcher")) == []
+    # Both installed desktop launchers run this closure, not only Windows.
+    assert "Windows and Linux" in reach.render("b", "h", groups, ["windows-launcher"], [])
+
+
+def test_launcher_change_without_a_version_bump_fails_even_with_the_label():
+    """#97: PRs #58 and #61 changed this closure under the label and kept launcher.json at 3."""
+    groups = groups_for({"desktop/src/main/installed-entry.ts": "changed"})
+    assert groups["windows-launcher"] == ["desktop/src/main/installed-entry.ts"]
+    assert groups["launcher-version"] == ["desktop/src/main/installed-entry.ts"]
+    assert reach.verdict(groups) == ["windows-launcher", "launcher-version"]
+    labelled = reach.allowed_by_labels("update-reach:windows-launcher")
+    assert reach.verdict(groups, labelled) == ["launcher-version"]
+    # launcher-version has no label of its own; the label must say why no bump is needed.
+    assert reach.allowed_by_labels("update-reach:launcher-version") == []
+    assert reach.verdict(groups, ["launcher-version"]) == ["windows-launcher", "launcher-version"]
+    message = reach.render("b", "h", groups, reach.verdict(groups, labelled), labelled)
+    assert "FAILED:" in message and 'raise desktop/launcher.json "version"' in message
+    assert "update-reach:no-launcher-change" in message and "--allow no-launcher-change" in message
+    assert "update-reach:launcher-version" not in message
+    # A behaviour-neutral change (a move, a comment): the explicit justification accepts both.
+    assert reach.verdict(groups, reach.allowed_by_labels("update-reach:no-launcher-change")) == []
+
+
+def test_launcher_version_must_go_up_not_merely_change():
+    for version in (None, "not json", json.dumps({"version": 0, "minimum": 0}),
+                    json.dumps({"version": True, "minimum": 0}), raised_launcher(0), raised_launcher(-1)):
+        groups = groups_for({"desktop/src/main/postgres.ts": "changed", reach.LAUNCHER_JSON: version})
+        assert groups["launcher-version"] == ["desktop/src/main/postgres.ts"], version
+    # A base from before launcher.json existed: any valid version is a raise.
+    head = tree({"desktop/src/main/postgres.ts": b"changed", reach.LAUNCHER_JSON: raised_launcher().encode()})
+    groups = reach.classify(["desktop/src/main/postgres.ts"], tree({reach.LAUNCHER_JSON: None}), head)
+    assert groups["launcher-version"] == []
+
+
+def test_launcher_version_alone_is_not_a_launcher_change():
+    groups = groups_for({reach.LAUNCHER_JSON: raised_launcher()})
+    assert groups["windows-launcher"] == [] and groups["launcher-version"] == []
+    assert reach.verdict(groups) == []
+
+
+def test_cli_fails_a_launcher_change_without_a_bump_despite_the_label(monkeypatch, capsys):
+    monkeypatch.setattr(reach, "git", lambda *a: "desktop/src/main/installed-entry.ts")
+    monkeypatch.setattr(reach, "reader", lambda revision: tree(
+        {"desktop/src/main/installed-entry.ts": b"changed"} if revision == "head" else {}))
+    assert reach.main(["--base", "base", "--head", "head", "--labels", "update-reach:windows-launcher"]) == 1
+    output = capsys.readouterr().out
+    assert "ACKNOWLEDGED: windows-launcher" in output and "OUT OF REACH: launcher-version" in output
+    assert reach.main(["--base", "base", "--head", "head", "--labels", "update-reach:no-launcher-change"]) == 0
+    assert reach.main(["--base", "base", "--head", "head", "--allow", "no-launcher-change"]) == 0
 
 
 def test_launcher_closure_follows_imports_and_requires_but_stops_at_the_full_app():
@@ -153,6 +214,20 @@ def test_type_only_imports_are_not_part_of_the_launcher():
     })
     assert reach.launcher_files(read) == {"desktop/src/main/managed-entry.ts", "desktop/src/main/runtime.ts",
                                           "desktop/src/main/required.ts"}
+
+
+def test_dynamic_side_effect_and_re_exported_modules_are_part_of_the_launcher():
+    # installed-entry.ts loads installer-updates with await import() for the recovery installer.
+    assert "desktop/src/main/installer-updates.ts" in reach.launcher_files(tree())
+    read = tree({
+        "desktop/src/main/managed-entry.ts": b"import './side';\nexport { x } from './again';\n"
+                                             b"export type { T } from './types-only';\n"
+                                             b"async function f() { await import('./later'); }\n",
+        "desktop/src/main/side.ts": b"", "desktop/src/main/again.ts": b"", "desktop/src/main/later.ts": b"",
+        "desktop/src/main/types-only.ts": b"export type T = 1;\n",
+    })
+    assert reach.launcher_files(read) == {"desktop/src/main/managed-entry.ts", "desktop/src/main/side.ts",
+                                          "desktop/src/main/again.ts", "desktop/src/main/later.ts"}
 
 
 def test_trust_key_change_fails_for_every_platform():
@@ -271,7 +346,7 @@ def test_archive_membership_honours_exclusions():
 
 
 def test_draft_note_keeps_groups_and_owner_labels_visible():
-    groups = groups_for({reach.LAUNCHER_ENTRY: "export const changed = true;"})
+    groups = groups_for({reach.LAUNCHER_ENTRY: "export const changed = true;", reach.LAUNCHER_JSON: raised_launcher()})
     failing = reach.verdict(groups)
     assert failing == ["windows-launcher"]
     note = reach.render("base", "head", groups, failing, [], draft=True)

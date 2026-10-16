@@ -408,3 +408,22 @@ test('a bridge that fails or a session count that cannot be read never installs 
  assert.equal(installs, 0);
  updater.stop();
 });
+
+test('#98: a failed download of a newer release keeps the staged one ready to install', async () => {
+ const { updater, calls } = fixture();
+ const staged = 'c'.repeat(40);
+ updater.useApplications(source({ pendingVersion: staged, cleanupError: null, retryCleanup: async () => {},
+  check: async () => available, download: async () => { throw Error('Source archive checksum or size mismatch'); },
+  releaseInfo: async () => ({ release: '1.0.0', notes: 'Staged notes' }), prepareInstall: async () => calls.push('prepare') }));
+ // A modern manager with a staged build checks the feed at once (#98).
+ await new Promise(setImmediate); assert.equal(updater.current.phase, 'available');
+ await updater.download();
+ assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.version, staged.slice(0, 12));
+ assert.match(updater.current.error, /checksum/);
+ await new Promise(setImmediate); assert.equal(updater.current.release, '1.0.0');
+ updater.onBeforeInstall(async () => calls.push('stop')); await updater.install();
+ assert.deepEqual(calls.slice(0, 2), ['stop', 'prepare']);
+ // Without a staged build the failure is an error, as before.
+ const plain = fixture(); plain.updater.useApplications(source({ download: async () => { throw Error('offline'); } }));
+ await plain.updater.check(); await plain.updater.download(); assert.equal(plain.updater.current.phase, 'error');
+});

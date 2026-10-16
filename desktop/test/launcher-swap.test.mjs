@@ -132,7 +132,8 @@ test('the archive reader refuses changed bytes, missing members and non-archives
 });
 
 test('the launcher reads launcher.json exactly as the build scripts do', () => {
- for (const text of ['{"version":2,"minimum":0}', '{"version":1,"minimum":1}', '{"version":0,"minimum":0}', '{"version":2,"minimum":3}', '{"version":"2","minimum":0}', '{"version":2}', '[]', 'null', '{"version":1.5,"minimum":0}']) {
+ for (const text of ['{"version":2,"minimum":0}', '{"version":1,"minimum":1}', '{"version":0,"minimum":0}', '{"version":2,"minimum":3}', '{"version":"2","minimum":0}', '{"version":2}', '[]', 'null', '{"version":1.5,"minimum":0}',
+  '{"version":4,"minimum":4,"start":3}', '{"version":2,"minimum":0,"start":3}', '{"version":2,"minimum":0,"start":"1"}']) {
   let expected; try { expected = readLauncher(text); } catch { expected = 'error'; }
   let actual; try { actual = swap.parseLauncher(text); } catch { actual = 'error'; }
   assert.deepEqual(actual, expected, text);

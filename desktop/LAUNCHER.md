@@ -15,12 +15,33 @@ and the release may replace an older launcher as described below.
 
 ## Versions
 
-`desktop/launcher.json` holds `{"version": n, "minimum": m}`.
+`desktop/launcher.json` holds `{"version": n, "minimum": m, "start": s}`.
 
 | Field | Meaning |
 |---|---|
-| `version` | The launcher this source packs into `app.asar`. Raise it whenever a file in the launcher closure changes. |
-| `minimum` | The oldest launcher a release built from this source needs. It is signed into every published manifest as `desktop.launcher`. |
+| `version` | The launcher this source packs into `app.asar`. Raise it whenever a file in the launcher closure changes. `scripts/ci/update_reach.py` fails a range that changes the closure without raising it (`launcher-version`), unless the owner labels it `update-reach:no-launcher-change`. |
+| `minimum` | The oldest launcher a release built from this source needs. It is signed into every published manifest as `desktop.launcher`. A running launcher below it is replaced, but only after the release's first healthy start (below), so it cannot protect that first start. |
+| `start` | The oldest launcher that can start a release built from this source at all, before any replacement. It is signed as `desktop.start`. Optional, 0 to `version`; a manifest without it can be started by any launcher. |
+
+**The start floor (#97).** Before a release is offered or downloaded, the
+updater compares `desktop.start` with the launcher it runs under. The launcher
+version is `SHUFFLE_LAUNCHER_VERSION` on Windows (0 when the launcher passes
+none). On Linux, the installed app runs the update in its own process without
+that variable, so the version comes from the installed `app.asar`'s
+`launcher.json`, then its `desktop-build.json` stamp. Profile and development
+builds have no installed launcher and are not compared. A launcher below the
+floor gets "AI Shuffle <version> needs a newer desktop launcher than this
+install has … Install the latest AI Shuffle installer", and nothing is
+downloaded or staged. Linux never replaces its launcher, so there the start
+floor is the only launcher check.
+
+Set `start` to the oldest launcher that can still start the release, not to
+`version`. A release that needs new launcher behaviour *before* its first
+healthy start must either do that work itself, as the late restore point does
+for launcher 3, or raise `start` and accept that older installs need an
+installer. Current value: 3. Launchers 3 (0.9.6 and 1.0.x) start these builds
+through the late restore point; older ones cannot verify them (the
+signing-key bridge).
 
 - `launcher.json` is packed into `app.asar`.
 - `scripts/stamp-desktop-build.mjs` stamps `launcher: <version>` into the
