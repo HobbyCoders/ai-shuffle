@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts import local_ci
 from scripts.live_smoke import gate as smoke_gate_mod
 from scripts.live_smoke import results as smoke_results
 from scripts.live_smoke import scenarios as smoke_scenarios
@@ -73,14 +74,58 @@ def latest_final_tag(tags: Iterable[str]) -> Optional[str]:
     return max(finals, key=lambda t: tuple(int(p) for p in t[1:].split(".")))
 
 
-def release_tags() -> list:
-    """Tags on origin. A checkout can carry local-only tags (an old v5.0.0 on
-    DesktopWorker once made the preflight suggest v5.0.1), so local tags are read
-    only when origin cannot be reached."""
-    remote = _try("git", "ls-remote", "--tags", "--refs", "origin")
-    if remote is None:
-        return (_try("git", "tag", "--list") or "").splitlines()
-    return [line.split("refs/tags/", 1)[1] for line in remote.splitlines() if "refs/tags/" in line]
+def public_main_ref() -> str:
+    """``<remote>/main`` of the public repository, resolved as ``local_ci.py --attest`` does.
+
+    A shared checkout can name the private archive ``origin`` and the public
+    repository ``public``; reading ``origin`` there reported the archive's main
+    and its old tags as the candidate. Overrides (LOCAL_CI_BASE) are ignored:
+    a release candidate is always public main.
+    """
+    return local_ci.resolve_base(public_only=True)
+
+
+def _parse_ls_remote_tags(listing: str) -> dict:
+    """``git ls-remote --tags`` output -> {tag: commit sha}, preferring peeled (``^{}``) lines."""
+    tags: dict = {}
+    for line in listing.splitlines():
+        sha, _, ref = line.partition("\t")
+        if not ref.startswith("refs/tags/"):
+            continue
+        name = ref[len("refs/tags/"):]
+        if name.endswith("^{}"):
+            tags[name[:-3]] = sha
+        else:
+            tags.setdefault(name, sha)
+    return tags
+
+
+def release_tags(remote: str = "origin", ref: Optional[str] = None) -> dict:
+    """Tags on ``remote`` -> commit sha (None when only known locally).
+
+    A checkout can carry local-only tags (an old v5.0.0 on one worker once
+    made the preflight suggest v5.0.1), and a shared checkout carries the
+    private archive's tags. So local tags are read only when the remote cannot
+    be reached, and then only those on ``ref``'s history.
+    """
+    listing = _try("git", "ls-remote", "--tags", remote)
+    if listing is None:
+        merged = ["--merged", ref] if ref else []
+        return {name: None for name in (_try("git", "tag", "--list", *merged) or "").splitlines() if name}
+    return _parse_ls_remote_tags(listing)
+
+
+def _commit(remote: str, tag: str, sha: Optional[str]) -> Optional[str]:
+    """The tag's commit, fetched by id from ``remote`` when this clone lacks it.
+
+    Never ``git fetch --tags``: the archive's same-named tags would clobber or
+    be clobbered, and the fetch would fail outright.
+    """
+    if not sha:
+        return _try("git", "rev-list", "-n", "1", f"refs/tags/{tag}")
+    if _try("git", "cat-file", "-e", f"{sha}^{{commit}}") is None:
+        _try("git", "fetch", "--quiet", "--no-tags", remote, sha)
+    return _try("git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
 
 
 def next_patch(tag: Optional[str]) -> str:
@@ -151,16 +196,30 @@ def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optio
 
 def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = None,
             smoke_dir: Optional[str] = None, skip_windows: Optional[str] = None) -> dict:
-    _try("git", "fetch", "--quiet", "--tags", "origin", "main")
-    head = _try("git", "rev-parse", "origin/main") or ""
-    tag = latest_final_tag(release_tags())
-    tag_sha = _try("git", "rev-list", "-n", "1", tag) if tag else None
+    blockers = []
+    try:
+        ref = public_main_ref()
+    except local_ci.Failure as error:
+        ref = None
+        blockers.append(str(error))
+    remote = ref.split("/", 1)[0] if ref else None
+    remote_url = _try("git", "remote", "get-url", remote) if remote else None
+    head, tag, tag_sha = "", None, None
     commits = []
     changed: list = []
-    if tag:
-        log = _try("git", "log", "--format=%h %s", f"{tag}..origin/main") or ""
+    if ref:
+        branch = ref.split("/", 1)[1]
+        _try("git", "fetch", "--quiet", "--no-tags", remote, f"+refs/heads/{branch}:refs/remotes/{ref}")
+        head = _try("git", "rev-parse", ref) or ""
+        tags = release_tags(remote, ref)
+        tag = latest_final_tag(tags)
+        tag_sha = _commit(remote, tag, tags.get(tag)) if tag else None
+        if tag and not tag_sha:
+            blockers.append(f"Could not read the commit of {tag} on {remote}; fetch {ref} and retry.")
+    if tag_sha and head:
+        log = _try("git", "log", "--format=%h %s", f"{tag_sha}..{head}") or ""
         commits = [line for line in log.splitlines() if line]
-        changed = (_try("git", "diff", "--name-only", f"{tag}..origin/main") or "").splitlines()
+        changed = (_try("git", "diff", "--name-only", f"{tag_sha}..{head}") or "").splitlines()
     runs = _gh_json("run", "list", "--repo", REPOSITORY, "--branch", "main", "--limit", "60",
                     "--json", "workflowName,status,conclusion,headSha") or []
     statuses = (_gh_json("api", f"repos/{REPOSITORY}/commits/{head}/statuses?per_page=100") or []) if head else []
@@ -170,8 +229,7 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         "ANDROID_WORKERS_READY": _variable("ANDROID_WORKERS_READY"),
         "PLAY_SIGNING_READY": _variable("PLAY_SIGNING_READY", env="google-play-internal"),
     }
-    blockers = []
-    if not commits:
+    if ref and not commits:
         blockers.append("Nothing new on main since the last release tag.")
     notes = []
     for context in REQUIRED_LOCAL:
@@ -186,6 +244,9 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
     smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir)
     blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
     return {
+        "repository": REPOSITORY,
+        "main_ref": ref,
+        "remote": {"name": remote, "url": remote_url},
         "main_head": head,
         "last_release": {"tag": tag, "sha": tag_sha},
         "suggested_tag": next_patch(tag),
@@ -203,8 +264,11 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
 
 
 def render(report: dict) -> str:
+    remote = report.get("remote") or {}
+    source = (f"{report.get('main_ref')} (remote '{remote.get('name')}' = {report.get('repository')})"
+              if report.get("main_ref") else f"no remote for {report.get('repository')}")
     lines = [
-        f"Candidate: origin/main {report['main_head'][:9]}  "
+        f"Candidate: {source} {report['main_head'][:9]}  "
         f"(last release {report['last_release']['tag']}, {report['commits_since_release']} commits since)",
         f"Suggested tag: {report['suggested_tag']}",
         "Local suites on candidate: " + ", ".join(f"{k}={v}" for k, v in report["local_suites_on_main_head"].items())
