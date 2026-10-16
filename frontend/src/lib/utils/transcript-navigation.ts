@@ -1,5 +1,6 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { agentDelivery } from './agent-delivery';
+import { createPrefixFold } from './prefix-fold';
 
 export interface UserTurnNavigationItem {
 	id: string;
@@ -64,6 +65,20 @@ function createTurnOpenerTracker(): (message: ChatMessage) => boolean {
 		}
 		return !steered && isNavigableUserTurn(message);
 	};
+}
+
+/** Cheap identity of what `deriveUserTurnNavigationItems` reads: prompt ids,
+ *  their turn ids (steered or opening) and prompt lengths, no regex. */
+export function turnNavigationSignatureStep(signature: string, message: ChatMessage): string {
+	if (!isNavigableUserTurn(message) || !message.id) return signature;
+	return signature + `${message.id}:${message.turnId ?? ''}:${(message.content ?? '').length}\u0000`;
+}
+
+/** The rail signature per streaming fold without re-reading every historical
+ *  prompt: only the rows near the tail are visited while the rest are the
+ *  same objects (#1282, prefix-fold.ts). */
+export function createTurnNavigationSignature(): (messages: readonly ChatMessage[]) => string {
+	return createPrefixFold(() => '', turnNavigationSignatureStep);
 }
 
 /** One navigation stop per turn, on the prompt that opened it. */

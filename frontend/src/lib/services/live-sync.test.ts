@@ -224,6 +224,43 @@ describe('root authenticated live-sync lifecycle',()=>{
   document.dispatchEvent(new Event('visibilitychange'));
   expect(m.reconnect).not.toHaveBeenCalled();
  });
+ describe('hidden periods (#1282)',()=>{
+  const setHidden=(hidden:boolean)=>{
+   Object.defineProperty(document,'hidden',{configurable:true,value:hidden});
+   Object.defineProperty(document,'visibilityState',{configurable:true,value:hidden?'hidden':'visible'});
+   document.dispatchEvent(new Event('visibilitychange'));
+  };
+  afterEach(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});});
+  it('a periodic reconcile while hidden reads nothing; the return reads each list and preferences once',async()=>{
+   stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
+   m.reconnect.mockClear();m.loadSessions.mockClear();m.loadProjectCatalog.mockClear();
+   setHidden(true);
+   Socket.all[0].emit({type:'sync_reconcile'});await vi.advanceTimersByTimeAsync(30_000);
+   expect(m.reconnect).not.toHaveBeenCalled();expect(m.loadSessions).not.toHaveBeenCalled();
+   expect(hydrateModelRegistry).not.toHaveBeenCalled();
+   m.invalidate.mockClear();setHidden(false);await vi.advanceTimersByTimeAsync(100);
+   // A short hide does not ask for a second blanket refresh on top.
+   expect(m.invalidate).not.toHaveBeenCalled();
+   expect(m.reconnect).toHaveBeenCalledOnce();expect(m.loadProjectCatalog).toHaveBeenCalledOnce();
+   expect(hydrateModelRegistry).toHaveBeenCalledOnce();
+   // sessions/tags and projects subscribers share the central list load.
+   expect(m.loadSessions).toHaveBeenCalledTimes(2);
+  });
+  it('a quick hide with nothing reported costs no catalogue or preference read',async()=>{
+   stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
+   m.reconnect.mockClear();m.invalidate.mockClear();m.loadSessions.mockClear();
+   setHidden(true);await vi.advanceTimersByTimeAsync(5_000);setHidden(false);await vi.advanceTimersByTimeAsync(100);
+   expect(m.reconnect).not.toHaveBeenCalled();expect(m.invalidate).not.toHaveBeenCalled();expect(m.loadSessions).not.toHaveBeenCalled();
+  });
+  it('a hide past one reconcile period, or coming back online, refreshes everything once',async()=>{
+   stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
+   m.reconnect.mockClear();m.invalidate.mockClear();
+   setHidden(true);await vi.advanceTimersByTimeAsync(60_000);setHidden(false);
+   expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenCalledOnce();
+   window.dispatchEvent(new Event('online'));
+   expect(m.reconnect).toHaveBeenCalledTimes(2);expect(m.invalidate).toHaveBeenCalledTimes(2);
+  });
+ });
  it('reconnects after close, but teardown removes retries and stale callbacks',async()=>{
   stop=startLiveSync();account('alice');Socket.all[0].close();await vi.advanceTimersByTimeAsync(1000);
   expect(Socket.all).toHaveLength(2);Socket.all[1].close();stop();await vi.advanceTimersByTimeAsync(30000);

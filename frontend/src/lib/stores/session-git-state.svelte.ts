@@ -12,6 +12,9 @@
  *   single poll,
  * - the poll is slow (60s) and stops the moment the last watcher releases,
  *   aborting whatever is in flight,
+ * - a hidden tab polls nothing; coming back re-reads only a checkout whose
+ *   last answer is older than the poll period, and keeps the others on their
+ *   original schedule (a quick alt-tab costs no request),
  * - the session open in the main panel doesn't subscribe at all: SessionCard
  *   reads the real git store, which already holds that checkout.
  *
@@ -45,6 +48,10 @@ interface Watch {
 	worktreeId: string | null;
 	abort: AbortController | null;
 	timer: ReturnType<typeof setInterval> | null;
+	/** One-shot wait for the rest of the period after a visibility return. */
+	delay: ReturnType<typeof setTimeout> | null;
+	/** performance.now() of the last successful read, or null before one. */
+	loadedAt: number | null;
 	inFlight: boolean;
 }
 
@@ -91,6 +98,7 @@ async function load(sessionId: string) {
 		}
 		entries[sessionId] = { status, diffStats, loaded: true };
 		cachedScopes.set(sessionId, watch.scope);
+		watch.loadedAt = performance.now();
 	} catch {
 		// Quietly settle on "nothing to show" rather than leaving the card
 		// pending forever; a later tick can still succeed.
@@ -106,9 +114,15 @@ async function load(sessionId: string) {
 	}
 }
 
-function teardown(sessionId: string, watch: Watch) {
+function pause(watch: Watch) {
 	if (watch.timer !== null) clearInterval(watch.timer);
 	watch.timer = null;
+	if (watch.delay !== null) clearTimeout(watch.delay);
+	watch.delay = null;
+}
+
+function teardown(sessionId: string, watch: Watch) {
+	pause(watch);
 	watch.abort?.abort();
 	watch.abort = null;
 	if (watches.get(sessionId) === watch) watches.delete(sessionId);
@@ -119,15 +133,21 @@ function teardown(sessionId: string, watch: Watch) {
 
 function resumeWatch(sessionId: string, watch: Watch) {
 	if (typeof document !== 'undefined' && document.hidden) return;
-	void load(sessionId);
-	if (watch.timer === null) watch.timer = setInterval(() => void load(sessionId), REFRESH_MS);
+	if (watch.timer !== null || watch.delay !== null) return;
+	const poll = () => {
+		watch.delay = null;
+		void load(sessionId);
+		watch.timer = setInterval(() => void load(sessionId), REFRESH_MS);
+	};
+	const wait = watch.loadedAt === null ? 0 : watch.loadedAt + REFRESH_MS - performance.now();
+	if (wait <= 0) poll();
+	else watch.delay = setTimeout(poll, wait);
 }
 
 function onVisibilityChange() {
 	for (const [sessionId, watch] of watches) {
 		if (document.hidden) {
-			if (watch.timer !== null) clearInterval(watch.timer);
-			watch.timer = null;
+			pause(watch);
 			watch.abort?.abort();
 			watch.abort = null;
 			watch.inFlight = false;
@@ -184,6 +204,8 @@ export const sessionGitState = {
 			worktreeId,
 			abort: null,
 			timer: null,
+			delay: null,
+			loadedAt: null,
 			inFlight: false
 		};
 		watches.set(sessionId, watch);

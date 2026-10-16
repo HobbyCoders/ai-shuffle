@@ -77,6 +77,56 @@ describe('sessionGitState', () => {
 		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
 	});
 
+	it('re-reads only stale checkouts after a quick hide and keeps the 60s cadence (#1282)', async () => {
+		const hide = (hidden: boolean) => {
+			Object.defineProperty(document, 'hidden', { configurable: true, value: hidden });
+			document.dispatchEvent(new Event('visibilitychange'));
+		};
+		const release = sessionGitState.watch('s1', 'proj-1');
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
+		// A five-second alt-tab: the answer is still fresh, so nothing is read.
+		await vi.advanceTimersByTimeAsync(10_000);
+		hide(true);
+		await vi.advanceTimersByTimeAsync(5_000);
+		hide(false);
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
+		// The next read still lands one period after the last one, not later.
+		await vi.advanceTimersByTimeAsync(REFRESH_MS - 15_000 - 1);
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(REFRESH_MS);
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(3);
+		// A hide longer than the period re-reads at once on return.
+		hide(true);
+		await vi.advanceTimersByTimeAsync(REFRESH_MS * 2);
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(3);
+		hide(false);
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(4);
+		// Hiding during the post-return wait cancels it; release stops everything.
+		await vi.advanceTimersByTimeAsync(5_000);
+		hide(true);
+		hide(false);
+		release();
+		await vi.advanceTimersByTimeAsync(REFRESH_MS * 3);
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(4);
+	});
+
+	it('retries a failed read on the first return instead of waiting a period', async () => {
+		mocks.getGitStatus.mockRejectedValueOnce(new Error('offline'));
+		sessionGitState.watch('s1', 'proj-1');
+		await flush();
+		Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+		document.dispatchEvent(new Event('visibilitychange'));
+		Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+		document.dispatchEvent(new Event('visibilitychange'));
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
+	});
+
 	it('aborts hidden work before it can launch a dirty diff request', async () => {
 		let finish!: (value: ReturnType<typeof status>) => void;
 		mocks.getGitStatus.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
