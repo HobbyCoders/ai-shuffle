@@ -14,6 +14,7 @@ from contextlib import suppress
 TTL = 60
 COMMAND_TTL = 30
 MAX_PENDING = 128
+COPY_LIMIT = 16384  # longest page selection a viewer can copy at once
 MAX_BODY = 262144
 
 
@@ -106,7 +107,7 @@ def validate_state(state, runtime_id):
     if not isinstance(editors, list) or len(editors) > 32:
         raise ControlError("Invalid text fields")
     for field in editors:
-        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
+        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser", "keys"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
             raise ControlError("Invalid text field")
         identifier(field["id"])
         if field["type"] not in ("text", "search", "email", "url", "tel", "password", "textarea", "file"):
@@ -117,6 +118,8 @@ def validate_state(state, runtime_id):
             raise ControlError("Invalid file accept filter")
         if "chooser" in field and type(field["chooser"]) is not bool:
             raise ControlError("Invalid file chooser flag")
+        if "keys" in field and type(field["keys"]) is not bool:
+            raise ControlError("Invalid keystroke flag")
         if "multiple" in field and type(field["multiple"]) is not bool:
             raise ControlError("Invalid multiple-file flag")
         if field["type"] == "password" and field["value"]:
@@ -228,7 +231,7 @@ class Broker:
             )
         )
 
-    async def settle(self, command_id, ok, error=None):
+    async def settle(self, command_id, ok, error=None, text=None):
         command = self.pending.pop(command_id, None)
         if command:
             if command["op"] in ("takeover", "release"):
@@ -236,6 +239,10 @@ class Broker:
             message = {"type": "command-result", "id": command_id, "ok": ok}
             if error:
                 message["error"] = error[:2048]
+            # A copy goes only to the viewer that asked for it; never logged,
+            # broadcast or kept in workspace state.
+            if text is not None and command["op"] == "copy":
+                message["text"] = text
             waiter = self.result_waiters.get(command_id)
             if waiter is not None and not waiter.done():
                 waiter.set_result(message)
@@ -343,6 +350,11 @@ class Broker:
                 result.get("error", ""), str
             ):
                 raise ControlError("Invalid result")
+            copied = result.get("text")
+            if copied is not None and (
+                not isinstance(copied, str) or len(copied) > COPY_LIMIT
+            ):
+                raise ControlError("Invalid copied text")
         if state["revision"] > self.report_revision:
             self.report_revision = state["revision"]
             self.state = state
@@ -359,7 +371,9 @@ class Broker:
             )
             await self.broadcast()
         for result in results:
-            await self.settle(result["id"], result["ok"], result.get("error"))
+            await self.settle(
+                result["id"], result["ok"], result.get("error"), result.get("text")
+            )
 
     async def submit(self, viewer_id, data, internal=False):
         self.identity(data)
@@ -374,6 +388,7 @@ class Broker:
             "takeover": set(),
             "release": set(),
             "heartbeat": set(),
+            "copy": set(),
             "navigate": {"url"},
             "command": {"command"},
             "tabs": {"action", "tab_id", "url"},
@@ -420,6 +435,9 @@ class Broker:
             paths = args.get("paths")
             if not isinstance(paths, list) or not 1 <= len(paths) <= 10 or any(not isinstance(p, str) or not p for p in paths):
                 raise ControlError("Invalid upload files")
+        elif op == "copy":
+            if args:
+                raise ControlError("Invalid copy")
         elif op == "edit":
             identifier(args.get("field"))
             if args.get("action") not in ("focus", "blur", "replace"):

@@ -43,7 +43,7 @@ afterEach(() => {
 let keyboardView: BrowserLiveView;
 
 async function setup(
-	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean } = {},
+	props: { interactive?: boolean; inspecting?: boolean; keyboardEnabled?: boolean; onCopy?: () => void } = {},
 ) {
 	const onInput = vi.fn();
 	const onInspect = vi.fn();
@@ -421,6 +421,17 @@ describe('native remote-browser keyboard bridge', () => {
 			['key', 'down', 'a'],
 			['key', 'up', ''],
 		]);
+	});
+	it('asks for a copy on Ctrl+C or Cmd+C and still forwards the key to the page', async () => {
+		const onCopy = vi.fn();
+		const { surface, onInput } = await setup({ onCopy });
+		surface.focus();
+		await fireEvent.keyDown(surface, { key: 'c', code: 'KeyC', keyCode: 67, ctrlKey: true });
+		await fireEvent.keyDown(surface, { key: 'c', code: 'KeyC', keyCode: 67, metaKey: true });
+		await fireEvent.keyDown(surface, { key: 'c', code: 'KeyC', keyCode: 67 });
+		await fireEvent.keyDown(surface, { key: 'C', code: 'KeyC', keyCode: 67, ctrlKey: true, shiftKey: true });
+		expect(onCopy).toHaveBeenCalledTimes(2);
+		expect(onInput.mock.calls.filter(([p]) => p.kind === 'key' && p.event === 'down')).toHaveLength(4);
 	});
 });
 describe('frame lifetime', () => {

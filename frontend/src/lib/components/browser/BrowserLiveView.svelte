@@ -71,6 +71,8 @@
 		onHoverLeave?: () => void;
 		/** The user asked to leave inspect mode from inside the view (Escape). */
 		onExitInspect?: () => void;
+		/** Ctrl/Cmd+C: copy the page's selected text to this device. Must run inside the key gesture. */
+		onCopy?: () => void;
 	}
 
 	let {
@@ -89,6 +91,7 @@
 		onInspect,
 		onHoverLeave,
 		onExitInspect,
+		onCopy,
 	}: Props = $props();
 
 	let wrapperEl: HTMLDivElement | undefined = $state();
@@ -696,6 +699,8 @@
 			if (e.key === 'Escape') onExitInspect?.();
 			return;
 		}
+		// The key still reaches the page; the copy itself comes back to this device.
+		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c' && !e.repeat) onCopy?.();
 		sendKey('down', e);
 	}
 
@@ -744,7 +749,7 @@
 					<BrowserFileInput {field} scale={editorScale} left={editorLeft} top={editorTop} onPick={onPickFiles} onActive={(active) => keyboardOpen = active} />
 				{/if}
 			{:else}
-				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} />
+				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} onText={commitText} onKey={(k) => bridgeKeyPair(k, k, k === 'Delete' ? 46 : 8)} />
 			{/if}
 		{/each}
 	{/if}

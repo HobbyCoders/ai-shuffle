@@ -340,3 +340,51 @@ async def test_reject_arbitrary_operations(broker, op, args):
     await broker.report("runtime", state(revision=1, viewer="viewer"), [])
     with pytest.raises(control.ControlError):
         await broker.submit("viewer", command(op=op, args=args))
+
+
+def test_keystroke_flag_on_text_fields_is_valid_state_and_must_be_boolean():
+    value = state()
+    value["editors"] = [{"id": "otp-1", "type": "tel", "label": "Digit 1", "value": "", "keys": True,
+                         "x": 1, "y": 1, "width": 20, "height": 30}]
+    assert control.validate_state(value, "runtime") == value
+    value["editors"][0]["keys"] = "yes"
+    with pytest.raises(control.ControlError):
+        control.validate_state(value, "runtime")
+
+
+@pytest.mark.asyncio
+async def test_copied_text_reaches_only_the_asking_viewer_and_never_workspace_state(broker):
+    received, others = [], []
+
+    async def send(message):
+        received.append(message)
+
+    async def other(message):
+        others.append(message)
+
+    broker.viewers["viewer"] = send
+    broker.viewers["watcher"] = other
+    await broker.report("runtime", state(revision=1, viewer="viewer"), [])
+    await broker.submit("viewer", command("copy-1", "copy"))
+    await broker.submit("viewer", command("edit-1", "edit", {"field": "f", "action": "focus"}))
+    await broker.poll("runtime")
+    with pytest.raises(control.ControlError):
+        await broker.submit("viewer", command("copy-2", "copy", {"x": 1}))
+    await broker.report("runtime", state(revision=2, viewer="viewer"), [
+        {"id": "copy-1", "ok": True, "text": "sk_live_example"},
+        # A non-copy command can never smuggle text to a viewer.
+        {"id": "edit-1", "ok": True, "text": "ignored"},
+    ])
+    results = [m for m in received if m["type"] == "command-result"]
+    assert results == [
+        {"type": "command-result", "id": "copy-1", "ok": True, "text": "sk_live_example"},
+        {"type": "command-result", "id": "edit-1", "ok": True},
+    ]
+    assert "sk_live_example" not in repr(others) and "sk_live_example" not in repr(broker.state)
+
+
+@pytest.mark.asyncio
+async def test_oversized_or_non_string_copy_results_are_rejected(broker):
+    for bad in ("x" * (control.COPY_LIMIT + 1), 5):
+        with pytest.raises(control.ControlError):
+            await broker.report("runtime", state(revision=1), [{"id": "c", "ok": True, "text": bad}])

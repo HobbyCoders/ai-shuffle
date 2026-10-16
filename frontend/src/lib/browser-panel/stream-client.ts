@@ -77,7 +77,7 @@ export interface BrowserStreamConfig {
 	onOpen?: () => void;
 	onHello?: (viewerId: string) => void;
 	onWorkspace?: (state: BrowserWorkspaceState | null) => void;
-	onCommandResult?: (id: string, ok: boolean, error?: string) => void;
+	onCommandResult?: (id: string, ok: boolean, error?: string, text?: string) => void;
 	/** The socket closed (clean or not). */
 	onClose?: (wasClean: boolean) => void;
 }
@@ -125,12 +125,13 @@ export function createBrowserStreamClient(
 	let protocolReady = false;
 	let workspace: BrowserWorkspaceState | null = null;
 	const pending = new Map<string, ReturnType<typeof setTimeout>>();
-	function settle(id: string, ok: boolean, error?: string) {
+	function settle(id: string, ok: boolean, error?: string, text?: string) {
 		const timer = pending.get(id);
 		if (!timer) return;
 		clearTimeout(timer);
 		pending.delete(id);
-		config.onCommandResult?.(id, ok, error);
+		if (text === undefined) config.onCommandResult?.(id, ok, error);
+		else config.onCommandResult?.(id, ok, error, text);
 	}
 	function reset() {
 		protocolReady = false;
@@ -273,6 +274,7 @@ export function createBrowserStreamClient(
 						msg.id,
 						msg.ok === true,
 						typeof msg.error === 'string' ? msg.error : undefined,
+						typeof msg.text === 'string' ? msg.text : undefined,
 					);
 				break;
 			case 'status':
