@@ -33,7 +33,7 @@
 	import { page } from '$app/state';
 	import {
 		Activity, ArrowLeft, Check, ChevronDown, ChevronRight, Cpu, Download, FilePen, Globe,
-		Hand, LoaderCircle, Lock, Moon, ShieldOff, SlidersHorizontal, Sparkles, SquareTerminal, Zap
+		Hand, LoaderCircle, Lock, Moon, ShieldOff, SlidersHorizontal, Smartphone, Sparkles, SquareTerminal, Zap
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
@@ -58,7 +58,7 @@
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
-		assistantMode = false, onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
+		assistantMode = false, onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal, phone
 	}: Props = $props();
 
 	type Picker = 'effort' | 'access';
@@ -486,6 +486,11 @@
 		closePanel();
 		terminal?.toggle();
 	}
+
+	function togglePhone() {
+		closePanel();
+		phone?.toggle();
+	}
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -810,6 +815,12 @@
 						<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
 							onclick={toggleTerminal} aria-label="Terminal" title={terminal.disabledReason ?? undefined}>
 							<SquareTerminal size={20} aria-hidden="true" /><span class="act-label">Terminal</span>
+						</button>
+					{/if}
+					{#if phone && !assistantMode}
+						<button type="button" class="act" aria-pressed={phone.open} onpointerenter={phone.preload} onfocus={phone.preload}
+							onclick={togglePhone} aria-label="Phone">
+							<Smartphone size={20} aria-hidden="true" /><span class="act-label">Phone</span>
 						</button>
 					{/if}
 					{#if !assistantMode}

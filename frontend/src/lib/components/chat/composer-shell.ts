@@ -145,6 +145,15 @@ export interface ComposerSheetProps {
 	onBrowserPreload?: () => void;
 	/** The in-app terminal toggle; absent when this viewer can't open terminals. */
 	terminal?: TerminalToggle;
+	/** The Phone (Android emulator) toggle; absent when the worker has none for this viewer. */
+	phone?: PhoneToggle;
+}
+
+/** The composer's Phone toggle: opens the worker's Android emulator panel. */
+export interface PhoneToggle {
+	open: boolean;
+	toggle: () => void;
+	preload: () => void;
 }
 
 /**

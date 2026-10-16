@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
+	import type { TerminalToggle, PhoneToggle } from '$lib/components/chat/composer-shell';
 	/**
 	/** Chat surface for code, chat and voice. Lane-specific heroes share one
 	 * persistent editor. A live voice call adds compact controls alongside it. */
@@ -48,9 +48,10 @@
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
 		terminal?: TerminalToggle;
+		phone?: PhoneToggle;
 	}
 
-	let { assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { assistantMode = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, phone }: Props = $props();
 
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
@@ -423,7 +424,7 @@
 						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
 						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
-					<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
+					<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} {phone} />
 				{/key}
 			{/if}
 		</div>
