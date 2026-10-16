@@ -613,6 +613,13 @@ SUITES = [
           update_reach_checks, "Update-reach regression tests and installed-app update verdict"),
 ]
 
+# The Windows full run (about 75 minutes) is longer than one Monitor job, so it
+# goes in checkpointed chunks (docs/ci/pr-checks.md, "Full gates longer than one
+# Monitor budget"). Release hints name this command, not the one-shot `full --attest`.
+WINDOWS_FULL_COMMAND = "python scripts/local_ci.py full --step --attest"
+WINDOWS_FULL_HINT = (f"`{WINDOWS_FULL_COMMAND}` (one Monitor job per run; "
+                     "repeat the same command until it prints COMPLETE)")
+
 # Covered only at release time or by hand: no hardware here, or a full image build.
 NOT_LOCAL = [
     (["ios/*"], "iOS app: needs a Mac. Runs only when the owner dispatches ios.yml before a release."),
@@ -623,7 +630,7 @@ NOT_LOCAL = [
      "`python scripts/verify_container_postgres.py` where Docker runs."),
 ] + ([] if os.name == "nt" else [
     (["desktop/*", "app/core/config.py", "app/core/process*.py", "app/core/*windows*", "run_local.*"],
-     "Windows: not tested on this machine. A stable release waits for `python scripts/local_ci.py full --attest` "
+     f"Windows: not tested on this machine. A stable release waits for {WINDOWS_FULL_HINT} "
      "on a Windows worker; edge does not."),
 ])
 

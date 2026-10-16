@@ -10,7 +10,14 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 1.0.1
 
-Fixes from the first day of public use, plus a built-in Android emulator.
+Fixes from the first day of public use, plus a built-in Android emulator, faster session search and smaller prompts.
+
+### Session search
+
+- SessionSearch is much faster on large installs. It now searches a separate copy of the chat text instead of reading whole transcripts.
+- After you update, AI Shuffle builds that copy once in the background. On a large install it takes about 1 GB of extra database space. Until it finishes, search keeps working the old way.
+- `%` and `_` in a search now match those characters. Before, they acted as wildcards. For very common words the top results can also come back in a different order.
+- If you go back to an older version, the copy stays in the database and keeps being updated. To remove it, run `python -m app.maintenance.session_recall_projection --remove`.
 
 ### Phone apps
 
@@ -27,6 +34,8 @@ Fixes from the first day of public use, plus a built-in Android emulator.
 
 ### Sessions and agents
 
+- Moving a session between workers is faster. Both workers now log how long each step of the move took.
+- Agents start with a smaller prompt. They load only their everyday tools up front and see the rest by name, so you may see an agent look up a tool (ToolSearch or `read_tool_docs`) the first time it uses it.
 - Answering an agent's question resets the peer-chat budget, so a long, supervised run of chats no longer stops partway.
 - Settling a session can no longer be undone by an older write that arrives late.
 - Logging and disk work no longer pause the server when the disk is slow.
@@ -35,6 +44,10 @@ Fixes from the first day of public use, plus a built-in Android emulator.
 ### Android app
 
 - The Google Play build leaves out on-device app control, which Play does not allow; the APK from the downloads page keeps it.
+
+### Desktop
+
+- Desktop installs that updated from 0.9.6 and now show 'No verified database restore point exists': install the latest installer from the releases page; your data is untouched.
 
 ### Settings
 

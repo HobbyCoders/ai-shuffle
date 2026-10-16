@@ -6,7 +6,16 @@ vi.mock('$lib/api/client', () => ({
 	getErrorMessage: (e: { detail?: string }, fallback: string) => e?.detail ?? fallback
 }));
 
-import { CHECK_POLL_MS, CHECK_TIMEOUT_MS, IMAGE_HINT, UpdatesState, describeWorker, imageHint } from './updates-state.svelte';
+import {
+	CHECK_POLL_MS,
+	CHECK_TIMEOUT_MS,
+	IMAGE_HINT,
+	INSTALLER_URL,
+	UpdatesState,
+	describeWorker,
+	imageHint,
+	installerHint
+} from './updates-state.svelte';
 
 const self = (phase: string, extra: Record<string, unknown> = {}) => ({
 	device_id: 'self',
@@ -192,5 +201,39 @@ describe('newer Docker image hint (#1821)', () => {
 		expect(state.checking).toBe(false);
 		expect(state.rows?.map((row) => row.hint)).toEqual([IMAGE_HINT, IMAGE_HINT]);
 		expect(state.rows?.[0]).toMatchObject({ tone: 'err', text: 'Needs a new Docker image' });
+	});
+});
+
+describe('a desktop only the latest installer can update', () => {
+	const failed = (extra: Record<string, unknown> = {}) =>
+		self('error', { error: 'No healthy source build is available. Install the latest AI Shuffle installer to recover.', remedy: 'installer', ...extra });
+
+	it('says so in plain words, with data reassurance only when the launcher kept it', () => {
+		expect(describeWorker(failed())).toEqual({ tone: 'err', text: 'Needs the latest installer' });
+		expect(installerHint(failed())).toBe('This update cannot finish inside the app. Run the latest installer to finish it.');
+		expect(installerHint(failed({ data_kept: true }))).toBe(
+			'This update cannot finish inside the app. Run the latest installer to finish it. Your data is kept as it was before the update.'
+		);
+		expect(installerHint(self('unsupported', { remedy: 'installer' }))).toMatch(/^This app cannot update itself\. /);
+		expect(installerHint(self('error', { error: 'Source archive checksum or size mismatch' }))).toBeUndefined();
+	});
+
+	it('wins over the refusal the launcher state caused', () => {
+		const refusal = { device_id: 'self', device_name: 'Current worker', accepted: false, reason: 'Updater unavailable; install a release with update support' };
+		expect(describeWorker(self('unsupported', { supported: false, remedy: 'installer' }), refusal)).toEqual({ tone: 'err', text: 'Needs the latest installer' });
+	});
+
+	it('links the latest installer under the results of a check', async () => {
+		await ready();
+		snapshots = [[failed({ data_kept: true })]];
+		await state.check();
+		expect(state.checking).toBe(false);
+		expect(state.rows?.[0]).toMatchObject({
+			tone: 'err',
+			text: 'Needs the latest installer',
+			hint: installerHint(failed({ data_kept: true })),
+			link: { label: 'Download the latest installer', href: INSTALLER_URL }
+		});
+		expect(INSTALLER_URL).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
 	});
 });

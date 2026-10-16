@@ -6,8 +6,9 @@
 	import { notify } from '$lib/stores/notifications';
 	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
+	import { DATA_KEPT, INSTALLER_ACTION, INSTALLER_URL } from '$lib/components/settings/pages/update-remedy';
 
-	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean; notice?: string | null };
+	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean; notice?: string | null; remedy?: 'installer' | null; data_kept?: boolean };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; completed_at?: number; workers: { device_id: string; device_name: string; status: string; message: string }[] };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: Operation | null };
 	// excluded: not part of this update (offline, no updater, disabled, current, nothing offered).
@@ -16,8 +17,9 @@
 	/** A chat still running on a worker that refused to restart (#1818). */
 	type Busy = { session_id: string; title: string; tasks: string[] };
 	type Receipt = { results: { device_id?: string; device_name: string; accepted: boolean | null; reason: string; busy?: Busy[]; deferred?: boolean }[] };
-	/** The restart panel: work that kept a restart from running, or a restart waiting on it. */
-	type Panel = { kind: 'busy'; workers: { device_name: string; busy: Busy[] }[] } | { kind: 'deferred' };
+	/** The restart panel: work that kept a restart from running, a restart waiting on it,
+	 *  or workers only the latest installer can update. */
+	type Panel = { kind: 'busy'; workers: { device_name: string; busy: Busy[] }[] } | { kind: 'deferred' } | { kind: 'installer' };
 	// Older container supervisors leave "Application update is running." on an
 	// idle status after an install; a message like that does not fit idle.
 	const IN_PROGRESS = /\b(?:update is running|checking|downloading|building|preparing|installing)\b/i;
@@ -74,6 +76,8 @@
 		? { role: worker.role, label: worker.label } : classify(worker, snapshot!.update_all_workers, offers))) ?? []);
 	// A Docker worker told ahead that a coming update needs a newer image (#1821).
 	function withNotice(worker: Worker, row: { role: Role; label: string }) {
+		// The launcher's reason is technical; the installer panel shows it as detail.
+		if (worker.remedy === 'installer') return { worker, role: row.role, label: 'Needs the latest installer' };
 		return { worker, role: row.role, label: worker.notice && worker.phase !== 'image-required' ? `${row.label}; a coming update needs a newer Docker image` : row.label };
 	}
 	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
@@ -81,6 +85,12 @@
 	const available = $derived(targets.some(row => row.role === 'available'));
 	const staged = $derived(targets.filter(row => row.role === 'staged').length);
 	const unknown = $derived(targets.filter(row => row.role === 'unknown'));
+	// Included workers whose update only the latest installer can finish
+	// (app/core/update_workers.py remedy()). Clicking opens the download panel.
+	const installer = $derived(targets.filter(row => row.worker.remedy === 'installer'));
+	const dataKept = $derived(installer.length > 0 && installer.every(row => row.worker.data_kept));
+	const installerMessage = $derived(installer.length
+		? `${installer.length > 1 || snapshot?.update_all_workers ? `${installer.map(row => row.worker.device_name).join(', ')}: ` : ''}This update cannot finish inside the app. ${INSTALLER_ACTION} to finish it.${dataKept ? ` ${DATA_KEPT}` : ''}` : '');
 	// Restart is offered only once EVERY included worker is staged, never on the first one.
 	const ready = $derived(staged > 0 && !downloading && !available && !unknown.length);
 	const held = $derived(staged > 0 && !downloading && !available && unknown.length
@@ -88,7 +98,7 @@
 	// Release notes travel in the signed manifest; show the offered update's.
 	const offered = $derived(targets.find(row => row.role !== 'unknown' && !!row.worker.notes?.trim())?.worker);
 	const operationError = $derived(operation?.phase === 'error' ? 'Update startup could not be confirmed. Check the affected workers before retrying.' : '');
-	const error = $derived(requestError || operationError || targets.find(row => row.worker.error)?.worker.error || held);
+	const error = $derived(requestError || operationError || installerMessage || targets.find(row => row.worker.error)?.worker.error || held);
 	const visible = $derived(!!snapshot?.allow_updates && (waiting || celebrating || ready || available || downloading || !!receipt || !!error));
 	const busy = $derived(pending || downloading || waiting || celebrating);
 	const action = $derived(ready ? 'Update and restart' : available ? 'Download update' : 'Check for updates');
@@ -165,6 +175,7 @@
 		panel = next;
 	}
 	function closePanel() { panel = null; }
+	function openInstallerPage() { window.open(INSTALLER_URL, '_blank', 'noopener,noreferrer'); }
 	function panelKey(event: KeyboardEvent) {
 		if (panel && event.key === 'Escape') { closePanel(); buttonEl?.focus(); }
 	}
@@ -216,6 +227,7 @@
 	function clicked() {
 		if (panel) { closePanel(); return; }
 		if (deferred && !busy) { openPanel({ kind: 'deferred' }); return; }
+		if (installer.length && !busy) { openPanel({ kind: 'installer' }); return; }
 		void activate();
 	}
 	function applySnapshot(next: Snapshot) {
@@ -298,6 +310,8 @@
 			notify.info(status, { title: 'Update in progress', persist: false });
 			return;
 		}
+		// Retrying in the app would fail the same way.
+		if (installer.length) { openPanel({ kind: 'installer' }); return; }
 		await activate(true);
 	}
 	function settleManualCheck(next: Snapshot) {
@@ -314,7 +328,8 @@
 		if (elapsed < MANUAL_CHECK_SETTLE_MS || (checking && elapsed < REQUEST_WATCH_MS)) return;
 		manualCheckAt = 0;
 		if (checking) notify.info('Still checking. The update button appears here if an update is found.', { title: 'Checking for updates', persist: false });
-		else if (error) notify.warning(error, { title: 'Update check needs attention', persist: false });
+		else if (error) notify.warning(error, { title: 'Update check needs attention', persist: false,
+			...(installer.length ? { action: { label: INSTALLER_ACTION, onClick: openInstallerPage } } : {}) });
 		else notify.info(snapshot?.update_all_workers ? 'Every included worker is up to date.' : 'This worker is up to date.', { title: 'No updates found', persist: false });
 	}
 	/** The manual "Check for updates" entry (#1623). Asks every worker in scope
@@ -385,7 +400,7 @@
 	<div class="update-slot" class:complete={celebrating} class:leaving={celebration === 'leaving'}>
 		<button class="update-button" class:ready class:failed={!!error && !waiting && !celebrating && !deferred}
 			type="button" onclick={clicked} aria-disabled={busy} aria-busy={busy && !celebrating} bind:this={buttonEl}
-			aria-label={waiting || celebrating || deferred ? headline : busy ? 'Downloading update' : action}
+			aria-label={waiting || celebrating || deferred ? headline : busy ? 'Downloading update' : installer.length ? 'Update needs the latest installer' : action}
 			aria-haspopup="dialog" aria-expanded={!!panel} aria-controls={panel ? panelId : undefined}
 			title={panel ? undefined : status} aria-describedby={tipOpen ? tooltipId : undefined}
 			onmouseenter={showTip} onmouseleave={() => tipOpen = false} onfocus={showTip} onblur={() => tipOpen = false}
@@ -402,8 +417,20 @@
 		</button>
 		{#if panel}
 			<NotificationSlot order={DOCK_ORDER.restart}>
-			<div class="update-panel" id={panelId} role="dialog" aria-label={panel.kind === 'busy' ? 'Work is still running' : 'Restart scheduled'}>
-				{#if panel.kind === 'busy'}
+			<div class="update-panel" id={panelId} role="dialog" aria-label={panel.kind === 'busy' ? 'Work is still running' : panel.kind === 'installer' ? 'Update needs the latest installer' : 'Restart scheduled'}>
+				{#if panel.kind === 'installer'}
+					<strong>Update needs the latest installer</strong>
+					<p class="panel-hint">This update cannot finish inside the app. Run the latest installer to finish it.{dataKept ? ` ${DATA_KEPT}` : ''}</p>
+					{#each installer as row (row.worker.device_id)}
+						{#if row.worker.error || row.worker.message}
+							<span class="panel-worker">{installer.length > 1 || snapshot?.update_all_workers ? `${row.worker.device_name}: ` : ''}{row.worker.error || row.worker.message}</span>
+						{/if}
+					{/each}
+					<div class="panel-actions">
+						<a class="panel-primary" href={INSTALLER_URL} target="_blank" rel="noopener noreferrer" onclick={closePanel}>{INSTALLER_ACTION}</a>
+						<button type="button" class="panel-quiet" onclick={closePanel}>Not now</button>
+					</div>
+				{:else if panel.kind === 'busy'}
 					<strong>Work is still running</strong>
 					<p class="panel-hint">Restart would stop it.</p>
 					{#each panel.workers as group (group.device_name)}
@@ -498,8 +525,9 @@
 	.busy-title { color: var(--foreground); }
 	.busy-tasks { font-size: 11px; color: var(--muted-foreground); }
 	.panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-	.panel-actions button { min-height: 32px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; font-size: 12px; text-align: center; cursor: pointer; }
-	.panel-actions button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	.panel-actions button, .panel-actions a { min-height: 32px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; font-size: 12px; text-align: center; cursor: pointer; }
+	.panel-actions a { display: inline-flex; align-items: center; text-decoration: none; }
+	.panel-actions button:focus-visible, .panel-actions a:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.panel-primary { color: var(--primary-foreground); background: var(--primary); }
 	.panel-primary:hover { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
 	.panel-actions .panel-danger { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, transparent); border-color: color-mix(in oklch, var(--destructive) 30%, transparent); }
@@ -515,7 +543,7 @@
 	@keyframes update-leave { to { opacity: 0; transform: scale(.65); } }
 	@keyframes close-gap { to { width: 0; margin-left: calc(-1 * var(--update-gap, 8px)); } }
 	.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-	@media (max-width: 639px), (pointer: coarse) { .panel-actions button { min-height: 44px; } }
+	@media (max-width: 639px), (pointer: coarse) { .panel-actions button, .panel-actions a { min-height: 44px; } }
 	@media (hover: none) { .update-slot { width: 40px; height: 40px; } .update-button { border-radius: 11px; } }
 	@media (prefers-reduced-motion: reduce) {
 		.update-button :global(.update-spinner), .completion-ring, .complete .update-button, .leaving { animation: none; }

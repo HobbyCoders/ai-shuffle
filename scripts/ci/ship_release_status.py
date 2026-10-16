@@ -242,9 +242,11 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         if context == WINDOWS_CONTEXT and skip_windows:
             notes.append(f"Windows full suite not run on this release (--skip-windows): {skip_windows}")
             continue
-        where = "on DesktopWorker (Windows)" if context == WINDOWS_CONTEXT else "on a Linux worker"
-        blockers.append(f"{context} on {head[:9]} is {local[context]}: run "
-                        f"`python scripts/local_ci.py full --attest` {where} on a clean checkout of main.")
+        if context == WINDOWS_CONTEXT:
+            run = f"{local_ci.WINDOWS_FULL_HINT} on DesktopWorker (Windows)"
+        else:
+            run = "`python scripts/local_ci.py full --attest` on a Linux worker"
+        blockers.append(f"{context} on {head[:9]} is {local[context]}: run {run} on a clean checkout of main.")
     smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir, skip_rows=skip_smoke_rows)
     blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
     return {

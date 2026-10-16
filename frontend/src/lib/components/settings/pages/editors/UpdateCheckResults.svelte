@@ -7,6 +7,7 @@
 	import type { UpdateResultRow } from '../updates-state.svelte';
 	import StatusDot from '../../rows/StatusDot.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
+	import { ExternalLink } from 'lucide-svelte';
 
 	interface Props {
 		rows: UpdateResultRow[];
@@ -17,7 +18,9 @@
 
 	let { rows, running, error = '' }: Props = $props();
 	// One copy of each hint, however many workers share it.
-	const hints = $derived([...new Set(rows.flatMap((row) => (row.hint ? [row.hint] : [])))]);
+	const hints = $derived([
+		...new Map(rows.flatMap((row) => (row.hint ? [[`${row.hint}\n${row.link?.href ?? ''}`, row] as const] : []))).values()
+	]);
 </script>
 
 {#if rows.length === 0 && running}
@@ -32,7 +35,14 @@
 			</SettingRow>
 		{/each}
 	</div>
-	{#each hints as hint (hint)}<p class="st-msg">{hint}</p>{/each}
+	{#each hints as row (`${row.hint}\n${row.link?.href ?? ''}`)}
+		<p class="st-msg">{row.hint}</p>
+		{#if row.link}
+			<p class="st-msg">
+				<a class="st-btn sm" href={row.link.href} target="_blank" rel="noopener noreferrer"><ExternalLink />{row.link.label}</a>
+			</p>
+		{/if}
+	{/each}
 {/if}
 {#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
 
