@@ -244,3 +244,28 @@ async def test_bypass_skips_the_rule_lookup(monkeypatch):
     adapter, event, answers = _headless_adapter("bypassPermissions")
     await adapter._answer_without_approver(event)
     assert answers == [("tu-1", True, None)]
+
+
+@pytest.mark.asyncio
+async def test_a_bypass_worker_gets_its_answer_while_the_store_writes(monkeypatch, tmp_path):
+    """#105: Bypass answers a ``can_use_tool`` at once, while the request event
+    is still being saved (a database write yields). That answer used to arrive
+    before the engine waited for it, was dropped, and the call sat parked for
+    the engine's 900 s permission timeout with nobody asked."""
+    import time
+
+    from fluid.engine import delegated
+    from fluid.store.base import MemoryStore
+
+    class SlowStore(MemoryStore):
+        async def append_event(self, session_id, event):
+            await asyncio.sleep(0.05)
+            return await super().append_event(session_id, event)
+
+    monkeypatch.setattr(ha.HarnessAdapter, "_test_memory_store_factory", SlowStore)
+    # A lost answer parks the call for this long, past the turn budget.
+    monkeypatch.setattr(delegated, "PERMISSION_TIMEOUT", TURN_BUDGET_SECONDS * 4)
+    started = time.monotonic()
+    text = await _headless_turn_text(monkeypatch, tmp_path, "bypassPermissions")
+    assert "It is sunny in Paris." in text
+    assert time.monotonic() - started < 5

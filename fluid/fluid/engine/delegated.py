@@ -250,6 +250,11 @@ _STALE_PERMISSION_DENIAL = (
 # host that answers late still wins; past it the call is denied, not parked.
 PERMISSION_TIMEOUT = 900.0
 
+# The wait when no host is subscribed to the session's events, so nobody can
+# see the request: long enough for a reconnecting host to replay and answer
+# it, short enough that a call nobody can approve fails at once (#105).
+UNWATCHED_PERMISSION_TIMEOUT = 10.0
+
 # The PreToolUse callback's deadline, sent to the CLI at ``initialize`` (in
 # seconds, the unit of the CLI's matcher ``timeout``) instead of relying on its
 # unpinned default. A callback the CLI gives up on counts as "no opinion", so a
@@ -1077,6 +1082,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             fut = self._pending_permissions.get(op.request_id)
             if fut is not None and not fut.done():
                 fut.set_result(op)
+            else:
+                # Never silent: a decision nobody waits for leaves the CLI
+                # parked on its request until the timeout denies it.
+                logger.warning(
+                    "permission decision for %s matched no open request; ignored",
+                    op.request_id,
+                )
         elif isinstance(op, SetModel):
             await self._apply_setting({"subtype": "set_model", "model": op.model})
             self.model = op.model
@@ -2732,6 +2744,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 mapped.events = [
                     e for e in mapped.events if not isinstance(e, PermissionRequest)
                 ]
+            elif mapped.permission is not None:
+                # Armed BEFORE the PermissionRequest is published, as the
+                # native loop does: a host that answers at once (Bypass
+                # allows without asking anyone) can reply while the event is
+                # still being persisted, and an answer with no waiter was
+                # dropped, leaving the call parked for PERMISSION_TIMEOUT.
+                self._arm_permission(mapped.permission)
             for event in mapped.events:
                 if isinstance(event, ContextCompaction):
                     # The main conversation's (subagents' were dropped above).
@@ -2820,6 +2839,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     # ─── permission bridge ───────────────────────────────────────────────
 
+    def _arm_permission(self, bridge: PermissionBridge) -> asyncio.Future:
+        """The future ``RespondPermission`` resolves for ``bridge``, created once."""
+        fut = self._pending_permissions.get(bridge.fluid_request_id)
+        if fut is None:
+            fut = asyncio.get_running_loop().create_future()
+            self._pending_permissions[bridge.fluid_request_id] = fut
+        return fut
+
     async def _handle_permission(self, bridge: PermissionBridge) -> None:
         """Answer a ``can_use_tool`` request by parking on the host's
         ``RespondPermission`` (the reader emitted the PermissionRequest).
@@ -2839,16 +2866,31 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         prompt is not withdrawn (fluid has no event for that); its late answer
         finds no pending request and is dropped. EOF ends the wait the same
         way, and the turn's reader reports the closed stream.
+
+        With no host subscribed to the session's events nobody can see the
+        request, so the wait is cut to ``UNWATCHED_PERMISSION_TIMEOUT`` (a
+        late subscriber still replays the request and may answer in time)
+        and the model is told why the call was denied.
         """
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._pending_permissions[bridge.fluid_request_id] = fut
+        fut = self._arm_permission(bridge)
+        # A loop with no session yet (a direct call) cannot tell who listens;
+        # it keeps the full wait.
+        watched = self._session is None or self.bus.subscriber_count(self.session_id) > 0
+        timeout = PERMISSION_TIMEOUT if watched else min(
+            PERMISSION_TIMEOUT, UNWATCHED_PERMISSION_TIMEOUT,
+        )
+        logger.info(
+            "claude CLI asks permission for %s in mode %s%s",
+            bridge.tool_name, self.permission_mode or "default",
+            f" ({bridge.reason})" if bridge.reason else "",
+        )
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
         watch = asyncio.create_task(self._watch_parked_stdout(bridge.cli_request_id))
         try:
-            await self._notify_permission_prompt(bridge)
+            if not fut.done():
+                await self._notify_permission_prompt(bridge)
             done, _ = await asyncio.wait(
-                {fut, interrupt_wait, watch}, timeout=PERMISSION_TIMEOUT,
+                {fut, interrupt_wait, watch}, timeout=timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if fut not in done and watch in done:
@@ -2864,13 +2906,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     message = "interrupted while awaiting permission"
                 else:
                     logger.warning(
-                        "no permission decision for %s within %.0fs; denying",
-                        bridge.tool_name, PERMISSION_TIMEOUT,
+                        "no permission decision for %s within %.0fs%s; denying",
+                        bridge.tool_name, timeout, "" if watched else " (no host attached)",
                     )
                     message = (
-                        f"permission request timed out after {PERMISSION_TIMEOUT:.0f}s "
+                        f"permission request timed out after {timeout:.0f}s "
                         "with no decision; the call was denied"
                     )
+                    if not watched:
+                        message += " (no one is attached to this session to answer it)"
+                    if bridge.reason:
+                        message += f". The CLI asked because: {bridge.reason}"
                 await self._write_control_response(
                     bridge.cli_request_id, False, bridge.input, message=message,
                 )

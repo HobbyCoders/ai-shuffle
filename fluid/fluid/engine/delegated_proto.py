@@ -416,6 +416,9 @@ class PermissionBridge:
     # The CLI's own ``permission_suggestions``: the rules it would add for an
     # "always allow" answer, echoed back as ``updatedPermissions``.
     suggestions: tuple[dict[str, Any], ...] = ()
+    # Why the CLI asks (its ``decision_reason``), e.g. a safety check that
+    # still asks in bypassPermissions mode. None when it gave none.
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1216,14 +1219,16 @@ class StreamJsonMapper:
         suggestions = tuple(
             s for s in raw_suggestions if isinstance(s, dict)
         ) if isinstance(raw_suggestions, list) else ()
+        reason = req.get("decision_reason")
+        reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
         bridge = PermissionBridge(
             cli_request_id=frame.get("request_id", ""), fluid_request_id=fluid_rid,
             tool_name=tool_name, tool_use_id=tid, input=inp,
-            suggestions=suggestions,
+            suggestions=suggestions, reason=reason,
         )
         event = PermissionRequest(
             session_id=self.session_id, turn_id=self.turn_id, request_id=fluid_rid,
-            tool_use_id=tid, name=tool_name, input=inp, risk=risk,
+            tool_use_id=tid, name=tool_name, input=inp, risk=risk, reason=reason,
         )
         return Mapped(events=[event], permission=bridge)
 
