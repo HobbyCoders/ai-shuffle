@@ -79,6 +79,12 @@ LAUNCHER_STOP = {"desktop/src/main/index.ts"}
 WINDOWS_PACKAGING = ("desktop/electron-builder.yml", "desktop/build/*")
 # Owner maintenance tools the image carries (python -m scripts.credential_keys).
 IMAGE_TOOLING = ("scripts/*",)
+# Test tools the image installs for the agent's workbench (pytest, ruff, ...).
+# The Dockerfile pip-installs them after the hash-locked runtime closure
+# (requirements.lock), and the running app never imports a package only they
+# provide (tests/test_update_reach.py keeps that true). An existing container
+# keeps its older test tools; the app it runs is unaffected.
+IMAGE_DEV_TOOLING = ("requirements-dev.txt",)
 ANDROID_NATIVE = ("android/*",)
 # Cloud services moved to hobbycoders-cloud. Keep historical paths excluded:
 # update_reach_readiness classifies past main commits as well as this deletion.
@@ -92,8 +98,8 @@ IMAGE_SUPERVISOR = ("docker/*",)
 LABEL = "update-reach:"
 
 FAILING = ("docker-image", "image-pin", "docker-image-copy", "windows-launcher", "update-trust-key")
-GROUPS = FAILING + ("image-inputs", "image-supervisor", "image-tooling", "windows-packaging", "android-native",
-                    "macos-linux-desktop")
+GROUPS = FAILING + ("image-inputs", "image-supervisor", "image-tooling", "image-dev-tooling", "windows-packaging",
+                    "android-native", "macos-linux-desktop")
 
 Reader = Callable[[str], Optional[bytes]]
 
@@ -257,7 +263,13 @@ def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
     for path in changed:
         for source in copies:
             if path == source or path.startswith(source + "/"):
-                groups["image-tooling" if matches(path, IMAGE_TOOLING) else "docker-image-copy"].append(path)
+                if matches(path, IMAGE_DEV_TOOLING):
+                    group = "image-dev-tooling"
+                elif matches(path, IMAGE_TOOLING):
+                    group = "image-tooling"
+                else:
+                    group = "docker-image-copy"
+                groups[group].append(path)
                 break
 
     launcher = launcher_files(base) | launcher_files(head)
@@ -298,6 +310,8 @@ EXPLAIN = {
     "image-supervisor": "Images that hand over to the updated supervisor get this with the update; older images keep "
                         "their own copy until the image is replaced. Keep it compatible with both.",
     "image-tooling": "Owner tools inside the image stay at the image's version (not used by the running app).",
+    "image-dev-tooling": "Test tools inside the image (the agent's workbench) stay at the image's version; the "
+                         "running app never imports them. Only new images get the change.",
     "windows-packaging": "Only new Windows installs get packaging changes (icons, installer options).",
     "android-native": "Needs a Play build.",
     "macos-linux-desktop": "macOS and Linux desktop apps have no in-place update; these need a new installer.",

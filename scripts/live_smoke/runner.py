@@ -15,6 +15,11 @@ installation-specific names must not be committed to this tree::
     python -m scripts.live_smoke check "$REV" --worker "$LOCAL_LABEL" --worker "$PEER_LABEL"
 
 Repeat on the other worker with roles swapped, from its own loopback listener.
+
+``--preview`` runs the same rows against an isolated AI_SHUFFLE_PREVIEW=1
+instance of this clean checkout instead of the owner's worker (see
+docs/internal/live-smoke.md). The runner proves which code the instance runs
+and writes ``<label>-preview.json`` marked as a preview run.
 Desktop launch-token restrictions may require manually recorded evidence; never
 copy credentials. Record browser/owner rows separately and import the peer's
 result file before checking both. --rows creates diagnostic partial files that
@@ -24,9 +29,11 @@ row 9 proves a consumed peer-message receipt, not obedience or mid-turn timing.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 import struct
+import subprocess
 import time
 import zlib
 from collections.abc import Callable
@@ -36,6 +43,7 @@ from scripts.live_smoke import results as results_mod
 from scripts.live_smoke import scenarios as scen
 from scripts.live_smoke.client import ClientError
 
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_AGENT_PREF = "composer.profile"
 CHEAP_HINTS = ("haiku", "nano", "flash-lite", "mini", "lite", "flash", "small")
 BUSY_REMOTE = {"working", "parked", "permission", "question"}
@@ -79,6 +87,20 @@ def pick_model(models: dict) -> tuple[str | None, str]:
             if value and (hint in value.lower() or hint in label.lower()):
                 return value, f"cheapest by name ('{hint}')"
     return None, "worker default (no model name looked cheap)"
+
+
+def checkout_state(root: Path = ROOT) -> dict:
+    """This checkout as app/preview.py identifies it, and whether tracked files are unchanged."""
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(root), *args], text=True, timeout=30).strip()
+    try:
+        head = git("rev-parse", "HEAD").lower()
+        clean = git("status", "--porcelain", "--untracked-files=no") == ""
+    except (OSError, subprocess.SubprocessError):
+        head, clean = "", False
+    # Same digest as app.preview._source_identity's worktree_id.
+    return {"head": head, "clean": clean,
+            "worktree_id": hashlib.sha256(str(root.resolve()).encode()).hexdigest()}
 
 
 def _tokens(session: dict) -> dict:
@@ -146,7 +168,8 @@ class Runner:
                  only: list | None = None, project: str | None = None, agent: str | None = None,
                  poll_s: float = 3.0, sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic, run_id: str | None = None,
-                 log: Callable[[str], None] = lambda _m: None):
+                 log: Callable[[str], None] = lambda _m: None, preview: bool = False,
+                 checkout: Callable[[], dict] = checkout_state):
         self.client = client
         self.data = data
         self.defaults = data.get("defaults") or {}
@@ -167,6 +190,9 @@ class Runner:
         self.self_worker: dict = {}
         self.cap_exceeded = False
         self.model: str | None = None
+        self.preview_mode = preview
+        self.checkout = checkout
+        self.preview: dict | None = None
 
     # -- setup --------------------------------------------------------------
 
@@ -181,6 +207,8 @@ class Runner:
         if not me or not me.get("revision"):
             raise SetupError("the worker did not report its own revision (deploy-status)")
         self.self_worker = me
+        if self.preview_mode:
+            self.preview = self.check_preview()
         rows = installs.get("installs") or []
         others = [w for w in workers if not w.get("is_self")]
         if self.peer_flag:
@@ -202,6 +230,33 @@ class Runner:
             "instance_id": (install or {}).get("id"),
             "why": None if online else f"worker offline: {peer.get('label')}",
         }
+
+    def check_preview(self) -> dict:
+        """Prove the instance runs this clean checkout at the revision it reports.
+
+        The instance must serve a preview stamp (AI_SHUFFLE_PREVIEW=1 after
+        ``python -m app.preview stamp``) from the same worktree as this runner,
+        at the commit deploy-status reports, with no tracked file changed. The
+        rows then exercise that code through the same HTTP and WebSocket API
+        as on a real worker.
+        """
+        try:
+            identity = self.client.preview_identity()
+        except ClientError as exc:
+            raise SetupError(f"--preview needs an AI_SHUFFLE_PREVIEW=1 instance of this checkout: {exc}") from None
+        commit = str(identity.get("commit") or "").lower()
+        if not results_mod.REVISION.fullmatch(commit) or commit != self.revision:
+            raise SetupError(f"--preview: the instance reports revision {self.revision[:9] or 'none'} but serves "
+                             f"a preview stamped at {commit[:9] or 'none'}; start it with "
+                             "SHUFFLE_SOURCE_REVISION set to the stamped commit")
+        local = self.checkout()
+        if identity.get("worktree_id") != local["worktree_id"]:
+            raise SetupError("--preview: the instance runs from another checkout; run the smoke from "
+                             "the checkout it was stamped in")
+        if local["head"] != commit or not local["clean"]:
+            raise SetupError(f"--preview: this checkout must be clean at {commit[:9]} (the stamped commit)")
+        return {"commit": commit, "branch": identity.get("branch"), "build_sha256": identity.get("build_sha256"),
+                "worktree_id": local["worktree_id"], "verified_at_end": None}
 
     def choose_model(self) -> dict:
         if self.model_flag:
@@ -555,8 +610,12 @@ class Runner:
                     out["reason"] = "interrupted"
         finally:
             cleanup = self.cleanup()
+            if self.preview is not None:
+                end = self.checkout()
+                self.preview["verified_at_end"] = (end["clean"] and end["head"] == self.preview["commit"]
+                                                   and end["worktree_id"] == self.preview["worktree_id"])
             result = self._result(started, choice, out_rows, outcome, cleanup)
-            path = results_mod.result_path(self.base, self.revision, self.self_worker.get("label") or "worker",
+            path = results_mod.result_path(self.base, self.revision, self.label,
                                            partial=self.run_id if self.only else None)
             results_mod.write(path, result)
         return result, path
@@ -588,6 +647,12 @@ class Runner:
             report.append(entry)
         return report
 
+    @property
+    def label(self) -> str:
+        """The result file's worker name; a preview run never takes a real worker's name."""
+        label = self.self_worker.get("label") or "worker"
+        return f"{label}-preview" if self.preview is not None else label
+
     def _result(self, started: str, choice: dict, rows: list, outcome: str | None, cleanup: list) -> dict:
         if outcome is None:
             if self.cap_exceeded or any(r["status"] == "fail" for r in rows):
@@ -600,7 +665,7 @@ class Runner:
         return {
             "format": 1,
             "revision": self.revision,
-            "worker": self.self_worker.get("label"),
+            "worker": self.label if self.preview is not None else self.self_worker.get("label"),
             "app_version": self.self_worker.get("app_version"),
             "peer": {k: (self.peer or {}).get(k) for k in ("label", "revision", "online")},
             "run_id": self.run_id,
@@ -615,4 +680,5 @@ class Runner:
             "outcome": outcome,
             "rows": rows,
             "sessions": cleanup,
+            **({"preview": self.preview} if self.preview is not None else {}),
         }

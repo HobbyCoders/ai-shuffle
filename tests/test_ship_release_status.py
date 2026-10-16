@@ -17,21 +17,106 @@ def test_latest_final_tag_ignores_prereleases_and_sorts_numerically():
     assert srs.latest_final_tag([]) is None
 
 
-def test_release_tags_reads_origin_and_ignores_local_only_tags(monkeypatch):
+def test_release_tags_reads_the_remote_and_ignores_local_only_tags(monkeypatch):
     def fake_try(*args):
-        if args[:2] == ("git", "ls-remote"):
-            return "a1\trefs/tags/v0.9.1\nb2\trefs/tags/android-latest"
+        if args[:3] == ("git", "ls-remote", "--tags"):
+            assert args[3] == "public"
+            return ("t1\trefs/tags/v0.9.1\nc1\trefs/tags/v0.9.1^{}\n"
+                    "b2\trefs/tags/android-latest\nc3\trefs/tags/v0.9.2")
         if args[:2] == ("git", "tag"):
             return "v5.0.0\nv0.9.1"
         return None
     monkeypatch.setattr(srs, "_try", fake_try)
-    assert srs.release_tags() == ["v0.9.1", "android-latest"]
-    assert srs.latest_final_tag(srs.release_tags()) == "v0.9.1"
+    tags = srs.release_tags("public", "public/main")
+    # Annotated tags resolve to their peeled commit, not the tag object.
+    assert tags == {"v0.9.1": "c1", "android-latest": "b2", "v0.9.2": "c3"}
+    assert srs.latest_final_tag(tags) == "v0.9.2"
 
 
-def test_release_tags_falls_back_to_local_tags_offline(monkeypatch):
-    monkeypatch.setattr(srs, "_try", lambda *a: "v0.9.1" if a[:2] == ("git", "tag") else None)
-    assert srs.release_tags() == ["v0.9.1"]
+def test_release_tags_offline_reads_only_tags_on_the_public_history(monkeypatch):
+    calls = []
+
+    def fake_try(*args):
+        calls.append(args)
+        return "v0.9.1" if args[:2] == ("git", "tag") else None
+    monkeypatch.setattr(srs, "_try", fake_try)
+    assert srs.release_tags("public", "public/main") == {"v0.9.1": None}
+    # The archive's tags live in the same clone; only tags merged into public main count.
+    assert ("git", "tag", "--list", "--merged", "public/main") in calls
+
+
+def _shared_checkout(tmp_path):
+    """A clone whose origin is the private archive and whose ``public`` is the public repo."""
+    import subprocess
+
+    def git(cwd, *args):
+        return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+
+    def repo(name, tag, subject):
+        path = tmp_path / name
+        path.mkdir()
+        git(path, "init", "-q", "-b", "main")
+        git(path, "config", "user.email", "fixture@example.invalid")
+        git(path, "config", "user.name", "fixture")
+        git(path, "config", "commit.gpgsign", "false")
+        (path / "a.txt").write_text(name)
+        git(path, "add", ".")
+        git(path, "commit", "-qm", "root")
+        git(path, "tag", "-a", tag, "-m", tag)
+        (path / "b.txt").write_text(subject)
+        git(path, "add", ".")
+        git(path, "commit", "-qm", subject)
+        return path
+
+    private = repo("private", "v0.9.6", "archive change")
+    public = repo("public", "v1.0.0", "public change")
+    shared = tmp_path / "shared"
+    subprocess.run(["git", "clone", "-q", str(private), str(shared)], check=True)
+    git(shared, "remote", "add", "public", str(public))
+    return shared, git(public, "rev-parse", "HEAD"), git, public
+
+
+def test_collect_reads_public_main_in_a_checkout_whose_origin_is_the_archive(tmp_path, monkeypatch):
+    shared, public_head, git, public = _shared_checkout(tmp_path)
+    import subprocess
+
+    def run(*args):
+        return subprocess.check_output(args, cwd=shared, text=True, stderr=subprocess.DEVNULL).strip()
+    monkeypatch.setattr(srs, "_run", run)
+    monkeypatch.setattr(srs, "public_main_ref", lambda: "public/main")
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: [])
+    monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path / "smoke"))
+    assert report["main_ref"] == "public/main"
+    assert report["remote"] == {"name": "public", "url": str(public)}
+    assert report["main_head"] == public_head
+    assert report["last_release"]["tag"] == "v1.0.0"
+    assert report["last_release"]["sha"] == git(public, "rev-parse", "v1.0.0^{commit}")
+    assert report["commit_subjects"][0].endswith("public change")
+    assert report["suggested_tag"] == "v1.0.1"
+    assert "Candidate: public/main (remote 'public' = HobbyCoders/ai-shuffle)" in srs.render(report)
+
+
+def test_public_main_ref_uses_local_ci_public_resolution(monkeypatch):
+    seen = {}
+
+    def resolve(*, public_only=False):
+        seen["public_only"] = public_only
+        return "public/main"
+    monkeypatch.setattr(srs.local_ci, "resolve_base", resolve)
+    assert srs.public_main_ref() == "public/main" and seen == {"public_only": True}
+
+
+def test_collect_without_a_public_remote_blocks(tmp_path, monkeypatch):
+    def fail():
+        raise srs.local_ci.Failure("No remote points to HobbyCoders/ai-shuffle")
+    monkeypatch.setattr(srs, "public_main_ref", fail)
+    monkeypatch.setattr(srs, "_try", lambda *a: None)
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: [])
+    monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
+    assert not report["ready"] and report["main_ref"] is None
+    assert report["blockers"][0] == "No remote points to HobbyCoders/ai-shuffle"
 
 
 def test_next_patch():
@@ -161,7 +246,7 @@ def test_smoke_gate_without_a_candidate_blocks(tmp_path):
 def _fake_collect(monkeypatch, statuses):
     def fake_try(*args):
         if args[:2] == ("git", "rev-parse"):
-            return CANDIDATE
+            return "abc" if args[-1].startswith("abc") else CANDIDATE
         if args[:2] == ("git", "ls-remote"):
             return "abc\trefs/tags/v0.1.0"
         if args[:2] == ("git", "log"):
@@ -172,6 +257,7 @@ def _fake_collect(monkeypatch, statuses):
     monkeypatch.setattr(srs, "_try", fake_try)
     monkeypatch.setattr(srs, "_gh_json", lambda *a: statuses if a[0] == "api" else runs)
     monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
+    monkeypatch.setattr(srs, "public_main_ref", lambda: "public/main")
 
 
 @pytest.mark.parametrize("skip, ready, notes", [
@@ -214,3 +300,34 @@ def test_linux_suite_cannot_be_skipped(tmp_path, monkeypatch):
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="x")
     assert not report["ready"]
     assert report["blockers"][0].startswith("local/full-suite")
+
+
+def test_skip_smoke_rows_excuses_not_run_rows_into_the_release_notes(tmp_path, monkeypatch):
+    rows = SMOKE_ROWS + [{"id": "x.4", "check": "peer", "kind": "script", "two_worker": True}]
+    _smoke_file(tmp_path, "ServerWorker-preview")
+    path = tmp_path / CANDIDATE / "ServerWorker-preview.json"
+    data = json.loads(path.read_text())
+    data["rows"].append({"id": "x.4", "kind": "script", "status": "not_run", "reason": "worker offline"})
+    data["preview"] = {"commit": CANDIDATE, "verified_at_end": True}
+    path.write_text(json.dumps(data))
+    blocked = srs.smoke_gate(CANDIDATE, None, None, str(tmp_path), scenario_rows=rows)
+    assert blocked["verdict"] == "block"
+    report = srs.smoke_gate(CANDIDATE, None, None, str(tmp_path), scenario_rows=rows,
+                            skip_rows=[["two_worker", "no second worker for the preview"]])
+    assert report["verdict"] == "pass"
+    assert report["release_notes_lines"] == [
+        "Live smoke passed on ServerWorker-preview (isolated preview instance of the candidate) at 123456789.",
+        "Live smoke rows not run (--skip-smoke-rows two_worker): x.4 on ServerWorker-preview. "
+        "Reason: no second worker for the preview"]
+
+
+def test_main_passes_skip_smoke_rows_through(monkeypatch, capsys):
+    seen = {}
+
+    def fake_collect(*args):
+        seen["args"] = args
+        return {"ready": True}
+    monkeypatch.setattr(srs, "collect", fake_collect)
+    monkeypatch.setattr(srs, "render", lambda report: "ok")
+    assert srs.main(["--skip-smoke-rows", "two_worker", "peer away", "--skip-smoke-rows", "x.2", "browser"]) == 0
+    assert seen["args"][-1] == [["two_worker", "peer away"], ["x.2", "browser"]]

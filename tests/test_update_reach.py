@@ -163,12 +163,87 @@ def test_trust_key_change_fails_for_every_platform():
 
 
 def test_image_only_copies_fail_but_owner_tooling_is_reported():
-    groups = groups_for({"requirements-dev.txt": "x", "scripts/credential_keys.py": "x",
+    # A file the image runs from /usr/local/bin that no update replaces.
+    dockerfile = (ROOT / "Dockerfile").read_text() + "\nCOPY image-extra.sh /usr/local/bin/extra\n"
+    groups = groups_for({"Dockerfile": dockerfile, "image-extra.sh": "x", "scripts/credential_keys.py": "x",
                          "fluid/tests/unit/test_x.py": "x"})
-    assert groups["docker-image-copy"] == ["requirements-dev.txt"]
+    assert groups["docker-image-copy"] == ["image-extra.sh"]
     assert groups["image-tooling"] == ["scripts/credential_keys.py"]
     # fluid/ ships in the archive in part; its tests never run in the image.
-    assert reach.verdict(groups) == ["docker-image-copy"]
+    assert "docker-image-copy" in reach.verdict(groups)
+
+
+def test_test_only_dependencies_are_reported_not_failed():
+    # requirements-dev.txt once needed an owner label on every bump although
+    # the running app never uses what it installs.
+    groups = groups_for({"requirements-dev.txt": "pytest>=9\n"})
+    assert groups["image-dev-tooling"] == ["requirements-dev.txt"]
+    assert groups["docker-image-copy"] == []
+    assert reach.verdict(groups) == []
+    text = reach.render("base", "head", groups, [], [])
+    assert "note: image-dev-tooling (1 file)" in text and "Passed:" in text
+
+
+def test_runtime_dependencies_still_need_a_new_image():
+    # requirements.lock is an image input (its own pin), not dev tooling.
+    groups = groups_for({"requirements.lock": "x"})
+    assert groups["image-dev-tooling"] == []
+
+
+# Import names of requirements-dev.txt entries. A new dev dependency must be
+# added here, so the check below covers it.
+DEV_IMPORTS = {
+    "pytest": "pytest", "pytest-asyncio": "pytest_asyncio", "pytest-cov": "pytest_cov",
+    "pytest-mock": "pytest_mock", "pytest-xdist": "xdist", "pytest-timeout": "pytest_timeout",
+    "pytest-socket": "pytest_socket", "distlib": "distlib", "httpx": "httpx", "freezegun": "freezegun",
+    "ruff": "ruff", "pyyaml": "yaml",
+}
+
+
+def _requirement_names(text):
+    names = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line and not line.startswith("-"):
+            names.append(re.split(r"[<>=!~\[; ]", line, maxsplit=1)[0].lower())
+    return names
+
+
+def test_dev_dependencies_are_installed_only_as_workbench_tools():
+    """Why requirements-dev.txt is report-only: verified against the Dockerfile and the app."""
+    import ast
+
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    runtime = dockerfile.split("\nFROM ")[-1]
+    # Installed after the hash-locked runtime closure, never in place of it.
+    locked = runtime.index("--require-hashes -r requirements.lock")
+    dev = runtime.index("pip install --no-cache-dir -r requirements-dev.txt")
+    assert locked < dev
+    assert runtime.count("requirements-dev.txt") == 2  # the COPY and the pip install
+    for path in ("entrypoint.sh", *map(str, (ROOT / "docker").glob("*"))):
+        file = ROOT / path
+        if file.is_file():
+            assert b"requirements-dev" not in file.read_bytes(), path
+
+    dev_names = _requirement_names((ROOT / "requirements-dev.txt").read_text())
+    assert set(dev_names) <= set(DEV_IMPORTS), "map the new dev dependency's import name in DEV_IMPORTS"
+    locked_names = {m.group(1).lower() for m in re.finditer(r"(?m)^([A-Za-z0-9_.-]+)==",
+                                                             (ROOT / "requirements.lock").read_text())}
+    dev_only = {DEV_IMPORTS[name] for name in dev_names if name not in locked_names}
+    assert "pytest" in dev_only and "yaml" not in dev_only  # PyYAML ships in the runtime lock
+
+    offenders = []
+    for folder in ("app", "fluid/fluid", "docker"):
+        for file in (ROOT / folder).rglob("*.py"):
+            for node in ast.walk(ast.parse(file.read_bytes(), str(file))):
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and not node.level:
+                    modules = [node.module or ""]
+                else:
+                    continue
+                offenders += [f"{file.relative_to(ROOT)}: {m}" for m in modules if m.split(".")[0] in dev_only]
+    assert offenders == [], "the running app imports a test-only dependency; move it to requirements.txt"
 
 
 def test_android_native_and_packaging_are_notes_only():

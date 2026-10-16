@@ -76,41 +76,65 @@ the secret scan.
 
 ### Full gates longer than one Monitor budget
 
-On a slower machine, including Windows, use the supported checkpointed path:
+On a slower machine, including Windows (about 75 minutes there), use the
+supported checkpointed path. The whole sequence is one command, repeated:
 
 ```bash
-python scripts/local_ci.py full --step --attest
+python scripts/local_ci.py full --step --attest     # one Monitor job; repeat until it prints COMPLETE
 ```
 
+Each invocation runs stages back to back while the next stage still fits in
+`--budget` minutes (default 40, inside the Monitor tool's 45-minute budget),
+judged by that stage's last recorded duration on this machine
+(`full-stage-times.json` beside the backend test map; a stage never timed
+counts as 10 minutes, an unseen backend batch as the slowest batch timed).
 Run **one invocation per Monitor job**, inspect its completion, then repeat the
-same command until it prints `COMPLETE`. An intermediate exit 0 means only that
-stage passed, not a full pass or successful attestation. Do not wrap the commands
-in one long Monitor loop, detach processes, use `serves=true`, or increase the
-two-worker limit. Without publication, omit `--attest` on every invocation.
+same command. On Windows that is usually two or three invocations. An
+intermediate exit 0 means only that those stages passed, not a full pass or
+successful attestation. Do not wrap the commands in one long Monitor loop,
+detach processes, use `serves=true`, or increase the two-worker limit. Without
+publication, omit `--attest`. `--budget 0` runs exactly one stage.
+
+`--attest` accepts a completed stage set: stages run without `--attest` (for
+example while main was being checked) can be attested afterwards with the same
+command, or with `python scripts/local_ci.py full --attest`, as long as the
+revision, tree, interpreter and machine are unchanged. That posts the status
+from the completed set without rerunning anything.
 
 Stages cover the same suites and backend tests as `full`: security, backend
 batches of 20 files using the original directory collection and exclusions,
 each remaining suite, then final security/release checks and test-map merge.
 No tests are dropped to meet the time budget. Backend map hits accumulate across
 batches. Other suites keep their original commands and platform availability.
-Native Windows timing still needs measurement; if an individual stage exceeds
-45 minutes, report it rather than treating an interrupted run as a pass.
+If an estimate is too low and an invocation outlives its Monitor budget, the
+interrupted stage gets no receipt; the next invocation runs it first and
+records its real duration. A single stage longer than 45 minutes cannot pass
+this way; report it rather than treating an interrupted run as a pass.
 
 Receipts live beside `passes.json` in `full-stages.json` in this worktree's Git
 directory. Only a successfully completed stage gets a receipt; an interrupted
 or failed stage is rerun. Every invocation requires a clean unchanged checkout
 and runs the Python preflight. Revision/tree, interpreter path, machine, worker
-count, audit/attestation mode and stage plan must match to reuse receipts.
+count, audit mode and stage plan must match to reuse receipts.
 Changing any of those starts a new run. Run only one staged gate per worktree
 at a time. If dependencies or external tools change in place, use
 `full --step --restart` (plus `--attest` if applicable) once, then omit `--restart`
 for subsequent stages. `--only` cannot attest or supply full-stage receipts.
 
-`--attest` retains the clean current-public-main and update-reach requirements.
-Partial work posts only pending/failure statuses. Only after **all** stages pass
-does the final stage write the full pass and post success (including
+`--attest` retains the clean current-public-main and update-reach requirements,
+and checks them first, in seconds: right after the Python preflight, before
+any commit status and before any suite. Partial work posts only pending/failure
+statuses (one pending per invocation). Only after **all** stages pass does the
+final stage write the full pass and post success (including
 `local/windows-suite` on Windows). If main advances mid-run, update to it and
 start over; old receipts cannot authorize the new revision.
+
+The update-reach check walks the private archive's history across the public
+root (see [release-channels.md](release-channels.md)). When
+`AI_SHUFFLE_PRIVATE_CHECKOUT` is unset and this clone has a remote for
+`HobbyCoders/ai-shuffle-private` (a shared checkout where `origin` is the
+archive), `--attest` uses this clone's own Git directory for it, says so, and
+refreshes that remote's `main`. A shallow clone is never used.
 
 The last lines of each run list what this machine did not cover:
 

@@ -23,7 +23,7 @@ def gate(tmp_path, monkeypatch):
     monkeypatch.setattr(ci, "fetch_base", lambda *a, **kw: None)
     monkeypatch.setattr(ci, "attest_update_reach", lambda *a: calls.append("reach"))
     monkeypatch.setattr(ci, "attest", lambda state, *a: calls.append(state))
-    monkeypatch.setattr(ci, "security_check", lambda *a: calls.append("security"))
+    monkeypatch.setattr(ci, "security_check", lambda *a, **kw: calls.append("security"))
     monkeypatch.setattr(ci, "backend", lambda ctx: calls.append(("backend", ctx.backend_selected)))
     monkeypatch.setattr(ci, "run_suites", lambda mode, only, python: (calls.append(only[0]) or (only, [], [])))
     monkeypatch.setattr(ci, "save_record", lambda *a: calls.append("record"))
@@ -36,7 +36,7 @@ def gate(tmp_path, monkeypatch):
     tests.mkdir(parents=True)
     for name in ["a", "b"]:
         (tests / f"test_{name}.py").write_text("def test_ok(): pass")
-    return calls, argparse.Namespace(attest=True, strict_audit=False, restart=False)
+    return calls, argparse.Namespace(attest=True, strict_audit=False, restart=False, budget=0)
 
 
 def step(args):
@@ -56,7 +56,8 @@ def test_full_gate_only_records_and_attests_after_every_stage(gate):
     before = list(calls)
     assert step(args) == 0
     assert calls.count("success") == 1
-    assert calls[len(before):] == ["reach"]
+    # The update-reach recheck runs in local_ci.attest_preflight, before this.
+    assert calls[len(before):] == []
 
 
 def test_failed_stage_retries_without_replaying_successes(gate, monkeypatch):
@@ -189,3 +190,96 @@ def test_batch_map_hits_survive_recycled_worker_ids(gate, monkeypatch):
     assert len(hits) == 2
     assert {name for hit in hits for name in json.loads(hit.read_text())["hits"]} == {
         "tests/core/test_a.py", "tests/core/test_b.py"}
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(stages, "_clock", lambda: now[0])
+    return now
+
+
+def _timed(calls, clock, name, seconds):
+    def fake(*args, **kwargs):
+        clock[0] += seconds
+        calls.append(name if name != "backend" else ("backend", args[0].backend_selected))
+        return None
+    return fake
+
+
+def test_budget_runs_stages_back_to_back_while_the_next_fits(gate, monkeypatch, clock, capsys):
+    calls, args = gate
+    args.budget = 10  # minutes
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps(
+        {"security": 10, "backend-1": 240, "backend-2": 240, "fluid": 60, "finish": 60}))
+    monkeypatch.setattr(ci, "security_check", _timed(calls, clock, "security", 10))
+    monkeypatch.setattr(ci, "backend", _timed(calls, clock, "backend", 240))
+    monkeypatch.setattr(ci, "run_suites", lambda mode, only, python: (
+        _timed(calls, clock, only[0], 60)() or (only, [], [])))
+    assert step(args) == 0
+    # 10 + 240 + 240 + 60 s elapsed; finish (about 72 s with margin) would pass 600 s.
+    assert [c for c in calls if c not in ("pending",)] == [
+        "security", ("backend", ["tests/core/test_a.py"]), ("backend", ["tests/core/test_b.py"]), "fluid"]
+    assert calls.count("pending") == 1  # one pending status per invocation, not per stage
+    assert "success" not in calls and "record" not in calls
+    out = capsys.readouterr().out
+    assert "4/5 complete" in out and "Next: finish" in out
+    assert step(args) == 0
+    assert calls.count("success") == calls.count("record") == 1
+    assert calls.count("pending") == 2
+    assert "COMPLETE: every available full-gate suite passed." in capsys.readouterr().out
+
+
+def test_unknown_stages_are_estimated_and_timings_are_recorded(gate, monkeypatch, clock):
+    calls, args = gate
+    args.budget = 5
+    monkeypatch.setattr(ci, "security_check", _timed(calls, clock, "security", 30))
+    monkeypatch.setattr(ci, "backend", _timed(calls, clock, "backend", 100))
+    # security ran; backend-1 is unknown (10 min) and does not fit 5 minutes.
+    assert step(args) == 0
+    assert calls == ["pending", "security"]
+    times = json.loads((ci.MAP_PATH.parent / "full-stage-times.json").read_text())
+    assert times == {"security": 30}
+    assert step(args) == 0  # the first stage of an invocation always runs
+    times = json.loads((ci.MAP_PATH.parent / "full-stage-times.json").read_text())
+    assert times["backend-1"] == 100
+    # The unseen batch is estimated from the slowest batch timed so far.
+    assert stages.estimate(times, "backend-2") == pytest.approx(100 * stages.ESTIMATE_MARGIN)
+    assert stages.estimate(times, "backend-linux") == stages.UNKNOWN_STAGE_SECONDS
+
+
+def test_completed_stage_set_is_attested_later_without_rerunning(gate, capsys):
+    calls, args = gate
+    args.attest, args.budget = False, 40
+    assert step(args) == 0
+    assert "pending" not in calls and "success" not in calls and calls.count("record") == 1
+    ran = len(calls)
+    args.attest = True
+    assert step(args) == 0
+    assert calls[ran:] == ["success"]
+    assert "from the completed stage set" in capsys.readouterr().out
+    assert step(args) == 0
+    assert calls[ran:] == ["success"]  # attested once
+
+
+def test_full_attest_accepts_a_completed_stage_set(gate, monkeypatch):
+    calls, args = gate
+    args.attest, args.budget = False, 40
+    step(args)
+    ran = len(calls)
+    monkeypatch.setattr(ci, "attest_preflight", lambda revision: calls.append("preflight"))
+    monkeypatch.setattr(ci, "python_preflight", lambda python: None)
+    monkeypatch.setattr(ci, "choose_python", lambda: sys.executable)
+    assert ci.main(["full", "--attest"]) == 0
+    assert calls[ran:] == ["preflight", "success"]
+
+
+def test_full_attest_without_completed_stages_runs_the_suites(gate, monkeypatch):
+    calls, _ = gate
+    monkeypatch.setattr(ci, "attest_preflight", lambda revision: calls.append("preflight"))
+    monkeypatch.setattr(ci, "python_preflight", lambda python: None)
+    monkeypatch.setattr(ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(ci, "run_suites", lambda mode, only, python: (calls.append(("suites", mode)) or ([], [], [])))
+    assert ci.main(["full", "--attest"]) == 0
+    assert calls[:3] == ["preflight", "pending", "security"]
+    assert ("suites", "full") in calls and calls[-1] == "success"
