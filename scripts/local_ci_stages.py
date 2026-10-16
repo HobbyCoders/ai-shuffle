@@ -570,7 +570,7 @@ def _advance(ci, args, python, revision, state, path, times, times_path, beat, h
             finally:
                 write_state(path, state)
                 _save_times(times_path, times)
-            print(f"Stopped at the end of the {budget / 60:g}-minute budget. {message} "
+            print(f"\nStopped at the end of the {budget / 60:g}-minute budget. {message} "
                   f"{len(completed_stages)}/{len(plan)} stages complete; no full pass recorded yet. "
                   "Run the same command in a new Monitor invocation to continue.")
             return 0
