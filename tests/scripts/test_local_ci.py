@@ -741,3 +741,27 @@ def test_attestation_refuses_dirty_or_non_public_head(base_repo, monkeypatch, cl
         local_ci.cmd_check(local_ci.argparse.Namespace(command="full", attest=True, only=None))
     assert fetched == ["public/main"]
     assert posted == []
+
+
+def test_checks_never_inherit_the_pushing_repository_from_git(monkeypatch, tmp_path):
+    """A pre-push hook runs with GIT_DIR set (in a worktree). Test fixtures
+    that call `git -C <tmp> init/commit/config` must not reach this repo."""
+    import subprocess
+
+    real = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True)
+    if real.returncode == 0:  # the list matches this git's own
+        assert set(real.stdout.split()) <= local_ci.GIT_LOCAL_ENV
+    monkeypatch.setenv("GIT_DIR", "/repo/.git/worktrees/w")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/repo/.git/worktrees/w/index")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.bare")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "kept")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(local_ci.subprocess, "run", fake_run)
+    local_ci.run(["true"], env={"PYTHONPATH": "x"})
+    assert not {"GIT_DIR", "GIT_INDEX_FILE", "GIT_CONFIG_KEY_0"} & set(seen)
+    assert seen["GIT_AUTHOR_NAME"] == "kept" and seen["PYTHONPATH"] == "x" and "PATH" in seen

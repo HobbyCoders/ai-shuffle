@@ -1663,6 +1663,15 @@ def create_builtin_tools_server(
 
     all_tools.extend([android_devices, android_action])
 
+    # This worker's Android emulator (app/mcp/emulator_tools.py); listed only
+    # where the platform has an emulator backend (Linux x86_64 today).
+    try:
+        from app.mcp.emulator_tools import build_emulator_tools
+
+        all_tools.extend(build_emulator_tools(tool, cwd=cwd))
+    except Exception:  # noqa: BLE001 — the emulator never blocks a session
+        logger.warning("emulator tool registration failed", exc_info=True)
+
 
     # ------------------------------------------------------------------
     # ScheduleWakeup — pause + resume session after a delay
@@ -2927,6 +2936,8 @@ def get_builtin_tool_names() -> List[str]:
     names = [
         "mcp__builtins__AndroidDevices",
         "mcp__builtins__AndroidAction",
+        "mcp__builtins__Emulator",
+        "mcp__builtins__EmulatorScreenshot",
         "mcp__builtins__ScheduleWakeup",
         "mcp__builtins__Task",
         # Top-level session coordination and Task-worker messaging.

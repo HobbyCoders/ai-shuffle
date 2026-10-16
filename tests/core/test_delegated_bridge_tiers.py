@@ -157,6 +157,7 @@ async def test_rarely_used_tools_are_deferred(tmp_path):
     for name in (
         "Glob", "Grep",
         "mcp__builtins__AndroidAction", "mcp__builtins__AndroidDevices",
+        "mcp__builtins__Emulator", "mcp__builtins__EmulatorScreenshot",
         "mcp__builtins__CronCreate", "mcp__builtins__CronList",
         "mcp__builtins__GetAppErrors", "mcp__builtins__GetAppLogs",
         "mcp__builtins__ArchiveSession",

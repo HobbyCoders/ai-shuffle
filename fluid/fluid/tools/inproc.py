@@ -27,6 +27,9 @@ class InprocTool:
     handler: RawHandler
     risk: str = "safe"
     annotations: Any = None
+    # Optional per-input risk (``ToolSpec.classify_risk``): one tool whose
+    # actions differ, e.g. a status action that only reads. Capped at ``risk``.
+    classify_risk: Callable[[dict[str, Any]], str] | None = None
 
     def as_handler(self) -> Callable[[dict[str, Any], Any], Awaitable[Any]]:
         """Adapt the SDK-style ``args``-only handler to the registry's

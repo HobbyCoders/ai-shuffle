@@ -8,6 +8,12 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## Next release
+
+### Agents and providers
+
+- Android emulator: AI Shuffle can run an Android phone emulator on Linux x86_64 workers with KVM. Install it once from the new Phone panel (about 2 GB from Google, after you accept the Android SDK License), then watch and use the phone live in the panel. Agents can install, open and test the apps they build with the new Emulator and EmulatorScreenshot tools. Docker installs need `--device /dev/kvm`. See [Android emulator](/docs/features/android-emulator).
+
 ## 1.0.0
 
 The first release from the public repository, [github.com/HobbyCoders/ai-shuffle](https://github.com/HobbyCoders/ai-shuffle). It is built and signed there, and it brings the fixes and features below on top of 0.9.6.

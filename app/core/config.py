@@ -221,6 +221,19 @@ class Settings(BaseSettings):
     # tool suite to agents nor starts a native supervisor with no browser behind it.
     start_chrome: bool = True
 
+    # Android emulator (app/core/android_emulator; docs/internal/phone-panel-api.md).
+    #   - android_sdk_dir: where the owner-started SDK install lands. None =
+    #     <data_dir>/android-sdk. Env: ANDROID_SDK_DIR.
+    #   - emulator_max_devices: emulators that may run at once on this worker,
+    #     shared by every session. Env: EMULATOR_MAX_DEVICES.
+    #   - emulator_idle_timeout_seconds: a running emulator with no viewer and
+    #     no tool or panel use for this long is stopped; 0 keeps it running.
+    #   - emulator_system_image: the SDK package path of the system image.
+    android_sdk_dir: Optional[Path] = None
+    emulator_max_devices: int = 1
+    emulator_idle_timeout_seconds: int = 1800
+    emulator_system_image: str = "system-images;android-35;google_apis;x86_64"
+
     # Service info
     service_name: str = "ai-shuffle"
     # The release tag is the version source. Release builds pass it as the

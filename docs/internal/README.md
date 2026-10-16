@@ -15,6 +15,7 @@ image excludes `docs/`, and the update source archive carries only
 | [changelog-template.md](changelog-template.md) | How to write a release's changelog entry and notes. |
 | [acceptance-clean-box.md](acceptance-clean-box.md) | The phase 1 exit test: a stranger installs with Docker Compose on clean Ubuntu from the docs alone. |
 | [computer-use.md](computer-use.md) | Native computer use internals. |
+| [phone-panel-api.md](phone-panel-api.md) | The Android emulator's Phone panel API (HTTP + WebSocket) and its frame and input transport. |
 | [native-image-generation.md](native-image-generation.md) | Native Responses image generation. |
 | [managed-worker-connections.md](managed-worker-connections.md) | Managed worker connection credentials. |
 | [managed-worker-credential-repair.md](managed-worker-credential-repair.md) | Reconnecting one revoked account worker on Android. |
