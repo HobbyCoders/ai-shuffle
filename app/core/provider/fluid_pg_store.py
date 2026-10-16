@@ -588,6 +588,17 @@ def _like_pattern(term: str) -> str:
     return f"%{escaped}%"
 
 
+# A row too long to index has one overflow marker instead of pieces; its
+# text is read (and matched) in full from the source table, as legacy recall did.
+_OVERFLOW_TEXT = {
+    session_recall.NATIVE: ("(SELECT recall_node_text(d.message) FROM fluid_session_nodes d "
+                            "WHERE d.session_id = o.session_id AND d.node_id = o.row_key)"),
+    session_recall.ENTRY: ("(SELECT recall_entry_text(d.entry) FROM session_store_entries d "
+                           "WHERE d.id = o.row_key::bigint)"),
+    session_recall.EVENT: "lower(o.raw)",
+}
+
+
 def _recall_matches(source: str, where: str, where_params: List[Any],
                     patterns: List[str]) -> tuple:
     """SQL (and params) for an arm's candidate rows: session_id, row_key, t, h."""
@@ -604,6 +615,14 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
             f"ORDER BY ts DESC LIMIT {_SEARCH_TERM_ROWS})"
         )
         params += [source, *where_params, *group]
+    any_term = " OR ".join(["x.body LIKE %s"] * len(patterns))
+    arms.append(
+        "(SELECT o.session_id, o.row_key, o.part, o.ts, x.body FROM ("
+        "SELECT session_id, row_key, part, ts, raw FROM session_recall_text "
+        f"WHERE source = %s AND part = {session_recall.OVERFLOW_PART} AND {where}) o "
+        f"CROSS JOIN LATERAL (SELECT {_OVERFLOW_TEXT[source]} AS body) x WHERE {any_term})"
+    )
+    params += [source, *where_params, *patterns]
     hits = "1" if len(patterns) == 1 else " + ".join(
         ["MAX(CASE WHEN body LIKE %s THEN 1 ELSE 0 END)"] * len(patterns))
     sql = (
@@ -653,11 +672,13 @@ def _fold_payload(event_type: str, raw: Optional[str], stamp: Optional[str]) -> 
 
 
 def _indexed_event_candidates(conn, cur, me: str, excluded: List[str],
-                              patterns: List[str]) -> tuple:
+                              patterns: List[str], scope: Optional[List[str]]) -> tuple:
     """(best candidate rows, their text events oldest first) for sessions
     another worker runs, both read from the projection."""
     cur.execute(f"SELECT id, owner_device_id FROM sessions WHERE {_remote_sql()}", (me,))
-    owners = {r["id"]: r["owner_device_id"] for r in cur.fetchall() if r["id"] not in excluded}
+    allowed = set(scope) if scope is not None else None
+    owners = {r["id"]: r["owner_device_id"] for r in cur.fetchall()
+              if r["id"] not in excluded and (allowed is None or r["id"] in allowed)}
     if not owners:
         return [], []
     matches, params = _recall_matches(session_recall.EVENT, "session_id = ANY(%s)", [sorted(owners)], patterns)
@@ -671,13 +692,14 @@ def _indexed_event_candidates(conn, cur, me: str, excluded: List[str],
     if not found:
         return [], []
     ids = [r["session_id"] for r in found]
-    # Each text event's first piece carries what the fold reads, so a whole
-    # session folds without touching session_events or decoding JSON. Plain
-    # tuples: these are the bulk of a broad search's rows.
+    # Each text event's first row (piece 0 or its overflow marker) carries
+    # what the fold reads, so a whole session folds without touching
+    # session_events or decoding JSON. Plain tuples: these are the bulk of a
+    # broad search's rows.
     tuples = conn.cursor(cursor_factory=psycopg2.extensions.cursor)
     tuples.execute(
         "SELECT session_id, event_type, raw, stamp, ts FROM session_recall_text "
-        f"WHERE source = %s AND part = 0 AND session_id IN ({_in(ids)}) ORDER BY session_id, seq",
+        f"WHERE source = %s AND part <= 0 AND session_id IN ({_in(ids)}) ORDER BY session_id, seq",
         [session_recall.EVENT, *ids],
     )
     events = [
@@ -685,6 +707,54 @@ def _indexed_event_candidates(conn, cur, me: str, excluded: List[str],
         for sid, etype, raw, stamp, ts in tuples.fetchall()
     ]
     return found, events
+
+
+# How far a worker's ownership is inherited up its parent chain, as in
+# api_user_scope._OWNER_DEPTH and artifact_access._CHAT_PARENT_DEPTH.
+_SCOPE_DEPTH = 8
+_KNOWN_PROVENANCE = ("(m.owner IS NOT NULL OR s.provenance_owner = 'install-admin' "
+                     "OR s.provenance_owner LIKE 'account:_%%' OR s.provenance_owner LIKE 'paired:%%' "
+                     "OR s.provenance_owner LIKE 'api_user:%%')")
+
+
+def _scope_ids(cur, api_user_id: Optional[str], reader: Optional[Dict[str, Any]]) -> Optional[List[str]]:
+    """Session ids (app and store) a scoped reader could possibly recall; None
+    for the owner, who reads everything.
+
+    A superset of what ``api_user_scope.visible_store_ids`` and
+    ``artifact_access.readable_store_ids`` allow, which still decide every hit
+    afterwards. It only keeps the indexed prefilter's newest-first caps from
+    filling up with sessions this reader can never see.
+    """
+    if not api_user_id and reader is None:
+        return None
+    if reader is not None and not api_user_id and reader.get("owner_authority"):
+        # The install owner's authority reads every chat without an API key,
+        # plus its own account's chats.
+        cur.execute(
+            "SELECT s.id, s.sdk_session_id FROM sessions s "
+            "LEFT JOIN mobile_tool_identity m ON m.session_id = s.id "
+            "WHERE s.api_user_id IS NULL OR m.owner = %s OR s.provenance_owner = %s",
+            (reader.get("owner"), reader.get("owner")),
+        )
+    else:
+        if api_user_id:
+            join, decided, match, params = "", "s.api_user_id IS NOT NULL", "s.api_user_id = %s", [api_user_id]
+        else:
+            join = "LEFT JOIN mobile_tool_identity m ON m.session_id = s.id"
+            decided, match = _KNOWN_PROVENANCE, "(m.owner = %s OR s.provenance_owner = %s)"
+            params = [reader.get("owner"), reader.get("owner")]
+        # A worker without its own owner record belongs to its parent chat's.
+        cur.execute(
+            "WITH RECURSIVE w(id, sdk, at, depth) AS ("
+            "SELECT id, sdk_session_id, id, 0 FROM sessions "
+            "UNION ALL "
+            f"SELECT w.id, w.sdk, s.parent_session_id, w.depth + 1 FROM w JOIN sessions s ON s.id = w.at {join} "
+            f"WHERE NOT {decided} AND s.is_worker AND s.parent_session_id IS NOT NULL AND w.depth < {_SCOPE_DEPTH}) "
+            f"SELECT w.id, w.sdk AS sdk_session_id FROM w JOIN sessions s ON s.id = w.at {join} WHERE {match}",
+            params,
+        )
+    return sorted({sid for r in cur.fetchall() for sid in (r["id"], r["sdk_session_id"]) if sid})
 
 
 def _first_readable(items: List[Any], reader: Dict[str, Any], cap: int, *, key) -> List[Any]:
@@ -734,11 +804,16 @@ def _search_sync(
         excluded = _exclusion_ids(cur, exclude_session_id)
         not_excluded = f"session_id NOT IN ({_in(excluded)})" if excluded else "TRUE"
         likes = [_like_pattern(t) for t in terms]
+        scope = _scope_ids(cur, api_user_id, reader) if indexed else None
+        indexed_where, indexed_params = not_excluded, list(excluded)
+        if scope is not None:
+            indexed_where += " AND session_id = ANY(%s)"
+            indexed_params.append(scope)
 
         # Arm A — this store's own native session node tree.
         if indexed:
             native = _indexed_top_rows(cur, session_recall.NATIVE, "fluid_session_nodes", "node_id",
-                                       not_excluded, excluded, "session_id, ts, message", likes,
+                                       indexed_where, indexed_params, "session_id, ts, message", likes,
                                        fetch_sessions)
         else:
             native = _top_rows(
@@ -756,7 +831,7 @@ def _search_sync(
         # transcript; sidechain files live under a subpath and are not recall).
         if indexed:
             delegated = _indexed_top_rows(cur, session_recall.ENTRY, "session_store_entries", "id",
-                                          not_excluded, excluded, "session_id, created_at, entry", likes,
+                                          indexed_where, indexed_params, "session_id, created_at, entry", likes,
                                           fetch_sessions)
         else:
             delegated = _top_rows(
@@ -778,7 +853,7 @@ def _search_sync(
         if me:
             types = list(_EVENT_TEXT_TYPES)
             if indexed:
-                found, events = _indexed_event_candidates(conn, cur, me, excluded, likes)
+                found, events = _indexed_event_candidates(conn, cur, me, excluded, likes, scope)
             else:
                 event_column = "recall_text" if cached else "payload"
                 source = (

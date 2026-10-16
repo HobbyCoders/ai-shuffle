@@ -1,9 +1,11 @@
 """SessionSearch's maintained text projection, on opt-in disposable PostgreSQL.
 
-Covers the triggers that keep ``session_recall_text`` exact, the resumable
-batched backfill and its readiness gate, and the indexed search path: ranked
-parity with the legacy query while every term is rarer than the per-term cap,
-literal LIKE wildcards, and the newest-first cap for common terms.
+Covers the triggers that keep ``session_recall_text`` exact (and never fail a
+write, nor cost much on a huge one), their short per-table install, the
+resumable batched backfill and its readiness gate, and the indexed search
+path: ranked parity with the legacy query while every term is rarer than the
+per-term cap, literal LIKE wildcards, the newest-first cap for common terms,
+rows too long to index, and scoped readers.
 """
 import time
 from dataclasses import asdict
@@ -23,6 +25,7 @@ def _wipe(cur):
                   "session_events", "session_event_counters"):
         cur.execute(f"DELETE FROM {table} WHERE session_id LIKE %s", (PREFIX + "%",))
     cur.execute("DELETE FROM sessions WHERE id LIKE %s", (PREFIX + "%",))
+    cur.execute("DELETE FROM api_users WHERE id LIKE %s", (PREFIX + "%",))
     cur.execute("DELETE FROM session_recall_text WHERE session_id LIKE %s", (PREFIX + "%",))
     # Other suites share this database and must keep the legacy path.
     cur.execute("DELETE FROM session_recall_backfill")
@@ -30,8 +33,11 @@ def _wipe(cur):
 
 @pytest.fixture(autouse=True)
 def clean():
-    from app.db import base
+    from app.db import base, session_recall
 
+    with base.get_db() as conn:
+        assert session_recall.install_objects(conn.cursor())
+    assert session_recall.install_triggers()
     with base.get_db() as conn:
         _wipe(conn.cursor())
     yield
@@ -70,20 +76,37 @@ def _backfill_all(batch=None):
         assert session_recall.ready(conn.cursor())
 
 
-def test_bootstrap_installs_triggers_and_waits_for_backfill():
+def test_bootstrap_creates_only_objects_and_triggers_install_per_table():
     from app.db import base, session_recall
 
+    session_recall.uninstall()
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        # The removal path (python -m app.maintenance.session_recall_projection --remove).
+        cur.execute("SELECT COUNT(*) AS n FROM pg_trigger WHERE tgname LIKE 'trg_session_recall%%'")
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT to_regclass('session_recall_text') AS t, to_regproc('recall_pieces') AS f")
+        assert dict(cur.fetchone()) == {"t": None, "f": None}
+        from app.db.schema_postgres import create_postgres_schema
+
+        create_postgres_schema(cur)
+        # Bootstrap never locks a transcript table: no trigger yet.
+        assert not session_recall.installed(cur)
+        assert not session_recall.ready(cur)
+    assert session_recall.install_triggers()
     with base.get_db() as conn:
         cur = conn.cursor()
         assert session_recall.installed(cur)
         assert not session_recall.ready(cur)
-        assert session_recall.install(cur)  # idempotent
+        assert session_recall.install_objects(cur)  # idempotent
+    assert session_recall.install_triggers()
 
 
 def test_triggers_keep_projection_to_scored_text_on_every_write():
-    from app.db import base
+    from app.db import base, session_recall
 
     sid = PREFIX + "native"
+    _backfill_all()
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)", (
@@ -131,6 +154,10 @@ def test_triggers_keep_projection_to_scored_text_on_every_write():
         cur.execute("UPDATE session_events SET id = %s, payload = %s WHERE session_id = %s AND seq = 3",
                     (PREFIX + "e2", Json({"text": "Merged"}), remote))
         assert _projection(cur, "e", remote) == {PREFIX + "e1": "hello world", PREFIX + "e2": "merged"}
+        cur.execute("DELETE FROM session_store_entries WHERE session_id = %s", (sdk,))
+        assert _projection(cur, "s", sdk) == {}
+        # No write above went through the triggers' error handler.
+        assert session_recall.ready(cur)
 
 
 def test_backfill_is_batched_resumable_and_gates_readiness():
@@ -177,23 +204,158 @@ def test_backfill_is_batched_resumable_and_gates_readiness():
 def test_install_waits_only_briefly_for_a_busy_table():
     from app.db import base, session_recall
 
+    _backfill_all()
+    name = session_recall._trigger_name("nodes")
     with base.get_db() as conn:
-        conn.cursor().execute("DROP TRIGGER trg_session_recall_nodes ON fluid_session_nodes")
-    try:
-        with base.get_db() as blocker:
-            blocker.cursor().execute("LOCK TABLE fluid_session_nodes IN ROW EXCLUSIVE MODE")
-            started = time.perf_counter()
-            with base.get_db() as conn:
-                cur = conn.cursor()
-                assert session_recall.install(cur, lock_timeout_ms=50) is False
-                assert not session_recall.installed(cur)
-                cur.execute("SELECT current_setting('lock_timeout') AS v")
-                assert cur.fetchone()["v"] == "0"
-            assert time.perf_counter() - started < 2
-    finally:
+        conn.cursor().execute(f"DROP TRIGGER {name} ON fluid_session_nodes")
+    with base.get_db() as blocker:
+        blocker.cursor().execute("LOCK TABLE fluid_session_nodes IN ROW EXCLUSIVE MODE")
+        started = time.perf_counter()
+        assert session_recall.install_triggers(lock_timeout_ms=50) is False
+        assert time.perf_counter() - started < 1
         with base.get_db() as conn:
-            assert session_recall.install(conn.cursor())
-            assert session_recall.installed(conn.cursor())
+            cur = conn.cursor()
+            assert not session_recall.installed(cur)
+            assert not session_recall.ready(cur)
+            cur.execute("SELECT current_setting('lock_timeout') AS v")
+            assert cur.fetchone()["v"] == "0"
+            # The other tables kept (or got) their triggers in their own transactions.
+            assert session_recall._source_triggers(cur, "session_events")
+    assert session_recall.install_triggers()
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert session_recall.installed(cur)
+        # Rows written while the trigger was missing are copied again.
+        cur.execute("SELECT source, done FROM session_recall_backfill ORDER BY source")
+        assert {r["source"]: r["done"] for r in cur.fetchall()} == {"e": True, "n": False, "s": True}
+
+
+def test_a_failing_projection_never_fails_the_write_and_is_rebuilt():
+    from app.db import base, session_recall
+
+    sid = PREFIX + "fail"
+    _backfill_all()
+    with base.get_db() as conn:
+        conn.cursor().execute("DROP TABLE session_recall_text")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
+                    (sid, "a", 1.0, _node("user", [{"kind": "text", "text": "Survives"}])))
+        cur.execute("INSERT INTO session_events(id,session_id,seq,event_type,payload) VALUES (%s,%s,%s,%s,%s)",
+                    (PREFIX + "fe", sid, 1, "message.user", Json({"content": "Survives too"})))
+        cur.execute("SELECT source, done FROM session_recall_backfill ORDER BY source")
+        assert {r["source"]: r["done"] for r in cur.fetchall()} == {"e": False, "n": False, "s": True}
+        assert not session_recall.ready(cur)
+    assert session_recall.run_backfill(pause_seconds=0)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert _projection(cur, "n", sid) == {"a": "survives"}
+        assert _projection(cur, "e", sid) == {PREFIX + "fe": "survives too"}
+
+
+def test_a_huge_write_costs_about_the_same_as_without_the_trigger():
+    """Linear chunking, and nothing past ``MAX_ROW_CHARS`` is indexed."""
+    from app.db import base, session_recall
+
+    name = session_recall._trigger_name("nodes")
+    timings = {}
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        for size in (session_recall.MAX_ROW_CHARS, 3_000_000):
+            text = ("é漢字abcdefg " * (size // 11 + 1))[:size]
+            for trigger in (False, True):
+                cur.execute(f"ALTER TABLE fluid_session_nodes {'ENABLE' if trigger else 'DISABLE'} TRIGGER {name}")
+                started = time.perf_counter()
+                cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)", (
+                    PREFIX + "huge", f"{size}-{trigger}", 1.0,
+                    _node("user", [{"kind": "toolresultblock", "content": [{"kind": "text", "text": text}]}])))
+                timings[size, trigger] = time.perf_counter() - started
+        cur.execute("SELECT row_key, COUNT(*) AS n, MIN(part) AS first FROM session_recall_text "
+                    "WHERE session_id = %s GROUP BY row_key", (PREFIX + "huge",))
+        rows = {r["row_key"]: (r["n"], r["first"]) for r in cur.fetchall()}
+    cap = session_recall.MAX_ROW_CHARS
+    assert rows[f"{cap}-True"][0] > cap // 1000 and rows["3000000-True"] == (1, session_recall.OVERFLOW_PART)
+    # A whole row at the cap (pieces, trigram entries) stays well under a second...
+    assert timings[cap, True] < timings[cap, False] + 0.5, timings
+    # ...and a 3 MB one costs about what the insert costs anyway.
+    assert timings[3_000_000, True] < 2 * timings[3_000_000, False] + 0.1, timings
+
+
+def test_rows_too_long_to_index_are_matched_in_their_source(recall):
+    from app.db import base, session_recall
+
+    tail = "x" * (session_recall.MAX_ROW_CHARS + 10) + " overflowneedle tail"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions(id,sdk_session_id,title,owner_device_id) VALUES (%s,%s,%s,%s)",
+                    (PREFIX + "ovr", None, "Remote", "test-remote"))
+        cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
+                    (PREFIX + "ovn", "0", 1.0, _node("user", [{"kind": "text", "text": tail}])))
+        cur.execute("INSERT INTO session_store_entries(project_key,session_id,entry) VALUES (%s,%s,%s)",
+                    ("p", PREFIX + "ovs", Json({"type": "user", "message": {"content": tail}})))
+        execute_values(cur, "INSERT INTO session_events(id,session_id,seq,event_type,payload) VALUES %s", [
+            (PREFIX + "ove1", PREFIX + "ovr", 1, "message.user", Json({"content": "short question"})),
+            (PREFIX + "ove2", PREFIX + "ovr", 2, "message.assistant", Json({"content": tail})),
+        ])
+        cur.execute("SELECT source, part FROM session_recall_text WHERE session_id LIKE %s AND part < 0 "
+                    "ORDER BY source", (PREFIX + "ov%",))
+        assert [(r["source"], r["part"]) for r in cur.fetchall()] == [("e", -1), ("n", -1), ("s", -1)]
+    _backfill_all()
+    hits = recall._search_sync(["overflowneedle"], 5, None)
+    assert sorted(h.session_id for h in hits) == sorted([PREFIX + "ovn", PREFIX + "ovs", PREFIX + "ovr"])
+    # The overflowed event still folds: the session's short message is found too.
+    hits = recall._search_sync(["short question"], 5, None)
+    assert [h.session_id for h in hits] == [PREFIX + "ovr"]
+
+
+def test_backfill_never_waits_on_a_row_being_written():
+    import psycopg2.errors
+
+    from app.db import base, session_recall
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", [
+            (f"{PREFIX}lk", f"n{i}", float(i), _node("user", [{"kind": "text", "text": f"Row {i}"}]))
+            for i in range(3)
+        ])
+        cur.execute("DELETE FROM session_recall_text WHERE session_id LIKE %s", (PREFIX + "%",))
+        cur.execute("DELETE FROM session_recall_backfill")
+    with base.get_db() as writer:
+        writer.cursor().execute("SELECT 1 FROM fluid_session_nodes WHERE session_id = %s AND node_id = 'n1' "
+                                "FOR UPDATE", (PREFIX + "lk",))
+        started = time.perf_counter()
+        with pytest.raises(psycopg2.errors.LockNotAvailable), base.get_db() as conn:
+            session_recall.backfill_step(conn.cursor(), "n", 200)
+        assert time.perf_counter() - started < 1
+    _backfill_all()
+    with base.get_db() as conn:
+        assert _projection(conn.cursor(), "n", PREFIX + "lk") == {"n0": "row 0", "n1": "row 1", "n2": "row 2"}
+
+
+def test_backfill_batches_are_bounded_by_bytes():
+    from app.db import base, session_recall
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", [
+            (f"{PREFIX}by", f"n{i}", float(i),
+             _node("user", [{"kind": "text", "text": " ".join(str(i * 7919 + k) for k in range(3000))}]))
+            for i in range(6)
+        ])
+        cur.execute("DELETE FROM session_recall_text WHERE session_id LIKE %s", (PREFIX + "%",))
+        cur.execute("DELETE FROM session_recall_backfill")
+    steps = 0
+    while True:
+        with base.get_db() as conn:
+            steps += 1
+            # A batch stops after the row that crosses its byte budget.
+            if session_recall.backfill_step(conn.cursor(), "n", 200, max_bytes=1):
+                break
+    # One row per batch (other suites' rows may share the table), then "done".
+    assert steps >= 7
+    with base.get_db() as conn:
+        assert len(_projection(conn.cursor(), "n", PREFIX + "by")) == 6
 
 
 def _corpus():
@@ -316,6 +478,50 @@ def test_sql_session_cut_keeps_the_python_top_sessions(recall, monkeypatch):
     assert len({h["session_id"] for h in indexed if h["session_id"].startswith(PREFIX + "ses-n")}) == 4
 
 
+def test_scoped_reader_keeps_its_older_sessions_under_the_common_term_cap(recall, monkeypatch):
+    """The newest-first cap applies to what the reader may see, not to the
+    owner's newer sessions it would drop afterwards."""
+    from app.db import base
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        sessions = [(f"{PREFIX}own{i}", f"{PREFIX}ownses{i}", None, None, None) for i in range(10)]
+        sessions += [(f"{PREFIX}key{i}", f"{PREFIX}keyses{i}", "rp-user", None, None) for i in range(2)]
+        sessions += [(f"{PREFIX}keychat", f"{PREFIX}keychatses", "rp-user", None, None),
+                     (f"{PREFIX}keywork", f"{PREFIX}keyworkses", None, True, f"{PREFIX}key0")]
+        cur.execute("INSERT INTO api_users(id,name,api_key_hash) VALUES ('rp-user','Key','x')")
+        execute_values(cur, "INSERT INTO sessions(id,sdk_session_id,api_user_id,is_worker,parent_session_id) "
+                       "VALUES %s", sessions)
+        rows = [(f"{PREFIX}ownses{i}", str(j), 100.0 + i * 10 + j, _node("user", [{"kind": "text", "text": "commonword"}]))
+                for i in range(10) for j in range(3)]
+        rows += [(f"{PREFIX}keyses{i}", "0", 1.0 + i, _node("user", [{"kind": "text", "text": "commonword"}]))
+                 for i in range(2)]
+        rows.append((f"{PREFIX}keyworkses", "0", 5.0, _node("user", [{"kind": "text", "text": "commonword"}])))
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", rows)
+    _backfill_all()
+    monkeypatch.setattr(recall, "_SEARCH_TERM_ROWS", 4)
+    scoped = recall._search_sync(["commonword"], 5, f"{PREFIX}keychat")
+    assert {h.session_id for h in scoped} == {f"{PREFIX}keyses0", f"{PREFIX}keyses1", f"{PREFIX}keyworkses"}
+    owner = recall._search_sync(["commonword"], 5, None)
+    assert {h.session_id for h in owner} == {f"{PREFIX}ownses9", f"{PREFIX}ownses8"}
+
+
+def _vacuum(*tables):
+    """Fresh visibility map and statistics: dead rows other suites left in the
+    shared database would otherwise inflate the buffer counts."""
+    import os
+
+    import psycopg2
+
+    conn = psycopg2.connect(os.environ["TEST_POSTGRES_DSN"])
+    try:
+        conn.autocommit = True
+        for table in tables:
+            conn.cursor().execute(f"VACUUM ANALYZE {table}")
+    finally:
+        conn.close()
+
+
 def _buffers(cur, sql, params):
     cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, params)
     plan = cur.fetchone()["QUERY PLAN"][0]["Plan"]
@@ -340,9 +546,8 @@ def test_common_term_over_long_transcripts_reads_bounded_buffers(recall, monkeyp
                 {"kind": "toolresultblock", "content": [{"kind": "text", "text": f"commonword {filler}"}]},
             ])))
         execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", rows)
-        cur.execute("ANALYZE fluid_session_nodes")
-        cur.execute("ANALYZE session_recall_text")
     _backfill_all()
+    _vacuum("fluid_session_nodes", "session_recall_text")
     monkeypatch.setattr(recall, "_SEARCH_TERM_ROWS", 50)
     with base.get_db() as conn:
         cur = conn.cursor()

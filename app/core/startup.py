@@ -531,16 +531,17 @@ def start_background_tasks() -> List[asyncio.Task]:
     logger.info("Database maintenance task started (every 4 hours, first run in 30s)")
 
     async def _session_recall_backfill():
-        """Install and backfill SessionSearch's text projection, in short
-        batches off the event loop, until recall can use it."""
+        """Install and backfill SessionSearch's text projection in short
+        batches off the event loop, then recheck it now and then: a trigger
+        that hit an error marks its source for a rebuild, and a dropped
+        object is reinstalled."""
         from app.db import session_recall
 
         await asyncio.sleep(45)
         while True:
             try:
-                if await asyncio.to_thread(session_recall.run_backfill):
-                    break
-                await asyncio.sleep(1)
+                ready = await asyncio.to_thread(session_recall.run_backfill)
+                await asyncio.sleep(600 if ready else 1)
             except asyncio.CancelledError:
                 break
             except Exception as e:  # noqa: BLE001 — recall keeps its legacy queries
