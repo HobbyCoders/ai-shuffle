@@ -322,8 +322,9 @@ also independently supports safe ancestors and rechecks its own pointer.
 
 ## Before a stable release
 
-- A full pass on Linux (`local/full-suite`, above) and on Windows: the same
-  command on DesktopWorker also posts `local/windows-suite`. The ship-release
+- A full pass on Linux (`local/full-suite`, above) and on Windows: on
+  DesktopWorker, `python scripts/local_ci.py full --step --attest` (repeated
+  until it prints `COMPLETE`, see above) also posts `local/windows-suite`. The ship-release
   skill checks both statuses on the release commit. If DesktopWorker is off, the
   release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in

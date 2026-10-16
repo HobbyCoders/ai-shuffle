@@ -93,6 +93,18 @@ def test_desktop_always_runs_unit_tests(monkeypatch, platform_name):
     assert calls == [("desktop", "typecheck", "test")]
 
 
+def test_windows_not_covered_note_names_the_staged_command():
+    # Pinned text: a Windows full run outlasts one Monitor job (docs/ci/pr-checks.md).
+    notes = [note for _paths, note in local_ci.NOT_LOCAL if note.startswith("Windows:")]
+    if os.name == "nt":
+        assert notes == []
+        return
+    assert notes == [
+        "Windows: not tested on this machine. A stable release waits for "
+        "`python scripts/local_ci.py full --step --attest` (one Monitor job per run; "
+        "repeat the same command until it prints COMPLETE) on a Windows worker; edge does not."]
+
+
 def test_name_selection():
     assert local_ci.select_by_name(["requirements.txt"]) == "all"
     assert local_ci.select_by_name(["tests/conftest.py"]) == "all"

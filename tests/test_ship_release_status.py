@@ -288,6 +288,27 @@ def test_collect_waits_for_both_local_suites(tmp_path, monkeypatch):
     assert "local/windows-suite=missing" in srs.render(report)
 
 
+def test_missing_windows_suite_names_the_staged_command(tmp_path, monkeypatch):
+    # A Windows full run (~75 min) outlasts one 45-minute Monitor job, so the blocker must
+    # name the checkpointed command documented in docs/ci/pr-checks.md, not `full --attest`.
+    _fake_collect(monkeypatch, [_status("local/full-suite")])
+    blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
+    assert blocker == (
+        "local/windows-suite on 123456789 is missing: run "
+        "`python scripts/local_ci.py full --step --attest` (one Monitor job per run; "
+        "repeat the same command until it prints COMPLETE) on DesktopWorker (Windows) "
+        "on a clean checkout of main.")
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "ci" / "pr-checks.md").read_text(encoding="utf-8")
+    assert "python scripts/local_ci.py full --step --attest" in docs and "COMPLETE" in docs
+
+
+def test_missing_linux_suite_keeps_the_one_shot_command(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/windows-suite")])
+    blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
+    assert blocker == ("local/full-suite on 123456789 is missing: run "
+                       "`python scripts/local_ci.py full --attest` on a Linux worker on a clean checkout of main.")
+
+
 def test_skip_windows_releases_with_a_note(tmp_path, monkeypatch):
     _fake_collect(monkeypatch, [_status("local/full-suite")])
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="DesktopWorker off")
