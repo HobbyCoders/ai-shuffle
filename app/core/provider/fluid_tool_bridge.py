@@ -305,95 +305,48 @@ NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "ListAgents", "SendMessage",
 })
 
-# Individual tools of EAGER servers (and fluid builtins) that the native leg
-# moves to the deferred tier: each serves a specific owner request (pair an
-# Android device, build a plugin, schedule a cron, read the app's own logs,
-# tidy the sidebar), not the turn-by-turn work, and together their full docs
-# cost ~3.8k tokens on every first request (AndroidAction's JSON schema alone
-# is ~1.5k). Deferred, each is still announced by name + one-liner and stays
-# callable: ToolSearch loads the schema on the JSON path, ``read_tool_docs``
-# serves the docs under code mode. The set is applied once at session build,
-# so the prompt prefix stays byte-stable across turns. Registry names, so a
-# fluid builtin and an ``mcp__builtins__`` bridge copy are both expressible.
-NATIVE_DEFERRED_TOOLS: frozenset[str] = frozenset({
-    "mcp__builtins__AndroidAction",
-    "mcp__builtins__AndroidDevices",
-    "mcp__builtins__Emulator",
-    "mcp__builtins__EmulatorScreenshot",
-    "mcp__builtins__CheckPlugin",
-    "mcp__builtins__FindPlugins",
-    "mcp__builtins__InstallPlugin",
-    "mcp__builtins__CronCreate",
-    "mcp__builtins__CronDelete",
-    "mcp__builtins__CronList",
-    "mcp__builtins__RemoteTrigger",
-    "mcp__builtins__DeployStatus",
-    "mcp__builtins__GetAppErrors",
-    "mcp__builtins__GetAppLogs",
-    "mcp__builtins__HandOffSession",
-    "mcp__builtins__NotifyDevices",
-    "mcp__builtins__WorktreeReport",
-    "SettleSession",
-    "UnsettleSession",
-    "ArchiveSession",
+# The native leg's eager tier: the turn-by-turn core whose full docs (code
+# mode) or schemas (JSON path) ride every first request. Every other tool on
+# the registry when the session is built (fluid's memory, recall, session,
+# scratch and web builtins, the remaining ``builtins`` bridge tools,
+# chat-access) is moved to the deferred tier: announced by name, still
+# callable, its docs loaded on demand by ``read_tool_docs`` under code mode or
+# by ToolSearch on the JSON path. Before this allowlist those docs cost ~17k
+# tokens per first request (Oct 2026). Registry names; an allowlist, so a tool
+# added later starts deferred. Applied once at session build, so the prompt
+# prefix stays byte-stable across turns.
+NATIVE_EAGER_TOOLS: frozenset[str] = frozenset({
+    "Read", "Edit", "Write", "Bash", "Grep", "Glob",
+    "Task", "ToolSearch", "Monitor", "AskUser",
+    # The skills index in every prompt points at it.
+    "Skill",
 })
-
 
 # The delegated (Claude Code CLI) leg's always-loaded tier. Fluid's bundled
 # bridge serves every app tool to the CLI as ``mcp__fluid_bundled__<registry
 # name>``; with all ~90 schemas loaded they cost ~30.5k tokens of the CLI's
-# context on every request (its /context "MCP tools" row, Oct 2026). Only the
-# tools below stay loaded: the turn-by-turn operating surface the delegated
-# prompt names (Task and the background-task tools, the agent roster, memory
-# and session recall, ScheduleWakeup, the stand-ins for banned CLI tools,
-# peer-session coordination, hand-off and usage), the private-access pair the
-# access guidance tells the model to call first, and the chat lane's
-# attachment reader. Every other bridged tool (app-config, ai-tools, the rest
-# of chat-access, Android, cron, plugins, sidebar organisation, the app's
-# logs, and the Glob/Grep fallback, which
-# duplicates the CLI's own search tools wherever the CLI ships them) is
-# listed with ``_meta
-# anthropic/alwaysLoad: false``: the CLI shows it by name in its deferred-tools
-# list and its own ToolSearch loads the schema on demand. Names never change,
-# so permission rules, hooks and prompt references keep matching. An allowlist:
-# a tool added to the bridge later starts deferred. The tier is priced in
+# context on every request (its /context "MCP tools" row, Oct 2026), and the
+# earlier 23-tool tier still ~12k. Only the turn-by-turn core stays loaded:
+# Task and Monitor (the CLI's own are banned on this leg) and the chat lane's
+# attachment reader. Every other bridged tool (memory and recall, the task
+# tools, peer sessions, hand-off, usage, private access, app-config, ai-tools,
+# Android, cron, plugins, sidebar organisation, the app's logs, and the
+# Glob/Grep fallback) is listed with ``_meta anthropic/alwaysLoad: false``:
+# the CLI shows it by name in its deferred-tools list and its own ToolSearch
+# loads the schema on demand. Names never change, so permission rules, hooks
+# and prompt references keep matching. An allowlist: a tool added to the
+# bridge later starts deferred. The tier is priced in
 # tests/core/test_delegated_bridge_tiers.py.
 DELEGATED_LOADED_TOOLS: frozenset[str] = frozenset({
     "mcp__builtins__Task",
     "mcp__builtins__Monitor",
-    "mcp__builtins__TaskGet",
-    "mcp__builtins__TaskOutput",
-    "mcp__builtins__TaskList",
-    "mcp__builtins__TaskStop",
-    "mcp__builtins__ScheduleWakeup",
-    "mcp__builtins__ListAgents",
-    "mcp__builtins__SendMessage",
-    # Stand-ins the prompt names for the CLI's banned RemoteTrigger and
-    # PushNotification (harness_adapter._DELEGATED_STAND_INS).
-    "mcp__builtins__RemoteTrigger",
-    "mcp__builtins__NotifyDevices",
-    "mcp__builtins__Remember",
-    "mcp__builtins__Recall",
-    "mcp__builtins__Forget",
-    "mcp__builtins__SessionSearch",
-    "mcp__builtins__SessionView",
-    # Peer-session coordination and worker hand-off: the host prompt tells
-    # the model to call these directly ("Use ListSessions", "Call
-    # HandOffSession once, then finish the turn").
-    "mcp__builtins__ListSessions",
-    "mcp__builtins__MessageSession",
-    "mcp__builtins__StartSession",
-    "mcp__builtins__HandOffSession",
-    # Read at every wake under the owner's usage rule.
-    "mcp__builtins__GetUsage",
-    "mcp__chat-access__RequestChatAccess",
-    "mcp__chat-access__ChatResources",
     # app.core.attachment_read.DELEGATED_READ: the chat lane's only reader.
     "mcp__attachments__Read",
 })
 
 # Kill switch: AI_SHUFFLE_PERF_BRIDGE_DEFER=0 (or false/off/no) puts every
-# bridged tool back on the always-loaded tier for sessions started afterwards.
+# bridged tool back on the always-loaded tier, and every native tool outside
+# the deferred servers back on the eager tier, for sessions started afterwards.
 BRIDGE_DEFER_ENV = "AI_SHUFFLE_PERF_BRIDGE_DEFER"
 
 
@@ -411,15 +364,23 @@ def delegated_bridge_deferred() -> Callable[[str], bool] | None:
 
 
 def defer_native_tools(registry: ToolRegistry) -> List[str]:
-    """Move :data:`NATIVE_DEFERRED_TOOLS` into the registry's deferred tier.
+    """Move every registered tool outside :data:`NATIVE_EAGER_TOOLS` into the
+    registry's deferred tier.
 
-    Returns the names actually deferred (absent tools are skipped). A vendored
-    fluid without ``defer_schema`` leaves everything eager, the old behaviour.
+    Returns the names deferred by this call. A vendored fluid without
+    ``defer_schema`` leaves everything eager, the old behaviour; so does the
+    :data:`BRIDGE_DEFER_ENV` kill switch, which then keeps only the deferred
+    servers (:data:`DEFERRED_SDK_SERVERS`) out of the prefix.
     """
     defer = getattr(registry, "defer_schema", None)
-    if not callable(defer):
+    if not callable(defer) or delegated_bridge_deferred() is None:
         return []
-    return [name for name in sorted(NATIVE_DEFERRED_TOOLS) if defer(name)]
+    already = {spec.name for spec in registry.deferred_tools()}
+    names = sorted(
+        spec.name for spec in registry.list_tools(loaded_only=False)
+        if spec.name not in NATIVE_EAGER_TOOLS and spec.name not in already
+    )
+    return [name for name in names if defer(name)]
 
 
 def _builtins_call_timeouts(registry: ToolRegistry) -> dict[str, Optional[float]]:

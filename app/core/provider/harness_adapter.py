@@ -6013,39 +6013,41 @@ def _deferred_tool_names(registry: Any, projection: Any = None) -> frozenset:
         return frozenset()
 
 
-def _catalog_one_liner(spec: Any, leaf: str) -> str:
-    """``<first line of the description> [risk: X]`` — the whole prompt budget a
-    deferred tool gets. Mirrors ``Projection.one_liner``; kept local so the
-    collapse works against the currently vendored fluid too."""
-    description = getattr(spec, "description", "") or ""
-    try:
-        # The ToolSearch catalog's own rule: first line, cut at a word boundary
-        # near 100 chars. Many descriptions are one long paragraph, so the bare
-        # first line was the WHOLE description (ArchiveSession: ~350 tokens).
-        from fluid.tools.builtins.tool_search import _one_line
+def _deferred_catalog_rows(entries: List[Tuple[str, Any]]) -> List[str]:
+    """Deferred tools as names grouped by server: one line per server.
 
-        first = _one_line(description)
-    except ImportError:
-        first = ""
-        for line in description.strip().splitlines():
-            if line.strip():
-                first = line.strip()
-                break
-    # A description's own "In code mode reach it with ..." sentence is how a
-    # deferred tool is called from run_python; keep it past the cut.
-    reach = description.find("In code mode reach it")
-    if reach >= 0 and "In code mode reach it" not in first:
-        first = f"{first} {description[reach:].splitlines()[0].strip()}".strip()
-    note ="" if getattr(spec, "code_mode_allowed", True) else "  [JSON-path only]"
-    return f"{first or leaf} [risk: {getattr(spec, 'risk', 'write')}]{note}"
+    ``entries`` are ``(leaf, spec)`` pairs. A fluid builtin (no ``mcp__``
+    prefix) groups under ``core``. Names only: the docs are one
+    ``read_tool_docs`` call away, and ``search_tools`` finds a tool by purpose,
+    so a one-line summary per tool (~7k chars for ~65 tools) bought little.
+    A tool that code mode cannot call is listed on its own line so the model
+    calls it directly instead of importing it.
+    """
+    groups: Dict[str, List[str]] = {}
+    direct: List[str] = []
+    for leaf, spec in entries:
+        if not getattr(spec, "code_mode_allowed", True):
+            direct.append(leaf)
+            continue
+        parts = str(getattr(spec, "name", "") or leaf).split("__", 2)
+        server = parts[1] if len(parts) == 3 and parts[0] == "mcp" else "core"
+        groups.setdefault(server, []).append(leaf)
+    order = sorted(groups, key=lambda server: (server != "core", server))
+    rows = [f"- {server}: {', '.join(sorted(groups[server]))}" for server in order]
+    if direct:
+        rows.append(
+            "- direct tool call only, not from run_python: "
+            + ", ".join(sorted(direct))
+        )
+    return rows
 
 
 _DEFERRED_CATALOG_HEADER = (
     "## Deferred tools\n"
-    "Imported and called exactly like the tools above "
-    "(`from tools.<name> import <name>`), but only their one-line summaries are "
-    'here. Run `read_tool_docs("<name>")` for the signature and parameter docs '
-    "before the first call to one — do not guess its parameters."
+    "Imported and called like the tools above "
+    "(`from tools.<name> import <name>`), but their docs are not loaded. Run "
+    '`read_tool_docs("<name>")` before the first call to one; never guess its '
+    'parameters. `search_tools("<keywords>")` finds one by purpose.'
 )
 
 
@@ -6123,7 +6125,7 @@ def _code_mode_tool_sections(
     )
 
     blocks: list[str] = []
-    collapsed: list[str] = []
+    collapsed: list[Tuple[str, Any]] = []
     if deferred is None:
         # The registry when there is one; otherwise the projection, which knows
         # the tier itself once the vendored fluid carries it.
@@ -6137,7 +6139,7 @@ def _code_mode_tool_sections(
         if permit is not None and not permit(getattr(spec, "name", None) or leaf):
             continue
         if getattr(spec, "name", None) in deferred:
-            collapsed.append(f"- {leaf}: {_catalog_one_liner(spec, leaf)}")
+            collapsed.append((leaf, spec))
             continue
         schema = getattr(spec, "input_schema", None) or {}
         props: dict = schema.get("properties") or {}
@@ -6182,7 +6184,7 @@ def _code_mode_tool_sections(
         # One section, no tool_name: the rows are a catalog, not documentation,
         # and pricing them per tool would report a deferred tool as loaded.
         blocks.append(
-            ("\n".join([_DEFERRED_CATALOG_HEADER, *collapsed]), "")
+            ("\n".join([_DEFERRED_CATALOG_HEADER, *_deferred_catalog_rows(collapsed)]), "")
         )
     if not blocks:
         return []

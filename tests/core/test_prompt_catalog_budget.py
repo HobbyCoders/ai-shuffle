@@ -5,13 +5,17 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 
 
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
-# Canonical CI recipe: native full=131778, eager=95975; delegated append=16307.
-# 1.0.1 growth: the deferred Emulator and EmulatorScreenshot tools add 250
-# eager chars (their name + one-liner announcements) and 1,906 to the full
-# catalog (schemas loaded on demand); fixes before them added 777 eager chars.
+# Canonical CI recipe: native full=131778, eager=56029; delegated append=16307,
+# delegated always-loaded bridge tools=7458.
+# Context diet (Oct 2026): only the turn-by-turn core stays eager on the native
+# leg (NATIVE_EAGER_TOOLS) and the deferred tools are listed as names grouped
+# by server: eager 95,975 -> 56,029. The delegated bridge loads only Task and
+# Monitor (DELEGATED_LOADED_TOOLS): 34,012 -> 7,458 chars of schemas on every
+# CLI request. The full catalog is unchanged: deferred docs load on demand.
 MEASURED_FULL = 131_778
-MEASURED_EAGER = 95_975
+MEASURED_EAGER = 56_029
 MEASURED_DELEGATED_APPEND = 16_307
+MEASURED_DELEGATED_LOADED_TOOLS = 7_458
 
 
 def test_prompt_catalog_budget():
@@ -32,6 +36,17 @@ def test_delegated_append_budget():
         f"Delegated append: {size:,} chars exceeds {ceiling:,}. "
         "Run PYTHONPATH=fluid python scripts/measure_prompt_catalog.py --delegated; "
         "tighten wording without dropping rules or raising the budget."
+    )
+
+
+def test_delegated_loaded_tools_budget():
+    totals = measure(native=False)["totals"]
+    size = totals["delegated_loaded_tools"]
+    ceiling = MEASURED_DELEGATED_LOADED_TOOLS * 101 // 100
+    assert size <= ceiling, (
+        f"Delegated always-loaded bridge tools: {size:,} chars exceeds {ceiling:,}. "
+        "Every one rides each CLI request; keep new tools deferred "
+        "(DELEGATED_LOADED_TOOLS is an allowlist) or tighten their wording."
     )
 
 

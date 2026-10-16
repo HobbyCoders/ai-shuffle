@@ -239,9 +239,19 @@ def _specs(n: int, desc: str = "does a thing") -> list[ToolSpec]:
     ]
 
 
+def test_catalog_grouped_names_roundtrip() -> None:
+    specs = [*_specs(5), ToolSpec(name="Lookup", description="d", input_schema={})]
+    block = render_deferred_catalog(specs)
+    assert block is not None and "does a thing" not in block
+    assert "never claim it is unavailable" in block
+    assert "+ mcp__srv0__: tool0000, tool0003" in block
+    assert "+ (no-prefix): Lookup" in block
+    assert parse_deferred_catalog(block) == {s.name for s in specs}
+
+
 def test_catalog_full_tier_roundtrips() -> None:
     specs = _specs(5)
-    block = render_deferred_catalog(specs)
+    block = render_deferred_catalog(specs, with_descriptions=True)
     assert block is not None and "does a thing" in block
     assert "never claim it is unavailable" in block
     assert parse_deferred_catalog(block) == {s.name for s in specs}
@@ -249,7 +259,7 @@ def test_catalog_full_tier_roundtrips() -> None:
 
 def test_catalog_degrades_to_names_only() -> None:
     specs = _specs(200, desc="d" * 90)
-    block = render_deferred_catalog(specs, budget_chars=6_000)
+    block = render_deferred_catalog(specs, budget_chars=6_000, with_descriptions=True)
     assert block is not None
     assert "d" * 30 not in block  # descriptions dropped
     assert parse_deferred_catalog(block) == {s.name for s in specs}
@@ -330,7 +340,7 @@ def test_catalog_defangs_a_server_description() -> None:
         input_schema={},
         source="mcp",
     )
-    block = render_deferred_catalog([hostile, *_specs(2)])
+    block = render_deferred_catalog([hostile, *_specs(2)], with_descriptions=True)
     assert block is not None
     assert block.count("</system-reminder>") == 1
     assert block.count("<system-reminder>") == 1

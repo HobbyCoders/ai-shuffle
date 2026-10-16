@@ -109,12 +109,23 @@ def measure(*, native=True):
             sections[f"{index:02d} {text.splitlines()[0]}"] = len(text)
     tools = {name: len(text) for text, name in full}
     full_text = system + "\n\n" + "\n\n".join(text for text, _ in full)
-    return {
-        "sections": sections, "tools": tools,
-        "totals": {"system": len(system), "full_catalog": sum(tools.values()) + 2 * (len(tools) - 1),
-                   "combined_full": len(full_text), "compiled_eager": len(compiled.text)},
-        "tool_count": len(specs),
-    }
+    totals = {"system": len(system), "full_catalog": sum(tools.values()) + 2 * (len(tools) - 1),
+              "combined_full": len(full_text), "compiled_eager": len(compiled.text)}
+    result = {"sections": sections, "tools": tools, "totals": totals, "tool_count": len(specs)}
+    if not native:
+        # What the CLI loads from the bundled bridge on every request: each
+        # always-loaded tool as name + description + JSON schema. The CLI's
+        # own preset prompt and tools are not ours and are not measured here.
+        from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
+        deferred = delegated_bridge_deferred() or (lambda _name: False)
+        loaded = {s.name: len(json.dumps({
+            "name": "mcp__fluid_bundled__" + s.name, "description": s.description,
+            "input_schema": s.input_schema})) for s in specs if not deferred(s.name)}
+        result["delegated_loaded_tools"] = loaded
+        totals["delegated_loaded_tools"] = sum(loaded.values())
+        totals["delegated_deferred_names"] = sum(
+            len("mcp__fluid_bundled__" + s.name) + 1 for s in specs if deferred(s.name))
+    return result
 
 
 def main():
@@ -129,7 +140,9 @@ def main():
     else:
         print("Fixture: owner code chat; bundled builtins/app-config/chat-access/ai-tools; no external MCPs")
         print("Characters / approximate tokens (chars/4; not provider billing):")
-        for group in ("sections", "tools", "totals"):
+        for group in ("sections", "tools", "delegated_loaded_tools", "totals"):
+            if group not in result:
+                continue
             print(f"\n{group}")
             for name, count in result[group].items():
                 print(f"{name}: {count:,} chars / {count / 4:,.1f} tokens")

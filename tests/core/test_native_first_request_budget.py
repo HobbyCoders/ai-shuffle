@@ -7,10 +7,11 @@ default-profile preset prompt and private-access guidance. The first request is
 priced with the app's own estimator (chars/4) and compared with the breakdown
 ``get_context_usage`` reported before the turn.
 
-Budgets are set from the measurement taken when the rarely used tools moved to
-the deferred tier (Oct 2026): tool rows were ~20.8k tokens in code mode and
-~22.2k on the JSON-tool path before, ~17.0k and ~16.9k after. They catch a
-regression that puts a big schema or doc block back on every first request.
+Budgets are set from the measurement taken when the native leg's eager tier
+became an allowlist of the turn-by-turn core (Oct 2026): tool rows were ~17.0k
+tokens in code mode and ~16.9k on the JSON-tool path before, ~8.4k and ~7.7k
+after. They catch a regression that puts a big schema or doc block back on
+every first request.
 """
 from __future__ import annotations
 
@@ -25,13 +26,13 @@ from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.store.base import MemoryStore
 
 # Reported "System tools" + "MCP tools" (what every first request pays for tool
-# docs or schemas). Measured ~17.0k (code mode) / ~16.9k (JSON path).
-TOOL_ROWS_BUDGET = 18_000
+# docs or schemas). Measured ~8.4k (code mode) / ~7.7k (JSON path).
+TOOL_ROWS_BUDGET = 9_000
 # Whole first request, prompt + schemas + first user message, with an empty
-# cwd and home. Measured ~28.2k (code mode) / ~28.1k (JSON path) before, ~24.6k
-# / ~23.3k after; the margin absorbs host-dependent sections (workspace facts,
-# environment).
-FIRST_REQUEST_BUDGET = 26_500
+# cwd and home. Measured ~24.6k (code mode) / ~23.3k (JSON path) before the
+# core-only eager tier, ~14.1k / ~12.3k after; the margin absorbs
+# host-dependent sections (workspace facts, environment).
+FIRST_REQUEST_BUDGET = 15_300
 # The breakdown before the first turn may miss only the per-turn reminders the
 # host adds while sending (memory snapshot, environment note): ~1.7% measured.
 REPORT_TOLERANCE = 0.03
@@ -182,39 +183,50 @@ async def test_reported_breakdown_matches_the_first_request(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code_mode", [True, False], ids=["code_mode", "json_tools"])
-async def test_rarely_used_tools_are_deferred_but_announced(
+async def test_only_the_core_is_eager_and_the_rest_is_announced(
     monkeypatch, tmp_path, code_mode
 ):
-    from app.core.provider.fluid_tool_bridge import NATIVE_DEFERRED_TOOLS
+    from app.core.provider.fluid_tool_bridge import NATIVE_EAGER_TOOLS
 
     engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
     deferred = {s.name for s in engine.registry.deferred_tools()}
     registered = {s.name for s in engine.registry.list_tools(loaded_only=False)}
-    expected = NATIVE_DEFERRED_TOOLS & registered
-    # The default servers carry every one of them; a rename must not silently
-    # put a tool back on the eager tier.
-    assert expected == NATIVE_DEFERRED_TOOLS
-    assert expected <= deferred
-    # Kept eager: the operating surface every turn relies on.
-    for name in ("Bash", "Read", "Monitor", "Task", "mcp__builtins__TaskOutput",
-                 "mcp__chat-access__RequestChatAccess"):
-        assert name in registered and name not in deferred, name
+    # Code mode's own tools register after the session build and stay eager.
+    host = registered - {"run_python", "list_tools", "search_tools",
+                         "read_tool_docs", "save_skill", "delete_skill",
+                         "save_plugin"}
+    assert host - deferred == NATIVE_EAGER_TOOLS & registered
+    # The default servers carry every eager tool; a rename must not silently
+    # drop one from the core.
+    assert NATIVE_EAGER_TOOLS <= registered
+    # Deferred now, still callable: memory, recall, peer sessions, the task
+    # tools, private access and the rarely used owner-request tools.
+    for name in ("Remember", "Recall", "SessionSearch", "StartSession",
+                 "mcp__builtins__TaskOutput", "mcp__chat-access__RequestChatAccess",
+                 "mcp__builtins__AndroidAction", "mcp__app-config__createAutomation"):
+        assert name in deferred, name
     sent_schemas = {t["name"] for t in request.tools}
-    assert not (expected & sent_schemas)
+    assert not (deferred & sent_schemas)
     if code_mode:
-        # Collapsed to a capped one-liner each in the code-mode catalog.
+        # Names only, one line per server, in the code-mode catalog.
         catalog = request.system[request.system.index("## Deferred tools"):]
-        for name in expected:
+        rows = [ln for ln in catalog.splitlines() if ln.startswith("- ")]
+        listed = {leaf for row in rows for leaf in row.split(": ", 1)[1].split(", ")}
+        for name in deferred:
             leaf = name.rsplit("__", 1)[-1]
-            line = next(ln for ln in catalog.splitlines() if ln.startswith(f"- {leaf}:"))
-            assert len(line) < 200, line
+            # A tool whose host capability is not wired here leaves the catalog.
+            assert (leaf in listed) == engine._tool_wired(name), leaf
             assert f"## {leaf}\n" not in request.system
     else:
         # Announced by name in the first turn's catalog reminder.
+        from fluid.tools.builtins.tool_search import parse_deferred_catalog
+
         text = "\n".join(
             getattr(b, "text", "") for m in request.messages for b in m.content
         )
-        for name in expected:
-            assert f"- {name}:" in text
+        # Tools whose host capability is not wired here are dropped, as the
+        # engine drops them from the request.
+        wired = {name for name in deferred if engine._tool_wired(name)}
+        assert wired and wired <= parse_deferred_catalog(text)

@@ -755,7 +755,7 @@ def test_render_deferred_catalog_truncates_and_sorts() -> None:
         ToolSpec(name="mcp__srv__zeta", description=long_desc, input_schema={}, source="mcp"),
         ToolSpec(name="mcp__srv__alpha", description="say hello", input_schema={}, source="mcp"),
     ]
-    text = render_deferred_catalog(specs)
+    text = render_deferred_catalog(specs, with_descriptions=True)
     assert text is not None and text.startswith("<system-reminder>")
     assert "select:" in text  # tells the model how to load
     alpha, zeta = text.index("mcp__srv__alpha"), text.index("mcp__srv__zeta")
@@ -781,11 +781,11 @@ async def test_deferred_catalog_injected_once_on_user_turn() -> None:
             if isinstance(b, Text)
         )
     first, second = provider.requests[0], provider.requests[1]
-    assert "mcp__srv__hello" in _texts(first)
+    assert "+ mcp__srv__: hello" in _texts(first)
     assert "<system-reminder>" in _texts(first)
     # Announced exactly once: the second turn's history carries the same single
     # reminder from turn one, and no new block is appended.
-    assert _texts(second).count("mcp__srv__hello") == 1
+    assert _texts(second).count("+ mcp__srv__: hello") == 1
     # The schema itself stays deferred — not in the tools array.
     assert all(t["name"] != "mcp__srv__hello" for t in first.tools)
     await loop.aclose()
@@ -819,7 +819,7 @@ async def test_deferred_catalog_not_replayed_on_resume() -> None:
 
     sent = _reminder_texts(resumed.provider.requests[0])
     # The history still carries the original announcement — exactly one of it.
-    assert sent.count("mcp__srv__hello") == 1
+    assert sent.count("+ mcp__srv__: hello") == 1
     assert sent.count("<system-reminder>") == 1
     await resumed.aclose()
 
@@ -852,8 +852,8 @@ async def test_deferred_catalog_on_resume_announces_only_new_tools() -> None:
     await resumed.wait_turn()
 
     sent = _reminder_texts(resumed.provider.requests[0])
-    assert sent.count("mcp__srv__weather") == 1  # the new one is announced
-    assert sent.count("mcp__srv__hello") == 1  # the old one only from history
+    assert sent.count("+ mcp__srv__: weather") == 1  # the new one is announced
+    assert sent.count("+ mcp__srv__: hello") == 1  # the old one only from history
     await resumed.aclose()
 
 
