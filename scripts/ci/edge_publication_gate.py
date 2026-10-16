@@ -186,13 +186,13 @@ def update_reach_readiness(revision, *, api=None, base=None, root=None, reposito
                       and pr.get("merge_commit_sha") == commit]
             if not merged:
                 refusals.append(f"{commit[:9]}: no merged main PR; needs "
-                                + ", ".join(reach.LABEL + name for name in failing))
+                                + ", ".join(reach.LABEL + name for name in reach.labels_for(failing)))
             for pr in merged:
                 labels = ",".join(label["name"] for label in pr["labels"])
                 missing = reach.verdict(groups, reach.allowed_by_labels(labels))
                 if missing:
                     refusals.append(f"PR #{pr['number']} ({commit[:9]}): owner must add "
-                                    + ", ".join(reach.LABEL + name for name in missing))
+                                    + ", ".join(reach.LABEL + name for name in reach.labels_for(missing)))
         if refusals:
             return False, warning + "OUT OF REACH — edge publication refused:\n" + "\n".join(refusals)
         return True, warning + f"Update reach accepted for {base[:9]}..{revision[:9]}."

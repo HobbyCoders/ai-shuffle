@@ -463,8 +463,11 @@ def test_update_reach_pr_policy(monkeypatch, capsys, state, labels, gh_error, ex
     spec.loader.exec_module(reach)
     # Drive the real classifier and CLI verdict using a changed launcher entry.
     monkeypatch.setattr(reach, "git", lambda *a: "desktop/src/main/managed-entry.ts")
+    # The head raises launcher.json's version, as a launcher change must (#97).
     monkeypatch.setattr(reach, "reader", lambda rev: lambda path:
-                        b"export const version = 2;" if path == reach.LAUNCHER_ENTRY else None)
+                        b"export const version = 2;" if path == reach.LAUNCHER_ENTRY
+                        else b'{"version": 2, "minimum": 0}' if path == reach.LAUNCHER_JSON and rev == "HEAD"
+                        else None)
     monkeypatch.setattr(local_ci.shutil, "which", lambda name: "/bin/gh")
     calls = []
 

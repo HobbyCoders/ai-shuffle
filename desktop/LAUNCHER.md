@@ -19,7 +19,7 @@ and the release may replace an older launcher as described below.
 
 | Field | Meaning |
 |---|---|
-| `version` | The launcher this source packs into `app.asar`. Raise it whenever a file in the launcher closure changes. |
+| `version` | The launcher this source packs into `app.asar`. Raise it whenever a file in the launcher closure changes. `scripts/ci/update_reach.py` fails a range that changes the closure without raising it (`launcher-version`), unless the owner labels it `update-reach:no-launcher-change`. |
 | `minimum` | The oldest launcher a release built from this source needs. It is signed into every published manifest as `desktop.launcher`. |
 
 - `launcher.json` is packed into `app.asar`.

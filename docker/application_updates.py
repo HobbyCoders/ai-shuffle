@@ -834,9 +834,17 @@ class ContainerUpdates:
 
     def remember(self, manifest):
         """The release name and notes shown beside the update button."""
-        self.offer = {"release": manifest.get("version"), "notes": manifest.get("notes")}
+        self.offer = {"revision": manifest["revision"], "release": manifest.get("version"), "notes": manifest.get("notes")}
 
     def publish(self, phase, message=None, error=None, version=None):
+        pending = self.state.get("pending")
+        if phase == "ready" and pending and self.offer.get("revision") != pending:
+            # "ready" always names the staged build, even after a check offered a
+            # newer one that was not downloaded (#98): never B's name over A's install.
+            try:
+                self.remember(self.manifest(pending))
+            except Exception:
+                self.offer = {"revision": pending}
         offered = self.offer if phase in ("available", "ready", "downloading") else {}
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
@@ -1142,12 +1150,33 @@ class ContainerUpdates:
         shutil.copytree(source / "frontend/build", source / "app/static")
         (directory / "complete").write_text(revision)
 
+    def drop_superseded(self, revision):
+        """Remove a staged build that a newer download replaced. Never one that
+        ran, is starting, failed or was handed over: those stay for recovery."""
+        keep = {self.state.get(field) for field in ("active", "previous", "pending", "booting")}
+        keep.update(self.state.get("failed", []))
+        keep.add(os.environ.get("SHUFFLE_HANDED_OVER"))
+        if revision in keep:
+            return
+        try:
+            directory = self.directory(revision)
+            if directory.is_dir():
+                shutil.rmtree(directory)
+        except (OSError, UpdateError) as exc:
+            _log(f"could not remove the replaced update {revision[:12]} ({type(exc).__name__}); "
+                 "it is removed after the next update")
+        self.prune_overlays()
+
     def check(self, download=False):
         if not self.allowed():
             raise UpdateError("Application updates are disabled")
-        if self.state.get("pending"):
+        staged = self.state.get("pending")
+        if staged and (self.state.get("booting") or self.install_requested.is_set()):
+            # Being installed or starting: that build is the one to finish.
             self.publish("ready", "Update ready. Choose Update and restart.")
             return
+        # A staged build must not hide a newer release (#98): read the feed
+        # anyway. It stays staged unless a newer download completes.
         self.publish("checking")
         signed = self.fetch("manifest" if self.channel == "stable" else "manifest/nightly")
         manifest = verify_manifest(signed, self.public_key)
@@ -1160,6 +1189,15 @@ class ContainerUpdates:
         # Said ahead of the release that needs it, while this one still installs.
         lacking = set(manifest["container"].get("recommends") or []) - set(self.image.get("provides") or [])
         self.notice = IMAGE_NOTICE if lacking else None
+        if staged:
+            staged_manifest = self.manifest(staged)
+            if (revision == staged or manifest["container"]["sequence"] <= staged_manifest["container"]["sequence"]
+                    or unsatisfied_capabilities(manifest["container"], self.image)
+                    or (revision in self.state.get("failed", []) and not download)):
+                # Nothing newer that this image can run: the staged build stays the offer.
+                self.remember(staged_manifest)
+                self.publish("ready", "Update ready. Choose Update and restart.")
+                return
         active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
             self.publish("idle", "You are up to date.")
@@ -1182,6 +1220,7 @@ class ContainerUpdates:
             return
         self.remember(manifest)
         if not download:
+            # With a build staged, Update downloads this one in its place.
             self.publish("available", "An application update is available.", version=revision)
             return
         directory = self.directory(revision)
@@ -1208,11 +1247,16 @@ class ContainerUpdates:
                 raise UpdateError("Updates were disabled while preparing; no update was activated")
             self.state["pending"] = revision
             self.save()
-            self.publish("ready", "Update ready. Choose Update and restart.")
         except Exception:
             shutil.rmtree(directory)
             self.prune_overlays()
+            if staged:
+                # The staged build is still the one Update and restart installs.
+                self.remember(self.manifest(staged))
             raise
+        if staged:
+            self.drop_superseded(staged)
+        self.publish("ready", "Update ready. Choose Update and restart.")
 
     def service(self):
         try:

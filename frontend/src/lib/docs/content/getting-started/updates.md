@@ -25,6 +25,8 @@ Most releases install from inside AI Shuffle:
 1. When a new release is out, the update button appears in the sidebar with its release notes.
 2. Choose **Download update**, then **Update and restart**. Agents stop, the update installs, and AI Shuffle starts again.
 
+On a Docker worker, a downloaded update that is waiting for **Update and restart** does not hide a newer release. Checking for updates still reads the feed: when a newer release is out, the button offers it, and **Download update** replaces the waiting one and removes its files. If that download fails, the earlier update stays ready to install. Nothing is replaced while an update is installing or starting.
+
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
 ### Runtime overlays
