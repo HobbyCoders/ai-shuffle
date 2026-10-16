@@ -22,13 +22,15 @@
 //   prepare <folder>   (any machine with git and python, in this checkout)
 //     the ephemeral key and four source archives of HEAD, each changed only
 //     by that key, as the update feed would serve them.
-//   run <installer.exe> <prepared folder> <output folder>   (Windows, isolated)
+//   run <installer.exe> <prepared folder> <output folder>   (Windows)
 //     installs the app, stages each revision from a local feed, drives the
 //     app and writes summary.txt and acceptance.json to the output folder.
 //
-// `run` installs an app and kills its processes: use it only through
-// late-restore-acceptance.ps1 (Windows Sandbox) or on a machine you will
-// throw away. It refuses an existing install, profile or worker data.
+// `run` installs an app and kills its processes, so it runs only on a
+// disposable machine: the late-restore-acceptance job of
+// desktop-installer.yml (a GitHub-hosted Windows runner), or with
+// SHUFFLE_ACCEPTANCE_THROWAWAY=1 on a machine you will throw away. It refuses
+// an existing install, profile or worker data.
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createPrivateKey, sign } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -77,7 +79,7 @@ if (mode === 'prepare') {
 }
 assert.equal(mode, 'run', 'usage: verify-late-restore-point.mjs prepare <folder> | run <installer.exe> <prepared folder> <output folder>');
 assert(process.platform === 'win32', 'Windows only');
-assert(process.env.SHUFFLE_ACCEPTANCE_SANDBOX === '1', 'Run through late-restore-acceptance.ps1, or set SHUFFLE_ACCEPTANCE_SANDBOX=1 on a machine you will throw away');
+assert(process.env.CI === 'true' || process.env.SHUFFLE_ACCEPTANCE_THROWAWAY === '1', 'Disposable machines only: a CI runner, or SHUFFLE_ACCEPTANCE_THROWAWAY=1 on a machine you will throw away');
 process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS = '1';
 const require = createRequire(import.meta.url);
 // This checkout's built launcher code (npm run build), the code being accepted.
@@ -114,7 +116,13 @@ let current = null;
 const step = name => { current = { name, checks: [], result: 'running' }; report.steps.push(current); console.log(`\n== ${name}`); };
 const pass = message => { current.checks.push(message); console.log('PASS: ' + message); };
 const note = message => { (current.notes ??= []).push(message); console.log('NOTE: ' + message); };
-const log = await fs.open(path.join(output, 'launch-output.log'), 'a');
+const launchLog = path.join(work, 'launch-output.log');
+await fs.mkdir(work, { recursive: true });
+const log = await fs.open(launchLog, 'a');
+// As verify-launcher-swap.mjs.
+const redact = line => line.replace(/github_pat_[A-Za-z0-9_]+|\bgh[pousr]_[A-Za-z0-9]{20,}|\bsk-[A-Za-z0-9_-]{16,}/g, '[redacted]')
+  .replace(/\bBearer\s+[^\s"',]+/gi, 'Bearer [redacted]').replace(/:\/\/[^\/\s:@]+:[^@\s]+@/g, '://[redacted]@')
+  .replace(/\b([\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',&]+/gi, '$1$2[redacted]');
 
 // --- The running app, driven over the Chromium debugger like verify-launcher-swap.mjs.
 let chromium, browser;
@@ -178,11 +186,27 @@ async function settle() {
   // The single-instance lock is held until the previous process has exited.
   await sleep(5000);
 }
-/** Answer an Electron message box with its default button (Enter). */
-function pressDefault(title) {
-  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    "$w = New-Object -ComObject WScript.Shell; if (-not $w.AppActivate($env:BOX_TITLE)) { exit 3 }; Start-Sleep -Milliseconds 500; $w.SendKeys('~')"],
-  { env: { ...process.env, BOX_TITLE: title }, stdio: 'inherit' });
+/**
+ * Press `button` in a message box through UI Automation and return the names
+ * of every button in that box; null while no such button is shown.
+ */
+function pressDialogButton(button) {
+  const script = `
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$A = [Windows.Automation.AutomationElement]
+$byName = New-Object Windows.Automation.PropertyCondition($A::NameProperty, $env:BUTTON)
+$target = $A::RootElement.FindFirst([Windows.Automation.TreeScope]::Descendants, $byName)
+if (-not $target) { exit 3 }
+$walker = [Windows.Automation.TreeWalker]::ControlViewWalker
+$box = $target
+while (($parent = $walker.GetParent($box)) -and -not $parent.Equals($A::RootElement)) { $box = $parent }
+$isButton = New-Object Windows.Automation.PropertyCondition($A::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
+$names = @($box.FindAll([Windows.Automation.TreeScope]::Descendants, $isButton) | ForEach-Object { $_.Current.Name })
+$target.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+ConvertTo-Json -Compress @{ title = $box.Current.Name; buttons = $names }`;
+  try {
+    return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, BUTTON: button }, encoding: 'utf8' }));
+  } catch (error) { if (error.status === 3) return null; throw error; }
 }
 const holders = new Set();
 /** Hold `file` open with no sharing, as a backup or antivirus scan might; resolves to its release. */
@@ -307,7 +331,8 @@ try {
   assert.notEqual(readyBeforeStart.state?.mayHaveMigrated?.[N1], undefined);
   if (readyBeforeStart.pg) note('PostgreSQL was already running at the first sample of the ready point (sampling is every 100 ms)');
   else pass('The ready late point was seen with N1 fenced (floor N1) before PostgreSQL started');
-  if (sawPreparing) pass('The status page showed "Preparing the update\'s database restore point…"'); else note('The progress text was not caught on the status page');
+  assert(sawPreparing, 'The status page did not show "Preparing the update\'s database restore point…" during the copy');
+  pass('The status page showed "Preparing the update\'s database restore point…"');
   await until(async () => (await readJson(stateFile)).active === N1 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was not removed after the healthy start', 120000);
   pass('With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy');
   assert.equal(await readJson(markerFile), null, 'Launcher 3 releases must not swap the launcher');
@@ -355,11 +380,14 @@ try {
   state = await readJson(stateFile);
   assert(state.failed?.includes(N3) && state.blocked === true, 'The old launcher did not fence the failed start');
   pass('The old launcher did not run P, N1 or N2: N3 failed and fenced');
-  await until(async () => { try { pressDefault('AI Shuffle'); return true; } catch { return false; } }, 'The "did not finish starting" dialog did not appear', 120000, 2000);
+  const dialog = await until(async () => pressDialogButton('Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000);
+  report.dialog = dialog;
+  assert.deepEqual([...dialog.buttons].filter(name => !/^(Close|Minimize|Maximize)$/.test(name)).sort(), ['Quit', 'Try Again'], 'The old launcher offered more than Try Again and Quit: ' + dialog.buttons);
+  pass('The old launcher offered only Try Again and Quit');
   w = watch(); await ready(N3); await w.stop();
   assert(w.samples.every(s => s.manifest === null || s.manifest === copied), 'Try Again made a second copy');
   await until(async () => (await readJson(stateFile)).active === N3 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was not removed after the healthy retry', 120000);
-  pass('Try Again (the dialog\'s default button) ran N3 without a second copy; the point was removed once healthy');
+  pass('Try Again ran N3 without a second copy; the point was removed once healthy');
   const swap = await until(async () => { const m = await readMarker(); if (m?.phase === 'rejected') throw Error('Self-test rejected the new launcher: ' + m.reason); return m?.phase === 'trial' ? m : null; }, 'The launcher was not replaced', 300000);
   assert.deepEqual([swap.revision, swap.to], [N3, target]);
   assert.equal(readLauncher(readAsarMember(require('node:fs'), appAsar, 'launcher.json').toString('utf8')).version, target);
@@ -378,9 +406,12 @@ try {
   for (const holder of holders) holder.kill();
   await kill().catch(() => {});
   await log.close();
+  // Evidence is uploaded where others can read it: tails only, credentials redacted.
   for (const [folder, name] of [['logs', 'worker.log'], ['logs', 'postgres.log'], ['updates', 'build.log'], ['updates', 'launch.log']]) {
-    await fs.copyFile(path.join(profile, folder, name), path.join(output, name)).catch(() => {});
+    try { const text = await fs.readFile(path.join(profile, folder, name), 'utf8'); await fs.writeFile(path.join(output, name), text.slice(-8 * 1024 ** 2).split(/\r?\n/).map(redact).join('\n')); }
+    catch { /* not written in this run */ }
   }
+  try { await fs.writeFile(path.join(output, 'launch-output.log'), (await fs.readFile(launchLog, 'utf8')).split(/\r?\n/).map(redact).join('\n')); } catch { /* none */ }
   await fs.writeFile(path.join(output, 'acceptance.json'), JSON.stringify(report, null, 2));
   const lines = report.steps.map(s => `${s.result.toUpperCase().padEnd(7)} ${s.name}${s.error ? '\n        ' + s.error.split('\n')[0] : ''}`);
   const summary = [`Late restore point acceptance: ${report.success ? 'PASS' : 'FAIL'}`, ...lines].join('\n');

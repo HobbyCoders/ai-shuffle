@@ -166,11 +166,13 @@ installs never receive this change in-app; nothing in a newer release runs
 there. Installing a current installer recovers them: its launcher makes the
 restore point and starts the staged update.
 
-Acceptance against the real 0.9.6 installer runs in Windows Sandbox:
-`desktop/scripts/late-restore-acceptance.ps1` (see its header) drives
-`desktop/scripts/verify-late-restore-point.mjs` through a bundled previous
-build, a failed copy with Try again, a kill during the copy and a kill after
-PostgreSQL started, then the launcher swap.
+Acceptance against a real 0.9.6 installer runs on a GitHub-hosted Windows
+runner: the `late-restore-acceptance` job of `desktop-installer.yml`
+(`launcher_acceptance` with `old_installer_sha256`; the installer comes from
+the `OLD_INSTALLER_URL` secret). `desktop/scripts/verify-late-restore-point.mjs`
+takes the install through a bundled previous build, a failed copy with Try
+again, a kill during the copy and a kill after PostgreSQL started, then the
+launcher swap.
 
 ## Replacing an older launcher
 
