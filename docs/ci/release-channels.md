@@ -27,8 +27,10 @@ The public root must have the complete tree of the merged private export. The
 bridge only verifies that transition for local update-reach attestation; it does
 not bypass archive exact-tree verification, signatures, protected-main status,
 merged-PR evidence or owner acceptance labels. It never fetches private objects
-into the public checkout. The local attester needs a separate complete private
+into the public checkout. The local attester needs a complete private
 checkout (`AI_SHUFFLE_PRIVATE_CHECKOUT` or the helpers' `--private-checkout`).
+When the variable is unset, `scripts/local_ci.py full --attest` uses the
+attesting clone itself if it already has a non-shallow remote for the archive.
 
 After freezing/draining publishers and inventorying the maximum container
 sequence across all distributed/withdrawn sources and images, open the final

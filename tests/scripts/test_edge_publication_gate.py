@@ -622,3 +622,33 @@ def test_outage_still_requires_labels(reach_history, signed_feed, monkeypatch, a
     assert ready is accepted
     if not accepted:
         assert "PR #42" in reason and "update-reach:windows-launcher" in reason
+
+
+def test_detected_private_archive_remote_satisfies_the_cutover_checkout(cutover_history, monkeypatch, capsys):
+    """local_ci.py --attest in a shared checkout (origin = the archive) needs no variable."""
+    import functools
+
+    root, head = cutover_history
+    monkeypatch.delenv("AI_SHUFFLE_PRIVATE_CHECKOUT", raising=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/HobbyCoders/ai-shuffle-private.git"],
+                   cwd=root, check=True)
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import local_ci
+    monkeypatch.setattr(local_ci, "ROOT", root)
+    real_git = local_ci.git
+    monkeypatch.setattr(local_ci, "git", lambda *a: "" if a[0] == "fetch" else real_git(*a))
+    local_ci.use_private_checkout()
+    assert "using this clone's HobbyCoders/ai-shuffle-private remote 'origin'" in capsys.readouterr().out
+
+    cutover = gate.load_cutover()
+    asked = []
+    def offline(repository, route=""):
+        asked.append(repository)
+        raise ValueError("offline")
+    monkeypatch.setattr(cutover, "verify_bridge", functools.partial(cutover.verify_bridge, github=offline))
+    monkeypatch.setattr(gate, "load_cutover", lambda: cutover)
+    ready, reason = gate.update_reach_readiness(head, root=root)
+    # Past the private-checkout requirement: the bridge went on to ask GitHub
+    # for the archive's identity (offline here), so the refusal is generic.
+    assert not ready and "AI_SHUFFLE_PRIVATE_CHECKOUT" not in reason
+    assert asked == ["HobbyCoders/ai-shuffle-private"]

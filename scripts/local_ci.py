@@ -6,6 +6,7 @@ change was made, at low CPU priority so the machine stays usable.
     python scripts/local_ci.py                 # the suites this branch's changes reach
     python scripts/local_ci.py full            # every suite, and record the backend test map
     python scripts/local_ci.py full --attest   # on main: also post local/full-suite for edge publication
+    python scripts/local_ci.py full --step --attest   # the same in resumable chunks of at most 40 minutes
     python scripts/local_ci.py install         # turn on the pre-push hook for this clone
     python scripts/local_ci.py list            # what each suite runs and when
 
@@ -36,6 +37,11 @@ from typing import Callable, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "HobbyCoders/ai-shuffle"
+# The archive the public history was cut from. --attest walks its history for
+# the public-root bridge (scripts/ci/public_cutover.py).
+PRIVATE_REPOSITORY = "HobbyCoders/ai-shuffle-private"
+PRIVATE_CHECKOUT_ENV = "AI_SHUFFLE_PRIVATE_CHECKOUT"
+GITHUB_URL = r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)"
 SECURITY_GATE_VERSION = 2
 # Edge publication waits for this commit status on the exact main revision
 # (scripts/ci/edge_publication_gate.py).
@@ -583,6 +589,16 @@ def choose_python() -> str:
     return os.environ.get("LOCAL_CI_PYTHON") or saved_python() or sys.executable
 
 
+def github_remote(repository: str) -> str | None:
+    """The remote (origin first) whose URL is ``repository`` on GitHub, or None."""
+    remotes = git("remote").splitlines()
+    for remote in sorted(remotes, key=lambda name: (name != "origin", name)):
+        url = git("remote", "get-url", remote).rstrip("/")
+        if re.fullmatch(GITHUB_URL + re.escape(repository) + r"(?:\.git)?", url, re.IGNORECASE):
+            return remote
+    return None
+
+
 def resolve_base(*, public_only: bool = False) -> str:
     """Prefer the public repository, not a remote name inherited from an archive.
 
@@ -596,12 +612,9 @@ def resolve_base(*, public_only: bool = False) -> str:
             override = configured.stdout.strip() if configured.returncode == 0 else ""
         if override:
             return override.removeprefix("refs/remotes/")
-    remotes = git("remote").splitlines()
-    for remote in sorted(remotes, key=lambda name: (name != "origin", name)):
-        url = git("remote", "get-url", remote).rstrip("/")
-        if re.fullmatch(r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)"
-                        + re.escape(REPOSITORY) + r"(?:\.git)?", url, re.IGNORECASE):
-            return f"{remote}/main"
+    remote = github_remote(REPOSITORY)
+    if remote:
+        return f"{remote}/main"
     raise Failure(f"No remote points to {REPOSITORY}; add a public repository remote"
                   + (" for --attest" if public_only else
                      " or set LOCAL_CI_BASE / git config local-ci.base to <remote>/<branch>"))
@@ -743,24 +756,65 @@ def attest_update_reach(revision: str) -> None:
     print(reason)
 
 
+def use_private_checkout() -> None:
+    """Point the public-history bridge at the archive this clone already holds.
+
+    Only when AI_SHUFFLE_PRIVATE_CHECKOUT is unset. A shared checkout often has
+    the archive as a remote (origin) beside the public repository; its common
+    Git directory is then a complete private clone, unless it is shallow.
+    Nothing is imported into a public-only clone: without such a remote this
+    does nothing and the bridge explains the variable.
+    """
+    if os.environ.get(PRIVATE_CHECKOUT_ENV, "").strip():
+        return
+    remote = github_remote(PRIVATE_REPOSITORY)
+    if remote is None:
+        return
+    if git("rev-parse", "--is-shallow-repository") != "false":
+        print(f"Not using remote '{remote}' ({PRIVATE_REPOSITORY}) for {PRIVATE_CHECKOUT_ENV}: "
+              "this clone is shallow.")
+        return
+    common = Path(git("rev-parse", "--git-common-dir"))
+    common = (common if common.is_absolute() else ROOT / common).resolve()
+    try:
+        # The bridge checks the archive's current main; refresh it, best effort.
+        git("fetch", "-q", "--no-tags", "--", remote, f"+refs/heads/main:refs/remotes/{remote}/main")
+    except subprocess.CalledProcessError:
+        print(f"Warning: could not refresh {remote}/main; using the archive history already fetched.")
+    os.environ[PRIVATE_CHECKOUT_ENV] = str(common)
+    print(f"{PRIVATE_CHECKOUT_ENV} is unset; using this clone's {PRIVATE_REPOSITORY} remote "
+          f"'{remote}' ({common}).")
+
+
+def attest_preflight(revision: str) -> None:
+    """Everything --attest needs, checked before any commit status or suite."""
+    public_base = resolve_base(public_only=True)
+    fetch_base(public_base, strict=True)
+    if not clean_checkout() or revision != git("rev-parse", public_base):
+        raise Failure(f"--attest runs only on a clean checkout of the current public main ({public_base})")
+    use_private_checkout()
+    attest_update_reach(revision)
+
+
 def cmd_check(args) -> int:
     mode = "full" if args.command == "full" else "changed"
-    python = choose_python()
-    python_preflight(python)
     revision = git("rev-parse", "HEAD")
-    if getattr(args, "step", False):
-        from local_ci_stages import run_step
-        return run_step(sys.modules[__name__], args, python, revision)
     if args.attest and args.only:
         raise Failure("--attest cannot be combined with --only")
+    if args.attest and mode != "full":
+        raise Failure("--attest needs `full`")
+    python = choose_python()
+    python_preflight(python)
     if args.attest:
-        if mode != "full":
-            raise Failure("--attest needs `full`")
-        public_base = resolve_base(public_only=True)
-        fetch_base(public_base, strict=True)
-        if not clean_checkout() or revision != git("rev-parse", public_base):
-            raise Failure(f"--attest runs only on a clean checkout of the current public main ({public_base})")
-        attest_update_reach(revision)
+        # Seconds, not after a long run: public main, a clean tree and update
+        # reach (with its private-archive bridge) before any status or suite.
+        attest_preflight(revision)
+    if getattr(args, "step", False) or args.attest:
+        import local_ci_stages
+        if getattr(args, "step", False) or local_ci_stages.completed(sys.modules[__name__], args, python, revision):
+            # A completed staged gate for this exact checkout attests without rerunning.
+            return local_ci_stages.run_step(sys.modules[__name__], args, python, revision)
+    if args.attest:
         attest("pending", f"Full suite running on {machine()}", revision)
     clean = clean_checkout()
     try:
@@ -939,6 +993,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--step", action="store_true",
                         help="with full: run one resumable stage; repeat until COMPLETE")
     parser.add_argument("--restart", action="store_true", help="with full --step: discard prior stage receipts")
+    parser.add_argument("--budget", type=float, metavar="MINUTES", default=None,
+                        help="with full --step: keep running stages while the next one fits in MINUTES "
+                             "(default 40, inside a 45-minute Monitor budget; 0 runs one stage)")
     parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
     parser.add_argument("--strict-audit", action="store_true",
                         help="fail on Python advisories, npm high/critical findings, or unavailable audits")
@@ -947,6 +1004,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--step requires full without --only")
     if args.restart and not args.step:
         parser.error("--restart requires --step")
+    if args.budget is not None and (not args.step or args.budget < 0):
+        parser.error("--budget requires --step and a number of minutes (0 or more)")
     if args.only:
         unknown = set(args.only) - {s.name for s in SUITES}
         if unknown:
