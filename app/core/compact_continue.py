@@ -34,6 +34,7 @@ decision and the per-session one-shot guard live in the v2 turn scheduler.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional, Tuple
 
@@ -174,7 +175,7 @@ async def context_over_threshold(session_id: str) -> Tuple[bool, Optional[int]]:
 
     usage = live_usage
     if fallback_reason is not None:
-        persisted = _persisted_usage(session_id)
+        persisted = await asyncio.to_thread(_persisted_usage, session_id)
         if persisted is not None:
             logger.info(
                 "compact-boundary: live context-usage unavailable for session=%s "

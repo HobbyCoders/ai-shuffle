@@ -423,6 +423,13 @@ app = FastAPI(
 # logged by the AccessLogMiddleware; this just ensures the *client* sees it too.
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    from starlette.requests import ClientDisconnect
+    if isinstance(exc, ClientDisconnect):
+        # The client went away mid-body. Expected, not a server bug, and no
+        # traceback: formatting one stats every frame file on the event loop,
+        # which stalled the loop under disk pressure (#2112).
+        logger.info("Client disconnected during %s %s", request.method, request.url.path)
+        return Response(status_code=400)
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,

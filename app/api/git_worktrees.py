@@ -183,7 +183,9 @@ def _session_may_be_hot(streaming: set, active_since: float):
 # here, so the endpoint holds ZERO GitPool jobs across the fan-out. Each
 # worktree is a distinct working directory with its own index.lock, so
 # concurrent reads across worktrees are safe.
-_STATUS_FANOUT_MAX_WORKERS = 6
+# Kept small: a project with hundreds of worktrees saturated the disk with
+# parallel `git status` reads, and every other blocking call slowed with it (#2112).
+_STATUS_FANOUT_MAX_WORKERS = 4
 _status_fanout_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=_STATUS_FANOUT_MAX_WORKERS,
     thread_name_prefix="git-wt-status",
