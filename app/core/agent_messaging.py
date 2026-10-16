@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fluid.events.ops import AgentMessage
 from fluid.tools.registry import ToolOutcome
 
 from app.core import swarm
+
+logger = logging.getLogger(__name__)
 
 
 def peer_rows(session_id: str | None) -> list[dict]:
@@ -354,6 +357,21 @@ async def resume_unavailable(target, row):
     return None
 
 
+def _persist_continuation_report(owner, session_id, report):
+    """Write a continuation's report where the first round's went."""
+    from app.core import provider_agent
+    from app.db import database
+
+    try:
+        owner_row = database.get_session(owner)
+    except Exception:  # noqa: BLE001 — the global project root still applies
+        logger.debug("agent_messaging: owner row read failed", exc_info=True)
+        owner_row = None
+    return provider_agent._persist_worker_report(
+        dict(owner_row) if owner_row else None, session_id, report,
+    )
+
+
 async def finish_message_resume(session_id, settled, outcome):
     """Complete a resumed worker through the same parent wake gate as Task."""
     from app.core import provider_agent, turn_scheduler
@@ -371,20 +389,22 @@ async def finish_message_resume(session_id, settled, outcome):
         # report the previous successful turn as its new result.
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
         events = [event for event in events if event.get("turn_id") == settled["id"]]
-        text = ""
+        pieces: list[tuple[bool, str]] = []
         for event in events:
             payload = event.get("payload") or {}
-            if event.get("event_type") == "tool.result":
-                text = ""
-            elif event.get("event_type") == "assistant.text_delta":
-                text += payload.get("text") or payload.get("delta") or ""
-            elif event.get("event_type") == "message.assistant" and payload.get("kind") in (None, "text"):
-                text += payload.get("content") or ""
+            piece = provider_agent.assistant_text_piece(event)
+            if piece is not None:
+                pieces.append(piece)
+            elif event.get("event_type") in ("tool.result", "message.user"):
+                # The report is what follows the last tool result or input (a
+                # parked worker's wake reuses this turn id).
+                pieces = []
             elif event.get("event_type") == "turn.aborted":
-                text = payload.get("message") or "Worker continuation interrupted"
+                pieces = [(False, payload.get("message") or "Worker continuation interrupted")]
             elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
                 outcome = "error"
-                text = str(payload.get("errors") or "Worker continuation failed")
+                pieces = [(False, str(payload.get("errors") or "Worker continuation failed"))]
+        text = provider_agent.join_assistant_text(pieces)
         status = "completed" if outcome == "completed" else "error"
         report = text or "Worker continuation ended without a report"
         summary, _ = provider_agent.bound_report(report)
@@ -403,6 +423,11 @@ async def finish_message_resume(session_id, settled, outcome):
         )
         if stopped:
             return  # Preserve Stop: a card update is not authority to wake anyone.
+        # Same report file as a first completion (#104): the fixed path now
+        # holds this round, and the previous round moves to a round file.
+        report_path, report_chars = await asyncio.to_thread(
+            _persist_continuation_report, owner, session_id, summary,
+        )
         # Read park BEFORE busy: unpark starts queued/running before clearing
         # the parked row. The single busy query covers queued->running too.
         # Admission holds this lock until both queue and ownership are written.
@@ -419,7 +444,10 @@ async def finish_message_resume(session_id, settled, outcome):
         if (not busy and not parked and (not latest or latest["id"] == settled["id"])
                 and not task_registry.is_woken(owner, session_id, completion_id=settled["id"])):
             settled_now = True
-            task_registry.complete_task(owner, session_id, status, summary=summary)
+            task_registry.complete_task(
+                owner, session_id, status, summary=summary,
+                report_path=report_path, report_chars=report_chars,
+            )
             # Only the last continuation may settle the shared task row. Emit
             # under the admission lock so a new resume cannot race this frame.
             from app.core.turn_recorder import record_task_settle_frame
@@ -436,6 +464,7 @@ async def finish_message_resume(session_id, settled, outcome):
         "task_id": session_id, "tool_use_id": session_id,
         "status": status, "summary": summary,
         "agent_message_turn_id": settled["id"],
+        **({"report_path": report_path} if report_path else {}),
     })
     if settled_now:
         # Same rule as a first run: an untouched dedicated checkout is reclaimed.

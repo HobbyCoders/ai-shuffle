@@ -584,6 +584,13 @@ def _agent_report_fields(task_id: str, record: Dict[str, Any]) -> Dict[str, Any]
                 head = text[:SYNC_REPORT_HEAD_CHARS]
                 chars = len(text)
                 fields["report_path"] = str(path)
+                # A worker continued with SendMessage reports again; report_path
+                # is always its LATEST round and the earlier ones stay listed.
+                from app.core.task_dispatch import earlier_task_reports
+
+                earlier = earlier_task_reports(str(path))
+                if earlier:
+                    fields["earlier_report_paths"] = earlier
             except OSError:
                 # The row remembers a file that is gone (worktree removed,
                 # different runner). Fall through to the event log rather than

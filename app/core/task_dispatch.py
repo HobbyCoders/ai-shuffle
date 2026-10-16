@@ -57,8 +57,10 @@ is refused when none is curated). Its markdown body rides the system prompt.
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -2156,6 +2158,11 @@ def write_task_report(
     BACKGROUND dispatch calls it from ``provider_agent.dispatch_worker``'s
     completion path, because there is no caller frame to return to by then.
     Both write it so a woken parent always has a report file to read.
+
+    ``<task_id>.md`` always holds the LATEST report. A worker continued with
+    SendMessage reports again under the same id (#104); the previous round is
+    first moved to ``<task_id>.round-<n>.md`` so a parent reading the fixed
+    path never gets an older verdict, and nothing earlier is lost.
     """
     try:
         directory = task_report_dir(caller_row)
@@ -2163,6 +2170,7 @@ def write_task_report(
         from fluid.state import safe_key
 
         path = directory / f"{safe_key(worker_session_id or str(uuid.uuid4()))}.md"
+        _archive_previous_report(path, report)
         path.write_text(report, encoding="utf-8")
         return str(path.resolve())
     except Exception:  # noqa: BLE001 — never fail a completed dispatch on I/O
@@ -2172,6 +2180,40 @@ def write_task_report(
             exc_info=True,
         )
         return None
+
+
+def _report_rounds(path: Path) -> List[Tuple[int, Path]]:
+    """``(n, path)`` for each ``<stem>.round-<n>.md`` beside ``path``, by n."""
+    prefix = f"{path.stem}.round-"
+    rounds = []
+    for candidate in path.parent.glob(f"{glob.escape(prefix)}*{path.suffix}"):
+        number = candidate.name[len(prefix):len(candidate.name) - len(path.suffix)]
+        if number.isdigit():
+            rounds.append((int(number), candidate))
+    return sorted(rounds)
+
+
+def _archive_previous_report(path: Path, report: str) -> None:
+    """Move an earlier, different report at ``path`` to the next round file."""
+    try:
+        previous = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if previous == report:
+        return  # The same report delivered again is not a new round.
+    rounds = _report_rounds(path)
+    number = rounds[-1][0] + 1 if rounds else 1
+    os.replace(path, path.with_name(f"{path.stem}.round-{number}{path.suffix}"))
+
+
+def earlier_task_reports(report_path: Optional[str]) -> List[str]:
+    """Absolute paths of the earlier rounds' reports for ``report_path``, oldest first."""
+    if not report_path:
+        return []
+    try:
+        return [str(p.resolve()) for _, p in _report_rounds(Path(report_path))]
+    except OSError:
+        return []
 
 
 async def _await_worker_registration(

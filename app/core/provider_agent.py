@@ -33,7 +33,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import (
-    TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple,
+    TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
 
 from app.core import rate_limit_breaker
@@ -639,30 +639,56 @@ def final_assistant_text(session_id: str) -> str:
     if target_turn_id is None:
         return ""
 
-    parts: List[str] = []
+    parts: List[Tuple[bool, str]] = []
     #: Text seen since the LAST ``tool.result`` — reset every time one lands, so
     #: what survives the loop is exactly the closing statement.
-    tail: List[str] = []
+    tail: List[Tuple[bool, str]] = []
     for ev in events:
         if ev.get("turn_id") != target_turn_id:
             continue
-        etype = ev.get("event_type")
-        payload = ev.get("payload") or {}
-        if etype == "tool.result":
+        if ev.get("event_type") in ("tool.result", "message.user"):
+            # A parked worker's wake is a new input in the same turn; what it
+            # wrote before parking is an interim remark, not the report.
             tail = []
             continue
-        if etype == "assistant.text_delta":
-            text = payload.get("text")
-        elif etype == "message.assistant":
-            if payload.get("kind") not in (None, "text"):
-                continue
-            text = payload.get("content")
+        piece = assistant_text_piece(ev)
+        if piece is not None:
+            parts.append(piece)
+            tail.append(piece)
+    return join_assistant_text(tail).strip() or join_assistant_text(parts).strip()
+
+
+def assistant_text_piece(event: Mapping[str, Any]) -> Optional[Tuple[bool, str]]:
+    """``(is_delta, text)`` for an assistant text event, else None."""
+    etype = event.get("event_type")
+    payload = event.get("payload") or {}
+    if etype == "assistant.text_delta":
+        text = payload.get("text") or payload.get("delta")
+        delta = True
+    elif etype == "message.assistant" and payload.get("kind") in (None, "text"):
+        text = payload.get("content")
+        delta = False
+    else:
+        return None
+    return (delta, text) if isinstance(text, str) and text else None
+
+
+def join_assistant_text(pieces: Sequence[Tuple[bool, str]]) -> str:
+    """Join assistant text events into one report.
+
+    Streamed deltas of one block join as they arrived. Separate text blocks
+    (each ``message.assistant``) are separated by a blank line, so two blocks
+    never read as one run-on sentence ("…when it lands.The missing…", #104).
+    """
+    out = ""
+    previous_delta = False
+    for delta, text in pieces:
+        if out and not (delta and previous_delta):
+            out = f"{out.rstrip()}\n\n{text.lstrip()}"
         else:
-            continue
-        if isinstance(text, str):
-            parts.append(text)
-            tail.append(text)
-    return "".join(tail).strip() or "".join(parts).strip()
+            out += text
+        previous_delta = delta
+    return out
 
 
 def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:

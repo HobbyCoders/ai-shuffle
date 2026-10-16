@@ -1005,6 +1005,14 @@ async def test_dispatched_worker_native_continuation_lifecycle(
             assert "original native report" not in wake["prompt"]
             if ending in {"completed", "parked_report"}:
                 assert "new native report" in wake["prompt"]
+                # TaskGet reads the continuation's report, not round one (#104).
+                from pathlib import Path
+                from app.mcp.builtin_tools import _agent_report_fields
+
+                fields = _agent_report_fields("native-child", row)
+                assert fields["report_path"] == row["reportPath"]
+                assert Path(fields["report_path"]).read_text() == "new native report"
+                assert fields["report_head"] == "new native report"
             assert wake["payload"]["pending_frames"][0]["agent_message_turn_id"] == continuation["id"]
     finally:
         if job and not job.done():
