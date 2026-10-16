@@ -184,6 +184,14 @@ message window from one session). Native legs get fluid's builtins via
 stores nothing the transcript does not already contain — it is retrieval,
 not learning.
 
+`SessionSearch` prefilters in `session_recall_text` (`app/db/session_recall.py`):
+only the text recall scores, lowercased and cut into overlapping pieces of
+about a kilobyte, kept current by triggers on the transcript tables. An
+existing database fills it in short background batches after start-up and
+keeps the older raw-JSON queries until that finishes. A term matching more
+than a couple of thousand pieces is read newest-first, so a very common word
+ranks recent sessions rather than scanning the whole history.
+
 ### Claude Code CLI memory
 
 The delegated leg runs the claude CLI, which keeps its own native memory
