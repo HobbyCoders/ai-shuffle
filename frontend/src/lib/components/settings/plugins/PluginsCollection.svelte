@@ -31,11 +31,37 @@
 	const model = new PluginsModel({ canManage: () => !access.readOnly });
 	setPluginsModel(model);
 
+	// The detail view has its own visibility-aware poller. Its collection must
+	// also defer resource invalidations, or reconnects still fetch hidden data.
+	let mounted = false;
+	let resourceDirty = true;
+	let refreshing = false;
+	async function refreshResources() {
+		if (!mounted || document.visibilityState === 'hidden' || !resourceDirty || refreshing) return;
+		resourceDirty = false;
+		refreshing = true;
+		try {
+			await model.load();
+		} finally {
+			refreshing = false;
+			if (resourceDirty) void refreshResources();
+		}
+	}
 	onMount(() => {
-		void model.load();
-		return () => model.dispose();
+		mounted = true;
+		const onVisibility = () => void refreshResources();
+		document.addEventListener('visibilitychange', onVisibility);
+		void refreshResources();
+		return () => {
+			mounted = false;
+			document.removeEventListener('visibilitychange', onVisibility);
+			model.dispose();
+		};
 	});
-	watchResources(['connectors', 'plugins'], () => model.load());
+	watchResources(['connectors', 'plugins'], () => {
+		resourceDirty = true;
+		return refreshResources();
+	});
 
 	let filter = $state('');
 	const q = $derived(filter.trim().toLowerCase());
