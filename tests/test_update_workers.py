@@ -814,3 +814,62 @@ def test_stop_them_and_restart_stops_each_session_then_installs(busy, monkeypatc
 def test_a_mode_only_applies_to_install(setup):
     with pytest.raises(ValueError, match="Unknown update mode"):
         asyncio.run(fleet.dispatch("download", "stop"))
+
+
+# The launcher's own recovery messages (desktop/src/main/source-updates.ts and
+# installed-entry.ts): only the latest installer finishes these updates.
+NO_BUILD = ("No healthy source build is available. Install the latest AI Shuffle installer to recover. "
+            "Previous files and data have been retained.")
+NO_RESTORE_POINT = ("Could not record the application start: No verified database restore point exists. "
+                    "Install the latest desktop launcher before starting this update.")
+FAILED_START = ("This revision failed to start. Check again after a newer update. "
+                "Previous files and data have been retained.")
+MAY_HAVE_MIGRATED = ("The database may have been migrated, but the update state cannot prove which code "
+                     "last used it. Install the latest AI Shuffle installer to recover.")
+MIGRATED_NEWER_BUILD = ("The database may have been migrated. Install a verified newer build to recover; "
+                        "cancelling cannot run older code.")
+LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely."
+
+
+@pytest.mark.parametrize("phase,error,kept", [
+    ("error", NO_BUILD, True),
+    ("ready", NO_RESTORE_POINT, True),
+    ("error", FAILED_START, True),
+    # The database may have changed: never say the data is untouched.
+    ("error", MAY_HAVE_MIGRATED, False),
+    ("error", MIGRATED_NEWER_BUILD, False),
+    ("error", LINUX_ENTRY, False),
+    # A desktop that cannot update itself; nothing was attempted, so nothing is claimed.
+    ("unsupported", None, False),
+])
+def test_desktop_states_only_an_installer_fixes_name_it(phase, error, kept):
+    row = {"kind": "desktop", "online": True, "phase": phase, "error": error}
+    assert fleet.remedy(row) == {"remedy": "installer", "data_kept": kept}
+
+
+@pytest.mark.parametrize("row", [
+    # An ordinary failure the in-app updater can retry.
+    {"kind": "desktop", "phase": "error", "error": "Source archive checksum or size mismatch"},
+    {"kind": "desktop", "phase": "ready", "error": "Busy with active sessions; retry when finished."},
+    {"kind": "desktop", "phase": "available", "version": "abc"},
+    # Containers get a newer image, not an installer (imageHint in the web UI).
+    {"phase": "error", "error": "An application update failed first boot. Install a newer image; "
+                                "older code cannot safely run over this database. Files retained."},
+    {"phase": "unsupported"},
+    # An offline desktop's last words are not its current state.
+    {"kind": "desktop", "online": False, "phase": "error", "error": NO_BUILD},
+])
+def test_other_states_need_no_installer(row):
+    assert fleet.remedy(row) == {"remedy": None, "data_kept": False}
+
+
+def test_snapshot_reports_the_installer_remedy_for_this_desktop_and_a_peer(setup, monkeypatch):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    monkeypatch.setattr(updates, "_desktop_seen", 0)
+    updates.desktop_exchange({"phase": "error", "version": None, "error": NO_BUILD})
+    remote.return_value = {"supported": True, "allow_updates": True, "kind": "desktop", "phase": "error",
+                           "error": MAY_HAVE_MIGRATED}
+    workers = asyncio.run(fleet.snapshot())["workers"]
+    assert [(w["remedy"], w["data_kept"]) for w in workers] == [
+        ("installer", True), ("installer", False), (None, False)]
