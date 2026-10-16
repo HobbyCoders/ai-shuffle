@@ -130,7 +130,11 @@ async def test_checkout_head_mismatch_reaches_rpc_and_native_proxy(
     checkout = tmp_path / "checkout"
     git(base, "worktree", "add", "-b", "session-branch", str(checkout))
     if head == "detached":
-        git(checkout, "switch", "--detach", "HEAD")
+        # Behind its branch: a detached HEAD at the branch tip (or ahead of
+        # it) is reattached on send, so only a lossy one is still refused.
+        git(checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "--allow-empty", "-m", "Branch work")
+        git(checkout, "switch", "--detach", "HEAD~1")
     else:
         git(checkout, "switch", "-c", "other-branch")
     session_id = f"rpc-{head}-{native}"

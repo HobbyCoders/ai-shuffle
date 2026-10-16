@@ -1645,3 +1645,101 @@ def test_worktree_mutations_hold_the_repository_lock(base_checkout, monkeypatch)
     # remove_worktree also lists/prunes on its own; every call ran under the lock.
     assert {"add", "remove", "prune"} <= {op for op, _ in seen}
     assert all(held for _, held in seen), seen
+
+
+# ---------------------------------------------------------------------------
+# A session's own checkout left detached by its agent
+# ---------------------------------------------------------------------------
+
+def _out(cwd, *args) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _session_checkout_with_commit(project, branch):
+    path = checkout_manager.ensure_checkout(
+        project, branch=branch, runner_id=RUNNER, create_new_branch=True
+    )
+    assert path
+    _git(path, "config", "user.email", "t@t.test")
+    _git(path, "config", "user.name", "T")
+    (Path(path) / "work.txt").write_text("work\n", encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-m", "work")
+    return path
+
+
+def test_detached_checkout_with_deleted_branch_is_reattached_without_losing_work(
+    project, base_checkout, workspace_root
+):
+    """After merging, the agent detached and deleted its branch: sends kept failing."""
+    branch = "fix/notify"
+    path = _session_checkout_with_commit(project, branch)
+    _git(path, "checkout", "--detach")
+    (Path(path) / "work.txt").write_text("uncommitted\n", encoding="utf-8")
+    head = _out(path, "rev-parse", "HEAD")
+    _git(base_checkout, "branch", "-D", branch)
+
+    assert checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER) == path
+    assert _out(path, "symbolic-ref", "--short", "HEAD") == branch
+    assert _out(path, "rev-parse", "HEAD") == head
+    assert (Path(path) / "work.txt").read_text(encoding="utf-8") == "uncommitted\n"
+
+
+def test_detached_checkout_ahead_of_its_branch_moves_the_branch_forward(
+    project, base_checkout, workspace_root
+):
+    branch = "feat/ahead"
+    path = _session_checkout_with_commit(project, branch)
+    old_tip = _out(path, "rev-parse", "HEAD")
+    _git(path, "checkout", "--detach")
+    (Path(path) / "more.txt").write_text("more\n", encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-m", "more")
+    head = _out(path, "rev-parse", "HEAD")
+
+    assert checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER) == path
+    assert _out(path, "symbolic-ref", "--short", "HEAD") == branch
+    assert _out(path, "rev-parse", branch) == head
+    assert _out(path, "merge-base", old_tip, head) == old_tip
+
+
+def test_detached_checkout_behind_its_branch_is_still_refused(
+    project, base_checkout, workspace_root
+):
+    """Moving the branch back would drop its commits, so nothing is rewritten."""
+    branch = "feat/behind"
+    path = _session_checkout_with_commit(project, branch)
+    tip = _out(path, "rev-parse", "HEAD")
+    _git(path, "checkout", "--detach", "HEAD~1")
+
+    assert checkout_manager.ensure_checkout(project, branch=branch, runner_id=RUNNER) is None
+    assert _out(base_checkout, "rev-parse", branch) == tip
+    with pytest.raises(subprocess.CalledProcessError):
+        _out(path, "symbolic-ref", "-q", "HEAD")
+
+
+def test_checkout_switched_to_another_branch_is_not_switched_back(
+    project, base_checkout, workspace_root
+):
+    branch = "feat/bound"
+    path = _session_checkout_with_commit(project, branch)
+    _git(path, "switch", "-c", "feat/other")
+
+    assert checkout_manager._reattach_detached_checkout(path, branch) is False
+    assert _out(path, "symbolic-ref", "--short", "HEAD") == "feat/other"
+
+
+def test_reattach_never_takes_a_branch_another_worktree_holds(
+    project, base_checkout, workspace_root
+):
+    branch = "feat/held"
+    path = _session_checkout_with_commit(project, branch)
+    _git(path, "checkout", "--detach")
+    _git(base_checkout, "switch", branch)
+
+    assert checkout_manager._reattach_detached_checkout(path, branch) is False
+    assert _out(base_checkout, "symbolic-ref", "--short", "HEAD") == branch
+    with pytest.raises(subprocess.CalledProcessError):
+        _out(path, "symbolic-ref", "-q", "HEAD")
