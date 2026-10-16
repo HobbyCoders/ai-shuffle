@@ -573,7 +573,7 @@ class UserQuestionHandler:
 
     async def _answer_nonblocking(
         self, row: Dict[str, Any], envelope: Dict[str, Any],
-        answered_by_device: Optional[str],
+        answered_by_device: Optional[str], *, human_input: bool,
     ) -> bool:
         from app.core import interaction_events, interaction_wait, turn_claim, turn_manager
         from app.core import turn_scheduler
@@ -609,7 +609,7 @@ class UserQuestionHandler:
         context = {**context, "payload": turn_scheduler._context_payload(context)}
         accepted = await asyncio.to_thread(
             interactions.answer_question_and_enqueue, row, envelope,
-            answered_by_device, prompt, context,
+            answered_by_device, prompt, context, human_input=human_input,
         )
         if not accepted:
             return False
@@ -652,6 +652,7 @@ class UserQuestionHandler:
         answered_by_device: Optional[str],
         dismissed: bool = False,
         skipped: Optional[List[str]] = None,
+        *, human_input: bool = True,
     ) -> bool:
         from app.core import interaction_wait
         from app.db import interactions
@@ -669,7 +670,7 @@ class UserQuestionHandler:
             return False
         envelope = build_answer_envelope(answers, dismissed=dismissed, skipped=skipped)
         if (row.get("payload") or {}).get("nonblocking"):
-            return await self._answer_nonblocking(row, envelope, answered_by_device)
+            return await self._answer_nonblocking(row, envelope, answered_by_device, human_input=human_input)
         answered = await asyncio.to_thread(
             interactions.answer_interaction, row["id"], envelope, answered_by_device
         )
@@ -697,6 +698,7 @@ class UserQuestionHandler:
         answered_by_device: Optional[str] = None,
         dismissed: bool = False,
         skipped: Optional[List[str]] = None,
+        *, human_input: bool = True,
     ) -> bool:
         """
         Respond to a user question request.
@@ -712,6 +714,8 @@ class UserQuestionHandler:
             skipped: Question keys the user explicitly skipped. Each is answered
                 with ``SKIP_ANSWER_TEXT`` so a partially-answered multi-question
                 form still submits cleanly.
+            human_input: Server-side provenance, never read from the answer body.
+                Automated answers must pass False to preserve peer-chain limits.
 
         Returns:
             True if response was processed, False if request not found
@@ -723,6 +727,7 @@ class UserQuestionHandler:
             answered_by_device,
             dismissed=dismissed,
             skipped=skipped,
+            human_input=human_input,
         )
 
     def get_pending_questions(self, session_id: str) -> List[Dict[str, Any]]:
