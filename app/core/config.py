@@ -194,6 +194,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
+    # Compatibility release: opt in after all peer workers have upgraded.
+    network_require_token_binding: bool = False
 
     # Release safety: recipient-side kill switch. Enabling this alone does not
     # enable peer terminals: independent recipient-verified owner grants are

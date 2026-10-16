@@ -5,7 +5,7 @@ reached the owner: authentication failed, or the connection for the action
 could not be opened. Once the action may have been sent, a timeout or dropped
 connection is final.
 """
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -64,7 +64,9 @@ class Owner:
         return self.forward(request)
 
     def forward(self, request: httpx.Request) -> httpx.Response:
-        with self.worker.active():
+        # The simulated worker owns these configured listeners; request
+        # headers must not determine which endpoint bindings it accepts.
+        with self.worker.active(), patch.object(engine, "_own_endpoints", return_value=[DEAD, TUNNEL, SECOND]):
             response = self.client.request(request.method, request.url.path, content=request.content,
                                            headers={k: v for k, v in request.headers.items()
                                                     if k.lower() in ("authorization", "content-type", "accept")})

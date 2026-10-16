@@ -336,6 +336,25 @@ def test_ipv4_carrying_ipv6_endpoints_are_classified_by_the_ipv4(url, ok):
     assert endpoints.is_valid_endpoint(url) is ok
 
 
+@pytest.mark.parametrize("url,ok", [
+    ("http://2852039166:8000", False),
+    ("http://0xa9.0xfe.0xa9.0xfe", False),
+    ("http://0251.0376.0251.0376", False),
+    ("http://169.254.43518", False),
+    ("http://2852039166./", False),
+    ("http://4294967296", False),  # out-of-range integer, not a hostname
+    ("http://worker.123", False),
+    ("http://worker.0xinvalid", False),
+    ("http://0xc0a80114:8000", True),  # numeric private LAN stays valid
+    ("http://0300.0250.1.024:8000", True),
+    ("http://127.1:8000", True),
+    ("http://worker.example:8000", True),
+])
+def test_numeric_ipv4_endpoints_use_the_dialed_address_for_validation(url, ok):
+    from app.network import endpoints
+    assert endpoints.is_valid_endpoint(url) is ok
+
+
 def test_member_endpoints_are_validated_before_they_are_stored(workers, make_client):
     """NET-22: only plain http(s) addresses without credentials or link-local hosts are kept."""
     from app.network import endpoints

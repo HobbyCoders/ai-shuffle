@@ -598,11 +598,22 @@ async def test_a_peer_still_backfilling_does_not_stop_the_exchange(workers):
     set_owner_pref(c, "from_c", "hello")
     served_b = ServedBy(b, "https://b.example.com")
     with c.active():
+        assert engine.context().member(b.device_id) is None
         async with httpx.AsyncClient(transport=served_b.transport()) as client:
             summary = await transport.PeerLink(b.device_id, [served_b.base_url]).sync_once(client, engine.context())
+        # An unknown key's capability statement cannot create a trusted pin.
+        assert store.get_member(b.device_id) is None
     assert summary["snapshot_required"] and summary["snapshot_deferred"]
     assert summary["sent"] > 0
     assert owner_pref(b, "from_c") == "hello", "C's operations still reached B"
+    # Once A supplies B's signed membership certificate, B's own support
+    # statement becomes verifiable and the next exchange records its pin.
+    exchange(a, c)
+    with c.active():
+        assert engine.context().member(b.device_id) is not None
+        async with httpx.AsyncClient(transport=served_b.transport()) as client:
+            await transport.PeerLink(b.device_id, [served_b.base_url]).sync_once(client, engine.context())
+        assert store.get_member(b.device_id)["token_binding_required"]
 
 
 async def test_the_floor_is_relaxed_when_no_source_has_covered_it_for_long(workers, monkeypatch):

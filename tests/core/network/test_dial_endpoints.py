@@ -7,6 +7,8 @@ tunnel, and a tunnel that does not answer surfaces as the peer being
 unreachable instead of quietly falling back to the LAN address. Plain-http
 invites are accepted only on a path the owner controls.
 """
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -68,6 +70,42 @@ def test_dial_endpoints_uses_the_tunnel_alone_when_one_is_advertised():
     assert endpoints.peer_endpoints({"endpoints": [LAN]}, None) == [LAN]
     assert endpoints.peer_endpoints(None, {"endpoints": "not-a-list"}) == []
     assert endpoints.peer_endpoints(None, None) == []
+
+
+@pytest.mark.parametrize("dot", ["。", "．", "｡"], ids=["ideographic", "fullwidth", "halfwidth"])
+@pytest.mark.asyncio
+async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot):
+    url = f"http://169{dot}254{dot}169{dot}254:80"
+    assert endpoints.peer_endpoints({"endpoints": [url]}, None) == []
+    assert endpoints.peer_endpoints(None, {"endpoints": [url]}) == []
+    assert endpoints.dial_endpoints([url]) == []
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(403)
+    # Also exercise the raw-list constructor: no challenge may be sent before
+    # the stricter token transcript canonicalizer gets a chance to reject it.
+    link = transport.PeerLink("peer", [url])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(transport.PeerError):
+            await link.authenticate(client, SimpleNamespace(device_id="local"))
+    assert requests == []
+
+
+@pytest.mark.parametrize("url", ["https://faß.example", "https://K.example", "http://example.com:８０"])
+def test_peer_authorities_require_ascii_before_normalizing(url):
+    assert not endpoints.is_valid_endpoint(url)
+    assert endpoints.dial_endpoints([url]) == []
+
+
+@pytest.mark.parametrize("url, valid", [
+    ("http://[2002:a9fe:a9fe::1]:8000", False),
+    ("http://[2002:c0a8:114::1]:8000", True),
+    ("https://[2002:808:808::1]", True),
+])
+def test_6to4_addresses_apply_the_embedded_ipv4_link_local_rule(url, valid):
+    assert endpoints.is_valid_endpoint(url) is valid
+    assert endpoints.dial_endpoints([url]) == ([url] if valid else [])
 
 
 @pytest.mark.parametrize("url, local", [

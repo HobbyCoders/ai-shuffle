@@ -105,6 +105,9 @@ class TokenRequest(BaseModel):
     device_id: str = Field(min_length=4, max_length=64)
     challenge: str = Field(min_length=16, max_length=128)
     signature: str = Field(min_length=64, max_length=128)
+    endpoint: Optional[str] = Field(default=None, max_length=2048)
+    bound_signature: Optional[str] = Field(default=None, max_length=128)
+    token_binding_proof: Optional[str] = Field(default=None, max_length=128)
     incarnation: int = Field(default=1, ge=1)
     endpoints: List[str] = Field(default_factory=list, max_length=8)
     capabilities: Dict[str, Any] = Field(default_factory=dict)
@@ -121,6 +124,7 @@ class TokenRequest(BaseModel):
 
 
 class ExchangeRequest(BaseModel):
+    token_binding_proof: Optional[str] = Field(default=None, max_length=128)
     flush: bool = False
     catalog_backlog: bool = False
     watermarks: Dict[str, Dict[str, int]] = Field(default_factory=dict)
@@ -157,6 +161,12 @@ class LanSessionRequest(BaseModel):
     # Nothing else: this request crosses the LAN in the clear and only the
     # transcript is signed, so the member's endpoints, capabilities, version
     # and platform arrive only in the sealed exchange (extra fields are ignored).
+
+
+class AdvertisedAddresses(BaseModel):
+    # Two additional aliases keep the full advertisement compatible with the
+    # previous release's eight-endpoint limit (tunnel + primary + four LAN).
+    addresses: List[str] = Field(max_length=2)
 
 
 class LanSettings(BaseModel):
@@ -543,12 +553,15 @@ async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
         row = await run_sync(store.get_member, body.device_id)
         member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
     return {"challenge": tokens.new_challenge(body.device_id, requester, member_address=member_address),
-            "expires_in": tokens.CHALLENGE_TTL_SECONDS}
+            "expires_in": tokens.CHALLENGE_TTL_SECONDS, "token_binding": 1}
 
 
 @router.post("/peer/auth/token")
 async def peer_token(body: TokenRequest) -> dict:
-    result = tokens.issue_token(device_id=body.device_id, challenge=body.challenge, signature=body.signature)
+    result = await run_sync(tokens.issue_token, device_id=body.device_id, challenge=body.challenge,
+                            signature=body.signature, endpoint=body.endpoint, bound_signature=body.bound_signature,
+                            token_binding_proof=body.token_binding_proof,
+                            binding_present=bool({"endpoint", "bound_signature"} & body.model_fields_set))
     await run_sync(store.touch_member, body.device_id, capabilities=body.capabilities or None,
                    endpoints=body.endpoints or None, version=body.version, incarnation=body.incarnation,
                    platform=body.platform)
@@ -581,6 +594,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
             engine.scan_all(strict=True)
         elif released:
             catalog.publish_owned()
+        tokens.remember_binding_support(device_id, body.token_binding_proof)
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
                            version=body.version, incarnation=body.incarnation, platform=body.platform)
         ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
@@ -590,6 +604,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                 "version": settings.version, "snapshot_required": snapshot,
                 "peer_state": 1, "flushed": body.flush,
+                "token_binding_proof": tokens.binding_support_proof(ctx),
                 "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),
                 "catalog_backlog": catalog.has_events_backlog(ctx=ctx)}
 
@@ -908,6 +923,35 @@ async def peer_lan_call(request: Request) -> Response:
         raise HTTPException(401, "LAN session refused") from exc
     status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
     return Response(lan.seal_reply(session, seq, status_code, media_type, raw), media_type="application/octet-stream")
+
+
+def _advertised_addresses() -> dict:
+    from app.network import advertisements
+    return {"addresses": advertisements.owner_urls(), "advertised": engine._own_endpoints()}
+
+
+@router.get("/advertised-addresses")
+async def get_advertised_addresses(_: str = Depends(require_admin)) -> dict:
+    return await run_sync(_advertised_addresses)
+
+
+@router.put("/advertised-addresses")
+async def put_advertised_addresses(body: AdvertisedAddresses, _: str = Depends(require_admin)) -> dict:
+    from app.network import advertisements
+
+    def _save():
+        advertisements.set_owner_urls(body.addresses)
+        # The local setting is not replicated. Only this worker's ordinary
+        # signed presence publishes its resolved URLs to the other members.
+        engine.publish_presence(capabilities=transport._capabilities(), version=settings.version)
+        return _advertised_addresses()
+
+    try:
+        result = await run_sync(_save)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    engine.kick()
+    return result
 
 
 def _lan_settings() -> dict:

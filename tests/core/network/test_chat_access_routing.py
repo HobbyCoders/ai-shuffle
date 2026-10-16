@@ -9,7 +9,7 @@ B's forwarded calls interleave the way they do in production.
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -64,7 +64,9 @@ class Network:
         for base, (worker, asgi) in self.servers.items():
             if str(request.url).startswith(base):
                 self.seen.append((base, request.url.path, request.content))
-                with worker.active():
+                # Advertise the listener configuration, not caller-supplied headers.
+                endpoints = [url for url, (owner, _) in self.servers.items() if owner is worker]
+                with worker.active(), patch.object(engine, "_own_endpoints", return_value=endpoints):
                     response = await asgi.handle_async_request(request)
                     content = await response.aread()
                 return httpx.Response(response.status_code, content=content,

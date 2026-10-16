@@ -10,6 +10,7 @@
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
+	import InlineBanner from '../rows/InlineBanner.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import TextField from '../rows/TextField.svelte';
@@ -37,6 +38,9 @@
 		key.startsWith('legacy:') ? model.legacyInstalls.find((i) => `legacy:${i.id}` === key) : undefined
 	);
 	const linked = $derived(model.linkedRegistration(key));
+	const peerError = $derived(member
+		? model.status?.sync?.peers.find((peer) => peer.device_id === member.device_id)?.last_error
+		: null);
 	const busy = $derived(model.saving !== null);
 
 	let rev = $state(0);
@@ -101,6 +105,9 @@
 			}
 		]}
 	>
+		{#if peerError}
+			<InlineBanner tone="warn"><span role="alert">{peerError}</span></InlineBanner>
+		{/if}
 		<RowGroup title="Device">
 			{@render nameRow(member.name, 100)}
 			<SettingRow label="Platform"><ValueText value={member.platform ?? 'Unknown'} tone="fg" /></SettingRow>

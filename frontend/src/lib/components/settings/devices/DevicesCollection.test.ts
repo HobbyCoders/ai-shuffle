@@ -133,6 +133,7 @@ function reads(path: string): unknown {
 				}
 			]
 		};
+	if (path === '/network/advertised-addresses') return { addresses: [], advertised: ['https://desk.example.com'] };
 	if (path === '/network/lan') return { enabled: true, addresses: [], advertised: ['https://desk.example.com', 'http://10.0.0.5:8000'] };
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
@@ -166,6 +167,15 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+	it('shows the actionable peer refusal in the worker detail', async () => {
+		const error = 'Worker laptop refused https://alias.example because it does not advertise that address. Add Advertised addresses or set CLUSTER_ADVERTISE_URL.';
+		status.sync = { records: {}, ops: 0, holes: [], conflicts: 0, peers: [{ device_id: 'laptop', base_url: null,
+			endpoints: ['https://alias.example'], last_error: error, seconds_since_contact: null, online: false }] };
+		await model.loadStatus();
+		show('member:laptop');
+		expect(screen.getByRole('alert').textContent).toBe(error);
+	});
+
 	it('shows a desktop revision beside its bare version in the list and detail', async () => {
 		status.members![1] = member('laptop', { platform: 'windows', version: '0.9.1', revision: '04d9a0cfb' });
 		await model.loadStatus();
@@ -342,6 +352,18 @@ describe('Devices list', () => {
 		await model.loadStatus();
 		show('member:laptop');
 		expect(screen.getByText('Connection').closest('.st-row, [class*=row]')?.textContent).toContain('Direct (LAN)');
+	});
+
+	it('saves additional public URLs without depending on LAN-direct', async () => {
+		api.put.mockImplementation(async (_path: string, body: { addresses: string[] }) => ({ ...body, advertised: body.addresses }));
+		show('self', 'Network');
+		const field = await screen.findByRole('textbox', { name: 'Advertised addresses' });
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: 'https://proxy.example, https://other.example' } });
+		await fireEvent.blur(field);
+		await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith('/network/advertised-addresses', {
+			addresses: ['https://proxy.example', 'https://other.example']
+		}));
 	});
 
 	it('turns LAN-direct sync off and saves an extra address', async () => {

@@ -90,6 +90,9 @@ _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _links_generation: Optional[int] = None
 _last_contact: Dict[str, float] = {}
+# Control/browser callers create short-lived PeerLinks: warning throttling must
+# span instances. Expired entries are pruned when a new warning is emitted.
+_binding_warning_at: Dict[str, float] = {}
 # Authenticated peer frontiers, retained across failed/retried pulls. A failed
 # request does not make a known backlog disappear. Only committed watermarks do.
 _peer_watermarks: Dict[str, dict] = {}
@@ -275,6 +278,20 @@ CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
 class PeerConnectFailed(PeerError):
     """No address accepted a connection; no request reached the peer."""
+
+
+class PeerEndpointNotAdvertised(PeerError):
+    """A valid endpoint proof names an address the peer does not advertise."""
+
+    code = tokens.ENDPOINT_NOT_ADVERTISED
+
+    def __init__(self, device_id: str, endpoint: str):
+        # Build diagnostics from our own dial target, never remote error text.
+        endpoint = tokens.canonical_endpoint(endpoint)[:512]
+        super().__init__(
+            f"Worker {device_id} refused {endpoint} because it does not advertise that address. "
+            "On that worker, add it under Settings → Devices → This worker → Network → "
+            "Advertised addresses, or set CLUSTER_ADVERTISE_URL.")
 
 
 class PeerResponseTooLarge(PeerError):
@@ -531,10 +548,23 @@ class PeerLink:
         if response.status_code >= 400:
             detail = ""
             try:
-                detail = str(response.json().get("detail", ""))[:ERROR_DETAIL_LIMIT]
+                detail = response.json().get("detail", "")
             except Exception:  # noqa: BLE001
                 pass
-            raise _peer_error(response.status_code, detail)
+            if (response.status_code == 403 and path == "/api/v1/network/peer/auth/token"
+                    and isinstance(detail, dict) and detail.get("code") == tokens.ENDPOINT_NOT_ADVERTISED):
+                error = PeerEndpointNotAdvertised(self.device_id, base)
+                self.last_error = str(error)
+                now = time.monotonic()
+                last_warning = _binding_warning_at.get(self.device_id)
+                if last_warning is None or now - last_warning >= 300:
+                    for device_id, warned_at in list(_binding_warning_at.items()):
+                        if now - warned_at >= 300:
+                            _binding_warning_at.pop(device_id, None)
+                    _binding_warning_at[self.device_id] = now
+                    logger.warning("%s", error)
+                raise error
+            raise _peer_error(response.status_code, str(detail)[:ERROR_DETAIL_LIMIT])
         return response.json()
 
     def routes(self) -> list[str]:
@@ -563,6 +593,7 @@ class PeerLink:
             candidates = [self.base_url] if self.base_url else []
             candidates += [e for e in self.endpoints if e != self.base_url]
         last: BaseException | None = None
+        binding_refusal: PeerEndpointNotAdvertised | None = None
         connect_only = True
         for endpoint in candidates:
             endpoint = endpoint.rstrip("/")
@@ -570,13 +601,18 @@ class PeerLink:
                 token, expires = await self._issue_token(client, ctx, endpoint)
             except (httpx.HTTPError, PeerError, KeyError, ValueError, TypeError) as exc:
                 last = exc
+                if isinstance(exc, PeerEndpointNotAdvertised):
+                    binding_refusal = exc
                 connect_only = connect_only and isinstance(exc, CONNECT_ERRORS)
                 continue
             self.base_url, self.token, self.token_expires = endpoint, token, expires
+            self.last_error = None
             return
         if at is None:
             self.base_url = None
             self.token = None
+        if binding_refusal is not None:
+            raise binding_refusal
         message = f"{type(last).__name__}: {last}"[:200] if last is not None else "unreachable"
         if last is not None and connect_only:
             raise PeerConnectFailed(message) from last
@@ -592,6 +628,9 @@ class PeerLink:
             "device_id": ctx.device_id,
             "challenge": challenge["challenge"],
             "signature": signature,
+            "endpoint": tokens.canonical_endpoint(endpoint),
+            "bound_signature": tokens.sign_bound_challenge(
+                ctx.identity.signing_private, challenge["challenge"], self.device_id, endpoint),
             "incarnation": ctx.identity.incarnation,
             **(await asyncio.to_thread(_description)),
             "version": settings.version,
@@ -653,6 +692,13 @@ class PeerLink:
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
                 self.batches += 1
+            # A newly admitted peer's certificate may arrive in this exchange.
+            # Until membership knows its key, its support statement is not
+            # authenticated evidence. Keep syncing to learn the certificate;
+            # never pin an unknown identity or reject bootstrap for lacking it.
+            if engine.require_context().member(self.device_id) is not None:
+                await asyncio.to_thread(tokens.remember_binding_support, self.device_id,
+                                        exchange.get("token_binding_proof"))
             if not catch_up:
                 # A backlog drains in one pass instead of one batch per
                 # SYNC_ACTIVE_SECONDS; the time budget keeps the push below
@@ -942,7 +988,9 @@ def _decode_answer(status: int, raw: bytes) -> Any:
 
 def _description() -> dict:
     # Both probes can read the database, PATH and the filesystem.
-    return {"endpoints": engine._own_endpoints(), "capabilities": _capabilities()}
+    ctx = engine.context()
+    return {"endpoints": engine._own_endpoints(), "capabilities": _capabilities(),
+            **({"token_binding_proof": tokens.binding_support_proof(ctx)} if ctx else {})}
 
 
 def _capabilities() -> dict:
@@ -1112,7 +1160,7 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             await asyncio.to_thread(store.upsert_peer, link.device_id, base_url=link.active_url, contacted=True,
                                     error=None)
         except (httpx.HTTPError, PeerError) as exc:
-            link.last_error = f"{type(exc).__name__}: {exc}"[:200]
+            link.last_error = str(exc) if isinstance(exc, PeerEndpointNotAdvertised) else f"{type(exc).__name__}: {exc}"[:200]
             link.note_failure()
             await asyncio.to_thread(store.upsert_peer, link.device_id, error=link.last_error)
             logger.debug("Peer %s unreachable: %s", link.device_id, link.last_error)

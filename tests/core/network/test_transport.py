@@ -5,6 +5,7 @@ TestClient of worker A's router, entered under A's context. Everything else
 is the real code: tokens, exchange, push, snapshot copy, join polling.
 """
 import asyncio
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -101,7 +102,10 @@ class ServedBy:
             return httpx.Response(502, json={"detail": "unreachable"})
         path = url[len(self.base_url):]
         self.requests.append((request.method, path.split("?")[0]))
-        with self.server.active():
+        # The in-process listener advertises the endpoint it actually serves,
+        # just like a worker's tunnel/LAN configuration (not request headers).
+        with self.server.active(), patch.object(
+                engine, "_own_endpoints", return_value=list(dict.fromkeys([*engine._own_endpoints(), self.base_url]))):
             response = self.client.request(request.method, path, content=request.content,
                                            headers={k: v for k, v in request.headers.items()
                                                     if k.lower() in ("authorization", "content-type", "accept")})

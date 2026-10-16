@@ -483,6 +483,19 @@ export async function getNetworkPolicy(): Promise<NetworkPolicy> {
 	return api.get<NetworkPolicy>('/network/policy');
 }
 
+export interface AdvertisedAddresses {
+	addresses: string[];
+	advertised: string[];
+}
+
+export async function getAdvertisedAddresses(): Promise<AdvertisedAddresses> {
+	return api.get<AdvertisedAddresses>('/network/advertised-addresses', { cache: 'no-store' });
+}
+
+export async function updateAdvertisedAddresses(addresses: string[]): Promise<AdvertisedAddresses> {
+	return api.put<AdvertisedAddresses>('/network/advertised-addresses', { addresses });
+}
+
 // ─── LAN-direct sync ─────────────────────────────────────────────────────────
 
 export interface LanSettings {
