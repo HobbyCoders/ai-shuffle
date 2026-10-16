@@ -237,31 +237,49 @@ def _verify_coverage(ci, state: dict, plan: list, batches: list, fluid: list) ->
                              "once; use full --step --restart")
 
 
-def _alive(pid: int) -> bool:
-    if os.name == "nt":
-        import ctypes
-        kernel = ctypes.windll.kernel32
-        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
-        kernel.CloseHandle(handle)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
+def _lock_path(ci) -> Path:
+    return ci.records_path().with_name("full-stages.lock")
+
+
+def _claim(ci, path: Path):
+    """Hold this worktree's staged gate for the life of this process.
+
+    An OS file lock, taken atomically and released by the system when the
+    process ends however it ends, so a killed run never leaves a stale claim.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")  # noqa: SIM115 - held until _release
     try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        return False
-    return True
+        handle.close()
+        raise ci.Failure("Another full --step invocation is still running in this worktree. "
+                         "Wait for it to finish, then run the same command again.") from None
+    return handle
+
+
+def _release(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    handle.close()  # closing also drops a POSIX flock
 
 
 class _Heartbeat:
     """Refreshes full-stages.beat while this invocation lives.
 
-    It marks the worktree busy (a second invocation refuses to start) and tells
-    the next invocation how long a unit ran if this process is killed outright.
+    It tells the next invocation how long a unit ran if this process is killed
+    outright (full-stages.lock, not this file, keeps a second invocation out).
     """
 
     def __init__(self, path: Path):
@@ -317,8 +335,14 @@ def _restore_signals(previous: dict) -> None:
 
 
 def _stopped(ci, state: dict, times: dict, stage: str, files: list[str] | None, all_files: list[str],
-             ran_for: float, budget: float, first: bool, external: bool) -> str:
-    """Account for a unit that did not finish. Splits it, or explains; Failure if it never fits."""
+             ran_for: float, budget: float, first: bool, external: bool, had: float | None = None) -> str:
+    """Account for a unit that did not finish: split it, or defer it to the next invocation.
+
+    ``had`` is the time the unit had when it started (the budget left). Only a
+    unit that ran first, with a whole budget, can be judged too long; any other
+    is deferred, since it runs first next time. A unit that cannot be split
+    raises OutOfTime: a time limit, not a test failure.
+    """
     label = _label(stage, state, files)
     share = len(files) / len(all_files) if files else 1.0
     # A lower bound on the whole stage, so later estimates and fresh runs plan for it.
@@ -327,15 +351,22 @@ def _stopped(ci, state: dict, times: dict, stage: str, files: list[str] | None, 
     interrupted = state.setdefault("interrupted", {})
     if external and first:
         interrupted[key] = interrupted.get(key, 0) + 1
-    overran = budget > 0 and (ran_for >= OVERRUN_SHARE * budget
-                              or interrupted.get(key, 0) >= INTERRUPTIONS_BEFORE_SPLIT)
+    had = budget if had is None else had
+    overran = budget > 0 and first and (ran_for >= OVERRUN_SHARE * had
+                                        or interrupted.get(key, 0) >= INTERRUPTIONS_BEFORE_SPLIT)
     if not overran:
-        return (f"{label} was stopped after {ran_for / 60:.1f} min, before it had a whole budget; "
+        why = ("with no budget set" if budget <= 0 else
+               "before it had a whole budget" if not first else "before it used its whole budget")
+        return (f"{label} was stopped after {ran_for / 60:.1f} min, {why}; "
                 "it runs first in the next invocation.")
     if not files or len(files) < 2:
-        what = "it is not a test stage" if not files else f"it is one test file ({files[0]})"
-        raise ci.Failure(f"{label} does not fit in a {budget / 60:g}-minute budget and cannot be split "
-                         f"further: {what}. Report it; no receipt was recorded")
+        what = "it is not a test stage" if not files else f"it is one test file, {files[0]}"
+        raise ci.OutOfTime(
+            f"{label} needs more than a whole {budget / 60:g}-minute budget and cannot be split further "
+            f"({what}). No receipt and no failure status were recorded. Run the same command once with "
+            "a larger --budget that still fits the job's time limit (for example --budget 44 under a "
+            "45-minute Monitor job), or with --budget 0 (this stage alone, no limit) where nothing "
+            "limits the run's time; then continue with the usual command")
     halves = _split(state, stage, files)
     return (f"{label} does not fit in a {budget / 60:g}-minute budget; split it into shards of "
             f"{halves[0]} and {halves[1]} test files. Finished shards are kept.")
@@ -429,12 +460,15 @@ def run_step(ci, args, python: str, revision: str) -> int:
         raise ci.Failure("full --step requires a clean checkout; commit changes first")
     batches, fluid, plan, identity = _plan(ci, args, python, revision)
     path, beat_path = _state_path(ci), _beat_path(ci)
+    lock = _claim(ci, _lock_path(ci))
+    try:
+        return _step_claimed(ci, args, python, revision, batches, fluid, plan, identity, path, beat_path)
+    finally:
+        _release(lock)
+
+
+def _step_claimed(ci, args, python, revision, batches, fluid, plan, identity, path, beat_path) -> int:
     beat = _load(beat_path)
-    other = beat.get("pid")
-    if (isinstance(other, int) and other != os.getpid()
-            and _wall() - beat.get("beat", 0) < 3 * HEARTBEAT_SECONDS and _alive(other)):
-        raise ci.Failure(f"Another full --step invocation (process {other}) is still running in this "
-                         "worktree. Wait for it to finish, then run the same command again.")
     state = _load(path)
     if getattr(args, "restart", False) or state.get("identity") != identity:
         state = _fresh_state(ci, identity, state)
@@ -479,9 +513,10 @@ def _recover(ci, args, state: dict, times: dict, beat: dict, revision: str, all_
           f"after about {max(ran_for, 0) / 60:.1f} min; no receipt was recorded for it.")
     try:
         print(_stopped(ci, state, times, attempt["stage"], attempt["files"], all_files(attempt["stage"]),
-                       max(ran_for, 0.0), attempt["budget"], attempt["first"], external=True))
+                       max(ran_for, 0.0), attempt["budget"], attempt["first"], external=True,
+                       had=attempt.get("available")))
     except ci.Failure as error:
-        if args.attest:
+        if args.attest and not isinstance(error, ci.OutOfTime):
             ci.attest("failure", f"Stage {attempt['stage']} on {ci.machine()}: {error}", revision)
         raise
 
@@ -536,7 +571,7 @@ def _advance(ci, args, python, revision, state, path, times, times_path, beat, h
             ci.attest("pending", f"Full gate from stage {stage} on {ci.machine()}", revision)
             posted = True
         attempt = {"id": uuid.uuid4().hex, "stage": stage, "files": files, "started": _wall(),
-                   "budget": budget, "first": first}
+                   "budget": budget, "available": budget - elapsed, "first": first}
         state["attempt"] = attempt
         heartbeat.attempt = attempt["id"]
         write_state(path, state)
@@ -562,9 +597,9 @@ def _advance(ci, args, python, revision, state, path, times, times_path, beat, h
             state.pop("attempt", None)
             try:
                 message = _stopped(ci, state, times, stage, files, stage_all, ran_for, budget,
-                                   first, external=False)
+                                   first, external=False, had=budget - elapsed)
             except ci.Failure as error:
-                if args.attest:
+                if args.attest and not isinstance(error, ci.OutOfTime):  # a time limit, not a failed test
                     ci.attest("failure", f"Stage {stage} on {ci.machine()}: {error}", revision)
                 raise
             finally:

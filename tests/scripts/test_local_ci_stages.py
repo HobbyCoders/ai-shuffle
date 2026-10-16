@@ -293,7 +293,7 @@ MINUTE = 60.0
 class Simulated:
     """A fake machine: suites cost simulated seconds and stop at the stage deadline."""
 
-    def __init__(self, monkeypatch, tmp_path, calls, fluid_costs, desktop=12 * MINUTE):
+    def __init__(self, monkeypatch, tmp_path, calls, fluid_costs, desktop=12 * MINUTE, batch=10 * MINUTE):
         self.calls, self.now, self.tmp_path = calls, [0.0], tmp_path
         self.fluid_costs = fluid_costs
         self.fluid_ran: list[str] = []
@@ -304,7 +304,7 @@ class Simulated:
         for name in fluid_costs:
             (tmp_path / name).write_text("def test_ok(): pass")
         monkeypatch.setattr(ci, "security_check", lambda *a, **kw: self.spend("security", 1 * MINUTE))
-        monkeypatch.setattr(ci, "backend", lambda ctx: self.spend(("backend", ctx.backend_selected), 10 * MINUTE))
+        monkeypatch.setattr(ci, "backend", lambda ctx: self.spend(("backend", ctx.backend_selected), batch))
         monkeypatch.setattr(ci, "run_suites", lambda mode, only, python: (
             self.spend(only[0], desktop) or (only, [], [])))
         monkeypatch.setattr(ci, "SUITES", [ci.Suite("backend", [], ci.backend, ""),
@@ -388,26 +388,46 @@ def test_cold_machine_halves_a_stage_that_overran_a_whole_budget(gate, monkeypat
     assert _times()["fluid"] == 3600
 
 
-def test_one_test_file_longer_than_the_budget_fails_instead_of_looping(gate, monkeypatch, tmp_path, capsys):
+def test_one_test_file_longer_than_the_budget_stops_instead_of_looping(gate, monkeypatch, tmp_path, capsys):
     calls, args = gate
     args.budget = 40
     Simulated(monkeypatch, tmp_path, calls, _fluid([50, 1]))
     (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps({"fluid": 51 * 60}))
-    with pytest.raises(ci.Failure, match=r"cannot be split further: it is one test file "
-                                         r"\(fluid/tests/unit/test_f00.py\)"):
+    with pytest.raises(ci.OutOfTime, match=r"cannot be split further \(it is one test file, "
+                                           r"fluid/tests/unit/test_f00.py\)"):
         for _ in range(8):
             step(args)
-    assert "failure" in calls and "success" not in calls and "record" not in calls
+    # A time limit, not a failed test: no failure status, and the way on is named.
+    assert "failure" not in calls and "success" not in calls and "record" not in calls
 
 
-def test_non_test_stage_longer_than_the_budget_fails_instead_of_looping(gate, monkeypatch, tmp_path):
+def test_non_test_stage_longer_than_the_budget_says_how_to_continue(gate, monkeypatch, tmp_path, capsys):
     calls, args = gate
     args.budget = 40
-    Simulated(monkeypatch, tmp_path, calls, _fluid([1]), desktop=50 * MINUTE)
-    with pytest.raises(ci.Failure, match="desktop does not fit .* it is not a test stage"):
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([1]), desktop=42 * MINUTE)
+    with pytest.raises(ci.OutOfTime, match="desktop needs more than a whole 40-minute budget .* "
+                                           r"\(it is not a test stage\)") as stopped:
         for _ in range(8):
             step(args)
-    assert "failure" in calls and "success" not in calls
+    assert "--budget 44" in str(stopped.value) and "--budget 0" in str(stopped.value)
+    assert "failure" not in calls and "success" not in calls
+    assert issubclass(ci.OutOfTime, ci.Failure)  # so the CLI still exits 1
+    args.budget = 44  # the advice: one larger budget for this stage
+    sim.drive(args, capsys)
+    assert calls.count("success") == 1
+
+
+def test_late_unit_that_only_had_part_of_the_budget_is_deferred_not_failed(gate, monkeypatch, tmp_path, capsys):
+    """Started 2 minutes in, a 39-minute desktop stage gets 38 minutes; it must run first next time."""
+    calls, args = gate
+    args.budget = 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([0.5]), desktop=39 * MINUTE, batch=0.25 * MINUTE)
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps({"desktop": 25 * 60}))
+    outputs = sim.drive(args, capsys)
+    assert "desktop was stopped after 38.0 min, before it had a whole budget" in outputs[0]
+    assert "it runs first in the next invocation" in outputs[0]
+    assert outputs[1].splitlines()[1] == "Full gate stage 5/6: desktop"  # first, with the whole budget
+    assert "failure" not in calls and calls.count("success") == 1
 
 
 class Killed(BaseException):
@@ -502,18 +522,27 @@ def test_repeated_kills_split_even_when_the_budget_exceeds_the_monitor(gate, mon
     assert calls.count("success") == 1
 
 
-def test_second_invocation_refuses_while_one_is_running(gate, tmp_path):
-    import os
-    import time
+def test_second_invocation_refuses_while_another_process_holds_the_lock(gate, tmp_path):
+    import subprocess
     _calls, args = gate
-    beat = ci.records_path().with_name("full-stages.beat")
-    beat.parent.mkdir(parents=True, exist_ok=True)
-    beat.write_text(json.dumps({"pid": os.getppid(), "beat": time.time(), "attempt": None}))
-    with pytest.raises(ci.Failure, match="Another full --step invocation"):
-        step(args)
-    beat.write_text(json.dumps({"pid": os.getppid(), "beat": time.time() - 3600, "attempt": None}))
-    assert step(args) == 0  # a stale heartbeat is a dead run, not a lock
-    assert json.loads(beat.read_text())["pid"] is None  # released at the end
+    lock = ci.records_path().with_name("full-stages.lock")
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         ("import sys, time; from pathlib import Path; sys.path.insert(0, sys.argv[1]);"
+          "import local_ci as ci, local_ci_stages as s; held = s._claim(ci, Path(sys.argv[2]));"
+          "print('held', flush=True); time.sleep(60)"),
+         str(Path(ci.__file__).parent), str(lock)],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        with pytest.raises(ci.Failure, match="Another full --step invocation"):
+            step(args)
+    finally:
+        holder.kill()  # an outright kill: the system drops its lock
+        holder.wait()
+    assert step(args) == 0
+    held = stages._claim(ci, lock)  # released at the end of the invocation
+    stages._release(held)
 
 
 def test_attest_refuses_receipts_that_do_not_cover_the_tree(gate, monkeypatch, tmp_path, capsys):
@@ -545,6 +574,7 @@ def test_success_names_the_tree_the_stages_covered(gate, monkeypatch, tmp_path, 
 
 def test_deadline_stops_the_whole_process_tree(tmp_path, monkeypatch):
     import os
+    import subprocess
     import time
     child_pid = tmp_path / "child.pid"
     script = ("import subprocess, sys, time, pathlib\n"
@@ -559,13 +589,19 @@ def test_deadline_stops_the_whole_process_tree(tmp_path, monkeypatch):
     pid = int(child_pid.read_text())
 
     def running(pid):
-        if os.name != "nt":
-            try:
-                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-                return state != "Z"  # an unreaped zombie is not running
-            except OSError:
-                pass
-        return stages._alive(pid)
+        if os.name == "nt":
+            listed = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, check=False)
+            return str(pid) in listed.stdout
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            return state != "Z"  # an unreaped zombie is not running
+        except OSError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
 
     for _ in range(50):
         if not running(pid):
