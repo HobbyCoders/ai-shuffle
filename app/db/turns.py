@@ -1065,6 +1065,46 @@ def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
         return _rows(cursor.fetchall() or [])
 
 
+def _inherit_reply_to(cursor: Any, turn_id: str, settled_rows: List[Any]) -> None:
+    """Hand a settled continuation's parent link to the turn that goes on.
+
+    Settling a parked row here never fires its completion hook, so the parent a
+    SendMessage continuation owes its report (``agent_message_reply_to``) must
+    move to the turn that carries the work forward (``exclude_turn_id``) — the
+    one whose settlement does fire it. Without this a wakeup turn parked beside
+    the continuation finished the work with no parent, and the task never
+    completed (#123). A turn that already names a parent keeps it.
+    """
+    owners = []
+    for row in settled_rows:
+        reply_to = (_parse_json(row.get("payload")) or {}).get("agent_message_reply_to")
+        if reply_to:
+            owners.append((float(row.get("position") or 0), reply_to))
+    if not owners:
+        return
+    cursor.execute("SELECT payload FROM turns WHERE id=%s FOR UPDATE", (turn_id,))
+    current = cursor.fetchone()
+    if current is None:
+        return
+    payload = dict(_parse_json(current.get("payload")) or {})
+    kept = payload.get("agent_message_reply_to")
+    if kept:
+        dropped = sorted({owner for _, owner in owners if owner != kept})
+        if dropped:
+            # Never silent: these parents' continuations end with no report.
+            logger.warning(
+                "turns: turn %s keeps reply_to %s; settled parked continuation(s) "
+                "for %s have no turn left to report them", turn_id, kept, dropped,
+            )
+        return
+    payload["agent_message_reply_to"] = max(owners, key=lambda item: item[0])[1]
+    cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), turn_id))
+    logger.info(
+        "turns: turn %s inherits reply_to %s from a settled parked continuation",
+        turn_id, payload["agent_message_reply_to"],
+    )
+
+
 def settle_parked_turns(
     session_id: str, exclude_turn_id: Optional[str] = None,
     *, resolved_before: Optional[datetime] = None,
@@ -1085,7 +1125,8 @@ def settle_parked_turns(
     Does NOT loosen ``settle_turn``'s own guard.
 
     ``exclude_turn_id`` protects the turn currently going live (the self-heal
-    call site) from settling itself. ``resolved_before`` restricts reconcile to
+    call site) from settling itself, and inherits a settled continuation's
+    ``agent_message_reply_to`` (:func:`_inherit_reply_to`). ``resolved_before`` restricts reconcile to
     parks whose foreground ended before a completed successor started. In that
     reconcile mode, take the session admission lock and recheck ownership,
     successor completion and absence of busy/newer parked turns in the UPDATE
@@ -1154,8 +1195,10 @@ def settle_parked_turns(
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         if can_settle is not None and not can_settle():
             return 0
-        cursor.execute(sql + "RETURNING id, payload", params)
+        cursor.execute(sql + "RETURNING id, payload, position", params)
         rows = cursor.fetchall()
+        if exclude_turn_id is not None and rows:
+            _inherit_reply_to(cursor, exclude_turn_id, rows)
         # Commit the lifecycle transition and its only terminal event together.
         # An append failure leaves the row parked, so Stop/repair can retry.
         from app.db import session_events

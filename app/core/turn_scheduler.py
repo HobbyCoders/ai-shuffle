@@ -1402,11 +1402,9 @@ async def _on_agent_message_locked(
         # A later message can see the rearmed row before ANY continuation starts.
         # Its saved context still belongs to the original dispatch, so inherit
         # the live continuation owner, not just the last executed turn's payload.
-        for owner in task_registry.sessions_with_task(session_id):
-            record = supervisor.get_worker(owner, session_id)
-            if record and record.continuation_turn_id:
-                reply_to = owner
-                break
+        from app.core.agent_messaging import live_continuation_owner
+
+        reply_to = live_continuation_owner(session_id)
     owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
     if reply_to and task_registry.is_user_stopped(reply_to):
         return None

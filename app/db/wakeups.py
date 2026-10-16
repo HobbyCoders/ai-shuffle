@@ -338,7 +338,12 @@ def idle_edge_candidates(
     * is ``status='active'`` (not streaming/parked/archived — i.e. no live turn);
     * was last touched within ``max_idle_seconds`` (when given);
     * has a persisted context-usage snapshot (``context_usage_json`` present);
-    * has NO in-flight turn (no ``turns`` row in a live state); and
+    * has NO in-flight turn (no ``turns`` row in a live state);
+    * is NOT parked: no ``parked`` turn row and no durable parked marker
+      (``parked_task_kind``). A parked session reads ``status='active'`` but is
+      waiting on its own background work; a nudge there runs as a separate turn
+      that the unpark wake later resumes in place of the parked one, which is
+      how a SendMessage continuation lost its parent link (#123); and
     * has NO pending wakeup already armed (so the watchdog never piles a second
       nudge on top of one it — or ScheduleWakeup — already scheduled).
 
@@ -350,8 +355,8 @@ def idle_edge_candidates(
     as a same-shape value under both Postgres and the SQLite shim.
     """
     _ph = ph()
-    live_states = ("queued", "running", "interrupting", "draining")
-    placeholders = ", ".join([_ph] * len(live_states))
+    busy_states = ("queued", "running", "interrupting", "draining", "parked")
+    placeholders = ", ".join([_ph] * len(busy_states))
     recency_sql = ""
     recency_params: tuple = ()
     if max_idle_seconds is not None and float(max_idle_seconds) > 0:
@@ -370,6 +375,7 @@ def idle_edge_candidates(
               AND s.status = {_ph}
               {recency_sql}
               AND s.context_usage_json IS NOT NULL
+              AND s.parked_task_kind IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM turns t
                   WHERE t.session_id = s.id
@@ -380,7 +386,7 @@ def idle_edge_candidates(
                   WHERE w.session_id = s.id
               )
             """,
-            (instance_id, status, *recency_params, *live_states),
+            (instance_id, status, *recency_params, *busy_states),
         )
         rows = cursor.fetchall() or []
     return rows_to_list(list(rows))

@@ -424,6 +424,40 @@ async def test_watchdog_skips_session_with_active_turn(mock_db, monkeypatch):
     assert scheduled == []
 
 
+@pytest.mark.parametrize("park", ["parked_turn", "parked_marker", "registry_work"])
+async def test_watchdog_skips_session_parked_on_background_work(mock_db, monkeypatch, park):
+    """A parked session reads status='active' but is not idle (#123): a nudge
+    there becomes a new turn the unpark wake resumes instead of the parked one."""
+    from app.core import wakeup_service
+    from app.core.task_registry import task_registry
+    from app.db import database
+    from app.db import turns as turns_db
+
+    sid = f"wd-{park}"
+    database.create_session(session_id=sid, profile_id="default")
+    database.set_session_context_usage(session_id=sid, data=_usage(190_000))
+    if park == "parked_turn":
+        turn = turns_db.enqueue_turn(sid, "agent_message", prompt="continue")
+        turns_db.start_turn(turn["id"], None, "runner")
+        turns_db.park_turn(turn["id"], ["monitor"])
+    elif park == "parked_marker":
+        database.set_session_parked_task_kind(sid, "shell")
+    else:
+        monkeypatch.setattr(
+            task_registry, "get_parking_background_work",
+            lambda session_id: [{"id": "monitor"}] if session_id == sid else [],
+        )
+
+    scheduled = []
+    monkeypatch.setattr(wakeup_service, "schedule",
+                        lambda **kw: scheduled.append(kw))
+
+    nudged = await wakeup_service.scan_once()
+
+    assert nudged == []
+    assert scheduled == []
+
+
 async def test_watchdog_skips_session_with_pending_wakeup(mock_db, monkeypatch):
     from app.core import wakeup_service
     from app.db import database

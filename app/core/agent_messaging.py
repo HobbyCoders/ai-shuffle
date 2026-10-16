@@ -372,14 +372,72 @@ def _persist_continuation_report(owner, session_id, report):
     )
 
 
+def live_continuation_owner(session_id):
+    """The parent whose SendMessage continuation of ``session_id`` is live.
+
+    A continuation registers a supervisor record carrying
+    ``continuation_turn_id``; a first Task dispatch does not, so its own
+    dispatch tail stays the only completer.
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.task_registry import task_registry
+
+    for owner in task_registry.sessions_with_task(session_id):
+        record = supervisor.get_worker(owner, session_id)
+        if record and record.continuation_turn_id:
+            return owner
+    return None
+
+
+def _inherited_continuation_owner(session_id, settled):
+    """The live continuation owner a reply_to-less turn reports to, if any.
+
+    Only a turn queued AFTER the continuation inherits it (higher ``position``):
+    one already running when SendMessage queued the continuation (a first
+    dispatch, a user's turn) ended before the continuation's work began, and
+    must not report as its result. The parent's task row must still be running.
+    Blocking (one indexed read).
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    owner = live_continuation_owner(session_id)
+    if not owner:
+        return None
+    if (task_registry.get_task(owner, session_id) or {}).get("status") != "running":
+        return None
+    record = supervisor.get_worker(owner, session_id)
+    continuation = turns_db.get_turn(record.continuation_turn_id) if record else None
+    try:
+        if (continuation is None or settled.get("position") is None
+                or float(settled["position"]) <= float(continuation["position"])):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return owner
+
+
 async def finish_message_resume(session_id, settled, outcome):
     """Complete a resumed worker through the same parent wake gate as Task."""
     from app.core import provider_agent, turn_scheduler
     from app.core.task_registry import task_registry
 
-    owner = (settled.get("payload") or {}).get("agent_message_reply_to")
-    if not owner or outcome == "parked":
+    if outcome == "parked":
         return
+    owner = (settled.get("payload") or {}).get("agent_message_reply_to")
+    if not owner:
+        # The turn that ran the continuation's last step need not be the one
+        # SendMessage queued: a wakeup turn (idle watchdog, ScheduleWakeup) that
+        # parked beside it is what the unpark wake resumes (#123). Its parent
+        # is still the live continuation's owner.
+        owner = await asyncio.to_thread(_inherited_continuation_owner, session_id, settled)
+        if not owner:
+            return
+        logger.info(
+            "agent_messaging: turn %s of %s carries no reply_to; completing the "
+            "live continuation for %s", settled.get("id"), session_id, owner,
+        )
     from app.core import provider_agent_supervisor as supervisor
     from app.db import turns as turns_db
 
