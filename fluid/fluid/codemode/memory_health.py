@@ -24,7 +24,12 @@ from pathlib import Path
 
 from fluid.codemode import facts
 from fluid.codemode.continual import MIN_NEW_ENTRIES
-from fluid.codemode.skills import MAX_MEMORIES, atomic_write_text
+from fluid.codemode.skills import (
+    JOURNAL_LOSS_FILE,
+    MAX_MEMORIES,
+    atomic_write_text,
+    read_journal_loss,
+)
 
 HEALTH_FILE = "memory-health.json"
 DAY = 86400.0
@@ -35,6 +40,14 @@ ACTIVE_MIN_USER_ENTRIES = 5
 LEARNER_QUIET = 14 * DAY
 FAILED_PASS_SHARE = 0.5
 MIN_PASSES_TO_JUDGE = 4
+# Coverage: journal entries the overflow reap dropped unread, as a share of
+# what the learner took in over COVERAGE_WINDOW (read, filtered as low value,
+# or dropped). journal_loss.json holds a running total only, so each run
+# keeps a few (time, total) samples in the health state to measure growth.
+COVERAGE_WINDOW = 3 * DAY
+DROPPED_SHARE = 0.1
+LOSS_SAMPLE_EVERY = 3 * 3600.0
+LOSS_SAMPLES_KEPT = 64
 # Usage: share of settled facts (older than USAGE_GRACE) never recalled and
 # not in any current snapshot.
 USAGE_GRACE = 7 * DAY
@@ -134,11 +147,16 @@ def _oldest_log_ts(store) -> float | None:
     return min(stamps) if stamps else None
 
 
+def _budget_skipped(row: dict) -> bool:
+    return str(row.get("error") or "").startswith("InferenceBudgetExhausted")
+
+
 def _counts_as_failure(row: dict) -> bool | None:
     """True for a failed pass, False for one that ran, None for neither
-    (a pass skipped for a held lock or a spent daily budget)."""
+    (no model call: a held lock, a spent daily budget, or a slice of
+    low-value entries only)."""
     error = str(row.get("error") or "")
-    if error.startswith("skipped:") or error.startswith("InferenceBudgetExhausted"):
+    if row.get("ran") is False or error.startswith("skipped:") or _budget_skipped(row):
         return None
     if error and not row.get("consumed"):
         return True
@@ -270,8 +288,10 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     doc = store._facts.snapshot()
     live = _local(doc)
     plans = _snapshot_plans(store, [e for e in live if not e.get("conflicted")])
+    learner = _learner_signal(store, now, learning_enabled, previous)
+    samples = learner.pop("samples", previous.get("journal_loss_samples") or [])
     signals = [
-        _learner_signal(store, now, learning_enabled),
+        learner,
         _usage_signal(live, plans, now),
         _unconfirmed_signal(live, now),
         _duplicates_signal(live),
@@ -290,12 +310,63 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
         "signals": signals,
         "protected_ids": protected_ids,
         "lost_protected": lost,
+        "journal_loss_samples": samples,
     }
 
 
-def _learner_signal(store, now, learning_enabled) -> dict:
+def _loss_samples(store, now, previous) -> tuple[list[list[float]], int, int | None]:
+    """``(samples, dropped_total, dropped_in_window)``.
+
+    ``samples`` are the ``[at, dropped_unsynthesized]`` pairs to keep, this
+    run's reading included. ``dropped_in_window`` is the growth since the
+    newest sample at least COVERAGE_WINDOW old (or the oldest one, while the
+    history is shorter), None with no earlier sample to compare against.
+    """
+    record = read_journal_loss(Path(store.root) / JOURNAL_LOSS_FILE) or {}
+    total = int(record.get("dropped_unsynthesized") or 0)
+    kept = []
+    for sample in previous.get("journal_loss_samples") or []:
+        if (isinstance(sample, list) and len(sample) == 2
+                and all(isinstance(v, (int, float)) for v in sample) and sample[0] <= now):
+            kept.append([float(sample[0]), int(sample[1])])
+    kept.sort()
+    baseline = None
+    if kept:
+        older = [s for s in kept if s[0] <= now - COVERAGE_WINDOW]
+        baseline = older[-1] if older else kept[0]
+    # A total below the baseline means the record was reset: count from zero.
+    dropped = None if baseline is None else (total - baseline[1] if total >= baseline[1] else total)
+    if not kept or now - kept[-1][0] >= LOSS_SAMPLE_EVERY:
+        kept.append([now, total])
+    # Keep the window, plus the newest sample before it as the baseline.
+    start = max((i for i, s in enumerate(kept) if s[0] <= now - COVERAGE_WINDOW), default=0)
+    return kept[start:][-LOSS_SAMPLES_KEPT:], total, dropped
+
+
+def _coverage(store, now, previous) -> dict:
+    """What the learner took in over COVERAGE_WINDOW, from the pass log and
+    the journal loss record."""
+    rows = [r for r in _log_rows(store, now - COVERAGE_WINDOW) if r.get("kind") == "synthesis"]
+    read = sum(int(r.get("consumed") or 0) for r in rows if _counts_as_failure(r) is False)
+    filtered = sum(int(r.get("filtered") or 0) for r in rows)
+    skipped = [r for r in rows if _budget_skipped(r)]
+    budget_days = len({int(float(r.get("ts") or 0) // DAY) for r in skipped})
+    samples, total, dropped = _loss_samples(store, now, previous)
+    return {"read_3d": read, "filtered_3d": filtered, "dropped_3d": dropped,
+            "dropped_total": total, "budget_skips_3d": len(skipped),
+            "budget_spent_days_3d": budget_days, "samples": samples}
+
+
+def _learner_signal(store, now, learning_enabled, previous=None) -> dict:
     if not learning_enabled:
         return _signal("learner", False, "Background learning is off.")
+    coverage = _coverage(store, now, previous or {})
+    signal = _learner_outcome(store, now, coverage)
+    signal["samples"] = coverage["samples"]
+    return signal
+
+
+def _learner_outcome(store, now, coverage) -> dict:
     try:
         recent_user = sum(
             1 for e in store.journal_entries()
@@ -309,22 +380,39 @@ def _learner_signal(store, now, learning_enabled) -> dict:
     outcomes = [o for o in outcomes if o is not None]
     passes, failed = len(outcomes), sum(outcomes)
     detail = {"recent_user_entries": recent_user, "pending_entries": pending,
-              "passes_7d": passes, "failed_passes_7d": failed}
+              "passes_7d": passes, "failed_passes_7d": failed,
+              **{k: v for k, v in coverage.items() if k != "samples"}}
+    budget_days = coverage["budget_spent_days_3d"]
+    # Said on every outcome below: a spent budget is why entries wait or drop.
+    budget_note = (
+        f" The daily learning budget ran out on {_plural(budget_days, 'day')} of the last 3."
+        if budget_days else ""
+    )
+    dropped = coverage["dropped_3d"]
+    taken_in = coverage["read_3d"] + coverage["filtered_3d"] + (dropped or 0)
+    if dropped and dropped >= MIN_NEW_ENTRIES and dropped >= DROPPED_SHARE * taken_in:
+        return _signal(
+            "learner", True,
+            f"The learner read {coverage['read_3d']} of {taken_in} journal entries in the "
+            f"last 3 days; {dropped} were dropped unread." + budget_note, **detail)
     if recent_user < ACTIVE_MIN_USER_ENTRIES and not passes:
-        return _signal("learner", False, "Too little recent activity to judge.", **detail)
+        return _signal("learner", False, "Too little recent activity to judge." + budget_note, **detail)
     if not passes and pending >= MIN_NEW_ENTRIES:
-        return _signal("learner", True, "Learning has not run despite recent sessions.", **detail)
+        return _signal("learner", True, "Learning has not run despite recent sessions." + budget_note,
+                       **detail)
     if passes >= MIN_PASSES_TO_JUDGE and failed / passes >= FAILED_PASS_SHARE:
-        return _signal("learner", True, f"{failed} of {passes} learning passes this week failed.", **detail)
+        return _signal("learner", True, f"{failed} of {passes} learning passes this week failed.",
+                       **detail)
     last_write = float(store.learner_yield().get("last_write_at") or 0)
     detail["last_write_at"] = last_write or None
     oldest = _oldest_log_ts(store)
     running_long_enough = oldest is not None and now - oldest >= LEARNER_QUIET
     if running_long_enough and now - last_write >= LEARNER_QUIET:
-        return _signal("learner", True, "The learner saved no fact in 14 days of sessions.", **detail)
+        return _signal("learner", True, "The learner saved no fact in 14 days of sessions." + budget_note,
+                       **detail)
     if last_write and now - last_write < LEARNER_QUIET:
-        return _signal("learner", False, "The learner is saving facts.", **detail)
-    return _signal("learner", False, "The learner is running.", **detail)
+        return _signal("learner", False, "The learner is saving facts." + budget_note, **detail)
+    return _signal("learner", False, "The learner is running." + budget_note, **detail)
 
 
 def _usage_signal(live, plans, now) -> dict:

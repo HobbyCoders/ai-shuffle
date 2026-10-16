@@ -344,9 +344,15 @@ class FactStore:
             calls = budget.get("calls", 0) if budget.get("day") == day else 0
             if calls >= MAX_INFERENCE_CALLS_PER_DAY - max(0, reserve):
                 return False
-            doc["inference_budget"] = {"day": day, "calls": calls + 1}
+            doc["inference_budget"] = {"day": day, "calls": calls + 1, "last_at": time.time()}
             self._write(doc)
             return True
+
+    def inference_budget(self):
+        """``{"day", "calls", "last_at"}`` of the day's claims so far, read
+        without the lock (the document is replaced atomically); {} when none."""
+        budget = self._load().get("inference_budget")
+        return dict(budget) if isinstance(budget, dict) else {}
 
     def snapshot(self):
         with file_transaction(self.lock):

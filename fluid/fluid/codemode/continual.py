@@ -31,7 +31,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from fluid.codemode.facts import MAX_INFERENCE_CALLS_PER_DAY
 from fluid.codemode.skills import (
+    JOURNAL_MAX_BYTES,
     LEARNER_SILENCE_ALARM_SECONDS,
     MAX_LOG_BYTES,
     MAX_LOG_ENTRIES,
@@ -357,13 +359,18 @@ class InferenceBudgetExhausted(RuntimeError):
     """The store's daily inference-call budget is spent (see facts.py)."""
 
 
-# Journal previews are already trimmed at write time; cap the slice we show.
-MAX_ENTRIES_PER_PASS = 40
+# Journal lines one pass reads. Low-value lines (see low_value_entry) are
+# consumed without being shown, so this bounds the read, not the prompt: the
+# prompt is bounded by PROMPT_CHAR_LIMIT below. At 40 lines and 32k chars a
+# busy worker's pass showed about 12 entries, 48 calls covered about 570 of
+# roughly 1,700 a day, and the overflow reap dropped the rest unread (#103).
+MAX_ENTRIES_PER_PASS = 400
 # The request's user-message size. Split so the journal always fits: memory
 # lines have a fixed budget, the skill library a reserve, and the journal the
 # rest (never less than the minimum); the library then fills whatever the
-# journal left unused.
-PROMPT_CHAR_LIMIT = 32_000
+# journal left unused. About 25k input tokens, far inside every learner
+# model's window; sized so a day's paced passes read a busy day's journal.
+PROMPT_CHAR_LIMIT = 96_000
 MEMORY_PROMPT_CHARS = 6_000
 LIBRARY_PROMPT_RESERVE = 8_000
 JOURNAL_MIN_PROMPT_CHARS = 8_000
@@ -416,6 +423,71 @@ CONSOLIDATE_MIN_MEMORIES = 8
 # otherwise spend the whole facts.MAX_INFERENCE_CALLS_PER_DAY budget, and a
 # store whose learner is always out of budget is never curated.
 CONSOLIDATE_RESERVED_CALLS = 2
+# Synthesis calls are spread over the UTC day instead of spent as soon as
+# entries arrive: by a given time of day a store may have made
+# PACE_BURST_CALLS plus its share of the day's calls so far, and never two
+# within MIN_PASS_INTERVAL. Before this, a busy worker spent all 48 calls
+# by 00:04-03:55 UTC and its learner read nothing for the rest of the day.
+# A pass that waits reads a bigger slice instead. A pending Remember entry
+# (mark_urgent) is not paced; the daily cap still holds.
+PACE_BURST_CALLS = 2
+MIN_PASS_INTERVAL = 15 * 60.0
+# Past this share of JOURNAL_MAX_BYTES (between the reap target and the
+# overflow line) a pass may run ahead of the pace, still MIN_PASS_INTERVAL
+# apart, so a burst of sessions is read instead of reaped.
+PACE_PRESSURE_FRACTION = 0.6
+# Successful cells are shown with their code and output clipped to these
+# sizes; a failed cell is shown whole. What a working cell did is in its
+# first lines and its tool list, and the long tail of a file it printed is
+# what the repository records anyway.
+OK_CELL_CODE_CHARS = 1_200
+OK_CELL_OUTPUT_CHARS = 400
+# Tools whose successful calls only read: file and search reads and task
+# status polls (MCP-namespaced ids match on their last segment).
+READ_ONLY_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "LS", "NotebookRead",
+    "TaskGet", "TaskList", "TaskOutput", "ToolSearch",
+})
+
+
+def paced_call_allowance(now: float) -> int:
+    """Synthesis calls a store may have made by ``now`` in its UTC day."""
+    budget = MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS
+    elapsed = (now % 86400) / 86400
+    return min(budget, PACE_BURST_CALLS + int(budget * elapsed))
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + " …[clipped]"
+
+
+def _tool_base(name: Any) -> str:
+    return str(name or "").rsplit("__", 1)[-1]
+
+
+def low_value_entry(entry: dict) -> bool:
+    """True for a journal entry the learner consumes without showing it.
+
+    A call or cell that succeeded and only read (``READ_ONLY_TOOLS``) shows
+    repository content or task progress: what the repository or the task
+    already records, which the learner is told never to memorize. Everything
+    else is shown: conversation, Remember and friction entries, any failure,
+    and every cell that wrote, ran a command, used a skill or called no tool.
+    """
+    kind = entry.get("kind", "cell")
+    if kind == "tool":
+        return not entry.get("error") and _tool_base(entry.get("name")) in READ_ONLY_TOOLS
+    if kind != "cell" or entry.get("error"):
+        return False
+    calls = entry.get("calls")
+    if isinstance(calls, list) and any(
+        isinstance(c, dict) and c.get("ok") is False for c in calls
+    ):
+        return False
+    if referenced_skills(str(entry.get("code", ""))):
+        return False
+    tools = entry.get("tools") or []
+    return bool(tools) and all(_tool_base(t) in READ_ONLY_TOOLS for t in tools)
 
 
 class Synthesizer:
@@ -543,7 +615,28 @@ class Synthesizer:
         new = self._store.journal_count() - self._store.synth_cursor()
         if self._urgent and new >= 1:
             return True
-        return new >= self._min_new
+        return new >= self._min_new and self._paced()
+
+    def _paced(self, now: float | None = None) -> bool:
+        """True when the day's spread of calls leaves room for a pass now
+        (see PACE_BURST_CALLS). A pass held back here leaves no log row."""
+        now = time.time() if now is None else now
+        try:
+            budget = self._store._facts.inference_budget()
+        except Exception:  # noqa: BLE001 — an unreadable budget is checked at claim
+            return True
+        if budget.get("day") != int(now // 86400):
+            return True
+        calls = int(budget.get("calls") or 0)
+        if calls >= MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS:
+            return False  # spent: every session's learner waits for the next day quietly
+        if now - float(budget.get("last_at") or 0.0) < MIN_PASS_INTERVAL:
+            return False
+        if calls < paced_call_allowance(now):
+            return True
+        # Ahead of the pace, but the backlog is heading for the overflow
+        # reap: a later call spent now beats entries dropped unread.
+        return self._store._journal_size() > JOURNAL_MAX_BYTES * PACE_PRESSURE_FRACTION
 
     def kick(self) -> None:
         """Start a background pass if one is due and none is running."""
@@ -611,7 +704,8 @@ class Synthesizer:
             # retained by reap) and is retried once the UTC day rolls over.
             self._budget_spent_day = int(time.time() // 86400)
             self.last_error = f"{type(exc).__name__}: {exc}"
-            self._log_pass("synthesis", [], error=self.last_error)
+            # No call was made, so this is not a silent pass.
+            self._log_pass("synthesis", [], error=self.last_error, ran=False)
             # Synthesis stops short of CONSOLIDATE_RESERVED_CALLS, so a due
             # curation pass can still run on the calls it left.
             changed = []
@@ -627,7 +721,9 @@ class Synthesizer:
                 )
             except InferenceBudgetExhausted as exc:
                 self._budget_spent_day = int(time.time() // 86400)
-                self._log_pass("consolidation", [], error=f"{type(exc).__name__}: {exc}")
+                self._log_pass(
+                    "consolidation", [], error=f"{type(exc).__name__}: {exc}", ran=False,
+                )
             except Exception as exc:  # consolidation is opportunistic, never fatal
                 self._consolidation_failed(f"{type(exc).__name__}: {exc}")
         await self._notify(changed)
@@ -730,12 +826,24 @@ class Synthesizer:
                 # later pass would stop at the same corrupt line.
                 self._store.set_synth_cursor(reached)
             return []
+        # Low-value entries are consumed unshown, so neither the prompt nor
+        # the day's calls are spent on them.
+        shown = [(n, e) for n, e in indexed if not low_value_entry(e)]
+        if not shown:
+            self._store.set_synth_cursor(min(reached, self._store.journal_count()))
+            self._log_pass("synthesis", [], consumed=0, filtered=len(indexed), ran=False)
+            try:
+                self._store.reap_journal()
+            except Exception:
+                pass
+            return []
         # Only what the prompt can show is consumed: the rest of the slice
         # stays behind the cursor for the next pass.
-        fitted = self._fit_journal(indexed)
-        deferred = len(indexed) - len(fitted)
+        fitted = self._fit_journal(shown)
+        deferred = len(shown) - len(fitted)
         if deferred:
             reached = fitted[-1][0]
+        filtered = sum(1 for n, _ in indexed if n <= reached) - len(fitted)
         entries = [e for _, e in fitted]
         groups: dict[str | None, list[dict]] = {}
         for entry in entries:
@@ -801,6 +909,7 @@ class Synthesizer:
             "synthesis", changed, error=self.last_error,
             consumed=len(entries), output_preview=text, usage=usage,
             stop_reason=self.last_stop_reason, deferred=deferred or None,
+            filtered=filtered or None,
         )
         return changed
 
@@ -818,12 +927,16 @@ class Synthesizer:
         provider_status: int | None = None,
         retry_after_s: float | None = None,
         deferred: int | None = None,
+        filtered: int | None = None,
         ran: bool = True,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
 
-        ``ran=False`` marks a row for a pass that never started (the lock
-        was held elsewhere); it does not count toward the yield alarm.
+        ``ran=False`` marks a row for a pass that made no model call (the
+        lock was held elsewhere, the daily budget was spent, or every entry
+        was low-value); it carries ``"ran": false`` and does not count toward
+        the yield alarm. ``filtered`` counts low-value entries the pass
+        consumed without showing them.
 
         ``last_error`` dies with the process, and a background pass that
         silently fails — or silently decides NO_CHANGES — is otherwise
@@ -846,6 +959,10 @@ class Synthesizer:
             record["consumed"] = consumed
         if deferred:
             record["deferred"] = int(deferred)
+        if filtered:
+            record["filtered"] = int(filtered)
+        if not ran:
+            record["ran"] = False
         if usage:
             record["usage"] = dict(usage)
         if error:
@@ -1171,17 +1288,17 @@ class Synthesizer:
                 f"[tool] {e.get('name')}({str(e.get('input', '')).strip()}) "
                 f"-> {outcome}"
             )]
-        lines = [
-            f"### cell {cell_no}",
-            "```python",
-            str(e.get("code", "")).rstrip("\n"),
-            "```",
-        ]
+        code = str(e.get("code", "")).rstrip("\n")
         summary = {
             k: e[k]
             for k in ("stdout", "value", "error", "host_calls", "tools")
             if e.get(k)
         }
+        if not e.get("error"):
+            code = _clip(code, OK_CELL_CODE_CHARS)
+            if isinstance(summary.get("stdout"), str):
+                summary["stdout"] = _clip(summary["stdout"], OK_CELL_OUTPUT_CHARS)
+        lines = [f"### cell {cell_no}", "```python", code, "```"]
         if summary:
             lines.append(f"outcome: {json.dumps(summary, ensure_ascii=False)}")
         return lines
