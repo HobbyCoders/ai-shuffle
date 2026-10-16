@@ -115,6 +115,21 @@ describe('sessionGitState', () => {
 		expect(mocks.getGitStatus).toHaveBeenCalledTimes(4);
 	});
 
+	it('treats a device sleep as a long hide even though the monotonic clock stood still', async () => {
+		sessionGitState.watch('s1', 'proj-1');
+		await flush();
+		Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+		document.dispatchEvent(new Event('visibilitychange'));
+		// An hour of sleep: the wall clock jumps, performance.now() and timers do not.
+		const before = performance.now();
+		vi.setSystemTime(Date.now() + 3_600_000);
+		expect(performance.now()).toBe(before);
+		Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+		document.dispatchEvent(new Event('visibilitychange'));
+		await flush();
+		expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
+	});
+
 	it('retries a failed read on the first return instead of waiting a period', async () => {
 		mocks.getGitStatus.mockRejectedValueOnce(new Error('offline'));
 		sessionGitState.watch('s1', 'proj-1');

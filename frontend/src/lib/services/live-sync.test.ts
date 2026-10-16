@@ -252,6 +252,31 @@ describe('root authenticated live-sync lifecycle',()=>{
    setHidden(true);await vi.advanceTimersByTimeAsync(5_000);setHidden(false);await vi.advanceTimersByTimeAsync(100);
    expect(m.reconnect).not.toHaveBeenCalled();expect(m.invalidate).not.toHaveBeenCalled();expect(m.loadSessions).not.toHaveBeenCalled();
   });
+  it('a device sleep counts as a long hide although the monotonic clock stood still',async()=>{
+   stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
+   m.reconnect.mockClear();m.invalidate.mockClear();
+   setHidden(true);
+   const before=performance.now();vi.setSystemTime(Date.now()+3_600_000);expect(performance.now()).toBe(before);
+   setHidden(false);
+   expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenCalledOnce();
+  });
+  it('a quick hide after the socket went quiet for a reconcile period refreshes everything',async()=>{
+   stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
+   Socket.all[0].emit({type:'sync_ready'});
+   // Visible, but nothing heard for a period: the socket may be half-open.
+   await vi.advanceTimersByTimeAsync(60_000);
+   m.reconnect.mockClear();m.invalidate.mockClear();
+   setHidden(true);await vi.advanceTimersByTimeAsync(1_000);setHidden(false);
+   expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenCalledOnce();
+  });
+  it('coming back online while hidden makes even a quick return refresh everything',async()=>{
+   stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
+   m.reconnect.mockClear();m.invalidate.mockClear();
+   setHidden(true);window.dispatchEvent(new Event('online'));
+   expect(m.invalidate).not.toHaveBeenCalled();
+   await vi.advanceTimersByTimeAsync(5_000);setHidden(false);
+   expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenCalledOnce();
+  });
   it('a hide past one reconcile period, or coming back online, refreshes everything once',async()=>{
    stop=startLiveSync();account('alice');await vi.advanceTimersByTimeAsync(100);
    m.reconnect.mockClear();m.invalidate.mockClear();

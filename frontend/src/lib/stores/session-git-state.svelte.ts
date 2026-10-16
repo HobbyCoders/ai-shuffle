@@ -50,7 +50,9 @@ interface Watch {
 	timer: ReturnType<typeof setInterval> | null;
 	/** One-shot wait for the rest of the period after a visibility return. */
 	delay: ReturnType<typeof setTimeout> | null;
-	/** performance.now() of the last successful read, or null before one. */
+	/** Date.now() of the last successful read, or null before one. Wall clock,
+	 *  not performance.now(): the monotonic clock stops during device sleep on
+	 *  Android, macOS and Linux, so a long sleep would look like a short hide. */
 	loadedAt: number | null;
 	inFlight: boolean;
 }
@@ -98,7 +100,7 @@ async function load(sessionId: string) {
 		}
 		entries[sessionId] = { status, diffStats, loaded: true };
 		cachedScopes.set(sessionId, watch.scope);
-		watch.loadedAt = performance.now();
+		watch.loadedAt = Date.now();
 	} catch {
 		// Quietly settle on "nothing to show" rather than leaving the card
 		// pending forever; a later tick can still succeed.
@@ -139,7 +141,8 @@ function resumeWatch(sessionId: string, watch: Watch) {
 		void load(sessionId);
 		watch.timer = setInterval(() => void load(sessionId), REFRESH_MS);
 	};
-	const wait = watch.loadedAt === null ? 0 : watch.loadedAt + REFRESH_MS - performance.now();
+	// Capped at one period in case the wall clock was set back.
+	const wait = watch.loadedAt === null ? 0 : Math.min(REFRESH_MS, watch.loadedAt + REFRESH_MS - Date.now());
 	if (wait <= 0) poll();
 	else watch.delay = setTimeout(poll, wait);
 }

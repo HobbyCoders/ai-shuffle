@@ -65,10 +65,16 @@ export function startLiveSync() {
   if (document.hidden) preferencesDeferred = true;
   else void preferenceSync.reconnect();
  };
- // When the tab was last hidden. A short hide catches up only on what the
- // socket reported meanwhile; a long one (past a server reconcile period,
- // or a page that loaded hidden) refreshes everything once.
+ // When the tab was last hidden (Date.now()). A short hide catches up only
+ // on what the socket reported meanwhile; a long one (past a server reconcile
+ // period, a page that loaded hidden, or a network drop while hidden)
+ // refreshes everything once. Wall clock, not performance.now(): the
+ // monotonic clock stops during device sleep on Android, macOS and Linux.
  let hiddenAt: number | null = document.hidden ? -Infinity : null;
+ // When the global socket last heard from the server. A socket that went
+ // quiet for a reconcile period may be half-open after a sleep, so what it
+ // "reported meanwhile" cannot be trusted either.
+ let lastSocketMessageAt = Date.now();
  // When the project catalog was last invalidated: a catalog request that
  // started after it (the boot load, at startup) already answers it.
  let projectsInvalidatedAt = 0;
@@ -116,9 +122,10 @@ export function startLiveSync() {
   const ws = new WebSocket(wsUrl('/api/v1/ws/global', { device_id: getOrCreateDeviceId() }));
   socket = ws;
   let lastMessage = Date.now();
+  lastSocketMessageAt = lastMessage;
   ws.onmessage = event => {
    if (epoch !== generation || socket !== ws) return;
-   lastMessage = Date.now();
+   lastMessage = lastSocketMessageAt = Date.now();
    let data: Record<string, unknown>;
    try { data = JSON.parse(event.data); } catch { return; }
    if (data.type === 'sync_ready') {
@@ -202,12 +209,17 @@ export function startLiveSync() {
   if (full || preferencesDeferred) { preferencesDeferred = false; void preferenceSync.reconnect(); }
   if (full) invalidate();
  };
- const online = () => resume(true);
+ const online = () => {
+  // Hidden: resume() would skip it, so the next return catches up in full.
+  if (document.hidden) { hiddenAt = -Infinity; return; }
+  resume(true);
+ };
  const visibility = () => {
-  if (document.hidden) { hiddenAt ??= performance.now(); return; }
+  if (document.hidden) { hiddenAt ??= Date.now(); return; }
   const since = hiddenAt;
   hiddenAt = null;
-  resume(since === null || performance.now() - since >= FULL_RESUME_AFTER_MS);
+  const now = Date.now();
+  resume(since === null || now - since >= FULL_RESUME_AFTER_MS || now - lastSocketMessageAt >= FULL_RESUME_AFTER_MS);
  };
  window.addEventListener('online', online);
  document.addEventListener('visibilitychange', visibility);
