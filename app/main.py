@@ -104,13 +104,10 @@ CONSOLE_HANDLER_NAME = "ai-shuffle-console"
 if os.environ.get("TESTING") != "1" and not any(
     handler.get_name() == CONSOLE_HANDLER_NAME for handler in root_logger.handlers
 ):
-    from app.core.queued_logging import QueuedHandler
-
-    sink = logging.StreamHandler()
-    sink.setFormatter(log_format)
-    console_handler = QueuedHandler(sink)
+    console_handler = logging.StreamHandler()
     console_handler.set_name(CONSOLE_HANDLER_NAME)
     console_handler.setLevel(log_level)
+    console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
@@ -179,6 +176,17 @@ async def lifespan(app: FastAPI):
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.loop_watchdog import start_loop_watchdog, stop_loop_watchdog
     from app.core.plugin_auto_update import start_plugin_auto_update, stop_plugin_auto_update
+
+    # Uvicorn configures logging after importing this entrypoint and closes
+    # existing handlers. Start queue consumers HERE, not at import time, or
+    # its dictConfig would silently stop the console/ring consumers.
+    from app.api.logs import ring_handler
+    from app.core.queued_logging import QueuedHandler, install_queued_handler
+
+    install_queued_handler(root_logger, ring_handler)
+    for handler in list(root_logger.handlers):
+        if handler.get_name() == CONSOLE_HANDLER_NAME:
+            install_queued_handler(root_logger, handler.sink if isinstance(handler, QueuedHandler) else handler)
 
     # Persistent, crash-surviving on-disk logging: attach a RotatingFileHandler
     # to the root logger + enable faulthandler + a logging excepthook so a crash

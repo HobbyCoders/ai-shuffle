@@ -19,7 +19,6 @@ from pydantic import BaseModel
 
 from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.db import error_logs
-from app.core.queued_logging import QueuedHandler
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +72,7 @@ ring_handler.setFormatter(
 )
 
 _root = logging.getLogger()
-ring_queue_handler = QueuedHandler(ring_handler)
-_root.addHandler(ring_queue_handler)
+_root.addHandler(ring_handler)
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Tests for persistent, crash-surviving file logging (app.core.file_logging).
 
 Covers:
-- setup_file_logging attaches a RotatingFileHandler with the configured level,
+- setup_file_logging queues a RotatingFileHandler with the configured level,
   rotation sizing, and UTF-8 encoding, under <data_dir>/logs/<instance_id>/app.log
   (per-instance namespacing so installs sharing a data dir never fight over
   rotation).

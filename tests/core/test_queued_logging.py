@@ -119,3 +119,32 @@ def test_sink_level_changes_are_respected_and_arguments_are_snapshotted():
         assert output.getvalue() == "before\n"
     finally:
         handler.close()
+
+
+def test_installation_is_idempotent_and_replaces_a_closed_consumer():
+    from app.core.queued_logging import install_queued_handler
+
+    logger = logging.Logger("isolated-console", level=logging.INFO)
+    output = io.StringIO()
+    sink = logging.StreamHandler(output)
+    sink.set_name("isolated-console-sink")
+    logger.addHandler(sink)
+    first = install_queued_handler(logger, sink)
+    try:
+        assert install_queued_handler(logger, sink) is first
+        assert logger.handlers == [first]
+        logger.info("first lifespan")
+        first.flush()
+        first.close()  # logging.config.dictConfig closes registered handlers
+        second = install_queued_handler(logger, sink)
+        try:
+            assert second is not first
+            assert second.get_name() == sink.get_name()
+            assert logger.handlers == [second]
+            logger.info("second lifespan")
+            second.flush()
+            assert output.getvalue() == "first lifespan\nsecond lifespan\n"
+        finally:
+            second.close()
+    finally:
+        first.close()

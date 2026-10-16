@@ -94,3 +94,22 @@ class QueuedHandler(logging.Handler):
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=2)
         super().close()
+
+
+def install_queued_handler(logger: logging.Logger, sink: logging.Handler) -> QueuedHandler:
+    """Wrap a configured sink once, after server logging configuration.
+
+    dictConfig closes registered handlers, including queue consumers, even with
+    disable_existing_loggers=False. Repeated lifespan startup must replace such
+    a stopped bridge rather than mistake its name for an active consumer.
+    """
+    for handler in list(logger.handlers):
+        if isinstance(handler, QueuedHandler) and handler.sink is sink:
+            if not handler._closed:
+                return handler
+            logger.removeHandler(handler)
+    bridge = QueuedHandler(sink)
+    bridge.set_name(sink.get_name())
+    logger.removeHandler(sink)
+    logger.addHandler(bridge)
+    return bridge
