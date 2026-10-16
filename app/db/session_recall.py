@@ -75,7 +75,7 @@ from app.db.base import get_db, table_exists
 
 logger = logging.getLogger(__name__)
 
-VERSION = 2
+VERSION = 3
 TABLE = "session_recall_text"
 NATIVE, ENTRY, EVENT = "n", "s", "e"
 SOURCES = (NATIVE, ENTRY, EVENT)
@@ -95,6 +95,10 @@ PENDING = -1
 LOCK_TIMEOUT_MS = 250
 
 _TABLE_TAG = f"session_recall v{VERSION}"
+# Stands for the install schema in what the triggers run: names there are
+# schema-qualified at install, so a writer whose search_path lacks the schema
+# (``pg_restore`` sets it empty) is projected like any other.
+_S = "@schema@."
 
 # source -> (source table, trigger name suffixes)
 _SOURCE_TABLES = {
@@ -273,23 +277,23 @@ _DDL = [
         n := length(body);
         IF cap > {MAX_ROW_CHARS} THEN
             -- The background holds the source row's share lock.
-            DELETE FROM {TABLE} WHERE source = src AND session_id = sid AND row_key = rkey;
+            DELETE FROM {_S}{TABLE} WHERE source = src AND session_id = sid AND row_key = rkey;
             IF n > cap THEN
                 body := left(body, cap);
             END IF;
         ELSIF n > cap THEN
-            INSERT INTO {TABLE} (source, session_id, row_key, part, ts, body, seq, event_type, raw, stamp, chars)
+            INSERT INTO {_S}{TABLE} (source, session_id, row_key, part, ts, body, seq, event_type, raw, stamp, chars)
             VALUES (src, sid, rkey, {PENDING}, rts, '', eseq, etype, eraw, estamp, n)
             ON CONFLICT (source, session_id, row_key, part) DO UPDATE SET ts = EXCLUDED.ts,
                 seq = EXCLUDED.seq, event_type = EXCLUDED.event_type, raw = EXCLUDED.raw,
                 stamp = EXCLUDED.stamp, chars = EXCLUDED.chars;
             RETURN;
         END IF;
-        INSERT INTO {TABLE} (source, session_id, row_key, part, ts, body, seq, event_type, raw, stamp)
+        INSERT INTO {_S}{TABLE} (source, session_id, row_key, part, ts, body, seq, event_type, raw, stamp)
         SELECT src, sid, rkey, p.part, rts, p.piece,
                CASE WHEN p.part = 0 THEN eseq END, CASE WHEN p.part = 0 THEN etype END,
                CASE WHEN p.part = 0 THEN eraw END, CASE WHEN p.part = 0 THEN estamp END
-        FROM recall_pieces(body) p
+        FROM {_S}recall_pieces(body) p
         ON CONFLICT (source, session_id, row_key, part) DO UPDATE SET ts = EXCLUDED.ts,
             body = EXCLUDED.body, seq = EXCLUDED.seq, event_type = EXCLUDED.event_type,
             raw = EXCLUDED.raw, stamp = EXCLUDED.stamp;
@@ -308,7 +312,7 @@ def _sync_function(source: str, name: str, old_key: str, put: str, needs: tuple,
     keeps the legacy queries until the startup task rebuilds everything.
     """
     present = " AND ".join(
-        [f"to_regclass('{TABLE}') IS NOT NULL", *[f"to_regprocedure('{fn}') IS NOT NULL" for fn in needs]])
+        [f"to_regclass('{_S}{TABLE}') IS NOT NULL", *[f"to_regprocedure('{_S}{fn}') IS NOT NULL" for fn in needs]])
     return f"""
     CREATE OR REPLACE FUNCTION {name}() RETURNS trigger
     LANGUAGE plpgsql AS $fn$
@@ -317,7 +321,7 @@ def _sync_function(source: str, name: str, old_key: str, put: str, needs: tuple,
             RETURN NULL;
         END IF;
         IF TG_OP <> 'INSERT' THEN
-            DELETE FROM {TABLE} WHERE source = '{source}' AND session_id = OLD.session_id
+            DELETE FROM {_S}{TABLE} WHERE source = '{source}' AND session_id = OLD.session_id
                 AND row_key = {old_key};
         END IF;
         IF TG_OP <> 'DELETE' AND ({put_when}) THEN
@@ -332,22 +336,22 @@ def _sync_function(source: str, name: str, old_key: str, put: str, needs: tuple,
 _DDL += [
     _sync_function(
         NATIVE, "session_recall_nodes_sync", "OLD.node_id",
-        "session_recall_put('n', NEW.session_id, NEW.node_id, NEW.ts, recall_node_text(NEW.message), "
+        f"{_S}session_recall_put('n', NEW.session_id, NEW.node_id, NEW.ts, {_S}recall_node_text(NEW.message), "
         f"NULL, NULL, NULL, NULL, {MAX_ROW_CHARS})",
         ("recall_node_text(jsonb)", "recall_pieces(text)", _PUT_SIGNATURE),
     ),
     _sync_function(
         ENTRY, "session_recall_entries_sync", "OLD.id::text",
-        "session_recall_put('s', NEW.session_id, NEW.id::text, EXTRACT(EPOCH FROM NEW.created_at), "
-        f"recall_entry_text(NEW.entry), NULL, NULL, NULL, NULL, {MAX_ROW_CHARS})",
+        f"{_S}session_recall_put('s', NEW.session_id, NEW.id::text, EXTRACT(EPOCH FROM NEW.created_at), "
+        f"{_S}recall_entry_text(NEW.entry), NULL, NULL, NULL, NULL, {MAX_ROW_CHARS})",
         ("recall_entry_text(jsonb)", "recall_pieces(text)", _PUT_SIGNATURE),
         put_when="NEW.subpath IS NULL",
     ),
     _sync_function(
         EVENT, "session_recall_events_sync", "OLD.id",
-        "session_recall_put('e', NEW.session_id, NEW.id, COALESCE(EXTRACT(EPOCH FROM NEW.created_at), 0), "
-        "lower(recall_event_raw(NEW.event_type, NEW.payload)), NEW.seq, NEW.event_type, "
-        f"recall_event_raw(NEW.event_type, NEW.payload), NEW.payload->>'timestamp', {MAX_ROW_CHARS})",
+        f"{_S}session_recall_put('e', NEW.session_id, NEW.id, COALESCE(EXTRACT(EPOCH FROM NEW.created_at), 0), "
+        f"lower({_S}recall_event_raw(NEW.event_type, NEW.payload)), NEW.seq, NEW.event_type, "
+        f"{_S}recall_event_raw(NEW.event_type, NEW.payload), NEW.payload->>'timestamp', {MAX_ROW_CHARS})",
         ("recall_event_raw(text, jsonb)", "recall_pieces(text)", _PUT_SIGNATURE),
     ),
 ]
@@ -415,8 +419,12 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
             cursor.execute(f"DROP TABLE {TABLE}")
             present = False
         intact = present and not _missing_functions(cursor)
+        cursor.execute("SELECT quote_ident(current_schema()) AS s")
+        schema = cursor.fetchone()["s"]
+        if not schema or "'" in schema:
+            raise ValueError("no usable current schema")
         for statement in _DDL if present else [*_TABLE_DDL, *_DDL]:
-            cursor.execute(statement)
+            cursor.execute(statement.replace(_S, f"{schema}."))
         if not intact:
             cursor.execute("DELETE FROM session_recall_backfill")
         cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
@@ -514,8 +522,9 @@ def ready(cursor) -> bool:
 
 
 # Per source: its primary key, the stored size of the column its extractor
-# reads, and its rows (share-locked, so a concurrent delete or update waits for
-# the short copy instead of racing it) as session_recall_put's arguments.
+# reads, and session_recall_put's arguments computed from one of its rows
+# (``x``). Rows are share-locked while copied, so a concurrent delete or update
+# waits for the short copy instead of racing it.
 _KEY_COLUMNS = {NATIVE: ("session_id", "node_id"), ENTRY: ("id",), EVENT: ("session_id", "seq")}
 _SIZE = {
     NATIVE: "pg_column_size(message)",
@@ -523,24 +532,31 @@ _SIZE = {
     EVENT: f"CASE WHEN event_type IN {_TEXT_EVENTS_SQL} THEN pg_column_size(payload) ELSE 0 END",
 }
 _FILTER = {NATIVE: "TRUE", ENTRY: "subpath IS NULL", EVENT: "TRUE"}
-# The rows _ROWS copies.
+# The rows that are copied.
 _COPY_FILTER = {**_FILTER, EVENT: f"event_type IN {_TEXT_EVENTS_SQL}"}
 _SOURCE_TABLE = {s: t for s, (t, _) in _SOURCE_TABLES.items()}
 _NO_FOLD = "NULL::bigint AS eseq, NULL::text AS etype, NULL::text AS eraw, NULL::text AS estamp"
-_ROWS = {
-    NATIVE: ("SELECT session_id, node_id, session_id AS sid, node_id AS rkey, ts::float8 AS rts, "
-             f"recall_node_text(message) AS t, {_NO_FOLD} FROM fluid_session_nodes "
-             "WHERE {where} FOR SHARE NOWAIT"),
-    ENTRY: ("SELECT id, session_id AS sid, id::text AS rkey, EXTRACT(EPOCH FROM created_at)::float8 AS rts, "
-            f"recall_entry_text(entry) AS t, {_NO_FOLD} FROM session_store_entries "
-            "WHERE {where} AND subpath IS NULL FOR SHARE NOWAIT"),
-    EVENT: ("SELECT session_id, seq, session_id AS sid, id AS rkey, "
-            "COALESCE(EXTRACT(EPOCH FROM created_at), 0)::float8 AS rts, lower(r) AS t, "
-            "seq AS eseq, event_type AS etype, r AS eraw, payload->>'timestamp' AS estamp FROM ("
-            "SELECT id, session_id, seq, event_type, payload, created_at, "
-            "recall_event_raw(event_type, payload) AS r FROM session_events "
-            f"WHERE {{where}} AND event_type IN {_TEXT_EVENTS_SQL} FOR SHARE NOWAIT) e"),
+_ARGS = {
+    NATIVE: ("x.session_id AS sid, x.node_id AS rkey, x.ts::float8 AS rts, "
+             f"recall_node_text(x.message) AS t, {_NO_FOLD}"),
+    ENTRY: ("x.session_id AS sid, x.id::text AS rkey, EXTRACT(EPOCH FROM x.created_at)::float8 AS rts, "
+            f"recall_entry_text(x.entry) AS t, {_NO_FOLD}"),
+    EVENT: ("x.session_id AS sid, x.id AS rkey, COALESCE(EXTRACT(EPOCH FROM x.created_at), 0)::float8 AS rts, "
+            "lower(recall_event_raw(x.event_type, x.payload)) AS t, x.seq AS eseq, x.event_type AS etype, "
+            "recall_event_raw(x.event_type, x.payload) AS eraw, x.payload->>'timestamp' AS estamp"),
 }
+_ARG_NAMES = ("sid", "rkey", "rts", "t", "eseq", "etype", "eraw", "estamp")
+
+
+def _rows(source: str, where: str, tail: str = "") -> str:
+    """The share-locked rows matching ``where`` (plus ``tail``: ORDER BY,
+    LIMIT), with their key columns and session_recall_put's arguments. The
+    text is extracted only from the rows returned."""
+    keys = ", ".join(f"x.{c}" for c in _KEY_COLUMNS[source])
+    return (f"SELECT {keys}, {_ARGS[source]} FROM (SELECT * FROM {_SOURCE_TABLE[source]} "
+            f"WHERE {where} AND {_COPY_FILTER[source]} {tail} FOR SHARE NOWAIT) x")
+
+
 # One row by its projection key: (where, params from session_id and row_key).
 _ROW_MATCH = {
     NATIVE: ("session_id = %s AND node_id = %s", lambda sid, key: [sid, key]),
@@ -569,9 +585,9 @@ def backfill_step(cursor, source: str, batch: int | None = None, max_bytes: int 
 
     The window is the next rows in key order up to ``batch`` rows and
     ``max_bytes`` stored bytes; of those, only the leading rows up to the first
-    whose text reaches ``max_chars`` in total are locked and cut into pieces
-    this time (a compressible window stays short). The first row always goes,
-    so every batch makes progress.
+    whose text reaches ``max_chars`` in total are locked, extracted (once) and
+    cut into pieces this time (a compressible window stays short). The first
+    row always goes, so every batch makes progress.
 
     Caller owns the (short) transaction: rows and progress commit together, so
     an interrupted pass resumes exactly where it stopped. Raises
@@ -605,30 +621,26 @@ def backfill_step(cursor, source: str, batch: int | None = None, max_bytes: int 
         cursor.execute("UPDATE session_recall_backfill SET done = TRUE WHERE source = %s", (source,))
         return True
     new_key = [last[f"k{i}"] for i in range(len(columns))]
-    # Stored bytes say little about a compressible row's text. Rows are
-    # measured one at a time in key order, without locks, up to the first that
-    # reaches the character budget; only those are then share-locked,
-    # extracted again and cut, so no lock outlives that work.
-    weight = (f"COALESCE((SELECT LEAST(length(x.t), {INDEX_MAX_CHARS}) FROM ("
-              + _ROWS[source].format(where=" AND ".join(f"{c} = k.{c}" for c in columns))
-              .replace(" FOR SHARE NOWAIT", "") + ") x), 0)")
+    # Stored bytes say little about a compressible row's text. The batch walks
+    # the window one row at a time in key order, share-locking and extracting
+    # each row once, and stops after the first row that brings its text to the
+    # character budget; the rows walked are then cut up from what was
+    # extracted. Rows past the stop are neither read nor locked.
+    weight = f"LEAST(COALESCE(length(n.t), 0), {INDEX_MAX_CHARS})"
 
     def next_row(after: str) -> str:
-        return (f"SELECT k.*, {weight} AS w FROM (SELECT {order} FROM {_SOURCE_TABLE[source]} "
-                f"WHERE {_row(columns)} > {after} AND {_row(columns)} <= {_params(new_key)} "
-                f"AND {_COPY_FILTER[source]} ORDER BY {order} LIMIT 1) k")
+        return _rows(source, f"{_row(columns)} > {after} AND {_row(columns)} <= {_params(new_key)}",
+                     f"ORDER BY {order} LIMIT 1")
 
-    span = f"{_row(columns)} > {_params(key)} AND {_row(columns)} <= {_params(new_key)}"
     cursor.execute(
-        f"WITH RECURSIVE c({order}, total) AS ({next_row(_params(key))} "
-        f"UNION ALL SELECT {', '.join(f'n.{col}' for col in columns)}, c.total + n.w FROM c CROSS JOIN LATERAL ("
+        f"WITH RECURSIVE c({order}, {', '.join(_ARG_NAMES)}, total) AS ("
+        f"SELECT n.*, {weight} FROM ({next_row(_params(key))}) n "
+        f"UNION ALL SELECT n.*, c.total + {weight} FROM c CROSS JOIN LATERAL ("
         f"{next_row(_row([f'c.{col}' for col in columns]))}"
         ") n WHERE c.total < %s), "
-        f"p AS MATERIALIZED (SELECT {order} FROM c), "
-        f"b AS MATERIALIZED ({_ROWS[source].format(where=f'{span} AND {_row(columns)} IN (SELECT {order} FROM p)')}), "
-        f"w AS MATERIALIZED (SELECT COUNT({_put(source)}) AS n FROM b) "
-        f"SELECT {aliases}, (SELECT n FROM w) AS written FROM p ORDER BY {keys_desc} LIMIT 1",
-        [*key, *new_key, *new_key, int(max_chars or _BATCH_CHARS), *key, *new_key],
+        f"w AS MATERIALIZED (SELECT COUNT({_put(source)}) AS n FROM c b) "
+        f"SELECT {aliases}, (SELECT n FROM w) AS written FROM c ORDER BY {keys_desc} LIMIT 1",
+        [*key, *new_key, *new_key, int(max_chars or _BATCH_CHARS)],
     )
     done = cursor.fetchone()
     if done is not None:
@@ -661,7 +673,7 @@ def promote_overflow(*, max_seconds: float = 10.0, pause_seconds: float = 0.1) -
                     break
                 source, sid, key = todo[0]
                 where, params = _ROW_MATCH[source]
-                cur.execute(f"SELECT COUNT({_put(source)}) AS n FROM ({_ROWS[source].format(where=where)}) b",
+                cur.execute(f"SELECT COUNT({_put(source)}) AS n FROM ({_rows(source, where)}) b",
                             params(sid, key))
                 if not cur.fetchone()["n"]:
                     # Its row is gone or no longer scored: the marker is stale.
