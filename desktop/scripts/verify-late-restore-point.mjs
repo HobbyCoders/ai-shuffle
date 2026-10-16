@@ -240,14 +240,26 @@ const statusText = page => page.evaluate(() => ({
   detail: document.getElementById('status-detail')?.textContent ?? '',
   error: document.getElementById('status-error')?.textContent ?? '',
 }));
-function launch() {
-  return fs.rm(path.join(profile, 'DevToolsActivePort'), { force: true }).then(() => {
+async function launch() {
+  const port = path.join(profile, 'DevToolsActivePort');
+  for (let attempt = 1; ; attempt++) {
+    await fs.rm(port, { force: true });
     // Not windowsHide: that passes SW_HIDE to the launcher, whose first window
     // (a message box such as "The last update did not finish starting") would
     // then never be shown. Started from a shortcut, it is visible.
     const child = spawn(exe, ['--remote-debugging-port=0'], { stdio: ['ignore', log.fd, log.fd] });
     child.on('error', e => console.error(e));
-  });
+    let exited = null; child.on('exit', (code, signal) => { exited = { code, signal }; });
+    const started = Date.now();
+    while (Date.now() - started < 30000 && !await exists(port)) await sleep(500);
+    // A start that quit at once without a debugger port lost the single-instance lock: start it once more.
+    if (attempt === 1 && exited && !await exists(port)) {
+      note(`AI Shuffle exited (code ${exited.code}, signal ${exited.signal ?? 'none'}) without opening its debugger port; started it again once the previous instance had exited`);
+      await previousExited();
+      continue;
+    }
+    return;
+  }
 }
 async function ready(revision) {
   const page = await until(workerPage, 'The worker UI did not open', 900000, 1000);
@@ -260,10 +272,20 @@ async function close() {
   const page = (await workerPage()) ?? (await statusPage());
   if (page) await page.evaluate(() => window.shuffleDesktop.window.close()).catch(() => {});
   await until(async () => !await healthy(), 'The worker did not stop', 120000);
-  await until(async () => !await appRunning(), 'AI Shuffle did not exit after its window closed', 120000, 1000);
   await settle();
 }
-const appRunning = async () => /AI Shuffle\.exe/i.test(await run('tasklist.exe', ['/FI', 'IMAGENAME eq AI Shuffle.exe', '/NH'], { timeout: 30000 }));
+/** PIDs of every AI Shuffle.exe still running (launcher, updated app, self-test). */
+const appProcesses = async () => (await run('tasklist.exe', ['/FI', 'IMAGENAME eq AI Shuffle.exe', '/FO', 'CSV', '/NH'], { timeout: 30000 }))
+  .split(/\r?\n/).filter(line => /^"AI Shuffle\.exe"/i.test(line)).map(line => line.split('","')[1]);
+/** The next start must take the single-instance lock, which the previous app holds until it has exited. */
+async function previousExited() {
+  let left = [];
+  try { await until(async () => !(left = await appProcesses()).length, '', 120000, 500); }
+  catch (error) {
+    if (error.timedOut) throw error;
+    throw Error(`AI Shuffle is still running (PIDs ${left.join(', ') || 'unknown'}) 120 s after it was closed; a new start would find the single-instance lock taken`);
+  }
+}
 /** Hard kill: the app's process tree at once, then anything else running from the install or the profile (worker, PostgreSQL). */
 async function kill() {
   try { await run('taskkill.exe', ['/F', '/T', '/IM', 'AI Shuffle.exe'], { timeout: 30000 }); } catch (error) { if (error.timedOut) throw error; /* none running */ }
@@ -273,8 +295,7 @@ async function kill() {
 }
 async function settle() {
   if (browser) await browser.close().catch(() => {}); browser = null; browserPort = null;
-  // The single-instance lock is held until the previous process has exited.
-  await sleep(5000);
+  await previousExited();
 }
 /**
  * Press `button` in AI Shuffle's message box titled `title` and report how.

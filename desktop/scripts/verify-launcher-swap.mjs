@@ -71,13 +71,38 @@ async function connect(){await until(async()=>{
  if(candidate)await candidate.close().catch(()=>{});
  return false;
 },'Installed desktop debugger and worker did not become ready',300000);}
-async function launch(){await fs.rm(path.join(profile,'DevToolsActivePort'),{force:true});
- const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});child.on('error',e=>console.error(e));await connect();}
+// Every AI Shuffle.exe still running (launcher, updated app, self-test); null if tasklist fails.
+function appProcesses(){
+ try{return execFileSync('tasklist.exe',['/FI','IMAGENAME eq AI Shuffle.exe','/FO','CSV','/NH'],{encoding:'utf8',timeout:30000,windowsHide:true})
+  .split(/\r?\n/).filter(line=>/^"AI Shuffle\.exe"/i.test(line)).map(line=>line.split('","')[1]);}catch{return null;}
+}
+// The next start must take the single-instance lock, which the previous app holds until it has exited.
+async function previousExited(){
+ let left=[];
+ try{await until(()=>{left=appProcesses();return left!==null&&!left.length;},'',120000);}
+ catch{throw Error(`AI Shuffle is still running (PIDs ${left?.join(', ')||'unknown'}) 120 s after it was closed; a new start would find the single-instance lock taken`);}
+}
+async function launch(){
+ for(let attempt=1;;attempt++){
+  await fs.rm(path.join(profile,'DevToolsActivePort'),{force:true});
+  const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});child.on('error',e=>console.error(e));
+  let exited=null;child.on('exit',(code,signal)=>{exited={code,signal};});
+  const started=Date.now();
+  while(Date.now()-started<30000&&!await exists(path.join(profile,'DevToolsActivePort')))await new Promise(r=>setTimeout(r,500));
+  // A start that quit at once without a debugger port lost the single-instance lock: start it once more.
+  if(attempt===1&&exited&&!await exists(path.join(profile,'DevToolsActivePort'))){
+   console.log(`AI Shuffle exited (code ${exited.code}, signal ${exited.signal??'none'}) without opening its debugger port; starting it again once the previous instance has exited`);
+   report.restartRetries=(report.restartRetries??0)+1;await previousExited();continue;
+  }
+  break;
+ }
+ await connect();
+}
 async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
  await until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
  if(browser)await browser.close().catch(()=>{});browser=null;page=null;
  // The next start takes the single-instance lock this app holds until it has exited.
- await new Promise(r=>setTimeout(r,5000));}
+ await previousExited();}
 const version=()=>page.evaluate(()=>window.shuffleDesktop.version);
 try{
  await installPreview(installer,install,()=>console.log('Installing the older published installer…'));
