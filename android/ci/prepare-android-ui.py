@@ -6,6 +6,9 @@ KeyguardService bind times out while the cold image is still optimizing; runs
 38343028922 and 38347338129). Recover only those exact first-boot failures,
 each once, before any Shuffle code is installed. Never dismiss an application
 ANR, never recover during instrumentation, and never turn off Android's dialogs.
+
+Then set the emulator WebView's debug flags (configure_webview) before the app
+is installed.
 """
 
 import os
@@ -104,6 +107,33 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
     raise RuntimeError("Emulator never reached a stable unlocked launcher before app verification")
 
 
+# The emulator's built-in AOSP WebView is never updated and gets no variations
+# seed, so it runs Chromium's code defaults. In Chromium 133 (API 36 image
+# BE2A.250530.026.D1) PartitionAllocUnretainedDanglingPtr defaults to mode=crash:
+# a dangling base::Unretained inside WebView's own IO thread aborted the app
+# process with SIGTRAP mid-suite (release run 38824056427, attempts 1 and 2;
+# Chromium's own field-trial testing config runs this study as
+# dump_without_crashing). Turn off only that internal check. Every other
+# WebView, renderer or app crash still fails the run.
+WEBVIEW_FLAGS_FILE = "/data/local/tmp/webview-command-line"
+WEBVIEW_FLAGS = "_ --disable-features=PartitionAllocUnretainedDanglingPtr"
+
+
+def configure_webview(adb, out: Path):
+    out.mkdir(parents=True, exist_ok=True)
+    # WebView reads the flags file only on debuggable (userdebug/eng) builds.
+    build_type = adb("shell", "getprop", "ro.build.type").strip()
+    if build_type not in ("userdebug", "eng"):
+        raise RuntimeError(f"WebView ignores {WEBVIEW_FLAGS_FILE} on a {build_type or 'unknown'} build")
+    adb("shell", f"echo '{WEBVIEW_FLAGS}' > {WEBVIEW_FLAGS_FILE} && chmod 644 {WEBVIEW_FLAGS_FILE}")
+    written = adb("shell", "cat", WEBVIEW_FLAGS_FILE).strip()
+    if written != WEBVIEW_FLAGS:
+        raise RuntimeError(f"WebView flags file reads back as {written!r}")
+    # Keep the exact WebView provider and version with the run's evidence.
+    (out / "webview.txt").write_text(adb("shell", "dumpsys", "webviewupdate"), encoding="utf-8")
+    print(f"WebView flags for this emulator: {WEBVIEW_FLAGS}", flush=True)
+
+
 def main():
     serial = os.environ.get("ANDROID_SERIAL", "emulator-5554")
     if not re.fullmatch(r"emulator-\d+", serial):
@@ -117,7 +147,10 @@ def main():
         subprocess.run(["bash", "ci/emulator-diagnostics.sh", "launcher-recovery"],
                        check=False, timeout=240)
 
-    prepare(adb, Path(os.environ["RUNNER_TEMP"]) / "android-emulator" / "readiness", diagnostics=diagnostics)
+    out = Path(os.environ["RUNNER_TEMP"]) / "android-emulator" / "readiness"
+    prepare(adb, out, diagnostics=diagnostics)
+    # Before the app is installed: WebView reads its flags when it first loads in a process.
+    configure_webview(adb, out)
 
 
 if __name__ == "__main__":

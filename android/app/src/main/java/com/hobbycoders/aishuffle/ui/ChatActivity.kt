@@ -562,7 +562,14 @@ class ChatActivity : NativeScreen() {
         if (::downloads.isInitialized) downloads.close()
         bootstrap?.remove(); bootstrap = null
         if (shellBridgeInstalled && ::web.isInitialized) runCatching { WebViewCompat.removeWebMessageListener(web, MobileUi.SHELL_BRIDGE) }
-        if (::web.isInitialized) { runCatching { unregisterReceiver(signedOut) }; web.stopLoading(); web.clearHistory(); web.destroy() }
+        if (::web.isInitialized) {
+            runCatching { unregisterReceiver(signedOut) }
+            // WebView.destroy() is only valid once the view is out of the view
+            // system; a destroyed view still attached keeps receiving window
+            // callbacks during the activity's own teardown (as OfflineDemoActivity).
+            (web.parent as? ViewGroup)?.removeView(web)
+            web.stopLoading(); web.clearHistory(); web.destroy()
+        }
         super.onDestroy()
     }
     companion object {

@@ -31,7 +31,8 @@ sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 avd=${ANDROID_AVD_HOME:-$HOME/.android/avd}
 capture avd-config cat "$avd/test.avd/config.ini"
 capture emulator-version cat "$sdk/emulator/source.properties"
-capture system-image-version cat "$sdk/system-images/android-34/default/x86_64/source.properties"
+# Every installed x86_64 image (the job installs the matrix API level), with its path.
+capture system-image-version bash -c 'for f in "$1"/system-images/android-*/*/x86_64/source.properties; do echo "== $f"; cat "$f"; done' _ "$sdk"
 
 # The action kills the emulator before subsequent workflow steps. Capture guest
 # state inside its test script, before teardown, without dismissing ANR dialogs.
@@ -44,6 +45,8 @@ if [[ "$phase" == test-failure || "$phase" == launcher-recovery ]]; then
   capture window adb -s "$serial" shell dumpsys window
   capture cpuinfo adb -s "$serial" shell dumpsys cpuinfo
   capture meminfo adb -s "$serial" shell dumpsys meminfo
+  # The WebView provider and version the app ran on (emulator images never update it).
+  capture webview adb -s "$serial" shell dumpsys webviewupdate
   for tag in data_app_anr system_app_anr system_server_anr; do
     capture "$tag" adb -s "$serial" shell dumpsys dropbox --print "$tag"
   done
