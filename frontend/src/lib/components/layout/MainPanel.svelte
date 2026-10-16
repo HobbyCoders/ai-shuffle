@@ -87,7 +87,8 @@
 	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { terminalAccess } from '$lib/terminal/gating';
-	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
+	import type { TerminalToggle, PhoneToggle } from '$lib/components/chat/composer-shell';
+	import { phonePanel } from '$lib/stores/phone-panel.svelte';
 	import { preloadWhenIdle, runWhenIdle } from '$lib/components/deck/lazy/lazy-component';
 	import {
 		featurePanelKeyForView,
@@ -96,6 +97,7 @@
 		BrowserSidePanel,
 		ChangedFilesPanelLazy,
 		TerminalSidePanel,
+		PhoneSidePanel,
 		InitRepoModalLazy,
 		type FeaturePanelKey
 	} from '$lib/components/deck/lazy/panels';
@@ -380,6 +382,20 @@
 			disabledReason: access.kind === 'disabled' ? access.reason : null,
 			toggle: () => terminals.toggle(sid),
 			preload: () => void TerminalSidePanel.preload(),
+		};
+	});
+	// The composer's Phone toggle: offered once the worker answers the emulator
+	// status (any answer but "no such API" / "not for you").
+	$effect(() => {
+		if (terminalSessionId) untrack(() => void phonePanel.ensureCapability());
+	});
+	const phoneToggle = $derived.by((): PhoneToggle | undefined => {
+		const sid = terminalSessionId;
+		if (!sid || phonePanel.capability !== 'available') return undefined;
+		return {
+			open: activeSidePanel.active === 'phone',
+			toggle: () => phonePanel.toggle(sid),
+			preload: () => void PhoneSidePanel.preload(),
 		};
 	});
 	/** The chat column's width: the notification dock centres on it, not on the side panel. */
@@ -1045,6 +1061,7 @@
 						onBrowserPreload={() => BrowserSidePanel.preload()}
 						browserOpen={sessionBrowser.open}
 						terminal={terminalToggle}
+						phone={phoneToggle}
 					/>
 					</div>
 				</div>
@@ -1112,6 +1129,8 @@
 						<LazyPanel handle={BrowserSidePanel} props={{ sessionId: activeTab.sessionId, embedded: true, panelActions }} label="the live browser" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'terminal' && activeTab?.sessionId}
 						<LazyPanel handle={TerminalSidePanel} props={{ sessionId: activeTab.sessionId, panelActions, mobile: panelOverlay }} label="the terminal" fallbackActions={panelActions} />
+					{:else if activeSidePanel.active === 'phone'}
+						<LazyPanel handle={PhoneSidePanel} props={{ panelActions, mobile: panelOverlay }} label="the phone" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'changes' && activeProject}
 						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" fallbackActions={panelActions}
 							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,

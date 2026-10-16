@@ -61,6 +61,10 @@ export const BrowserSidePanel = createLazyComponent('browser-panel', () =>
 export const TerminalSidePanel = createLazyComponent('terminal-panel', () =>
 	import('$lib/components/terminal/TerminalPanel.svelte')
 );
+/** The worker's Android emulator. */
+export const PhoneSidePanel = createLazyComponent('phone-panel', () =>
+	import('$lib/components/phone/PhonePanel.svelte')
+);
 export const ChangedFilesPanelLazy = createLazyComponent('changed-files', () =>
 	import('$lib/components/git/ChangedFilesPanel.svelte')
 );
