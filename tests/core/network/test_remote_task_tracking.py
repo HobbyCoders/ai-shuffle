@@ -4,6 +4,7 @@ Two in-process workers over the real signed control endpoint: ServerWorker runs 
 child, Windows runs the parent chat. No provider, no second machine.
 """
 import asyncio
+import concurrent.futures
 import copy
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
@@ -471,14 +472,62 @@ async def provider_turn(worker, child):
     return await asyncio.wait_for(visible(), 5)
 
 
+def run_as(worker, make_coro):
+    """Run ``make_coro()`` to the end as ``worker``, on its own loop and thread.
+
+    ``Worker.active()`` swaps process-wide globals (device identity, network
+    context, DATA_DIR); only the database follows the task's context. Held
+    across an ``await`` on the parent's loop, it let the parent's Swarm
+    coordinator, woken by the very report being delivered, resume as the
+    target and dispatch its next item to itself. The parent's loop is blocked
+    until the target is done, as if the two workers were separate processes.
+    """
+    def target():
+        with worker.active():
+            return asyncio.run(make_coro())
+
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        return pool.submit(target).result()
+
+
 async def report_from_target(a, child, **kwargs):
     await provider_turn(a, child)
     with a.active():
         finish_child(child, **kwargs)
         assert remote_task.owe_if_finished(child)
         body = remote_tasks.get_child(child)["report"]
-        assert await remote_task.deliver_due() == 1
-        return body
+    assert run_as(a, remote_task.deliver_due) == 1
+    return body
+
+
+def test_target_side_delivery_never_lends_its_globals_to_the_parent_loop(workers, monkeypatch, kicks):
+    """Regression: a parent task must never run while the target's globals are active."""
+    from app.network import identity
+
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    seen = set()
+
+    async def scenario():
+        with b.active():
+            stop = asyncio.Event()
+
+            async def parent_task():  # stands in for the parent's Swarm coordinator
+                while not stop.is_set():
+                    seen.add(identity._cached.device_id)
+                    await asyncio.sleep(0)
+
+            watcher = asyncio.create_task(parent_task())
+            await asyncio.sleep(0)
+            body = await report_from_target(a, child, text="Delivered from the target.")
+            stop.set()
+            await watcher
+            return body
+
+    assert asyncio.run(scenario())["report"] == "Delivered from the target."
+    assert seen == {b.device_id}
+    with b.active():
+        assert task_registry.get_task("caller", child)["status"] == "completed"
 
 
 def test_provider_turn_waits_for_target_commit_after_admission(workers, monkeypatch):
@@ -600,7 +649,7 @@ def test_remote_swarm_failure_and_cancel_block_successor_and_wake_once(workers, 
                     assert remote_task.owe_if_finished(child)
                     body = remote_tasks.get_child(child)["report"]
                     assert body["status"] == "stopped"
-                    assert await remote_task.deliver_due() == 1
+                assert run_as(a, remote_task.deliver_due) == 1
             await asyncio.wait_for(coordinator.jobs[key], 5)
             snapshot = coordinator.snapshot(key)
             assert snapshot["status"] == ending
