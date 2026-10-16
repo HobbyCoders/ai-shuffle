@@ -88,8 +88,11 @@ def read_metrics(client, sid):
     return {"input_tokens": total("input_tokens"),
             "output_tokens": total("output_tokens"),
             "reasoning_tokens": total("reasoning_tokens"),
+            "reasoning_tokens_complete": bool(usage) and all("reasoning_tokens" in u for u in usage),
             "cache_read_tokens": total("cache_read_input_tokens"),
-            "model_calls": len(usage), "tool_calls": tools}
+            "model_calls": len(usage), "tool_calls": tools,
+            "input_tokens_estimated": any(u.get("input_tokens_estimated") for u in usage),
+            "output_tokens_estimated": any(u.get("output_tokens_estimated") for u in usage)}
 
 
 def summarize(rows):
@@ -234,11 +237,20 @@ class Benchmark:
                     c.stop(sid)
                     c.archive(sid)
                     # Verify the write before claiming cleanup.
-                    if c.session(sid).get("status") != "archived":
+                    archived = c.session(sid)
+                    if archived.get("status") != "archived":
                         raise RuntimeError("archive not confirmed")
                     with self.lock:
                         self.sessions.discard(sid)
                         self.write_journal()
+                    # Failed/timed-out runs still consumed tokens and tools.
+                    # Metrics failure must not misreport a verified archive failure.
+                    if "model_calls" not in row:
+                        row["observed_effort"] = archived.get("effort")
+                        try:
+                            row.update(read_metrics(c, sid))
+                        except Exception as exc:
+                            row["metrics_error"] = type(exc).__name__
                 except Exception:
                     row["cleanup_failed"] = True
             c.close()

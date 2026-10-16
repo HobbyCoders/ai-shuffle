@@ -54,7 +54,9 @@ def test_metrics_count_calls_once_and_preserve_missing_reasoning():
     client = SimpleNamespace(_http=SimpleNamespace(stream=stream))
     got = read_metrics(client, "fixture")
     assert got == {"input_tokens": 21, "output_tokens": 15, "reasoning_tokens": 9,
-                   "cache_read_tokens": 41, "model_calls": 2, "tool_calls": 1}
+                   "cache_read_tokens": 41, "model_calls": 2, "tool_calls": 1,
+                   "input_tokens_estimated": False, "output_tokens_estimated": False,
+                   "reasoning_tokens_complete": True}
     records.clear()
     assert read_metrics(client, "fixture")["reasoning_tokens"] is None
 
@@ -103,4 +105,44 @@ def test_one_run_sets_effort_and_archives_even_when_metrics_fail(monkeypatch, tm
     assert not runner.sessions
     assert json.loads(runner.journal.read_text()) == []
     assert runner.rows[0]["error"] == "ValueError"
+    assert runner.rows[0]["metrics_error"] == "ValueError"
+    assert not runner.rows[0].get("cleanup_failed")
     assert "private detail" not in (tmp_path / "result.json").read_text()
+
+
+def test_cluster_bootstrap_is_reproducible_and_rejects_duplicate_runs():
+    import pytest
+    from scripts.effort_benchmark_analysis import analyze, paired_interval
+    rows = [{"task": task, "kind": "coding", "config": config,
+             "repetition": rep, "passed": True, "wall_seconds": seconds}
+            for task in ("a", "b") for rep in range(3)
+            for config, seconds in (("default", 20), ("high", 10))]
+    result = paired_interval(rows, "wall_seconds")
+    assert result["pairs"] == 6
+    assert result["task_clusters"] == 2
+    assert result["mean_difference"] == -10
+    assert result["ci95"] == [-10, -10]
+    assert paired_interval(list(reversed(rows)), "wall_seconds") == result
+    with pytest.raises(ValueError, match="duplicate"):
+        analyze({"rows": rows + rows[:1]})
+
+
+def test_committed_evidence_has_all_repetitions_and_matches_task_fixture():
+    import hashlib
+    from pathlib import Path
+    from scripts.effort_benchmark import TASK_FILE
+    from scripts.effort_benchmark_analysis import analyze
+    data = json.loads((Path(__file__).resolve().parents[1] / "docs" / "benchmarks" /
+                       "effort-gpt-6.1-sol-2026-10-16.json").read_text())
+    assert data["task_sha256"] == hashlib.sha256(TASK_FILE.read_bytes()).hexdigest()
+    expected = {(task["id"], config, rep) for task in load_tasks()
+                for config in ("default", "low", "medium", "high", "xhigh") for rep in range(3)}
+    assert len(data["rows"]) == 300
+    assert {(r["task"], r["config"], r["repetition"]) for r in data["rows"]} == expected
+    assert data["cleanup"]["sweep_sessions_archived_and_read_back"] == 300
+    computed = analyze(data)
+    assert data["summary"] == computed["summary"]
+    assert data["high_vs_default"] == computed["high_vs_default"]
+    assert all(r["observed_effort"] == r["config"] for r in data["rows"]
+               if r["config"] != "default")
+    assert all("reasoning_tokens_complete" in r for r in data["rows"])
