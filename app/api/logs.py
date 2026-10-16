@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.db import error_logs
+from app.core.queued_logging import QueuedHandler
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,8 @@ ring_handler.setFormatter(
 )
 
 _root = logging.getLogger()
-_root.addHandler(ring_handler)
+ring_queue_handler = QueuedHandler(ring_handler)
+_root.addHandler(ring_queue_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +107,7 @@ async def get_logs(
     Returns the most recent `limit` lines, optionally filtered by level and
     search term.
     """
-    buf = ring_handler.buffer
+    buf = list(ring_handler.buffer)
 
     # Collect unique levels for the filter dropdown
     all_levels = sorted({r.level for r in buf})
@@ -139,7 +141,7 @@ async def export_logs(
     """
     Export all buffered log lines as a downloadable text file (admin only).
     """
-    buf = ring_handler.buffer
+    buf = list(ring_handler.buffer)
     text = "\n".join(r.message for r in buf)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"ai-shuffle-logs-{timestamp}.log"

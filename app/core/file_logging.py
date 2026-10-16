@@ -17,8 +17,10 @@ environment.
 This module adds — purely additively, it never touches the ring buffer or the
 DB handler:
 
-1. A ``RotatingFileHandler`` on the ROOT logger so every app/uvicorn/third-party
-   record lands in ``<data_dir>/logs/app.log`` (rotated, UTF-8).
+1. A queued ``RotatingFileHandler`` on the ROOT logger writes app/uvicorn/
+   third-party records to ``<data_dir>/logs/app.log`` (rotated, UTF-8). The
+   bounded queue drops records under sustained disk pressure rather than
+   blocking the event loop; the sink reports the loss when it recovers.
 2. ``faulthandler`` pointed at ``<data_dir>/logs/fatal.log`` (kept open for the
    process lifetime) so a segfault / fatal signal leaves a native traceback
    that survives the crash.
@@ -62,6 +64,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
+from app.core.queued_logging import QueuedHandler
+
 logger = logging.getLogger(__name__)
 
 # Format matches the existing console/ring-buffer format so all three sinks read
@@ -74,7 +78,7 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 #  - _fatal_file: faulthandler writes to this fd for the process lifetime; if it
 #    were garbage-collected the fd would close and the native traceback on a
 #    fatal signal would go nowhere.
-_file_handler: Optional[RotatingFileHandler] = None
+_file_handler: Optional[QueuedHandler] = None
 _fatal_file = None
 _prev_excepthook = None
 
@@ -291,7 +295,7 @@ def setup_file_logging() -> Optional[Path]:
         return None
 
     if _file_handler is not None:
-        return Path(_file_handler.baseFilename)
+        return Path(_file_handler.sink.baseFilename)
 
     try:
         log_dir = get_log_dir()
@@ -315,6 +319,7 @@ def setup_file_logging() -> Optional[Path]:
         )
         handler.setLevel(file_level)
         handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        handler = QueuedHandler(handler)
     except Exception:  # noqa: BLE001
         logger.exception("Could not open app.log — file logging disabled")
         return None
@@ -349,7 +354,7 @@ def setup_file_logging() -> Optional[Path]:
 
     logger.info("File logging enabled — app.log at %s (level=%s)",
                 log_dir / "app.log", settings.file_log_level.upper())
-    return Path(handler.baseFilename)
+    return Path(handler.sink.baseFilename)
 
 
 # The directory that holds the ``app`` package: ``server/`` in a packaged
@@ -449,9 +454,9 @@ def _flush_and_close_file_handler() -> None:
 def log_shutdown_banner() -> None:
     """Log a clean shutdown line so a normal stop is distinguishable from a crash.
 
-    Flushes the file handler immediately: shutdown can be cut short (SIGTERM
-    grace window), and the whole point of the banner is that its presence or
-    absence on disk distinguishes a clean stop from a crash.
+    Requests a bounded drain of the file queue: shutdown can be cut short
+    (SIGTERM grace window). Call off the event loop. A stuck disk may still
+    prevent the banner from reaching disk before the process exits.
     """
     logger.info("=== AI Shuffle shutting down (pid=%s) ===", os.getpid())
     if _file_handler is not None:

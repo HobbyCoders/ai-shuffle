@@ -104,10 +104,13 @@ CONSOLE_HANDLER_NAME = "ai-shuffle-console"
 if os.environ.get("TESTING") != "1" and not any(
     handler.get_name() == CONSOLE_HANDLER_NAME for handler in root_logger.handlers
 ):
-    console_handler = logging.StreamHandler()
+    from app.core.queued_logging import QueuedHandler
+
+    sink = logging.StreamHandler()
+    sink.setFormatter(log_format)
+    console_handler = QueuedHandler(sink)
     console_handler.set_name(CONSOLE_HANDLER_NAME)
     console_handler.setLevel(log_level)
-    console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
@@ -402,7 +405,7 @@ async def lifespan(app: FastAPI):
         pass
     logger.info("Shutting down AI Shuffle...")
     from app.core.file_logging import log_shutdown_banner
-    log_shutdown_banner()
+    await run_sync(log_shutdown_banner)
 
 
 # Create FastAPI application
