@@ -60,6 +60,9 @@ for kind in ("anthropic", "delegated"):
     ])
 row = provider("anthropic", "claude-opus-4-6", ["low", "medium", "high", "max"], "high")
 CASES.append(pytest.param("anthropic", "claude-opus-4-6", row, "xhigh", "high", id="api-bound-metadata-clamp"))
+for pin in ("claude-opus-4-6[1m]", "claude-sonnet-4-6[1m]"):
+    CASES.append(pytest.param("anthropic", pin, provider("anthropic", pin, ["low", "high"], "low"),
+                              "high", "high", id=f"api-bound-context-marker-{pin}"))
 for model, pick, expected in (("claude-opus-4-6", "xhigh", "high"),
                               ("claude-haiku-4-5", "high", None)):
     row = provider("anthropic", model)
@@ -134,7 +137,8 @@ async def test_picker_to_wire(monkeypatch, tmp_path, kind, model, row, pick, exp
                 pass
             assert len(captured) == 1
             body = captured[0]
-            assert body["model"] == model  # never silently upgrade a catalog pin
+            assert body["model"] == (model.removesuffix("[1m]") if kind == "anthropic" else model)
+            # Strip only the app context marker; never upgrade a concrete pin.
             if kind == "anthropic":
                 # The pooled-client hot-swap path must preserve the same pin.
                 await adapter.set_model("claude-opus-4-6")

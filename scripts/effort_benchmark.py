@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import json
 import random
@@ -85,12 +87,27 @@ def read_metrics(client, sid):
     def total(key):
         vals = [u[key] for u in usage if isinstance(u.get(key), (int, float))]
         return sum(vals) if vals else None
+    outcomes = []
+    for u in usage:
+        estimated = bool(u.get("input_tokens_estimated") or u.get("output_tokens_estimated"))
+        reason = u.get("partial_usage_reason")
+        if reason not in ("stop", "argument_guard", "dropped_stream", "connection_failure", "provider_missing_usage"):
+            transport = u.get("transport_failure")
+            transport_reason = ("connection_failure" if isinstance(transport, dict)
+                                and transport.get("chunks_delivered") is False else "dropped_stream")
+            reason = ("argument_guard" if u.get("tool_arg_stream_aborted") else
+                      transport_reason if transport else "unknown" if estimated else None)
+        outcomes.append({"model_call_index": u.get("model_call_index"),
+                         "partial_usage_reason": reason, "estimated": estimated})
     return {"input_tokens": total("input_tokens"),
             "output_tokens": total("output_tokens"),
             "reasoning_tokens": total("reasoning_tokens"),
             "reasoning_tokens_complete": bool(usage) and all("reasoning_tokens" in u for u in usage),
             "cache_read_tokens": total("cache_read_input_tokens"),
             "model_calls": len(usage), "tool_calls": tools,
+            "model_call_outcomes": outcomes,
+            "partial_usage_reasons": dict(Counter(o["partial_usage_reason"] for o in outcomes
+                                                  if o["partial_usage_reason"] is not None)),
             "input_tokens_estimated": any(u.get("input_tokens_estimated") for u in usage),
             "output_tokens_estimated": any(u.get("output_tokens_estimated") for u in usage)}
 
@@ -106,7 +123,10 @@ def summarize(rows):
             values = [r[key] for r in group if r.get(key) is not None]
             summary[key] = ({"mean": statistics.mean(values),
                              "stdev": statistics.stdev(values) if len(values) > 1 else 0,
-                             "min": min(values), "max": max(values), "observations": len(values)}
+                             "min": min(values), "max": max(values), "observations": len(values),
+                             "median": statistics.median(values),
+                             "p90": statistics.quantiles(values, n=100, method="inclusive")[89] if len(values) > 1 else values[0],
+                             "p95": statistics.quantiles(values, n=100, method="inclusive")[94] if len(values) > 1 else values[0]}
                             if values else None)
         result[config] = summary
     return result
@@ -182,7 +202,8 @@ class Benchmark:
         c = self.client()
         sid = None
         row = {"task": task["id"], "kind": task["kind"], "config": config,
-               "repetition": repetition, "passed": False}
+               "repetition": repetition, "passed": False,
+               "started_at": datetime.now(timezone.utc).isoformat()}
         start = time.monotonic()
         try:
             with tempfile.TemporaryDirectory(prefix="shuffle-effort-") as directory:
@@ -254,6 +275,7 @@ class Benchmark:
                 except Exception:
                     row["cleanup_failed"] = True
             c.close()
+            row["finished_at"] = datetime.now(timezone.utc).isoformat()
             with self.lock:
                 self.rows.append(row)
                 self.persist()

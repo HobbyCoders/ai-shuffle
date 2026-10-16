@@ -5013,7 +5013,9 @@ def _native_api_model(model: Optional[str], options: Optional[SessionOptions]) -
     # clamp. Keep preset migration only on the unbound/short-alias path.
     if (options is not None and options.extra.get("provider_id")
             and (model or "").startswith("claude-")):
-        return model
+        # Stored profiles may still carry the legacy context-window marker;
+        # Messages accepts the version pin, not the app-only [1m] suffix.
+        return model.removesuffix("[1m]")
     return resolve_api_model_id(model)
 
 

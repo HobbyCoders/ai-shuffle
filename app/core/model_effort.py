@@ -150,16 +150,16 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
     default = cap["default_effort"]
     result = {"effort_levels": levels, "default_effort": default if levels is not None and default in levels else None,
               "effort_metadata_version": version}
-    # Measured ChatGPT-only default, not a family/provider capability inference:
-    # docs/benchmarks/effort-gpt-6.1-sol-2026-10-16.{md,json}: 60/60 at high,
-    # 27.16 -> 20.01s versus omitted effort; paired latency CI [-12.41,-2.75]s.
+    # Composer-only initial preference, never the child/home/vendor default:
+    # docs/benchmarks/effort-gpt-6.1-sol-2026-10-16.{md,json}: 60/60 in both arms,
+    # equal rounded medians; high had lower p95 and fewer argument-guard cutoffs.
     # initial_effort is consumed only for a never-picked composer. A remembered
     # string or NULL (provider default) still wins, and catalog support must exist.
     if (model == "gpt-6.1-sol" and route == "openai_responses"
             and provider and (provider.get("provider_type") == "chatgpt"
                               or provider.get("auth_mode") == "chatgpt")
             and levels is not None and "high" in levels):
-        result.update(default_effort="high", initial_effort="high")
+        result["initial_effort"] = "high"
     return result
 
 

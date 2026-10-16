@@ -24,7 +24,9 @@ Two bugs surfaced:
    legacy preset migration and silently upgraded to the current `opus` model.
    Consequently the 4.6 effort clamp was never exercised. Bound concrete Claude
    IDs now remain concrete at connect and hot-swap; unbound legacy presets and
-   short aliases retain their existing migration behaviour.
+   short aliases retain their existing migration behaviour. Bound rows storing
+   an older concrete ID now stay on that ID. Legacy `[1m]` context markers are
+   stripped before Messages requests; they are not valid API model-ID suffixes.
 2. Remembered/inherited Claude efforts were validated before being clamped.
    For example, `xhigh` on Opus 4.6 could disappear when metadata excluded it,
    or pass unmodified to the delegated CLI when metadata was unknown. Connect
@@ -102,7 +104,7 @@ Each configuration has 60 trials, including timeouts in its pass rate and latenc
 | High | 60/60 | 23,600 ± 12,603 | 83,915 ± 27,769 | 503 ± 391 | 4.25 ± 17.08 | 20.01 ± 8.89 | 6.70 ± 1.33 |
 | Xhigh | 59/60 | 24,850 ± 12,342 | 88,506 ± 29,917 | 950 ± 1,592 | 175.56 ± 183.13 | 33.05 ± 45.71 | 10.98 ± 30.41 |
 
-\* Input excludes separately reported cache reads. Interrupted-call estimates
+\* Input excludes separately reported cache reads. Guard/missing-usage estimates
 are included **and flagged in every raw row**; input/output had at least one
 estimated call in 16 default, 21 low, 18 medium, six high and three xhigh trials.
 These are mixed provider-reported/estimated token totals, **not billed totals**.
@@ -130,20 +132,50 @@ No failure was rerun or dropped to improve the score.
 | Multi-file tools, 21/config | 19.77 ± 7.16 (21/21) | 36.27 ± 61.94 (20/21) | 27.35 ± 16.79 (21/21) | 18.35 ± 5.72 (21/21) | 36.00 ± 62.04 (20/21) |
 | Corpus search, 3/config | 30.50 ± 13.98 (3/3) | 22.22 ± 1.76 (3/3) | 118.69 ± 159.84 (2/3) | 19.47 ± 1.63 (3/3) | 22.32 ± 1.63 (3/3) |
 
-High versus default finished 7.15 seconds faster on average (26.3%), with the
-same observed pass rate. The paired, task-cluster bootstrap 95% interval for
-high-minus-default latency is **[-12.41, -2.75] seconds** (10,000 resamples,
-seed 95, 20 task clusters). Output was 377.25 tokens lower on average, but token
-estimation uncertainty above applies. Small coding tasks show the strongest
-practical latency signal: **32.6% faster**, 36/36 versus 36/36. Three search
-repetitions of one task cannot establish a general search default.
+**This is an upper-tail/guard-incidence result, not a uniform 26.3% speedup.**
+Pass rates sit at the ceiling on these short tasks: 60/60 in both arms is not a
+population-equivalence result. Medians round to the same **18.2 seconds**.
+High had the lower mean on **12 of 20 tasks**, not every task (median task-mean
+difference -3.04 seconds). Three repetitions of one search task cannot establish
+a general search default.
+
+| Latency sensitivity | Default | High |
+|---|---:|---:|
+| Median seconds | 18.22 | 18.16 |
+| p90 seconds (inclusive interpolation) | 44.33 | 30.98 |
+| p95 seconds (inclusive interpolation) | 58.33 | 40.04 |
+| Trials containing estimated usage | 16 | 6 |
+| Known argument-guard cut-off calls | 16 | 6 |
+| Other unclassified estimated calls | 5 | 0 |
+| Mean seconds, excluding estimated-usage trials | 20.39 (44 trials) | 17.60 (54 trials) |
+
+Most of the full mean gap is associated with guard-affected/estimated trials.
+The observed full means are 27.16 versus 20.01 seconds (7.15 seconds / 26.3%
+lower), and the paired, task-cluster bootstrap 95% interval for high-minus-default
+is **[-12.41, -2.75] seconds** (10,000 resamples, seed 95, 20 task clusters). That
+interval does not remove time-varying provider/network confounding or validate
+long workloads. Excluding estimated trials is a **post-treatment sensitivity
+check**, not an unbiased causal estimate. Output was 377.25 tokens lower on
+average, but estimation uncertainty above applies.
+
+Archived events retain `tool_arg_stream_aborted`, identifying the guard counts
+above. A missing usage frame alone does **not** prove interruption: completed
+provider replies can omit usage too. The five other estimated default calls
+stay **unknown**; we do not invent a stop/drop cause for historical records.
+The runner now records per-call outcomes (stop, argument guard, dropped stream,
+provider missing usage, or unknown), and UTC trial start/end timestamps. The
+new native telemetry supplies those causes without changing effort or retry
+semantics. Historical rows lack those timestamps and cannot be fully backfilled.
 
 ## Tuning decision
 
 - **Ship a visible, table-driven high initial pick for ChatGPT gpt-6.1-sol only.**
-  `app/core/model_effort.py` points directly to these results and exposes both
-  `default_effort: high` and `initial_effort: high`, only if the actual catalog
-  advertises high. The composer consumes `initial_effort` only when there is no
+  `app/core/model_effort.py` points directly to these results and exposes only
+  `initial_effort: high`, if the actual catalog advertises high. Its vendor
+  `default_effort` remains unchanged: child Task/delegated/remote/orchestrated
+  sessions, assistant-home effort and Auto sliders do not adopt this initial
+  choice. This narrow preference is supported by equal observed passes, lower
+  tail latency and fewer argument-guard cutoffs, not higher demonstrated quality. The composer consumes `initial_effort` only when there is no
   remembered per-model choice. Explicit/remembered strings and remembered `NULL`
   (provider default) remain unchanged. The implicit initial choice is never
   persisted as a user preference. No hidden adapter override is installed.
@@ -158,11 +190,10 @@ repetitions of one task cannot establish a general search default.
   active would require an isolated authenticated preview; this run neither
   reconfigured the running worker nor copied its credentials. Lookup subagents
   were also not an isolated treatment arm. No saving is claimed for either.
-- **No local-model benchmark ran.** No local provider was configured/reachable
-  through the available app catalog without new access. An opt-in Qwen3 +
-  llama.cpp vendor candidate is implemented and wire-tested, including thinking
-  on/off. It is **not applied by any app/client path**. Unknown families and
-  server dialects fail closed; no generic sampling or reasoning guess ships.
+- **No local-model benchmark or preset ships.** No local provider was
+  configured/reachable through the available app catalog without new access.
+  The unused preset helper was removed during review; introducing family/vendor
+  sampling policy belongs in a separate, benchmarked change.
 
 No prompt text, tool descriptions, tool input schemas or deferred-tool policy
 changed. The only automatic tuning is the advertised gpt-6.1-sol initial choice
@@ -173,7 +204,7 @@ the existing running app revision recorded in the JSON, not this branch's fixes.
 ## Verification and cleanup
 
 - Focused app-to-wire, effort reuse/inheritance and assistant-home tests passed.
-- Local provider/preset unit tests: 25 passed.
+- Native stream/guard usage-reason tests and local provider wire tests passed.
 - Required `scripts/local_ci.py check`: backend and Fluid passed before pushing.
 - The separately requested raw backend invocation completed with 25,434 passed,
   681 skipped, one xfailed and three environment errors: one private PostgreSQL
@@ -181,9 +212,17 @@ the existing running app revision recorded in the JSON, not this branch's fixes.
   These were not `SET` shim errors and are not being called a green run.
 - All **300 sweep sessions plus the pilot** were archived and read back as
   archived. Disposable repositories were removed by their temporary-directory
-  contexts. No preview instance or extra worker was started.
-- The live workload was driven through the real app HTTP/WebSocket session API.
-  Frontend tests cover the new initial choice, explicit low and remembered NULL;
-  a branch UI with the changed backend catalog was not browser-verified. No
-  rendered markup/styles changed. The new initial choice was captured at the
-  request wire; the high treatment itself was exercised by 60 live sessions.
+  contexts. No existing worker was restarted or reconfigured.
+- Rendered branch verification used the real `AI_SHUFFLE_PREVIEW=1` app, its
+  stamped frontend build and a separate owned PostgreSQL/data/home/workspace.
+  An unused placeholder and synthetic subscription catalog enabled rendering;
+  no owner credential was copied and no model call was sent from the preview.
+  At **1280x800**, the web composer showed GPT-6.1 Sol / High; at **390x844**,
+  the mobile composer controls showed the same model with High selected.
+  Browser readback on both surfaces confirmed no remembered model-effort entry
+  (`modelEfforts: {}`, global effort `null`). The preview app and its database
+  were stopped after the screenshots. No rendered markup/styles changed.
+- Frontend tests pin the new initial choice, explicit low, remembered NULL and
+  unchanged vendor-default/Auto slider value. Backend producer tests pin Task,
+  delegated workers, remote Task, local/remote orchestration and assistant home.
+  The high treatment itself was exercised by 60 real sessions.

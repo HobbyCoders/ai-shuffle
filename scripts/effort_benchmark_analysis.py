@@ -37,12 +37,39 @@ def paired_interval(rows, metric, *, baseline="default", candidate="high", seed=
             "candidate_lower_pairs": sum(x < 0 for x in differences)}
 
 
+def latency_review(rows):
+    """Expose ceiling/tail and estimated-usage sensitivity, not just a mean win."""
+    result = {}
+    for config in ("default", "high"):
+        group = [r for r in rows if r["config"] == config]
+        if not group:
+            continue
+        clean = [r["wall_seconds"] for r in group
+                 if not r.get("input_tokens_estimated") and not r.get("output_tokens_estimated")]
+        reasons = collections.Counter(reason for r in group for reason in r.get("partial_usage_reasons", {})
+                                      for _ in range(r["partial_usage_reasons"][reason]))
+        result[config] = {"estimated_usage_trials": len(group) - len(clean),
+                          "fully_reported_trials": len(clean),
+                          "fully_reported_mean_seconds": statistics.mean(clean) if clean else None,
+                          "partial_usage_reasons": dict(reasons)}
+    base = collections.defaultdict(list)
+    other = collections.defaultdict(list)
+    for r in rows:
+        if r["config"] == "default": base[r["task"]].append(r["wall_seconds"])
+        if r["config"] == "high": other[r["task"]].append(r["wall_seconds"])
+    differences = [statistics.mean(other[k]) - statistics.mean(base[k]) for k in sorted(base.keys() & other.keys())]
+    result["task_mean_comparison"] = {"high_lower": sum(d < 0 for d in differences),
+                                      "tasks": len(differences),
+                                      "median_difference_seconds": statistics.median(differences) if differences else None}
+    return result
+
+
 def analyze(data):
     rows = data["rows"]
     keys = [(r["task"], r["config"], r["repetition"]) for r in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate task/configuration/repetition")
-    return {"summary": summarize(rows),
+    return {"summary": summarize(rows), "latency_review": latency_review(rows),
             "summary_by_kind": {kind: summarize([r for r in rows if r["kind"] == kind])
                                 for kind in sorted({r["kind"] for r in rows})},
             "high_vs_default": {metric: paired_interval(rows, metric)

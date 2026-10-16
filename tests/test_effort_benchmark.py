@@ -56,7 +56,19 @@ def test_metrics_count_calls_once_and_preserve_missing_reasoning():
     assert got == {"input_tokens": 21, "output_tokens": 15, "reasoning_tokens": 9,
                    "cache_read_tokens": 41, "model_calls": 2, "tool_calls": 1,
                    "input_tokens_estimated": False, "output_tokens_estimated": False,
-                   "reasoning_tokens_complete": True}
+                   "reasoning_tokens_complete": True,
+                   "partial_usage_reasons": {},
+                   "model_call_outcomes": [
+                       {"model_call_index": i, "partial_usage_reason": None, "estimated": False}
+                       for i in (1, 2)]}
+    records.clear()
+    for i, reason in enumerate(("stop", "argument_guard", "dropped_stream", "provider_missing_usage", "unknown")):
+        raw = {"model_call_index": i, "input_tokens_estimated": True}
+        if reason != "unknown":
+            raw["partial_usage_reason"] = reason
+        records.append(("turn.usage", {"usage": raw}))
+    assert read_metrics(client, "fixture")["partial_usage_reasons"] == {
+        reason: 1 for reason in ("stop", "argument_guard", "dropped_stream", "provider_missing_usage", "unknown")}
     records.clear()
     assert read_metrics(client, "fixture")["reasoning_tokens"] is None
 

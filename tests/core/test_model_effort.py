@@ -9,7 +9,8 @@ def test_benchmarked_default_is_subscription_sol_only_and_does_not_invent_suppor
              "effort_levels": ["low", "high"], "default_effort": "low"}}
     row = {"provider_type": "chatgpt", "models_json": [entry]}
     cap = effort_capabilities("gpt-6.1-sol", row)
-    assert cap["default_effort"] == cap["initial_effort"] == "high"
+    assert cap["default_effort"] == "low"
+    assert cap["initial_effort"] == "high"
     assert entry["reasoning_capabilities"]["default_effort"] == "low"  # raw vendor evidence retained
     for kind in ("openrouter", "openai", "custom"):
         other = effort_capabilities("gpt-6.1-sol", {**row, "provider_type": kind})

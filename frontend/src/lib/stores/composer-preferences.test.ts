@@ -12,9 +12,11 @@ it('uses the server benchmark default only before any per-model choice, includin
  const {api} = await import('$lib/api/client');
  vi.spyOn(api,'get').mockResolvedValue({models:[], default:'', legacy_map:{}, providers:[{
   id:'codex',name:'Subscription',provider_type:'chatgpt',default_model:'gpt-6.1-sol', models:[
-   {id:'gpt-6.1-sol',label:'Sol',effort_levels:['low','high'],default_effort:'high',initial_effort:'high'},
+   {id:'gpt-6.1-sol',label:'Sol',effort_levels:['low','high'],default_effort:'low',initial_effort:'high'},
    {id:'other',label:'Other',effort_levels:['low','high'],default_effort:'high'}]}]});
  await hydrateModelRegistry();
+ const {resolveModelEffort} = await import('$lib/constants/model-effort');
+ expect(resolveModelEffort('prov:codex:gpt-6.1-sol').defaultValue).toBe('low'); // Auto slider, web + mobile
  expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBe('high');
  expect(p.effortForModel('prov:codex:other')).toBeNull();
  expect(p.current.modelEfforts).toEqual({}); // implicit default never saves a pick
