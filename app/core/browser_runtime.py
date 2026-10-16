@@ -132,7 +132,8 @@ def resolve_config(session_id):
     from app.core.mcp_config import _build_mcp_servers_dict
     from app.core.profiles import get_profile
     from app.core.project_resolver import (
-        describe_checkout_mismatch, resolve_cwd, resolve_project_v2,
+        describe_checkout_mismatch, follow_own_branch_switch, resolve_cwd,
+        resolve_project_v2,
     )
     from app.db import database
 
@@ -144,6 +145,9 @@ def resolve_config(session_id):
         raise RuntimeUnavailable("Session profile unavailable")
     config = profile.get("config", {})
     cwd = resolve_cwd(row)
+    if cwd is None and follow_own_branch_switch(row):
+        # The agent switched or renamed its own worktree's branch this turn.
+        cwd = resolve_cwd(row)
     if cwd is None and resolve_project_v2(row):
         if describe_checkout_mismatch(row):
             raise RuntimeUnavailable(CHECKOUT_MISMATCH_DETAIL)

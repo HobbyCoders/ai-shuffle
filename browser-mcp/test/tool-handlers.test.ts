@@ -49,6 +49,7 @@ function networkSession(response: { headers: () => Record<string, string>; text:
     findNetworkEntry: (id: string) => network.find(id),
     networkEntries: () => (cleared ? [] : network.all()),
     clearNetwork: () => { cleared = true; },
+    checkCaptcha: async () => "none" as const,
   } as unknown as Session;
   return { session, isCleared: () => cleared };
 }
@@ -142,6 +143,7 @@ describe("browser_read_text truncation", () => {
     return {
       ensurePage: async () => undefined,
       evaluate: async () => ({ title: "Long", url: "http://h/long", text }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }
   it("keeps the tail note and reports the returned length", async () => {
@@ -169,6 +171,7 @@ describe("browser_eval result shaping", () => {
       ensurePage: async () => undefined,
       invalidateScreenshot: () => {},
       evaluate: async () => ({ ok: true, type: "string", value }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const body = bodyOf(await runEval(session, { code: "x" }));
     expect(body).toMatchObject({ ok: true, truncated: true, full_chars: value.length });
@@ -180,6 +183,7 @@ describe("browser_eval result shaping", () => {
       invalidateScreenshot: () => {},
       evaluate: async () => ({ ok: false, error: "Unexpected token '<'", stack: "SyntaxError: x\n    at f" }),
       recentNetwork: () => [{ id: "req4", method: "GET", url: "http://h/api", status: 302, content_type: "text/html" }],
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const res = await runEval(session, { code: "await (await fetch('/api')).json()" });
     expect(res.isError).toBe(true);
@@ -190,6 +194,7 @@ describe("browser_eval result shaping", () => {
       ensurePage: async () => undefined,
       invalidateScreenshot: () => {},
       evaluate: async () => { throw new Error("eval timed out"); },
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const res = await runEval(session, { code: "while(true){}" });
     expect(res.isError).toBe(true);
@@ -210,6 +215,7 @@ describe("browser_console", () => {
       ensurePage: async () => undefined,
       consoleEntries: () => buffer.all(),
       clearConsole: () => buffer.clear(),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const body = bodyOf(await runConsole(session, { pattern: "boom", only_errors: true, limit: 1, clear: true }));
     expect(body).toMatchObject({ matched: 2, returned: 1, entries: [{ level: "error", text: "boom 2" }] });
@@ -221,6 +227,7 @@ describe("browser_tabs error paths", () => {
   const session = {
     selectTab: async (id: string) => { throw new Error(`no such tab: ${id}`); },
     closeTab: async () => { throw new Error("cannot close the last tab"); },
+    checkCaptcha: async () => "none" as const,
   } as unknown as Session;
   it("requires tab_id for select and close", async () => {
     expect(bodyOf(await runTabs(session, { op: "select" })).error).toBe("op=select requires tab_id");
@@ -244,6 +251,7 @@ describe("browser_upload guards", () => {
       const session = {
         ensurePage: async () => undefined,
         resolveRef: () => ({ evaluate: async () => { throw new Error("detached"); }, setInputFiles }),
+        checkCaptcha: async () => "none" as const,
       } as unknown as Session;
       await expect(runUpload(session, { ref: "e3", paths: [join(dir, "a.txt")] })).rejects.toThrow(/^stale_ref: e3/);
       expect(setInputFiles).not.toHaveBeenCalled();
@@ -274,6 +282,7 @@ function actSession(locator: Record<string, unknown>): Session {
     eventMark: () => 0,
     eventsSince: () => [],
     settleAdoptions: async () => {},
+    checkCaptcha: async () => "none" as const,
   } as unknown as Session;
 }
 
@@ -325,6 +334,7 @@ describe("browser_act type budget", () => {
       ...actSession({}),
       beginWatch,
       resolveRef: async (ref: string) => { throw new StaleRefError(ref); },
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const res = await runAct(session, { kind: "click", ref: "e404" });
     expect(bodyOf(res).error).toMatch(/^stale_ref: e404/);
@@ -356,6 +366,7 @@ describe("browser_act outcomes", () => {
       hasValidScreenshot: () => true,
       toViewportPoint: async (c: [number, number]) => c,
       ensurePage: async () => ({ url: () => "http://h/", mouse: { click: async () => { throw new Error("Protocol error: Input.dispatchMouseEvent: socket hang up"); } } }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const res = await runAct(session, { kind: "click", coordinate: [5, 5] });
     expect(bodyOf(res)).toMatchObject({ code: "outcome_unknown", outcome: "unknown" });
@@ -378,6 +389,7 @@ describe("browser_act outcomes", () => {
     const session = {
       ...actSession({ click: async () => {} }),
       eventsSince: () => [{ type: "new_tab", tab_id: "tab2", url: "https://x.test/" }],
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     expect(bodyOf(await runAct(session, { kind: "click", ref: "e1" })).events).toEqual([{ type: "new_tab", tab_id: "tab2", url: "https://x.test/" }]);
   });
@@ -397,6 +409,7 @@ describe("browser_act outcomes", () => {
         evaluate: async () => ({ scrollW: 800, scrollH: 600, innerW: 800, innerH: 600, scrollX: 0, scrollY: 0 }),
         screenshot: async () => Buffer.from("jpeg"),
       }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const res = await runAct(session, { kind: "click", coordinate: [5, 5], screenshot_id: "s4" });
     expect(bodyOf(res)).toMatchObject({ code: "stale_screenshot", outcome: "not_executed" });
@@ -419,6 +432,7 @@ describe("dialog gate", () => {
       pendingDialog: pending,
       describeDialog: () => ({ type: "confirm", message: "Delete?", tab_id: "tab1" }),
       ...extra,
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }
   it("refuses page work while a dialog waits, before running anything", async () => {
@@ -450,6 +464,7 @@ describe("browser_navigate redirect onto a refused address", () => {
       ensurePage: async () => page,
       notifyNavigation: () => {},
       ssrfBlockReason: (host: string) => (reason && host === "127.0.0.2" ? reason : undefined),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }
 
@@ -471,6 +486,7 @@ describe("browser_navigate redirect onto a refused address", () => {
       ensurePage: async () => page,
       notifyNavigation: () => {},
       ssrfBlockReason: () => undefined,
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     await expect(runNavigate(session, { url: "https://slow.example/" })).rejects.toThrow("page.goto: Timeout 30000ms exceeded.");
   });
@@ -483,6 +499,7 @@ describe("browser_navigate redirect onto a refused address", () => {
       ensurePage: async () => page,
       notifyNavigation: () => {},
       ssrfBlockReason: () => "169.254.169.254: cloud metadata",
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     await expect(runNavigate(session, { url: "https://public.example/" })).rejects.toThrow(
       "blocked by SSRF policy: 169.254.169.254: cloud metadata",

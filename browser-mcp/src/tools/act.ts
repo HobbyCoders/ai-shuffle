@@ -13,6 +13,7 @@
 import type { Locator, Page } from "playwright-core";
 import { StaleRefError, raceWithTimeout, type Session } from "../session.js";
 import { jsonResult, errorResult, errorCode, text, type McpToolResult } from "./result.js";
+import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
 import { ACT_KINDS } from "../schemas.js";
 import { runScreenshot } from "./screenshot.js";
 
@@ -276,6 +277,11 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
   }
   if (events.length) body.events = events;
   if (screenshotRefreshed) body.screenshot_refreshed = true;
+  // A site can withhold its captcha widget from this browser (captcha.ts).
+  if (!session.pendingDialog && (await session.checkCaptcha()) === "withheld") {
+    body.captcha_unavailable = true;
+    body.captcha_note = CAPTCHA_AGENT_NOTE;
+  }
 
   if (snapshotStale && !session.pendingDialog) {
     const snap = await session.snapshot({ filter: "interactive" });

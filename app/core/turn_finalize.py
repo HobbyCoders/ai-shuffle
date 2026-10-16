@@ -45,6 +45,25 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _checkout_shared_with_another_session(
+    session: dict, project_id: str, branch: str
+) -> bool:
+    """Whether a live session other than ``session`` (or its own workers) is
+    bound to ``branch`` of the project, and so to the same checkout."""
+    from app.db import database
+
+    session_id = session.get("id")
+    for other in database.list_sessions_for_v2_branch(project_id, branch):
+        if other.get("id") == session_id:
+            continue
+        if other.get("parent_session_id") == session_id:
+            continue
+        if (other.get("status") or "") == "archived":
+            continue
+        return True
+    return False
+
+
 def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]]:
     """Point the session row at the branch its checkout is actually on.
 
@@ -71,6 +90,13 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
       previous value is a better answer than none.
     - Never when another checkout on this runner already claims the new name,
       which would make the branch ambiguous to the resolver.
+    - Never the project's main working tree, even when a row binds a branch to
+      it: only a linked worktree (``.git`` is a file) is a session's own.
+    - Never a checkout another live session is also bound to (a fork, or a
+      peer chat that shares the checkout). Moving the shared row would take
+      it away from that session; it keeps the honest mismatch refusal
+      instead. The session's own workers, which inherit its branch, do not
+      count, and neither do archived sessions.
     - The ``checkouts`` row is corrected alongside the session row. It names
       the same stale branch for the same reason, and leaving it behind would
       send the next resolution off to materialize a second worktree.
@@ -102,8 +128,12 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
         os.path.realpath(path)
     ):
         return None
+    # The main working tree keeps its ``.git`` directory; a linked worktree
+    # has a ``.git`` file pointing at it.
+    if not os.path.isfile(os.path.join(path, ".git")):
+        return None
 
-    head = (git_service.get_current_branch(path) or "").strip()
+    head =(git_service.get_current_branch(path) or "").strip()
     if not head or head == "HEAD":
         return None
 
@@ -127,6 +157,19 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
             session_id,
             head,
             existing.get("path"),
+        )
+        return None
+
+    if head != recorded and _checkout_shared_with_another_session(
+        session, project_id, recorded
+    ):
+        logger.info(
+            "turn_finalize: not resyncing %s to %r — another session is bound to "
+            "its checkout %s on %r",
+            session_id,
+            head,
+            path,
+            recorded,
         )
         return None
 

@@ -1,7 +1,7 @@
 /** Wire protocol v2. No page-provided objects are forwarded as CDP commands. */
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
-  accept?: string; multiple?: boolean; chooser?: boolean;
+  accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
   x: number; y: number; width: number; height: number;
 }
 export interface BrowserWorkspaceState {
@@ -15,7 +15,7 @@ export interface BrowserWorkspaceState {
 }
 export interface BrowserCommand {
   id: string; runtime_id: string; tab_id: string | null; viewer_id: string;
-  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit" | "upload";
+  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit" | "upload" | "copy";
   args: Record<string, unknown>; expires_at: number;
 }
 export function object(v: unknown): v is Record<string, unknown> {
@@ -63,7 +63,7 @@ export function validateCommand(raw: unknown, runtimeId: string, now = Date.now(
   if (!object(raw.args)) fail();
   const a = raw.args;
   switch (raw.op) {
-    case "takeover": case "release": case "heartbeat": keys(a, []); break;
+    case "takeover": case "release": case "heartbeat": case "copy": keys(a, []); break;
     case "tabs":
       keys(a, ["action", "tab_id", "url"]);
       if (!["create", "select", "close"].includes(String(a.action))) fail();

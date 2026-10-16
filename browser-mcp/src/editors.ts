@@ -103,7 +103,10 @@ export async function readEditors(page: Page): Promise<BrowserEditor[]> {
       let id = registry.ids.get(el);
       if (!id) { id = `${seed}-${fields.length}`; registry.ids.set(el, id); }
       registry.nodes.set(id, el);
-      fields.push({ id, type, value, ...(type === 'file' ? { chooser, accept: (el as HTMLInputElement).accept.slice(0, 1024), multiple: (el as HTMLInputElement).multiple } : {}), label: labelFor(el), x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      // Split one-time-code boxes reformat themselves and move focus on every
+      // digit. Those take real keystrokes, so the page's own handlers run.
+      const keys = type !== 'file' && type !== 'textarea' && ((el as HTMLInputElement).autocomplete === 'one-time-code' || (el.maxLength > 0 && el.maxLength <= 2));
+      fields.push({ id, type, value, ...(keys ? { keys } : {}), ...(type === 'file' ? { chooser, accept: (el as HTMLInputElement).accept.slice(0, 1024), multiple: (el as HTMLInputElement).multiple } : {}), label: labelFor(el), x: rect.x, y: rect.y, width: rect.width, height: rect.height });
     }
     return fields;
   }, randomUUID());
@@ -134,4 +137,36 @@ export async function editField(page: Page, args: Record<string, unknown>): Prom
     // receive edits just as they do with physical typing.
     el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: null }));
   }, args);
+}
+
+/** Longest copy a viewer can take in one go (matches the edit limit). */
+export const COPY_LIMIT = 16384;
+
+/** The page's current selection, for the viewer's own clipboard. Password fields are refused. */
+export async function copySelection(page: Page): Promise<string> {
+  const text = await page.evaluate(() => {
+    // Follow focus through open shadow roots and same-origin frames to the real field.
+    let doc: Document | ShadowRoot = document;
+    let active: Element | null = document.activeElement;
+    for (;;) {
+      if (active?.shadowRoot?.activeElement) { doc = active.shadowRoot; active = active.shadowRoot.activeElement; continue; }
+      if (active instanceof HTMLIFrameElement) {
+        try { const inner = active.contentDocument; if (inner) { doc = inner; active = inner.activeElement; continue; } } catch { /* cross-origin frame */ }
+      }
+      break;
+    }
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      if (active instanceof HTMLInputElement && active.type === 'password') return { refused: true, text: '' };
+      try {
+        const start = active.selectionStart, end = active.selectionEnd;
+        if (start !== null && end !== null && end > start) return { refused: false, text: active.value.slice(start, end) };
+      } catch { /* email/number inputs have no selection API */ }
+    }
+    const selection = 'getSelection' in doc && typeof doc.getSelection === 'function' ? doc.getSelection() : window.getSelection();
+    return { refused: false, text: selection?.toString() ?? '' };
+  });
+  if (text.refused) throw new Error("Password fields can't be copied.");
+  if (!text.text) throw new Error('Select some text on the page first.');
+  if (text.text.length > COPY_LIMIT) throw new Error(`That selection is too long to copy (limit ${COPY_LIMIT} characters).`);
+  return text.text;
 }

@@ -180,9 +180,13 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
         if base_commit is not None:
             raise WorkerCheckoutError("base_commit requires a Git project checkout.")
         return None
-    project = project_resolver.resolve_project_v2(dict(parent_row))
+    parent_row = dict(parent_row)
+    project = project_resolver.resolve_project_v2(parent_row)
     if not project:
         raise WorkerCheckoutError("The caller's project is unavailable; refusing shared coding checkout.")
+    # A caller that switched or renamed its own worktree's branch this turn
+    # integrates into that branch, as its browser does (#2369).
+    project_resolver.follow_own_branch_switch(parent_row)
     expected = parent_row.get("branch") or parent_row.get("worktree_branch")
     parent_path = _caller_checkout(parent_row, expected)
     if not parent_path:
@@ -476,8 +480,9 @@ def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowl
     project = project_resolver.resolve_project_v2(row)
     if not project:
         raise WorkerCheckoutError("The caller's project is unavailable; refusing shared coding checkout.")
+    project_resolver.follow_own_branch_switch(row)
     expected = row.get("branch") or row.get("worktree_branch")
-    parent_path = _caller_checkout(parent_row, expected)
+    parent_path = _caller_checkout(row, expected)
     if not parent_path:
         return RemoteWorkerBranch(REMOTE_NONE)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id):

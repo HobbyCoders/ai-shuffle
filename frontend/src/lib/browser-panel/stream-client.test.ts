@@ -411,6 +411,10 @@ describe('workspace protocol', () => {
 		latest().receive({ type: 'command-result', id: 'retry', ok: true });
 		vi.advanceTimersByTime(30000);
 		expect(result).toHaveBeenCalledExactlyOnceWith('retry', true, undefined);
+		// A copy result carries its text to this viewer's callback.
+		expect(client.send({ ...command, id: 'copy', op: 'copy' })).toBe(true);
+		latest().receive({ type: 'command-result', id: 'copy', ok: true, text: 'copied words' });
+		expect(result).toHaveBeenLastCalledWith('copy', true, undefined, 'copied words');
 		send.mockRestore();
 		warn.mockRestore();
 	});

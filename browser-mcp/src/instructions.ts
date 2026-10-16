@@ -36,6 +36,7 @@ SHARED WORKSPACE
 - A person can watch and take control in the Browser panel. browser_status always works and shows control, tabs, viewport, busy, any pending dialog and downloads. Other tools fail with human_control while a viewer owns or requests control. Do not retry in a loop; do other work or ask for control back.
 - To finish a sign-in handoff, ask the user to choose Return control in the Browser panel and wait for Agent control before resuming. A chat reply alone does not release browser ownership. Never override genuine human control.
 - This browser has no cookies for the user's own apps and cannot sign in by itself. When navigate reports redirected_to_origin, that is a sign-in wall: ask the user to sign in through the panel, or use an endpoint that needs no session. Never type credentials yourself.
+- captcha_unavailable means the site asked for a captcha but never sent its widget to this browser, so nobody can solve it here, not even through the panel. Tell the user this step needs their own browser.
 - Uploads: check paths first with browser_status upload_paths (that check reflects the browser runtime, not your shell). browser_upload accepts only files under the runtime upload root. Never copy files into the root to get around it.
 - Microphone capture is unsupported in the built-in Browser panel: ask the user to open the page in their normal browser and approve microphone access there. The agent browser runs on its browser-host worker, not necessarily the user's device. Do not auto-grant permissions or use blanket permission flags.
 

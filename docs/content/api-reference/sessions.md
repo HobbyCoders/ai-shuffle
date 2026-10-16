@@ -740,7 +740,7 @@ Start the session's shared browser (the Browser panel) without navigating it or 
 
 **Auth:** Required
 
-Returns the browser state: `runtime_id`, `revision`, `available`, `busy`, `target_id`, `active_tab_id`, `tabs` (each with `id`, `url`, `title`, `current`), `viewport` and `control` (`owner` is `agent` or `human`). Returns `503` with a reason when the browser cannot start.
+Returns the browser state: `runtime_id`, `revision`, `available`, `busy`, `target_id`, `active_tab_id`, `tabs` (each with `id`, `url`, `title`, `current`), `viewport` and `control` (`owner` is `agent` or `human`). An optional `notice` carries a plain message for the viewer, for example when a site never sent its captcha to this browser and the step has to be finished in the user's own browser. Returns `503` with a reason when the browser cannot start.
 
 ## Moving Sessions Between Devices
 

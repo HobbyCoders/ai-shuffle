@@ -6,7 +6,7 @@ export interface BrowserViewport {
 
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
-  accept?: string; multiple?: boolean; chooser?: boolean;
+  accept?: string; multiple?: boolean; chooser?: boolean; keys?: boolean;
   x: number; y: number; width: number; height: number;
 }
 
@@ -25,6 +25,8 @@ export interface BrowserWorkspaceState {
 		pending_viewer_id: string | null;
 	};
 	busy: boolean;
+	/** Plain notice for the viewer, e.g. a captcha the site withheld from this browser. */
+	notice?: string;
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -81,7 +83,9 @@ export function isBrowserWorkspaceState(
 		!validWorkspaceViewport(value.viewport) ||
 		!Array.isArray(value.tabs) ||
 		value.tabs.length > 128 ||
-		!object(value.control)
+		!object(value.control) ||
+		(value.notice !== undefined &&
+			(typeof value.notice !== 'string' || value.notice.length > 512))
 	) {
 		return false;
 	}
@@ -92,6 +96,7 @@ export function isBrowserWorkspaceState(
 		(field.accept === undefined || (typeof field.accept === 'string' && field.accept.length <= 1024)) &&
 		(field.multiple === undefined || typeof field.multiple === 'boolean') &&
 		(field.chooser === undefined || typeof field.chooser === 'boolean') &&
+		(field.keys === undefined || typeof field.keys === 'boolean') &&
 		(field.type !== 'password' || field.value === '') && ['x', 'y', 'width', 'height'].every(k => typeof field[k] === 'number' && Number.isFinite(field[k])) &&
 		(field.width as number) > 0 && (field.height as number) > 0))) return false;
 	const ids = new Set<string>();

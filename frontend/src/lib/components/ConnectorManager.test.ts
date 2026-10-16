@@ -34,7 +34,8 @@ const listInstalls = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/installs', () => ({ listInstalls }));
 const notify = vi.hoisted(() => vi.fn());
 vi.mock('$lib/stores/notifications', () => ({ notify }));
-vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
+const watchResources = vi.hoisted(() => vi.fn());
+vi.mock('$lib/services/watch-resources', () => ({ watchResources }));
 vi.mock('$lib/components/plugins/GoogleConnection.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/plugins/PlaidConnection.svelte', () => ({ default: () => {} }));
 const usesSubscription = vi.hoisted(() => vi.fn(() => false));
@@ -197,6 +198,126 @@ describe('ConnectorManager list', () => {
 		await waitFor(() => expect((screen.getByRole('button', { name: 'Delete' }) as HTMLButtonElement).disabled).toBe(false));
 		await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 		await waitFor(() => expect(notify).toHaveBeenCalledWith('in use', { severity: 'error' }));
+	});
+
+	it('does no status or expanded-log polling during 60 hidden seconds, then refreshes on return', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+		try {
+			const view = render(ConnectorManager);
+			await screen.findByText('Family bot');
+			await fireEvent.click(screen.getByRole('button', { name: 'Event logs for Family bot' }));
+			await waitFor(() => expect(conn.getConnectorLogs).toHaveBeenCalledTimes(1));
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(conn.getConnectors).toHaveBeenCalledTimes(5);
+			expect(conn.getConnectorLogs).toHaveBeenCalledTimes(5);
+			visibility.mockReturnValue('hidden');
+			document.dispatchEvent(new Event('visibilitychange'));
+			const statusCalls = conn.getConnectors.mock.calls.length;
+			const logCalls = conn.getConnectorLogs.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(conn.getConnectors.mock.calls.length - statusCalls).toBe(0);
+			expect(conn.getConnectorLogs.mock.calls.length - logCalls).toBe(0);
+			expect(vi.getTimerCount()).toBe(0);
+			conn.getConnectors.mockResolvedValue([connector({ status: 'error', status_message: 'token revoked' })]);
+			visibility.mockReturnValue('visible');
+			document.dispatchEvent(new Event('visibilitychange'));
+			expect(await screen.findByText('token revoked')).toBeTruthy();
+			expect(conn.getConnectors).toHaveBeenCalledTimes(statusCalls + 1);
+			view.unmount();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally { visibility.mockRestore(); }
+	});
+
+	it('never starts a late poller after unmount during the initial load', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		let resolve!: (items: Connector[]) => void;
+		conn.getConnectors.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+		const view = render(ConnectorManager);
+		view.unmount();
+		resolve([connector()]);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(conn.getConnectors).toHaveBeenCalledTimes(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it('defers an initially hidden load and coalesces hidden resource invalidations', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+		try {
+			render(ConnectorManager);
+			const refresh = watchResources.mock.calls.at(-1)![1];
+			await refresh();
+			await refresh();
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(conn.getConnectors).not.toHaveBeenCalled();
+			expect(vi.getTimerCount()).toBe(0);
+			visibility.mockReturnValue('visible');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await screen.findByText('Family bot');
+			await vi.advanceTimersByTimeAsync(0);
+			expect(conn.getConnectors).toHaveBeenCalledTimes(1);
+			visibility.mockReturnValue('hidden');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await refresh();
+			await refresh();
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(conn.getConnectors).toHaveBeenCalledTimes(1);
+			visibility.mockReturnValue('visible');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(conn.getConnectors).toHaveBeenCalledTimes(2);
+		} finally { visibility.mockRestore(); }
+	});
+
+	it('does not overlap slow polls and retains an in-flight resource invalidation', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		render(ConnectorManager);
+		await screen.findByText('Family bot');
+		let resolve!: (items: Connector[]) => void;
+		conn.getConnectors.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(conn.getConnectors).toHaveBeenCalledTimes(2);
+		const refresh = watchResources.mock.calls.at(-1)![1];
+		await refresh();
+		await refresh();
+		resolve([connector()]);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(conn.getConnectors).toHaveBeenCalledTimes(3);
+		expect(conn.getConnectorTypes).toHaveBeenCalledTimes(2);
+	});
+
+	it('does not fetch expanded logs after a pending status read becomes hidden', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+		try {
+			render(ConnectorManager);
+			await screen.findByText('Family bot');
+			await fireEvent.click(screen.getByRole('button', { name: 'Event logs for Family bot' }));
+			await waitFor(() => expect(conn.getConnectorLogs).toHaveBeenCalledTimes(1));
+			let resolve!: (items: Connector[]) => void;
+			conn.getConnectors.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+			await vi.advanceTimersByTimeAsync(15_000);
+			visibility.mockReturnValue('hidden');
+			document.dispatchEvent(new Event('visibilitychange'));
+			resolve([connector()]);
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(conn.getConnectorLogs).toHaveBeenCalledTimes(1);
+			expect(conn.getConnectors).toHaveBeenCalledTimes(2);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally { visibility.mockRestore(); }
+	});
+
+	it('recovers from a failed status poll at the next interval', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		render(ConnectorManager);
+		await screen.findByText('Family bot');
+		conn.getConnectors.mockRejectedValueOnce(new Error('offline'));
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(screen.getByText('Family bot')).toBeTruthy();
+		conn.getConnectors.mockResolvedValue([connector({ status: 'error', status_message: 'token revoked' })]);
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(await screen.findByText('token revoked')).toBeTruthy();
 	});
 
 	it('polls connector status every 15 seconds and stops on unmount', async () => {

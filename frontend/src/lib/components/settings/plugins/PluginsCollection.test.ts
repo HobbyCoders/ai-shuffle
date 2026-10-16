@@ -40,7 +40,8 @@ const m = vi.hoisted(() => ({
 vi.mock('$lib/api/plugins', () => ({ ...m }));
 vi.mock('$lib/api/connectors', () => ({ getConnectors: m.getConnectors, getConnectorTypes: m.getConnectorTypes }));
 vi.mock('$lib/api/client', () => ({ api: { get: m.get, post: m.post } }));
-vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
+const watchResources = vi.hoisted(() => vi.fn());
+vi.mock('$lib/services/watch-resources', () => ({ watchResources }));
 // Account editing has its own tests (ConnectorManager, GoogleConnection,
 // AccountConnections); here it only has to mount for the right type.
 vi.mock('$lib/components/ConnectorManager.svelte', async () => ({
@@ -123,6 +124,44 @@ beforeEach(() => {
 	m.get.mockResolvedValue([]);
 });
 afterEach(cleanup);
+
+describe('background resource refreshes', () => {
+	it('defers hidden invalidations and reloads once on visibility, not after unmount', async () => {
+		const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+		try {
+			const page = await show();
+			const refresh = watchResources.mock.calls.find(([names]) => names.includes('connectors'))![1];
+			const initial = m.getConnectors.mock.calls.length;
+			visibility.mockReturnValue('hidden');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await refresh();
+			await refresh();
+			expect(m.getConnectors).toHaveBeenCalledTimes(initial);
+			visibility.mockReturnValue('visible');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await waitFor(() => expect(m.getConnectors).toHaveBeenCalledTimes(initial + 1));
+			visibility.mockReturnValue('hidden');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await refresh();
+			page.unmount();
+			visibility.mockReturnValue('visible');
+			document.dispatchEvent(new Event('visibilitychange'));
+			expect(m.getConnectors).toHaveBeenCalledTimes(initial + 1);
+		} finally { visibility.mockRestore(); }
+	});
+
+	it('delays an initially hidden collection load until it is visible', async () => {
+		const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+		try {
+			render(PluginsCollection);
+			expect(m.getConnectors).not.toHaveBeenCalled();
+			expect(m.getInstalledPlugins).not.toHaveBeenCalled();
+			visibility.mockReturnValue('visible');
+			document.dispatchEvent(new Event('visibilitychange'));
+			await waitFor(() => expect(m.getConnectors).toHaveBeenCalledTimes(1));
+		} finally { visibility.mockRestore(); }
+	});
+});
 
 describe('the list (from PluginsHub)', () => {
 	it.each(['explore', 'sources'])('explains unavailable sources in %s without hiding cached plugins', async (item) => {

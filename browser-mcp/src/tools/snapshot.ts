@@ -6,6 +6,7 @@
 
 import type { Session } from "../session.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
+import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
 
 export async function runSnapshot(
   session: Session,
@@ -18,8 +19,10 @@ export async function runSnapshot(
     maxChars: input.max_chars,
   });
   // Add content context for zero refs without inferring app readiness.
-  const warning =
+  const empty =
     snap.refs.length === 0 ? contentWarning(await session.pageContent(), 0) : undefined;
+  const captcha = (await session.checkCaptcha()) === "withheld";
+  const warning = [empty, captcha ? CAPTCHA_AGENT_NOTE : undefined].filter(Boolean).join(" ") || undefined;
   return jsonResult(
     {
       ok: true,
@@ -28,6 +31,7 @@ export async function runSnapshot(
       url: session.currentUrl().slice(0, 300),
       ref_count: snap.refs.length,
       truncated: snap.truncated,
+      ...(captcha ? { captcha_unavailable: true } : {}),
       ...(warning ? { warning } : {}),
     },
     warning ? `${snap.text}\n[warning] ${warning}`.trim() : snap.text,
