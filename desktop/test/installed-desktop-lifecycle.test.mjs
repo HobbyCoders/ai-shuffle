@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { closeInstalledDesktop } from '../scripts/installed-desktop-lifecycle.mjs';
+import { closeInstalledDesktop, desktopProcesses, parseTasklist, waitForDesktopExit } from '../scripts/installed-desktop-lifecycle.mjs';
 const { QuitGuard } = createRequire(import.meta.url)('../dist/main/quit.js');
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -62,4 +62,28 @@ test('cleanup tolerates an already disconnected app, but still waits for its wor
  await closeInstalledDesktop({ isClosed: () => true }, browser, async () => { waited = true; }, 0);
  assert.equal(waited, true);
  assert.equal(browser.listenerCount('disconnected'), 0);
+});
+
+test('tasklist rows give the image and pid; its no-match notice gives none', () => {
+ assert.deepEqual(parseTasklist('INFO: No tasks are running which match the specified criteria.\r\n'), []);
+ assert.deepEqual(parseTasklist('"electron.exe","6532","Console","1","120,404 K"\r\n"electron.exe","7012","Console","1","40,100 K"\r\n'),
+  [{ image: 'electron.exe', pid: 6532 }, { image: 'electron.exe', pid: 7012 }]);
+});
+
+test('the next start waits for the updated app (electron.exe), not only for the AI Shuffle.exe launcher', async () => {
+ // The fixed wait this replaces looked for AI Shuffle.exe only. The launcher
+ // has exited by then; the updated app still holds the single-instance lock.
+ const running = { 'AI Shuffle.exe': [], 'electron.exe': ['"electron.exe","6532","Console","1","120,404 K"'] };
+ const list = () => desktopProcesses(image => running[image].join('\r\n') || 'INFO: No tasks are running which match the specified criteria.');
+ let done = false;
+ const waiting = waitForDesktopExit(5000, list, 1).then(() => { done = true; });
+ await new Promise(resolve => setTimeout(resolve, 20));
+ assert.equal(done, false);
+ running['electron.exe'] = [];
+ await waiting;
+ assert.equal(done, true);
+});
+
+test('a desktop that never exits names what is still running', async () => {
+ await assert.rejects(waitForDesktopExit(0, () => [{ image: 'electron.exe', pid: 6532 }], 1), /still running .*electron\.exe 6532.*single-instance lock/);
 });

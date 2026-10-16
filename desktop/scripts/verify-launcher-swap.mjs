@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
 import { readLauncher } from './launcher-contract.mjs';
+import { closeInstalledDesktop, describeSnapshot, desktopProcesses, desktopSnapshot, waitForDesktopExit } from './installed-desktop-lifecycle.mjs';
 assert(process.platform==='win32'&&process.env.CI==='true','Fresh Windows CI only');
 process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS='1';
 const require=createRequire(import.meta.url);
@@ -43,7 +44,7 @@ assert(!await exists(path.join(process.env.USERPROFILE,'.ai-shuffle')),'Fresh wo
 await fs.mkdir(output,{recursive:true});
 const report={success:false,checks:[]};
 const passed=message=>{report.checks.push(message);console.log('PASS: '+message);};
-const log=await fs.open(path.join(temporary,'launcher-swap.log'),'a');
+const launcherLog=path.join(temporary,'launcher-swap.log'),log=await fs.open(launcherLog,'a');
 let chromium,browser,page;
 const evidenceLogs=[['logs','worker.log'],['logs','worker.prev.log'],['updates','build.log'],['updates','launch.log']];
 const LOG_TAIL_CHARS=8*1024*1024;
@@ -52,6 +53,9 @@ const redact=line=>line.replace(/github_pat_[A-Za-z0-9_]+|\bgh[pousr]_[A-Za-z0-9
  .replace(/\b([\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',&]+/gi,'$1$2[redacted]');
 async function collectLogs(){
  const target=path.join(output,'logs');await fs.mkdir(target,{recursive:true});report.logs={};
+ // The launchers' own output: the script started each AI Shuffle.exe with this file as stdout and stderr.
+ try{await fs.writeFile(path.join(target,'launcher-swap.log'),(await fs.readFile(launcherLog,'utf8')).split(/\r?\n/).map(redact).join('\n'));report.logs['launcher-swap.log']='copied';}
+ catch(error){report.logs['launcher-swap.log']=String(error);}
  for(const [folder,name] of evidenceLogs){const key=folder+'/'+name;let text;
   try{text=await fs.readFile(path.join(profile,folder,name),'utf8');}catch(error){report.logs[key]=error.code==='ENOENT'?'missing':String(error);continue;}
   const truncated=text.length>LOG_TAIL_CHARS;const lines=(truncated?text.slice(-LOG_TAIL_CHARS):text).split(/\r?\n/).map(redact);
@@ -71,13 +75,52 @@ async function connect(){await until(async()=>{
  if(candidate)await candidate.close().catch(()=>{});
  return false;
 },'Installed desktop debugger and worker did not become ready',300000);}
-async function launch(){await fs.rm(path.join(profile,'DevToolsActivePort'),{force:true});
- const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});child.on('error',e=>console.error(e));await connect();}
-async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
- await until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
- if(browser)await browser.close().catch(()=>{});browser=null;page=null;
- // The next start takes the single-instance lock this app holds until it has exited.
- await new Promise(r=>setTimeout(r,5000));}
+// What each start and close did, for a start that never opens (report.launches, report.closes).
+report.launches=[];report.closes=[];
+const snapshot=()=>desktopSnapshot([install,profile]);
+const launchLog=path.join(sourceRoot,'launch.log');
+const size=file=>fs.stat(file).then(s=>s.size,()=>0);
+async function launch(label,{probe=false}={}){
+ await fs.rm(path.join(profile,'DevToolsActivePort'),{force:true});
+ const record={label,before:snapshot()};report.launches.push(record);
+ const launched=await size(launchLog),started=Date.now();record.startedAt=new Date(started).toISOString();
+ const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});record.pid=child.pid;
+ let exited=false;
+ child.on('error',e=>{record.spawnError=String(e);console.error(e);});
+ child.on('exit',(code,signal)=>{exited=true;record.exit={code,signal,at:new Date().toISOString(),afterMs:Date.now()-started};
+  console.log(`${label}: AI Shuffle.exe ${child.pid} exited with code ${code}${signal?` (${signal})`:''} ${Date.now()-started} ms after it was started`);});
+ console.log(`${label}: started AI Shuffle.exe ${child.pid}; before it:\n`+describeSnapshot(record.before));
+ if(probe){
+  // Experiment: did this start hand over to an updated app (launch.log grows) before its launcher exited?
+  try{await until(async()=>exited,`${label}: the launcher did not exit`,120000);}
+  catch(error){record.hung=snapshot();console.log(`${label}: launcher still running:\n`+describeSnapshot(record.hung));throw error;}
+  await new Promise(r=>setTimeout(r,10000));
+  record.handedOver=await size(launchLog)>launched;record.afterExit=snapshot();
+  console.log(`${label}: launcher ${record.handedOver?'started':'did NOT start'} an updated app; then:\n`+describeSnapshot(record.afterExit));
+  if(!record.handedOver){await waitForDesktopExit();return launch(label+' (after the previous app exited)');}
+ }
+ const slow=setTimeout(()=>{record.after60s=snapshot();console.log(`${label}: not ready 60 s after it was started:\n`+describeSnapshot(record.after60s));},60000);
+ try{await connect();record.readyAfterMs=Date.now()-started;}
+ catch(error){record.notReady=snapshot();record.launchLogGrew=await size(launchLog)>launched;
+  console.log(`${label}: not ready (launch.log ${record.launchLogGrew?'grew':'unchanged'}):\n`+describeSnapshot(record.notReady));throw error;}
+ finally{clearTimeout(slow);}
+}
+const workerStopped=()=>until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
+async function close(label,{probe=false}={}){
+ const record={label};report.closes.push(record);const start=Date.now();
+ if(probe){
+  // Experiment: as main did before this fix, start again as soon as the worker stopped (no wait at all).
+  if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
+  await workerStopped();record.workerStoppedMs=Date.now()-start;record.atWorkerStop=desktopProcesses();
+  console.log(`${label}: worker stopped after ${record.workerStoppedMs} ms; still running: ${record.atWorkerStop.map(p=>`${p.image} ${p.pid}`).join(', ')||'nothing'}`);
+  browser=null;page=null;return;
+ }
+ await closeInstalledDesktop(page,browser,async()=>{await workerStopped();record.workerStoppedMs=Date.now()-start;record.atWorkerStop=desktopProcesses();},90000);
+ record.disconnectedMs=Date.now()-start;browser=null;page=null;
+ // The next start takes the single-instance lock, which the launcher AND the updated app (electron.exe) hold until they have exited.
+ await waitForDesktopExit();record.exitedMs=Date.now()-start;
+ console.log(`${label}: worker stopped after ${record.workerStoppedMs} ms (still running then: ${record.atWorkerStop.map(p=>`${p.image} ${p.pid}`).join(', ')||'nothing'}); debugger disconnected after ${record.disconnectedMs} ms; every AI Shuffle process exited after ${record.exitedMs} ms`);
+}
 const version=()=>page.evaluate(()=>window.shuffleDesktop.version);
 try{
  await installPreview(installer,install,()=>console.log('Installing the older published installer…'));
@@ -104,7 +147,7 @@ try{
  await fs.writeFile(path.join(unpacked,'build/application-update-key.pem'),pem);
  await fs.rm(appAsar);await asar.createPackage(unpacked,appAsar);
  const oldHash=await fileHash(appAsar);
- await launch();report.installerVersion=await version();await close();
+ await launch('Older installer');report.installerVersion=await version();await close('Older installer');
  passed(`Older installer (launcher ${report.installerLauncher}) starts its bundled app with the ephemeral release key`);
 
  // This checkout as a signed revision: the real archive script over a commit
@@ -138,7 +181,7 @@ try{
  passed('A revision that needs launcher '+target+' is built and pending');
 
  // 1. The old launcher starts it; once healthy, the updated app swaps app.asar.
- await launch();
+ await launch('Pending revision (old launcher)');
  assert.equal(await version(),'main@'+revision.slice(0,12));
  await until(async()=>JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8')).active===revision,'The revision did not commit healthy state');
  await until(async()=>{const m=await marker();if(m?.phase==='rejected')throw Error('Self-test rejected the new launcher: '+m.reason);return m?.phase==='trial';},'The updated app did not replace the launcher',300000);
@@ -147,26 +190,26 @@ try{
  assert.equal(await fileHash(appAsar),record.new);assert.equal(await fileHash(oldAsar),oldHash);assert(!await exists(newAsar));
  assert.equal(asarLauncher(appAsar),target);
  assert.equal(readAsarMember(require('node:fs'),appAsar,'package.json').toString(),readAsarMember(require('node:fs'),oldAsar,'package.json').toString());
- await close();
+ await close('Pending revision (old launcher)',{probe:true});
  passed(`The updated app replaced launcher ${report.installerLauncher} with ${target}, kept app.asar.old, and the self-test passed`);
 
  // 2. First start of the new launcher: on trial, then confirmed by the app it started.
- await launch();
+ await launch('First start of the new launcher',{probe:true});
  assert.equal(await version(),'main@'+revision.slice(0,12));
  await until(async()=>(await marker())?.phase==='confirmed','The new launcher was not confirmed',60000);
  record=await marker();assert.equal(record.starts,1);
  const host=JSON.parse(await fs.readFile(path.join(sourceRoot,'installed-host.json'),'utf8'));
  assert.equal(host.executable,exe);assert.equal(host.userData,profile);
- await close();
+ await close('First start of the new launcher',{probe:true});
  passed('The new launcher started the updated app with SHUFFLE_LAUNCHER_VERSION '+target+', which confirmed it, in the same profile');
 
  // 3. Second start: still the new launcher, nothing restored, the installer stamp untouched.
- await launch();
+ await launch('Second start of the new launcher',{probe:true});
  assert.equal(await version(),'main@'+revision.slice(0,12));
  assert.equal((await marker()).phase,'confirmed');
  assert.equal(await fileHash(appAsar),record.new);assert.equal(asarLauncher(appAsar),target);assert(await exists(oldAsar));
  assert.equal(await fs.readFile(buildPath,'utf8'),buildText);
- await close();
+ await close('Second start of the new launcher');
  passed('A second restart keeps launcher '+target+' and app.asar.old; desktop-build.json is unchanged');
  report.gaps=['The release key is ephemeral and the source is staged by this checkout\'s updater from a local feed, not downloaded from the hub by the installed app.',
   'The restore path (a new launcher that fails before the updated app confirms it) is unit-tested only.'];
@@ -176,4 +219,4 @@ try{
  try{report.marker=await marker();}catch{}
  try{report.files=Object.fromEntries(await Promise.all([appAsar,oldAsar,newAsar].map(async p=>[path.basename(p),await exists(p)?await fileHash(p):null])));}catch{}
  try{const buildLog=await fs.readFile(path.join(sourceRoot,'build.log'),'utf8');report.buildErrors=buildLog.split(/\r?\n/).filter(line=>/error|failed|traceback|cannot|no such|not found|not recognized/i.test(line)).slice(-25).map(line=>redact(line).slice(0,1000));}catch{}}
-finally{if(page)await close().catch(()=>{});await log.close();await collectLogs().catch(error=>{report.logsError=String(error);});await fs.writeFile(path.join(output,'acceptance.json'),JSON.stringify(report,null,2));}
+finally{if(page)await close('Cleanup').catch(()=>{});await log.close();await collectLogs().catch(error=>{report.logsError=String(error);});await fs.writeFile(path.join(output,'acceptance.json'),JSON.stringify(report,null,2));}
