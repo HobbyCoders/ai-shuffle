@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fluid.tools.builtins._util import detect_newline, read_text_preserving, resolve, write_text_with_newline
-from fluid.tools.fragments import NO_VERIFY_READBACK, READ_BEFORE_EDIT
+from fluid.tools.fragments import NO_VERIFY_READBACK
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -16,7 +16,6 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "Use Write for new files or complete rewrites; use Edit for partial "
         "changes to an existing file (overwriting a large file to change a "
         "few lines wastes tokens and risks losing content)."
-        + (f" {READ_BEFORE_EDIT}" if has("Read") else "")
         if has("Edit")
         else "Use Write for new files or complete rewrites."
     )

@@ -53,14 +53,11 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "(node_modules, .git, build output, virtualenvs) are pruned from "
         "the walk.\n"
         "\n"
-        "This is a recursive file search, not a directory listing: a pattern "
-        "without `/` matches basenames at any depth; `src/*.py` is rooted "
-        "under `path`, while `src/**/*.py` also includes descendants. "
-        "Directories themselves are not returned. "
-        "Patterns accept `**`, `?`, character classes and `{a,b}` alternation, "
-        "and a leading `!` inverts the pattern into an exclusion (e.g. "
-        "!{vendor/**,dist/**}). A pattern that cannot be honoured comes back as "
-        "an error naming the construct, never as an empty result."
+        "This is a recursive file search, not a directory listing: `src/*.py` "
+        "is rooted under `path`, while `src/**/*.py` also includes "
+        "descendants. Directories themselves are not returned. Patterns accept "
+        "`**`, `?`, character classes and `{a,b}`; one that cannot be honoured "
+        "is an error naming the construct, never an empty result."
     )
 
 

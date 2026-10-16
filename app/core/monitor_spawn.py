@@ -925,14 +925,10 @@ WAIT_SECONDS_PARAM = (
 )
 
 WAIT_SECONDS_DESCRIPTION_CLAUSE = (
-    "\n\n**`wait_seconds` for work that is probably quick.** Waiting a few "
-    "seconds here is cheaper than a completion: if the command finishes inside "
-    "the wait, its exit code and output come back in this result and no "
-    "notification, wake or extra turn happens at all. If it does not, you get "
-    "the normal background receipt and end the turn exactly as you would have. "
-    "It is never a reason to wait in Bash instead. A non-zero exit comes back "
-    "as an ordinary result carrying that exit code — a failing test run is an "
-    "answer, not a tool error, and nothing is raised."
+    "\n\n`wait_seconds` suits work that is probably quick (see the "
+    "parameter); it is never a reason to wait in Bash instead. A non-zero "
+    "exit comes back as an ordinary result carrying that exit code — a "
+    "failing test run is an answer, not a tool error."
 )
 
 

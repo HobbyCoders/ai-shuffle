@@ -58,6 +58,14 @@ def test_optional_workflow_blocks_require_their_tools():
     assert "end your turn" in text
 
 
+def test_code_mode_background_defers_to_the_workflow_block():
+    # With automatic workflows the "# Background work" block states the park
+    # doctrine, so the code-mode block keeps only its Task-specific rule.
+    text = ha._code_mode_section(frozenset({"Task", "Monitor"}), workflow_background=True)
+    assert 'Task(mode="background")' in text and "end your turn" not in text
+    assert "Never poll for pending results" in text
+
+
 def test_parent_guidance_obeys_profile_surface():
     text = parent_subagent_guidance(task_available=False, monitor_available=True,
                                    swarm_available=False, browser_available=False)

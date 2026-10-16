@@ -49,8 +49,14 @@ def _ctx(tmp_path) -> ToolCtx:
 # ─── 1. Bash names Git Bash and the PowerShell remedy ────────────────────────
 
 
+def test_bash_windows_notes_are_only_described_on_windows() -> None:
+    posix = bash_mod.describe(windows=False)
+    assert "Git Bash, not PowerShell" not in posix and "MANGLED" not in posix
+    assert "Quote file paths that contain spaces." in posix
+
+
 def test_bash_description_warns_that_powershell_is_mangled() -> None:
-    text = bash_mod.describe()
+    text = bash_mod.describe(windows=True)
     assert "On Windows that shell is Git Bash, not PowerShell" in text
     assert "$env:NAME" in text and "MANGLED" in text
     # The remedy, not just the prohibition.
@@ -59,7 +65,7 @@ def test_bash_description_warns_that_powershell_is_mangled() -> None:
 
 
 def test_bash_powershell_remedy_drops_the_write_mention_without_write() -> None:
-    text = bash_mod.describe(frozenset({"Bash"}))
+    text = bash_mod.describe(frozenset({"Bash"}), windows=True)
     assert "powershell -File script.ps1" in text
     assert "Write" not in text
 

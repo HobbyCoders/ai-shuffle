@@ -73,26 +73,44 @@ DELEGATION_SIZING = (
     "mechanical sweep over many separate modules. Configured maximums are "
     "safety ceilings, not targets; never add workers to approach them."
 )
-SWARM_ROUTING = SWARM_ROUTING_SUMMARY + (
-    " Do not split batches into Task calls; submit the planned workflow in one "
-    "start call, not smaller waves. "
-    "When the user asks for a swarm, the graph must cover the whole requested "
-    "job, including integration, verification, and review (inside task "
-    "briefs or as a final task), not just a small initial slice. Coverage "
-    "comes from what each task includes, not from the number of tasks. "
-    + DELEGATION_SIZING + " "
-    "Swarm's task maximum is one of those ceilings. max_parallel limits "
-    "concurrent tasks, not total workflow scope; nesting depth limits "
-    "delegation chains, not how many tasks a workflow holds. "
-    "If the work still exceeds a limit after grouping related units, explain "
-    "the limit and the complete staged plan rather than silently dropping "
-    "scope. Add adaptive follow-ups only for genuinely new information or "
-    "decisions. "
+_SWARM_BATCH_RULE = (
+    "Do not split batches into Task calls; submit the planned workflow in one "
+    "start call, not smaller waves."
+)
+_SWARM_TASK_FIT = (
     "Task also fits a pair of independent assignments or an adaptive follow-up "
     "whose brief needs your judgment of earlier results. If Swarm is "
     "unavailable or the user explicitly requests individual calls, use Task; "
     "never override a restriction on delegation."
 )
+# Swarm — what a started workflow must cover and how its limits read. Only
+# needed when a Swarm start is being written, so a host that carries the
+# routing in its prompt can keep this part in Swarm's own (deferred) docs.
+SWARM_SCOPE_RULES = (
+    "When the user asks for a swarm, the graph must cover the whole requested "
+    "job, including integration, verification, and review (inside task "
+    "briefs or as a final task), not just a small initial slice. Coverage "
+    "comes from what each task includes, not from the number of tasks. "
+    "max_parallel limits concurrent tasks, not total workflow scope; nesting "
+    "depth limits delegation chains, not how many tasks a workflow holds. "
+    "If the work still exceeds a limit after grouping related units, explain "
+    "the limit and the complete staged plan rather than silently dropping "
+    "scope. Add adaptive follow-ups only for genuinely new information or "
+    "decisions."
+)
+SWARM_ROUTING = (
+    SWARM_ROUTING_SUMMARY + " " + _SWARM_BATCH_RULE + " "
+    + DELEGATION_SIZING + " Swarm's task maximum is one of those ceilings. "
+    + SWARM_SCOPE_RULES + " " + _SWARM_TASK_FIT
+)
+# The routing a host prompt carries when Swarm's docs hold SWARM_SCOPE_RULES.
+SWARM_ROUTING_BRIEF = (
+    SWARM_ROUTING_SUMMARY + " " + _SWARM_BATCH_RULE + " "
+    + DELEGATION_SIZING + " Swarm's task maximum is one of those ceilings; "
+    "read Swarm's docs for workflow coverage and limits before a start. "
+    + _SWARM_TASK_FIT
+)
+
 
 # Task/Swarm/base prompt — session isolation is not Git checkout isolation.
 SUBAGENT_WORKTREE_SUMMARY = (

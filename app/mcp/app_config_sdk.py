@@ -43,41 +43,9 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 APP_CONFIG_SYSTEM_PROMPT = """
-## AI Shuffle Configuration
-
-You can configure AI Shuffle directly through conversation. Use the `app-config` tools
-to manage hooks, automations, MCP servers, profiles, and connectors.
-
-### How to Use
-
-1. **Discover first** — Call `getConfigCapabilities` to learn valid event types,
-   trigger types, connector types, and current system state before creating anything.
-2. **Check for duplicates** — Always `list*` before creating to avoid duplicates
-   or conflicts with existing configuration.
-3. **Describe your plan** — Before any write operation, tell the user exactly what
-   you're about to create/change. Include the key parameters. Wait for acknowledgment.
-4. **Execute and confirm** — After creating/updating, confirm success and tell the
-   user how to find it in the UI or modify it later.
-5. **Never delete without asking** — Always get explicit user confirmation before
-   deleting hooks, automations, or MCP servers. Describe what will be lost.
-
-### Intent Mapping
-
-- "Block dangerous commands" / "prevent rm -rf" → Hook (PreToolUse on Bash)
-- "Run X every morning" / "schedule a daily check" → Automation (cron trigger)
-- "Check for Y every 5 minutes" → Automation (interval trigger)
-- "Set up a webhook for Z" → Automation (webhook trigger) or Hook (webhook type)
-- "Add an MCP server" / "connect to X service" → MCP Server
-- "Create a profile for code review" → Profile
-- "Connect Telegram/Discord/Slack" → Connector (direct user to Settings UI for secrets)
-
-### Safety Rules
-
-- Hook bash commands run with the app's permissions. Explain what each command does.
-- Automation prompts run as Claude sessions with real tool access and cost.
-  Always set budget limits (max_cost_per_run and max_runs_per_day).
-- MCP servers execute external processes. Only add servers the user explicitly requests.
-- Never expose webhook secrets, API keys, or HMAC tokens in your responses.
+## AI Shuffle configuration
+The app-config tools manage hooks, automations, MCP servers, profiles, subagents and connectors. Call getConfigCapabilities first and list before creating, to avoid duplicates. Before any write, tell the user exactly what you will create or change, with the key parameters, and wait for acknowledgment; never delete without explicit confirmation that says what will be lost. Afterwards confirm and say where to find or change it in the UI.
+Hook commands run with the app's permissions: explain each one. Automations run real sessions with real tools and cost: always set max_cost_per_run and max_runs_per_day. Add only MCP servers the user explicitly requests. Never expose webhook secrets, API keys or HMAC tokens; connector secrets go through the Settings UI.
 """
 
 
@@ -97,7 +65,15 @@ def _create_discovery_tools() -> list:
         "getConfigCapabilities",
         "Discover what can be configured in AI Shuffle — valid event types, "
         "trigger types, available connectors, and current system stats. "
-        "Call this first before creating hooks, automations, or other config.",
+        "Call this first before creating hooks, automations, or other config. "
+        "Which construct fits a request: blocking or guarding a command "
+        "(\"prevent rm -rf\") is a Hook (PreToolUse on Bash); \"every morning\" "
+        "is an Automation with a cron trigger, \"every 5 minutes\" one with an "
+        "interval trigger; a webhook is an Automation webhook trigger or a "
+        "webhook Hook; connecting a service is an MCP server; a reusable "
+        "setup (\"a profile for code review\") is a Profile; "
+        "Telegram/Discord/Slack is a Connector, whose secrets the user enters "
+        "in the Settings UI.",
         {"type": "object", "properties": {}},
     )
     async def get_capabilities(args: dict) -> dict:

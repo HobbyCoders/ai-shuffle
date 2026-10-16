@@ -196,9 +196,27 @@ def skills_index(
     if not skills:
         return None
     lines = "\n".join(
-        f"- {s.name}: {s.description}" for s in sorted(skills, key=lambda s: s.name)
+        f"- {s.name}: {skill_summary(s.description)}"
+        for s in sorted(skills, key=lambda s: s.name)
     )
     return f"{skills_header(SKILLS_HEADER, skills)}\n{lines}"
+
+
+# A skills index is an index: the name and enough of the description to pick
+# the skill. The full SKILL.md, frontmatter included, loads on demand. Long
+# descriptions (trigger-phrase lists, 500+ chars) cost every request.
+SKILL_SUMMARY_CHARS = 200
+
+
+def skill_summary(description: str, cap: int = SKILL_SUMMARY_CHARS) -> str:
+    """``description`` on one line, cut at a word boundary near ``cap``."""
+    text = " ".join((description or "").split())
+    if len(text) <= cap:
+        return text
+    cut = text.rfind(" ", 0, cap)
+    if cut < cap // 2:
+        cut = cap - 1
+    return text[:cut].rstrip(" ,;:") + "…"
 
 
 def skills_header(header: str, skills: Sequence) -> str:

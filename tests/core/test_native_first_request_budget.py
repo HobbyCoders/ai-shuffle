@@ -26,14 +26,15 @@ from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.store.base import MemoryStore
 
 # Reported "System tools" + "MCP tools" (what every first request pays for tool
-# docs or schemas). Measured ~9.0k (code mode) / ~10.1k (JSON path, which
+# docs or schemas). Measured ~8.4k (code mode) / ~9.6k (JSON path, which
 # also keeps the frequently used tools loaded: NATIVE_JSON_EAGER_TOOLS).
-TOOL_ROWS_BUDGET = 10_500
+TOOL_ROWS_BUDGET = 10_000
 # Whole first request, prompt + schemas + first user message, with an empty
 # cwd and home. Measured ~24.6k (code mode) / ~23.3k (JSON path) before the
-# core-only eager tier, ~14.8k / ~14.7k after; the margin absorbs
-# host-dependent sections (workspace facts, environment).
-FIRST_REQUEST_BUDGET = 15_300
+# core-only eager tier, ~14.8k / ~14.7k after it, ~13.5k / ~13.6k after the
+# wording pass; the margin absorbs host-dependent sections (workspace facts,
+# environment).
+FIRST_REQUEST_BUDGET = 14_300
 # The breakdown before the first turn may miss only the per-turn reminders the
 # host adds while sending (memory snapshot, environment note): ~1.7% measured.
 REPORT_TOLERANCE = 0.03

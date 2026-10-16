@@ -792,11 +792,8 @@ def build_task_contract(
         mode_text = (
             "mode='sync' waits for the report. mode='background' returns a "
             "worker session ID so the parent can continue independent work; "
-            "completion is push-based, so do not busy-poll. Omitting mode "
-            "takes the target's default: read-only research agents run in the "
-            "background, every other agent runs sync. For a read-only research "
-            "agent, omit mode; pass sync only when you cannot take a single "
-            "further step without the report."
+            "completion is push-based, so do not busy-poll. The mode "
+            "parameter says when to omit it."
         )
         if background_only_ids:
             mode_text += (
@@ -980,25 +977,25 @@ def parent_subagent_guidance(
     ``delegate_by_default`` is for the assistant's home only: it replaces the
     authorize-first delegation line.
     """
-    from fluid.tools.fragments import DELEGATION_SIZING, END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
+    from fluid.tools.fragments import DELEGATION_SIZING, END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING_BRIEF
 
     parts = []
     if task_available:
         parts.append(
             "# Subagent delegation\n"
-            "Use only the roster IDs exposed by the current provider. "
-            "Defaults may run on another provider. Never invent a subagent ID or provider. "
+            "Use only the roster IDs exposed by the current provider (defaults "
+            "may run on another provider). Never invent a subagent ID or provider. "
             "For model, do not fabricate an id; pass the name the user used even if absent "
-            "from the roster, following Task.model's user-request and host-validation rules. "
-            "Never silently use the default after a model refusal. "
-            "If the roster is empty, do not delegate. Give an isolated worker "
-            "a self-contained brief, verified checkout/prerequisites, allowed "
-            "scope and expected result. Choose the role that matches the work: "
-            "rendered UI belongs to the frontend role when present, not a "
-            "backend-only worker. Handle quick direct work yourself. "
+            "from the roster (Task.model has the rules), and never silently use the "
+            "default after a model refusal. If the roster is empty, do not delegate. "
+            "Match the role to the work: rendered UI goes to the frontend role "
+            "when present, not a backend-only worker. Handle quick direct work "
+            "yourself. "
             + (DELEGATE_BY_DEFAULT if delegate_by_default else DELEGATE_WHEN_AUTHORIZED)
             + SUBAGENT_WORKTREE_GUIDANCE + "\n"
-            + (SWARM_ROUTING if swarm_available else
+            # Swarm's coverage/limit rules ride its own deferred docs
+            # (harness_adapter._install_task_contract adds them there).
+            + (SWARM_ROUTING_BRIEF if swarm_available else
                DELEGATION_SIZING + " Use Task for independent or adaptive assignments; "
                "do not invent an unavailable workflow tool; never override a restriction on delegation.")
         )
@@ -1008,8 +1005,7 @@ def parent_subagent_guidance(
             "Background completion is push-based and wakes the owning "
             "session, including subagents. Parking is not a final assignment "
             "report. Inspect completion before claiming the work is done. "
-            + END_TURN_ON_BACKGROUND
-            + " No sleep loops or status polling. "
+            + END_TURN_ON_BACKGROUND + " "
             + ("Long builds, installs, suites and CI waits belong in Monitor."
                if monitor_available else
                "If no background runner is exposed, report that limitation; "

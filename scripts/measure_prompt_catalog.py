@@ -57,6 +57,9 @@ def compile_fixture(*, native=True):
         }
         for name, value in fixed.items():
             stack.enter_context(patch(name, return_value=value))
+        # Render for the platform the environment block declares, not the
+        # test host's: Bash's Windows notes would otherwise move the budget.
+        stack.enter_context(patch("fluid.tools.builtins.bash.HOST_IS_WINDOWS", False))
         stack.enter_context(patch.object(type(settings), "managed_database_available", return_value=True))
         # Fail closed if a future factory starts consulting the live database.
         db_guard = stack.enter_context(patch("app.db.base.get_connection", side_effect=AssertionError("offline fixture opened DB")))

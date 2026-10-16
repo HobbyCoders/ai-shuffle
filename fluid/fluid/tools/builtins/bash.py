@@ -28,12 +28,17 @@ MAX_TIMEOUT_S = 600.0
 # and the last half, the middle dropped as it streams. Well above what the
 # model can see, so the cap only ever bites a runaway command.
 MAX_CAPTURE_BYTES = 8 * _TRUNCATE_LIMIT
+# The host this process runs on; describe() reads it at call time so a
+# measurement fixture can declare the platform it renders for.
+HOST_IS_WINDOWS = sys.platform == "win32"
 
 
-def describe(tools: frozenset[str] | None = None) -> str:
+def describe(tools: frozenset[str] | None = None, *, windows: bool | None = None) -> str:
     """Bash's description, specialized to the session's tool surface.
 
     ``tools=None`` means the full builtin surface (the module-constant SPEC).
+    ``windows`` (default: this process's platform) adds the Git Bash notes,
+    which only describe a Windows host; elsewhere they are dead prompt.
     Cross-tool routing clauses are emitted only when the named tool exists in
     the surface — prose about an absent tool is hallucinated-call bait.
     """
@@ -76,6 +81,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
         if has("Write")
         else "put the script in a .ps1 file"
     )
+    if windows is None:
+        windows = HOST_IS_WINDOWS
     windows_shell_bullet = (
         "- On Windows that shell is Git Bash, not PowerShell or cmd. "
         "PowerShell syntax is not rejected there, it is MANGLED: bash expands "
@@ -126,9 +133,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "- That no-output form is a NON-EMPTY string, so in code mode test "
         "`'[exit code' in out` (or `'(no output)' in out`), never `if out:` or "
         "`out or fallback` — those are always true and will misfire.\n"
-        "- Quote file paths that contain spaces. Under Git Bash, write Windows "
-        "paths with forward slashes or inside quotes so backslashes survive.\n"
-        + windows_shell_bullet
+        "- Quote file paths that contain spaces."
+        + (" Under Git Bash, write Windows paths with forward slashes or inside "
+           "quotes so backslashes survive.\n" + windows_shell_bullet
+           if windows else "\n")
     )
 
 
