@@ -116,6 +116,16 @@ let current = null;
 const step = name => { current = { name, checks: [], result: 'running' }; report.steps.push(current); console.log(`\n== ${name}`); };
 const pass = message => { current.checks.push(message); console.log('PASS: ' + message); };
 const note = message => { (current.notes ??= []).push(message); console.log('NOTE: ' + message); };
+// Safety checks (fence before PostgreSQL, no stale or second copy, no older code
+// after a failed start) stay fatal assertions. Everything else is recorded as a
+// failure and the run goes on, so one run shows every remaining problem.
+const fail = message => { (current.failures ??= []).push(message); console.log('FAIL: ' + message); };
+const expect = (ok, message, failure = message) => { if (ok) pass(message); else fail(failure); return !!ok; };
+/** A wait that is not a safety check: on timeout record it and go on. */
+async function expectWithin(fn, message, failure, timeout) {
+  try { await until(fn, failure, timeout); pass(message); return true; } catch (error) { fail(String(error?.message ?? error)); return false; }
+}
+const finish = () => { current.result = current.failures?.length ? 'fail' : 'pass'; };
 const launchLog = path.join(work, 'launch-output.log');
 await fs.mkdir(work, { recursive: true });
 const log = await fs.open(launchLog, 'a');
@@ -125,12 +135,21 @@ const redact = line => line.replace(/github_pat_[A-Za-z0-9_]+|\bgh[pousr]_[A-Za-
   .replace(/\b([\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',&]+/gi, '$1$2[redacted]');
 
 // --- The running app, driven over the Chromium debugger like verify-launcher-swap.mjs.
-let chromium, browser;
+let chromium, browser, browserPort = null;
+/**
+ * Pages of the running app. One connection per app process, kept open: page
+ * handles taken from it stay usable while other code polls (the launcher and
+ * the app it starts each write their own DevToolsActivePort).
+ */
 async function debuggerPages() {
   const port = (await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split(/\r?\n/)[0];
   assert.match(port, /^[1-9]\d{0,4}$/);
-  if (browser) await browser.close().catch(() => {});
-  browser = await chromium.connectOverCDP('http://127.0.0.1:' + port, { timeout: 1500 });
+  if (!browser?.isConnected() || browserPort !== port) {
+    if (browser) await browser.close().catch(() => {});
+    browser = null; browserPort = null;
+    browser = await chromium.connectOverCDP('http://127.0.0.1:' + port, { timeout: 1500 });
+    browserPort = port;
+  }
   return browser.contexts().flatMap(c => c.pages());
 }
 /** The worker UI once it answers, else null. */
@@ -146,6 +165,22 @@ async function statusPage() {
     for (const page of await debuggerPages()) if (await page.evaluate(() => !!window.shuffleDesktopWorker).catch(() => false)) return page;
   } catch { /* not up yet */ }
   return null;
+}
+/**
+ * Every status detail the page shows from now until it navigates away: a
+ * MutationObserver reports each change over the console, and a poll backs it up.
+ */
+async function recordDetails(page) {
+  const seen = new Set(); let stopped = false;
+  page.on('console', message => { const text = message.text(); if (text.startsWith('acceptance-detail:')) seen.add(text.slice(18)); });
+  await page.evaluate(() => {
+    const detail = document.getElementById('status-detail');
+    new MutationObserver(() => console.log('acceptance-detail:' + detail.textContent)).observe(detail, { childList: true, characterData: true, subtree: true });
+  });
+  const poll = (async () => {
+    while (!stopped) { try { seen.add((await statusText(page)).detail); } catch { /* navigating */ } await sleep(50); }
+  })();
+  return { seen, stop: async () => { stopped = true; await poll; } };
 }
 const statusText = page => page.evaluate(() => ({
   heading: document.getElementById('status-heading')?.textContent ?? '',
@@ -182,7 +217,7 @@ async function kill() {
   await settle();
 }
 async function settle() {
-  if (browser) await browser.close().catch(() => {}); browser = null;
+  if (browser) await browser.close().catch(() => {}); browser = null; browserPort = null;
   // The single-instance lock is held until the previous process has exited.
   await sleep(5000);
 }
@@ -280,7 +315,7 @@ try {
   ({ chromium } = await import(pathToFileURL(path.join(resources, 'worker/server/browser-mcp/node_modules/playwright-core/index.mjs')).href));
   await launch(); await ready(); await close();
   pass(`Installer ${report.installer.revision.slice(0, 12)} (launcher ${report.installer.launcher}, no restore points) starts with the ephemeral key`);
-  current.result = 'pass';
+  finish();
 
   const target = readLauncher(await fs.readFile(path.join(desktop, 'launcher.json'), 'utf8')).version;
   const [P, N1, N2, N3] = NAMES.map(name => plan.revisions[name].revision);
@@ -290,13 +325,12 @@ try {
   await stage('P', 3);
   let w = watch(); await launch(); await ready(P); await w.stop();
   await until(async () => (await readJson(stateFile)).active === P, 'P did not become healthy', 120000);
-  assert(!w.samples.some(s => s.journal), 'A restore point was made for a bundled previous build');
-  pass('P started healthy; no restore-point.json at any time');
+  expect(!w.samples.some(s => s.journal), 'P started healthy; no restore-point.json at any time', 'A restore point was made for a bundled previous build');
   await close();
   // A database large enough that the copy can be watched and interrupted.
   const filler = await fs.open(path.join(pgData, 'zz-acceptance-filler.bin'), 'w'); await filler.truncate(FILLER_GB * 1024 ** 3); await filler.close();
   pass(`Added a ${FILLER_GB} GB file to the stopped cluster so a copy takes long enough to interrupt`);
-  current.result = 'pass';
+  finish();
 
   step('N1: a failed copy shows its reason; closing keeps P with N1 ready; Try again starts N1');
   await stage('N1', 3);
@@ -307,37 +341,41 @@ try {
   let page = await failurePage('The copy failure was not shown');
   let text = await statusText(page);
   report.failurePage = text;
-  assert.equal(text.heading, 'The update could not start yet');
-  assert.match(text.error, /^Could not prepare the update's database restore point: .*EBUSY.*\. A file in the AI Shuffle data folder is in use\. .* choose Try again\. If it keeps failing, close AI Shuffle and open it again/);
+  expect(text.heading === 'The update could not start yet', 'The failure page heading is "The update could not start yet"', 'Failure page heading: ' + JSON.stringify(text.heading));
+  expect(/^Could not prepare the update's database restore point: .*EBUSY.*\. A file in the AI Shuffle data folder is in use\. .* choose Try again\. If it keeps failing, close AI Shuffle and open it again/.test(text.error),
+    'The failure names the locked file and gives the in-use advice', 'Failure text: ' + JSON.stringify(text.error));
   let state = await readJson(stateFile);
+  // Safety: a failed copy never fences the update or starts PostgreSQL.
   assert.equal(state.booting, N1); assert.equal(state.waiting, N1); assert.equal(state.mayHaveMigrated?.[N1], undefined);
-  assert(!await exists(journalFile)); assert(!await exists(snapshotDir)); assert(!await exists(path.join(pgData, 'postmaster.pid')));
-  pass('A locked database file: the failure page names the cause; no journal, no partial copy, no fence, PostgreSQL not started');
+  assert(!await exists(path.join(pgData, 'postmaster.pid')), 'PostgreSQL started after a failed copy');
+  pass('No fence and PostgreSQL not started after the failed copy');
+  expect(!await exists(journalFile) && !await exists(snapshotDir), 'No journal and no partial copy left', 'A journal or a partial copy was left after the failed copy');
   await close(); await launch(); await ready(P);
-  assert.equal((await readJson(stateFile)).staged, N1);
+  assert.equal((await readJson(stateFile)).staged, N1, 'N1 is not staged after closing');
   pass('Closing and reopening runs P, with N1 still ready to install');
   await close(); await install_(N1);
   await launch();
   page = await failurePage('The copy failure was not shown again');
   await unlock();
   w = watch();
-  let sawPreparing = false;
-  const progress = (async () => { for (let i = 0; i < 600 && !sawPreparing; i++) { try { sawPreparing = /Preparing the update's database restore point/.test((await statusText(page)).detail); } catch { break; } await sleep(100); } })();
+  const details = await recordDetails(page);
   await page.click('#restart');
-  await ready(N1); await w.stop(); await progress;
+  await ready(N1); await w.stop(); await details.stop();
+  report.retryDetails = [...details.seen];
   const readyBeforeStart = w.samples.find(s => s.journal?.late && s.journal.phase === 'ready' && s.journal.revision === N1);
+  // Safety: the point is ready only together with the fence.
   assert(readyBeforeStart, 'No ready late restore point was seen');
   assert.equal(readyBeforeStart.floor?.revision, N1, 'The point became ready before N1 was fenced');
   assert.notEqual(readyBeforeStart.state?.mayHaveMigrated?.[N1], undefined);
   if (readyBeforeStart.pg) note('PostgreSQL was already running at the first sample of the ready point (sampling is every 100 ms)');
   else pass('The ready late point was seen with N1 fenced (floor N1) before PostgreSQL started');
-  assert(sawPreparing, 'The status page did not show "Preparing the update\'s database restore point…" during the copy');
-  pass('The status page showed "Preparing the update\'s database restore point…"');
-  await until(async () => (await readJson(stateFile)).active === N1 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was not removed after the healthy start', 120000);
-  pass('With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy');
-  assert.equal(await readJson(markerFile), null, 'Launcher 3 releases must not swap the launcher');
+  expect([...details.seen].some(text => /Preparing the update's database restore point/.test(text)), 'The status page showed "Preparing the update\'s database restore point…"',
+    'The status page did not show "Preparing the update\'s database restore point…" during the copy; it showed: ' + JSON.stringify([...details.seen]));
+  await expectWithin(async () => (await readJson(stateFile)).active === N1 && !await exists(journalFile) && !await exists(snapshotDir),
+    'With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy', 'N1 did not become active with the point removed', 120000);
+  expect(await readJson(markerFile) === null, 'Launcher 3 releases do not swap the launcher', 'A launcher 3 release swapped the launcher');
   await close();
-  current.result = 'pass';
+  finish();
 
   step('N2: killed during the copy, before the fence; reopening runs N1; installing N2 again replaces the stale copy');
   await stage('N2', 3);
@@ -345,23 +383,23 @@ try {
   await until(async () => { const j = await readJson(journalFile).catch(() => null); return j?.late && j.phase === 'preparing' && j.revision === N2; }, 'The copy did not start', 600000, 50);
   await kill();
   state = await readJson(stateFile);
-  assert.equal(state.waiting, N2, 'N2 was fenced before the kill; the copy was too fast to interrupt');
+  assert.equal(state.waiting, N2, 'N2 was fenced before the kill; the copy was too fast to interrupt (raise SHUFFLE_ACCEPTANCE_FILLER_GB)');
   assert.equal((await readJson(journalFile)).phase, 'preparing');
   pass('Killed N2 mid-copy: journal preparing, N2 not fenced');
   await launch(); await ready(N1);
-  assert.equal((await readJson(stateFile)).staged, N2);
+  assert.equal((await readJson(stateFile)).staged, N2, 'N2 is not staged after the kill');
   pass('Reopening ran N1 (the previous version), N2 staged');
-  await until(async () => !await exists(journalFile) && !await exists(snapshotDir), 'N1 did not remove the abandoned copy', 120000);
-  pass('N1 removed the abandoned partial copy once healthy');
+  await expectWithin(async () => !await exists(journalFile) && !await exists(snapshotDir), 'N1 removed the abandoned partial copy once healthy', 'N1 did not remove the abandoned copy', 120000);
   await close(); await install_(N2);
   const reinstalled = Date.now();
   w = watch(); await launch(); await ready(N2); await w.stop();
   const fresh = w.samples.find(s => s.journal?.late && s.journal.phase === 'ready' && s.journal.revision === N2);
+  // Safety: never start with a copy older than the data the previous build wrote since.
   assert(fresh && fresh.manifest > reinstalled, 'The stale copy was not replaced by a new one');
-  await until(async () => (await readJson(stateFile)).active === N2 && !await exists(journalFile), 'N2 did not finish', 120000);
-  pass('Installing N2 again made a new copy and started N2');
+  pass('Installing N2 again made a new copy');
+  await expectWithin(async () => (await readJson(stateFile)).active === N2 && !await exists(journalFile), 'N2 started and its point was removed once healthy', 'N2 did not finish', 120000);
   await close();
-  current.result = 'pass';
+  finish();
 
   step('N3: killed after PostgreSQL started; the old launcher offers only Try Again, which makes no second copy; then the swap');
   await stage('N3', target);
@@ -382,25 +420,29 @@ try {
   pass('The old launcher did not run P, N1 or N2: N3 failed and fenced');
   const dialog = await until(async () => pressDialogButton('Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000);
   report.dialog = dialog;
-  assert.deepEqual([...dialog.buttons].filter(name => !/^(Close|Minimize|Maximize)$/.test(name)).sort(), ['Quit', 'Try Again'], 'The old launcher offered more than Try Again and Quit: ' + dialog.buttons);
-  pass('The old launcher offered only Try Again and Quit');
+  const buttons = [...dialog.buttons].filter(name => !/^(Close|Minimize|Maximize)$/.test(name)).sort();
+  expect(JSON.stringify(buttons) === JSON.stringify(['Quit', 'Try Again']), 'The old launcher offered only Try Again and Quit', 'The old launcher offered: ' + JSON.stringify(dialog.buttons));
   w = watch(); await ready(N3); await w.stop();
+  // Safety: the retry keeps the copy taken before the database started.
   assert(w.samples.every(s => s.manifest === null || s.manifest === copied), 'Try Again made a second copy');
-  await until(async () => (await readJson(stateFile)).active === N3 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was not removed after the healthy retry', 120000);
-  pass('Try Again ran N3 without a second copy; the point was removed once healthy');
-  const swap = await until(async () => { const m = await readMarker(); if (m?.phase === 'rejected') throw Error('Self-test rejected the new launcher: ' + m.reason); return m?.phase === 'trial' ? m : null; }, 'The launcher was not replaced', 300000);
-  assert.deepEqual([swap.revision, swap.to], [N3, target]);
-  assert.equal(readLauncher(readAsarMember(require('node:fs'), appAsar, 'launcher.json').toString('utf8')).version, target);
-  pass(`The launcher was swapped to ${target} after the healthy start`);
-  await close(); await launch(); await ready(N3);
-  await until(async () => (await readMarker())?.phase === 'confirmed', 'The new launcher was not confirmed', 60000);
-  pass(`Launcher ${target} started N3 and was confirmed`);
+  pass('Try Again ran N3 without a second copy');
+  await expectWithin(async () => (await readJson(stateFile)).active === N3 && !await exists(journalFile) && !await exists(snapshotDir), 'The point was removed once N3 was healthy', 'The point was not removed after the healthy retry', 120000);
+  let swap = null;
+  try {
+    swap = await until(async () => { const m = await readMarker(); if (m?.phase === 'rejected') throw Error('Self-test rejected the new launcher: ' + m.reason); return m?.phase === 'trial' ? m : null; }, 'The launcher was not replaced', 300000);
+  } catch (error) { fail(String(error?.message ?? error)); }
+  if (swap) {
+    const swapped = readLauncher(readAsarMember(require('node:fs'), appAsar, 'launcher.json').toString('utf8')).version;
+    expect(swap.revision === N3 && swap.to === target && swapped === target, `The launcher was swapped to ${target} after the healthy start`, `Swap marker ${JSON.stringify(swap)}, installed launcher ${swapped}`);
+    await close(); await launch(); await ready(N3);
+    await expectWithin(async () => (await readMarker())?.phase === 'confirmed', `Launcher ${target} started N3 and was confirmed`, 'The new launcher was not confirmed', 60000);
+  }
   await close();
-  current.result = 'pass';
-  report.success = true;
+  finish();
+  report.success = report.steps.every(s => s.result === 'pass');
 } catch (error) {
   if (current) { current.result = 'fail'; current.error = String(error?.stack ?? error); }
-  console.error(error); process.exitCode = 1;
+  console.error(error);
   try { report.state = await readJson(stateFile); report.journal = await readJson(journalFile); report.floor = await readJson(floorFile); report.marker = await readMarker(); } catch { /* best effort */ }
 } finally {
   for (const holder of holders) holder.kill();
@@ -413,9 +455,11 @@ try {
   }
   try { await fs.writeFile(path.join(output, 'launch-output.log'), (await fs.readFile(launchLog, 'utf8')).split(/\r?\n/).map(redact).join('\n')); } catch { /* none */ }
   await fs.writeFile(path.join(output, 'acceptance.json'), JSON.stringify(report, null, 2));
-  const lines = report.steps.map(s => `${s.result.toUpperCase().padEnd(7)} ${s.name}${s.error ? '\n        ' + s.error.split('\n')[0] : ''}`);
+  const lines = report.steps.map(s => [`${s.result.toUpperCase().padEnd(7)} ${s.name}`,
+    ...(s.failures ?? []).map(f => '        FAIL: ' + f), ...(s.error ? ['        FATAL: ' + s.error.split('\n')[0]] : [])].join('\n'));
   const summary = [`Late restore point acceptance: ${report.success ? 'PASS' : 'FAIL'}`, ...lines].join('\n');
   await fs.writeFile(path.join(output, 'summary.txt'), summary + '\n');
   console.log('\n' + summary);
+  if (!report.success) process.exitCode = 1;
 }
 function readMarker() { return readJson(markerFile); }

@@ -60,6 +60,18 @@ test('a failed update restore point has its own failure heading and keeps Try ag
  assert.match(p.el('status-error').textContent, /disk full/);
  assert.equal(p.el('restart').hidden, false);
 });
+test('Try again after a failed restore point shows the copy while the restart is still running', async () => {
+ let finish; let p;
+ p = page({ state: { phase: 'failed', startupStep: 'restore-point', error: 'Could not prepare the update\'s database restore point: EBUSY.', postgres: { phase: 'idle' } },
+  restart: () => new Promise((resolve) => { finish = resolve; }) }); await tick();
+ const click = p.el('restart').listeners.click();
+ // Main sends the copy's progress before worker.restart() returns.
+ p.emit({ phase: 'idle', startupStep: 'restore-point', postgres: { phase: 'idle' } });
+ assert.equal(p.el('status-heading').textContent, 'Preparing the update');
+ assert.equal(p.el('status-detail').textContent, 'Preparing the update\'s database restore point…');
+ assert.equal(p.el('status-error').hidden, true);
+ finish(); await click;
+});
 test('ordinary startup is quiet, reflects readiness, and loads logs only when requested', async () => {
  const p = page(); await tick();
  assert.equal(p.el('status').dataset.mode, 'starting');

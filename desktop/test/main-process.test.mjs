@@ -480,16 +480,20 @@ test('a failed late restore point stops before PostgreSQL, shows its plain reaso
  const {RestorePointError}=createRequire(import.meta.url)('../dist/main/source-updates.js');
  const message='Could not prepare the update\'s database restore point: disk full. There is not enough free disk space for a copy of your database.';
  let attempts=0;const events=[];
- const updates={options:{root:'/isolated/source'},async requireRestorePoint(){if(++attempts===1)throw new RestorePointError(message);events.push('copied');},
+ const updates={options:{root:'/isolated/source'},async requireRestorePoint(_,late){if(++attempts===1)throw new RestorePointError(message);late.preparing();events.push('copied');},
   async databaseStarting(){events.push('floor');},async healthy(){},async finishRollback(){},async failed(){}};
  const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates},postgresStart:async()=>events.push('postgres')});
  assert.equal(main.postgres.state.phase,'idle');assert.deepEqual(events,[]);
  const state=main.window.sent.filter(([channel])=>channel==='desktop:worker-state').at(-1)[1];
  assert.equal(state.phase,'failed');assert.equal(state.error,message);assert.equal(state.startupStep,'restore-point');
  // A relaunch would go through an old launcher, which runs the previous version instead.
+ const before=main.window.sent.length;
  await main.ipc.worker.restart();
  assert.equal(main.app.relaunched,undefined);assert.equal(main.app.quits,0);
  assert.deepEqual(events,['copied','floor','postgres']);assert.equal(main.worker.state.phase,'ready');
+ // While Try again waits for the copy, the status page is told it is copying, not that it failed.
+ const retried=main.window.sent.slice(before).filter(([channel])=>channel==='desktop:worker-state').map(([,state])=>state);
+ assert.ok(retried.some(state=>state.startupStep==='restore-point'&&state.phase!=='failed'),JSON.stringify(retried.map(state=>[state.phase,state.startupStep])));
 });
 test('quitting a first boot before its database started lets the next launch retry it; after that it does not', async () => {
 	const applications = () => ({ options: { root: '/isolated/source' }, deferred: 0, async requireRestorePoint() {}, async finishRollback() {}, async deferBoot() { this.deferred++; }, async databaseStarting() { this.starting = (this.starting ?? 0) + 1; }, async healthy() {}, async failed() {} });
