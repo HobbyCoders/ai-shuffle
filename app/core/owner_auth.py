@@ -158,12 +158,18 @@ def container_install():
     it, on throwaway data, so it is that agent's own instance.
     """
     import os
-    if any(os.path.exists(marker) for marker in _CONTAINER_MARKERS):
+    if container_marker_present():
         return os.environ.get('AI_SHUFFLE_PREVIEW') != '1' or not settings.is_local_mode()
     return not settings.is_local_mode()
 
 
 _CONTAINER_MARKERS = ('/.dockerenv', '/run/.containerenv')
+
+
+def container_marker_present():
+    """Whether a root-created container runtime marker exists on this machine."""
+    import os
+    return any(os.path.exists(marker) for marker in _CONTAINER_MARKERS)
 
 
 def loopback_owner():
