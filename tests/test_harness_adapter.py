@@ -7755,9 +7755,11 @@ def test_memory_block_says_what_remember_is_for():
     assert "dependency that is missing" in text and "correction the user gives" in text
     # Recall is cheap and precedes re-discovery.
     assert "Recall is one cheap call" in text and "BEFORE re-discovering" in text
-    # The reminder rides the user turn; absence means empty.
-    assert '"# Memory" reminder on the user turn' in text
-    assert "the store is empty, not hidden" in text
+    # The reminder rides a user turn once, not every turn; changes arrive as
+    # a change list; no reminder anywhere means empty.
+    assert '"# Memory" reminder' in text and "on a user turn" in text
+    assert "after a compaction" in text and '"# Memory changes"' in text
+    assert "store is" in text and "empty, not hidden" in text
     # Note/Ledger never persist.
     assert "Note and Ledger are" in text and "never persist" in text
 

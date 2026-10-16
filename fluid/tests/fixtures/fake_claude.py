@@ -52,6 +52,8 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             the first block's deltas; =interrupt parks there
                             until an ``interrupt`` control_request, then closes
                             the block and returns a success result.
+  x  compact on request:    like (a), but a user message containing
+                            ``[compact-now]`` gets the compacting turn of (p).
   u  hooked tool turn:      a Bash tool_use, then a ``hook_callback``
                             control_request for the PreToolUse callback the
                             harness registered at ``initialize``; a
@@ -592,6 +594,11 @@ def main() -> int:
             emit(result_frame(session_id, "error_max_turns"))
         elif scenario == "p":
             turn_compacting(session_id)
+        elif scenario == "x":
+            if "[compact-now]" in json.dumps(msg):
+                turn_compacting(session_id)
+            else:
+                turn_simple(session_id)
         elif scenario == "j":
             turn_inline_context(session_id)
         elif scenario == "q":
