@@ -391,7 +391,7 @@ async def release_pending_questions(session_id: str) -> int:
         answers = auto_answers(questions)
         if not answers or not item.get("request_id"):
             continue
-        if await user_question_handler.respond(item["request_id"], session_id, answers):
+        if await user_question_handler.respond(item["request_id"], session_id, answers, human_input=False):
             released += 1
             await record_answers(session_id, questions, answers)
     return released

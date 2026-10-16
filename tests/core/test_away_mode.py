@@ -99,6 +99,7 @@ async def test_release_pending_questions_answers_waiting_requests():
         released = await away_mode.release_pending_questions("s1")
     assert released == 1
     assert respond.await_args.args[2] == {"Which track?": "Internal testing (Recommended)", "Tag version?": "v1.2.4"}
+    assert respond.await_args.kwargs["human_input"] is False
 
 
 @pytest.fixture

@@ -702,6 +702,97 @@ def test_message_budget_and_hop_limit(peers, monkeypatch):
         orch._queue("caller", {**args, "request_id": "hop"}, "message")
 
 
+@pytest.mark.parametrize("delivery", ["queued", "parked", "live"])
+@pytest.mark.parametrize("answerer", ["human", "away", "dismissed", "unauthorized"])
+async def test_question_answer_peer_budget_boundary(peers, monkeypatch, delivery, answerer):
+    from unittest.mock import AsyncMock, MagicMock
+    from app.api.chat_ws_handler import ChatWebSocketHandler
+    from app.core import away_mode, turn_scheduler
+    from app.core.user_question_handler import user_question_handler
+
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    monkeypatch.setattr(user_question_handler, "_retire_native_question", AsyncMock())
+    monkeypatch.setattr(away_mode, "record_answers", AsyncMock())
+
+    # Produce the exhausted chain, rather than seeding the field the guard reads.
+    sender, target = "caller", "peer"
+    for hop in range(orch.MAX_HOPS):
+        receipt = orch._queue(sender, {"session_id": target, "message": "Coordinate",
+                                      "request_id": f"hop-{hop}"}, "message")
+        current = turns.start_turn(receipt["turn_id"])
+        assert current
+        if hop < orch.MAX_HOPS - 1 or delivery == "queued":
+            turns.settle_turn(current["id"], "completed")
+        elif delivery == "parked":
+            turns.park_turn(current["id"], ["background-task"])
+        sender, target = target, sender
+    assert sender == "caller"
+    original_root = orch._context(sender)["payload"]["orchestration_root"]
+    args = {"session_id": "peer", "message": "Report the result", "request_id": "stable-report"}
+    with pytest.raises(ValueError, match="8 hops"):
+        orch._queue(sender, args, "message")
+
+    await user_question_handler.post_question(
+        request_id="continue-chain", tool_use_id="ask", session_id=sender,
+        questions=[{"question": "Continue?", "options": [{"label": "Yes"}, {"label": "No"}]}],
+        broadcast_func=AsyncMock(),
+    )
+    if answerer != "away":
+        ws = ChatWebSocketHandler(websocket=MagicMock(), device_id="owner-client",
+                                  user_id="admin", api_user_id=None)
+        ws.send_json = AsyncMock()
+        if answerer == "unauthorized":
+            ws._authorize_mobile_session = AsyncMock(return_value=False)
+        await ws.handle_user_question_response({"session_id": sender, "request_id": "continue-chain",
+                                                "answers": {"Continue?": "Yes"},
+                                                "dismissed": answerer == "dismissed"})
+        if answerer != "unauthorized":
+            assert any(call.args[0].get("success") for call in ws.send_json.call_args_list)
+    else:
+        assert await away_mode.release_pending_questions(sender) == 1
+    if answerer in ("dismissed", "unauthorized"):
+        assert not turns.get_queued_turns(sender)
+        assert orch._context(sender)["payload"]["orchestration_root"] == original_root
+        with pytest.raises(ValueError, match="8 hops"):
+            orch._queue(sender, args, "message")
+        return
+    (answer,) = turns.get_queued_turns(sender)
+    if delivery == "queued":
+        assert turns.start_turn(answer["id"])
+    elif delivery == "parked":
+        resumed = turns.start_turn(answer["id"], can_resume=lambda old, new: True)
+        assert resumed["id"] == current["id"]  # logical turn id survives
+    else:
+        # Native delivery can absorb this answer while the original turn runs.
+        assert turns.absorb_queued_turn(answer["id"])
+        assert turns.get_turn(current["id"])["state"] == "running"
+
+    context = orch._context(sender)
+    if answerer == "away":
+        assert context["payload"]["orchestration_root"] == original_root
+        with pytest.raises(ValueError, match="8 hops"):
+            orch._queue(sender, args, "message")
+        return
+
+    assert context["payload"]["orchestration_root"] == answer["id"]
+    assert not context["payload"].get("orchestration_depth")
+    # The scheduler carries the NEW root into automated follow-ups, not a fresh
+    # root on every wake. Retry receipts and the action ceiling still apply.
+    assert turn_scheduler._context_payload(context)["orchestration_root"] == answer["id"]
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 2)
+    sent = orch._queue(sender, args, "message")
+    sent_turn = turns.get_turn(sent["turn_id"])
+    assert sent_turn["parent_turn_id"] == answer["id"]
+    assert sent_turn["payload"]["orchestration_depth"] == 1
+    assert not await user_question_handler.respond("continue-chain", sender, {"Continue?": "Yes"})
+    assert orch._queue(sender, args, "message")["turn_id"] == sent["turn_id"]
+    orch._queue(sender, {**args, "request_id": "second"}, "message")
+    with pytest.raises(ValueError, match="budget"):
+        orch._queue(sender, {**args, "request_id": "overflow"}, "message")
+
+
 def test_chain_continuation_keeps_budget(peers):
     created = orch._queue("caller", {"title": "Work", "prompt": "go", "request_id": "first"}, "start")
     with get_db() as conn:

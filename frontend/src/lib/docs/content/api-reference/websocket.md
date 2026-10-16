@@ -146,6 +146,13 @@ ws.send(JSON.stringify({
 }));
 ```
 
+An accepted human answer to a nonblocking AskUser card starts a fresh peer-chain
+budget, just like a new user message. This also applies when the answer joins a
+running turn or resumes a parked turn. The existing hop, action and new-session
+limits still apply to that new chain. Replaying an already accepted answer does
+not reset it again. Away-mode automatic answers and background/peer wakes retain
+their existing budget; dismissing a card without answering grants no new budget.
+
 ### Message Queue
 
 A `query` sent while a turn is running is queued and answered with `query_queued`. `queue_message` adds to the same queue explicitly. After every change the server sends the whole queue:

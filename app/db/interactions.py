@@ -98,9 +98,13 @@ def answer_interaction(
 
 def answer_question_and_enqueue(
     row: Dict[str, Any], answer: Dict[str, Any], answered_by_device: Optional[str],
-    prompt: str, context: Dict[str, Any],
+    prompt: str, context: Dict[str, Any], *, human_input: bool = True,
 ) -> bool:
-    """Accept an answer and its user turn in one commit; retries cannot enqueue twice."""
+    """Accept an answer and its user turn in one commit; retries cannot enqueue twice.
+
+    Only an authenticated human answer grants a fresh peer-chain budget. Away
+    answers retain ancestry, even though they use the same question producer.
+    """
     from app.db import turns
 
     # A "user" row keeps the folder list it names, but this one would be the
@@ -118,7 +122,7 @@ def answer_question_and_enqueue(
             cursor.execute("SELECT profile_id FROM sessions WHERE id=%s", (row["session_id"],))
             session = cursor.fetchone()
             profile_id = session["profile_id"] if session else None
-        turns.enqueue_turn(
+        queued = turns.enqueue_turn(
             row["session_id"], "user", prompt=prompt,
             profile_id=profile_id, project_id=context.get("project_id"),
             worktree_id=context.get("worktree_id"), overrides=overrides,
@@ -126,6 +130,22 @@ def answer_question_and_enqueue(
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
             command_id=f"question-answer-{row['id']}", _conn=conn,
         )
+        if human_input and queued.get("id"):
+            # enqueue_turn holds the session admission lock. Reset the saved
+            # live/parked context too: an answer may steer into a running turn,
+            # or resume a parked logical turn without changing that turn's id.
+            # The new answer row is the durable budget root in every case.
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, payload FROM turns WHERE session_id=%s AND "
+                           "(id=%s OR state IN ('running','interrupting','draining','parked')) "
+                           "ORDER BY id FOR UPDATE", (row["session_id"], queued["id"]))
+            for turn in cursor.fetchall():
+                payload = dict(_parse_json(turn.get("payload")) or {})
+                payload.pop("orchestration_depth", None)
+                payload.pop("orchestration_remote_origin", None)
+                payload["orchestration_root"] = queued["id"]
+                cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
+                               (json.dumps(payload), turn["id"]))
     notify_session_write(row.get("session_id"), "pending_interactions")
     return True
 
