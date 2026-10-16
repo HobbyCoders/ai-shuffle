@@ -79,7 +79,7 @@ def validate_state(state, runtime_id):
     if not isinstance(state, dict):
         raise ControlError("Invalid workspace")
     finite(state)
-    if set(state) - {"editors"} != {
+    if set(state) - {"editors", "notice"} != {
         "runtime_id",
         "revision",
         "available",
@@ -103,6 +103,9 @@ def validate_state(state, runtime_id):
     for key in ("target_id", "active_tab_id"):
         if state.get(key) is not None:
             identifier(state[key])
+    # A plain viewer notice, e.g. a captcha the site withheld (#2378).
+    if "notice" in state and (not isinstance(state["notice"], str) or len(state["notice"]) > 512):
+        raise ControlError("Invalid workspace notice")
     editors = state.get("editors", [])
     if not isinstance(editors, list) or len(editors) > 32:
         raise ControlError("Invalid text fields")

@@ -25,6 +25,8 @@ export interface BrowserWorkspaceState {
 		pending_viewer_id: string | null;
 	};
 	busy: boolean;
+	/** Plain notice for the viewer, e.g. a captcha the site withheld from this browser. */
+	notice?: string;
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -81,7 +83,9 @@ export function isBrowserWorkspaceState(
 		!validWorkspaceViewport(value.viewport) ||
 		!Array.isArray(value.tabs) ||
 		value.tabs.length > 128 ||
-		!object(value.control)
+		!object(value.control) ||
+		(value.notice !== undefined &&
+			(typeof value.notice !== 'string' || value.notice.length > 512))
 	) {
 		return false;
 	}

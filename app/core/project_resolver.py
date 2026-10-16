@@ -324,6 +324,47 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def follow_own_branch_switch(session_row: Dict[str, Any]) -> bool:
+    """Rebind a running session to the branch its agent switched to (#2369).
+
+    The resolvers refuse a branch checkout whose HEAD is not the session's
+    bound branch, and turn end corrects the binding
+    (``turn_finalize.resync_session_branch_from_head``). In between, an agent
+    that ran ``git switch`` or ``git branch -m`` in its own worktree lost every
+    tool that resolves the checkout mid-turn: the browser, the Task launcher.
+
+    Call this from those agent-facing paths before (or after a refused)
+    resolution. It applies the turn-end resync early, with the same checks
+    (own linked worktree, never the main checkout, never a checkout another
+    session is bound to, never a detached HEAD or a name another checkout
+    claims), and only while the session has a live turn: a switch made
+    between turns was not made by this session's agent, and the spawn path
+    keeps refusing it. Updates ``session_row`` in place and returns True when
+    the binding moved.
+    """
+    session_id = session_row.get("id") if session_row else None
+    if not session_id or not _effective_branch(session_row):
+        return False
+    from app.db import turns as turns_db
+
+    if turns_db.get_live_turn(session_id) is None:
+        return False
+    from app.core.turn_finalize import resync_session_branch_from_head
+
+    moved = resync_session_branch_from_head(session_id)
+    if not moved:
+        return False
+    old, new = moved
+    session_row["branch"] = new
+    if str(session_row.get("worktree_branch") or "").strip():
+        session_row["worktree_branch"] = new
+    logger.info(
+        "project_resolver: session %s followed its own checkout from branch %r to %r",
+        session_id, old, new,
+    )
+    return True
+
+
 def describe_checkout_mismatch(session_row: Dict[str, Any]) -> Optional[str]:
     """Why a bound checkout that IS on disk was refused, else ``None``.
 

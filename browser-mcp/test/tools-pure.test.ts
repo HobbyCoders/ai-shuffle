@@ -14,6 +14,7 @@ function firstText(res: McpToolResult): string {
 // A session whose ensurePage would throw — proves the check ran BEFORE it.
 const noPageSession = {
   ensurePage: () => Promise.reject(new Error("should not reach ensurePage")),
+  checkCaptcha: async () => "none" as const,
 } as unknown as Session;
 
 describe("act.validateTarget", () => {
@@ -119,6 +120,7 @@ function snapshotSession(
       refs: new Array(refCount).fill({ ref: "e1" }),
       truncated: false,
     }),
+    checkCaptcha: async () => "none" as const,
   } as unknown as Session;
 }
 
@@ -191,6 +193,7 @@ describe("content warning via browser_navigate", () => {
         refs: new Array(refCount).fill({ ref: "e1" }),
         truncated: false,
       }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }
 
@@ -258,6 +261,7 @@ describe("emptyContentWarning via browser_read_text", () => {
     return {
       ensurePage: async () => ({}),
       evaluate: async () => ({ title: "App", url: "http://127.0.0.1:5173/", text }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }
 
@@ -293,6 +297,7 @@ describe("content warning cost", () => {
         refs: ["e1", "e2"],
         truncated: false,
       }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
     const body = bodyOf(await runSnapshot(session, {}));
     expect(body.warning).toBeUndefined();

@@ -39,6 +39,7 @@ import {
   type MutationStats,
 } from "./dommutation.js";
 import { reportCurrentTarget } from "./panel.js";
+import { CAPTCHA_PANEL_NOTICE, watchPageCaptcha, type CaptchaVerdict } from "./captcha.js";
 import type { PageContent } from "./tools/result.js";
 
 export class StaleRefError extends Error {
@@ -227,6 +228,48 @@ export class Session {
   /** The screen-preserving metrics last sent to each page (see pinViewport). */
   private readonly screenMetrics = new WeakMap<Page, string>();
   workspaceStatus?: () => Record<string, unknown>;
+  /** The Browser panel's notice while the current page withholds its captcha (captcha.ts). */
+  captchaNotice: string | null = null;
+  private captchaBackground?: Promise<unknown>;
+  private captchaRecheck = false;
+
+  /**
+   * Whether the current page asks for a captcha its site never sent (see
+   * captcha.ts). Updates the panel notice. `lookMs` keeps looking for a
+   * captcha that has not appeared yet; only an empty captcha waits longer.
+   */
+  async checkCaptcha(lookMs = 0): Promise<CaptchaVerdict> {
+    const page = this.currentEntry()?.page;
+    // An open dialog blocks page script; the probe would only stall.
+    if (!page || this.pendingDialog) return "none";
+    // Known withheld (the notice clears on navigation): no second grace wait.
+    const verdict = await watchPageCaptcha(page, { lookMs, ...(this.captchaNotice ? { graceMs: 0 } : {}) });
+    if (page === this.currentEntry()?.page) {
+      const notice = verdict === "withheld" ? CAPTCHA_PANEL_NOTICE : null;
+      if (notice !== this.captchaNotice) {
+        this.captchaNotice = notice;
+        this.onWorkspaceChange?.();
+      }
+    }
+    return verdict;
+  }
+
+  /** Re-check for the panel after page activity: one watcher at a time, re-run once if asked meanwhile. */
+  private checkCaptchaInBackground(): void {
+    if (this.captchaBackground) {
+      this.captchaRecheck = true;
+      return;
+    }
+    this.captchaBackground = this.checkCaptcha(3000)
+      .catch(() => "none")
+      .finally(() => {
+        this.captchaBackground = undefined;
+        if (this.captchaRecheck) {
+          this.captchaRecheck = false;
+          this.checkCaptchaInBackground();
+        }
+      });
+  }
 
   runAgentExclusive<T>(fn: () => Promise<T>): Promise<T> {
     try { this.agentAdmission?.(); } catch (err) { return Promise.reject(err); }
@@ -266,7 +309,9 @@ export class Session {
     const { readEditors } = await import('./editors.js');
     // An open dialog blocks page script; the editor scan would only stall.
     const editors = page && !this.pendingDialog ? await readEditors(page).catch(() => []) : [];
+    if (page) this.checkCaptchaInBackground();
     return { active_tab_id: id ?? null, target_id: target, editors,
+      ...(this.captchaNotice ? { notice: this.captchaNotice } : {}),
       tabs: tabs.slice(0, 128).map(t => ({ ...t, url: t.url.slice(0, 1024), title: t.title.slice(0, 256) })),
       viewport: { mode: this.viewportMode, ...(page?.viewportSize() ?? this.desiredViewport) } };
   }
@@ -640,6 +685,7 @@ export class Session {
 
   /** Refs are void after a committed navigation (or a current-page switch). */
   notifyNavigation(): void {
+    this.captchaNotice = null;
     this.refs.invalidateForNavigation();
     this.invalidateScreenshot();
     this.onWorkspaceChange?.();
