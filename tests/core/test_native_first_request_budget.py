@@ -26,11 +26,12 @@ from fluid.providers.base import ProviderCaps, StreamChunk
 from fluid.store.base import MemoryStore
 
 # Reported "System tools" + "MCP tools" (what every first request pays for tool
-# docs or schemas). Measured ~8.4k (code mode) / ~7.7k (JSON path).
-TOOL_ROWS_BUDGET = 9_000
+# docs or schemas). Measured ~9.0k (code mode) / ~10.1k (JSON path, which
+# also keeps the frequently used tools loaded: NATIVE_JSON_EAGER_TOOLS).
+TOOL_ROWS_BUDGET = 10_500
 # Whole first request, prompt + schemas + first user message, with an empty
 # cwd and home. Measured ~24.6k (code mode) / ~23.3k (JSON path) before the
-# core-only eager tier, ~14.1k / ~12.3k after; the margin absorbs
+# core-only eager tier, ~14.8k / ~14.7k after; the margin absorbs
 # host-dependent sections (workspace facts, environment).
 FIRST_REQUEST_BUDGET = 15_300
 # The breakdown before the first turn may miss only the per-turn reminders the
@@ -84,7 +85,8 @@ def _default_servers(session_id: str, cwd: str) -> dict:
     return {name: cfg for name, cfg in servers.items() if cfg}
 
 
-async def _first_request(monkeypatch, tmp_path, *, code_mode: bool):
+async def _first_request(monkeypatch, tmp_path, *, code_mode: bool,
+                         session_mode: str | None = None, **restrictions):
     import app.core.provider.harness_adapter as ha
     import fluid.context.plugins as fluid_plugins
     from app.core.config import settings
@@ -121,11 +123,14 @@ async def _first_request(monkeypatch, tmp_path, *, code_mode: bool):
             "fluid_provider": "openai_responses",
             "app_session_id": "app-sess",
             "github_connected": True,
+            **({"session_mode": session_mode} if session_mode else {}),
         },
+        **restrictions,
     ))
     try:
         engine = adapter._engine
-        assert (engine._codemode is not None) is code_mode
+        # The chat lane never builds code mode, whatever the setting says.
+        assert (engine._codemode is not None) is (code_mode and session_mode != "chat")
         reported = await engine.get_context_usage()
         await adapter.send_query("hello")
         async for _ in adapter.receive_events():
@@ -186,27 +191,36 @@ async def test_reported_breakdown_matches_the_first_request(
 async def test_only_the_core_is_eager_and_the_rest_is_announced(
     monkeypatch, tmp_path, code_mode
 ):
-    from app.core.provider.fluid_tool_bridge import NATIVE_EAGER_TOOLS
+    from app.core.provider.fluid_tool_bridge import (
+        NATIVE_EAGER_TOOLS, NATIVE_JSON_EAGER_TOOLS,
+    )
 
     engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
+    # The JSON-tool path also keeps the frequently used tools loaded: there a
+    # deferred tool costs a ToolSearch round trip and a prompt-cache rebuild.
+    eager = NATIVE_EAGER_TOOLS if code_mode else NATIVE_EAGER_TOOLS | NATIVE_JSON_EAGER_TOOLS
     deferred = {s.name for s in engine.registry.deferred_tools()}
     registered = {s.name for s in engine.registry.list_tools(loaded_only=False)}
     # Code mode's own tools register after the session build and stay eager.
     host = registered - {"run_python", "list_tools", "search_tools",
                          "read_tool_docs", "save_skill", "delete_skill",
                          "save_plugin"}
-    assert host - deferred == NATIVE_EAGER_TOOLS & registered
+    assert host - deferred == eager & registered
     # The default servers carry every eager tool; a rename must not silently
     # drop one from the core.
-    assert NATIVE_EAGER_TOOLS <= registered
-    # Deferred now, still callable: memory, recall, peer sessions, the task
-    # tools, private access and the rarely used owner-request tools.
-    for name in ("Remember", "Recall", "SessionSearch", "StartSession",
-                 "mcp__builtins__TaskOutput", "mcp__chat-access__RequestChatAccess",
+    assert eager <= registered
+    # Memory is eager: its save and correction rules must be in front of the
+    # model when it calls.
+    assert {"Remember", "Recall"} <= registered - deferred
+    # Deferred now, still callable: peer sessions, private access and the
+    # rarely used owner-request tools (plus the task tools under code mode).
+    for name in ("StartSession", "mcp__chat-access__RequestChatAccess",
                  "mcp__builtins__AndroidAction", "mcp__app-config__createAutomation"):
         assert name in deferred, name
+    for name in ("SessionSearch", "mcp__builtins__TaskOutput"):
+        assert (name in deferred) is code_mode, name
     sent_schemas = {t["name"] for t in request.tools}
     assert not (deferred & sent_schemas)
     if code_mode:
@@ -230,3 +244,65 @@ async def test_only_the_core_is_eager_and_the_rest_is_announced(
         # engine drops them from the request.
         wired = {name for name in deferred if engine._tool_wired(name)}
         assert wired and wired <= parse_deferred_catalog(text)
+
+
+def _tool_names(request) -> set[str]:
+    return {t["name"] for t in request.tools}
+
+
+@pytest.mark.asyncio
+async def test_chat_lane_keeps_every_permitted_tool_loaded(monkeypatch, tmp_path):
+    """The chat lane runs JSON tool calls and its ceiling leaves ToolSearch
+    out, so a deferred tool there could never be loaded: nothing beyond the
+    deferred servers may be deferred (review of the core-only eager tier)."""
+    from app.core.session_modes import CHAT_MODE_DENIED_TOOLS, CHAT_MODE_TOOL_SURFACE
+
+    engine, request, _reported = await _first_request(
+        monkeypatch, tmp_path, code_mode=True, session_mode="chat",
+        tool_allowlist=list(CHAT_MODE_TOOL_SURFACE),
+        disallowed_tools=list(CHAT_MODE_DENIED_TOOLS),
+    )
+    assert not engine._tool_permitted("ToolSearch")
+    sent = _tool_names(request)
+    for name in ("Read", "WebSearch", "WebFetch", "Remember", "Recall", "Forget",
+                 "mcp__chat-access__RequestChatAccess", "mcp__chat-access__ChatResources"):
+        assert name in sent, (name, sorted(sent))
+    unreachable = {s.name for s in engine.registry.deferred_tools()
+                   if engine._tool_wired(s.name)}
+    assert not unreachable, sorted(unreachable)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code_mode", [True, False], ids=["code_mode", "json_tools"])
+async def test_allowlist_without_tool_search_defers_nothing_it_permits(
+    monkeypatch, tmp_path, code_mode
+):
+    """A profile's "allow only selected" list or a Task agent's tools: list
+    that omits ToolSearch: every permitted tool stays loaded, because a
+    code-mode session whose kernel fails falls back to JSON tool calls."""
+    allow = ["Read", "Edit", "Bash", "SessionSearch", "Remember",
+             "mcp__builtins__TaskOutput", "mcp__chat-access__ChatResources"]
+    engine, request, _reported = await _first_request(
+        monkeypatch, tmp_path, code_mode=code_mode, tool_allowlist=allow,
+    )
+    assert not engine._tool_permitted("ToolSearch")
+    unreachable = {s.name for s in engine.registry.deferred_tools()
+                   if engine._tool_wired(s.name)}
+    assert not unreachable, sorted(unreachable)
+    if not code_mode:
+        # Every permitted tool whose host capability is wired here is sent.
+        wired = {name for name in allow if engine._tool_wired(name)}
+        assert wired and wired <= _tool_names(request), sorted(_tool_names(request))
+
+
+@pytest.mark.asyncio
+async def test_deferred_tools_stay_loadable_on_the_json_path(monkeypatch, tmp_path):
+    """Code mode off: what is deferred is announced and ToolSearch loads it."""
+    engine, request, _reported = await _first_request(
+        monkeypatch, tmp_path, code_mode=False,
+    )
+    assert "ToolSearch" in _tool_names(request)
+    deferred = {s.name for s in engine.registry.deferred_tools() if engine._tool_wired(s.name)}
+    assert "StartSession" in deferred
+    assert engine.registry.load_schema("StartSession")
+    assert "StartSession" in {t["name"] for t in engine._tools_api()}

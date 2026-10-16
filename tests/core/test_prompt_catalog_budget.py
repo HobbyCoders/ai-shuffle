@@ -5,15 +5,16 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 
 
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
-# Canonical CI recipe: native full=131778, eager=56029; delegated append=16307,
+# Canonical CI recipe: native full=131778, eager=58635; delegated append=16307,
 # delegated always-loaded bridge tools=7458.
 # Context diet (Oct 2026): only the turn-by-turn core stays eager on the native
 # leg (NATIVE_EAGER_TOOLS) and the deferred tools are listed as names grouped
-# by server: eager 95,975 -> 56,029. The delegated bridge loads only Task and
+# by server: eager 95,975 -> 56,029; Remember and Recall kept eager (their
+# save and correction rules must be in front of the model): 58,635. The delegated bridge loads only Task and
 # Monitor (DELEGATED_LOADED_TOOLS): 34,012 -> 7,458 chars of schemas on every
 # CLI request. The full catalog is unchanged: deferred docs load on demand.
 MEASURED_FULL = 131_778
-MEASURED_EAGER = 56_029
+MEASURED_EAGER = 58_635
 MEASURED_DELEGATED_APPEND = 16_307
 MEASURED_DELEGATED_LOADED_TOOLS = 7_458
 

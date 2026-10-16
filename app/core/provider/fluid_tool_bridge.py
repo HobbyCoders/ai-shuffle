@@ -320,6 +320,21 @@ NATIVE_EAGER_TOOLS: frozenset[str] = frozenset({
     "Task", "ToolSearch", "Monitor", "AskUser",
     # The skills index in every prompt points at it.
     "Skill",
+    # The memory block asks for saves and recalls every session, and their
+    # rules (user_requested for corrections, Recall's id/revision before a
+    # correction, never a secret) must be in front of the model when it calls.
+    "Remember", "Recall",
+})
+
+# Also eager when the session runs JSON tool calls (no code mode). There a
+# deferred tool costs a ToolSearch round trip on first use AND a rebuild of the
+# cached prompt prefix (the loaded schema joins the request's tools array), so
+# the tools a typical session reaches for are kept loaded. Code mode imports
+# any tool from the kernel; its docs come from read_tool_docs, which leaves the
+# prefix alone.
+NATIVE_JSON_EAGER_TOOLS: frozenset[str] = frozenset({
+    "mcp__builtins__TaskOutput", "mcp__builtins__TaskGet",
+    "SendMessage", "SessionSearch", "WebSearch", "WebFetch",
 })
 
 # The delegated (Claude Code CLI) leg's always-loaded tier. Fluid's bundled
@@ -363,22 +378,28 @@ def delegated_bridge_deferred() -> Callable[[str], bool] | None:
     return lambda name: name not in DELEGATED_LOADED_TOOLS
 
 
-def defer_native_tools(registry: ToolRegistry) -> List[str]:
-    """Move every registered tool outside :data:`NATIVE_EAGER_TOOLS` into the
+def defer_native_tools(
+    registry: ToolRegistry, *, can_load: bool = True, code_mode: bool = True,
+) -> List[str]:
+    """Move every registered tool outside :data:`NATIVE_EAGER_TOOLS` (plus
+    :data:`NATIVE_JSON_EAGER_TOOLS` when ``code_mode`` is False) into the
     registry's deferred tier.
 
-    Returns the names deferred by this call. A vendored fluid without
-    ``defer_schema`` leaves everything eager, the old behaviour; so does the
-    :data:`BRIDGE_DEFER_ENV` kill switch, which then keeps only the deferred
-    servers (:data:`DEFERRED_SDK_SERVERS`) out of the prefix.
+    Returns the names deferred by this call. ``can_load`` False (the session
+    may not call ToolSearch) defers nothing: a deferred tool would be
+    unreachable. A vendored fluid without ``defer_schema`` leaves everything
+    eager, the old behaviour; so does the :data:`BRIDGE_DEFER_ENV` kill switch.
+    Either way only the deferred servers (:data:`DEFERRED_SDK_SERVERS`) stay
+    out of the prefix.
     """
     defer = getattr(registry, "defer_schema", None)
-    if not callable(defer) or delegated_bridge_deferred() is None:
+    if not can_load or not callable(defer) or delegated_bridge_deferred() is None:
         return []
+    eager = NATIVE_EAGER_TOOLS if code_mode else NATIVE_EAGER_TOOLS | NATIVE_JSON_EAGER_TOOLS
     already = {spec.name for spec in registry.deferred_tools()}
     names = sorted(
         spec.name for spec in registry.list_tools(loaded_only=False)
-        if spec.name not in NATIVE_EAGER_TOOLS and spec.name not in already
+        if spec.name not in eager and spec.name not in already
     )
     return [name for name in names if defer(name)]
 

@@ -4562,7 +4562,18 @@ class HarnessAdapter(ProviderAdapter):
             # code-mode catalog collapses them and the prefix never moves.
             from app.core.provider.fluid_tool_bridge import defer_native_tools
 
-            defer_native_tools(registry)
+            # A deferred tool is reachable only through ToolSearch (JSON tool
+            # calls, including a code-mode session whose kernel fails to come
+            # up) or read_tool_docs (code mode). The chat lane's ceiling, a
+            # profile's "allow only selected" list or a Task agent's tools: list
+            # can leave ToolSearch out; then nothing more is deferred, so no
+            # tool the session may use becomes unreachable.
+            predicate = _tool_predicate(options)
+            defer_native_tools(
+                registry,
+                can_load=predicate is None or predicate("ToolSearch"),
+                code_mode=_expects_code_mode(options),
+            )
 
         if _session_mode(options) == "chat":
             from dataclasses import replace
@@ -5887,6 +5898,22 @@ def _fluid_skills_root() -> Path:
     from app.core.fluid_memory import skills_root
 
     return skills_root()
+
+
+def _expects_code_mode(options: SessionOptions) -> bool:
+    """Will this native leg try code mode? Mirrors the gate in ``connect``.
+
+    Construction can still fail (the leg then runs JSON tool calls), so this
+    only decides which tier the frequently used tools land on, never whether
+    a tool stays reachable.
+    """
+    from app.core.config import settings
+
+    return bool(
+        settings.fluid_code_mode
+        and _session_mode(options) != "chat"
+        and options.extra.get("assistant_proactive") is None
+    )
 
 
 def _tool_predicate(options: SessionOptions):
