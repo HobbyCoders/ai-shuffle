@@ -107,13 +107,34 @@ def low_priority_kwargs() -> dict:
     return {"preexec_fn": lower}
 
 
+# `git rev-parse --local-env-vars`: the variables that pin git to one
+# repository. git exports some of them (GIT_DIR in a worktree) to the pre-push
+# hook; a test fixture that inherits them runs `git -C <tmp> init/commit/config`
+# against THIS repository instead of its own, rewriting branches and config.
+GIT_LOCAL_ENV = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
+})
+
+
+def child_env(env: dict | None = None) -> dict:
+    """The environment a check runs with: ours, minus git's repository pins."""
+    merged = {key: value for key, value in os.environ.items()
+              if key not in GIT_LOCAL_ENV and not key.startswith("GIT_CONFIG_KEY_")
+              and not key.startswith("GIT_CONFIG_VALUE_")}
+    merged.update(env or {})
+    return merged
+
+
 def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         timeout: float | None = None) -> None:
     exe = shutil.which(argv[0]) or argv[0]
     shown = " ".join(argv)
     rel = cwd.relative_to(ROOT).as_posix() if cwd != ROOT else "."
     print(f"\n$ ({rel}) {shown}", flush=True)
-    merged = {**os.environ, **(env or {})}
+    merged = child_env(env)
     try:
         result = subprocess.run([exe, *argv[1:]], cwd=cwd, env=merged, timeout=timeout,
                                 **low_priority_kwargs())
