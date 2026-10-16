@@ -38,6 +38,7 @@
 		MessageSquare,
 		Maximize2,
 		Minimize2,
+		Copy,
 	} from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
 	import { startPanelBrowser, uploadPanelFiles } from '$lib/api/browser-panel';
@@ -144,7 +145,7 @@
 	let navigationPending = $state(false);
 	const loading = $derived(pageLoading || navigationPending);
 	let trackedPage = false;
-	const replies = new Map<string, { ok: boolean; error?: string }>();
+	const replies = new Map<string, { ok: boolean; error?: string; text?: string }>();
 	const awaitingReplies = new Set<string>();
 	// Last session we held a frame for. The canvas keeps its last picture across
 	// reconnects and transient status changes; only a genuine session switch
@@ -205,11 +206,12 @@
 				viewerId = id;
 				scope.notify();
 			},
-			onCommandResult: (_id, ok, error) => {
+			onCommandResult: (_id, ok, error, text) => {
 				if (!active) return;
-				if (awaitingReplies.has(_id)) replies.set(_id, { ok, error });
+				if (awaitingReplies.has(_id)) replies.set(_id, { ok, error, text });
 				scope.notify();
-				if (!ok)
+				// A failed copy is reported by copyFromPage itself, in plain words.
+				if (!ok && !copyRequests.has(_id))
 					commandError =
 						error || 'Command failed. Try again after checking control.';
 			},
@@ -570,11 +572,12 @@
 		await browse(withScheme);
 	}
 
-	async function acknowledged(scope: PanelOperation, op: string, args: Record<string, unknown>) {
+	async function acknowledged(scope: PanelOperation, op: string, args: Record<string, unknown>, track?: (id: string) => void) {
 		if (operation !== scope || scope.controller.signal.aborted || !workspace?.available || !client?.isConnected())
 			throw new Error('Browser disconnected. Try the address again.');
 		const id = `panel-${Date.now()}-${++commandSequence}`;
 		awaitingReplies.add(id);
+		track?.(id);
 		try {
 			if (!client.send({ type: 'workspace-command', id, op, args,
 				runtime_id: workspace.runtime_id, tab_id: workspace.active_tab_id }))
@@ -582,7 +585,44 @@
 			await scope.wait(() => replies.has(id), 'Browser did not respond. Try again.', 30_000);
 			const reply = replies.get(id)!;
 			if (!reply.ok) throw new Error(reply.error || 'Command failed. Try again.');
-		} finally { replies.delete(id); awaitingReplies.delete(id); }
+			return reply;
+		} finally { replies.delete(id); awaitingReplies.delete(id); copyRequests.delete(id); }
+	}
+
+	// Copy from the remote page to this device's clipboard. The text travels
+	// only to this viewer; it never enters workspace state or the agent's view.
+	const copyRequests = new Set<string>();
+	let copyNotice = $state('');
+	let copyNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	async function copyFromPage(): Promise<string> {
+		const scope = operation;
+		if (!scope) throw new Error('Browser is not connected.');
+		await ensureControl();
+		const reply = await acknowledged(scope, 'copy', {}, (id) => copyRequests.add(id));
+		return reply.text ?? '';
+	}
+	function copyToClipboard() {
+		// Start the clipboard write inside the user's gesture: Safari and Chrome
+		// refuse a write that begins after the round trip to the remote page.
+		const text = copyFromPage();
+		const done = () => { commandError = ''; showCopyNotice('Copied'); };
+		const failed = (error: unknown) => {
+			commandError = error instanceof Error && error.message ? error.message : "Couldn't copy. Select the text again and retry.";
+		};
+		const clip = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+		if (clip?.write && typeof ClipboardItem !== 'undefined') {
+			const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
+			clip.write([new ClipboardItem({ 'text/plain': blob })]).then(done, async (error) => {
+				// Some browsers reject promised clipboard items; retry the plain way.
+				try { await clip.writeText(await text); done(); } catch { failed(await text.then(() => error, (e) => e)); }
+			});
+		} else if (clip?.writeText) text.then((value) => clip.writeText(value)).then(done, failed);
+		else text.then(() => failed(new Error("This browser doesn't allow copying here.")), failed);
+	}
+	function showCopyNotice(message: string) {
+		copyNotice = message;
+		clearTimeout(copyNoticeTimer);
+		copyNoticeTimer = setTimeout(() => (copyNotice = ''), 1500);
 	}
 
 	function checkOwner() {
@@ -837,6 +877,16 @@
 			<BrowserWorkspaceToolbar mode="controls" {workspace} {viewerId} connected={streamOpen} onCommand={workspaceCommand} />
 			<div class="header-actions">
 				<button
+					class="tool-btn"
+					class:active={!!copyNotice}
+					onclick={copyToClipboard}
+					disabled={!isLive || !frameMatchesWorkspace}
+					aria-label={copyNotice || 'Copy selected text to this device'}
+					title="Copy the text selected on the page to this device (Ctrl+C or ⌘C also works)"
+				>
+					{#if copyNotice}<Check size={15} strokeWidth={1.75} />{:else}<Copy size={15} strokeWidth={1.75} />{/if}
+				</button>
+				<button
 					class="tool-btn inspect-toggle"
 					class:active={inspectMode}
 					onclick={toggleInspect}
@@ -886,6 +936,7 @@
 							onInspect={sendInspect}
 							onHoverLeave={() => (hoverRect = null)}
 							onExitInspect={exitInspect}
+							onCopy={copyToClipboard}
 						/>
 					{/key}
 					{#if !frameMatchesWorkspace}<div class="stream-badge" role="status">Previous page · waiting for the current frame · view only</div>{:else if showStreamBadge}

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
-import { readEditors, editField, uploadField, rememberFileChooser } from '../src/editors.js';
+import { readEditors, editField, uploadField, rememberFileChooser, copySelection, COPY_LIMIT } from '../src/editors.js';
 
 // Browser-dependent lane is opt-in; plain npm test must also work without Chrome.
 describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () => {
@@ -25,6 +25,45 @@ describe.skipIf(!process.env.CHROMIUM_PATH)('native browser editor bridge', () =
       const input = await page.locator('#chooser').elementHandle();
       await rememberFileChooser(page, input!);
       expect((await readEditors(page))[0]).toMatchObject({ type: 'file', chooser: true });
+    } finally { await browser.close(); }
+  });
+
+  it('flags split one-time-code boxes for keystrokes so the page can advance focus itself', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<input aria-label="Email"><div id="otp">${Array.from({ length: 6 }, (_, i) => `<input inputmode="numeric" maxlength="1" aria-label="Digit ${i + 1}">`).join('')}</div>
+        <script>const boxes = [...document.querySelectorAll('#otp input')];
+        boxes.forEach((box, i) => box.addEventListener('input', () => { box.value = box.value.replace(/\\D/g, '').slice(-1); if (box.value) boxes[i + 1]?.focus(); }));</script>`);
+      const editors = await readEditors(page);
+      expect(editors[0]).not.toHaveProperty('keys');
+      expect(editors.slice(1).map(f => f.keys)).toEqual([true, true, true, true, true, true]);
+      await editField(page, { field: editors[1].id, action: 'focus' });
+      // The panel sends committed text through Input.insertText, as a keyboard would.
+      for (const digit of '482915') await page.keyboard.insertText(digit);
+      expect(await page.locator('#otp input').evaluateAll(els => els.map(el => (el as HTMLInputElement).value).join(''))).toBe('482915');
+    } finally { await browser.close(); }
+  });
+
+  it('copies the page selection or a selected field range, and refuses passwords and empty selections', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<p id="key" style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">sk_test_0123456789abcdef</p>
+        <input id="name" value="Ada Lovelace"><input id="secret" type="password" value="hunter2">
+        <div id="host"></div><script>document.querySelector('#host').attachShadow({ mode: 'open' }).innerHTML = '<input id="inner" value="shadow value">';</script>`);
+      await expect(copySelection(page)).rejects.toThrow('Select some text');
+      // Text clipped by CSS is still copied in full.
+      await page.evaluate(() => { const r = document.createRange(); r.selectNodeContents(document.querySelector('#key')!); getSelection()!.removeAllRanges(); getSelection()!.addRange(r); });
+      expect(await copySelection(page)).toBe('sk_test_0123456789abcdef');
+      await page.evaluate(() => { const el = document.querySelector('#name') as HTMLInputElement; el.focus(); el.setSelectionRange(4, 12); });
+      expect(await copySelection(page)).toBe('Lovelace');
+      await page.evaluate(() => { const el = document.querySelector('#host')!.shadowRoot!.querySelector('input')!; el.focus(); el.setSelectionRange(0, 6); });
+      expect(await copySelection(page)).toBe('shadow');
+      await page.evaluate(() => { const el = document.querySelector('#secret') as HTMLInputElement; el.focus(); el.select(); });
+      await expect(copySelection(page)).rejects.toThrow('Password');
+      await page.evaluate((n) => { document.body.textContent = 'x'.repeat(n); const r = document.createRange(); r.selectNodeContents(document.body); getSelection()!.removeAllRanges(); getSelection()!.addRange(r); }, COPY_LIMIT + 1);
+      await expect(copySelection(page)).rejects.toThrow('too long');
     } finally { await browser.close(); }
   });
 
