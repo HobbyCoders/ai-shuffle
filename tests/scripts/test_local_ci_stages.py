@@ -615,3 +615,16 @@ def test_fluid_shard_command_keeps_the_directory_and_adds_the_batch_plugin(monke
     assert shard[0][:4] == [sys.executable, "-m", "pytest", "fluid/tests/unit"]
     assert "scripts.ci.local_ci_batch" in shard[0]
     assert json.loads(shard[1]["LOCAL_CI_BACKEND_BATCH"]) == ["fluid/tests/unit/test_x.py"]
+
+
+def test_shards_split_up_front_only_on_measured_timings():
+    files = [f"tests/core/test_{i:02}.py" for i in range(20)]
+    # Never timed: the 10-minute guess must not split a stage before any evidence.
+    assert len(stages._initial_shards({}, "backend-1", files, budget=6 * MINUTE)) == 1
+    assert len(stages._initial_shards({"backend-1": 900}, "backend-1", files, budget=6 * MINUTE)) == 3
+    state = {"shards": {"backend-1": [{"files": files[:10], "done": True, "seconds": 70.0},
+                                      {"files": files[10:], "done": False}]}}
+    seconds, measured = stages.unit_estimate({}, state, "backend-1", files[10:], files)
+    assert measured and seconds == pytest.approx(70.0 * stages.ESTIMATE_MARGIN)
+    assert stages.unit_estimate({}, {"shards": {}}, "backend-1", files, files) == (
+        stages.UNKNOWN_STAGE_SECONDS, False)

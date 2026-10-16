@@ -119,7 +119,9 @@ stopped, the stage gets no receipt, and the invocation exits 0 with
   files dealt round robin, stored in the state file, so a resumed run uses
   exactly the same partition. The shard that did not fit is halved; finished
   shards are kept. A stage this machine has timed above the budget starts as
-  several shards, so a second run splits up front and wastes nothing. A shard
+  several shards, so a second run splits up front and wastes nothing; a stage
+  never timed starts as one shard (up-front splits use measured durations, or
+  the rate of this run's finished shards, never the 10-minute guess). A shard
   runs the suite's own command and directories, with the other files ignored
   (`scripts/ci/local_ci_batch.py`); a single shard runs the original command.
 - A unit that cannot be split (a non-test stage such as `frontend`, or one test

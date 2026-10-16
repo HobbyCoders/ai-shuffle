@@ -163,6 +163,26 @@ def estimate(times: dict, stage: str, share: float = 1.0) -> float:
     return UNKNOWN_STAGE_SECONDS * share
 
 
+def _timed(times: dict, stage: str) -> bool:
+    """Whether estimate() rests on a duration measured here, not the default."""
+    return stage in times or (_is_batch(stage) and any(_is_batch(k) for k in times))
+
+
+def unit_estimate(times: dict, state: dict, stage: str, files: list[str] | None,
+                  all_files: list[str]) -> tuple[float, bool]:
+    """Seconds one unit is expected to take, and whether that was measured.
+
+    A recorded duration for the stage wins; otherwise the per-file rate of the
+    stage's shards already finished in this run; otherwise estimate()'s guess.
+    """
+    share = len(files) / len(all_files) if files else 1.0
+    done = [s for s in state.get("shards", {}).get(stage, []) if s["done"]] if files else []
+    if stage not in times and done:
+        rate = sum(s["seconds"] for s in done) / sum(len(s["files"]) for s in done)
+        return rate * len(files) * ESTIMATE_MARGIN, True
+    return estimate(times, stage, share), _timed(times, stage)
+
+
 def remaining() -> float | None:
     """Seconds left before the current unit is stopped, or None without a budget."""
     return None if _deadline is None else _deadline - _clock()
@@ -178,7 +198,7 @@ def _unit_key(stage: str, files: list[str] | None) -> str:
 
 def _initial_shards(times: dict, stage: str, files: list[str], budget: float) -> list[dict]:
     count = 1
-    if budget > 0:
+    if budget > 0 and _timed(times, stage):  # split up front on evidence, never on the guess
         count = max(1, min(len(files), math.ceil(estimate(times, stage) / budget)))
     # Round robin over the sorted list spreads a slow directory across shards.
     return [{"files": files[i::count], "done": False} for i in range(count)]
@@ -495,13 +515,14 @@ def _advance(ci, args, python, revision, state, path, times, times_path, beat, h
                 state["shards"][stage] = _initial_shards(times, stage, stage_all, budget)
             shards = state["shards"][stage]
             files = next(s for s in shards if not s["done"])["files"]
-            # Halve before starting what the timings say cannot fit a whole budget.
-            while (first and budget > 0 and len(files) > 1
-                   and estimate(times, stage, len(files) / len(stage_all)) > budget):
+            # Halve before starting what measured timings say cannot fit a whole budget.
+            while first and budget > 0 and len(files) > 1:
+                guess, measured = unit_estimate(times, state, stage, files, stage_all)
+                if not measured or guess <= budget:
+                    break
                 _split(state, stage, files)
                 files = next(s for s in shards if not s["done"])["files"]
-        share = len(files) / len(stage_all) if files else 1.0
-        expected = estimate(times, stage, share)
+        expected, _ = unit_estimate(times, state, stage, files, stage_all)
         elapsed = _clock() - began
         label = _label(stage, state, files)
         if not first and (budget <= 0 or elapsed + expected > budget):
