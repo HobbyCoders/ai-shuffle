@@ -1,0 +1,249 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "overlapping-matches",
+      "kind": "coding",
+      "prompt": "find_all must return the starting offsets of overlapping matches; empty needle returns []. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def find_all(text, needle):\n    if not needle: return []\n    positions=[]\n    start=0\n    while (pos := text.find(needle, start)) >= 0:\n        positions.append(pos)\n        start=pos+len(needle)\n    return positions\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(find_all(\"aaaa\", \"aa\"), [0,1,2])\n        self.assertEqual(find_all(\"abc\", \"z\"), [])\n        self.assertEqual(find_all(\"abc\", \"\"), [])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "retry-attempts",
+      "kind": "coding",
+      "prompt": "retry(fn, attempts) calls fn at most attempts times, returns success, and propagates the last ValueError; attempts <1 must raise ValueError before calling fn. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def retry(fn, attempts):\n    for i in range(attempts+1):\n        try: return fn()\n        except ValueError:\n            if i==attempts: raise\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        calls=[]\n        def f():\n            calls.append(1)\n            raise ValueError(\"failed\")\n        with self.assertRaises(ValueError): retry(f, 2)\n        self.assertEqual(len(calls), 2)\n        self.assertEqual(retry(lambda: 42, 1),42)\n        with self.assertRaises(ValueError): retry(lambda: 42, 0)\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "stable-dedup",
+      "kind": "coding",
+      "prompt": "unique must preserve first-occurrence order and accept unhashable JSON values. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def unique(values):\n    return sorted(set(values))\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(unique([3,1,3,2,1]),[3,1,2])\n        self.assertEqual(unique([[1],[2],[1]]), [[1],[2]])\n        self.assertEqual(unique([]),[])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "chunk-tail",
+      "kind": "coding",
+      "prompt": "chunks splits a sequence into consecutive chunks including the last partial chunk. Nonpositive size raises ValueError. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def chunks(seq, size):\n    return [seq[i:i+size] for i in range(0, len(seq)-size+1, size)]\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(chunks([1,2,3,4,5],2),[[1,2],[3,4],[5]])\n        self.assertEqual(chunks([],2),[])\n        with self.assertRaises(ValueError): chunks([1],0)\n        with self.assertRaises(ValueError): chunks([1],-1)\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "weighted-mean",
+      "kind": "coding",
+      "prompt": "weighted_mean ignores zero weights; rejects negative weights and mismatched lengths with ValueError; zero total weight returns None. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def weighted_mean(values, weights):\n    total=sum(v*w for v,w in zip(values,weights))\n    return total / len(values)\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(weighted_mean([10,20],[1,3]),17.5)\n        self.assertIsNone(weighted_mean([10],[0]))\n        self.assertIsNone(weighted_mean([],[]))\n        with self.assertRaises(ValueError): weighted_mean([1,2],[1])\n        with self.assertRaises(ValueError): weighted_mean([1],[-1])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "merge-intervals",
+      "kind": "coding",
+      "prompt": "merge combines overlapping or touching closed intervals without mutating the input; output sorted by start. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def merge(intervals):\n    out=[]\n    for start,end in intervals:\n        if out and start < out[-1][1]: out[-1][1]=end\n        else: out.append([start,end])\n    return out\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(merge([[5,7],[1,4],[3,6]]),[[1,7]])\n        self.assertEqual(merge([[1,9],[2,3]]),[[1,9]])\n        self.assertEqual(merge([[1,2],[2,4]]),[[1,4]])\n        a=[[2,3],[1,2]]\n        merge(a)\n        self.assertEqual(a,[[2,3],[1,2]])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "csv-quoting",
+      "kind": "coding",
+      "prompt": "parse reads a CSV string, preserving quoted commas and quoted embedded newlines, and returns rows as lists. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def parse(text):\n    return [line.split(\",\") for line in text.splitlines()]\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(parse('a,\"b,c\"\\n1,2\\n'), [[\"a\",\"b,c\"],[\"1\",\"2\"]])\n        self.assertEqual(parse('\"a\\nb\",c\\n'), [[\"a\\nb\",\"c\"]])\n        self.assertEqual(parse(\"\"),[])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "ttl-boundary",
+      "kind": "coding",
+      "prompt": "Cache.get(key, now) returns None when now >= expiry, removing expired entries. put(key,value,ttl,now) replaces a value. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "class Cache:\n    def __init__(self): self.data={}\n    def put(self,key,value,ttl,now): self.data[key]=(value,now+ttl)\n    def get(self,key,now):\n        value,expiry=self.data.get(key,(None,float(\"inf\")))\n        if now > expiry: return None\n        return value\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        c=Cache()\n        c.put(\"a\",7,10,100)\n        self.assertEqual(c.get(\"a\",109),7)\n        self.assertIsNone(c.get(\"a\",110))\n        self.assertNotIn(\"a\",c.data)\n        self.assertIsNone(c.get(\"missing\",0))\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "topological-order",
+      "kind": "coding",
+      "prompt": "order returns dependencies before dependents and includes dependency-only nodes. A cycle raises ValueError. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def order(graph):\n    result=[]\n    def visit(node):\n        if node in result: return\n        result.append(node)\n        for dep in graph.get(node,[]): visit(dep)\n    for node in graph: visit(node)\n    return result\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        a=order({\"app\":[\"lib\"],\"lib\":[\"base\"]})\n        self.assertLess(a.index(\"base\"),a.index(\"lib\"))\n        self.assertLess(a.index(\"lib\"),a.index(\"app\"))\n        with self.assertRaises(ValueError): order({\"a\":[\"b\"],\"b\":[\"a\"]})\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "json-pointer",
+      "kind": "coding",
+      "prompt": "lookup supports RFC6901 escaping (~1 slash, ~0 tilde), array indices, and an empty pointer returns the original document; bad pointers raise ValueError or KeyError. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def lookup(doc,pointer):\n    node=doc\n    for part in pointer.split(\"/\")[1:]:\n        node=node[part]\n    return node\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        doc={\"a/b\":{\"~key\":[10,20]}}\n        self.assertEqual(lookup(doc,\"/a~1b/~0key/1\"),20)\n        self.assertIs(lookup(doc,\"\"),doc)\n        with self.assertRaises((ValueError,KeyError)): lookup(doc,\"a\")\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "semver-prerelease",
+      "kind": "coding",
+      "prompt": "sort_versions implements SemVer order for these MAJOR.MINOR.PATCH values, including numeric prerelease identifiers and ignoring +build metadata. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def sort_versions(versions):\n    return sorted(versions)\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        self.assertEqual(sort_versions([\"1.0.0\",\"1.0.0-rc.10\",\"1.0.0-rc.2\",\"1.0.0-alpha\",\"0.9.0\",\"2.0.0\",\"10.0.0\"]),[\"0.9.0\",\"1.0.0-alpha\",\"1.0.0-rc.2\",\"1.0.0-rc.10\",\"1.0.0\",\"2.0.0\",\"10.0.0\"])\n        self.assertEqual(sort_versions([\"1.0.0+b\",\"1.0.0+a\"]),[\"1.0.0+b\",\"1.0.0+a\"])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "atomic-config-merge",
+      "kind": "coding",
+      "prompt": "merge_config deep-merges nested dicts without mutating either argument; explicit None deletes a key; list/scalar values replace. Fix solution.py and run its unittest suite. Do not change test_solution.py.",
+      "files": {
+        "solution.py": "def merge_config(base, patch):\n    base.update(patch)\n    return base\n",
+        "test_solution.py": "import unittest\nfrom solution import *\n\nclass Cases(unittest.TestCase):\n    def test_cases(self):\n        a={\"db\":{\"host\":\"x\",\"port\":5},\"remove\":1,\"items\":[1]}\n        b={\"db\":{\"port\":6},\"remove\":None,\"items\":[2]}\n        self.assertEqual(merge_config(a,b),{\"db\":{\"host\":\"x\",\"port\":6},\"items\":[2]})\n        self.assertEqual(a,{\"db\":{\"host\":\"x\",\"port\":5},\"remove\":1,\"items\":[1]})\n        self.assertEqual(b[\"items\"],[2])\n"
+      },
+      "check": "unittest"
+    },
+    {
+      "id": "ledger-1",
+      "kind": "tools",
+      "prompt": "Read manifest.json to locate the ledger and filter rule. Follow that rule, group included rows by user and sum cents. Write the result as a JSON object to answer.json, sorted keys. Verify your result.",
+      "files": {
+        "manifest.json": "{\"ledger\": \"data/batch-0.json\", \"rule\": \"rules.json\"}",
+        "rules.json": "{\"region\": \"east\", \"status\": \"paid\"}",
+        "data/batch-0.json": "[{\"user\": \"u0\", \"cents\": 7, \"status\": \"void\", \"region\": \"east\"}, {\"user\": \"u1\", \"cents\": 14, \"status\": \"paid\", \"region\": \"west\"}, {\"user\": \"u2\", \"cents\": 21, \"status\": \"paid\", \"region\": \"east\"}, {\"user\": \"u0\", \"cents\": 28, \"status\": \"paid\", \"region\": \"west\"}, {\"user\": \"u1\", \"cents\": 35, \"status\": \"void\", \"region\": \"east\"}, {\"user\": \"u2\", \"cents\": 42, \"status\": \"paid\", \"region\": \"west\"}, {\"user\": \"u0\", \"cents\": 49, \"status\": \"paid\", \"region\": \"east\"}, {\"user\": \"u1\", \"cents\": 56, \"status\": \"paid\", \"region\": \"west\"}, {\"user\": \"u2\", \"cents\": 63, \"status\": \"void\", \"region\": \"east\"}, {\"user\": \"u0\", \"cents\": 70, \"status\": \"paid\", \"region\": \"west\"}, {\"user\": \"u1\", \"cents\": 77, \"status\": \"paid\", \"region\": \"east\"}, {\"user\": \"u2\", \"cents\": 84, \"status\": \"paid\", \"region\": \"west\"}, {\"user\": \"u0\", \"cents\": 91, \"status\": \"void\", \"region\": \"east\"}]"
+      },
+      "check": "json",
+      "expected": {
+        "u2": 21,
+        "u0": 49,
+        "u1": 77
+      }
+    },
+    {
+      "id": "dependency-lock",
+      "kind": "tools",
+      "prompt": "Read package.json and lock.json. Write answer.json mapping each direct dependency name to its locked version; exclude devDependencies and transitives.",
+      "files": {
+        "package.json": "{\"dependencies\": {\"alpha\": \"^2\", \"beta\": \"~1\"}, \"devDependencies\": {\"tests\": \"^9\"}}",
+        "lock.json": "{\"alpha\": \"2.4.1\", \"beta\": \"1.8.0\", \"tests\": \"9.0.1\", \"transitive\": \"4.0.0\"}"
+      },
+      "check": "json",
+      "expected": {
+        "alpha": "2.4.1",
+        "beta": "1.8.0"
+      }
+    },
+    {
+      "id": "log-aggregation",
+      "kind": "tools",
+      "prompt": "Read logs/first.json and logs/second.json. Deduplicate records by id, keep only status >=500, then count by service. Write answer.json.",
+      "files": {
+        "logs/first.json": "[{\"id\": 1, \"service\": \"api\", \"status\": 500}, {\"id\": 2, \"service\": \"web\", \"status\": 200}, {\"id\": 3, \"service\": \"api\", \"status\": 503}]",
+        "logs/second.json": "[{\"id\": 1, \"service\": \"api\", \"status\": 500}, {\"id\": 4, \"service\": \"web\", \"status\": 502}, {\"id\": 5, \"service\": \"api\", \"status\": 400}]"
+      },
+      "check": "json",
+      "expected": {
+        "api": 2,
+        "web": 1
+      }
+    },
+    {
+      "id": "inventory-join",
+      "kind": "tools",
+      "prompt": "Join stock.json with reservations.json by sku. For every stock sku, write max(0, stock minus total reserved) to answer.json. Ignore reservations for unknown skus.",
+      "files": {
+        "stock.json": "{\"a\": 8, \"b\": 3, \"c\": 9}",
+        "reservations.json": "[{\"sku\": \"a\", \"qty\": 2}, {\"sku\": \"a\", \"qty\": 3}, {\"sku\": \"b\", \"qty\": 5}, {\"sku\": \"unknown\", \"qty\": 1}]"
+      },
+      "check": "json",
+      "expected": {
+        "a": 3,
+        "b": 0,
+        "c": 9
+      }
+    },
+    {
+      "id": "translation-fallback",
+      "kind": "tools",
+      "prompt": "Read locales/base.json and locales/fr.json. Recursively merge using French values only if they are nonempty strings, otherwise fallback to base. Exclude keys not present in base. Write answer.json.",
+      "files": {
+        "locales/base.json": "{\"menu\": {\"save\": \"Save\", \"close\": \"Close\"}, \"title\": \"Home\"}",
+        "locales/fr.json": "{\"menu\": {\"save\": \"Enregistrer\", \"close\": \"\"}, \"extra\": \"Ignore\"}"
+      },
+      "check": "json",
+      "expected": {
+        "menu": {
+          "save": "Enregistrer",
+          "close": "Close"
+        },
+        "title": "Home"
+      }
+    },
+    {
+      "id": "release-manifest",
+      "kind": "tools",
+      "prompt": "Read release.json and artifacts.json. Follow the release channel and platform selection to return the exact matching artifact url and sha256 as answer.json. Ignore unsigned artifacts.",
+      "files": {
+        "release.json": "{\"channel\": \"stable\", \"platform\": \"linux\"}",
+        "artifacts.json": "[{\"channel\": \"stable\", \"platform\": \"linux\", \"signed\": false, \"url\": \"bad\", \"sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"}, {\"channel\": \"beta\", \"platform\": \"linux\", \"signed\": true, \"url\": \"beta\", \"sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\"}, {\"channel\": \"stable\", \"platform\": \"linux\", \"signed\": true, \"url\": \"https://example.org/stable.tar\", \"sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]"
+      },
+      "check": "json",
+      "expected": {
+        "url": "https://example.org/stable.tar",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "id": "routing-priority",
+      "kind": "tools",
+      "prompt": "For each request in requests.json, use the first matching path prefix in routes.json (list order authoritative), or the fallback. Write answer.json mapping path to backend.",
+      "files": {
+        "routes.json": "{\"routes\": [{\"prefix\": \"/api/admin\", \"backend\": \"admin\"}, {\"prefix\": \"/api/\", \"backend\": \"api\"}, {\"prefix\": \"/assets/\", \"backend\": \"cdn\"}], \"fallback\": \"web\"}",
+        "requests.json": "[\"/api/admin/users\", \"/api/items\", \"/assets/logo.svg\", \"/about\", \"/api\"]"
+      },
+      "check": "json",
+      "expected": {
+        "/api/admin/users": "admin",
+        "/api/items": "api",
+        "/assets/logo.svg": "cdn",
+        "/about": "web",
+        "/api": "web"
+      }
+    },
+    {
+      "id": "search-answer",
+      "kind": "search",
+      "prompt": "Search the docs corpus. Which release first enabled checkpoints by default, and what was its retention in days? Write answer.json as {\"release\": <string>, \"retention_days\": <integer>, \"source\": <relative document path>}. Ignore proposed or reverted changes.",
+      "files": {
+        "docs/01-plan.txt": "Proposal: release 2.0 should enable checkpoints, retention 30 days. Never implemented.",
+        "docs/02-release.txt": "Release 2.0 shipped opt-in checkpoints with retention 3 days.",
+        "docs/03-release.txt": "Release 2.1 enabled checkpoints by default, with a seven-day retention policy.",
+        "docs/04-release.txt": "Release 2.2 raised retention to 14 days; defaults otherwise unchanged."
+      },
+      "check": "json",
+      "expected": {
+        "release": "2.1",
+        "retention_days": 7,
+        "source": "docs/03-release.txt"
+      }
+    }
+  ]
+}
