@@ -28,13 +28,13 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import shutil
 import signal
 import tempfile
 import threading
 import time
 import uuid
+from pathlib import Path
 
 BACKEND_BATCH_SIZE = 20
 DEFAULT_BUDGET_MINUTES = 40.0

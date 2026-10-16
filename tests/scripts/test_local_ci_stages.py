@@ -545,7 +545,6 @@ def test_success_names_the_tree_the_stages_covered(gate, monkeypatch, tmp_path, 
 
 def test_deadline_stops_the_whole_process_tree(tmp_path, monkeypatch):
     import os
-    import subprocess
     import time
     child_pid = tmp_path / "child.pid"
     script = ("import subprocess, sys, time, pathlib\n"
