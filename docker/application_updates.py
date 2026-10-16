@@ -834,9 +834,17 @@ class ContainerUpdates:
 
     def remember(self, manifest):
         """The release name and notes shown beside the update button."""
-        self.offer = {"release": manifest.get("version"), "notes": manifest.get("notes")}
+        self.offer = {"revision": manifest["revision"], "release": manifest.get("version"), "notes": manifest.get("notes")}
 
     def publish(self, phase, message=None, error=None, version=None):
+        pending = self.state.get("pending")
+        if phase == "ready" and pending and self.offer.get("revision") != pending:
+            # "ready" always names the staged build, even after a check offered a
+            # newer one that was not downloaded (#98): never B's name over A's install.
+            try:
+                self.remember(self.manifest(pending))
+            except Exception:
+                self.offer = {"revision": pending}
         offered = self.offer if phase in ("available", "ready", "downloading") else {}
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,

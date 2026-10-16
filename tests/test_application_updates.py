@@ -969,6 +969,24 @@ def test_a_failed_download_of_a_newer_release_keeps_the_staged_build(feed):
     assert updater.launch({}, activate=True)[2]["GIT_SHA"] == B
 
 
+def test_a_failed_check_after_a_newer_offer_names_the_staged_build(feed):
+    """Review of #98: A staged, B offered, then a check fails: "ready" must not name B."""
+    updater, publish, _, _, responses = feed
+    publish(revision=B, sequence=2, version="1.0.0", notes="A notes")
+    updater.check(download=True)
+    publish(revision=C, sequence=3, version="1.0.1", notes="B notes")
+    updater.check()
+    assert status_of(updater)["release"] == "1.0.1"
+    responses["/v1/desktop/manifest"] = b"not a signed manifest"
+    (updater.root / "request.json").write_text(json.dumps({"action": "check", "expires_at": 2**40}))
+    updater.service()
+    status = status_of(updater)
+    assert status["phase"] == "ready" and status["version"] == B[:12]
+    assert (status["release"], status["notes"]) == ("1.0.0", "A notes"), "the build Update and restart installs"
+    assert status["error"]
+    assert updater.state == {"pending": B}
+
+
 def test_a_staged_build_stays_when_the_feed_has_nothing_newer_it_can_run(feed):
     updater, publish, _, requests, _ = feed
     publish(revision=C, sequence=3)

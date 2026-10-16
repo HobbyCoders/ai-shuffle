@@ -237,7 +237,13 @@ def image_only_copies(dockerfile: str, inputs: Iterable[str], runtime_paths: Ite
     return result
 
 
+# Relative modules a launcher file loads: static imports (not type-only), side-effect
+# imports, re-exports, dynamic import() (installed-entry.ts loads installer-updates
+# that way) and require().
 _IMPORT = re.compile(r"""(?:^|\n)\s*import\s+(?!type\b)[^'";]*?from\s+['"](\.{1,2}/[^'"]+)['"]"""
+                     r"""|(?:^|\n)\s*import\s*['"](\.{1,2}/[^'"]+)['"]"""
+                     r"""|(?:^|\n)\s*export\s+(?!type\b)[^'";]*?from\s+['"](\.{1,2}/[^'"]+)['"]"""
+                     r"""|\bimport\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)"""
                      r"""|require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
 
 
@@ -256,7 +262,7 @@ def launcher_files(read: Reader, entry: str = LAUNCHER_ENTRY) -> set:
         if not path.endswith((".ts", ".js", ".cjs", ".mjs")):
             continue
         for match in _IMPORT.finditer(data.decode("utf8", "replace")):
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), match.group(1) or match.group(2)))
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), next(group for group in match.groups() if group)))
             candidates = [target] if posixpath.splitext(target)[1] else [target + ".ts", target + ".js"]
             for candidate in candidates:
                 if candidate not in LAUNCHER_STOP and read(candidate) is not None:

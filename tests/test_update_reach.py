@@ -216,6 +216,20 @@ def test_type_only_imports_are_not_part_of_the_launcher():
                                           "desktop/src/main/required.ts"}
 
 
+def test_dynamic_side_effect_and_re_exported_modules_are_part_of_the_launcher():
+    # installed-entry.ts loads installer-updates with await import() for the recovery installer.
+    assert "desktop/src/main/installer-updates.ts" in reach.launcher_files(tree())
+    read = tree({
+        "desktop/src/main/managed-entry.ts": b"import './side';\nexport { x } from './again';\n"
+                                             b"export type { T } from './types-only';\n"
+                                             b"async function f() { await import('./later'); }\n",
+        "desktop/src/main/side.ts": b"", "desktop/src/main/again.ts": b"", "desktop/src/main/later.ts": b"",
+        "desktop/src/main/types-only.ts": b"export type T = 1;\n",
+    })
+    assert reach.launcher_files(read) == {"desktop/src/main/managed-entry.ts", "desktop/src/main/side.ts",
+                                          "desktop/src/main/again.ts", "desktop/src/main/later.ts"}
+
+
 def test_trust_key_change_fails_for_every_platform():
     groups = groups_for({reach.TRUST_KEY: "new key"})
     assert groups["update-trust-key"] == [reach.TRUST_KEY]
