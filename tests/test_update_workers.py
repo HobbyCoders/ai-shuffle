@@ -829,6 +829,10 @@ MAY_HAVE_MIGRATED = ("The database may have been migrated, but the update state 
 MIGRATED_NEWER_BUILD = ("The database may have been migrated. Install a verified newer build to recover; "
                         "cancelling cannot run older code.")
 LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely."
+# InstallerRequiredError (source-updates.ts, #97): refused before any download.
+LAUNCHER_START = ("AI Shuffle 1.1.0 needs a newer desktop launcher than this install has (launcher 3; it needs 4). "
+                  "Install the latest AI Shuffle installer from hobbycoders.com to update. "
+                  "Your files and data have been kept. No update was downloaded.")
 
 
 @pytest.mark.parametrize("phase,error,kept", [
@@ -839,6 +843,7 @@ LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely
     ("error", MAY_HAVE_MIGRATED, False),
     ("error", MIGRATED_NEWER_BUILD, False),
     ("error", LINUX_ENTRY, False),
+    ("error", LAUNCHER_START, True),
     # A desktop that cannot update itself; nothing was attempted, so nothing is claimed.
     ("unsupported", None, False),
 ])

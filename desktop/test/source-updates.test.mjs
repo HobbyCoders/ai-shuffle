@@ -910,7 +910,7 @@ test('bootstrap first launch still downloads and selects an application; older s
  const legacy={load:async()=>{},select:async()=>{if(!legacyCalls)throw Error('No application');return {revision:A};},check:async(_progress,interactive)=>{assert.equal(interactive,true);legacyCalls++;}};
  assert.equal((await run(legacy)).revision,A);assert.equal(legacyCalls,1);
 });
-test('checks verify metadata only; explicit download stages the signed release and pending survives checks',async t=>{
+test('checks verify metadata only; explicit download stages the signed release and a newer release replaces it',async t=>{
  const f=await fixture(t);await f.release(A);const u=f.create();await u.load();
  await u.download();await u.select();await u.healthy();const old=await f.release(B);
  f.requests.length=0;const builds=f.builds;const progress=[];
@@ -920,10 +920,16 @@ test('checks verify metadata only; explicit download stages the signed release a
  assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.equal(f.requests.filter(url=>url===old.url).length,1);assert.equal(f.builds,builds+1);
  assert.equal(await fs.readFile(path.join(f.root,'versions',B,'release.json'),'utf8'),old.signed);
- await f.release(C);f.requests.length=0;
- assert.equal((await u.check()).version,B.slice(0,12));assert.equal((await u.download()).version,B.slice(0,12));
- const restarted=f.create();await restarted.load();assert.equal((await restarted.check()).kind,'ready');
- assert.deepEqual(f.requests,[]);assert.equal(f.builds,builds+1);
+ // #98: a pending download that never ran (no stageDownloads) no longer hides a newer release.
+ const newer=await f.release(C);f.requests.length=0;
+ assert.deepEqual(await u.check(),{kind:'available',version:C.slice(0,12),release:newer.manifest.version,notes:newer.manifest.notes});
+ assert.equal(u.pendingVersion,B,'a check downloads nothing');assert.equal(f.builds,builds+1);
+ assert.equal((await u.download()).version,C.slice(0,12));assert.equal(u.pendingVersion,C);
+ const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(state.pending,C);assert.equal(state.staged,undefined);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ const restarted=f.create();await restarted.load();f.requests.length=0;
+ assert.equal((await restarted.check()).kind,'ready');assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+ assert.equal(f.builds,builds+2);assert.equal((await restarted.select()).revision,C);
 });
 test('invalid check metadata fails before any archive request and can be retried',async t=>{
  const f=await fixture(t);const release=await f.release(A);const u=f.create();await u.load();
@@ -1279,7 +1285,7 @@ test('#97: a release the running launcher cannot start is refused before it is o
  await f.release(B,undefined,{version:'1.1.0',desktop:{launcher:5,start:4}});f.requests.length=0;
  for(const run of [()=>u.check(),()=>u.download()]){
   await assert.rejects(run(),error=>error instanceof InstallerRequiredError&&error.code==='installer_required'&&
-   /AI Shuffle 1\.1\.0 needs a newer desktop launcher.*launcher 3; it needs 4.*Install the latest AI Shuffle installer.*No update was downloaded/.test(error.message));
+   /AI Shuffle 1\.1\.0 needs a newer desktop launcher.*launcher 3; it needs 4.*Install the latest AI Shuffle installer.*Your files and data have been kept.*No update was downloaded/.test(error.message));
  }
  assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest'],'no archive was requested');
  assert.equal(f.builds,0);assert.equal(u.pendingVersion,null);
@@ -1318,6 +1324,11 @@ test('#98: when the newer download fails, the staged build stays ready; an unrea
  const {f,u}=await stagedOver(t);
  await f.release(C);f.fail=true;
  await assert.rejects(u.download(),/Local build failed/);
+ // The same holds without stageDownloads (a pending download): it stays pending.
+ {const g=await fixture(t);await g.release(A);const p=g.create();await p.load();await p.download();await p.select();await p.databaseStarting();await p.healthy();
+  await g.release(B);await p.download();await g.release(C);g.fail=true;await assert.rejects(p.download(),/Local build failed/);
+  assert.equal(JSON.parse(await fs.readFile(path.join(g.root,'state.json'),'utf8')).pending,B);
+  assert((await fs.stat(path.join(g.root,'versions',B,'release.json'))).isFile());}
  assert.equal(u.pendingVersion,B);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).staged,B);
  assert((await fs.stat(path.join(f.root,'versions',B,'release.json'))).isFile());
  await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});

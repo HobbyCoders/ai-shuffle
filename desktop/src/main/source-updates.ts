@@ -73,7 +73,7 @@ export class InstallerRequiredError extends Error {
   readonly code = 'installer_required';
   constructor(readonly release: string, readonly running: number, readonly needed: number) {
     super(`AI Shuffle ${release} needs a newer desktop launcher than this install has (launcher ${running}; it needs ${needed}). ` +
-      'Install the latest AI Shuffle installer from hobbycoders.com to update. Your data is kept. No update was downloaded.');
+      'Install the latest AI Shuffle installer from hobbycoders.com to update. Your files and data have been kept. No update was downloaded.');
   }
 }
 export interface SourceOptions {
@@ -674,12 +674,15 @@ export class SourceUpdates {
   }
   /**
    * A download nobody chose to install yet that never ran: the only build a newer
-   * release may replace (#98). Never one selected to start (pending), starting,
-   * failed, fenced, blocked or named by an unfinished restore point.
+   * release may replace (#98). That is a staged download, or the pending one of a
+   * manager that activates downloads on exit (no stageDownloads). Never one that
+   * Update and restart selected, starting, failed, fenced, blocked or named by an
+   * unfinished restore point.
    */
   private async replaceable(revision: string): Promise<boolean> {
     const s = this.state;
-    if (s.staged !== revision || s.pending || s.booting || s.waiting || s.blocked || this.hasMigrationRisk ||
+    const unchosen = s.staged === revision ? !s.pending : s.pending === revision && !s.staged && !this.explicitActivation;
+    if (!unchosen || s.booting || s.waiting || s.blocked || this.hasMigrationRisk ||
         [s.active, s.previous].includes(revision) || s.failed?.includes(revision) || s.mayHaveMigrated?.[revision] !== undefined ||
         this.migrationFloor === null || this.migrationFloor?.revision === revision) return false;
     try { const j = await this.journal(); return !j || j.phase === 'committed'; }
@@ -787,11 +790,14 @@ export class SourceUpdates {
       await removeSourceDirectory(target); await fs.rename(stage, target);
       if (!await this.updatesAllowed()) throw new Error('Updates were disabled while preparing; no update was activated');
       const field = this.explicitActivation ? 'staged' : 'pending';
-      const previous = this.state.staged;
-      if (replaces && previous === replaces) delete this.state.staged;
+      const before = { staged: this.state.staged, pending: this.state.pending };
+      if (replaces && before.staged === replaces) delete this.state.staged;
       this.state[field] = manifest.revision;
       try { await this.save(); }
-      catch (error) { delete this.state[field]; if (previous !== undefined) this.state.staged = previous; throw error; }
+      catch (error) {
+        for (const key of ['staged', 'pending'] as const) { if (before[key] === undefined) delete this.state[key]; else this.state[key] = before[key]; }
+        throw error;
+      }
     } finally { await removeSourceDirectory(stage); }
   }
   /** The signed manifest an installed revision was built from, verified again. */
