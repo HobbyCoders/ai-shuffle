@@ -90,13 +90,14 @@ def test_change_lists_give_way_to_a_full_snapshot_past_their_budget():
     assert mr.plan_memory_note(changed, held).kind == "full"
 
 
-@pytest.mark.parametrize(("tier", "reason", "folds"), [
-    (1, "trigger", False), (1, "image_consumed", False), (2, "trigger", True),
-    (3, "overflow", True), (4, "trigger", True), (3, "cli_auto_compact", True),
-    (0, "cli_manual_compact", True), (None, None, True),
+@pytest.mark.parametrize(("reason", "folds"), [
+    # Native folds carry the snapshot (fluid's pinned reminder), so they never
+    # drop it; a Claude Code compaction summarizes it away.
+    ("trigger", False), ("image_consumed", False), ("overflow", False), ("manual_compact", False),
+    ("cli_auto_compact", True), ("cli_manual_compact", True), ("cli_compact", True), (None, True),
 ])
-def test_which_compactions_can_fold_the_snapshot(tier, reason, folds):
-    assert mr.compaction_may_fold_snapshot(tier, reason) is folds
+def test_which_compactions_can_fold_the_snapshot(reason, folds):
+    assert mr.compaction_may_fold_snapshot(reason) is folds
 
 
 # ---------------------------------------------------------------------------
@@ -163,35 +164,107 @@ async def test_snapshot_change_is_sent_on_the_next_message(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_is_resent_after_a_compaction(monkeypatch):
+async def test_snapshot_is_resent_after_a_claude_code_compaction(monkeypatch):
     memory = {"section": _section(*FACTS)}
     adapter, loop = await _adapter(monkeypatch, memory)
     await _turn(adapter)
     await _turn(adapter)
-    # A tier-1 trim leaves user text alone; a digest or Claude Code compaction does not.
-    adapter._observe_memory_event(ContextCompaction(session_id="s", tier=1, reason="trigger"))
-    await _turn(adapter)
+    # Native compactions keep it in view (the compactor carries it onto the
+    # fold); a Claude Code compaction summarizes it away.
     adapter._observe_memory_event(ContextCompaction(session_id="s", tier=2, reason="trigger"))
-    await _turn(adapter)
     await _turn(adapter)
     adapter._observe_memory_event(ContextCompaction(session_id="s", tier=3, reason="cli_auto_compact"))
     await _turn(adapter)
-    assert await _memory_kinds(loop) == ["full", None, None, "full", None, "full"]
+    await _turn(adapter)
+    assert await _memory_kinds(loop) == ["full", None, None, "full", None]
+
+
+class _Recording:
+    """A provider that records every request and answers with ``reply``."""
+
+    name = "fake"
+
+    def __init__(self, reply: str = "ok"):
+        from fluid.providers.base import ProviderCaps
+
+        self.caps = ProviderCaps()
+        self.requests: list = []
+        self._chunks = [
+            StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": reply}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 2}, "stop_reason": "end_turn"}),
+        ]
+
+    async def stream(self, request):
+        self.requests.append(request)
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _snapshots_in(request) -> int:
+    """How many full snapshots a provider request shows the model."""
+    text = "\n".join((m.text() or "") for m in request.messages)
+    return sum(kind == "full" for kind, _ in mr.memory_blocks(text))
+
+
+async def _compactions(loop):
+    from fluid.store.base import iter_events
+
+    return [e async for e in iter_events(loop.store, loop.session_id, 0)
+            if isinstance(e, ContextCompaction)]
 
 
 @pytest.mark.asyncio
-async def test_real_manual_compaction_resends_the_snapshot(monkeypatch):
+async def test_automatic_native_compaction_inside_a_turn_keeps_the_snapshot(monkeypatch):
+    """A digest that folds the turn carrying the snapshot runs before a model
+    call, mid-session and mid-turn. Every request, including the one right
+    after the fold, must still show exactly one snapshot, without the adapter
+    re-sending it."""
+    from fluid.context.compaction import CompactionConfig
+
+    provider = _Recording("reply " * 300)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="fake",
+        compaction=CompactionConfig(trigger_tokens=4_000, keep_recent_turns=1),
+    )
     memory = {"section": _section(*FACTS)}
-    adapter, loop = await _adapter(monkeypatch, memory)
+    adapter, loop = await _adapter(monkeypatch, memory, loop=loop)
+    for i in range(10):
+        await _turn(adapter, f"turn {i} " + "words " * 400)
+    folds = [e for e in await _compactions(loop) if e.tier >= 2]
+    assert folds, "the scripted session never digested a turn"
+    # The snapshot went out once, on the first message only.
+    assert await _memory_kinds(loop) == ["full"] + [None] * 9
+    # And the model saw it on every call, before and after each fold.
+    assert [_snapshots_in(r) for r in provider.requests] == [1] * len(provider.requests)
+    # The fold is the reason: without the pin the digest drops it.
+    nodes = await loop.store.load_path(loop.session_id)
+    loop._compactor.config = __import__("dataclasses").replace(
+        loop._compactor.config, pinned_reminder=None)
+    assert _snapshots_in(type("R", (), {"messages": loop._compactor.view(nodes)})) == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_native_compaction_keeps_the_snapshot_without_a_resend(monkeypatch):
+    from fluid.context.compaction import CompactionConfig
+
+    provider = _Recording("reply " * 300)
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="fake",
+                      compaction=CompactionConfig(keep_recent_turns=1))
+    memory = {"section": _section(*FACTS)}
+    adapter, loop = await _adapter(monkeypatch, memory, loop=loop)
     for i in range(6):
-        await _turn(adapter, f"turn {i} " + "words " * 200)
+        await _turn(adapter, f"turn {i} " + "words " * 400)
     adapter.set_turn_source("user")
     await adapter.send_query("/compact")
     await _collect(adapter)
-    # The owner's /compact folded the early turns (a digest or an epoch).
-    assert adapter._memory_trusted_node is None
+    assert [e for e in await _compactions(loop) if e.tier >= 2], [
+        (e.tier, e.reason, e.spans) for e in await _compactions(loop)]
     await _turn(adapter, "after")
-    assert await _memory_kinds(loop) == ["full"] + [None] * 5 + ["full"]
+    assert await _memory_kinds(loop) == ["full"] + [None] * 6
+    assert _snapshots_in(provider.requests[-1]) == 1
 
 
 @pytest.mark.asyncio
@@ -209,9 +282,16 @@ async def test_fresh_adapter_reads_back_what_the_model_holds(monkeypatch):
     await _turn(woken)
     assert await _memory_kinds(loop) == ["full", "changes", None]
 
-    # A compaction recorded after the full snapshot's turn: re-send on wake.
+    # A Claude Code compaction recorded after the full snapshot's turn
+    # (another worker ran it): re-send on wake. A native one would not count.
     await loop.store.append_event(loop.session_id, ContextCompaction(
         session_id=loop.session_id, seq=10_000, tier=3, reason="trigger",
+    ))
+    native, _ = await _adapter(monkeypatch, memory, loop=loop)
+    await _turn(native)
+    assert (await _memory_kinds(loop))[-1] is None
+    await loop.store.append_event(loop.session_id, ContextCompaction(
+        session_id=loop.session_id, seq=10_001, tier=3, reason="cli_auto_compact",
     ))
     rewoken, _ = await _adapter(monkeypatch, memory, loop=loop)
     await _turn(rewoken)
@@ -248,7 +328,7 @@ async def test_folded_lookup_uses_the_filtered_database_query(monkeypatch):
 
     rows = [
         {"seq": 1, "event": {"_cls": "TurnStarted", "node_id": "n1"}},
-        {"seq": 2, "event": {"_cls": "ContextCompaction", "tier": 1, "reason": "trigger"}},
+        {"seq": 2, "event": {"_cls": "ContextCompaction", "tier": 2, "reason": "trigger"}},
     ]
     asked = []
 
@@ -359,5 +439,25 @@ async def test_a_stale_put_back_is_not_credited_to_a_later_compaction(monkeypatc
         await _delegated_turn(adapter, "again [compact-now]")
         await _delegated_turn(adapter)
         assert await _memory_kinds(loop) == ["full", None, None, None, "full"]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_delegated_command_other_than_compact_drops_the_trust(monkeypatch, tmp_path):
+    """A typed /clear (or any other Claude Code command) may reset the CLI's
+    context without a compaction boundary: the next message re-sends."""
+    memory = {"section": _section(*FACTS)}
+    adapter = await _delegated(monkeypatch, tmp_path, memory)
+    try:
+        loop = adapter._engine
+        await _delegated_turn(adapter)
+        await _delegated_turn(adapter)
+        await _delegated_turn(adapter, "/clear")
+        await _delegated_turn(adapter)
+        kinds = [k for k in await _memory_kinds(loop)]
+        users = [n for n in await loop.store.load_path(loop.session_id) if n.message.role == "user"]
+        assert users[2].message.text().strip() == "/clear"
+        assert kinds == ["full", None, None, "full"]
     finally:
         await adapter.disconnect()

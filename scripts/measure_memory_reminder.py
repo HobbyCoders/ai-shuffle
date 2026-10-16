@@ -14,9 +14,11 @@ No model, network or database. Both legs run the real HarnessAdapter:
 
 The script: a memory store seeded to the real snapshot size (~8.4k chars, the
 mean of 2,768 snapshots in 20 long sessions on the audit worker), one
-Remember at turn 8, a compaction before turn 14 (native: the owner's
-``/compact``; delegated: the CLI compacts mid-turn), 20 user turns of about
-300 characters with replies of about 1,200.
+Remember at turn 8, 20 user turns of about 300 characters with replies of
+about 1,200, and compaction: native compacts AUTOMATICALLY, inside turns,
+whenever history passes AUTO_COMPACT_HISTORY_TOKENS above the fixed prefix
+(the in-turn case: a digest folds the turn that carried the snapshot right
+before a model call); delegated has the CLI compact mid-turn at turn 14.
 
 Each leg runs twice: ``legacy`` (the full snapshot on every user message, the
 behavior before this change, reproduced by routing the memory slot through
@@ -43,7 +45,11 @@ sys.path[:0] = [str(ROOT), str(ROOT / "fluid")]
 
 TURNS = 20
 REMEMBER_AT = 8
-COMPACT_BEFORE = 14
+COMPACT_BEFORE = 14  # delegated: the CLI compacts during this turn
+# Native: the compactor's trigger, in estimated tokens above the fixed prefix.
+# Low on purpose, so the deduplicated run compacts too and the in-turn case
+# (a digest folding the turn that carried the snapshot) is exercised.
+AUTO_COMPACT_HISTORY_TOKENS = 500
 USER_CHARS = 300
 REPLY_CHARS = 1_200
 # The delegated leg's CLI summary after compaction (modelled, not measured).
@@ -157,8 +163,12 @@ def _remember(store) -> None:
                       provenance="user")
 
 
-async def _native(store, legacy: bool, prefix_chars: int) -> list[dict]:
+async def _native(store, legacy: bool, prefix_chars: int) -> tuple[list[dict], int]:
     from contextlib import ExitStack
+
+    from fluid.context.compaction import CompactionConfig
+    from fluid.events import ContextCompaction
+    from fluid.store.base import iter_events
 
     from app.core.provider.harness_adapter import HarnessAdapter
     from app.core.provider.types import SessionOptions
@@ -190,8 +200,11 @@ async def _native(store, legacy: bool, prefix_chars: int) -> list[dict]:
     provider = Recording()
     with ExitStack() as stack:
         _patches(stack, store, legacy)
-        loop = NativeLoop(provider=provider, store=MemoryStore(), model="fake",
-                          system="s" * prefix_chars)
+        loop = NativeLoop(
+            provider=provider, store=MemoryStore(), model="fake", system="s" * prefix_chars,
+            compaction=CompactionConfig(
+                trigger_tokens=prefix_chars // 4 + AUTO_COMPACT_HISTORY_TOKENS),
+        )
         adapter = HarnessAdapter()
         adapter._engine = loop
         adapter._options = SessionOptions(model="fake")
@@ -204,11 +217,12 @@ async def _native(store, legacy: bool, prefix_chars: int) -> list[dict]:
         for turn in range(1, TURNS + 1):
             if turn == REMEMBER_AT:
                 _remember(store)
-            if turn == COMPACT_BEFORE:
-                await adapter.send_query("/compact")
-                await drain()
             await adapter.send_query(_user_text(turn))
             await drain()
+        folds = len([
+            e async for e in iter_events(loop.store, loop.session_id, 0)
+            if isinstance(e, ContextCompaction) and e.tier >= 2
+        ])
     requests, texts = [], []
     for request in provider.requests:
         elements = [request.system or ""]
@@ -217,7 +231,14 @@ async def _native(store, legacy: bool, prefix_chars: int) -> list[dict]:
                      for m in request.messages]
         requests.append(elements)
         texts.append([_message_text(m) for m in request.messages])
-    return _cache_stats(requests, texts)
+    stats = _cache_stats(requests, texts)
+    for row, plain in zip(stats, texts):
+        # The snapshot reached this request through a fold (a digest, epoch or
+        # summary carrying it), not through the user message that sent it.
+        row["memory_via_fold"] = any(
+            "<system-reminder>\n# Memory\n" in t and not t.startswith("Turn ") for t in plain
+        )
+    return stats, folds
 
 
 def _message_text(message) -> str:
@@ -312,11 +333,14 @@ async def _delegated(store, legacy: bool, cwd: str, prefix_chars: int) -> list[d
 def measure(legacy: bool, prefixes: tuple[int, int]) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         native_store = _memory_store(Path(tmp) / "native")
-        native = asyncio.run(_native(native_store, legacy, prefixes[0]))
+        native, folds = asyncio.run(_native(native_store, legacy, prefixes[0]))
         delegated_store = _memory_store(Path(tmp) / "delegated")
         delegated = asyncio.run(_delegated(delegated_store, legacy, tmp, prefixes[1]))
     return {
-        "native": {"summary": _summary(native), "per_request": native},
+        "native": {"summary": {**_summary(native), "compactions_tier2plus": folds,
+                               "requests_with_memory_via_fold": sum(
+                                   r["memory_via_fold"] for r in native)},
+                   "per_request": native},
         "delegated": {"summary": _summary(delegated), "per_request": delegated},
     }
 
@@ -332,7 +356,8 @@ def main():
         print(json.dumps(result, indent=2))
         return
     print(f"Scripted session: {TURNS} turns, Remember at turn {REMEMBER_AT}, "
-          f"compaction before turn {COMPACT_BEFORE}; tokens are chars/4; fixed prefix "
+          f"native compacts automatically, delegated CLI compacts in turn {COMPACT_BEFORE}; "
+          f"tokens are chars/4; fixed prefix "
           f"{prefixes[0]:,} chars native, {prefixes[1]:,} delegated")
     keys = ("tokens_total", "tokens_per_request_mean", "tokens_last_request",
             "memory_tokens_total", "uncached_tokens_total", "cache_hit_rate")
@@ -343,6 +368,10 @@ def main():
             before = result["legacy"][leg]["summary"][key]
             after = result["current"][leg]["summary"][key]
             print(f"{key:28}{before:>12,}{after:>12,}")
+        if leg == "native":
+            for key in ("compactions_tier2plus", "requests_with_memory_via_fold"):
+                print(f"{key:28}{result['legacy'][leg]['summary'][key]:>12,}"
+                      f"{result['current'][leg]['summary'][key]:>12,}")
         series = [r["memory_tokens"] for r in result["current"][leg]["per_request"]]
         print("memory tokens per request (current):", series)
 

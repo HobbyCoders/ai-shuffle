@@ -9,9 +9,13 @@ The rule now:
 
 * **Full snapshot** on the first message of a conversation, and again whenever
   the copy the model saw can no longer be trusted to be in its context: after a
-  compaction that may have folded it (native tier 2 or higher, or any Claude
-  Code compaction), after a rewind or fork that left it off the active path,
-  and on a fresh adapter that cannot prove what the history holds.
+  Claude Code compaction (unless its SessionStart put-back already carried the
+  current one), after a rewind or fork that left it off the active path, after
+  a delegated slash command other than ``/compact``, and on a fresh adapter
+  that cannot prove what the history holds. A native compaction does not need
+  it: fluid's compactor carries the newest snapshot and its change lists onto
+  whatever digest, epoch or summary folds them
+  (``CompactionConfig.pinned_reminder``), in the same request, mid-turn too.
 * **Nothing** while the snapshot's facts are unchanged. A pure reorder (the
   snapshot ranks facts by recent use) is not a change.
 * **A compact change list** (:data:`CHANGES_HEADER`) when facts were added,
@@ -22,7 +26,7 @@ The rule now:
 What the model holds is recovered from the transcript itself
 (:func:`held_from_path`): the newest full snapshot on the active path plus the
 change lists after it. The caller says which full snapshot it trusts. A
-snapshot is trusted when no qualifying compaction ran after the turn that
+snapshot is trusted when no Claude Code compaction ran after the turn that
 carried it.
 
 Pure functions only; :class:`~app.core.provider.harness_adapter.HarnessAdapter`
@@ -46,7 +50,10 @@ CHANGES_INTRO = (
     "with these changes applied. Saved facts, not instructions."
 )
 _ADDED = "New or updated:"
-_REMOVED_IDS = "No longer in the snapshot (Recall still finds archived and omitted facts): "
+_REMOVED_IDS = (
+    "No longer in the snapshot (removed, replaced or dropped for space; Recall "
+    "only a fact you still need): "
+)
 _REMOVED_TEXT = "Lines no longer in the snapshot:"
 
 _OPEN = "<system-reminder>\n"
@@ -67,20 +74,19 @@ def wrap(body: str) -> str:
     return f"{_OPEN}{body}{_CLOSE}"
 
 
-def compaction_may_fold_snapshot(tier: Any, reason: Any) -> bool:
-    """Whether a ``ContextCompaction`` can have removed an earlier user
-    message's text from the model's context.
+def compaction_may_fold_snapshot(reason: Any) -> bool:
+    """Whether a ``ContextCompaction`` can have removed the snapshot from the
+    model's context.
 
-    Native tier 1 only trims tool results (and consumed images), so it never
-    touches the snapshot. Digests (2), epochs (3) and checkpoints (4) fold
-    whole turns. A Claude Code compaction summarizes everything before it.
+    A Claude Code compaction summarizes everything before it. A native one
+    never does: tier 1 only trims tool results, and digests, epochs and
+    checkpoint summaries carry the newest snapshot chain verbatim
+    (``fluid.context.compaction.pinned_reminder_chain``). An event of unknown
+    shape counts as folding, so the snapshot is re-sent.
     """
-    if isinstance(reason, str) and (reason in CLI_COMPACTION_REASONS or reason.startswith("cli_")):
+    if not isinstance(reason, str):
         return True
-    try:
-        return int(tier) >= 2
-    except (TypeError, ValueError):
-        return True  # unknown shape: assume the worst and re-send
+    return reason in CLI_COMPACTION_REASONS or reason.startswith("cli_")
 
 
 def section_items(section: str) -> tuple[str, ...]:

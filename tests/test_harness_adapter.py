@@ -7756,10 +7756,13 @@ def test_memory_block_says_what_remember_is_for():
     # Recall is cheap and precedes re-discovery.
     assert "Recall is one cheap call" in text and "BEFORE re-discovering" in text
     # The reminder rides a user turn once, not every turn; changes arrive as
-    # a change list; no reminder anywhere means empty.
+    # a change list; when none is visible, Recall.
     assert '"# Memory" reminder' in text and "on a user turn" in text
-    assert "after a compaction" in text and '"# Memory changes"' in text
-    assert "store is" in text and "empty, not hidden" in text
+    assert '"# Memory changes"' in text and "not repeated every turn" in text
+    assert "If no \"# Memory\" reminder is visible, use Recall." in text
+    # Absence must not read as "the store is empty": a fold or a new turn
+    # without the reminder is not an empty store.
+    assert "empty" not in text.split("Saved facts arrive", 1)[1]
     # Note/Ledger never persist.
     assert "Note and Ledger are" in text and "never persist" in text
 
