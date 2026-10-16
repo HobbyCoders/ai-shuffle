@@ -301,6 +301,37 @@ def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
 
 
+#: Claude Code ``decision_reason_type`` values that can carry one of its
+#: safety checks (``subcommandResults`` nests them inside a compound command).
+SAFETY_CHECK_REASON_TYPES = frozenset({"safetyCheck", "subcommandResults"})
+
+
+def safety_check_needs_person(reason_type: Any, classifier_approvable: Any) -> bool:
+    """Whether the claude CLI asks because of a safety check only a person
+    may pass (``classifier_approvable`` false, e.g. a removal whose target is
+    a shell variable). The CLI asks for these even in bypassPermissions."""
+    return reason_type in SAFETY_CHECK_REASON_TYPES and classifier_approvable is False
+
+
+def bypass_refuses(permission_mode: Any, reason_type: Any, classifier_approvable: Any) -> bool:
+    """Bypass approves every call the CLI asks about except a safety check
+    that needs a person: that one is denied at once (owner policy, #105).
+    Ask and Accept Edits put it to a person as any other prompt."""
+    return (
+        permission_mode == "bypassPermissions"
+        and safety_check_needs_person(reason_type, classifier_approvable)
+    )
+
+
+def safety_check_denial(reason: Optional[str]) -> str:
+    """What the model reads when Bypass refuses a safety-checked call."""
+    detail = f" ({reason})" if reason else ""
+    return (
+        f"Claude Code's safety check needs a person for this command{detail}. "
+        "Bypass mode refuses it; rewrite it with literal paths or a safer form."
+    )
+
+
 def narrow_tool_access_for_mode(access: ToolAccess, mode: Any) -> ToolAccess:
     """Compose an agent's own ``ToolAccess`` with the ceiling its mode imposes.
 

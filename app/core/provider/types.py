@@ -188,6 +188,11 @@ class PermissionRequestEvent(ProviderEvent):
     input: Any
     risk: str = "safe"
     request_id: Optional[str] = None
+    # Why the runtime asks (the claude CLI's ``decision_reason`` and its
+    # type), and whether its safety check may be passed by a classifier.
+    reason: Optional[str] = None
+    reason_type: Optional[str] = None
+    classifier_approvable: Optional[bool] = None
 
 
 @dataclass

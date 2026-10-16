@@ -2127,6 +2127,9 @@ async def _stream_to_websocket_impl(
                 _ctx_title           = getattr(context, 'title', None)
                 _ctx_display_name    = getattr(context, 'display_name', None)
                 _ctx_description     = getattr(context, 'description', None)
+                # The claude CLI's own reason for asking (delegated leg).
+                _ctx_reason_type     = getattr(context, 'decision_reason_type', None)
+                _ctx_classifier_ok   = getattr(context, 'classifier_approvable', None)
 
                 # Check profile-level tool restrictions FIRST. Entries may be
                 # exact names or fnmatch patterns (``mcp__browser__*``, ``*``),
@@ -2183,6 +2186,16 @@ async def _stream_to_websocket_impl(
                         # would be a prompt about the one thing the lane exists
                         # to do, with no other answer available.
                         return PermissionResultAllow(updated_input=tool_input)
+
+                # A safety check only a person may pass (a removal whose target
+                # is a shell variable, say): Bypass refuses it at once instead
+                # of allowing it or raising a prompt (owner policy, #105).
+                from app.core.session_modes import bypass_refuses, safety_check_denial, safety_check_needs_person
+
+                if bypass_refuses(_perm_mode, _ctx_reason_type, _ctx_classifier_ok):
+                    logger.info(f"[WS] {tool_name} refused under Bypass: Claude Code safety check")
+                    return PermissionResultDeny(message=safety_check_denial(_ctx_decision_reason))
+                _ctx_safety_check = safety_check_needs_person(_ctx_reason_type, _ctx_classifier_ok)
 
                 # User-level "awaiting input" indicator. The per-socket question /
                 # permission event only reaches the tab that owns this query; fanning
@@ -2464,6 +2477,7 @@ async def _stream_to_websocket_impl(
                         decision_reason=_ctx_decision_reason,
                         blocked_path=_ctx_blocked_path,
                         mode_managed=True,
+                        safety_check=_ctx_safety_check,
                     )
                     if isinstance(result, _DeferSentinel):
                         # Return PreToolUseHookSpecificOutput with defer

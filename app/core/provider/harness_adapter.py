@@ -97,7 +97,12 @@ from app.core.provider.fluid_credentials import (
 )
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
-from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
+from app.core.session_modes import (
+    bypass_refuses,
+    effective_permission_mode,
+    mode_approves_without_prompt,
+    safety_check_denial,
+)
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
 # from here — but a session replayed through this adapter must be decodable,
@@ -2708,6 +2713,9 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.assistant_permissions import NO_OWNER_DENIAL
 
             allow, message = False, NO_OWNER_DENIAL
+        elif bypass_refuses(self.permission_mode, ev.reason_type, ev.classifier_approvable):
+            # A safety check only a person may pass: Bypass refuses it (#105).
+            allow, message = False, safety_check_denial(ev.reason)
         elif self.permission_mode != "bypassPermissions":
             try:
                 saved = await self._saved_rule_decision(ev.name, ev.input)
@@ -2831,6 +2839,11 @@ class HarnessAdapter(ProviderAdapter):
                     # A high-risk call in an owner's-assistant session goes to
                     # the owner whatever the mode (app.core.assistant_permissions).
                     assistant_owner=self._owner_needed(tool_name, ev.input, getattr(ev, "risk", None)),
+                    # The CLI's reason for asking: the approver refuses a
+                    # safety check under Bypass and shows the reason under Ask.
+                    decision_reason=ev.reason,
+                    decision_reason_type=ev.reason_type,
+                    classifier_approvable=ev.classifier_approvable,
                     **_prompt_enrichment(tool_name, ev),
                 ),
             )
@@ -3543,6 +3556,9 @@ class HarnessAdapter(ProviderAdapter):
                     input=event.input,
                     risk=event.risk,
                     request_id=event.request_id,
+                    reason=getattr(event, "reason", None),
+                    reason_type=getattr(event, "reason_type", None),
+                    classifier_approvable=getattr(event, "classifier_approvable", None),
                 )
             ]
 

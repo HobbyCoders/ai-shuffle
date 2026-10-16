@@ -122,6 +122,7 @@ from fluid.messages import (
 from fluid.engine.delegated_toolmix import ToolMix
 from fluid.providers.anthropic.serialize import sse_to_chunk
 from fluid.store.base import new_id
+from fluid.tools.builtins._util import strip_ansi
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,11 @@ class PermissionBridge:
     # The CLI's own ``permission_suggestions``: the rules it would add for an
     # "always allow" answer, echoed back as ``updatedPermissions``.
     suggestions: tuple[dict[str, Any], ...] = ()
+    # Why the CLI asks (its ``decision_reason``), e.g. a safety check that
+    # still asks in bypassPermissions mode. None when it gave none.
+    reason: str | None = None
+    reason_type: str | None = None
+    classifier_approvable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1216,14 +1222,22 @@ class StreamJsonMapper:
         suggestions = tuple(
             s for s in raw_suggestions if isinstance(s, dict)
         ) if isinstance(raw_suggestions, list) else ()
+        reason = req.get("decision_reason")
+        # The CLI's text may carry ANSI escapes (its own schema says so).
+        reason = strip_ansi(reason).strip() if isinstance(reason, str) else ""
+        reason_type = req.get("decision_reason_type")
+        approvable = req.get("classifier_approvable")
         bridge = PermissionBridge(
             cli_request_id=frame.get("request_id", ""), fluid_request_id=fluid_rid,
             tool_name=tool_name, tool_use_id=tid, input=inp,
-            suggestions=suggestions,
+            suggestions=suggestions, reason=reason or None,
+            reason_type=reason_type if isinstance(reason_type, str) else None,
+            classifier_approvable=approvable if isinstance(approvable, bool) else None,
         )
         event = PermissionRequest(
             session_id=self.session_id, turn_id=self.turn_id, request_id=fluid_rid,
-            tool_use_id=tid, name=tool_name, input=inp, risk=risk,
+            tool_use_id=tid, name=tool_name, input=inp, risk=risk, reason=bridge.reason,
+            reason_type=bridge.reason_type, classifier_approvable=bridge.classifier_approvable,
         )
         return Mapped(events=[event], permission=bridge)
 

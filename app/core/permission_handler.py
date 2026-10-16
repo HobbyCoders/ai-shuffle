@@ -179,6 +179,7 @@ class PermissionHandler:
         mode_managed: bool = False,
         skip_saved_rules: bool = False,
         assistant_confirm: Optional[Dict[str, Any]] = None,
+        safety_check: bool = False,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """
         Request permission for a tool use.
@@ -212,6 +213,8 @@ class PermissionHandler:
             assistant_confirm: ``{question, ...}`` when the owner answers
                 this in the assistant's conversation (app/core/assistant_confirm);
                 the row then waits ``assistant_confirm.TTL_SECONDS``.
+            safety_check: the claude CLI asks because of a safety check
+                only a person may pass; a switch to Bypass never releases it.
 
         Returns:
             PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
@@ -234,6 +237,7 @@ class PermissionHandler:
             mode_managed=mode_managed,
             skip_saved_rules=skip_saved_rules,
             assistant_confirm=assistant_confirm,
+            safety_check=safety_check,
         )
 
     # ------------------------------------------------------------------
@@ -369,6 +373,7 @@ class PermissionHandler:
         mode_managed: bool = False,
         skip_saved_rules: bool = False,
         assistant_confirm: Optional[Dict[str, Any]] = None,
+        safety_check: bool = False,
     ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """Table-backed request_permission."""
         from app.core import interaction_wait
@@ -404,6 +409,8 @@ class PermissionHandler:
         )
         if mode_managed and not provider_agent:
             payload["mode_managed"] = True
+        if safety_check:
+            payload["safety_check"] = True
         ttl_seconds = PERMISSION_TTL_SECONDS
         if assistant_confirm is not None:
             from app.core.assistant_confirm import TTL_SECONDS as ttl_seconds
@@ -961,6 +968,11 @@ class PermissionHandler:
                 delegated=getattr(state.adapter, "_is_delegated", False),
             )
             if not mode_approves_without_prompt(mode, payload.get("tool_name", "")):
+                continue
+            if payload.get("safety_check"):
+                # A safety check only a person may pass is never released by
+                # a mode: Bypass refuses such calls outright and Ask leaves
+                # them to the person already asked (#105).
                 continue
             if mode != "bypassPermissions":
                 rule = await run_sync(self.saved_rule, session_id, payload.get("profile_id"),

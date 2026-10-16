@@ -257,3 +257,15 @@ async def test_native_engine_policy_changes_in_place(live):
     assert engine.permissions.approval_policy == "never_ask"
     await api.apply_permission_mode(SID, "default")
     assert engine.permissions.approval_policy == "on_write"
+
+
+async def test_a_switch_to_bypass_never_releases_a_safety_check(live):
+    """#105: a safety check only a person may pass is not approved by Bypass."""
+    state, _ = live
+    state.callback_refs["permission_mode"] = "bypassPermissions"
+    rows = [{"payload": {"request_id": "rm", "tool_name": "Bash", "mode_managed": True,
+                         "safety_check": True}}]
+    with patch.object(permission_handler, "_v2_pending_permissions", return_value=rows), \
+         patch.object(permission_handler, "respond", new_callable=AsyncMock) as respond:
+        await permission_handler.resolve_mode_permissions(SID, state)
+        respond.assert_not_awaited()
