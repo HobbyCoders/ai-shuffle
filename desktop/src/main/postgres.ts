@@ -354,9 +354,12 @@ export class PostgresSupervisor extends EventEmitter {
 		return this.serialize(() => this.doStop());
 	}
 
-	/** Used only while the desktop single-instance lock is held and the worker is reaped. */
-	updateRestorePoint(): ColdClusterCopy {
-		return new ColdClusterCopy(this.opts.root, snapshot => this.quiesce(snapshot));
+	/**
+	 * Used only while the desktop single-instance lock is held and the worker is reaped.
+	 * `before` runs ahead of the stop for a copy or restore, never for cleanup.
+	 */
+	updateRestorePoint(before?: () => Promise<void>): ColdClusterCopy {
+		return new ColdClusterCopy(this.opts.root, async snapshot => { await before?.(); await this.quiesce(snapshot); });
 	}
 
 	quiesce(requireClean = false): Promise<void> {

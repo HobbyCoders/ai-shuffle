@@ -22,6 +22,7 @@ import { installListenerHeader, type ListenerTarget } from './listener';
 import { AGENT_ACCESS, agentAccessDetail, DisclosureStore, ensureAgentAccessAcknowledged } from './disclosure';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
 import { RestorePointError } from './source-updates';
+import { quiesceRecordedWorker } from './worker-process';
 import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
@@ -210,7 +211,8 @@ async function main(): Promise<void> {
 		// From here a first boot may migrate the database, so a crash must block it.
 		// Unrecorded, a crash would look harmless to the launcher: do not start.
 		// A launcher from before restore points made none: this build makes it here (desktop/LAUNCHER.md).
-		const restorePoint = { database: async () => postgres.updateRestorePoint(), preparing: () => { preparingRestorePoint = true; window.send('desktop:worker-state', desktopState()); } };
+		// As the launcher does: reap a verified leftover worker before the cluster is stopped and copied.
+		const restorePoint = { database: async () => postgres.updateRestorePoint(() => quiesceRecordedWorker(path.join(userData, 'worker'))), preparing: () => { preparingRestorePoint = true; window.send('desktop:worker-state', desktopState()); } };
 		try { await applications?.requireRestorePoint(postgres.updateRestorePoint(), restorePoint); await applications?.databaseStarting(); }
 		catch (error) {
 			preparingRestorePoint = false;
