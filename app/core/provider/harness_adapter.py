@@ -854,7 +854,9 @@ class HarnessAdapter(ProviderAdapter):
                     native_ctx.extra.setdefault("recall_store", skills)
                     native_ctx.extra.setdefault("memory_store", skills)
                     native_ctx.extra.setdefault("memory_project", memory_project)
-                    skills.journal_context(session_id=app_session_id, project=memory_project)
+                    skills.journal_context(
+                        session_id=app_session_id, project=memory_project, cwd=options.cwd,
+                    )
                     synthesizer = None
                     if settings.fluid_continual:
                         # Materialized HERE rather than letting NativeLoop
@@ -903,6 +905,14 @@ class HarnessAdapter(ProviderAdapter):
                             session_model=session_model,
                             guidance_snapshot=_session_guidance_snapshot(
                                 session_model
+                            ),
+                            # The session model's resolved window sizes the
+                            # learner's request; a pinned learner model has no
+                            # resolved window here and falls back to fluid's
+                            # table (and a local model to the small default).
+                            context_window=(
+                                None if settings.fluid_continual_model
+                                else _native_context_window(kind, options)
                             ),
                         )
 

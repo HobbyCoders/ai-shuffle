@@ -47,6 +47,7 @@ from fluid.codemode.skills import (
 from fluid.codemode.verify import verify_sources
 from fluid.messages.content import Message, Text
 from fluid.providers.base import ProviderRequest, WireState
+from fluid.providers.windows import context_window_for
 
 _log = logging.getLogger(__name__)
 
@@ -368,9 +369,16 @@ MAX_ENTRIES_PER_PASS = 400
 # The request's user-message size. Split so the journal always fits: memory
 # lines have a fixed budget, the skill library a reserve, and the journal the
 # rest (never less than the minimum); the library then fills whatever the
-# journal left unused. About 25k input tokens, far inside every learner
-# model's window; sized so a day's paced passes read a busy day's journal.
-PROMPT_CHAR_LIMIT = 96_000
+# journal left unused. PROMPT_CHAR_LIMIT is the size for a learner model whose
+# context window is unknown or small (a local model): with SYNTH_MAX_TOKENS of
+# output it fits a 32k-token window. A known window raises it, at
+# PROMPT_CHARS_PER_TOKEN characters per token left over after the output and
+# the system prompt, up to LARGE_PROMPT_CHAR_LIMIT (about 25k input tokens),
+# which is what lets a day's paced passes read a busy day's journal.
+PROMPT_CHAR_LIMIT = 32_000
+LARGE_PROMPT_CHAR_LIMIT = 96_000
+PROMPT_CHARS_PER_TOKEN = 2
+SYSTEM_PROMPT_TOKENS = 4_000
 MEMORY_PROMPT_CHARS = 6_000
 LIBRARY_PROMPT_RESERVE = 8_000
 JOURNAL_MIN_PROMPT_CHARS = 8_000
@@ -425,11 +433,13 @@ CONSOLIDATE_MIN_MEMORIES = 8
 CONSOLIDATE_RESERVED_CALLS = 2
 # Synthesis calls are spread over the UTC day instead of spent as soon as
 # entries arrive: by a given time of day a store may have made
-# PACE_BURST_CALLS plus its share of the day's calls so far, and never two
-# within MIN_PASS_INTERVAL. Before this, a busy worker spent all 48 calls
-# by 00:04-03:55 UTC and its learner read nothing for the rest of the day.
-# A pass that waits reads a bigger slice instead. A pending Remember entry
-# (mark_urgent) is not paced; the daily cap still holds.
+# PACE_BURST_CALLS plus its share of the day's calls so far, and a pass
+# starts at least MIN_PASS_INTERVAL after the previous call. A pass makes one
+# call per project in its slice, back to back, and never more than the day's
+# remaining calls (see _fit_calls). Before this, a busy worker spent all 48
+# calls by 00:04-03:55 UTC and its learner read nothing for the rest of the
+# day. A pass that waits reads a bigger slice instead. A pending Remember
+# entry (mark_urgent) is not paced until it is read; the daily cap holds.
 PACE_BURST_CALLS = 2
 MIN_PASS_INTERVAL = 15 * 60.0
 # Past this share of JOURNAL_MAX_BYTES (between the reap target and the
@@ -443,10 +453,11 @@ PACE_PRESSURE_FRACTION = 0.6
 OK_CELL_CODE_CHARS = 1_200
 OK_CELL_OUTPUT_CHARS = 400
 # Tools whose successful calls only read: file and search reads and task
-# status polls (MCP-namespaced ids match on their last segment).
+# listings (MCP-namespaced ids match on their last segment). TaskGet and
+# TaskOutput are not here: they carry a worker's findings.
 READ_ONLY_TOOLS = frozenset({
     "Read", "Glob", "Grep", "LS", "NotebookRead",
-    "TaskGet", "TaskList", "TaskOutput", "ToolSearch",
+    "TaskList", "ToolSearch",
 })
 
 
@@ -458,7 +469,21 @@ def paced_call_allowance(now: float) -> int:
 
 
 def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + " …[clipped]"
+    """``text`` cut to about ``limit`` chars, keeping its head and its tail:
+    a test summary, a push result or a printed error sits at the end."""
+    if len(text) <= limit:
+        return text
+    head = limit // 2
+    tail = limit - head
+    return f"{text[:head]} …[{len(text) - limit} chars clipped]… {text[-tail:]}"
+
+
+def prompt_char_limit(context_window: int | None, max_tokens: int = 16_000) -> int:
+    """The learner's request size for a model with ``context_window`` tokens."""
+    if not context_window or context_window <= 0:
+        return PROMPT_CHAR_LIMIT
+    room = (context_window - max_tokens - SYSTEM_PROMPT_TOKENS) * PROMPT_CHARS_PER_TOKEN
+    return max(PROMPT_CHAR_LIMIT, min(LARGE_PROMPT_CHAR_LIMIT, room))
 
 
 def _tool_base(name: Any) -> str:
@@ -472,12 +497,18 @@ def low_value_entry(entry: dict) -> bool:
     repository content or task progress: what the repository or the task
     already records, which the learner is told never to memorize. Everything
     else is shown: conversation, Remember and friction entries, any failure,
-    and every cell that wrote, ran a command, used a skill or called no tool.
+    every cell that wrote, ran a command, used a skill or called no tool, and
+    any read that named a path outside the session's working directory and
+    the temp directory (``outside_cwd``, stamped at append): home config and
+    notes carry facts.
     """
     kind = entry.get("kind", "cell")
     if kind == "tool":
-        return not entry.get("error") and _tool_base(entry.get("name")) in READ_ONLY_TOOLS
+        return (not entry.get("error") and not entry.get("outside_cwd")
+                and _tool_base(entry.get("name")) in READ_ONLY_TOOLS)
     if kind != "cell" or entry.get("error"):
+        return False
+    if entry.get("outside_cwd"):
         return False
     calls = entry.get("calls")
     if isinstance(calls, list) and any(
@@ -507,6 +538,7 @@ class Synthesizer:
         close_timeout: float = 90.0,
         session_model: str | None = None,
         guidance_snapshot: dict[str, str] | None = None,
+        context_window: int | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -526,6 +558,12 @@ class Synthesizer:
         self._min_new = max(1, min_new_entries)
         self._max_entries = max_entries
         self._max_tokens = max_tokens
+        # The request size this learner model can take: ``context_window``
+        # from the host when it knows the model's window, else fluid's
+        # table, else the small default (see prompt_char_limit).
+        self._prompt_limit = prompt_char_limit(
+            context_window or context_window_for(model), max_tokens,
+        )
         self._effort = effort
         self._task: asyncio.Task | None = None
         # UTC day (time // 86400) on which the daily budget was found spent.
@@ -542,6 +580,8 @@ class Synthesizer:
         # entries at all", so the request lands on the next pass instead of
         # waiting for MIN_NEW_ENTRIES.
         self._urgent = False
+        # The journal line count when urgency was raised (see mark_urgent).
+        self._urgent_line = 0
         self.last_error: str | None = None
         # Spend: the last pass's tokens and the running total for this
         # synthesizer's life. Both land in the pass log; the loader puts the
@@ -598,8 +638,16 @@ class Synthesizer:
 
     # ─── triggering ──────────────────────────────────────────────────────
     def mark_urgent(self) -> None:
-        """A high-salience entry (Remember) is waiting: synthesize ASAP."""
+        """A high-salience entry (Remember) is waiting: synthesize ASAP.
+
+        Call after journaling the entry. Urgency lasts until a pass has read
+        every Remember entry, not until the whole backlog is read: a Remember
+        must not drain a paced backlog in back-to-back calls."""
         self._urgent = True
+        try:
+            self._urgent_line = max(self._urgent_line, self._store.journal_count())
+        except Exception:  # noqa: BLE001 — unknown: the next pass clears it
+            pass
 
     def due(self) -> bool:
         if self._budget_spent_day is not None:
@@ -819,6 +867,7 @@ class Synthesizer:
         cursor = self._store.synth_cursor()
         forgotten_before = self._store._facts.snapshot().get("forgotten_before", 0)
         indexed, reached = self._store.journal_slice_indexed(cursor, self._max_entries)
+        slice_end = reached
         indexed = [(n, e) for n, e in indexed if e.get("ts", 0) > forgotten_before]
         if not indexed:
             if reached > cursor:
@@ -838,19 +887,21 @@ class Synthesizer:
                 pass
             return []
         # Only what the prompt can show is consumed: the rest of the slice
-        # stays behind the cursor for the next pass.
-        fitted = self._fit_journal(shown)
+        # stays behind the cursor for the next pass. Each project in the
+        # slice costs one call, so the slice also stops before a project the
+        # day's remaining calls could not pay for.
+        fitted = self._fit_calls(self._fit_journal(shown))
         deferred = len(shown) - len(fitted)
         if deferred:
             reached = fitted[-1][0]
-        filtered = sum(1 for n, _ in indexed if n <= reached) - len(fitted)
-        entries = [e for _, e in fitted]
         groups: dict[str | None, list[dict]] = {}
-        for entry in entries:
+        for _, entry in fitted:
             groups.setdefault(entry.get("project"), []).append(entry)
-        changed = []
-        usage = {}
+        changed: list[str] = []
+        usage: dict[str, int] = {}
         text = ""
+        done: set[str | None] = set()
+        stop: Exception | None = None
         original_project = self._project
         try:
             for project, group in groups.items():
@@ -860,29 +911,50 @@ class Synthesizer:
                 try:
                     text, group_usage = await self._complete(self._prompt(group), _SYNTH_SYSTEM)
                 except (SynthesisIncomplete, SynthesisProviderError) as exc:
-                    # Not a verdict on the slice: leave the cursor where it
-                    # is so the next pass retries it (after the backoff),
-                    # and log what came back so a rejected or empty stream
-                    # is never mistaken for NO_CHANGES again.
                     for key, value in exc.usage.items():
                         usage[key] = usage.get(key, 0) + value
-                    self.last_error = str(exc)
-                    retry = self._note_failure(self.last_error)
-                    self._log_pass(
-                        "synthesis", changed, error=self.last_error,
-                        consumed=0, output_chars=exc.output_chars,
-                        usage=usage, stop_reason=exc.stop_reason,
-                        provider_status=getattr(exc, "status", None),
-                        retry_after_s=retry,
-                    )
-                    return changed
+                    stop = exc
+                    break
+                except InferenceBudgetExhausted as exc:
+                    if not done:
+                        raise  # no call made: _run_safe logs the skip
+                    stop = exc
+                    break
                 for key, value in group_usage.items():
                     usage[key] = usage.get(key, 0) + value
                 if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
                     return []
                 changed.extend(await self._apply(text, group))
+                done.add(project)
         finally:
             self._project = original_project
+        if stop is not None and not done:
+            # Not a verdict on the slice: leave the cursor where it is so the
+            # next pass retries it (after the backoff), and log what came back
+            # so a rejected or empty stream is never mistaken for NO_CHANGES.
+            self.last_error = str(stop)
+            retry = self._note_failure(self.last_error)
+            self._log_pass(
+                "synthesis", changed, error=self.last_error,
+                consumed=0, output_chars=getattr(stop, "output_chars", None),
+                usage=usage, stop_reason=getattr(stop, "stop_reason", None),
+                provider_status=getattr(stop, "status", None),
+                retry_after_s=retry,
+            )
+            return changed
+        if stop is not None:
+            # Some projects were answered and applied: consume the prefix of
+            # the slice they cover, so those entries are not paid for again.
+            prefix = []
+            for n, entry in fitted:
+                if entry.get("project") not in done:
+                    break
+                prefix.append((n, entry))
+            reached = prefix[-1][0] if prefix else cursor
+            deferred = len(shown) - len(prefix)
+            fitted = prefix
+        entries = [e for _, e in fitted]
+        filtered = sum(1 for n, _ in indexed if n <= reached) - len(fitted)
         if self._store._facts.snapshot().get("forgotten_before", 0) <= forgotten_before:
             # Clamped: a cursor past the end would make pending negative and
             # stop the learner until the journal caught up.
@@ -891,10 +963,18 @@ class Synthesizer:
         # rebased the cursor over a rewritten journal, so ``reached`` no
         # longer indexes the same lines and the cursor is left alone. The
         # pass itself still succeeded and is logged below.
-        try:
-            self._store.clear_learner_backoff(self._model)
-        except Exception:
-            pass
+        retry = None
+        if isinstance(stop, InferenceBudgetExhausted):
+            self._budget_spent_day = int(time.time() // 86400)
+            self.last_error = f"{type(stop).__name__}: {stop}"
+        elif stop is not None:
+            self.last_error = str(stop)
+            retry = self._note_failure(self.last_error)
+        else:
+            try:
+                self._store.clear_learner_backoff(self._model)
+            except Exception:
+                pass
         # Consumed entries have no reader left: drop the ones past the
         # retention tail and rebase the cursor. Best-effort — a failed reap
         # must never cost us the pass that just succeeded.
@@ -902,16 +982,44 @@ class Synthesizer:
             self._store.reap_journal()
         except Exception:
             pass
-        # The urgency flag covered the slice just consumed; a new Remember
-        # re-arms it (unless part of the slice was deferred).
-        self._urgent = self._urgent and bool(deferred)
+        # Urgency lasts while a Remember entry is still unread: one this
+        # slice holds past the reach, or the line urgency was raised at when
+        # the slice did not get that far. The rest of the backlog is paced.
+        if self._urgent and self._urgent_line <= slice_end and not any(
+            e.get("kind") == "remember" for n, e in indexed if n > reached
+        ):
+            self._urgent = False
         self._log_pass(
             "synthesis", changed, error=self.last_error,
             consumed=len(entries), output_preview=text, usage=usage,
             stop_reason=self.last_stop_reason, deferred=deferred or None,
-            filtered=filtered or None,
+            filtered=filtered or None, retry_after_s=retry,
         )
         return changed
+
+    def _calls_left(self) -> int | None:
+        """Synthesis calls left in the store's day, or None when unknown."""
+        try:
+            budget = self._store._facts.inference_budget()
+        except Exception:  # noqa: BLE001 — the claim still enforces the cap
+            return None
+        calls = int(budget.get("calls") or 0) if budget.get("day") == int(time.time() // 86400) else 0
+        return MAX_INFERENCE_CALLS_PER_DAY - CONSOLIDATE_RESERVED_CALLS - calls
+
+    def _fit_calls(self, fitted: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
+        """The prefix of ``fitted`` whose projects the day's remaining calls
+        can pay for (always the first project, which the claim then decides)."""
+        left = self._calls_left()
+        if left is None:
+            return fitted
+        projects: set[str | None] = set()
+        for i, (_, entry) in enumerate(fitted):
+            project = entry.get("project")
+            if project not in projects:
+                if projects and len(projects) >= max(1, left):
+                    return fitted[:i]
+                projects.add(project)
+        return fitted
 
     def _log_pass(
         self,
@@ -1200,7 +1308,7 @@ class Synthesizer:
         if not skills:
             lines.append("(empty)")
             return lines
-        limit = PROMPT_CHAR_LIMIT if budget is None else max(0, budget)
+        limit = self._prompt_limit if budget is None else max(0, budget)
         used = len(lines[0]) + 1
         referenced: set[str] = set()
         for e in entries:
@@ -1318,7 +1426,7 @@ class Synthesizer:
         reserve = min(library, LIBRARY_PROMPT_RESERVE) + 200  # headers
         return max(
             JOURNAL_MIN_PROMPT_CHARS,
-            PROMPT_CHAR_LIMIT - MEMORY_PROMPT_CHARS - guidance - reserve,
+            self._prompt_limit - MEMORY_PROMPT_CHARS - guidance - reserve,
         )
 
     def _fit_journal(self, indexed: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
@@ -1373,7 +1481,7 @@ class Synthesizer:
         return lines
 
     def _prompt(self, entries: list[dict]) -> str:
-        """The user message of one pass, at most ``PROMPT_CHAR_LIMIT`` chars
+        """The user message of one pass, at most ``self._prompt_limit`` chars
         for any journal slice :meth:`_fit_journal` admitted: the journal and
         the memory list have their own budgets and the skill library gets
         what is left. The model-guidance section goes last, so the only text
@@ -1382,7 +1490,7 @@ class Synthesizer:
         journal = self._journal_lines(entries)
         guidance = self._guidance_lines()
         fixed = len("\n".join(memory + [""] + journal + guidance)) + 2
-        library = self._library_lines(entries, PROMPT_CHAR_LIMIT - fixed)
+        library = self._library_lines(entries, self._prompt_limit - fixed)
         return "\n".join(library + [""] + memory + [""] + journal + guidance)
 
     async def _complete(
@@ -1409,14 +1517,14 @@ class Synthesizer:
             raise InferenceBudgetExhausted(
                 "Daily inference-model budget reached; explicit memory saves remain available"
             )
-        if len(prompt) > PROMPT_CHAR_LIMIT:
+        if len(prompt) > self._prompt_limit:
             # _prompt keeps the journal inside the limit; reaching this cut
             # means an oversized guidance file, and it is worth a line.
             _log.warning(
                 "Memory learner prompt of %d chars cut to %d (model=%s, store=%s)",
-                len(prompt), PROMPT_CHAR_LIMIT, self._model, self._store_label(),
+                len(prompt), self._prompt_limit, self._model, self._store_label(),
             )
-            prompt = prompt[:PROMPT_CHAR_LIMIT]
+            prompt = prompt[:self._prompt_limit]
         extra, wire_state = self._request_routing()
         request = ProviderRequest(
             model=self._model,

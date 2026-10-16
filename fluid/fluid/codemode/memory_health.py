@@ -156,8 +156,10 @@ def _counts_as_failure(row: dict) -> bool | None:
     (no model call: a held lock, a spent daily budget, or a slice of
     low-value entries only)."""
     error = str(row.get("error") or "")
-    if row.get("ran") is False or error.startswith("skipped:") or _budget_skipped(row):
+    if row.get("ran") is False or error.startswith("skipped:"):
         return None
+    if _budget_skipped(row) and not row.get("consumed"):
+        return None  # a budget stop after some projects were read did run
     if error and not row.get("consumed"):
         return True
     return False
@@ -349,8 +351,17 @@ def _coverage(store, now, previous) -> dict:
     rows = [r for r in _log_rows(store, now - COVERAGE_WINDOW) if r.get("kind") == "synthesis"]
     read = sum(int(r.get("consumed") or 0) for r in rows if _counts_as_failure(r) is False)
     filtered = sum(int(r.get("filtered") or 0) for r in rows)
-    skipped = [r for r in rows if _budget_skipped(r)]
-    budget_days = len({int(float(r.get("ts") or 0) // DAY) for r in skipped})
+    skipped = [r for r in rows if _budget_skipped(r) and not r.get("consumed")]
+    # Days the budget ran out: the store records them (a paced learner stops
+    # before it is refused, so it rarely writes a budget-skip row), and older
+    # stores only have the rows.
+    today = int(now // DAY)
+    days = {int(float(r.get("ts") or 0) // DAY) for r in rows if _budget_skipped(r)}
+    try:
+        days.update(store._facts.inference_budget_spent_days())
+    except Exception:  # noqa: BLE001 — an unreadable document is reported elsewhere
+        pass
+    budget_days = len({d for d in days if 0 <= today - d < round(COVERAGE_WINDOW / DAY)})
     samples, total, dropped = _loss_samples(store, now, previous)
     return {"read_3d": read, "filtered_3d": filtered, "dropped_3d": dropped,
             "dropped_total": total, "budget_skips_3d": len(skipped),

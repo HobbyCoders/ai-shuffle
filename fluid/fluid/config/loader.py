@@ -747,7 +747,10 @@ def _wire_continual(
     from fluid.codemode.skills import SkillStore, project_key_for
 
     skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
-    skills.journal_context(session_id=session_id, agent=agent, project=project_key_for(config.cwd))
+    skills.journal_context(
+        session_id=session_id, agent=agent, project=project_key_for(config.cwd),
+        cwd=str(config.cwd) if config.cwd else None,
+    )
     try:
         # Opportunistic lifecycle pass (interval-gated, deterministic,
         # archive-not-delete). Best-effort: curation must never block an
@@ -808,6 +811,7 @@ def _wire_continual(
             on_change=on_change,
             session_model=model,
             guidance_snapshot=guidance_snapshot or None,
+            context_window=config.context_window if not config.continual_model else None,
         )
         if bus is not None:
             learner.append(synthesizer)
