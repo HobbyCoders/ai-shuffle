@@ -46,6 +46,9 @@ const desktop = path.resolve(import.meta.dirname, '..'), repo = path.resolve(des
 const NAMES = ['P', 'N1', 'N2', 'N3'];
 // Added to the cluster so a copy takes long enough to be killed part way.
 const FILLER_GB = Number(process.env.SHUFFLE_ACCEPTANCE_FILLER_GB ?? 3);
+// Which of N1, N2, N3 to run (comma-separated; empty means all). The install
+// and P always run: each later step starts from the last healthy build.
+const STEPS = new Set((process.env.SHUFFLE_ACCEPTANCE_STEPS || 'N1,N2,N3').split(',').map(step => step.trim()).filter(Boolean));
 if (mode === 'prepare') {
   assert(args[0], 'usage: verify-late-restore-point.mjs prepare <folder>');
   const out = path.resolve(args[0]);
@@ -88,6 +91,7 @@ const { SOURCE_ORIGIN } = require('../dist/main/source-auth.js');
 const { readAsarMember } = require('../dist/main/asar.js');
 const asar = require('@electron/asar');
 
+assert([...STEPS].every(step => ['N1', 'N2', 'N3'].includes(step)) && STEPS.size, 'SHUFFLE_ACCEPTANCE_STEPS takes N1, N2 and N3, comma-separated');
 const [installerArg, preparedArg, outputArg] = args;
 assert(installerArg && preparedArg && outputArg, 'usage: verify-late-restore-point.mjs run <installer.exe> <prepared folder> <output folder>');
 const installer = path.resolve(installerArg), prepared = path.resolve(preparedArg), output = path.resolve(outputArg);
@@ -189,7 +193,10 @@ const statusText = page => page.evaluate(() => ({
 }));
 function launch() {
   return fs.rm(path.join(profile, 'DevToolsActivePort'), { force: true }).then(() => {
-    const child = spawn(exe, ['--remote-debugging-port=0'], { windowsHide: true, stdio: ['ignore', log.fd, log.fd] });
+    // Not windowsHide: that passes SW_HIDE to the launcher, whose first window
+    // (a message box such as "The last update did not finish starting") would
+    // then never be shown. Started from a shortcut, it is visible.
+    const child = spawn(exe, ['--remote-debugging-port=0'], { stdio: ['ignore', log.fd, log.fd] });
     child.on('error', e => console.error(e));
   });
 }
@@ -244,6 +251,49 @@ ConvertTo-Json -Compress @{ title = $box.Current.Name; buttons = $names }`;
   } catch (error) { if (error.status === 3) return null; throw error; }
 }
 const holders = new Set();
+/**
+ * What is on screen: a PNG of every monitor and every top-level window (title,
+ * process, visible or not), written to the output folder as <name>.png/.json.
+ */
+let shots = 0;
+function screenEvidence(name) {
+  const file = path.join(output, `screen-${String(++shots).padStart(2, '0')}-${name}`);
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class TopWindows {
+  delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr data);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  public static List<object[]> All() {
+    var list = new List<object[]>();
+    EnumWindows((hwnd, data) => { var text = new StringBuilder(512); GetWindowText(hwnd, text, 512); uint pid; GetWindowThreadProcessId(hwnd, out pid);
+      if (text.Length > 0) list.Add(new object[] { text.ToString(), (int)pid, IsWindowVisible(hwnd) }); return true; }, IntPtr.Zero);
+    return list;
+  }
+}
+'@
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+try {
+  $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+  $bitmap.Save($env:SHOT_FILE + '.png', [System.Drawing.Imaging.ImageFormat]::Png)
+  $shot = 'saved'
+} catch { $shot = 'failed: ' + $_.Exception.Message }
+$windows = foreach ($w in [TopWindows]::All()) {
+  $process = try { (Get-Process -Id $w[1] -ErrorAction Stop).ProcessName } catch { '?' }
+  [ordered]@{ title = $w[0]; pid = $w[1]; process = $process; visible = $w[2] }
+}
+ConvertTo-Json -Depth 3 ([ordered]@{ screenshot = $shot; session = [System.Diagnostics.Process]::GetCurrentProcess().SessionId; interactive = [Environment]::UserInteractive; windows = @($windows) }) | Set-Content -Encoding UTF8 ($env:SHOT_FILE + '.json')`;
+  try {
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, SHOT_FILE: file }, stdio: 'inherit' });
+    console.log('Screen evidence: ' + path.basename(file) + '.png/.json');
+  } catch (error) { console.log('Screen evidence failed: ' + (error?.message ?? error)); }
+}
 /** Hold `file` open with no sharing, as a backup or antivirus scan might; resolves to its release. */
 async function lock(file) {
   const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -320,6 +370,9 @@ try {
   const target = readLauncher(await fs.readFile(path.join(desktop, 'launcher.json'), 'utf8')).version;
   const [P, N1, N2, N3] = NAMES.map(name => plan.revisions[name].revision);
   report.revisions = { head: plan.head, P, N1, N2, N3 };
+  report.stepsRun = [...STEPS];
+  // The build that runs when an update does not start: each step ends with its own build healthy.
+  let last = P, state;
 
   step('P: an update over the bundled build starts with no copy');
   await stage('P', 3);
@@ -332,6 +385,7 @@ try {
   pass(`Added a ${FILLER_GB} GB file to the stopped cluster so a copy takes long enough to interrupt`);
   finish();
 
+  if (STEPS.has('N1')) {
   step('N1: a failed copy shows its reason; closing keeps P with N1 ready; Try again starts N1');
   await stage('N1', 3);
   const fillerFile = path.join(pgData, 'zz-acceptance-filler.bin');
@@ -344,13 +398,13 @@ try {
   expect(text.heading === 'The update could not start yet', 'The failure page heading is "The update could not start yet"', 'Failure page heading: ' + JSON.stringify(text.heading));
   expect(/^Could not prepare the update's database restore point: .*EBUSY.*\. A file in the AI Shuffle data folder is in use\. .* choose Try again\. If it keeps failing, close AI Shuffle and open it again/.test(text.error),
     'The failure names the locked file and gives the in-use advice', 'Failure text: ' + JSON.stringify(text.error));
-  let state = await readJson(stateFile);
+  state = await readJson(stateFile);
   // Safety: a failed copy never fences the update or starts PostgreSQL.
   assert.equal(state.booting, N1); assert.equal(state.waiting, N1); assert.equal(state.mayHaveMigrated?.[N1], undefined);
   assert(!await exists(path.join(pgData, 'postmaster.pid')), 'PostgreSQL started after a failed copy');
   pass('No fence and PostgreSQL not started after the failed copy');
   expect(!await exists(journalFile) && !await exists(snapshotDir), 'No journal and no partial copy left', 'A journal or a partial copy was left after the failed copy');
-  await close(); await launch(); await ready(P);
+  await close(); await launch(); await ready(last);
   assert.equal((await readJson(stateFile)).staged, N1, 'N1 is not staged after closing');
   pass('Closing and reopening runs P, with N1 still ready to install');
   await close(); await install_(N1);
@@ -375,9 +429,11 @@ try {
     'With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy', 'N1 did not become active with the point removed', 120000);
   expect(await readJson(markerFile) === null, 'Launcher 3 releases do not swap the launcher', 'A launcher 3 release swapped the launcher');
   await close();
-  finish();
+  finish(); last = N1;
+  }
 
-  step('N2: killed during the copy, before the fence; reopening runs N1; installing N2 again replaces the stale copy');
+  if (STEPS.has('N2')) {
+  step('N2: killed during the copy, before the fence; reopening runs the previous build; installing N2 again replaces the stale copy');
   await stage('N2', 3);
   await launch();
   await until(async () => { const j = await readJson(journalFile).catch(() => null); return j?.late && j.phase === 'preparing' && j.revision === N2; }, 'The copy did not start', 600000, 50);
@@ -386,10 +442,10 @@ try {
   assert.equal(state.waiting, N2, 'N2 was fenced before the kill; the copy was too fast to interrupt (raise SHUFFLE_ACCEPTANCE_FILLER_GB)');
   assert.equal((await readJson(journalFile)).phase, 'preparing');
   pass('Killed N2 mid-copy: journal preparing, N2 not fenced');
-  await launch(); await ready(N1);
+  await launch(); await ready(last);
   assert.equal((await readJson(stateFile)).staged, N2, 'N2 is not staged after the kill');
-  pass('Reopening ran N1 (the previous version), N2 staged');
-  await expectWithin(async () => !await exists(journalFile) && !await exists(snapshotDir), 'N1 removed the abandoned partial copy once healthy', 'N1 did not remove the abandoned copy', 120000);
+  pass('Reopening ran the previous build, N2 staged');
+  await expectWithin(async () => !await exists(journalFile) && !await exists(snapshotDir), 'The previous build removed the abandoned partial copy once healthy', 'The previous build did not remove the abandoned copy', 120000);
   await close(); await install_(N2);
   const reinstalled = Date.now();
   w = watch(); await launch(); await ready(N2); await w.stop();
@@ -399,8 +455,10 @@ try {
   pass('Installing N2 again made a new copy');
   await expectWithin(async () => (await readJson(stateFile)).active === N2 && !await exists(journalFile), 'N2 started and its point was removed once healthy', 'N2 did not finish', 120000);
   await close();
-  finish();
+  finish(); last = N2;
+  }
 
+  if (STEPS.has('N3')) {
   step('N3: killed after PostgreSQL started; the old launcher offers only Try Again, which makes no second copy; then the swap');
   await stage('N3', target);
   await launch();
@@ -417,8 +475,11 @@ try {
   assert(!await healthy(), 'A worker started after the failed first start');
   state = await readJson(stateFile);
   assert(state.failed?.includes(N3) && state.blocked === true, 'The old launcher did not fence the failed start');
-  pass('The old launcher did not run P, N1 or N2: N3 failed and fenced');
-  const dialog = await until(async () => pressDialogButton('Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000);
+  pass('The old launcher did not run an older build: N3 failed and fenced');
+  screenEvidence('expect-retry-dialog');
+  let dialog;
+  try { dialog = await until(async () => pressDialogButton('Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000); }
+  catch (error) { screenEvidence('no-retry-dialog'); throw error; }
   report.dialog = dialog;
   const buttons = [...dialog.buttons].filter(name => !/^(Close|Minimize|Maximize)$/.test(name)).sort();
   expect(JSON.stringify(buttons) === JSON.stringify(['Quit', 'Try Again']), 'The old launcher offered only Try Again and Quit', 'The old launcher offered: ' + JSON.stringify(dialog.buttons));
@@ -439,10 +500,12 @@ try {
   }
   await close();
   finish();
+  }
   report.success = report.steps.every(s => s.result === 'pass');
 } catch (error) {
   if (current) { current.result = 'fail'; current.error = String(error?.stack ?? error); }
   console.error(error);
+  screenEvidence('failure');
   try { report.state = await readJson(stateFile); report.journal = await readJson(journalFile); report.floor = await readJson(floorFile); report.marker = await readMarker(); } catch { /* best effort */ }
 } finally {
   for (const holder of holders) holder.kill();
@@ -457,7 +520,7 @@ try {
   await fs.writeFile(path.join(output, 'acceptance.json'), JSON.stringify(report, null, 2));
   const lines = report.steps.map(s => [`${s.result.toUpperCase().padEnd(7)} ${s.name}`,
     ...(s.failures ?? []).map(f => '        FAIL: ' + f), ...(s.error ? ['        FATAL: ' + s.error.split('\n')[0]] : [])].join('\n'));
-  const summary = [`Late restore point acceptance: ${report.success ? 'PASS' : 'FAIL'}`, ...lines].join('\n');
+  const summary = [`Late restore point acceptance: ${report.success ? 'PASS' : 'FAIL'}`, `Steps: install, P, ${[...STEPS].join(', ')}`, ...lines].join('\n');
   await fs.writeFile(path.join(output, 'summary.txt'), summary + '\n');
   console.log('\n' + summary);
   if (!report.success) process.exitCode = 1;

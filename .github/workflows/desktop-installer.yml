@@ -39,6 +39,13 @@ on:
         required: false
         type: string
         default: ''
+      late_restore_steps:
+        description: >-
+          With old_installer_sha256: which late restore steps to run after the install and P
+          (comma-separated N1, N2, N3; empty runs all)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -407,6 +414,8 @@ jobs:
           node desktop/scripts/verify-late-restore-point.mjs prepare (Join-Path $env:RUNNER_TEMP 'late-restore-prepared')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Update the older install through the late restore point
+        env:
+          SHUFFLE_ACCEPTANCE_STEPS: ${{ inputs.late_restore_steps }}
         run: |
           node desktop/scripts/verify-late-restore-point.mjs run (Join-Path $env:RUNNER_TEMP 'old-installer\old-installer.exe') (Join-Path $env:RUNNER_TEMP 'late-restore-prepared') (Join-Path $env:RUNNER_TEMP 'late-restore-evidence')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

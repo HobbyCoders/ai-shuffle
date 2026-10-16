@@ -169,7 +169,8 @@ restore point and starts the staged update.
 Acceptance against a real 0.9.6 installer runs on a GitHub-hosted Windows
 runner: the `late-restore-acceptance` job of `desktop-installer.yml`
 (`launcher_acceptance` with `old_installer_sha256`; the installer comes from
-the `OLD_INSTALLER_URL` secret). `desktop/scripts/verify-late-restore-point.mjs`
+the `OLD_INSTALLER_URL` secret; `late_restore_steps` picks some of N1, N2 and
+N3, after the install and P). `desktop/scripts/verify-late-restore-point.mjs`
 takes the install through a bundled previous build, a failed copy with Try
 again, a kill during the copy and a kill after PostgreSQL started, then the
 launcher swap.
