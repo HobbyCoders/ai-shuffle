@@ -277,37 +277,100 @@ async function settle() {
   await sleep(5000);
 }
 /**
- * Press `button` in a message box of AI Shuffle through UI Automation and
- * return the box's title and button names; null while no such box is shown.
- * Only AI Shuffle's own top-level windows are searched, never the whole
- * desktop, and the call is time-limited.
+ * Press `button` in AI Shuffle's message box titled `title` and report how.
+ * Null while no such box is shown. The box is found with Win32 (a visible
+ * top-level window of an AI Shuffle process with that title); its buttons are
+ * read from its child windows, or from UI Automation on that window only.
+ * Pressing tries BM_CLICK on the button, then Enter (the default button)
+ * with the box in front, then UI Automation Invoke, and counts as done only
+ * once the box has closed. Time-limited.
  */
-async function pressDialogButton(button) {
+async function pressDialogButton(title, button) {
   const script = `
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$A = [Windows.Automation.AutomationElement]
-$Scope = [Windows.Automation.TreeScope]
-$ids = @(Get-Process -Name 'AI Shuffle' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-if (-not $ids.Count) { exit 3 }
-$isButton = New-Object Windows.Automation.PropertyCondition($A::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
-$byName = New-Object Windows.Automation.PropertyCondition($A::NameProperty, $env:BUTTON)
-foreach ($id in $ids) {
-  $own = New-Object Windows.Automation.PropertyCondition($A::ProcessIdProperty, [int]$id)
-  foreach ($box in $A::RootElement.FindAll($Scope::Children, $own)) {
-    $target = $box.FindFirst($Scope::Descendants, [Windows.Automation.AndCondition]::new([Windows.Automation.Condition[]]@($isButton, $byName)))
-    if (-not $target) { continue }
-    $names = @($box.FindAll($Scope::Descendants, $isButton) | ForEach-Object { $_.Current.Name })
-    $title = $box.Current.Name
-    $target.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-    ConvertTo-Json -Compress @{ title = $title; buttons = $names }
-    exit 0
+Add-Type @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class Box {
+  delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc proc, IntPtr data);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder text, int max);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+  static string Text(IntPtr h) { var s = new StringBuilder(512); GetWindowText(h, s, 512); return s.ToString(); }
+  static string Class(IntPtr h) { var s = new StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
+  public static IntPtr Find(int[] pids, string title) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, d) => { uint pid; GetWindowThreadProcessId(h, out pid);
+      if (IsWindowVisible(h) && Array.IndexOf(pids, (int)pid) >= 0 && Text(h) == title) { found = h; return false; } return true; }, IntPtr.Zero);
+    return found;
+  }
+  public static string ClassOf(IntPtr h) { return Class(h); }
+  public static List<string[]> Children(IntPtr parent) {
+    var list = new List<string[]>();
+    EnumChildWindows(parent, (h, d) => { list.Add(new string[] { Class(h), Text(h), h.ToInt64().ToString() }); return true; }, IntPtr.Zero);
+    return list;
+  }
+  public static bool Click(IntPtr button) { IntPtr r; return SendMessageTimeout(button, 0x00F5, IntPtr.Zero, IntPtr.Zero, 2, 5000, out r) != IntPtr.Zero; }
+  public static bool Closed(IntPtr box, int ms) {
+    for (int waited = 0; waited < ms; waited += 250) { if (!IsWindow(box) || !IsWindowVisible(box)) return true; System.Threading.Thread.Sleep(250); }
+    return false;
   }
 }
-exit 3`;
-  try { return JSON.parse(await powershell(script, { env: { ...process.env, BUTTON: button }, timeout: 60000 })); }
-  catch (error) {
+'@
+$ids = [int[]]@(Get-Process -Name 'AI Shuffle' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+if (-not $ids.Count) { exit 3 }
+$box = [Box]::Find($ids, $env:BOX_TITLE)
+if ($box -eq [IntPtr]::Zero) { exit 3 }
+$result = [ordered]@{ title = $env:BOX_TITLE; class = [Box]::ClassOf($box); children = @(); automation = @(); buttons = @(); attempts = @(); closed = $false }
+$children = [Box]::Children($box)
+$result.children = @($children | ForEach-Object { $_[0] + ': ' + $_[1] })
+$plain = { param($text) ($text -replace '&', '').Trim() }
+$buttonWindows = @($children | Where-Object { $_[0] -eq 'Button' })
+$result.buttons = @($buttonWindows | ForEach-Object { & $plain $_[1] })
+$element = $null
+try {
+  $A = [Windows.Automation.AutomationElement]
+  $element = $A::FromHandle($box)
+  $all = $element.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+  $result.automation = @($all | ForEach-Object { $_.Current.ControlType.ProgrammaticName + ': ' + $_.Current.Name })
+  if (-not $result.buttons.Count) {
+    $result.buttons = @($all | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button } | ForEach-Object { $_.Current.Name })
+  }
+} catch { $result.automation = @('failed: ' + $_.Exception.Message) }
+$target = $buttonWindows | Where-Object { (& $plain $_[1]) -eq $env:BUTTON } | Select-Object -First 1
+if ($target) {
+  $sent = [Box]::Click([IntPtr][long]$target[2])
+  $result.attempts += 'BM_CLICK sent=' + $sent
+  if ([Box]::Closed($box, 10000)) { $result.closed = $true; $result.method = 'BM_CLICK' }
+}
+if (-not $result.closed -and $env:BUTTON_IS_DEFAULT -eq '1') {
+  $shell = New-Object -ComObject WScript.Shell
+  $front = [Box]::SetForegroundWindow($box) -or $shell.AppActivate($env:BOX_TITLE)
+  Start-Sleep -Milliseconds 500
+  $shell.SendKeys('~')
+  $result.attempts += 'Enter front=' + $front
+  if ([Box]::Closed($box, 10000)) { $result.closed = $true; $result.method = 'Enter' }
+}
+if (-not $result.closed -and $element) {
+  try {
+    $named = $element.FindFirst([Windows.Automation.TreeScope]::Descendants, (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, $env:BUTTON)))
+    if ($named) { $named.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); $result.attempts += 'Invoke' }
+    else { $result.attempts += 'Invoke: no element named ' + $env:BUTTON }
+  } catch { $result.attempts += 'Invoke failed: ' + $_.Exception.Message }
+  if ([Box]::Closed($box, 10000)) { $result.closed = $true; $result.method = 'Invoke' }
+}
+ConvertTo-Json -Depth 3 -Compress $result`;
+  try {
+    return JSON.parse(await powershell(script, { env: { ...process.env, BOX_TITLE: title, BUTTON: button, BUTTON_IS_DEFAULT: '1' }, timeout: 90000 }));
+  } catch (error) {
     if (error.code === 3) return null;
-    throw Error(error.timedOut ? 'UI Automation did not answer within 60 s' : 'UI Automation failed: ' + (error.stderr || error.message));
+    throw Error(error.timedOut ? 'Pressing the dialog button did not finish within 90 s' : 'Pressing the dialog button failed: ' + (error.stderr || error.message));
   }
 }
 const holders = new Set();
@@ -546,11 +609,15 @@ try {
   pass('The old launcher did not run an older build: N3 failed and fenced');
   await screenEvidence('expect-retry-dialog');
   let dialog;
-  try { dialog = await until(async () => pressDialogButton('Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000); }
+  // 0.9.6's retryBlocked: title "AI Shuffle", buttons Try Again (default) and Quit.
+  try { dialog = await until(async () => pressDialogButton('AI Shuffle', 'Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000); }
   catch (error) { await screenEvidence('no-retry-dialog'); throw error; }
   report.dialog = dialog;
   const buttons = [...dialog.buttons].filter(name => !/^(Close|Minimize|Maximize)$/.test(name)).sort();
-  expect(JSON.stringify(buttons) === JSON.stringify(['Quit', 'Try Again']), 'The old launcher offered only Try Again and Quit', 'The old launcher offered: ' + JSON.stringify(dialog.buttons));
+  expect(JSON.stringify(buttons) === JSON.stringify(['Quit', 'Try Again']), 'The old launcher offered only Try Again and Quit',
+    'The old launcher offered: ' + JSON.stringify(dialog.buttons) + ' (window children ' + JSON.stringify(dialog.children) + ', UI Automation ' + JSON.stringify(dialog.automation) + ')');
+  if (!dialog.closed) { await screenEvidence('try-again-not-pressed'); throw Error('Could not press Try Again: ' + JSON.stringify(dialog.attempts)); }
+  pass(`Pressed Try Again (${dialog.method})`);
   w = watch(); await ready(N3); await w.stop();
   // Safety: the retry keeps the copy taken before the database started.
   assert(w.samples.every(s => s.manifest === null || s.manifest === copied), 'Try Again made a second copy');
