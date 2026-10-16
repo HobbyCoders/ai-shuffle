@@ -225,8 +225,8 @@ class _QueuedErrorLogHandler(logging.handlers.QueueHandler):
                 prepared.session_id = get_current_session_id()
             self.enqueue(prepared)
         except queue.Full:
-            # The file handler still retains the record. Never recurse into
-            # logging or block the producer when the DB is unavailable.
+            # Other sinks have independent queues. Never recurse into logging
+            # or block the producer when the DB is unavailable.
             self.dropped += 1
         except Exception:
             pass
