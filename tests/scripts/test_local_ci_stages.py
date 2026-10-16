@@ -283,3 +283,336 @@ def test_full_attest_without_completed_stages_runs_the_suites(gate, monkeypatch)
     assert ci.main(["full", "--attest"]) == 0
     assert calls[:3] == ["preflight", "pending", "security"]
     assert ("suites", "full") in calls and calls[-1] == "success"
+
+
+# --- budgets shorter than a stage: shards, deadlines and interruptions -------
+
+MINUTE = 60.0
+
+
+class Simulated:
+    """A fake machine: suites cost simulated seconds and stop at the stage deadline."""
+
+    def __init__(self, monkeypatch, tmp_path, calls, fluid_costs, desktop=12 * MINUTE):
+        self.calls, self.now, self.tmp_path = calls, [0.0], tmp_path
+        self.fluid_costs = fluid_costs
+        self.fluid_ran: list[str] = []
+        monkeypatch.setattr(stages, "_clock", lambda: self.now[0])
+        monkeypatch.setattr(stages, "_wall", lambda: 1_000_000 + self.now[0])
+        unit = tmp_path / "fluid/tests/unit"
+        unit.mkdir(parents=True)
+        for name in fluid_costs:
+            (tmp_path / name).write_text("def test_ok(): pass")
+        monkeypatch.setattr(ci, "security_check", lambda *a, **kw: self.spend("security", 1 * MINUTE))
+        monkeypatch.setattr(ci, "backend", lambda ctx: self.spend(("backend", ctx.backend_selected), 10 * MINUTE))
+        monkeypatch.setattr(ci, "run_suites", lambda mode, only, python: (
+            self.spend(only[0], desktop) or (only, [], [])))
+        monkeypatch.setattr(ci, "SUITES", [ci.Suite("backend", [], ci.backend, ""),
+                                          ci.Suite("fluid", [], self.fluid, ""),
+                                          ci.Suite("desktop", [], lambda ctx: None, "")])
+
+    def spend(self, what, seconds):
+        left = stages.remaining()
+        if left is not None and seconds > left:
+            self.now[0] += max(left, 0)
+            raise ci.OutOfTime("simulated deadline")
+        self.now[0] += seconds
+        self.calls.append(what)
+
+    def fluid(self, ctx):
+        files = ctx.backend_selected or sorted(self.fluid_costs)
+        self.spend(("fluid", tuple(files)), sum(self.fluid_costs[f] for f in files))
+        self.fluid_ran.extend(files)
+
+    def drive(self, args, capsys, limit=12):
+        """Repeat the documented command until COMPLETE, as a Monitor-driven session would."""
+        outputs = []
+        for _ in range(limit):
+            began = self.now[0]
+            assert step(args) == 0
+            assert self.now[0] - began <= args.budget * MINUTE  # never past one budget
+            outputs.append(capsys.readouterr().out)
+            if "COMPLETE" in outputs[-1]:
+                return outputs
+        raise AssertionError("the staged gate did not finish: " + "\n".join(outputs))
+
+
+def _fluid(costs_in_minutes):
+    return {f"fluid/tests/unit/test_f{i:02}.py": minutes * MINUTE for i, minutes in enumerate(costs_in_minutes)}
+
+
+def _state():
+    return json.loads(ci.records_path().with_name("full-stages.json").read_text())
+
+
+def _times():
+    return json.loads((ci.MAP_PATH.parent / "full-stage-times.json").read_text())
+
+
+def test_windows_like_timings_shard_an_over_budget_stage_up_front(gate, monkeypatch, tmp_path, capsys):
+    """About 75 minutes of work, one stage (fluid, 60 min) longer than the 40-minute budget."""
+    calls, args = gate
+    args.budget = 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps(
+        {"security": 60, "backend-1": 600, "backend-2": 600, "fluid": 3600, "desktop": 720, "finish": 60}))
+    outputs = sim.drive(args, capsys)
+    assert len(outputs) == 4
+    assert not any("Stopped at the end" in out for out in outputs)  # planned, nothing wasted
+    shards = _state()["shards"]["fluid"]
+    assert [len(s["files"]) for s in shards] == [6, 6] and all(s["done"] for s in shards)
+    # Deterministic: the sorted files dealt round robin, kept in the state file.
+    files = sorted(sim.fluid_costs)
+    assert [s["files"] for s in shards] == [files[0::2], files[1::2]]
+    assert sorted(sim.fluid_ran) == files  # every fluid file ran exactly once
+    assert calls.count("success") == calls.count("record") == 1
+    assert calls.count("pending") == 4  # one per invocation
+    assert "fluid" in _state()["ran"]
+    assert _times()["fluid"] == 3600  # the two shards together
+
+
+def test_cold_machine_halves_a_stage_that_overran_a_whole_budget(gate, monkeypatch, tmp_path, capsys):
+    calls, args = gate
+    args.budget = 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
+    outputs = sim.drive(args, capsys)
+    text = "\n".join(outputs)
+    assert "before it had a whole budget; it runs first" in text  # started late, stopped, retried
+    assert "split it into shards of 6 and 6 test files" in text  # then overran a whole budget
+    state = _state()
+    assert [len(s["files"]) for s in state["shards"]["fluid"]] == [6, 6]
+    # Stopped attempts do not count; the finished shards cover every file once.
+    finished = [f for s in state["shards"]["fluid"] for f in s["files"]]
+    assert sorted(finished) == sorted(sim.fluid_costs)
+    assert calls.count("success") == 1 and "attempt" not in state
+    assert _times()["fluid"] == 3600
+
+
+def test_one_test_file_longer_than_the_budget_fails_instead_of_looping(gate, monkeypatch, tmp_path, capsys):
+    calls, args = gate
+    args.budget = 40
+    Simulated(monkeypatch, tmp_path, calls, _fluid([50, 1]))
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps({"fluid": 51 * 60}))
+    with pytest.raises(ci.Failure, match=r"cannot be split further: it is one test file "
+                                         r"\(fluid/tests/unit/test_f00.py\)"):
+        for _ in range(8):
+            step(args)
+    assert "failure" in calls and "success" not in calls and "record" not in calls
+
+
+def test_non_test_stage_longer_than_the_budget_fails_instead_of_looping(gate, monkeypatch, tmp_path):
+    calls, args = gate
+    args.budget = 40
+    Simulated(monkeypatch, tmp_path, calls, _fluid([1]), desktop=50 * MINUTE)
+    with pytest.raises(ci.Failure, match="desktop does not fit .* it is not a test stage"):
+        for _ in range(8):
+            step(args)
+    assert "failure" in calls and "success" not in calls
+
+
+class Killed(BaseException):
+    """An uncatchable stop (SIGKILL, TerminateProcess): no handler or finally runs."""
+
+
+def test_kill_mid_stage_resumes_from_the_heartbeat(gate, monkeypatch, tmp_path, capsys):
+    calls, args = gate
+    args.budget = 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps(
+        {"security": 60, "backend-1": 600, "backend-2": 600, "fluid": 1800, "finish": 60}))
+    assert step(args) == 0  # security, two batches, then fluid would not fit
+    beat = ci.records_path().with_name("full-stages.beat")
+
+    def killed(ctx):
+        sim.now[0] += 44 * MINUTE  # the Monitor gives up first
+        last = json.loads(beat.read_text())
+        beat.write_text(json.dumps({**last, "beat": stages._wall()}))  # the heartbeat thread's last write
+        raise Killed()
+
+    real_fluid, real_stop = ci.SUITES[1].run, stages._Heartbeat.stop
+    monkeypatch.setattr(ci.SUITES[1], "run", killed)
+    monkeypatch.setattr(stages._Heartbeat, "stop", lambda self: None)  # a killed process cleans nothing
+    monkeypatch.setattr(stages, "_restore_signals", lambda previous: None)
+    with pytest.raises(Killed):
+        step(args)
+    left = _state()
+    assert left["attempt"]["stage"] == "fluid" and left["completed"][-1] == "backend-2"
+    monkeypatch.setattr(ci.SUITES[1], "run", real_fluid)
+    monkeypatch.setattr(stages._Heartbeat, "stop", real_stop)
+    outputs = sim.drive(args, capsys)
+    assert "was stopped during fluid after about 44.0 min" in outputs[0]
+    assert "split it into shards of 6 and 6" in outputs[0]
+    assert sorted(sim.fluid_ran) == sorted(sim.fluid_costs)
+    assert calls.count("success") == 1
+
+
+
+@pytest.mark.parametrize("stop, minutes, splits", [(SystemExit(143), 44, True), (KeyboardInterrupt(), 2, False)])
+def test_signal_mid_stage_records_how_long_it_ran(gate, monkeypatch, tmp_path, capsys, stop, minutes, splits):
+    calls, args = gate
+    args.budget = 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps(
+        {"security": 60, "backend-1": 600, "backend-2": 600, "fluid": 1800, "finish": 60}))
+    step(args)
+    real_fluid = ci.SUITES[1].run
+
+    def stopped(ctx):
+        sim.now[0] += minutes * MINUTE
+        raise stop
+
+    monkeypatch.setattr(ci.SUITES[1], "run", stopped)
+    with pytest.raises(type(stop)):
+        step(args)
+    assert _state()["attempt"]["stopped_after"] == minutes * MINUTE
+    monkeypatch.setattr(ci.SUITES[1], "run", real_fluid)
+    capsys.readouterr()
+    outputs = sim.drive(args, capsys)
+    recovered = outputs[0].splitlines()[:2]  # what the next invocation made of the stop
+    assert recovered[0].startswith(f"The previous invocation was stopped during fluid after about {minutes}.0 min")
+    assert ("split it into shards" in recovered[1]) is splits
+    assert ("it runs first in the next invocation" in recovered[1]) is not splits
+    assert sorted(sim.fluid_ran) == sorted(sim.fluid_costs) and calls.count("success") == 1
+
+
+def test_repeated_kills_split_even_when_the_budget_exceeds_the_monitor(gate, monkeypatch, tmp_path, capsys):
+    """--budget 60 under a 45-minute Monitor: each kill looks short, but two in a row split."""
+    calls, args = gate
+    args.budget = 60
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 12))
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps(
+        {"security": 60, "backend-1": 600, "backend-2": 1800, "fluid": 2400, "finish": 60}))
+    step(args)  # security, backend-1 and backend-2; fluid (48 min) would not fit 60 after 41
+    real_fluid = ci.SUITES[1].run
+
+    def monitor_timeout(ctx):
+        sim.now[0] += 45 * MINUTE
+        raise SystemExit(143)
+
+    monkeypatch.setattr(ci.SUITES[1], "run", monitor_timeout)
+    outputs = []
+    for _ in range(2):
+        with pytest.raises(SystemExit):
+            step(args)
+        outputs.append(capsys.readouterr().out)
+    assert "it runs first in the next invocation" in outputs[1]  # the first kill: retried
+    monkeypatch.setattr(ci.SUITES[1], "run", real_fluid)
+    done = sim.drive(args, capsys)
+    assert "split it into shards of 6 and 6" in done[0]
+    assert calls.count("success") == 1
+
+
+def test_second_invocation_refuses_while_one_is_running(gate, tmp_path):
+    import os
+    import time
+    _calls, args = gate
+    beat = ci.records_path().with_name("full-stages.beat")
+    beat.parent.mkdir(parents=True, exist_ok=True)
+    beat.write_text(json.dumps({"pid": os.getppid(), "beat": time.time(), "attempt": None}))
+    with pytest.raises(ci.Failure, match="Another full --step invocation"):
+        step(args)
+    beat.write_text(json.dumps({"pid": os.getppid(), "beat": time.time() - 3600, "attempt": None}))
+    assert step(args) == 0  # a stale heartbeat is a dead run, not a lock
+    assert json.loads(beat.read_text())["pid"] is None  # released at the end
+
+
+def test_attest_refuses_receipts_that_do_not_cover_the_tree(gate, monkeypatch, tmp_path, capsys):
+    calls, args = gate
+    args.attest, args.budget = False, 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([5] * 4))
+    (ci.MAP_PATH.parent / "full-stage-times.json").write_text(json.dumps({"fluid": 3600}))
+    sim.drive(args, capsys)
+    path = ci.records_path().with_name("full-stages.json")
+    state = _state()
+    state["shards"]["fluid"][0]["files"].pop()  # a test file no receipt covers
+    path.write_text(json.dumps(state))
+    args.attest = True
+    with pytest.raises(ci.Failure, match="do not cover its 4 test files exactly once"):
+        step(args)
+    assert "success" not in calls
+
+
+def test_success_names_the_tree_the_stages_covered(gate, monkeypatch, tmp_path, capsys):
+    calls, args = gate
+    described = []
+    monkeypatch.setattr(ci, "attest", lambda state, description, revision: described.append((state, description)))
+    args.budget = 40
+    sim = Simulated(monkeypatch, tmp_path, calls, _fluid([1] * 3))
+    sim.drive(args, capsys)
+    successes = [d for s, d in described if s == "success"]
+    assert len(successes) == 1 and "tree tree" in successes[0] and "stages" in successes[0]
+
+
+def test_deadline_stops_the_whole_process_tree(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import time
+    child_pid = tmp_path / "child.pid"
+    script = ("import subprocess, sys, time, pathlib\n"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+              f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+              "time.sleep(60)\n")
+    monkeypatch.setattr(ci, "DEADLINE", time.monotonic() + 3)
+    began = time.monotonic()
+    with pytest.raises(ci.OutOfTime, match="end of this invocation's budget"):
+        ci.run([sys.executable, "-c", script])
+    assert time.monotonic() - began < 30
+    pid = int(child_pid.read_text())
+
+    def running(pid):
+        if os.name != "nt":
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                return state != "Z"  # an unreaped zombie is not running
+            except OSError:
+                pass
+        return stages._alive(pid)
+
+    for _ in range(50):
+        if not running(pid):
+            break
+        time.sleep(0.1)
+    else:
+        if os.name != "nt":
+            os.kill(pid, 9)
+        raise AssertionError("the command's child outlived the deadline")
+    with pytest.raises(ci.OutOfTime, match="no time left"):
+        ci.run([sys.executable, "-c", "pass"])
+    monkeypatch.setattr(ci, "DEADLINE", None)
+    ci.run([sys.executable, "-c", "pass"])  # no budget, no limit
+
+
+def test_real_shard_collection_under_its_own_rootdir(tmp_path):
+    """fluid/tests/unit has its own rootdir (fluid/pyproject.toml); shard paths stay checkout-relative."""
+    import os
+    import subprocess
+
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    fluid = tmp_path / "fluid"
+    (fluid / "tests/unit").mkdir(parents=True)
+    (fluid / "pyproject.toml").write_text("[tool.pytest.ini_options]\ntestpaths = ['tests']\n")
+    for name in ["a", "b"]:
+        (fluid / f"tests/unit/test_{name}.py").write_text("def test_example(): pass\n")
+    env = {**os.environ, "PYTHONPATH": str(ci.ROOT),
+           "LOCAL_CI_BACKEND_BATCH": json.dumps(["fluid/tests/unit/test_b.py"])}
+    result = subprocess.run([sys.executable, "-m", "pytest", "fluid/tests/unit", "--collect-only", "-q",
+                             "-p", "scripts.ci.local_ci_batch", "-p", "no:cacheprovider"],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test_b.py::test_example" in result.stdout
+    assert "test_a.py::" not in result.stdout
+
+
+def test_fluid_shard_command_keeps_the_directory_and_adds_the_batch_plugin(monkeypatch):
+    commands = []
+    monkeypatch.setattr(ci, "run", lambda argv, **kw: commands.append((argv, kw["env"])))
+    monkeypatch.setattr(ci, "pytest_args", lambda *a: ["-q"])
+    ci.fluid(ci.Context("full", "revision", None, sys.executable))
+    ci.fluid(ci.Context("full", "revision", None, sys.executable,
+                        backend_selected=["fluid/tests/unit/test_x.py"]))
+    whole, shard = commands
+    assert whole[0] == [sys.executable, "-m", "pytest", "fluid/tests/unit", "-q"]
+    assert "LOCAL_CI_BACKEND_BATCH" not in whole[1]
+    assert shard[0][:4] == [sys.executable, "-m", "pytest", "fluid/tests/unit"]
+    assert "scripts.ci.local_ci_batch" in shard[0]
+    assert json.loads(shard[1]["LOCAL_CI_BACKEND_BATCH"]) == ["fluid/tests/unit/test_x.py"]

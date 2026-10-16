@@ -73,6 +73,14 @@ class Failure(Exception):
     pass
 
 
+class OutOfTime(Failure):
+    """A command was stopped at the staged gate's deadline (see local_ci_stages)."""
+
+
+# time.monotonic() after which run() stops its command; set only by full --step.
+DEADLINE: float | None = None
+
+
 @dataclass
 class Context:
     mode: str                      # "changed" or "full"
@@ -81,7 +89,7 @@ class Context:
     python: str
     log: Callable[[str], None] = print
     notes: list[str] = field(default_factory=list)
-    backend_selected: list[str] | None = None
+    backend_selected: list[str] | None = None  # full --step: the test files of one shard
     map_hits: Path | None = None
 
     def changed(self, patterns: Iterable[str]) -> bool:
@@ -136,20 +144,89 @@ def child_env(env: dict | None = None) -> dict:
     return merged
 
 
+def _parents() -> list[tuple[int, int]]:
+    """(pid, parent pid) for every process: /proc on Linux (slim images lack ps), else ps."""
+    proc = Path("/proc")
+    if (proc / "self" / "stat").is_file():
+        pairs = []
+        for entry in proc.iterdir():
+            if entry.name.isdigit():
+                try:  # "pid (name) state ppid ..."; the name may contain spaces
+                    pairs.append((int(entry.name), int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])))
+                except (OSError, ValueError, IndexError):
+                    continue
+        return pairs
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+                                 text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [(int(parts[0]), int(parts[1])) for parts in map(str.split, listing.splitlines())
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit()]
+
+
+def descendants(pid: int) -> list[int]:
+    """Process IDs below ``pid``, best effort (pytest-xdist workers, npm's node)."""
+    children: dict[int, list[int]] = {}
+    for child, parent in _parents():
+        children.setdefault(parent, []).append(child)
+    found, queue = [], [pid]
+    while queue:
+        for child in children.get(queue.pop(), []):
+            if child not in found:
+                found.append(child)
+                queue.append(child)
+    return found
+
+
+def kill_tree(process: subprocess.Popen) -> None:
+    """Stop a command and everything it started, so nothing outlives a stopped stage."""
+    if process.poll() is None:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                           capture_output=True, check=False)
+        else:
+            below = descendants(process.pid)  # before the parent dies and they are reparented
+            for pid in [process.pid, *below]:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    process.wait()
+
+
 def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         timeout: float | None = None) -> None:
     exe = shutil.which(argv[0]) or argv[0]
     shown = " ".join(argv)
     rel = cwd.relative_to(ROOT).as_posix() if cwd != ROOT else "."
+    stop_at_deadline = False
+    if DEADLINE is not None:
+        left = DEADLINE - time.monotonic()
+        if left <= 0:
+            raise OutOfTime(f"no time left in this invocation's budget for {shown}")
+        if timeout is None or left < timeout:
+            timeout, stop_at_deadline = left, True
     print(f"\n$ ({rel}) {shown}", flush=True)
     merged = child_env(env)
+    process = subprocess.Popen([exe, *argv[1:]], cwd=cwd, env=merged, **low_priority_kwargs())
     try:
-        result = subprocess.run([exe, *argv[1:]], cwd=cwd, env=merged, timeout=timeout,
-                                **low_priority_kwargs())
+        returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        kill_tree(process)
+        if stop_at_deadline:
+            raise OutOfTime(f"stopped {shown} (in {rel}) at the end of this invocation's budget") from None
         raise Failure("local check timed out; push blocked") from None
-    if result.returncode:
-        raise Failure(f"{shown} (in {rel}) exited {result.returncode}")
+    except BaseException:
+        # Ctrl-C, or SIGTERM turned into SystemExit by full --step: leave no orphans.
+        kill_tree(process)
+        raise
+    if returncode:
+        raise Failure(f"{shown} (in {rel}) exited {returncode}")
 
 
 def git(*args: str) -> str:
@@ -365,8 +442,16 @@ def backend_linux(ctx: Context) -> None:
         ctx.notes.append("Linux-only backend steps were not run on this machine.")
 
 
+FLUID_TESTS = "fluid/tests/unit"
+
+
 def fluid(ctx: Context) -> None:
-    run([ctx.python, "-m", "pytest", "fluid/tests/unit", *pytest_args(ctx.python)], env=python_env())
+    env, extra = python_env(), []
+    if ctx.backend_selected is not None:
+        # One full --step shard: the same directory and hooks, other files ignored.
+        env = {**env, "LOCAL_CI_BACKEND_BATCH": json.dumps(ctx.backend_selected)}
+        extra = ["-p", "scripts.ci.local_ci_batch"]
+    run([ctx.python, "-m", "pytest", FLUID_TESTS, *extra, *pytest_args(ctx.python)], env=env)
 
 
 def frontend(ctx: Context) -> None:
@@ -991,11 +1076,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", nargs="+", metavar="SUITE", help="run just these suites (not recorded as a pass)")
     parser.add_argument("--attest", action="store_true", help=f"with full on main: post {ATTEST_CONTEXT}")
     parser.add_argument("--step", action="store_true",
-                        help="with full: run one resumable stage; repeat until COMPLETE")
+                        help="with full: run resumable stages within --budget; repeat until COMPLETE")
     parser.add_argument("--restart", action="store_true", help="with full --step: discard prior stage receipts")
     parser.add_argument("--budget", type=float, metavar="MINUTES", default=None,
-                        help="with full --step: keep running stages while the next one fits in MINUTES "
-                             "(default 40, inside a 45-minute Monitor budget; 0 runs one stage)")
+                        help="with full --step: keep running stages while the next one fits in MINUTES, "
+                             "stop a stage at MINUTES and split test stages that do not fit "
+                             "(default 40, inside a 45-minute Monitor budget; 0 runs one stage, unlimited)")
     parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
     parser.add_argument("--strict-audit", action="store_true",
                         help="fail on Python advisories, npm high/critical findings, or unavailable audits")
