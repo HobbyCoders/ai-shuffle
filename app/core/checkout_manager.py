@@ -192,6 +192,63 @@ def _require_checkout_root(path: str) -> None:
         raise WorktreeError(f"Checkout {path!r} is not its own Git working tree")
 
 
+def _reattach_detached_checkout(path: str, branch: str) -> bool:
+    """Put a registered branch checkout with no branch back on its branch, losslessly.
+
+    An agent can leave its own checkout detached, typically with
+    ``git checkout origin/main`` after its PR merged, often followed by
+    deleting the merged branch. Every later send then failed the binding
+    check, and the owner had no way to re-point the session. Recover only
+    when no commit or file can be lost:
+
+    - the bound branch no longer exists locally: create it at HEAD;
+    - it exists and its tip is HEAD or an ancestor of HEAD: move it to HEAD.
+
+    Both attach HEAD at the commit it already has, so the working tree is
+    untouched, and git itself refuses a branch that another worktree has
+    checked out. Anything else (a branch with commits HEAD lacks, an
+    unborn HEAD, a folder that is not its own working tree, a checkout on
+    some other branch) is left for :func:`_require_branch_binding` to
+    refuse. Returns True when it reattached.
+    """
+    if not branch or branch.startswith("-"):
+        return False
+    try:
+        _require_checkout_root(path)
+    except WorktreeError:
+        return False
+    if git_service._run_git(path, ["symbolic-ref", "-q", "HEAD"], timeout=10).returncode == 0:
+        return False  # on a branch: a real mismatch, never ours to rewrite
+    head = git_service._run_git(path, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=10)
+    head_sha = (head.stdout or "").strip()
+    if head.returncode != 0 or not head_sha:
+        return False
+    if git_service._run_git(path, ["check-ref-format", "--branch", branch], timeout=10).returncode != 0:
+        return False
+    tip = git_service._run_git(
+        path, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}"], timeout=10
+    )
+    tip_sha = (tip.stdout or "").strip() if tip.returncode == 0 else ""
+    if tip_sha and tip_sha != head_sha:
+        ancestor = git_service._run_git(
+            path, ["merge-base", "--is-ancestor", tip_sha, head_sha], timeout=10
+        )
+        if ancestor.returncode != 0:
+            return False
+    switched = git_service._run_git(path, ["switch", "-C", branch, head_sha], timeout=30)
+    if switched.returncode != 0 or git_service.get_current_branch(path) != branch:
+        logger.warning(
+            "checkout_manager: could not reattach detached %s to %r: %s",
+            path, branch, (switched.stderr or "").strip()[:300],
+        )
+        return False
+    logger.info(
+        "checkout_manager: reattached detached checkout %s to its branch %r at %s (%s)",
+        path, branch, head_sha[:12], "moved forward" if tip_sha else "recreated",
+    )
+    return True
+
+
 def _require_branch_binding(path: str, branch: str) -> None:
     """Refuse stale/adopted branch paths without switching HEAD or rewriting rows."""
     _require_checkout_root(path)
@@ -569,6 +626,12 @@ def _ensure_branch_checkout(
         resolved = _resolve_checkout_path(path) if path else path
         if resolved and os.path.isdir(resolved):
             if _dir_is_worktree(resolved):
+                # The row says this folder IS this branch's checkout, so a
+                # detached HEAD here is the session's own agent having left
+                # it (e.g. after merging and deleting the branch). Reattach
+                # when that loses nothing; otherwise the check below refuses.
+                if git_service.get_current_branch(resolved) != branch:
+                    _reattach_detached_checkout(resolved, branch)
                 _require_branch_binding(resolved, branch)
                 # Status-refresh reuses the ORIGINAL path (its uniqueness key) so it
                 # updates in place — only when absolute, so a legacy relative row
