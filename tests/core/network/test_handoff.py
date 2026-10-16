@@ -2008,3 +2008,86 @@ async def test_idle_receiving_checkout_users_cannot_start_until_the_import_ends(
         assert runs.get_active_run("handoff-test") is None
         assert not handoff.admission_held("new-receiver")
         assert runs.claim_run("idle-receiver", settings.effective_instance_id, 60)
+
+
+def test_checkout_scan_runs_git_only_for_sessions_in_the_target_folder(pair, monkeypatch, tmp_path):
+    """#2305: a move scans every session of the project at least twice per worker.
+
+    Validating each session's own branch folder ran Git once or more per
+    session (over a thousand processes per scan on a long-used project), which
+    made each side of a move take tens of seconds. Only a session whose
+    registered folder is the target folder can use it, so only that one may
+    need Git.
+    """
+    from app.core import checkout_manager
+    a, _b, source, _target = pair
+    validated = []
+    real_binding = checkout_manager._require_branch_binding
+
+    def binding(path, branch):
+        validated.append(branch)
+        return real_binding(path, branch)
+
+    with a.active():
+        project_id = database.get_session("handoff-test")["project_v2_id"]
+        for index in range(20):
+            folder = tmp_path / f"stale-{index}"
+            folder.mkdir()  # A leftover task folder: exists, but is no checkout.
+            checkouts.upsert_checkout(project_id, settings.effective_instance_id, str(folder),
+                                      branch=f"task/stale-{index}")
+            _bind_session(f"stale-{index}", f"task/stale-{index}")
+        _bind_session("same-folder", BRANCH, cwd=source)
+        session = database.get_session("handoff-test")
+        project = projects_v2.get_project_v2(project_id)
+        monkeypatch.setattr(checkout_manager, "_require_branch_binding", binding)
+        assert handoff._checkout_users(session, project, str(source), None) == ["same-folder"]
+        assert validated == [BRANCH]
+        validated.clear()
+        assert handoff._checkout_users(session, project, str(tmp_path / "stale-3"), None) == []
+        assert validated == ["task/stale-3"]  # Its folder matches; Git still refuses it.
+
+
+@pytest.mark.asyncio
+async def test_move_logs_where_each_side_spent_its_time(pair, monkeypatch, caplog):
+    """#2305: the access log showed only ten-second status polls, never the slow step."""
+    import logging
+    import threading
+    a, b, _source, _target = pair
+    decoded_on = []
+    real_open = handoff._open_export
+
+    def open_export(*args):
+        decoded_on.append(threading.current_thread() is threading.main_thread())
+        return real_open(*args)
+
+    monkeypatch.setattr(handoff, "_open_export", open_export)
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    with caplog.at_level(logging.INFO, logger=handoff.__name__):
+        with a.active():
+            assert await handoff.move(database.get_session("handoff-test"), b.device_id) is True
+    messages = [record.getMessage() for record in caplog.records]
+    export = next(m for m in messages if m.startswith("Hand-off export for session handoff-test exported"))
+    imported = next(m for m in messages if m.startswith("Hand-off import for session handoff-test committed"))
+    for step in ("checkout_guard=", "git_publish=", "history=", "rows=", "mb=", "encrypt="):
+        assert step in export
+    for step in ("owner_export=", "decode=", "checkout_guard=", "git_fetch=", "install_history=", "owner_commit="):
+        assert step in imported
+    # The export is decrypted and parsed off the event loop.
+    assert decoded_on == [False]
+
+
+@pytest.mark.asyncio
+async def test_refused_move_logs_its_timing_as_failed(pair, monkeypatch, caplog):
+    import logging
+    a, b, source, _target = pair
+    with a.active():
+        _bind_session("sibling", BRANCH, cwd=source)
+        _start_work("sibling", True)
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    with caplog.at_level(logging.INFO, logger=handoff.__name__):
+        with a.active():
+            with pytest.raises(ValueError, match="Another session is working in this checkout"):
+                await handoff.move(database.get_session("handoff-test"), b.device_id)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("Hand-off export for session handoff-test failed") for m in messages)
+    assert any(m.startswith("Hand-off import for session handoff-test failed") for m in messages)

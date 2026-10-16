@@ -297,6 +297,21 @@ def resolve_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     return checkout_manager.ensure_checkout(project, None)
 
 
+def existing_checkout_path(session_row: Dict[str, Any]) -> Optional[str]:
+    """The registered checkout folder this session uses, if it exists, unvalidated.
+
+    :func:`resolve_existing_cwd` returns this path only after Git confirms a
+    branch checkout is still on its branch, which costs a subprocess. A caller
+    matching many sessions against one folder compares this path first and
+    validates only a match. Pure read; never materializes.
+    """
+    row = resolve_local_checkout(session_row)
+    if not row:
+        return None
+    path = checkout_manager._resolve_checkout_path(row["path"]) if row.get("path") else None
+    return path if path and os.path.isdir(path) else None
+
+
 def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     """Pure-read cwd resolution — NEVER materializes.
 
@@ -308,11 +323,8 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     the caller falls back to the default
     workspace. No ``git worktree add`` / no clone, so reads never mutate disk.
     """
-    row = resolve_local_checkout(session_row)
-    if not row:
-        return None
-    path = checkout_manager._resolve_checkout_path(row["path"]) if row.get("path") else None
-    if path and os.path.isdir(path):
+    path = existing_checkout_path(session_row)
+    if path:
         branch = _effective_branch(session_row)
         if branch:
             try:
