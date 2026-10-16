@@ -230,21 +230,23 @@ def test_install_waits_only_briefly_for_a_busy_table():
         assert {r["source"]: r["done"] for r in cur.fetchall()} == {"e": True, "n": False, "s": True}
 
 
-def test_a_failing_projection_never_fails_the_write_and_is_rebuilt():
+@pytest.mark.parametrize("drop", ["TABLE session_recall_text", "FUNCTION recall_node_text(jsonb)",
+                                  "FUNCTION recall_event_raw(text, jsonb)"])
+def test_a_missing_projection_object_never_fails_the_write_and_is_rebuilt(drop):
     from app.db import base, session_recall
 
     sid = PREFIX + "fail"
     _backfill_all()
     with base.get_db() as conn:
-        conn.cursor().execute("DROP TABLE session_recall_text")
+        conn.cursor().execute(f"DROP {drop}")
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
                     (sid, "a", 1.0, _node("user", [{"kind": "text", "text": "Survives"}])))
         cur.execute("INSERT INTO session_events(id,session_id,seq,event_type,payload) VALUES (%s,%s,%s,%s,%s)",
                     (PREFIX + "fe", sid, 1, "message.user", Json({"content": "Survives too"})))
-        cur.execute("SELECT source, done FROM session_recall_backfill ORDER BY source")
-        assert {r["source"]: r["done"] for r in cur.fetchall()} == {"e": False, "n": False, "s": True}
+        # Search keeps the legacy queries meanwhile.
+        assert not session_recall.installed(cur)
         assert not session_recall.ready(cur)
     assert session_recall.run_backfill(pause_seconds=0)
     with base.get_db() as conn:
@@ -253,8 +255,95 @@ def test_a_failing_projection_never_fails_the_write_and_is_rebuilt():
         assert _projection(cur, "e", sid) == {PREFIX + "fe": "survives too"}
 
 
+def test_an_older_version_is_rebuilt_and_its_triggers_replaced():
+    """An install from an earlier shape (here: no ``chars`` column, older
+    trigger names) must never meet the current functions."""
+    from app.db import base, session_recall
+
+    sid = PREFIX + "upgrade"
+    _backfill_all()
+    current = session_recall._trigger_name("nodes")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE session_recall_text DROP COLUMN chars")
+        cur.execute("COMMENT ON TABLE session_recall_text IS 'session_recall v1'")
+        cur.execute(f"ALTER TRIGGER {current} ON fluid_session_nodes RENAME TO trg_session_recall_v1_nodes")
+        assert not session_recall.installed(cur)
+    with base.get_db() as conn:
+        assert session_recall.install_objects(conn.cursor())
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        # The old trigger calls the current function, which fits the new table.
+        cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
+                    (sid, "a", 1.0, _node("user", [{"kind": "text", "text": "x" * 300_000}])))
+    assert session_recall.run_backfill(pause_seconds=0)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert session_recall._source_triggers(cur, "fluid_session_nodes") == {current}
+        cur.execute("SELECT COUNT(*) AS n FROM session_recall_text WHERE session_id = %s AND part >= 0", (sid,))
+        assert cur.fetchone()["n"] > 300
+
+
+def _subtransactions(cur) -> int:
+    cur.execute("SELECT (pg_stat_get_backend_subxact(b)).subxact_count AS n FROM pg_stat_get_backend_idset() b "
+                "WHERE pg_stat_get_backend_pid(b) = pg_backend_pid()")
+    return cur.fetchone()["n"]
+
+
+def test_bulk_writes_open_no_subtransactions():
+    """A subtransaction per row would overflow the 64-entry cache of every
+    multi-row write (session delete, delta compaction, fork copies, sync)."""
+    from app.db import base
+
+    n = 10_000
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", [
+            (PREFIX + "bulk", f"n{i}", float(i), _node("user", [{"kind": "text", "text": f"node text {i}"}]))
+            for i in range(n)], page_size=1000)
+        execute_values(cur, "INSERT INTO session_store_entries(project_key,session_id,entry) VALUES %s", [
+            ("p", PREFIX + "bulk", Json({"type": "user", "message": {"content": f"entry {i}"}})) for i in range(n)],
+            page_size=1000)
+        execute_values(cur, "INSERT INTO session_events(id,session_id,seq,event_type,payload) VALUES %s", [
+            (f"{PREFIX}be{i}", PREFIX + "bulk", i, "message.assistant", Json({"content": f"event {i}"}))
+            for i in range(n)], page_size=1000)
+        cur.execute("SELECT COUNT(*) AS n FROM session_recall_text WHERE session_id = %s", (PREFIX + "bulk",))
+        assert cur.fetchone()["n"] == 3 * n
+        assert _subtransactions(cur) == 0
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        for table in ("fluid_session_nodes", "session_store_entries", "session_events"):
+            cur.execute(f"DELETE FROM {table} WHERE session_id = %s", (PREFIX + "bulk",))
+        cur.execute("SELECT COUNT(*) AS n FROM session_recall_text WHERE session_id = %s", (PREFIX + "bulk",))
+        assert cur.fetchone()["n"] == 0
+        assert _subtransactions(cur) == 0
+
+
+@pytest.mark.parametrize("source", ["n", "s", "e"])
+def test_per_row_lookups_use_the_primary_key_when_a_source_looks_rare(source):
+    """The triggers' cached plans: with a newest-first index the per-row delete
+    could use, statistics showing no rows of a source made the planner pick it
+    over the primary key, so a bulk delete scanned all of it for every row
+    (8 s for 10k rows)."""
+    from app.db import base
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        execute_values(cur, "INSERT INTO session_recall_text(source,session_id,row_key,part,ts,body) VALUES %s", [
+            (other, f"{PREFIX}stats{i % 50}", f"r{i}", 0, float(i), f"text {i}")
+            for other in "nse" if other != source for i in range(3000)])
+        cur.execute("ANALYZE session_recall_text")
+        cur.execute("SET LOCAL plan_cache_mode = force_generic_plan")
+        cur.execute("PREPARE recall_row(text, text) AS DELETE FROM session_recall_text "
+                    f"WHERE source = '{source}' AND session_id = $1 AND row_key = $2")
+        cur.execute("EXPLAIN EXECUTE recall_row('a', 'b')")
+        plan = "\n".join(next(iter(r.values())) for r in cur.fetchall())
+        cur.execute("DEALLOCATE recall_row")
+    assert "session_recall_text_pkey" in plan, plan
+
+
 def test_a_huge_write_costs_about_the_same_as_without_the_trigger():
-    """Linear chunking, and nothing past ``MAX_ROW_CHARS`` is indexed."""
+    """Linear chunking, and a write indexes at most ``MAX_ROW_CHARS``."""
     from app.db import base, session_recall
 
     name = session_recall._trigger_name("nodes")
@@ -274,38 +363,77 @@ def test_a_huge_write_costs_about_the_same_as_without_the_trigger():
                     "WHERE session_id = %s GROUP BY row_key", (PREFIX + "huge",))
         rows = {r["row_key"]: (r["n"], r["first"]) for r in cur.fetchall()}
     cap = session_recall.MAX_ROW_CHARS
-    assert rows[f"{cap}-True"][0] > cap // 1000 and rows["3000000-True"] == (1, session_recall.OVERFLOW_PART)
+    assert rows[f"{cap}-True"][0] > cap // 1000 and rows["3000000-True"] == (1, session_recall.PENDING)
     # A whole row at the cap (pieces, trigram entries) stays well under a second...
     assert timings[cap, True] < timings[cap, False] + 0.5, timings
     # ...and a 3 MB one costs about what the insert costs anyway.
     assert timings[3_000_000, True] < 2 * timings[3_000_000, False] + 0.1, timings
 
 
-def test_rows_too_long_to_index_are_matched_in_their_source(recall):
+def test_rows_too_long_to_index_are_found_then_cut_up_in_the_background(recall):
     from app.db import base, session_recall
 
     tail = "x" * (session_recall.MAX_ROW_CHARS + 10) + " overflowneedle tail"
+    huge = "y" * (session_recall.INDEX_MAX_CHARS + 10) + " hugeneedle"
+    _backfill_all()  # these are live writes: only the triggers see them
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("INSERT INTO sessions(id,sdk_session_id,title,owner_device_id) VALUES (%s,%s,%s,%s)",
                     (PREFIX + "ovr", None, "Remote", "test-remote"))
         cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
                     (PREFIX + "ovn", "0", 1.0, _node("user", [{"kind": "text", "text": tail}])))
+        cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
+                    (PREFIX + "ovh", "0", 0.5, _node("user", [{"kind": "text", "text": huge}])))
         cur.execute("INSERT INTO session_store_entries(project_key,session_id,entry) VALUES (%s,%s,%s)",
                     ("p", PREFIX + "ovs", Json({"type": "user", "message": {"content": tail}})))
         execute_values(cur, "INSERT INTO session_events(id,session_id,seq,event_type,payload) VALUES %s", [
             (PREFIX + "ove1", PREFIX + "ovr", 1, "message.user", Json({"content": "short question"})),
             (PREFIX + "ove2", PREFIX + "ovr", 2, "message.assistant", Json({"content": tail})),
         ])
-        cur.execute("SELECT source, part FROM session_recall_text WHERE session_id LIKE %s AND part < 0 "
-                    "ORDER BY source", (PREFIX + "ov%",))
-        assert [(r["source"], r["part"]) for r in cur.fetchall()] == [("e", -1), ("n", -1), ("s", -1)]
+
+    def markers():
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT source, session_id, part FROM session_recall_text "
+                        "WHERE session_id LIKE %s AND part < 0 ORDER BY 1, 2", (PREFIX + "ov%",))
+            return [(r["source"], r["session_id"][len(PREFIX):], r["part"]) for r in cur.fetchall()]
+
+    def found():
+        return {term: sorted(h.session_id[len(PREFIX):] for h in recall._search_sync([term], 5, None))
+                for term in ("overflowneedle", "hugeneedle", "short question")}
+
+    expected = {"overflowneedle": ["ovn", "ovr", "ovs"], "hugeneedle": ["ovh"], "short question": ["ovr"]}
+    assert markers() == [("e", "ovr", -1), ("n", "ovh", -1), ("n", "ovn", -1), ("s", "ovs", -1)]
+    assert found() == expected  # read from the source tables meanwhile
+    assert session_recall.promote_overflow(pause_seconds=0) == 4
+    assert markers() == []
+    # Now from the pieces (and the overflowed event still folds); only the
+    # first INDEX_MAX_CHARS characters of a message are indexed.
+    assert found() == dict(expected, hugeneedle=[])
+
+
+def test_marked_rows_are_read_newest_first_within_a_budget(recall, monkeypatch):
+    """However many rows wait for promotion, a search reads a bounded amount."""
+    from app.db import base, session_recall
+
+    size = session_recall.MAX_ROW_CHARS + 1000
     _backfill_all()
-    hits = recall._search_sync(["overflowneedle"], 5, None)
-    assert sorted(h.session_id for h in hits) == sorted([PREFIX + "ovn", PREFIX + "ovs", PREFIX + "ovr"])
-    # The overflowed event still folds: the session's short message is found too.
-    hits = recall._search_sync(["short question"], 5, None)
-    assert [h.session_id for h in hits] == [PREFIX + "ovr"]
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", [
+            (f"{PREFIX}mk{i}", "0", float(i),
+             _node("user", [{"kind": "text", "text": "z" * size + f" markerneedle{'old' if i == 0 else ''}"}]))
+            for i in range(12)])
+    monkeypatch.setattr(recall, "_MARKER_CHARS", 3 * size)
+    started = time.perf_counter()
+    newest = recall._search_sync(["markerneedle"], 5, None)
+    assert time.perf_counter() - started < 2
+    # Only the three newest marked rows are read; the oldest waits for promotion.
+    assert {h.session_id for h in newest} == {f"{PREFIX}mk{i}" for i in (9, 10, 11)}
+    assert recall._search_sync(["markerneedleold"], 5, None) == []
+    while session_recall.promote_overflow(pause_seconds=0):
+        pass
+    assert [h.session_id for h in recall._search_sync(["markerneedleold"], 5, None)] == [f"{PREFIX}mk0"]
 
 
 def test_backfill_never_waits_on_a_row_being_written():
@@ -333,7 +461,7 @@ def test_backfill_never_waits_on_a_row_being_written():
         assert _projection(conn.cursor(), "n", PREFIX + "lk") == {"n0": "row 0", "n1": "row 1", "n2": "row 2"}
 
 
-def test_backfill_batches_are_bounded_by_bytes():
+def test_backfill_batches_are_bounded_by_bytes_and_characters():
     from app.db import base, session_recall
 
     with base.get_db() as conn:
@@ -353,6 +481,32 @@ def test_backfill_batches_are_bounded_by_bytes():
             if session_recall.backfill_step(conn.cursor(), "n", 200, max_bytes=1):
                 break
     # One row per batch (other suites' rows may share the table), then "done".
+    assert steps >= 7
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert len(_projection(cur, "n", PREFIX + "by")) == 6
+        cur.execute("DELETE FROM session_recall_text WHERE session_id LIKE %s", (PREFIX + "%",))
+        cur.execute("DELETE FROM session_recall_backfill")
+    # Compressible text: few stored bytes, many characters to cut up. Rows past
+    # the character budget are measured but never locked: a writer holding
+    # one does not stop the batch before it.
+    with base.get_db() as writer:
+        writer.cursor().execute("SELECT 1 FROM fluid_session_nodes WHERE session_id = %s AND node_id = 'n1' "
+                                "FOR UPDATE", (PREFIX + "by",))
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO session_recall_backfill (source, last_key) VALUES ('n', %s)",
+                        (f'["{PREFIX}by", "n"]',))
+            assert session_recall.backfill_step(cur, "n", 200, max_chars=1) is False
+            assert list(_projection(cur, "n", PREFIX + "by")) == ["n0"]
+        with base.get_db() as conn:
+            conn.cursor().execute("DELETE FROM session_recall_backfill")
+    steps = 0
+    while True:
+        with base.get_db() as conn:
+            steps += 1
+            if session_recall.backfill_step(conn.cursor(), "n", 200, max_chars=1):
+                break
     assert steps >= 7
     with base.get_db() as conn:
         assert len(_projection(conn.cursor(), "n", PREFIX + "by")) == 6

@@ -532,16 +532,16 @@ def start_background_tasks() -> List[asyncio.Task]:
 
     async def _session_recall_backfill():
         """Install and backfill SessionSearch's text projection in short
-        batches off the event loop, then recheck it now and then: a trigger
-        that hit an error marks its source for a rebuild, and a dropped
-        object is reinstalled."""
+        batches off the event loop, then keep checking it every minute: rows
+        too long for a user's write to index are cut into pieces, and a
+        dropped object is reinstalled (and every source copied again)."""
         from app.db import session_recall
 
         await asyncio.sleep(45)
         while True:
             try:
                 ready = await asyncio.to_thread(session_recall.run_backfill)
-                await asyncio.sleep(600 if ready else 1)
+                await asyncio.sleep(60 if ready else 1)
             except asyncio.CancelledError:
                 break
             except Exception as e:  # noqa: BLE001 — recall keeps its legacy queries

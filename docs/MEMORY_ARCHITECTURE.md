@@ -187,13 +187,16 @@ not learning.
 `SessionSearch` prefilters in `session_recall_text` (`app/db/session_recall.py`):
 only the text recall scores, lowercased and cut into overlapping pieces of
 about a kilobyte, kept current by triggers on the transcript tables. A message
-longer than 200,000 characters is not cut up; search reads that one row from
-its transcript table instead. An existing database installs the triggers (one
-table at a time, waiting at most a quarter of a second for each) and fills the
-table in short background batches after start-up, keeping the older raw-JSON
-queries until that finishes. A trigger error never fails the transcript write:
-it is logged, and search falls back to the raw-JSON queries until that table
-has been copied again. A term matching more than a couple of thousand pieces
+longer than 200,000 characters is not cut up during its own write: it gets a
+marker, search reads that row from its transcript table, and a background step
+cuts it into pieces within about a minute. At most the first 5 million
+characters of one message are indexed. An existing database installs the
+triggers (one table at a time, waiting at most a quarter of a second for each)
+and fills the table in short background batches after start-up, keeping the
+older raw-JSON queries until that finishes. If the table or one of its
+functions goes missing, the triggers skip it rather than fail the transcript
+write, search falls back to the raw-JSON queries, and the next background pass
+rebuilds and refills it. A term matching more than a couple of thousand pieces
 is read newest-first, so a very common word ranks recent sessions rather than
 scanning the whole history.
 

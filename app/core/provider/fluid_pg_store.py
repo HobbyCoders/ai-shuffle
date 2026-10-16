@@ -588,9 +588,12 @@ def _like_pattern(term: str) -> str:
     return f"%{escaped}%"
 
 
-# A row too long to index has one overflow marker instead of pieces; its
-# text is read (and matched) in full from the source table, as legacy recall did.
-_OVERFLOW_TEXT = {
+# A row too long for its write to index has a marker instead of pieces until
+# the background cuts it up, normally within a minute. Meanwhile its text is
+# read and matched in full from the source table, as legacy recall did:
+# newest markers first, up to this many characters per arm and search.
+_MARKER_CHARS = 4_000_000
+_MARKER_TEXT = {
     session_recall.NATIVE: ("(SELECT recall_node_text(d.message) FROM fluid_session_nodes d "
                             "WHERE d.session_id = o.session_id AND d.node_id = o.row_key)"),
     session_recall.ENTRY: ("(SELECT recall_entry_text(d.entry) FROM session_store_entries d "
@@ -611,16 +614,18 @@ def _recall_matches(source: str, where: str, where_params: List[Any],
         cond = " AND ".join(["body LIKE %s"] * len(group))
         arms.append(
             "(SELECT session_id, row_key, part, ts, body FROM session_recall_text "
-            f"WHERE source = %s AND {where} AND {cond} "
+            f"WHERE source = %s AND part >= 0 AND {where} AND {cond} "
             f"ORDER BY ts DESC LIMIT {_SEARCH_TERM_ROWS})"
         )
         params += [source, *where_params, *group]
     any_term = " OR ".join(["x.body LIKE %s"] * len(patterns))
     arms.append(
         "(SELECT o.session_id, o.row_key, o.part, o.ts, x.body FROM ("
-        "SELECT session_id, row_key, part, ts, raw FROM session_recall_text "
-        f"WHERE source = %s AND part = {session_recall.OVERFLOW_PART} AND {where}) o "
-        f"CROSS JOIN LATERAL (SELECT {_OVERFLOW_TEXT[source]} AS body) x WHERE {any_term})"
+        "SELECT * FROM (SELECT session_id, row_key, part, ts, raw, "
+        "SUM(chars) OVER (ORDER BY ts DESC, session_id, row_key) - chars AS before "
+        f"FROM session_recall_text WHERE source = %s AND part = {session_recall.PENDING} AND {where}) m "
+        f"WHERE before < {_MARKER_CHARS}) o "
+        f"CROSS JOIN LATERAL (SELECT {_MARKER_TEXT[source]} AS body) x WHERE {any_term})"
     )
     params += [source, *where_params, *patterns]
     hits = "1" if len(patterns) == 1 else " + ".join(
