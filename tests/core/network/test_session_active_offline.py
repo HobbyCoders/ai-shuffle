@@ -11,6 +11,43 @@ from tests.core.network.test_control import _new_session
 from tests.core.network.test_session_active_control import settle
 
 
+async def test_frozen_clock_mirrored_revisions_and_duplicate_receipts(workers, monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+    from app.core.session_settlement import dismiss_owner_waits
+    from app.db import interactions
+    from app.network import session_active
+
+    a, b = workers("owner"), workers("mirror")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    _new_session(a, "frozen", "Frozen clock")
+    converge([a, b])
+    clock = Mock()
+    clock.now.return_value = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(session_active, "datetime", clock)
+    monkeypatch.setattr(engine, "kick", lambda: None)
+
+    for index in range(2):
+        with b.active():
+            if index:
+                session_active.write_shared("frozen", True)
+            edit = session_active.write_shared("frozen", False)
+        exchange(b, a)
+        with a.active():
+            prompt = interactions.create_interaction("frozen", "permission", {"request_id": str(index)}, 300)
+            # Signed fast delivery and revisionless replication share one local
+            # receipt, but different mirrored writes get distinct receipts even
+            # when their updated_at is identical.
+            assert await dismiss_owner_waits("frozen", expected_revision=edit["_settled_membership"])
+            assert interactions.get_interaction(prompt["id"])["state"] == "answered"
+            fresh = interactions.create_interaction("frozen", "permission", {"request_id": "fresh"}, 300)
+            assert not await dismiss_owner_waits("frozen")
+            assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+            interactions.cancel_interaction(fresh["id"])
+
+
 @pytest.mark.parametrize("final_active", [False, True])
 async def test_offline_repeated_edits_survive_restart_and_reconnect(workers, monkeypatch, final_active):
     a, b = workers("gaming"), workers("unraid")

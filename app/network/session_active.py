@@ -27,6 +27,10 @@ def project(cursor, record: dict) -> None:
     There is deliberately no FK: a membership envelope can precede the session
     catalog on a third worker. prepare_session_mirror applies it on insertion.
     """
+    # Local-only fencing counter: advance for every accepted local or mirrored
+    # membership write, even with a frozen clock or while publication is held.
+    cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1 WHERE session_id=%s",
+                   (record["session_id"],))
     cursor.execute("UPDATE sessions SET is_active=%s WHERE id=%s",
                    (record["is_active"], record["session_id"]))
 
@@ -63,8 +67,8 @@ def write_shared(session_id: str, active: bool) -> Optional[dict]:
         cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
         row = dict(cur.fetchone())
         row["_settled_membership"] = membership_envelope
-        cur.execute("SELECT updated_at FROM network_session_active WHERE session_id=%s", (session_id,))
-        row["_settled_revision"] = {"membership_updated_at": cur.fetchone()["updated_at"]}
+        cur.execute("SELECT local_revision FROM network_session_active WHERE session_id=%s", (session_id,))
+        row["_settled_revision"] = {"membership_revision": cur.fetchone()["local_revision"]}
     engine.kick()
     return row
 
@@ -91,8 +95,8 @@ def write_shared_many(session_ids: list[str], active: bool) -> list[dict]:
             membership_envelope = _record_active(cur, session_id, active)
             cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
             row = {**dict(cur.fetchone()), "_settled_membership": membership_envelope}
-            cur.execute("SELECT updated_at FROM network_session_active WHERE session_id=%s", (session_id,))
-            row["_settled_revision"] = {"membership_updated_at": cur.fetchone()["updated_at"]}
+            cur.execute("SELECT local_revision FROM network_session_active WHERE session_id=%s", (session_id,))
+            row["_settled_revision"] = {"membership_revision": cur.fetchone()["local_revision"]}
             rows.append(row)
     engine.kick()
     return rows
@@ -182,8 +186,8 @@ def _write(session_id: str, active: bool, *, archived: Optional[bool] = None,
                     (active, datetime.now(timezone.utc).isoformat(), *status_params, session_id))
         row = dict(cur.fetchone())
         envelope = engine.record(cur, "sessions", session_id, row, force=True)
-        cur.execute("SELECT updated_at FROM network_session_active WHERE session_id=%s", (session_id,))
-        row["_settled_revision"] = {"membership_updated_at": cur.fetchone()["updated_at"]}
+        cur.execute("SELECT local_revision FROM network_session_active WHERE session_id=%s", (session_id,))
+        row["_settled_revision"] = {"membership_revision": cur.fetchone()["local_revision"]}
         if envelope is None and not local:
             # Do not commit a remote edit that cannot be published yet.
             raise PermissionError(

@@ -35,11 +35,11 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         if not row or row.get("is_active") or row.get("status") == "archived" or control.owner_of(dict(row)):
             return None
         revision = store.get_record(cur, "session_active", session_id)
-        cur.execute("SELECT updated_at, local_pending FROM network_session_active WHERE session_id=%s", (session_id,))
+        cur.execute("SELECT local_revision, local_pending FROM network_session_active WHERE session_id=%s", (session_id,))
         membership = cur.fetchone()
         if expected_revision is not None:
-            if "membership_updated_at" in expected_revision:
-                if not membership or membership["updated_at"] != expected_revision["membership_updated_at"]:
+            if "membership_revision" in expected_revision:
+                if not membership or membership["local_revision"] != expected_revision["membership_revision"]:
                     return None
             elif "session_updated_at" in expected_revision:
                 if row["updated_at"] != expected_revision["session_updated_at"]:
@@ -64,7 +64,7 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         # Fast delivery and replication can race on the SAME revision. A
         # committed receipt prevents their second snapshot sweeping later waits.
         token = str(expected_revision["session_updated_at"] if expected_revision and "session_updated_at" in expected_revision
-                    else membership["updated_at"] if membership else row["updated_at"])
+                    else "membership:" + str(membership["local_revision"]) if membership else row["updated_at"])
         receipt = "settled-" + hashlib.sha256((session_id + "\0" + token).encode()).hexdigest()
         cur.execute("SELECT id FROM session_events WHERE id=%s", (receipt,))
         if cur.fetchone():
