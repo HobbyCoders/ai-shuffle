@@ -217,8 +217,8 @@ async def test_deferred_catalog_omits_filtered_tools() -> None:
     await loop.wait_turn()
 
     announced = _turn_texts(provider.requests[0])
-    assert "mcp__browser__click" in announced
-    assert "mcp__secrets__read_vault" not in announced
+    assert "+ mcp__browser__: click" in announced
+    assert "mcp__secrets__" not in announced and "read_vault" not in announced
     await loop.aclose()
 
 

@@ -33,16 +33,11 @@ from app.core.provider.types import SessionOptions
 SID = "11111111-1111-1111-1111-111111111111"
 CLI_PREFIX = "mcp__fluid_bundled__"
 # The loaded tier, priced with the app's estimator (chars/4) over the CLI's
-# view of each tool. The CLI's tokenizer counted the tier at ~1.33x that
-# (7.6k for ~5.8k here, an earlier cut of the tier). The first cut's budget
-# (8,500, ~11.3k CLI tokens) plus the 1,819 the peer-session, hand-off and
-# usage tools cost (ListSessions, MessageSession, StartSession, HandOffSession,
-# GetUsage). The tier itself measures ~8.9k here; the CLI counted 12.1k.
-LOADED_BUDGET = 10_319
-# Named in the private-access guidance but only usable after a grant, which
-# the loaded RequestChatAccess and ChatResources lead to; the CLI announces
-# them in its deferred list and ToolSearch loads them then.
-DEFERRED_AFTER_GRANT = {"ChatHttpRequest", "ChatRunCommand"}
+# view of each tool. The CLI's tokenizer counts the tier at ~1.33x that. The
+# 23-tool tier measured ~8.9k here (the CLI counted 12.1k); the core-only
+# tier (Task, Monitor) measures ~2.55k here (Oct 2026), budgeted with a
+# small margin for roster text that varies by install.
+LOADED_BUDGET = 2_800
 
 
 @pytest.fixture(autouse=True)
@@ -143,7 +138,7 @@ async def test_loaded_tier_stays_under_budget(tmp_path):
     )
     # The deferred tier carries most of the bridge: a regression that loads it
     # all again fails the budget above long before this.
-    assert everything > 2 * loaded_tokens, (loaded_tokens, everything)
+    assert everything > 5 * loaded_tokens, (loaded_tokens, everything)
 
 
 @pytest.mark.asyncio
@@ -177,21 +172,24 @@ async def test_rarely_used_tools_are_deferred(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tools_the_prompt_names_are_loaded(tmp_path):
+async def test_tools_the_prompt_names_are_on_the_bridge(tmp_path):
     from app.mcp.chat_access_sdk import GUIDANCE
 
     _options, registry, tools = await _bridge(tmp_path)
     blocks = "\n".join(ha._delegated_guidance_blocks(_options, registry))
-    deferred = {t["name"].rsplit("__", 1)[-1] for t in tools if _is_deferred(t)}
+    listed = {t["name"].rsplit("__", 1)[-1] for t in tools}
+    loaded = {t["name"].rsplit("__", 1)[-1] for t in tools if not _is_deferred(t)}
     # The app-tools note calls each bridged tool by its ``__<name>`` suffix.
+    # Loaded or deferred, each is on the bridge: the CLI lists a deferred one
+    # by name and its ToolSearch loads the schema when the model asks.
     named = set(re.findall(r"__([A-Z]\w+)", blocks))
-    # Glob/Grep: the note sends the model to the bundled copies only when the
-    # CLI's own are missing; the CLI lists the deferred copies by name then.
     assert named - {"Glob", "Grep"}, blocks
-    assert not (named - {"Glob", "Grep"}) & deferred, blocks
-    # The private-access guidance's first steps.
+    assert named <= listed, named - listed
+    # The background-work routing the prompt leads with stays loaded.
+    assert {"Task", "Monitor"} <= loaded
+    # The private-access guidance's tools are all bridged.
     for name in set(re.findall(r"\b(RequestChatAccess|Chat[A-Z]\w+)\b", GUIDANCE)):
-        assert (name in deferred) == (name in DEFERRED_AFTER_GRANT), name
+        assert name in listed, name
 
 
 @pytest.mark.asyncio

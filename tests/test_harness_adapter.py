@@ -2909,17 +2909,17 @@ def test_deferred_tools_collapse_to_name_and_one_liner(agent_workspace):
     assert "- record_id (str, required): Id of the record to act on." not in after.text
     assert "Fields to write." not in after.text
 
-    # ...and are replaced by one catalog line each, under a header that says
-    # how to get the rest.
+    # ...and are replaced by their names, one line per server, under a header
+    # that says how to get the rest.
     assert "## Deferred tools" in after.text
     assert 'read_tool_docs("<name>")' in after.text
-    assert (
-        "- update_provider_0: update_provider_0: manage the record and return "
-        "it as JSON. [risk: safe]"
-    ) in after.text
-    for spec in deferred_specs:
-        leaf = spec.name.split("__")[-1]
-        assert f"- {leaf}: " in after.text
+    assert "manage the record" not in after.text
+    group = next(
+        line for line in after.text.splitlines() if line.startswith("- app-config: ")
+    )
+    assert group.split(": ", 1)[1].split(", ") == sorted(
+        spec.name.split("__")[-1] for spec in deferred_specs
+    )
 
     # Sections: one per fully documented tool, plus ONE collapsed section that
     # names no tool (so the breakdown prices it as prompt, not as loaded tools).
@@ -7899,10 +7899,11 @@ def test_skill_catalog_entry_says_how_it_is_reached_in_code_mode():
     read_entry = next(t for t in full if "## Read\n" in t)
     assert "Skill(name=" not in read_entry
     deferred = ha._code_mode_tool_sections(codemode, deferred=frozenset({"Skill"}))
-    one_liners = deferred[-1][0]
-    assert "- Skill:" in one_liners and "from tools.Skill import Skill" in one_liners
-    # The guidance comes from fluid's own description, not an app-side splice.
-    assert one_liners.count("from tools.Skill import Skill") == 1
+    index = deferred[-1][0]
+    # Deferred, it is a name under its group; the header says how every
+    # deferred tool is imported and where its docs come from.
+    assert "- core: Skill" in index
+    assert "`from tools.<name> import <name>`" in index and "read_tool_docs" in index
 
 
 def test_code_mode_skills_header_keeps_the_plugin_opt_in_note(tmp_path, monkeypatch):

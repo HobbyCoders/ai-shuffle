@@ -193,7 +193,7 @@ def test_resume_rehydrates_compaction_and_deferred_catalog(tmp_path) -> None:
         await engine.aclose()
 
     asyncio.run(first_run())
-    assert "mcp__m__touch" in first.requests[0].messages[0].text()
+    assert "+ mcp__m__: touch" in first.requests[0].messages[0].text()
 
     store2 = make_store(tmp_path)
     second = ScriptedProvider([_text("ok again")])
@@ -210,7 +210,7 @@ def test_resume_rehydrates_compaction_and_deferred_catalog(tmp_path) -> None:
     asyncio.run(resumed_run())
     # The catalog was already in the stored history, so it is not announced again.
     last_user = second.requests[0].messages[-1].text()
-    assert "mcp__m__touch" not in last_user
+    assert "+ mcp__m__: touch" not in last_user
 
 
 def test_resume_unknown_session_is_an_error(tmp_path, capsys) -> None:

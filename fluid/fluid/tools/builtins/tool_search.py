@@ -59,14 +59,20 @@ def _catalog_text(text: str) -> str:
 # so a resumed session can recognise its own past announcements.
 DEFERRED_CATALOG_HEADER = "The following deferred tools are available."
 # Full-tier lines are ``- name: desc``; names-only tier lines are bare
-# ``- name`` — the parser accepts both. Server-summary lines use ``* `` so
-# they are never mistaken for tool names.
+# ``- name``; grouped lines are ``+ <prefix>: leaf, leaf`` — the parser
+# accepts all three. Server-summary lines use ``* `` so they are never
+# mistaken for tool names.
 _CATALOG_NAME_RE = re.compile(r"^- ([^\s:]+?):?(?:\s|$)", re.MULTILINE)
+_CATALOG_GROUP_RE = re.compile(r"^\+ (\S+): (.*)$", re.MULTILINE)
+_CATALOG_LEAF_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# The grouped tier's label for names without an ``mcp__<server>__`` prefix.
+_NO_PREFIX = "(no-prefix)"
 
 # Catalog budget: the listing rides a user turn once per newly-known tool, so
 # an unbounded catalog from a large MCP server (thousands of tools) would eat
-# the window before work starts. Tiers degrade: full (name + one-liner) →
-# names only → one summary line per server.
+# the window before work starts. Tiers degrade: names grouped by server (or,
+# with ``with_descriptions``, name + one-liner first) → one summary line per
+# server.
 CATALOG_BUDGET_CHARS = 12_000
 
 _CATALOG_PREAMBLE = (
@@ -76,6 +82,7 @@ _CATALOG_PREAMBLE = (
     "available: never claim it is unavailable, and never substitute another "
     "route for it — load it instead."
 )
+_GROUPED_NOTE = "Grouped by prefix: a tool's full name is the prefix plus the listed name."
 
 
 def _server_of(name: str) -> str:
@@ -83,38 +90,63 @@ def _server_of(name: str) -> str:
     return parts[1] if len(parts) == 3 else "(local)"
 
 
+def _prefix_of(name: str) -> tuple[str, str]:
+    """``(prefix, leaf)``: ``mcp__srv__x`` -> ``("mcp__srv__", "x")``."""
+    parts = name.split("__", 2)
+    if len(parts) == 3 and parts[0] == "mcp" and parts[1] and parts[2]:
+        return f"mcp__{parts[1]}__", parts[2]
+    return "", name
+
+
+def _grouped(ordered: Sequence[ToolSpec]) -> str:
+    groups: dict[str, list[str]] = {}
+    for s in ordered:
+        prefix, leaf = _prefix_of(s.name)
+        groups.setdefault(prefix, []).append(leaf)
+    return "\n".join(
+        [_GROUPED_NOTE]
+        + [
+            f"+ {prefix or _NO_PREFIX}: {', '.join(leaves)}"
+            for prefix, leaves in sorted(groups.items())
+        ]
+    )
+
+
 def render_deferred_catalog(
-    specs: Sequence[ToolSpec], *, budget_chars: int = CATALOG_BUDGET_CHARS
+    specs: Sequence[ToolSpec], *, budget_chars: int = CATALOG_BUDGET_CHARS,
+    with_descriptions: bool = False,
 ) -> str | None:
     """System-reminder block announcing known-but-unloaded tools.
 
-    The deferred tier of progressive disclosure, budgeted: the full listing
-    (name + truncated one-line description) is used while it fits
-    ``budget_chars``; past that it degrades to bare names, and past *that* to
-    one line per server — so a pathological catalog can never eat the window.
+    The deferred tier of progressive disclosure, budgeted. By default the
+    names are listed grouped by server prefix (the model finds a tool by
+    purpose with ToolSearch keywords, which search the descriptions);
+    ``with_descriptions`` lists name + truncated one-line description instead
+    while it fits ``budget_chars``. Past the budget the listing degrades to
+    one line per server, so a pathological catalog can never eat the window.
     Returns ``None`` when there is nothing to announce.
     """
     if not specs:
         return None
     ordered = sorted(specs, key=lambda s: s.name)
-    # The block is a trusted system-reminder; a server's description is not.
-    # Defang the harness markers and keep each entry on its own line, so a
-    # description cannot close the block or forge an entry of its own.
-    full = "\n".join(
-        f"- {s.name}: {_catalog_text(_one_line(s.description))}" for s in ordered
-    )
+    full = None
+    if with_descriptions:
+        # The block is a trusted system-reminder; a server's description is
+        # not. Defang the harness markers and keep each entry on its own line,
+        # so a description cannot close the block or forge an entry of its own.
+        full = "\n".join(
+            f"- {s.name}: {_catalog_text(_one_line(s.description))}" for s in ordered
+        )
+    if full is None or len(full) > budget_chars:
+        full = _grouped(ordered)
     if len(full) > budget_chars:
-        names_only = "\n".join(f"- {s.name}" for s in ordered)
-        if len(names_only) <= budget_chars:
-            full = names_only
-        else:
-            by_server: dict[str, int] = {}
-            for s in ordered:
-                by_server[_server_of(s.name)] = by_server.get(_server_of(s.name), 0) + 1
-            full = "\n".join(
-                f"* {server}: {count} tools — find them with ToolSearch keywords"
-                for server, count in sorted(by_server.items())
-            )
+        by_server: dict[str, int] = {}
+        for s in ordered:
+            by_server[_server_of(s.name)] = by_server.get(_server_of(s.name), 0) + 1
+        full = "\n".join(
+            f"* {server}: {count} tools — find them with ToolSearch keywords"
+            for server, count in sorted(by_server.items())
+        )
     return (
         "<system-reminder>\n"
         + _CATALOG_PREAMBLE.format(header=DEFERRED_CATALOG_HEADER)
@@ -140,6 +172,12 @@ def parse_deferred_catalog(text: str) -> set[str]:
         end = text.find("</system-reminder>", found)
         block = text[found:] if end < 0 else text[found:end]
         names.update(_CATALOG_NAME_RE.findall(block))
+        for prefix, leaves in _CATALOG_GROUP_RE.findall(block):
+            prefix = "" if prefix == _NO_PREFIX else prefix.rstrip(":")
+            names.update(
+                prefix + leaf for leaf in (x.strip() for x in leaves.split(","))
+                if _CATALOG_LEAF_RE.match(leaf)
+            )
         start = found + len(DEFERRED_CATALOG_HEADER) if end < 0 else end
 
 SPEC = ToolSpec(

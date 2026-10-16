@@ -188,7 +188,10 @@ async def test_registry_exposure_tracks_transport_not_model_name(kind, mode, exp
     adapter = HarnessAdapter()
     adapter._provider_kind = kind
     registry = await adapter._build_registry(SessionOptions(model="unrelated-model-name", extra={"session_mode": mode}), native=True)
-    assert (SPEC.name in {s.name for s in registry.list_tools()}) is exposed
+    # Registered (callable, announced in the deferred tier) on the Responses
+    # transport only; outside the turn-by-turn core it is not eagerly loaded.
+    assert (SPEC.name in {s.name for s in registry.list_tools(loaded_only=False)}) is exposed
+    assert SPEC.name not in {s.name for s in registry.list_tools()}
 
 
 async def test_full_native_loop_calls_image_provider_and_records_its_usage_once(tmp_path):
