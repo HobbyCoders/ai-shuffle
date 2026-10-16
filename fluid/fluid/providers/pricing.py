@@ -24,6 +24,14 @@ This module is the seam under all of them:
   and its rates are used verbatim.
 * **Nothing here raises.** Every entry point swallows its own errors and
   returns ``None``. A missing price is an accounting gap, never a failed turn.
+* **An unpriced family match is logged.** An id that only matches a
+  family-wide unpriced row (``gpt-6.2-sol`` under ``gpt-6``) logs one warning
+  per id, so a new model in a known family is not silently recorded as free.
+* **Subscriptions are priced too.** A call on a ChatGPT/Codex (or other
+  subscription) login gets the same API-price estimate as an API-key call;
+  the host marks the row ``billing = "subscription"`` and shows the figure as
+  what the usage would cost at API prices, not as money spent (see the app's
+  ``usage_attribution``). A subscription call is never priced at 0 here.
 
 Rates are USD per 1,000,000 tokens.
 """
@@ -160,6 +168,9 @@ _XAI = "docs.x.ai/docs/models, 2026-09-04; short-context tier (<200k prompt)"
 _ZAI = "docs.z.ai/guides/overview/pricing, 2026-09-04"
 # The gpt-6 rows (astra, sol, luna) as the pricing page read on this date.
 _OPENAI_6_LUNA = "developers.openai.com/api/docs/pricing, 2026-09-23; short-context tier"
+# gpt-6.1-sol, the only gpt-6.1 id the page lists (Standard table, short
+# context, <=272K input). gpt-6.1-terra and gpt-6.1-astra are not listed.
+_OPENAI_6_1 = "developers.openai.com/api/docs/pricing, 2026-10-16; Standard, short-context tier"
 
 PRICES: list[tuple[str, ModelPrice]] = [
     # ── xAI, reached through the openai_responses dialect ────────────────
@@ -210,6 +221,16 @@ PRICES: list[tuple[str, ModelPrice]] = [
             source=_OPENAI_6_LUNA,
         ),
     ),
+    # Without this row gpt-6.1-sol fell through to the unpriced "gpt-6" row
+    # below and every call recorded no cost (#106). Its cached-input rate is
+    # half of gpt-6-sol's.
+    (
+        "gpt-6.1-sol",
+        ModelPrice(
+            input=2.00, cached_input=0.10, cache_write=2.50, output=10.00,
+            source=_OPENAI_6_1,
+        ),
+    ),
     # Without this row luna would fall through to the unpriced "gpt-6" row
     # below and record no cost.
     (
@@ -226,11 +247,37 @@ PRICES: list[tuple[str, ModelPrice]] = [
 ]
 
 
-def _table_price(normalized: str) -> ModelPrice | None:
+def _table_row(normalized: str) -> tuple[str, ModelPrice] | None:
     for prefix, price in PRICES:
         if normalized.startswith(prefix):
-            return price
+            return prefix, price
     return None
+
+
+def _table_price(normalized: str) -> ModelPrice | None:
+    row = _table_row(normalized)
+    return row[1] if row else None
+
+
+# Ids already warned about, so a busy session logs one line per model, not one
+# per call. Bounded: past the cap nothing more is recorded or warned.
+_WARNED_UNPRICED: set[str] = set()
+_WARNED_UNPRICED_MAX = 256
+
+
+def _warn_unpriced_family(normalized: str) -> None:
+    row = _table_row(normalized)
+    if row is None or row[1].priced or normalized in _WARNED_UNPRICED:
+        return
+    if len(_WARNED_UNPRICED) >= _WARNED_UNPRICED_MAX:
+        return
+    _WARNED_UNPRICED.add(normalized)
+    log.warning(
+        "No sourced price for model %r: it only matches the unpriced %r family row "
+        "(%s), so its calls record no cost. Add a row to fluid/providers/pricing.py "
+        "or supply the rate from the host catalog.",
+        normalized, row[0], row[1].source,
+    )
 
 
 def resolve_price(
@@ -314,7 +361,11 @@ def estimate_cost(
             cost = _cost_from_price(price, usage)
             if cost is not None:
                 return cost
-        return _delegated_cost(normalize_model_id(model), usage)
+        normalized = normalize_model_id(model)
+        cost = _delegated_cost(normalized, usage)
+        if cost is None:
+            _warn_unpriced_family(normalized)
+        return cost
     except Exception:  # noqa: BLE001 — accounting never fails a turn
         log.debug("cost estimate failed for %s", model, exc_info=True)
         return None
