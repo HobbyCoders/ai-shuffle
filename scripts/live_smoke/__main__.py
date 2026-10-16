@@ -1,9 +1,11 @@
 """Command line for the live smoke. See docs/internal/live-smoke.md.
 
     python -m scripts.live_smoke run                 # drive the script rows on this worker
+    python -m scripts.live_smoke run --preview --url http://127.0.0.1:18080   # an isolated preview instance
     python -m scripts.live_smoke record REV --worker NAME --row ID --status pass --evidence "..."
     python -m scripts.live_smoke import FILE         # bring another worker's result file here
     python -m scripts.live_smoke check REV --worker A --worker B [--skip-smoke REASON]
+                                                    [--skip-smoke-rows two_worker REASON]
     python -m scripts.live_smoke render [--check]    # regenerate scenarios.md from scenarios.json
 
 Nothing here runs on a schedule; it starts only when someone runs it.
@@ -35,7 +37,7 @@ def cmd_run(args) -> int:
         client, data, results_base=results_mod.smoke_dir(args.results_dir), model=args.model,
         token_cap=args.token_cap, peer=args.peer, project=args.project, agent=args.agent,
         only=[r.strip() for r in args.rows.split(",") if r.strip()] if args.rows else None,
-        log=lambda m: print(m, flush=True),
+        log=lambda m: print(m, flush=True), preview=args.preview,
     )
     signal.signal(signal.SIGTERM, _interrupt)
     try:
@@ -87,7 +89,7 @@ def cmd_import(args) -> int:
 def cmd_check(args) -> int:
     data = scen.load(args.scenarios)
     report = gate.evaluate(results_mod.smoke_dir(args.results_dir), args.revision, args.worker,
-                           scen.rows(data), skip_reason=args.skip_smoke)
+                           scen.rows(data), skip_reason=args.skip_smoke, skip_rows=args.skip_smoke_rows)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
@@ -132,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--project", help="project name or id for rows that need one (default from scenarios)")
     run.add_argument("--agent", help="agent (profile) id for every session and message (default: the account's "
                      "default agent, the one the web UI composer starts new chats with)")
+    run.add_argument("--preview", action="store_true",
+                     help="the target is an isolated AI_SHUFFLE_PREVIEW=1 instance of this clean checkout "
+                          "(use --url for its port); the result is written as <label>-preview, marked as a preview run")
     run.set_defaults(fn=cmd_run)
 
     rec = sub.add_parser("record", help="record a browser or owner row result")
@@ -154,6 +159,9 @@ def build_parser() -> argparse.ArgumentParser:
     chk.add_argument("revision")
     chk.add_argument("--worker", action="append", help="worker the release covers (repeat); default: every file present")
     chk.add_argument("--skip-smoke", metavar="REASON", help="override the gate; the reason goes into the release notes")
+    chk.add_argument("--skip-smoke-rows", nargs=2, action="append", metavar=("ROWS", "REASON"),
+                     help="rows that may stay not run: two_worker or comma-separated row ids; repeatable. "
+                          "Failed rows still block; the reason goes into the release notes")
     chk.add_argument("--json", action="store_true")
     chk.set_defaults(fn=cmd_check)
 

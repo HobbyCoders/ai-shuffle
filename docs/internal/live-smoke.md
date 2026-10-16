@@ -65,6 +65,57 @@ never waits on it, and a run with such rows is "incomplete", never a pass.
 Every wait has a deadline (`within_s`), so a stuck session fails its row
 instead of hanging the run.
 
+Those rows block the gate unless the owner excuses them by name with
+`--skip-smoke-rows two_worker "<reason>"` (see "The release gate").
+
+## Smoke the candidate without restarting a real worker
+
+The gate needs a result for the candidate revision, but the owner's worker
+does not have to run it. Run the same rows against an **isolated preview
+instance** of a clean checkout at the candidate commit instead:
+
+1. In a separate checkout (or worktree) of the candidate, clean, at the
+   commit you will tag: build the UI and stamp it.
+
+   ```bash
+   (cd frontend && npm ci && npm run build)
+   python -m app.preview stamp
+   ```
+
+2. Start the app from that checkout as an isolated instance: its own data
+   folder and managed PostgreSQL (never the running worker's data dir), on a
+   port other than 8000/8001, with
+
+   ```bash
+   AI_SHUFFLE_PREVIEW=1 SHUFFLE_SOURCE_REVISION="$(git rev-parse HEAD)"
+   ```
+
+   in its environment. The instance needs an agent with a working provider
+   and, for rows with `needs_project`, the project registered. It must
+   answer passwordless loopback requests: a worker started by the desktop
+   app requires the desktop's listener token, which the runner does not
+   have, so start the instance under a supervisor that does not set one.
+   Never copy a `.env` into the checkout.
+
+3. From that same checkout:
+
+   ```bash
+   python -m scripts.live_smoke run --preview --url http://127.0.0.1:<port>
+   ```
+
+`--preview` refuses to start unless `GET /api/preview` answers with a stamp
+from **this** checkout (the same worktree), at the revision the instance
+reports in deploy-status, with no tracked file changed. It checks the
+checkout again at the end. The rows then run exactly as on a real worker:
+real sessions through the same HTTP and WebSocket API, the real provider,
+the same checks, cap and cleanup. The result is written as
+`<smoke dir>/<revision>/<label>-preview.json` (never a real worker's file)
+with a `preview` block (commit, branch, build hash, `verified_at_end`).
+
+An isolated instance has no paired peer, so its two-worker rows are not run;
+excuse them explicitly (see "The release gate") or also run the rows on two
+real workers.
+
 ## Result file
 
 One file per revision per worker:
@@ -102,7 +153,9 @@ on Windows). Format (`format: 1`):
 ```
 
 Browser and owner rows are written `not_run` with the reason "needs
-browser" or "owner step".
+browser" or "owner step". A `--preview` run adds
+`"preview": {"commit", "branch", "build_sha256", "worktree_id", "verified_at_end"}`
+and names the file and `worker` `<label>-preview`.
 
 ## Adding browser and owner results afterwards
 
@@ -130,6 +183,23 @@ revision, a file for another revision, an interrupted or over-cap run, a
 failed row, a scenario row missing from the file, a script row not run, or
 a browser row not recorded (rows marked `optional` excepted). Owner rows
 never block; they are listed as owner to-dos.
+
+A preview result (`<label>-preview`) counts like a worker's file. It also
+blocks when its stamp is for another commit or the checkout changed during
+the run, and the release notes name it as an isolated preview instance of
+the candidate:
+
+```bash
+python scripts/ci/ship_release_status.py --smoke-worker ServerWorker-preview \
+  --skip-smoke-rows two_worker "isolated preview instance; no second worker"
+```
+
+`--skip-smoke-rows ROWS "<reason>"` (repeatable, on `ship_release_status.py`
+and `live_smoke check`) excuses rows that were **not run**: `ROWS` is
+`two_worker` (every row that needs the other worker) or comma-separated row
+ids. A matching row that ran and failed, or is missing from the file, still
+blocks; an unknown row id or an empty reason blocks. Each excuse adds a
+release-notes line naming the rows, the workers and the reason.
 
 `--skip-smoke "<reason>"` overrides the gate. The report then says
 `verdict: skipped`, keeps the blockers it overrode under `would_block`, and

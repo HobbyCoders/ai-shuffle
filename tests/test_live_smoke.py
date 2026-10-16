@@ -901,3 +901,166 @@ def test_new_harness_steps_validate_required_inputs(step):
     row["steps"].append(step)
     with pytest.raises(scenarios.ScenarioError):
         scenarios.validate(_data(row))
+
+
+# -- preview runs and the row-skip policy --------------------------------------
+
+PEER_ROW = {"id": "t.2", "check": "peer", "kind": "script", "two_worker": True,
+            "steps": [{"op": "start", "as": "a", "on": "peer", "prompt": "reply OK", "expect_reply": "^OK$"}]}
+WORKTREE = "f" * 64
+
+
+class PreviewWorker(FakeWorker):
+    """An isolated AI_SHUFFLE_PREVIEW=1 instance: no paired peer, a preview stamp."""
+
+    def __init__(self, identity=None, **kw):
+        super().__init__(peer=False, **kw)
+        self.identity = identity if identity is not None else {
+            "branch": "main", "commit": REV, "worktree_id": WORKTREE, "source_sha256": "1" * 64,
+            "build_sha256": "2" * 64}
+
+    def preview_identity(self):
+        if isinstance(self.identity, Exception):
+            raise self.identity
+        return self.identity
+
+
+def _checkout(*states):
+    """A fake checkout_state: each call returns the next state (the last one repeats)."""
+    states = list(states) or [{}]
+    def state():
+        current = states.pop(0) if len(states) > 1 else states[0]
+        return {"head": REV, "clean": True, "worktree_id": WORKTREE, **current}
+    return state
+
+
+def test_preview_run_is_written_as_a_marked_preview_result(tmp_path):
+    worker = PreviewWorker()
+    result, path = _run(worker, _data(_script("t.1"), PEER_ROW), tmp_path, preview=True, checkout=_checkout())
+    assert path == tmp_path / REV / "ServerWorker-preview.json"  # never a real worker's file
+    assert result["worker"] == "ServerWorker-preview"
+    assert result["preview"] == {"commit": REV, "branch": "main", "build_sha256": "2" * 64,
+                                 "worktree_id": WORKTREE, "verified_at_end": True}
+    rows = {r["id"]: r for r in result["rows"]}
+    # The real code path ran: a session was started and checked through the API.
+    assert rows["t.1"]["status"] == "pass" and worker.sent and worker.archived == ["s1"]
+    assert rows["t.2"]["status"] == "not_run" and "no other worker is paired" in rows["t.2"]["reason"]
+    assert result["outcome"] == "incomplete"
+
+    rows_for_gate = [_script("t.1"), PEER_ROW]
+    blocked = gate.evaluate(tmp_path, REV, None, rows_for_gate)
+    assert blocked["verdict"] == "block"
+    report = gate.evaluate(tmp_path, REV, None, rows_for_gate,
+                           skip_rows=[("two_worker", "isolated preview instance has no peer")])
+    assert report["verdict"] == "pass", report["blockers"]
+    assert report["workers"][0]["preview"] is True
+    assert report["release_notes_lines"] == [
+        f"Live smoke passed on ServerWorker-preview (isolated preview instance of the candidate) at {REV[:9]}.",
+        "Live smoke rows not run (--skip-smoke-rows two_worker): t.2 on ServerWorker-preview. "
+        "Reason: isolated preview instance has no peer",
+    ]
+
+
+@pytest.mark.parametrize("identity, checkout, message", [
+    (ClientError("GET /api/preview: HTTP 404 (not a preview instance)"), {}, "AI_SHUFFLE_PREVIEW=1 instance"),
+    (None, {"worktree_id": "e" * 64}, "runs from another checkout"),
+    (None, {"clean": False}, "must be clean"),
+    (None, {"head": "c" * 40}, "must be clean"),
+    ({"commit": "c" * 40, "worktree_id": WORKTREE}, {}, "SHUFFLE_SOURCE_REVISION"),
+])
+def test_preview_run_refuses_an_instance_it_cannot_prove(tmp_path, identity, checkout, message):
+    worker = PreviewWorker(identity=identity)
+    with pytest.raises(SetupError, match=message):
+        _run(worker, _data(_script("t.1")), tmp_path, preview=True, checkout=_checkout(checkout))
+    assert worker.sent == []  # nothing ran, nothing was written
+    assert not (tmp_path / REV).exists()
+
+
+def test_preview_checkout_changed_during_the_run_blocks_the_gate(tmp_path):
+    worker = PreviewWorker()
+    result, _ = _run(worker, _data(_script("t.1")), tmp_path, preview=True,
+                     checkout=_checkout({}, {"clean": False}))
+    assert result["preview"]["verified_at_end"] is False
+    report = gate.evaluate(tmp_path, REV, None, [_script("t.1")])
+    assert report["blockers"] == ["ServerWorker-preview's preview checkout changed during the run"]
+
+
+def test_preview_stamp_for_another_commit_blocks(tmp_path):
+    worker = PreviewWorker()
+    _, path = _run(worker, _data(_script("t.1")), tmp_path, preview=True, checkout=_checkout())
+    data = json.loads(path.read_text())
+    data["preview"]["commit"] = "c" * 40
+    results.write(path, data)
+    assert gate.evaluate(tmp_path, REV, None, [_script("t.1")])["blockers"] == [
+        f"ServerWorker-preview's preview instance was stamped at {'c' * 9}, not {REV[:9]}"]
+
+
+def test_skip_rows_excuses_only_rows_that_were_not_run(tmp_path):
+    worker = FakeWorker(answer=lambda p: ("NOPE", []))
+    _run(worker, _data(PEER_ROW), tmp_path)  # the peer row ran and failed
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], [PEER_ROW], skip_rows=[("two_worker", "peer away")])
+    assert report["verdict"] == "block" and "t.2 failed" in report["blockers"][0]
+
+
+def test_skip_rows_with_a_peer_offline_and_by_row_id(tmp_path):
+    rows = [_script("t.1"), PEER_ROW]
+    _run(FakeWorker(peer_online=False), _data(*rows), tmp_path)
+    assert gate.evaluate(tmp_path, REV, ["ServerWorker"], rows)["verdict"] == "block"
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], rows, skip_rows=[("t.2", "DesktopWorker offline")])
+    assert report["verdict"] == "pass"
+    assert report["skipped_rows"] == [{"worker": "ServerWorker", "row": "t.2", "selector": "t.2",
+                                       "reason": "DesktopWorker offline",
+                                       "why_not_run": "worker offline: DesktopWorker"}]
+    assert report["release_notes_lines"][-1] == (
+        "Live smoke rows not run (--skip-smoke-rows t.2): t.2 on ServerWorker. Reason: DesktopWorker offline")
+
+
+@pytest.mark.parametrize("skip, expect", [
+    (("t.9", "typo"), "unknown rows: t.9"),
+    (("two_worker", "  "), "needs a reason"),
+])
+def test_skip_rows_policy_errors_block(tmp_path, skip, expect):
+    rows = [_script("t.1"), PEER_ROW]
+    _run(FakeWorker(peer_online=False), _data(*rows), tmp_path)
+    report = gate.evaluate(tmp_path, REV, ["ServerWorker"], rows, skip_rows=[skip])
+    assert report["verdict"] == "block" and any(expect in b for b in report["blockers"])
+
+
+def test_check_cli_takes_skip_smoke_rows(tmp_path, capsys):
+    scen_file = tmp_path / "scenarios.json"
+    scen_file.write_text(json.dumps(_data(_script("t.1"), PEER_ROW)))
+    _run(FakeWorker(peer_online=False), _data(_script("t.1"), PEER_ROW), tmp_path / "smoke")
+    base = ["--scenarios", str(scen_file), "--results-dir", str(tmp_path / "smoke")]
+    assert cli.main(["check", REV, *base]) == 1
+    assert cli.main(["check", REV, *base, "--skip-smoke-rows", "two_worker", "DesktopWorker away"]) == 0
+    assert "--skip-smoke-rows two_worker" in capsys.readouterr().out
+
+
+def test_client_reads_the_preview_identity():
+    def handler(request):
+        if request.url.path == "/api/preview" and request.url.port == 18080:
+            return httpx.Response(200, json={"commit": REV})
+        return httpx.Response(404)
+    client = HttpWorkerClient("http://127.0.0.1:18080", transport=httpx.MockTransport(handler))
+    assert client.preview_identity() == {"commit": REV}
+    normal = HttpWorkerClient("http://127.0.0.1:8000", transport=httpx.MockTransport(handler))
+    with pytest.raises(ClientError, match="not a preview instance"):
+        normal.preview_identity()
+
+
+def test_checkout_state_matches_the_preview_stamp_identity(tmp_path):
+    import subprocess
+
+    from app import preview
+    from scripts.live_smoke.runner import checkout_state
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "c")
+    state = checkout_state(tmp_path)
+    identity = preview._source_identity(tmp_path)
+    assert state == {"head": identity["commit"], "clean": True, "worktree_id": identity["worktree_id"]}
+    (tmp_path / "tracked.txt").write_text("x")
+    git("add", "tracked.txt")
+    assert checkout_state(tmp_path)["clean"] is False

@@ -73,6 +73,27 @@ class HttpWorkerClient:
             raise ClientError(f"{method} {path}: HTTP {resp.status_code} {detail}")
         return resp.json() if resp.content else {}
 
+    def preview_identity(self) -> dict:
+        """The stamped checkout an AI_SHUFFLE_PREVIEW=1 instance serves (app/preview.py).
+
+        Outside ``/api/v1``; a normal worker answers 404.
+        """
+        try:
+            resp = self._http.get("/api/preview")
+        except httpx.TransportError as exc:
+            raise Unreachable(f"{self.base_url} unreachable: {type(exc).__name__}") from None
+        if resp.status_code in (401, 403):
+            raise AuthRefused(f"GET /api/preview: HTTP {resp.status_code}; {AUTH_HINT}")
+        if resp.status_code != 200:
+            raise ClientError(f"GET /api/preview: HTTP {resp.status_code} (not a preview instance)")
+        try:
+            data = resp.json()
+        except ValueError:
+            raise ClientError("GET /api/preview: not JSON (not a preview instance)") from None
+        if not isinstance(data, dict):
+            raise ClientError("GET /api/preview: unexpected answer")
+        return data
+
     def deploy_status(self) -> dict:
         # Mounted under the settings router (app/api/settings.py, prefix /api/v1/settings).
         return self._req("GET", "/settings/application-updates/deploy-status")

@@ -300,3 +300,34 @@ def test_linux_suite_cannot_be_skipped(tmp_path, monkeypatch):
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="x")
     assert not report["ready"]
     assert report["blockers"][0].startswith("local/full-suite")
+
+
+def test_skip_smoke_rows_excuses_not_run_rows_into_the_release_notes(tmp_path, monkeypatch):
+    rows = SMOKE_ROWS + [{"id": "x.4", "check": "peer", "kind": "script", "two_worker": True}]
+    _smoke_file(tmp_path, "ServerWorker-preview")
+    path = tmp_path / CANDIDATE / "ServerWorker-preview.json"
+    data = json.loads(path.read_text())
+    data["rows"].append({"id": "x.4", "kind": "script", "status": "not_run", "reason": "worker offline"})
+    data["preview"] = {"commit": CANDIDATE, "verified_at_end": True}
+    path.write_text(json.dumps(data))
+    blocked = srs.smoke_gate(CANDIDATE, None, None, str(tmp_path), scenario_rows=rows)
+    assert blocked["verdict"] == "block"
+    report = srs.smoke_gate(CANDIDATE, None, None, str(tmp_path), scenario_rows=rows,
+                            skip_rows=[["two_worker", "no second worker for the preview"]])
+    assert report["verdict"] == "pass"
+    assert report["release_notes_lines"] == [
+        "Live smoke passed on ServerWorker-preview (isolated preview instance of the candidate) at 123456789.",
+        "Live smoke rows not run (--skip-smoke-rows two_worker): x.4 on ServerWorker-preview. "
+        "Reason: no second worker for the preview"]
+
+
+def test_main_passes_skip_smoke_rows_through(monkeypatch, capsys):
+    seen = {}
+
+    def fake_collect(*args):
+        seen["args"] = args
+        return {"ready": True}
+    monkeypatch.setattr(srs, "collect", fake_collect)
+    monkeypatch.setattr(srs, "render", lambda report: "ok")
+    assert srs.main(["--skip-smoke-rows", "two_worker", "peer away", "--skip-smoke-rows", "x.2", "browser"]) == 0
+    assert seen["args"][-1] == [["two_worker", "peer away"], ["x.2", "browser"]]

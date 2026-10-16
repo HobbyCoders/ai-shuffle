@@ -17,6 +17,7 @@ Usage::
     python scripts/ci/ship_release_status.py --json     # machine-readable
     python scripts/ci/ship_release_status.py --smoke-worker ServerWorker --smoke-worker DesktopWorker
     python scripts/ci/ship_release_status.py --skip-smoke "DesktopWorker away this week"
+    python scripts/ci/ship_release_status.py --skip-smoke-rows two_worker "DesktopWorker away; preview run only"
     python scripts/ci/ship_release_status.py --skip-windows "DesktopWorker away; no Windows changes"
 """
 from __future__ import annotations
@@ -182,7 +183,8 @@ def _variable(name: str, env: Optional[str] = None) -> Optional[str]:
 
 
 def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optional[str] = None,
-               smoke_dir: Optional[str] = None, scenario_rows: Optional[list] = None) -> dict:
+               smoke_dir: Optional[str] = None, scenario_rows: Optional[list] = None,
+               skip_rows: Optional[list] = None) -> dict:
     """Live smoke verdict for the candidate (``pass``, ``block`` or ``skipped``).
 
     ``workers`` are the covered workers; when omitted, every worker with a
@@ -191,11 +193,13 @@ def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optio
     base = smoke_results.smoke_dir(smoke_dir)
     if scenario_rows is None:
         scenario_rows = smoke_scenarios.rows(smoke_scenarios.load())
-    return smoke_gate_mod.evaluate(base, revision, workers, scenario_rows, skip_reason=skip_reason)
+    return smoke_gate_mod.evaluate(base, revision, workers, scenario_rows, skip_reason=skip_reason,
+                                   skip_rows=skip_rows)
 
 
 def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = None,
-            smoke_dir: Optional[str] = None, skip_windows: Optional[str] = None) -> dict:
+            smoke_dir: Optional[str] = None, skip_windows: Optional[str] = None,
+            skip_smoke_rows: Optional[list] = None) -> dict:
     blockers = []
     try:
         ref = public_main_ref()
@@ -241,7 +245,7 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         where = "on DesktopWorker (Windows)" if context == WINDOWS_CONTEXT else "on a Linux worker"
         blockers.append(f"{context} on {head[:9]} is {local[context]}: run "
                         f"`python scripts/local_ci.py full --attest` {where} on a clean checkout of main.")
-    smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir)
+    smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir, skip_rows=skip_smoke_rows)
     blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
     return {
         "repository": REPOSITORY,
@@ -297,12 +301,15 @@ def main(argv: Optional[list] = None) -> int:
                              "every worker with a file for the candidate)")
     parser.add_argument("--skip-smoke", metavar="REASON", default=None,
                         help="tag without a passing live smoke; the reason goes into the release notes")
+    parser.add_argument("--skip-smoke-rows", nargs=2, action="append", metavar=("ROWS", "REASON"),
+                        help="smoke rows that may stay not run (two_worker, or comma-separated row ids); "
+                             "failed rows still block and the reason goes into the release notes")
     parser.add_argument("--skip-windows", metavar="REASON", default=None,
                         help="tag without a Windows full-suite pass; the reason goes into the release notes")
     parser.add_argument("--smoke-dir", default=None,
                         help="smoke results folder (default $AI_SHUFFLE_SMOKE_DIR or <data dir>/smoke)")
     args = parser.parse_args(argv)
-    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_windows)
+    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_windows, args.skip_smoke_rows)
     print(json.dumps(report, indent=2) if args.json else render(report))
     return 0
 
