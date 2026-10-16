@@ -906,7 +906,9 @@ async def scan_once() -> List[str]:
         session_id = cand.get("id")
         if not session_id:
             continue
-        usage = compact_continue._persisted_usage(session_id)
+        # A blocking DB read per candidate: keep it off the event loop, which
+        # stalled long enough under disk pressure to fail readiness (#2112).
+        usage = await asyncio.to_thread(compact_continue._persisted_usage, session_id)
         # No autocompaction → no compaction edge to nudge past: fluid's native
         # legs trim instead of autocompacting and always report False. Mirrors
         # the same guard in compact_continue.usage_over_threshold.

@@ -217,9 +217,10 @@ class _QueuedErrorLogHandler(logging.handlers.QueueHandler):
             from app.core.session_context import get_current_session_id
             prepared = copy.copy(record)
             prepared.msg, prepared.args = record.getMessage(), None
-            if record.exc_info:
-                prepared.stack_info = _formatter.formatException(record.exc_info)
-            prepared.exc_info = prepared.exc_text = None
+            # Keep exc_info: formatting a traceback stats every frame's source
+            # file (linecache.checkcache), which stalled the event loop under
+            # disk pressure (#2112). The listener thread formats it instead.
+            prepared.exc_text = None
             if getattr(prepared, "session_id", None) is None:
                 prepared.session_id = get_current_session_id()
             self.enqueue(prepared)

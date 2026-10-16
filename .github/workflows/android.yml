@@ -179,11 +179,18 @@ jobs:
             target: default
             cores: 2
             memory: 2048
+            advisory: false
+          # Report only: on hosted runners the API 36 guest failed three
+          # release runs in a row in emulator start-up, not in AI Shuffle, and
+          # blocked every release. It still runs and uploads its report; API 34
+          # stays the blocking device check. Internal tracking: #2375.
           - api: 36
             target: default
             cores: 4
             memory: 4096
+            advisory: true
     needs: build
+    continue-on-error: ${{ matrix.advisory }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     defaults:
