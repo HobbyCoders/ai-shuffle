@@ -58,6 +58,7 @@
 	import type { PageRect } from '$lib/browser-panel/coords';
 	import BrowserLiveView from './BrowserLiveView.svelte';
 	import BrowserWorkspaceToolbar from './BrowserWorkspaceToolbar.svelte';
+	import BrowserWorkspaceNotice from './BrowserWorkspaceNotice.svelte';
 	import {
 		ownsControl,
 		type BrowserWorkspaceState,
@@ -864,6 +865,7 @@
 		</header>
 
 		<div class="panel-body" bind:this={panelBodyEl}>
+			<BrowserWorkspaceNotice notice={workspace?.notice} />
 			{#if commandError}<div class="command-error" role="alert">{commandError}<button onclick={() => commandError = ''} aria-label="Dismiss browser error">×</button></div>{/if}
 			{#if hasFrame && framedSessionId === sessionId}
 				<!-- The canvas stays mounted across reconnects and target re-attaches:

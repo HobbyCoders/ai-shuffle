@@ -105,6 +105,7 @@ function staleSession(revalidates: boolean, calls: string[]): Session {
     disposeWatch: async () => {},
     settle: async () => ({ urlChanged: false, domMutated: "none" }),
     resolveRef: () => { throw new Error("no refs here"); },
+    checkCaptcha: async () => "none" as const,
   } as unknown as Session;
 }
 

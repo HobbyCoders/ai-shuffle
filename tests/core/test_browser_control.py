@@ -96,6 +96,17 @@ def test_native_edit_state_rejects_password_disclosure():
         control.validate_state(value, "runtime")
 
 
+def test_state_carries_a_plain_viewer_notice():
+    """A captcha the site withheld reaches the panel as a short notice (#2378)."""
+    value = state()
+    value["notice"] = "This step needs your own browser."
+    assert control.validate_state(value, "runtime") == value
+    for bad in (None, 3, "x" * 513):
+        value["notice"] = bad
+        with pytest.raises(control.ControlError, match="notice"):
+            control.validate_state(value, "runtime")
+
+
 @pytest.mark.asyncio
 async def test_no_redelivery_immediate_results_and_stale_revision(broker):
     received = []

@@ -12,6 +12,12 @@ const state = {
 	control: { owner: 'agent', viewer_id: null, pending_viewer_id: null },
 };
 describe('workspace wire validation', () => {
+	it('accepts a short plain notice and rejects anything else', () => {
+		expect(isBrowserWorkspaceState({ ...state, notice: 'This step needs your own browser.' })).toBe(true);
+		for (const notice of [3, null, 'x'.repeat(513)]) {
+			expect(isBrowserWorkspaceState({ ...state, notice })).toBe(false);
+		}
+	});
 	it('accepts agent resize dimensions without allowing them as panel defaults', () => {
 		for (const viewport of [
 			{ mode: 'fixed', width: 1, height: 4096 },

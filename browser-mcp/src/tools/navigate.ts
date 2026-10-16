@@ -7,6 +7,7 @@
 import type { Session } from "../session.js";
 import { runWait } from "./wait.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
+import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
 import {
   EGRESS_REFUSAL_HEADER,
   EGRESS_REFUSED_NET_ERRORS,
@@ -211,10 +212,13 @@ export async function runNavigate(
   const rewriteNote = rewroteTo
     ? `the browser cannot reach your shell's loopback, so this opened ${rewroteTo} instead — use that address for this server from now on`
     : undefined;
+  // A site can withhold its captcha widget from this browser (captcha.ts).
+  const captcha = (await session.checkCaptcha()) === "withheld";
   const notes = [
     ...(rewriteNote ? [rewriteNote] : []),
     ...(redirected ? [AUTH_WALL_NOTE] : []),
     ...(warning ? [warning] : []),
+    ...(captcha ? [CAPTCHA_AGENT_NOTE] : []),
   ];
   return jsonResult(
     {
@@ -227,6 +231,7 @@ export async function runNavigate(
       ...(rewroteTo ? { rewrote_loopback_to: rewroteTo, note: rewriteNote } : {}),
       ...(redirected ? { redirected_to_origin: landedOrigin } : {}),
       ...(warning ? { warning } : {}),
+      ...(captcha ? { captcha_unavailable: true, captcha_note: CAPTCHA_AGENT_NOTE } : {}),
     },
     notes.length ? `${snap.text}\n[warning] ${notes.join(" ")}`.trim() : snap.text,
   );

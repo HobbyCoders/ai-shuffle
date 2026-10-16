@@ -102,6 +102,7 @@ describe("browser_navigate loopback retry", () => {
       pageContent: async () => ({ title: "Dev server", textChars: 200 }),
       ssrfBlockReason: () => undefined,
       snapshot: async () => ({ text: "heading \"Dev\"", snapshot_id: 1, refs: ["e1"], truncated: false }),
+      checkCaptcha: async () => "none" as const,
     } as unknown as Session;
   }
 
