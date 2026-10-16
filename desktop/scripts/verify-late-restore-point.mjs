@@ -37,7 +37,7 @@ import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
 import { readLauncher } from './launcher-contract.mjs';
 
@@ -106,6 +106,20 @@ const floorFile = path.join(sourceRoot, 'database-floor.json'), markerFile = pat
 const exists = p => fs.stat(p).then(() => true, e => { if (e.code === 'ENOENT') return false; throw e; });
 const readJson = async p => { try { return JSON.parse(await fs.readFile(p, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+/**
+ * Run a helper program with a time limit, never blocking the event loop (a
+ * hung UI Automation call must not freeze every other timeout here).
+ */
+function run(file, argv, { timeout = 60000, env = process.env } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, argv, { env, timeout, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (!error) { resolve(stdout); return; }
+      if (error.killed) { reject(Object.assign(Error(`${path.basename(file)} did not finish within ${timeout / 1000} s`), { timedOut: true })); return; }
+      reject(Object.assign(error, { stdout, stderr }));
+    });
+  });
+}
+const powershell = (script, options) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], options);
 async function until(fn, message, timeout = 300000, every = 250) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const value = await fn(); if (value) return value; await sleep(every); }
@@ -117,19 +131,54 @@ assert(!await exists(path.join(process.env.USERPROFILE, '.ai-shuffle')), 'Fresh 
 await fs.mkdir(output, { recursive: true });
 const report = { success: false, steps: [] };
 let current = null;
-const step = name => { current = { name, checks: [], result: 'running' }; report.steps.push(current); console.log(`\n== ${name}`); };
-const pass = message => { current.checks.push(message); console.log('PASS: ' + message); };
+const step = name => { current = { name, checks: [], result: 'running' }; report.steps.push(current); console.log(`\n== ${name}`); void writeEvidence(); };
+const pass = message => { current.checks.push(message); console.log('PASS: ' + message); void writeEvidence(); };
 const note = message => { (current.notes ??= []).push(message); console.log('NOTE: ' + message); };
 // Safety checks (fence before PostgreSQL, no stale or second copy, no older code
 // after a failed start) stay fatal assertions. Everything else is recorded as a
 // failure and the run goes on, so one run shows every remaining problem.
-const fail = message => { (current.failures ??= []).push(message); console.log('FAIL: ' + message); };
+const fail = message => { (current.failures ??= []).push(message); console.log('FAIL: ' + message); void writeEvidence(); };
 const expect = (ok, message, failure = message) => { if (ok) pass(message); else fail(failure); return !!ok; };
 /** A wait that is not a safety check: on timeout record it and go on. */
 async function expectWithin(fn, message, failure, timeout) {
   try { await until(fn, failure, timeout); pass(message); return true; } catch (error) { fail(String(error?.message ?? error)); return false; }
 }
-const finish = () => { current.result = current.failures?.length ? 'fail' : 'pass'; };
+async function finish() { current.result = current.failures?.length ? 'fail' : 'pass'; await writeEvidence(true); }
+/**
+ * acceptance.json and summary.txt after every check, redacted logs after every
+ * step: a run that is killed still leaves what it found.
+ */
+let writing = Promise.resolve();
+function writeEvidence(logs = false) {
+  writing = writing.then(async () => {
+    if (logs) {
+      // Evidence is uploaded where others can read it: tails only, credentials redacted.
+      for (const [folder, name] of [['logs', 'worker.log'], ['logs', 'postgres.log'], ['updates', 'build.log'], ['updates', 'launch.log']]) {
+        try { const text = await fs.readFile(path.join(profile, folder, name), 'utf8'); await fs.writeFile(path.join(output, name), text.slice(-8 * 1024 ** 2).split(/\r?\n/).map(redact).join('\n')); }
+        catch { /* not written in this run */ }
+      }
+      try { await fs.writeFile(path.join(output, 'launch-output.log'), (await fs.readFile(launchLog, 'utf8')).split(/\r?\n/).map(redact).join('\n')); } catch { /* none */ }
+    }
+    await fs.writeFile(path.join(output, 'acceptance.json'), JSON.stringify(report, null, 2));
+    const lines = report.steps.map(s => [`${s.result.toUpperCase().padEnd(7)} ${s.name}`,
+      ...(s.failures ?? []).map(f => '        FAIL: ' + f), ...(s.error ? ['        FATAL: ' + s.error.split('\n')[0]] : [])].join('\n'));
+    const verdict = report.success ? 'PASS' : report.done ? 'FAIL' : 'FAIL (incomplete)';
+    await fs.writeFile(path.join(output, 'summary.txt'), [`Late restore point acceptance: ${verdict}`, `Steps: install, P, ${[...STEPS].join(', ')}`, ...lines].join('\n') + '\n');
+  }).catch(error => console.log('Could not write evidence: ' + error));
+  return writing;
+}
+// Well inside the job's limit, so the evidence and the upload still happen.
+const DEADLINE_MINUTES = Number(process.env.SHUFFLE_ACCEPTANCE_DEADLINE_MINUTES ?? 180);
+setTimeout(async () => {
+  const message = `The run did not finish within ${DEADLINE_MINUTES} minutes`;
+  console.error(message);
+  if (current) { current.result = 'fail'; current.error = message; }
+  await screenEvidence('deadline');
+  for (const holder of holders) holder.kill();
+  await kill().catch(() => {});
+  report.done = true; await writeEvidence(true);
+  process.exit(1);
+}, DEADLINE_MINUTES * 60000).unref();
 const launchLog = path.join(work, 'launch-output.log');
 await fs.mkdir(work, { recursive: true });
 const log = await fs.open(launchLog, 'a');
@@ -211,16 +260,15 @@ async function close() {
   const page = (await workerPage()) ?? (await statusPage());
   if (page) await page.evaluate(() => window.shuffleDesktop.window.close()).catch(() => {});
   await until(async () => !await healthy(), 'The worker did not stop', 120000);
-  await until(async () => !appRunning(), 'AI Shuffle did not exit after its window closed', 120000, 1000);
+  await until(async () => !await appRunning(), 'AI Shuffle did not exit after its window closed', 120000, 1000);
   await settle();
 }
-const appRunning = () => /AI Shuffle\.exe/i.test(execFileSync('tasklist.exe', ['/FI', 'IMAGENAME eq AI Shuffle.exe', '/NH'], { encoding: 'utf8' }));
+const appRunning = async () => /AI Shuffle\.exe/i.test(await run('tasklist.exe', ['/FI', 'IMAGENAME eq AI Shuffle.exe', '/NH'], { timeout: 30000 }));
 /** Hard kill: the app's process tree at once, then anything else running from the install or the profile (worker, PostgreSQL). */
 async function kill() {
-  try { execFileSync('taskkill.exe', ['/F', '/T', '/IM', 'AI Shuffle.exe'], { stdio: 'ignore' }); } catch { /* none running */ }
-  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    "Get-Process | Where-Object { $_.Path -and ($_.Path.StartsWith($env:KILL_A, 'OrdinalIgnoreCase') -or $_.Path.StartsWith($env:KILL_B, 'OrdinalIgnoreCase')) } | Stop-Process -Force -ErrorAction SilentlyContinue"],
-  { env: { ...process.env, KILL_A: install, KILL_B: profile }, stdio: 'inherit' });
+  try { await run('taskkill.exe', ['/F', '/T', '/IM', 'AI Shuffle.exe'], { timeout: 30000 }); } catch (error) { if (error.timedOut) throw error; /* none running */ }
+  await powershell("Get-Process | Where-Object { $_.Path -and ($_.Path.StartsWith($env:KILL_A, 'OrdinalIgnoreCase') -or $_.Path.StartsWith($env:KILL_B, 'OrdinalIgnoreCase')) } | Stop-Process -Force -ErrorAction SilentlyContinue",
+    { env: { ...process.env, KILL_A: install, KILL_B: profile }, timeout: 60000 });
   await settle();
 }
 async function settle() {
@@ -229,26 +277,38 @@ async function settle() {
   await sleep(5000);
 }
 /**
- * Press `button` in a message box through UI Automation and return the names
- * of every button in that box; null while no such button is shown.
+ * Press `button` in a message box of AI Shuffle through UI Automation and
+ * return the box's title and button names; null while no such box is shown.
+ * Only AI Shuffle's own top-level windows are searched, never the whole
+ * desktop, and the call is time-limited.
  */
-function pressDialogButton(button) {
+async function pressDialogButton(button) {
   const script = `
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $A = [Windows.Automation.AutomationElement]
-$byName = New-Object Windows.Automation.PropertyCondition($A::NameProperty, $env:BUTTON)
-$target = $A::RootElement.FindFirst([Windows.Automation.TreeScope]::Descendants, $byName)
-if (-not $target) { exit 3 }
-$walker = [Windows.Automation.TreeWalker]::ControlViewWalker
-$box = $target
-while (($parent = $walker.GetParent($box)) -and -not $parent.Equals($A::RootElement)) { $box = $parent }
+$Scope = [Windows.Automation.TreeScope]
+$ids = @(Get-Process -Name 'AI Shuffle' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+if (-not $ids.Count) { exit 3 }
 $isButton = New-Object Windows.Automation.PropertyCondition($A::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
-$names = @($box.FindAll([Windows.Automation.TreeScope]::Descendants, $isButton) | ForEach-Object { $_.Current.Name })
-$target.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-ConvertTo-Json -Compress @{ title = $box.Current.Name; buttons = $names }`;
-  try {
-    return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, BUTTON: button }, encoding: 'utf8' }));
-  } catch (error) { if (error.status === 3) return null; throw error; }
+$byName = New-Object Windows.Automation.PropertyCondition($A::NameProperty, $env:BUTTON)
+foreach ($id in $ids) {
+  $own = New-Object Windows.Automation.PropertyCondition($A::ProcessIdProperty, [int]$id)
+  foreach ($box in $A::RootElement.FindAll($Scope::Children, $own)) {
+    $target = $box.FindFirst($Scope::Descendants, [Windows.Automation.AndCondition]::new([Windows.Automation.Condition[]]@($isButton, $byName)))
+    if (-not $target) { continue }
+    $names = @($box.FindAll($Scope::Descendants, $isButton) | ForEach-Object { $_.Current.Name })
+    $title = $box.Current.Name
+    $target.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    ConvertTo-Json -Compress @{ title = $title; buttons = $names }
+    exit 0
+  }
+}
+exit 3`;
+  try { return JSON.parse(await powershell(script, { env: { ...process.env, BUTTON: button }, timeout: 60000 })); }
+  catch (error) {
+    if (error.code === 3) return null;
+    throw Error(error.timedOut ? 'UI Automation did not answer within 60 s' : 'UI Automation failed: ' + (error.stderr || error.message));
+  }
 }
 const holders = new Set();
 /**
@@ -256,7 +316,7 @@ const holders = new Set();
  * process, visible or not), written to the output folder as <name>.png/.json.
  */
 let shots = 0;
-function screenEvidence(name) {
+async function screenEvidence(name) {
   const file = path.join(output, `screen-${String(++shots).padStart(2, '0')}-${name}`);
   const script = `
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -290,9 +350,10 @@ $windows = foreach ($w in [TopWindows]::All()) {
 }
 ConvertTo-Json -Depth 3 ([ordered]@{ screenshot = $shot; session = [System.Diagnostics.Process]::GetCurrentProcess().SessionId; interactive = [Environment]::UserInteractive; windows = @($windows) }) | Set-Content -Encoding UTF8 ($env:SHOT_FILE + '.json')`;
   try {
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, SHOT_FILE: file }, stdio: 'inherit' });
+    await powershell(script, { env: { ...process.env, SHOT_FILE: file }, timeout: 90000 });
     console.log('Screen evidence: ' + path.basename(file) + '.png/.json');
-  } catch (error) { console.log('Screen evidence failed: ' + (error?.message ?? error)); }
+    (report.screens ??= []).push(path.basename(file));
+  } catch (error) { console.log('Screen evidence failed: ' + (error?.message ?? error)); (report.screens ??= []).push(path.basename(file) + ': ' + (error?.message ?? error)); }
 }
 /** Hold `file` open with no sharing, as a backup or antivirus scan might; resolves to its release. */
 async function lock(file) {
@@ -365,7 +426,7 @@ try {
   ({ chromium } = await import(pathToFileURL(path.join(resources, 'worker/server/browser-mcp/node_modules/playwright-core/index.mjs')).href));
   await launch(); await ready(); await close();
   pass(`Installer ${report.installer.revision.slice(0, 12)} (launcher ${report.installer.launcher}, no restore points) starts with the ephemeral key`);
-  finish();
+  await finish();
 
   const target = readLauncher(await fs.readFile(path.join(desktop, 'launcher.json'), 'utf8')).version;
   const [P, N1, N2, N3] = NAMES.map(name => plan.revisions[name].revision);
@@ -379,11 +440,17 @@ try {
   let w = watch(); await launch(); await ready(P); await w.stop();
   await until(async () => (await readJson(stateFile)).active === P, 'P did not become healthy', 120000);
   expect(!w.samples.some(s => s.journal), 'P started healthy; no restore-point.json at any time', 'A restore point was made for a bundled previous build');
+  // Safety: the update is fenced (floor P) before PostgreSQL starts.
+  const firstStart = w.samples.find(s => s.pg);
+  assert(firstStart, 'PostgreSQL was never seen running for P');
+  assert.equal(firstStart.floor?.revision, P, 'PostgreSQL started before P was fenced');
+  assert.notEqual(firstStart.state?.mayHaveMigrated?.[P] ?? (firstStart.state?.active === P ? 0 : undefined), undefined, 'PostgreSQL started before P was fenced');
+  pass('P was fenced (floor P) before PostgreSQL started');
   await close();
   // A database large enough that the copy can be watched and interrupted.
   const filler = await fs.open(path.join(pgData, 'zz-acceptance-filler.bin'), 'w'); await filler.truncate(FILLER_GB * 1024 ** 3); await filler.close();
   pass(`Added a ${FILLER_GB} GB file to the stopped cluster so a copy takes long enough to interrupt`);
-  finish();
+  await finish();
 
   if (STEPS.has('N1')) {
   step('N1: a failed copy shows its reason; closing keeps P with N1 ready; Try again starts N1');
@@ -429,11 +496,11 @@ try {
     'With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy', 'N1 did not become active with the point removed', 120000);
   expect(await readJson(markerFile) === null, 'Launcher 3 releases do not swap the launcher', 'A launcher 3 release swapped the launcher');
   await close();
-  finish(); last = N1;
+  await finish(); last = N1;
   }
 
   if (STEPS.has('N2')) {
-  step('N2: killed during the copy, before the fence; reopening runs the previous build; installing N2 again replaces the stale copy');
+  step('N2: killed during the copy, before the fence; reopening runs the previous build, which removes the partial copy; installing N2 again makes a new copy');
   await stage('N2', 3);
   await launch();
   await until(async () => { const j = await readJson(journalFile).catch(() => null); return j?.late && j.phase === 'preparing' && j.revision === N2; }, 'The copy did not start', 600000, 50);
@@ -451,11 +518,12 @@ try {
   w = watch(); await launch(); await ready(N2); await w.stop();
   const fresh = w.samples.find(s => s.journal?.late && s.journal.phase === 'ready' && s.journal.revision === N2);
   // Safety: never start with a copy older than the data the previous build wrote since.
-  assert(fresh && fresh.manifest > reinstalled, 'The stale copy was not replaced by a new one');
-  pass('Installing N2 again made a new copy');
+  // (The booting build dropping a leftover itself is unit-tested; here the previous build removed it.)
+  assert(fresh && fresh.manifest > reinstalled, 'N2 started without a copy made after it was installed again');
+  pass('Installing N2 again made a new copy before N2 started');
   await expectWithin(async () => (await readJson(stateFile)).active === N2 && !await exists(journalFile), 'N2 started and its point was removed once healthy', 'N2 did not finish', 120000);
   await close();
-  finish(); last = N2;
+  await finish(); last = N2;
   }
 
   if (STEPS.has('N3')) {
@@ -476,10 +544,10 @@ try {
   state = await readJson(stateFile);
   assert(state.failed?.includes(N3) && state.blocked === true, 'The old launcher did not fence the failed start');
   pass('The old launcher did not run an older build: N3 failed and fenced');
-  screenEvidence('expect-retry-dialog');
+  await screenEvidence('expect-retry-dialog');
   let dialog;
   try { dialog = await until(async () => pressDialogButton('Try Again'), 'The "did not finish starting" dialog did not appear', 120000, 2000); }
-  catch (error) { screenEvidence('no-retry-dialog'); throw error; }
+  catch (error) { await screenEvidence('no-retry-dialog'); throw error; }
   report.dialog = dialog;
   const buttons = [...dialog.buttons].filter(name => !/^(Close|Minimize|Maximize)$/.test(name)).sort();
   expect(JSON.stringify(buttons) === JSON.stringify(['Quit', 'Try Again']), 'The old launcher offered only Try Again and Quit', 'The old launcher offered: ' + JSON.stringify(dialog.buttons));
@@ -499,30 +567,21 @@ try {
     await expectWithin(async () => (await readMarker())?.phase === 'confirmed', `Launcher ${target} started N3 and was confirmed`, 'The new launcher was not confirmed', 60000);
   }
   await close();
-  finish();
+  await finish();
   }
   report.success = report.steps.every(s => s.result === 'pass');
 } catch (error) {
   if (current) { current.result = 'fail'; current.error = String(error?.stack ?? error); }
   console.error(error);
-  screenEvidence('failure');
+  await screenEvidence('failure');
   try { report.state = await readJson(stateFile); report.journal = await readJson(journalFile); report.floor = await readJson(floorFile); report.marker = await readMarker(); } catch { /* best effort */ }
 } finally {
   for (const holder of holders) holder.kill();
   await kill().catch(() => {});
   await log.close();
-  // Evidence is uploaded where others can read it: tails only, credentials redacted.
-  for (const [folder, name] of [['logs', 'worker.log'], ['logs', 'postgres.log'], ['updates', 'build.log'], ['updates', 'launch.log']]) {
-    try { const text = await fs.readFile(path.join(profile, folder, name), 'utf8'); await fs.writeFile(path.join(output, name), text.slice(-8 * 1024 ** 2).split(/\r?\n/).map(redact).join('\n')); }
-    catch { /* not written in this run */ }
-  }
-  try { await fs.writeFile(path.join(output, 'launch-output.log'), (await fs.readFile(launchLog, 'utf8')).split(/\r?\n/).map(redact).join('\n')); } catch { /* none */ }
-  await fs.writeFile(path.join(output, 'acceptance.json'), JSON.stringify(report, null, 2));
-  const lines = report.steps.map(s => [`${s.result.toUpperCase().padEnd(7)} ${s.name}`,
-    ...(s.failures ?? []).map(f => '        FAIL: ' + f), ...(s.error ? ['        FATAL: ' + s.error.split('\n')[0]] : [])].join('\n'));
-  const summary = [`Late restore point acceptance: ${report.success ? 'PASS' : 'FAIL'}`, `Steps: install, P, ${[...STEPS].join(', ')}`, ...lines].join('\n');
-  await fs.writeFile(path.join(output, 'summary.txt'), summary + '\n');
-  console.log('\n' + summary);
+  report.done = true;
+  await writeEvidence(true);
+  console.log('\n' + await fs.readFile(path.join(output, 'summary.txt'), 'utf8'));
   if (!report.success) process.exitCode = 1;
 }
 function readMarker() { return readJson(markerFile); }

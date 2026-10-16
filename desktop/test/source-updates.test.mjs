@@ -282,6 +282,18 @@ test('older launcher: once the copy is ready the update is fenced, so a stop bef
  assert.equal((await launcher.select()).revision,B);
  await (await o.child()).requireRestorePoint(undefined,o.late);assert.deepEqual(o.calls,['snapshot']);
 });
+test('older launcher: each copy failure gets advice for its own cause',async t=>{
+ for(const [error,advice] of [
+  [Object.assign(Error('EACCES: permission denied, copyfile'),{code:'EACCES'}),/not allowed to read or write a file in its data folder\. Check that folder's permissions/],
+  [Object.assign(Error('EBUSY: resource busy or locked, copyfile'),{code:'EBUSY'}),/in use\. Close other programs/],
+  [Object.assign(Error('EPERM: operation not permitted, copyfile'),{code:'EPERM'}),/in use\. Close other programs/],
+  [Error('Database restore point failed validation'),/did not match your database/],
+  [Error('something else'),/something else\. Choose Try again\./],
+ ])await t.test(error.message,async t=>{
+  const o=await oldLauncherUpdate(t);o.db.snapshot=async()=>{throw error;};
+  await assert.rejects((await o.child()).requireRestorePoint(undefined,o.late),e=>e instanceof RestorePointError&&advice.test(e.message)&&(error.code==='EACCES'||!/permissions/.test(e.message)));
+ });
+});
 test('older launcher: a failed late copy stays closed with a plain reason, and Try again or the next launch recover',async t=>{
  for(const next of ['try again','reopen'])await t.test(next,async t=>{
   const o=await oldLauncherUpdate(t);const snapshot=o.db.snapshot;

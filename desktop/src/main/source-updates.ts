@@ -922,7 +922,9 @@ export class SourceUpdates {
     const code = (error as NodeJS.ErrnoException | undefined)?.code ?? '';
     const advice = code === 'ENOSPC' || /\bENOSPC\b|no space|disk (is )?full|not enough space/i.test(reason)
       ? 'There is not enough free disk space for a copy of your database. Free some disk space, then choose Try again.'
-      : ['EBUSY', 'EPERM', 'EACCES'].includes(code) || /\b(EBUSY|EPERM|EACCES)\b|locked|in use/i.test(reason)
+      : code === 'EACCES' || /\bEACCES\b|permission denied/i.test(reason)
+        ? 'AI Shuffle is not allowed to read or write a file in its data folder. Check that folder\'s permissions and any security software that may block it, then choose Try again.'
+      : ['EBUSY', 'EPERM'].includes(code) || /\b(EBUSY|EPERM)\b|locked|in use/i.test(reason)
         ? 'A file in the AI Shuffle data folder is in use. Close other programs that may be using it, such as a backup or an antivirus scan, then choose Try again.'
         : /failed validation|changed while/i.test(reason)
           ? 'The copy did not match your database. Choose Try again to make a new copy.'

@@ -126,8 +126,8 @@ launcher would have:
 - If the copy fails, the update does not start and the database is not
   touched. The status page says "The update could not start yet" and gives the
   reason with advice for its cause: free disk space (`ENOSPC`), close programs
-  holding a file (`EBUSY`, `EPERM`, `EACCES`), or make a new copy (failed
-  validation). **Try again** repeats the copy in the same process on Windows
+  holding a file (`EBUSY`, `EPERM`), check the data folder's permissions
+  (`EACCES`), or make a new copy (failed validation). **Try again** repeats the copy in the same process on Windows
   and Linux; it does not relaunch, because a relaunch goes through the old
   launcher.
 - Closing the app instead: before the fence, the old launcher runs the

@@ -414,6 +414,9 @@ jobs:
           node desktop/scripts/verify-late-restore-point.mjs prepare (Join-Path $env:RUNNER_TEMP 'late-restore-prepared')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Update the older install through the late restore point
+        # The script stops itself at 180 minutes and writes its evidence; this
+        # and the job's 240 leave time for the summary and the upload.
+        timeout-minutes: 200
         env:
           SHUFFLE_ACCEPTANCE_STEPS: ${{ inputs.late_restore_steps }}
         run: |
