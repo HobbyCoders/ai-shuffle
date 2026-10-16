@@ -749,6 +749,27 @@ async def test_local_delayed_settlement_revision_cannot_dismiss_a_new_settle(cha
     await session_active._apply_settle_change(newest, False)
     assert interactions.get_interaction(later["id"])["state"] == "answered"
 
+async def test_recreated_membership_does_not_reuse_old_revision_or_receipt(chats, monkeypatch):
+    from app.core.session_settlement import dismiss_owner_waits
+    from app.db import interactions
+    from app.network import session_active
+
+    monkeypatch.setattr(session_active.engine, "kick", lambda: None)
+    old = session_active.write_shared("target", False)["_settled_revision"]
+    assert not await dismiss_owner_waits("target", expected_revision=old)
+    # Network reset/rejoin removes local membership metadata, not chat history.
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM network_session_active WHERE session_id=%s", ("target",))
+    new = session_active.write_shared("target", False)["_settled_revision"]
+    assert new["membership_revision"] == old["membership_revision"]
+    assert new["membership_epoch"] != old["membership_epoch"]
+    prompt = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+    assert not await dismiss_owner_waits("target", expected_revision=old)
+    assert interactions.get_interaction(prompt["id"])["state"] == "pending"
+    assert await dismiss_owner_waits("target", expected_revision=new)
+    assert interactions.get_interaction(prompt["id"])["state"] == "answered"
+
+
 @pytest.mark.parametrize("initial_wait", [True, False])
 async def test_repeated_settle_revision_preserves_post_snapshot_wait(chats, monkeypatch, initial_wait):
     from app.core import user_question_handler
