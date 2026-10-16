@@ -1,16 +1,20 @@
 """Talk to the worker's own HTTP API the way the local web UI does.
 
-Authentication: none is stored or sent. The runner runs on the worker's
-machine and calls it on loopback; the worker treats direct loopback requests
-as the local owner (``app.core.owner_auth.local_access``) and requires a
-matching ``Origin`` header for anything that changes state
+Authentication: on a native install the runner needs no credential. It runs on
+the worker's machine and calls it on loopback; such a worker treats direct
+loopback requests as the local owner (``app.core.owner_auth.local_access``)
+and requires a matching ``Origin`` header for anything that changes state
 (``docs/content/api-reference/authentication.md``). The HTTP client ignores
 proxy environment variables, because a proxied request is never local.
 
-A worker started by the desktop app also requires its per-launch listener
-token on loopback, which no outside script has; such a worker answers 401/403
-and the runner stops with :class:`AuthRefused` instead of asking for a
-password.
+The Docker image never treats loopback as the owner (every process in the
+container is the app or an agent it started), and a worker started by the
+desktop app requires its per-launch listener token on loopback. Those workers
+answer 401/403 unless the owner hands the runner an owner token
+(``--token-file``: a token from ``POST /api/v1/owner/login`` with
+``"bearer": true``). It is sent as a Bearer and as the chat socket's
+``token`` and never stored. Without one the runner stops with
+:class:`AuthRefused` instead of asking for a password.
 """
 from __future__ import annotations
 
@@ -36,24 +40,30 @@ class AuthRefused(ClientError):
 
 
 AUTH_HINT = (
-    "the worker refused passwordless local access. Run the smoke on the worker's own "
-    "machine against its loopback address (default http://127.0.0.1:8000). A worker "
-    "started by the desktop app only admits its own window on loopback, so the runner "
-    "cannot drive it; record that worker's rows by hand instead."
+    "the worker refused the request. A native worker admits passwordless loopback, so run "
+    "the smoke on its own machine against its loopback address (default "
+    "http://127.0.0.1:8000). A Docker worker never treats loopback as the owner: ask the "
+    "owner for an owner token and pass it with --token-file. A worker started by the "
+    "desktop app only admits its own window on loopback; record its rows by hand instead."
 )
 
 
 class HttpWorkerClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 15.0,
-                 ack_timeout: float = 30.0, transport: httpx.BaseTransport | None = None):
+                 ack_timeout: float = 30.0, transport: httpx.BaseTransport | None = None,
+                 token: str | None = None):
         self.base_url = base_url.rstrip("/")
+        self._token = token or None
         self.origin = self.base_url
         self.ack_timeout = ack_timeout
         # Seconds to keep reading after an ack, and to wait for a refusal.
         self.linger_s = 3.0
+        headers = {"Origin": self.origin, "Accept": "application/json"}
+        if self._token:
+            headers["Authorization"] = "Bearer " + self._token
         self._http = httpx.Client(
             base_url=self.base_url, timeout=timeout, trust_env=False,
-            headers={"Origin": self.origin, "Accept": "application/json"}, transport=transport,
+            headers=headers, transport=transport,
         )
 
     def close(self) -> None:
@@ -170,7 +180,11 @@ class HttpWorkerClient:
 
     def _ws_url(self) -> str:
         # app/api/websocket.py: router prefix /api/v1, route /ws/chat.
-        return "ws" + self.base_url[len("http"):] + API + "/ws/chat"
+        url = "ws" + self.base_url[len("http"):] + API + "/ws/chat"
+        if self._token:
+            from urllib.parse import quote
+            url += "?token=" + quote(self._token, safe="")
+        return url
 
     def _exchange(self, frame: dict, done, wait_s: float, linger_s: float = 0.0) -> dict | None:
         """Send one frame and read replies until ``done(reply)`` or ``wait_s`` passes.

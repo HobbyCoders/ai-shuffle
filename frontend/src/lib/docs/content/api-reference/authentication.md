@@ -10,9 +10,29 @@ Endpoints for owner sign-in, local installation setup and development-tool authe
 
 ## Local setup and owner access
 
-Requests from the same machine (loopback) on the local listener get owner access without signing in. Other devices on the LAN sign in with the owner password, unless the owner turns on **Trusted LAN**. The authenticated remote listener accepts only existing paired devices. API users keep their scoped integration roles on every network.
+On the desktop app and a native install, requests from the same machine (loopback) on the local listener get owner access without signing in. A worker started by the desktop app also requires its per-launch listener token, which only its own window sends. Other devices on the LAN sign in with the owner password, unless the owner turns on **Trusted LAN**. The authenticated remote listener accepts only existing paired devices. API users keep their scoped integration roles on every network.
+
+The Docker image never gives passwordless owner access to its own machine. Inside the container, every process is AI Shuffle itself or something it started for an agent (shell commands, background commands, hooks, MCP servers), so requests from loopback (`127.0.0.1`, `::1`) or from the container's own address get no owner access, whatever `Host`, `Origin` or `X-Forwarded-For` they send. Sign in with the owner password, or send an owner token (see [Calling a Docker worker from scripts](#calling-a-docker-worker-from-scripts)). **Trusted LAN** never covers the worker's own addresses either, on any install.
 
 Passwordless owner requests that change something (anything but `GET`) must be same-origin: send an `Origin` header that matches the host, as a browser does. Scripts can instead sign in and send the owner token as a Bearer (see [Owner password](#owner-password)).
+
+### Calling a Docker worker from scripts
+
+What changes depends on how the script reaches the container:
+
+- **From the host through the published port** (for example `curl http://localhost:8000` with the default compose file): nothing changes. Docker forwards those requests from its bridge network, so they never counted as the container's own machine and already needed a sign-in.
+- **From inside the container** (`docker exec <container> curl http://localhost:8000/...`), or **with host networking** (`network_mode: host`): these used to get owner access without signing in. They now get `401` or `403` on owner endpoints, and `/api/v1/auth/status` reports `"is_admin": false`.
+
+Sign in once and send the token instead:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/owner/login \
+  -H "Content-Type: application/json" \
+  -d '{"password": "your-owner-password", "bearer": true}' | jq -r .token)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/sessions
+```
+
+An owner token is the owner's authority: do not put it where an agent can read it, such as a project folder or an environment variable the container passes on. For an integration that only needs some projects or agents, create an [API user](/docs/api-reference/api-users) instead. `/health` and `/health/ready` need no sign-in, so the container's health check is unaffected.
 
 ## Owner password
 
@@ -101,7 +121,7 @@ curl -X POST http://localhost:8000/api/v1/auth/setup \
 
 ### POST /api/v1/auth/logout
 
-Sign out: clear the browser's `session` cookie and end the current paired-browser session. Browser requests must be same-origin. Signing out does not end passwordless owner access from loopback or a Trusted LAN.
+Sign out: clear the browser's `session` cookie and end the current paired-browser session. Browser requests must be same-origin. Signing out does not end passwordless owner access from loopback (desktop and native installs) or a Trusted LAN.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/logout \
@@ -117,7 +137,7 @@ Check authentication status. No auth required.
 curl http://localhost:8000/api/v1/auth/status
 ```
 
-**Example local response (additional status fields are returned):**
+**Example local response on a desktop or native install (additional status fields are returned):**
 ```json
 {
   "authenticated": true,

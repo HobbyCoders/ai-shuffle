@@ -629,12 +629,37 @@ def test_http_client_sends_origin_and_no_credentials():
     client = HttpWorkerClient("http://127.0.0.1:8000", transport=httpx.MockTransport(handler))
     assert client.deploy_status() == {"workers": []}
     client.archive("s1")
-    with pytest.raises(AuthRefused, match="passwordless local access"):
+    with pytest.raises(AuthRefused, match="--token-file"):
         client.projects()
     for req in seen:
         assert req.headers["origin"] == "http://127.0.0.1:8000"
         assert "authorization" not in req.headers and "cookie" not in req.headers
     assert seen[1].method == "PATCH" and json.loads(seen[1].content) == {"is_active": False, "archived": True}
+
+
+def test_http_client_sends_an_owner_token_only_when_given_one(tmp_path):
+    """A Docker worker never treats loopback as the owner; the owner hands the
+    runner a token instead, sent as a Bearer and as the chat socket's token."""
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"workers": []})
+    client = HttpWorkerClient("http://127.0.0.1:8000", transport=httpx.MockTransport(handler), token="shr_a/b+c")
+    client.deploy_status()
+    assert seen[0].headers["authorization"] == "Bearer shr_a/b+c"
+    assert urlsplit(client._ws_url()).query == "token=shr_a%2Fb%2Bc"
+    assert "?" not in HttpWorkerClient("http://127.0.0.1:8000")._ws_url()
+
+    token_file = tmp_path / "owner-token"
+    token_file.write_text("shr_from_file\n", encoding="utf-8")
+    assert cli._read_token(str(token_file)) == "shr_from_file"
+    assert cli._read_token(None) is None
+    token_file.write_text("\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="holds no token"):
+        cli._read_token(str(token_file))
+    with pytest.raises(ValueError, match="holds no token"):
+        cli._read_token(str(tmp_path / "missing"))
 
 
 def test_http_client_maps_errors():

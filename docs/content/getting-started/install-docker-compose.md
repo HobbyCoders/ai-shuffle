@@ -376,6 +376,19 @@ docker compose start
 
 With `docker run`, leave out the two `docker compose` lines: run the loop first (it creates the volumes), then your `docker run` command.
 
+## Scripts and `curl`
+
+AI Shuffle never treats requests from inside its own container as the owner, because agents' commands run there too. A script that calls the API, from the host or with `docker exec`, signs in with the owner password and sends the token it gets back:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/owner/login \
+  -H "Content-Type: application/json" \
+  -d '{"password": "your-owner-password", "bearer": true}' | jq -r .token)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/sessions
+```
+
+Earlier versions let `docker exec <container> curl http://localhost:8000/...` (and the host itself, with `network_mode: host`) act as the owner without a password; those calls now get `401` or `403`. Requests from the host through the published port always needed a sign-in, so they are unchanged, and so is the health check. Keep the token out of project folders and the container's environment, where agents could read it. Details: [Calling a Docker worker from scripts](/docs/api-reference/authentication#calling-a-docker-worker-from-scripts).
+
 ## Optional settings
 
 These are only needed in special cases. Uncomment the matching line under `environment:` in `compose.yaml` (or add `-e NAME=value` to `docker run`), then run `docker compose up -d`. A line in `.env` alone does not reach the container.

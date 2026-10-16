@@ -18,11 +18,14 @@ http://localhost:8000/api/v1
 
 ### Local access
 
-The local listener grants owner access to localhost requests without a login. Other devices on your LAN sign in with the owner password, unless the owner turns on **Trusted LAN**. Phones reach a worker through **Devices → Remote access** and their own pairing. See [Authentication](/docs/api-reference/authentication) for the details.
+On the desktop app and a native install, the local listener grants owner access to localhost requests without a login. The Docker image does not: inside the container, loopback is also where agents' commands run, so scripts there sign in and send an owner token. Other devices on your LAN sign in with the owner password, unless the owner turns on **Trusted LAN**. Phones reach a worker through **Devices → Remote access** and their own pairing. See [Authentication](/docs/api-reference/authentication) for the details.
 
 ```bash
-# Direct request from the same machine (loopback)
+# Direct request from the same machine (loopback), desktop or native install
 curl http://localhost:8000/api/v1/sessions
+
+# Docker, or any other machine: send an owner token
+curl http://localhost:8000/api/v1/sessions -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
 ### API Key (Bearer Token)
