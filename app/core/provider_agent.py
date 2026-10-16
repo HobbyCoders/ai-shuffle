@@ -2355,6 +2355,17 @@ async def dispatch_worker(
         except Exception:  # noqa: BLE001 — inheritance is best-effort
             logger.debug("ProviderAgent: parent session read failed", exc_info=True)
             parent_row = None
+        if parent_row:
+            # A caller that switched or renamed its own worktree's branch this
+            # turn hands its workers that branch, as its browser follows it
+            # (#2369). Before any inheritance below reads the row.
+            try:
+                from app.core import project_resolver
+
+                parent_row = dict(parent_row)
+                project_resolver.follow_own_branch_switch(parent_row)
+            except Exception:  # noqa: BLE001 — the checks below still refuse honestly
+                logger.debug("ProviderAgent: caller branch follow failed", exc_info=True)
 
         project_id = (parent_row or {}).get("project_id")
         # The worker runs as whoever owns its caller: an API key's worker is
