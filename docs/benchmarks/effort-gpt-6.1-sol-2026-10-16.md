@@ -71,8 +71,12 @@ All coding fixtures compile but fail their initial tests. Tests/input fixtures
 are immutable, and successful answers must pass the external automatic checker.
 Each task/configuration runs three times in a fresh session and fresh repository.
 The 300 jobs were globally shuffled with seed 95 and concurrency four.
-`default` omits an effort override; the live catalog advertised `low` as the
-model default. Explicit effort selections were read back from session state.
+`default` omits an effort override; the session effort read back as `NULL`.
+On that app-to-Responses serialization path the outgoing request omits the
+`reasoning` object entirely (no `reasoning.effort`), as the omission wire test
+asserts. It was **not an explicit low request**; low was the live provider
+catalog's advertised default. Explicit effort selections were read back from
+session state.
 Wall time covers fixture/session startup through finished reply, not cleanup.
 Tool count is app `tool.use` events, including code-mode subcalls.
 
@@ -136,14 +140,19 @@ repetitions of one task cannot establish a general search default.
 
 ## Tuning decision
 
-- **Recommend explicitly selecting high for this small-coding-task workload.**
-  It has a measured latency win without an observed pass-rate loss. The
-  recommendation and all losing sweep results ship with the benchmark.
-- **Do not install a global or automatic task-type default.** These short
-  synthetic tasks do not validate a task classifier, long coding projects,
-  conversations, or overriding an owner's explicit provider-default reset.
-  The provider's advertised default and explicit `NULL` semantics remain intact.
-  A 60/60 result is not proof of population-level equivalence.
+- **Ship a visible, table-driven high initial pick for ChatGPT gpt-6.1-sol only.**
+  `app/core/model_effort.py` points directly to these results and exposes both
+  `default_effort: high` and `initial_effort: high`, only if the actual catalog
+  advertises high. The composer consumes `initial_effort` only when there is no
+  remembered per-model choice. Explicit/remembered strings and remembered `NULL`
+  (provider default) remain unchanged. The implicit initial choice is never
+  persisted as a user preference. No hidden adapter override is installed.
+- **Do not generalize to other models or add a task classifier.** These short
+  synthetic tasks do not validate other models, long coding projects or
+  conversations. A 60/60 result is not proof of population-level equivalence.
+  Raw vendor capability metadata retains its original default; deliberate
+  provider-default omissions still omit `reasoning.effort` rather than forcing
+  high. Existing sessions are not rewritten.
 - **Do not lower background effort.** Learner, summaries and titles were not
   isolated treatment arms with the main effort held constant. Making that code
   active would require an isolated authenticated preview; this run neither
@@ -155,9 +164,9 @@ repetitions of one task cannot establish a general search default.
   on/off. It is **not applied by any app/client path**. Unknown families and
   server dialects fail closed; no generic sampling or reasoning guess ships.
 
-No prompt text, tool descriptions, input schemas, deferred-tool policy or
-automatic effort policy changed. Prefix-size/duplicate-paragraph prompt guards
-are therefore unchanged. The correctness fixes were verified with captured
+No prompt text, tool descriptions, tool input schemas or deferred-tool policy
+changed. The only automatic tuning is the advertised gpt-6.1-sol initial choice
+above. Prefix-size/duplicate-paragraph prompt guards are unchanged. The correctness fixes were verified with captured
 requests, not live Anthropic/xAI/OpenRouter/Claude calls. The GPT benchmark used
 the existing running app revision recorded in the JSON, not this branch's fixes.
 
@@ -173,5 +182,8 @@ the existing running app revision recorded in the JSON, not this branch's fixes.
 - All **300 sweep sessions plus the pilot** were archived and read back as
   archived. Disposable repositories were removed by their temporary-directory
   contexts. No preview instance or extra worker was started.
-- No browser UI verification was performed: this changes no rendered UI, and
-  the live workload was driven through the real app HTTP/WebSocket session API.
+- The live workload was driven through the real app HTTP/WebSocket session API.
+  Frontend tests cover the new initial choice, explicit low and remembered NULL;
+  a branch UI with the changed backend catalog was not browser-verified. No
+  rendered markup/styles changed. The new initial choice was captured at the
+  request wire; the high treatment itself was exercised by 60 live sessions.

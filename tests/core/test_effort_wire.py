@@ -48,6 +48,9 @@ for kind, model, levels, default in ROUTES:
     route = "delegated" if kind == "delegated" else ha._provider_row_kind(kind, "api_key")
     for effort in (effort_capabilities(model, row, route=route)["effort_levels"] or []) + [None]:
         CASES.append(pytest.param(kind, model, row, effort, effort, id=f"{kind}-{effort}"))
+CASES.append(pytest.param("chatgpt", "gpt-6.1-sol",
+    provider("chatgpt", "gpt-6.1-sol", ["low", "high"], "low"),
+    "app-initial", "high", id="benchmarked-initial-picker-to-wire"))
 # Remembered or inherited invalid picks, effortless and unknown models.
 for kind in ("anthropic", "delegated"):
     CASES.extend([
@@ -100,6 +103,8 @@ async def test_picker_to_wire(monkeypatch, tmp_path, kind, model, row, pick, exp
     monkeypatch.setattr(settings, "fluid_code_mode", False)
     monkeypatch.setattr(settings, "fluid_continual", False)
     # The UI's effort override enters the exact config builder used by profiles.
+    if pick == "app-initial":
+        pick = effort_capabilities(model, row)["initial_effort"]
     config = _build_thinking_config({}, model, {"effort": pick} if pick else {})
     opts = AgentOptions(model=model, cwd=str(tmp_path), **config)
     if row:

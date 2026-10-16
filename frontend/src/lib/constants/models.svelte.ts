@@ -40,6 +40,8 @@ export interface ModelOption {
 	effort_metadata_version?: number;
 	reasoning_capabilities?: ReasoningCapabilities;
 	default_effort?: string | null;
+	/** Benchmarked app initial pick; absent means keep the provider's omission. */
+	initial_effort?: string | null;
 }
 
 /**
@@ -221,6 +223,8 @@ export interface ProviderModel {
 	effort_metadata_version?: number;
 	reasoning_capabilities?: ReasoningCapabilities;
 	default_effort?: string | null;
+	/** Benchmarked app initial pick; absent means keep the provider's omission. */
+	initial_effort?: string | null;
 }
 
 /**
@@ -765,6 +769,8 @@ interface RegistryModelPayload {
 	effort_metadata_version?: number;
 	reasoning_capabilities?: ReasoningCapabilities;
 	default_effort?: string | null;
+	/** Benchmarked app initial pick; absent means keep the provider's omission. */
+	initial_effort?: string | null;
 }
 
 interface RegistryProviderPayload {

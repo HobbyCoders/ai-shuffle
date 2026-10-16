@@ -26,7 +26,7 @@
     "Five timed-out runs retained as failures; their token/tool metrics recovered from archived app event logs",
     "Default omits the effort override; live catalog default was low. Explicit picks were read back from session state.",
     "The API/CLI wire fixes are not active in the baseline app used for this GPT-only sweep.",
-    "High is a corpus-specific recommendation, not an automatically installed task classifier or override of explicit provider-default selections."
+    "High is shipped only as the table-driven initial composer choice for ChatGPT gpt-6.1-sol; remembered strings and NULL still win. No task classifier or other-model default is inferred."
   ],
   "summary": {
     "default": {
