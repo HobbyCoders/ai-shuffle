@@ -75,6 +75,8 @@ class Context:
     python: str
     log: Callable[[str], None] = print
     notes: list[str] = field(default_factory=list)
+    backend_selected: list[str] | None = None
+    map_hits: Path | None = None
 
     def changed(self, patterns: Iterable[str]) -> bool:
         if self.files is None:
@@ -145,6 +147,59 @@ def python_env() -> dict:
 
 def has_module(python: str, module: str) -> bool:
     return subprocess.run([python, "-c", f"import {module}"], capture_output=True).returncode == 0
+
+
+# Import names for requirements-dev.txt, plus PyYAML used by the gate itself.
+DEV_MODULES = (
+    "pytest", "pytest_asyncio", "pytest_cov", "pytest_mock", "xdist",
+    "pytest_timeout", "pytest_socket", "distlib", "httpx", "freezegun", "ruff", "yaml",
+)
+
+
+def python_preflight(python: str) -> None:
+    """Refuse an incomplete/contaminated interpreter before any commit status."""
+    hint = ("Use a fresh venv with requirements.txt + requirements-dev.txt "
+            "and set LOCAL_CI_PYTHON to its Python; clear external PYTHONPATH entries.")
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if entry and not (ROOT / entry).resolve().is_relative_to(ROOT.resolve()):
+            raise Failure(f"Inherited PYTHONPATH points outside this checkout. {hint}")
+    probe = """
+import importlib, json, pathlib, sys
+root = pathlib.Path.cwd().resolve()
+errors = []
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        errors.append('cannot import ' + name)
+try:
+    importlib.import_module('claude_agent_sdk')
+except ImportError:
+    pass
+else:
+    errors.append('claude_agent_sdk is importable')
+try:
+    docker = importlib.import_module('docker')
+    locations = list(getattr(docker, '__path__', []))
+    if getattr(docker, '__file__', None):
+        locations.append(docker.__file__)
+    if not locations or any(not pathlib.Path(p).resolve().is_relative_to(root) for p in locations):
+        errors.append('docker resolves outside the checkout')
+except ImportError:
+    errors.append('cannot import the checkout docker namespace')
+print(json.dumps(errors))
+"""
+    try:
+        result = subprocess.run([python, "-c", probe, *DEV_MODULES], cwd=ROOT,
+                                capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Failure(f"Python preflight could not complete. {hint}") from None
+    try:
+        errors = json.loads(result.stdout) if result.returncode == 0 else ["interpreter probe failed"]
+    except ValueError:
+        errors = ["interpreter probe returned invalid output"]
+    if errors:
+        raise Failure(f"Python preflight: {', '.join(errors)}. {hint}")
 
 
 def pytest_args(python: str, timeout: int = 120, parallel: bool = True) -> list[str]:
@@ -236,17 +291,23 @@ def backend(ctx: Context) -> None:
     # would ignore it, so listed Windows-only failures are dropped here.
     known = windows_known_files()
     targets = [t for t in targets if t not in known]
+    if ctx.backend_selected is not None:
+        # Keep directory collection hooks. Explicit root files need filtering too:
+        # pytest does not call ignore_collect for explicit command-line files.
+        targets = [t for t in targets if not t.endswith(".py") or t in ctx.backend_selected]
+        env = {**env, "LOCAL_CI_BACKEND_BATCH": json.dumps(ctx.backend_selected)}
+        extra += ["-p", "scripts.ci.local_ci_batch"]
     if not targets:
         print("No backend tests reach this change.")
         return
     print(f"Backend: {'the whole fast subset' if selection == 'all' else f'{len(targets)} test files'}")
     hits = None
     if ctx.mode == "full" and sys.version_info >= (3, 12):
-        hits = Path(tempfile.mkdtemp(prefix="local-ci-map-"))
+        hits = ctx.map_hits or Path(tempfile.mkdtemp(prefix="local-ci-map-"))
         env = {**env, "BACKEND_TEST_MAP_DIR": str(hits)}
         extra = [*extra, "-p", "tests._test_map"]
     run([ctx.python, "-m", "pytest", *targets, *extra, *args], env=env)
-    if hits is not None:
+    if hits is not None and ctx.map_hits is None:
         MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
         run([ctx.python, "scripts/ci/backend_test_map.py", "merge", "--hits", str(hits),
              "--out", str(MAP_PATH), "--commit", git("rev-parse", "HEAD")], env=env)
@@ -346,7 +407,9 @@ def workflows(ctx: Context) -> None:
     run([ctx.python, "scripts/ci/test-cost-policy.py"])
     run([ctx.python, "-m", "pytest", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--confcutdir=tests/scripts",
          "tests/scripts/test_owner_publication_policy.py", "tests/scripts/test_edge_publication_gate.py",
-         "tests/scripts/test_local_ci.py", "tests/scripts/test_security_gate.py", "tests/scripts/test_cloud_split.py"])
+         "tests/scripts/test_local_ci.py", "tests/scripts/test_local_ci_preflight.py",
+         "tests/scripts/test_local_ci_stages.py", "tests/scripts/test_security_gate.py",
+         "tests/scripts/test_cloud_split.py"])
 
 
 def android_play(ctx: Context) -> None:
@@ -429,7 +492,7 @@ SUITES = [
     Suite("android-app", ["android/app/*", "android/build.gradle*", "android/settings.gradle*", "android/gradle*"],
           android_app, "Android unit tests (Gradle)", android_unavailable),
     Suite("workflows", [".github/workflows/*", "scripts/ci/*", "tests/scripts/test_owner_publication_policy.py",
-                        "tests/scripts/test_edge_publication_gate.py", "tests/scripts/test_local_ci.py", "scripts/local_ci.py",
+                        "tests/scripts/test_edge_publication_gate.py", "tests/scripts/test_local_ci*.py", "scripts/local_ci*.py",
                         ".githooks/*", ".gitleaks.toml", "scripts/secret_scan.py", "scripts/dependency_audit.py",
                         "tests/scripts/test_security_gate.py"], workflows, "Workflow and publication policy tests"),
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
@@ -662,7 +725,13 @@ def attest_update_reach(revision: str) -> None:
 def cmd_check(args) -> int:
     mode = "full" if args.command == "full" else "changed"
     python = choose_python()
+    python_preflight(python)
     revision = git("rev-parse", "HEAD")
+    if getattr(args, "step", False):
+        from local_ci_stages import run_step
+        return run_step(sys.modules[__name__], args, python, revision)
+    if args.attest and args.only:
+        raise Failure("--attest cannot be combined with --only")
     if args.attest:
         if mode != "full":
             raise Failure("--attest needs `full`")
@@ -846,10 +915,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs="?", default="check", choices=["check", "full", "install", "list", "pre-push"])
     parser.add_argument("--only", nargs="+", metavar="SUITE", help="run just these suites (not recorded as a pass)")
     parser.add_argument("--attest", action="store_true", help=f"with full on main: post {ATTEST_CONTEXT}")
+    parser.add_argument("--step", action="store_true",
+                        help="with full: run one resumable stage; repeat until COMPLETE")
+    parser.add_argument("--restart", action="store_true", help="with full --step: discard prior stage receipts")
     parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
     parser.add_argument("--strict-audit", action="store_true",
                         help="fail on Python advisories, npm high/critical findings, or unavailable audits")
     args = parser.parse_args(argv)
+    if args.step and (args.command != "full" or args.only):
+        parser.error("--step requires full without --only")
+    if args.restart and not args.step:
+        parser.error("--restart requires --step")
     if args.only:
         unknown = set(args.only) - {s.name for s in SUITES}
         if unknown:

@@ -68,6 +68,38 @@ def commit(root):
     return git(root, "rev-parse", "HEAD")
 
 
+@pytest.mark.parametrize("directory", [".venv", "venv", "frontend/node_modules"])
+def test_dependency_examples_ignored_but_tracked_files_scanned(tmp_path, directory):
+    init(tmp_path)
+    shutil.copyfile(ROOT / ".gitignore", tmp_path / ".gitignore")
+    commit(tmp_path)
+    example = tmp_path / directory / "Lib/site-packages/pydantic/networks.py"
+    example.parent.mkdir(parents=True)
+    example.write_text("postgresql://example:" + "dependency-password@localhost/db")
+    assert secret_scan.scan(tmp_path) == 0
+    git(tmp_path, "add", "-f", str(example))
+    assert secret_scan.scan(tmp_path) == 1
+
+
+@pytest.mark.parametrize("name", [
+    ".venv", "venv", "env", "ENV", "browser-mcp/node_modules",
+    "desktop/node_modules", "frontend/node_modules", "tools/node_modules",
+])
+def test_provisioned_dependency_symlinks_keep_checkout_clean(tmp_path, monkeypatch, name):
+    init(tmp_path)
+    shutil.copyfile(ROOT / ".gitignore", tmp_path / ".gitignore")
+    commit(tmp_path)
+    link = tmp_path / name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(tmp_path / "external-dependencies", target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+    monkeypatch.setattr(local_ci, "ROOT", tmp_path)
+    assert local_ci.clean_checkout()
+    assert secret_scan.scan(tmp_path) == 0
+
+
 def test_tree_scope_and_redacted_output(tmp_path, capsys):
     init(tmp_path)
     (tmp_path / ".gitignore").write_text("ignored.txt\n")
@@ -153,6 +185,7 @@ def test_old_pass_cannot_skip_security_gate(tmp_path, monkeypatch):
 
 
 def test_check_security_steps_run_even_with_only(monkeypatch):
+    monkeypatch.setattr(local_ci, "python_preflight", lambda python: None)
     calls = []
     monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(local_ci, "git", lambda *args: "head")

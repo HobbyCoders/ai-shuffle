@@ -26,10 +26,11 @@ wheels/
 *.egg
 
 # Virtual environments
-.venv/
-venv/
-env/
-ENV/
+# No trailing slash: also ignore provisioned worktree symlinks.
+.venv
+venv
+env
+ENV
 
 # Environment variables
 .env
@@ -61,8 +62,8 @@ docker-compose.override.yml
 /.remember
 Claude Code.bat
 
-# Node
-node_modules/
+# Node (directories and provisioned symlinks at any depth)
+node_modules
 
 # Stray backend snapshot dir (not the app package)
 /backend/
