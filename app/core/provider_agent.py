@@ -676,9 +676,10 @@ def assistant_text_piece(event: Mapping[str, Any]) -> Optional[Tuple[bool, str]]
 def join_assistant_text(pieces: Sequence[Tuple[bool, str]]) -> str:
     """Join assistant text events into one report.
 
-    Streamed deltas of one block join as they arrived. Separate text blocks
-    (each ``message.assistant``) are separated by a blank line, so two blocks
-    never read as one run-on sentence ("…when it lands.The missing…", #104).
+    Streamed deltas join as they arrived. A ``message.assistant`` row is a
+    whole text block and is separated by a blank line. A live turn records
+    only deltas, and they carry no block boundary (compaction merges them),
+    so two blocks streamed back to back still join without one.
     """
     out = ""
     previous_delta = False

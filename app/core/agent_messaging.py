@@ -390,11 +390,15 @@ async def finish_message_resume(session_id, settled, outcome):
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
         events = [event for event in events if event.get("turn_id") == settled["id"]]
         pieces: list[tuple[bool, str]] = []
+        # Every text of the turn: the report when nothing follows the last
+        # input (a message delivered after the worker's closing text).
+        turn_text: list[tuple[bool, str]] = []
         for event in events:
             payload = event.get("payload") or {}
             piece = provider_agent.assistant_text_piece(event)
             if piece is not None:
                 pieces.append(piece)
+                turn_text.append(piece)
             elif event.get("event_type") in ("tool.result", "message.user"):
                 # The report is what follows the last tool result or input (a
                 # parked worker's wake reuses this turn id).
@@ -404,7 +408,8 @@ async def finish_message_resume(session_id, settled, outcome):
             elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
                 outcome = "error"
                 pieces = [(False, str(payload.get("errors") or "Worker continuation failed"))]
-        text = provider_agent.join_assistant_text(pieces)
+        text = (provider_agent.join_assistant_text(pieces).strip()
+                or provider_agent.join_assistant_text(turn_text).strip())
         status = "completed" if outcome == "completed" else "error"
         report = text or "Worker continuation ended without a report"
         summary, _ = provider_agent.bound_report(report)

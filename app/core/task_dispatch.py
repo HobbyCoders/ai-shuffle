@@ -2171,7 +2171,7 @@ def write_task_report(
 
         path = directory / f"{safe_key(worker_session_id or str(uuid.uuid4()))}.md"
         _archive_previous_report(path, report)
-        path.write_text(report, encoding="utf-8")
+        _write_report_file(path, report)
         return str(path.resolve())
     except Exception:  # noqa: BLE001 — never fail a completed dispatch on I/O
         logger.warning(
@@ -2194,16 +2194,41 @@ def _report_rounds(path: Path) -> List[Tuple[int, Path]]:
 
 
 def _archive_previous_report(path: Path, report: str) -> None:
-    """Move an earlier, different report at ``path`` to the next round file."""
+    """Keep an earlier, different report at ``path`` as the next round file.
+
+    Never raises: losing an earlier round must not stop the new report from
+    being written. A move the platform refuses (Windows, while a reader holds
+    the file open) falls back to a copy.
+    """
     try:
         previous = path.read_text(encoding="utf-8")
     except OSError:
         return
     if previous == report:
         return  # The same report delivered again is not a new round.
-    rounds = _report_rounds(path)
-    number = rounds[-1][0] + 1 if rounds else 1
-    os.replace(path, path.with_name(f"{path.stem}.round-{number}{path.suffix}"))
+    try:
+        rounds = _report_rounds(path)
+        number = rounds[-1][0] + 1 if rounds else 1
+        target = path.with_name(f"{path.stem}.round-{number}{path.suffix}")
+        try:
+            os.replace(path, target)
+        except OSError:
+            target.write_text(previous, encoding="utf-8")
+    except OSError:
+        logger.warning("task_dispatch: could not keep the previous report %s", path, exc_info=True)
+
+
+def _write_report_file(path: Path, report: str) -> None:
+    """Write ``report`` to ``path`` whole: a temp file renamed into place, so
+    a reader never sees a half-written report. Where the rename is refused
+    (an open reader on Windows), the file is rewritten in place."""
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(report, encoding="utf-8")
+        os.replace(temp, path)
+    except OSError:
+        temp.unlink(missing_ok=True)
+        path.write_text(report, encoding="utf-8")
 
 
 def earlier_task_reports(report_path: Optional[str]) -> List[str]:

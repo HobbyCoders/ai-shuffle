@@ -145,3 +145,69 @@ async def test_a_continued_worker_saves_its_new_report_for_task_get(report_dir, 
     _, frame = terminal.await_args.args
     assert frame["report_path"] == first
     assert frame["summary"] == new_report
+
+
+def test_a_refused_move_still_writes_the_new_report(report_dir, monkeypatch):
+    """Windows refuses to move a file a reader holds open: the earlier round
+    is copied instead, and the new report is written either way."""
+    import os
+
+    first = task_dispatch.write_task_report(None, "w1", "Round one")
+    real_replace = os.replace
+
+    def refuse(src, dst):
+        if str(src) == first:
+            raise PermissionError("held open")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(task_dispatch.os, "replace", refuse)
+    second = task_dispatch.write_task_report(None, "w1", "Round two")
+    assert second == first
+    assert Path(second).read_text() == "Round two"
+    (earlier,) = task_dispatch.earlier_task_reports(second)
+    assert Path(earlier).read_text() == "Round one"
+
+
+def test_a_refused_rename_rewrites_the_report_in_place(report_dir, monkeypatch):
+    task_dispatch.write_task_report(None, "w1", "Round one")
+
+    def refuse(src, dst):
+        raise PermissionError("held open")
+
+    monkeypatch.setattr(task_dispatch.os, "replace", refuse)
+    path = task_dispatch.write_task_report(None, "w1", "Round two")
+    assert path and Path(path).read_text() == "Round two"
+    assert not list(report_dir.glob(".*.tmp"))
+
+
+async def test_a_continuation_with_no_text_after_the_message_reports_its_turn(
+    report_dir, monkeypatch,
+):
+    """A message delivered after the worker's closing text: nothing follows
+    it, so the turn's text is the report, not 'ended without a report'."""
+    from app.core import agent_messaging, turn_scheduler
+    from app.db import database
+
+    task_registry.start_task("parent-1", "w1", "agent", "Review", tool_use_id="w1")
+    settled = {"id": "wt2", "payload": {"agent_message_reply_to": "parent-1"}}
+    monkeypatch.setattr(provider_agent, "_load_session_events", lambda sid: [
+        {"turn_id": "wt2", "event_type": "message.user", "payload": {"content": "go"}},
+        {"turn_id": "wt2", "event_type": "assistant.text_delta",
+         "payload": {"text": "Verdict: MERGE"}},
+        {"turn_id": "wt2", "event_type": "message.user",
+         "payload": {"content": "[agent message] also check X"}},
+    ])
+    monkeypatch.setattr(database, "get_session", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "_session_has_parked_turn", lambda sid: False)
+    monkeypatch.setattr("app.db.turns.session_has_unsettled_turns", lambda sid: False)
+    monkeypatch.setattr("app.db.turns.get_cwd_failure", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "_latest_context_turn", lambda sid: {"id": "wt2"})
+    monkeypatch.setattr("app.core.turn_recorder.record_task_settle_frame", AsyncMock())
+    monkeypatch.setattr("app.core.provider_agent_feed.record_continuation_report", AsyncMock())
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
+    monkeypatch.setattr("app.core.worker_checkout.reclaim_untouched_worker_checkout",
+                        lambda sid: None)
+
+    await agent_messaging.finish_message_resume("w1", settled, "completed")
+    row = task_registry.get_task("parent-1", "w1")
+    assert Path(row["reportPath"]).read_text() == "Verdict: MERGE"
