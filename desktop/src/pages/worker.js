@@ -67,6 +67,14 @@
    return;
   }
   const starting = pg?.phase === 'starting' || state.phase === 'starting' || state.phase === 'idle';
+  if (state.startupStep === 'restore-point') {
+   // Copying a large database can take minutes; this is progress, not a slow start.
+   resetWait();
+   status.section.dataset.mode = 'starting';
+   status.heading.textContent = 'Preparing the update';
+   status.detail.textContent = 'Preparing the update\'s database restore point…';
+   return;
+  }
   if (starting) {
    if (slowTimer === null && !slow) {
     // This is guidance about elapsed time, not a fabricated failure or readiness deadline.

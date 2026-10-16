@@ -38,6 +38,15 @@ workflow verifies the transitional installer on a clean Windows runner. This is
 not evidence of an existing-install migration: verify that swap before switching
 signers. Future minimum bumps should follow a Windows acceptance run.
 
+Version and minimum **4** are the launchers that make the database restore
+point before an update's first start (`prepareRollback`, and `recoverRollback`
+after a failed first start). The launcher closure gained them in 1.0.0 without
+a version bump, so the 0.9.6 launcher (no restore points) and the 1.0.x
+launchers (restore points) both report 3. Minimum 4 makes every version-3
+launcher swap to this one after the update's first healthy start; from the
+next update on, the launcher makes the restore point again. Run the acceptance
+run below against a 0.9.6 installer and a 1.0.x installer before release.
+
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.
 It runs from any branch and publishes nothing
@@ -86,6 +95,54 @@ until it exits.
 **Compatibility rule.** A release must keep steps 1 to 7 working for every
 launcher at or above its `desktop.launcher`. A missing
 `SHUFFLE_LAUNCHER_VERSION` means 0.
+
+A release must also start under a launcher that skips anything added after it,
+because the swap only happens once the release is healthy. The updated app
+never relies on the launcher alone for its first start:
+
+## Launchers without restore points
+
+Launchers before 1.0.0 (0.9.6 and older, version 3 or lower) select a pending
+build without making a database restore point. The updated app checks for the
+point (`requireRestorePoint`) before it starts PostgreSQL for the first time.
+When there is none, it makes one itself (`lateRestorePoint`), the way the
+launcher would have:
+
+- Only in the booting build's own process, before it started the database
+  (`attach` wrote `waiting`), and only when the database floor is the previous
+  build's own. The launcher's `select` marked that floor uncertain; `waiting`
+  proves nothing has started the database since. Any other state is refused
+  as before.
+- The point is marked `late` in `restore-point.json`. The app copies the
+  database, then fences itself (`databaseStarting`), then marks the point
+  ready. A ready late point therefore always comes with the fence, so an old
+  launcher never runs the previous build next to it; that would make the copy
+  stale. A late copy left without the fence is made again; one left fenced but
+  not ready is checked (or made again) and finished.
+- The status page says "Preparing the update's database restore point…" while
+  the copy runs.
+- If the copy fails, the update does not start. The partial copy is removed
+  and the window shows "Could not prepare the update's database restore point:
+  <reason>. Free some disk space and choose Try again." Try again repeats the
+  copy. Closing the app leaves the update staged and the previous version runs.
+- When the previous version is the installer's bundled build (no source update
+  was ever active), no point is made. Only a launcher that bundles that build
+  could restore it, and that launcher never restores; the point would only
+  block a newer installer's recovery. The update starts under its migration
+  fence, as every update did under these launchers.
+
+If the update then fails its first start, the app marks it failed and fenced
+(`failed`, `mayHaveMigrated`, the database floor) and relaunches the launcher.
+An old launcher ignores `restore-point.json`. It never runs older code on that
+database: it offers **Try Again**, which runs the same update again, or
+**Quit**. The restore point is kept. A retried start that becomes healthy
+deletes it. Installing a current installer instead restores the database to
+the point and goes back to the previous version, as a current launcher does.
+
+Once the update is healthy, the launcher swap below replaces the old launcher.
+Linux installs share this check but have no launcher swap: under a 0.9.6
+installer, every update makes its own point until a current installer is
+installed.
 
 ## Replacing an older launcher
 

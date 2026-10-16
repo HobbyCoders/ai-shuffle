@@ -11,7 +11,9 @@
 //
 // When a launcher older than `minimum` starts a release, the release replaces
 // it from its own verified source (desktop/LAUNCHER.md). Minimum 3 is the
-// owner-accepted signing-key bridge; future bumps need Windows acceptance.
+// owner-accepted signing-key bridge. Minimum 4 replaces launchers without
+// database restore points (0.9.6) and the 1.0.x ones that report 3; every
+// bump needs a Windows acceptance run.
 export function readLauncher(text) {
  const value = JSON.parse(text);
  const count = n => Number.isSafeInteger(n) && n >= 0;

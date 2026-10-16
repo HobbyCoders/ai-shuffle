@@ -463,6 +463,28 @@ test('missing restore point fails closed before PostgreSQL or worker start',asyn
  const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates}});
  assert.equal(main.postgres.state.phase,'idle');assert.equal(main.worker.state.phase,'idle');
 });
+test('an older launcher\'s update copies the database for its restore point before PostgreSQL starts, and the window says so',async()=>{
+ const events=[];
+ const updates={options:{root:'/isolated/source'},async requireRestorePoint(validator,late){
+  events.push('validate');assert.equal(typeof validator.validate,'function');
+  // The copy is the app's own PostgreSQL restore point, quiesced by the same supervisor.
+  late.preparing();assert.equal(typeof (await late.database('a'.repeat(40))).validate,'function');events.push('late copy');
+ },async databaseStarting(){events.push('floor');},async healthy(){},async finishRollback(){},async failed(){}};
+ const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates},postgresStart:async()=>events.push('postgres')});
+ assert.deepEqual(events,['validate','late copy','floor','postgres']);
+ const states=main.window.sent.filter(([channel])=>channel==='desktop:worker-state').map(([,state])=>state.startupStep);
+ assert.ok(states.includes('restore-point'),'the status page is told about the copy');
+ assert.equal(main.window.sent.filter(([channel])=>channel==='desktop:worker-state').at(-1)[1].startupStep,undefined);
+});
+test('a failed late restore point stops before PostgreSQL and shows only its plain reason',async()=>{
+ const {RestorePointError}=createRequire(import.meta.url)('../dist/main/source-updates.js');
+ const message='Could not prepare the update\'s database restore point: disk full. Free some disk space and choose Try again.';
+ const updates={options:{root:'/isolated/source'},async requireRestorePoint(){throw new RestorePointError(message);},async databaseStarting(){assert.fail('must not lower the fence');}};
+ const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates}});
+ assert.equal(main.postgres.state.phase,'idle');
+ const state=main.window.sent.filter(([channel])=>channel==='desktop:worker-state').at(-1)[1];
+ assert.equal(state.phase,'failed');assert.equal(state.error,message);assert.equal(state.startupStep,undefined);
+});
 test('quitting a first boot before its database started lets the next launch retry it; after that it does not', async () => {
 	const applications = () => ({ options: { root: '/isolated/source' }, deferred: 0, async requireRestorePoint() {}, async finishRollback() {}, async deferBoot() { this.deferred++; }, async databaseStarting() { this.starting = (this.starting ?? 0) + 1; }, async healthy() {}, async failed() {} });
 	const executable = '/Programs/AI Shuffle/AI Shuffle.exe';

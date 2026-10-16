@@ -46,6 +46,13 @@ test('startup sync has its own splash step', async () => {
  assert.equal(p.el('status-heading').textContent, 'Syncing your devices');
  assert.match(p.el('status-detail').textContent, /before opening/);
 });
+test('an update\'s database restore point has its own splash step', async () => {
+ const p = page({ state: { phase: 'idle', startupStep: 'restore-point', postgres: { phase: 'idle' } } }); await tick();
+ assert.equal(p.el('status').dataset.mode, 'starting');
+ assert.equal(p.el('status-heading').textContent, 'Preparing the update');
+ assert.equal(p.el('status-detail').textContent, 'Preparing the update\'s database restore point…');
+ assert.equal(p.el('restart').hidden, true);
+});
 test('ordinary startup is quiet, reflects readiness, and loads logs only when requested', async () => {
  const p = page(); await tick();
  assert.equal(p.el('status').dataset.mode, 'starting');
