@@ -173,7 +173,7 @@ export function invalidateSttCapability(): void {
 }
 
 // Apply local/remote settings and account changes to the next recording.
-resourceSync.subscribe(['settings'], invalidateSttCapability);
+resourceSync.subscribe(['settings'], invalidateSttCapability, { whileHidden: true });
 sessionOwnerBoundary.subscribe(invalidateSttCapability);
 
 // ============================================================================

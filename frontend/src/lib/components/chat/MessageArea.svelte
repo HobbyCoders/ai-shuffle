@@ -70,7 +70,7 @@
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
-		latestTurnKey,
+		createLatestTurnKeyTracker,
 		hasLinkedSubagent as hasLinkedSubagentIn,
 		type DisplayItem,
 		type TranscriptModel
@@ -88,6 +88,7 @@
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	import { applyPerformanceProfile } from '$lib/utils/perf-profile';
 	import {
+		createTurnNavigationSignature,
 		deriveUserTurnNavigationItems,
 		isNavigableUserTurn,
 		resolveCurrentTurnIndex,
@@ -440,15 +441,14 @@
 	let handoffTick = $state(0);
 	const turnHandoff = createTurnHandoffHold(() => handoffTick++);
 	onDestroy(() => turnHandoff.dispose());
-	// The store emits on every stream delta; rescan only when the array changes.
-	let latestKeyFor: { messages: ChatMessage[] | null; key: string | null } = { messages: null, key: null };
+	// The store emits on every stream delta; the tracker answers a repeated
+	// array at once and a streaming fold from the rows near the tail (#1282).
+	const latestTurnKeyOf = createLatestTurnKeyTracker();
 	const heldTurnKeys = $derived.by(() => {
 		void handoffTick;
-		const messages = $activeSession.messages;
-		if (messages !== latestKeyFor.messages) latestKeyFor = { messages, key: latestTurnKey(messages) };
 		return turnHandoff.update({
 			sessionId: $activeSession.sessionId,
-			latestTurnKey: latestKeyFor.key,
+			latestTurnKey: latestTurnKeyOf($activeSession.messages),
 			unsettled: latestTurnUnsettled,
 			parked: $activeSession.turnParked === true
 		});
@@ -593,16 +593,11 @@
 		items: []
 	};
 
-	const turnNavigationSignature = $derived.by(() => {
-		let signature = '';
-		for (const message of $activeSession.messages) {
-			if (!isNavigableUserTurn(message) || !message.id) continue;
-			// The turn id decides whether a prompt opens a turn or was steered
-			// into one, and it changes when the server reconciles a send.
-			signature += `${message.id}:${message.turnId ?? ''}:${(message.content ?? '').length}\u0000`;
-		}
-		return signature;
-	});
+	// The turn id in it decides whether a prompt opens a turn or was steered
+	// into one, and it changes when the server reconciles a send. Incremental:
+	// a streaming fold re-reads only the rows near the tail (#1282).
+	const navigationSignatureOf = createTurnNavigationSignature();
+	const turnNavigationSignature = $derived(navigationSignatureOf($activeSession.messages));
 
 	const turnNavigationItems = $derived.by(() => {
 		const signature = turnNavigationSignature;
