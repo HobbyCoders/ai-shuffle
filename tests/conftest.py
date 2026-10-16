@@ -19,6 +19,9 @@ from unittest.mock import patch, AsyncMock
 
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# Prefer this checkout's fluid over any installed copy: without PYTHONPATH=fluid
+# an older site-packages fluid shadows it and tests fail on missing attributes.
+sys.path.insert(0, str(Path(__file__).parent.parent / "fluid"))
 
 # Set test environment variables before importing app modules.
 # A test process must never load the launching worker's private env file.
