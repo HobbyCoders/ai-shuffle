@@ -1,7 +1,7 @@
 """Tests for persistent, crash-surviving file logging (app.core.file_logging).
 
 Covers:
-- setup_file_logging attaches a RotatingFileHandler with the configured level,
+- setup_file_logging queues a RotatingFileHandler with the configured level,
   rotation sizing, and UTF-8 encoding, under <data_dir>/logs/<instance_id>/app.log
   (per-instance namespacing so installs sharing a data dir never fight over
   rotation).
@@ -106,6 +106,40 @@ def fake_settings(tmp_path, monkeypatch):
     file_logging._pending_fatal_warning = None
 
 
+
+
+@pytest.mark.asyncio
+async def test_file_rotation_and_traceback_formatting_stay_off_event_loop(fake_settings, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    fake_settings()
+    file_logging.setup_file_logging()
+    file_logging._file_handler.flush()
+    loop_thread = threading.current_thread()
+    calls = []
+    original = RotatingFileHandler.shouldRollover
+
+    def slow_rotation_check(handler, record):
+        calls.append(threading.current_thread())
+        time.sleep(0.1)  # model a stat() stalled behind disk work
+        return original(handler, record)
+
+    monkeypatch.setattr(RotatingFileHandler, "shouldRollover", slow_rotation_check)
+    handler = file_logging._file_handler
+    try:
+        raise RuntimeError("queued file traceback")
+    except RuntimeError:
+        record = logging.LogRecord("file.test", logging.ERROR, __file__, 1, "failed", (), sys.exc_info())
+    started = time.perf_counter()
+    handler.handle(record)
+    emit_seconds = time.perf_counter() - started
+    await asyncio.to_thread(handler.flush)
+    print(f"file-log producer elapsed ms: {emit_seconds * 1000:.2f}")
+    assert calls and all(thread is not loop_thread for thread in calls)
+    assert "RuntimeError: queued file traceback" in (_log_dir(tmp_path) / "app.log").read_text()
+
+
 def test_setup_attaches_rotating_file_handler_with_config(fake_settings, tmp_path):
     fake_settings(file_log_level="WARNING", file_log_max_bytes=1234, file_log_backup_count=3)
 
@@ -114,11 +148,12 @@ def test_setup_attaches_rotating_file_handler_with_config(fake_settings, tmp_pat
     # Per-instance namespacing: logs/<instance_id>/app.log
     assert path == _log_dir(tmp_path) / "app.log"
     handler = file_logging._file_handler
-    assert isinstance(handler, RotatingFileHandler)
+    assert isinstance(handler, file_logging.QueuedHandler)
+    assert isinstance(handler.sink, RotatingFileHandler)
     assert handler.level == logging.WARNING
-    assert handler.maxBytes == 1234
-    assert handler.backupCount == 3
-    assert handler.encoding == "utf-8"
+    assert handler.sink.maxBytes == 1234
+    assert handler.sink.backupCount == 3
+    assert handler.sink.encoding == "utf-8"
     # Attached to the ROOT logger so all app/uvicorn/third-party records land here.
     assert handler in logging.getLogger().handlers
     assert _log_dir(tmp_path).is_dir()
@@ -151,9 +186,9 @@ def test_setup_is_idempotent(fake_settings, tmp_path):
     fake_settings()
     first = file_logging.setup_file_logging()
     root = logging.getLogger()
-    count_after_first = sum(isinstance(h, RotatingFileHandler) for h in root.handlers)
+    count_after_first = sum(isinstance(h, file_logging.QueuedHandler) and isinstance(h.sink, RotatingFileHandler) for h in root.handlers)
     second = file_logging.setup_file_logging()
-    count_after_second = sum(isinstance(h, RotatingFileHandler) for h in root.handlers)
+    count_after_second = sum(isinstance(h, file_logging.QueuedHandler) and isinstance(h.sink, RotatingFileHandler) for h in root.handlers)
     assert first == second
     assert count_after_first == count_after_second == 1
 
@@ -179,7 +214,7 @@ def test_disabled_via_env_flag(fake_settings, tmp_path):
     assert path is None
     assert file_logging._file_handler is None
     # No RotatingFileHandler attached, no logs dir created.
-    assert not any(isinstance(h, RotatingFileHandler) for h in logging.getLogger().handlers)
+    assert not any(isinstance(h, file_logging.QueuedHandler) and isinstance(h.sink, RotatingFileHandler) for h in logging.getLogger().handlers)
     assert not (tmp_path / "logs").exists()
 
 

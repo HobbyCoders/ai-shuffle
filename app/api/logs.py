@@ -105,7 +105,7 @@ async def get_logs(
     Returns the most recent `limit` lines, optionally filtered by level and
     search term.
     """
-    buf = ring_handler.buffer
+    buf = list(ring_handler.buffer)
 
     # Collect unique levels for the filter dropdown
     all_levels = sorted({r.level for r in buf})
@@ -139,7 +139,7 @@ async def export_logs(
     """
     Export all buffered log lines as a downloadable text file (admin only).
     """
-    buf = ring_handler.buffer
+    buf = list(ring_handler.buffer)
     text = "\n".join(r.message for r in buf)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"ai-shuffle-logs-{timestamp}.log"
