@@ -10,6 +10,12 @@ app. An agent with a shell can still read the install's database descriptor and
 keys, decrypt same-user DPAPI files, or run a database client. Environment
 filtering and owner-only HTTP checks do not prevent that.
 
+The network route is closed separately: in the Docker image, loopback and the
+container's own addresses never grant passwordless owner access
+(`owner_auth.local_access`, `container_install`), so an agent cannot become
+the owner by calling the local API. That does not help against the file access
+above; this file split is still needed for that.
+
 Do not treat a shell-enabled agent as unable to access owner data. A malicious
 repository, web page or tool response can try to exploit this access. The
 terminal API's owner checks restrict the API, not the OS account's authority.

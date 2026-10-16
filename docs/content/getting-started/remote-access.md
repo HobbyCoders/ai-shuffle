@@ -18,7 +18,7 @@ AI Shuffle runs on your own machine. There are three ways to reach it from somew
 
 Set AI Shuffle to listen on your machine's home network address (`BIND_HOST` with Docker, see [Install with Docker](/docs/getting-started/install-docker-compose)). Any device on your network can then open `http://<machine address>:8000`.
 
-Each browser signs in with your owner password once (see [First run](/docs/getting-started/first-run)). **Settings → Security → Trusted LAN, no login** skips the password for every device on your network. It is off by default. Turning it on makes anyone on your Wi-Fi the owner.
+Each browser signs in with your owner password once (see [First run](/docs/getting-started/first-run)). **Settings → Security → Trusted LAN, no login** skips the password for every device on your network. It is off by default. Turning it on makes anyone on your Wi-Fi the owner. It never covers the machine AI Shuffle runs on: opening it there by the machine's LAN address or host name (instead of `localhost`), from inside a Docker container, or through rootless Podman's `pasta` networking still asks for the password. On Docker, agents can reach the worker through the host's published port like any device on your network, so keep it off when agents work on code or pages you do not trust.
 
 ## With Tailscale
 

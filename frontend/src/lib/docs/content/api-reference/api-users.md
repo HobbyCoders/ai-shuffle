@@ -15,7 +15,7 @@ API users provide authentication for external integrations, connectors, and auto
 - A unique API key (prefix: `aih_`)
 - Optional project and agent restrictions
 
-API users are connector/application credentials, not human sign-in accounts. They never get owner access, even when a request arrives over the local network. The examples below use passwordless owner access from the same machine, which needs a same-origin `Origin` header on changes. Scripts on other machines can use an owner token instead (see [Owner password](/docs/api-reference/authentication#owner-password)).
+API users are connector/application credentials, not human sign-in accounts. They never get owner access, even when a request arrives over the local network. The examples below use passwordless owner access from the same machine (desktop app or native install), which needs a same-origin `Origin` header on changes. On a Docker worker, and on other machines, scripts use an owner token instead (see [Owner password](/docs/api-reference/authentication#owner-password)).
 
 ## API User CRUD
 

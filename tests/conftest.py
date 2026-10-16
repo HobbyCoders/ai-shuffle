@@ -253,6 +253,29 @@ def _test_only_memory_store(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _loopback_owner_install(request, monkeypatch):
+    """Tests run as a native install, where loopback can be the owner.
+
+    ``owner_auth.container_install`` otherwise follows the machine running the
+    tests (a Docker worker or a CI runner), so the same loopback test would
+    pass on one and fail on the other. Tests of the Docker rule use the
+    ``docker_install`` fixture; tests of the detection itself are marked
+    ``real_install_detection``.
+    """
+    if request.node.get_closest_marker("real_install_detection"):
+        return
+    from app.core import owner_auth
+    monkeypatch.setattr(owner_auth, "container_install", lambda: False)
+
+
+@pytest.fixture
+def docker_install(monkeypatch):
+    """Run the test as the Docker image, where loopback is never the owner."""
+    from app.core import owner_auth
+    monkeypatch.setattr(owner_auth, "container_install", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_computer_use_halt_state(monkeypatch):
     """Stop tests must not leak arbitrary session flags into another test."""
     from app.mcp.computer_use import abort

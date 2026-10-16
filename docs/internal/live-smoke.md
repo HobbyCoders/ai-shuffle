@@ -28,11 +28,19 @@ python -m scripts.live_smoke run
 ```
 
 It talks to the worker's own HTTP API on loopback
-(`http://127.0.0.1:8000`, `--url` to change) with the same passwordless
-local access the worker grants its own machine. It sends no credential and
-stores none. A worker started by the desktop app only admits its own window
-on loopback, so the runner gets "refused passwordless local access" there;
-record that worker's rows by hand instead (see below).
+(`http://127.0.0.1:8000`, `--url` to change). On a native install it uses the
+passwordless local access that worker grants its own machine and sends no
+credential. The Docker image never treats loopback as the owner (agents'
+commands run in the same container), so there the owner signs in
+(`POST /api/v1/owner/login` with `"bearer": true`), writes the token to a
+private file and passes `--token-file PATH`; the runner sends it as a Bearer
+and as the chat socket's `token`, and stores it nowhere. Without it the runner
+stops with "the worker refused the request". An agent must not mint or look
+for that token itself: running the smoke on Docker is the owner's call. A
+worker started by the desktop app only admits its own window on loopback;
+record that worker's rows by hand instead (see below). For in-chat live tests,
+the live-test skill drives sessions through the agent tools (StartSession,
+MessageSession, ArchiveSession) and needs no token.
 
 Useful flags: `--token-cap N`, `--model M` (default: the cheapest-looking
 usable model), `--peer NAME` (default: the only other paired worker),
@@ -92,9 +100,10 @@ instance** of a clean checkout at the candidate commit instead:
 
    in its environment. The instance needs an agent with a working provider
    and, for rows with `needs_project`, the project registered. It must
-   answer passwordless loopback requests: a worker started by the desktop
-   app requires the desktop's listener token, which the runner does not
-   have, so start the instance under a supervisor that does not set one.
+   answer passwordless loopback requests: start it with `LOCAL_MODE=1` (a
+   preview inside the Docker image otherwise refuses loopback like the
+   worker itself) and under a supervisor that does not set the desktop's
+   listener token, which the runner does not have.
    Never copy a `.env` into the checkout.
 
 3. From that same checkout:

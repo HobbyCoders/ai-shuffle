@@ -28,6 +28,34 @@ finally:
 """
 
 
+# What an agent's shell in the container sees: no owner on loopback or on the
+# container's own address, for reads or for a write with a forged Origin.
+AGENT_LOOPBACK_PROBE = """import json, socket, urllib.error, urllib.request
+def call(base, path, method="GET"):
+    host = base.split("//", 1)[1]
+    request = urllib.request.Request(base + path, method=method, data=b"{}" if method != "GET" else None,
+                                     headers={"Host": host, "Origin": base, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+bases = ["http://127.0.0.1:8000", "http://localhost:8000"]
+try:
+    bases.append("http://" + socket.gethostbyname(socket.gethostname()) + ":8000")
+except OSError:
+    pass
+for base in bases:
+    status, body = call(base, "/api/v1/auth/status")
+    auth = json.loads(body)
+    assert status == 200 and auth["is_admin"] is False and auth["local_access"] is False, (base, auth)
+    for path, method in (("/api/v1/workspace/config", "GET"), ("/api/v1/workspace/config", "POST"),
+                         ("/api/v1/settings/application-updates", "GET")):
+        status, _ = call(base, path, method)
+        assert status in (401, 403), (base, path, method, status)
+"""
+
+
 class Check:
     def __init__(self, image, artifacts):
         self.image = image
@@ -180,11 +208,13 @@ class Check:
         self.ready(recreated)
         assert self.system_id(recreated) == identity
         assert self.sql(recreated, "SELECT value FROM container_persistence_check;") == "retained"
-        self.docker("exec", "--user", "99:100", recreated, "python", "-c",
-                    "import json,urllib.request; "
-                    "data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/workspace/config')); "
-                    "assert data['workspace_path']=='/workspace/container-onboarding-check'")
-        self.passed("graceful restart and recreation preserve cluster identity, data and UI-authored workspace settings")
+        # Persistence is read from the database: an in-container process is
+        # never the owner on loopback, so it cannot read the owner API.
+        saved = self.sql(recreated, "SELECT value FROM system_settings WHERE key LIKE 'workspace_path%';")
+        assert "/workspace/container-onboarding-check" in saved.splitlines(), saved
+        self.docker("exec", "--user", "99:100", recreated, "python", "-c", AGENT_LOOPBACK_PROBE)
+        self.passed("graceful restart and recreation preserve cluster identity, data and UI-authored workspace "
+                    "settings; an in-container process gets no owner access on loopback")
 
         # Dump stdout must be only the custom archive, not entrypoint diagnostics.
         archive = self.docker("exec", "--user", "99:100", recreated, "python", RUNTIME,
