@@ -63,6 +63,10 @@
   const pg = state.postgres;
   if (pg?.phase === 'failed' || state.phase === 'failed') {
    const databaseFailed = pg?.phase === 'failed';
+   if (!databaseFailed && state.startupStep === 'restore-point') {
+    showFailure('The update could not start yet', 'Before its first start, the update copies your database so it can go back if something goes wrong. That copy could not be made. Your data has not been changed.', state.error);
+    return;
+   }
    showFailure(databaseFailed ? 'Your local database could not start' : 'Your local worker could not start', 'Review the error below, then try again. Your setup will resume when startup succeeds.', databaseFailed ? pg.error : state.error);
    return;
   }

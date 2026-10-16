@@ -851,23 +851,29 @@ export class SourceUpdates {
       // cleanup failed, or an unfenced late copy of this build (possibly stale).
       if (existing.phase !== 'committed' && !(existing.late && existing.revision === revision && ['preparing', 'ready'].includes(existing.phase))) return false;
       try { await this.dropRestorePoint(existing, late.database); }
-      catch (error) { throw this.restorePointError(error); }
+      catch (error) { throw this.restorePointError(error, false); }
     }
+    const floor = this.migrationFloor;
+    if (this.recoveryRequired || floor === null) return false;
     const previous = this.state.active;
     if (!previous) {
       // The previous version is the installer's bundled build. Only a launcher
       // bundling that same build can restore to it, and that launcher (0.9.6 or
       // older) never restores: a point would only block a newer installer's
       // recovery. Start under the migration fence, as these launchers always did.
+      // attach (without the installer's baseline) fences that build's own floor;
+      // any other fence, or a block it does not explain, is refused.
+      const fences = Object.entries(this.state.mayHaveMigrated ?? {});
+      if (fences.some(([fenced, sequence]) => !floor || fenced !== floor.revision || sequence === null || sequence > floor.sequence) ||
+          (this.state.blocked && !fences.length)) return false;
       console.warn('This launcher makes no database restore point; the update starts under its migration fence');
       return true;
     }
     await this.assertCanRun(previous);
-    const floor = this.migrationFloor;
     // select() marks the floor uncertain because it hands the database to code
     // that might not record it. waiting proves nothing has started it since, so
     // the previous build's own floor still holds; any other floor is refused.
-    if (floor === null || (floor && (floor.revision !== previous || floor.sequence !== await this.sequence(previous)))) return false;
+    if (floor && (floor.revision !== previous || floor.sequence !== await this.sequence(previous))) return false;
     const state = { ...this.state };
     delete state.pending; delete state.staged; delete state.booting; delete state.waiting;
     if (state.blocked || state.recoveryRequired || Object.keys(state.mayHaveMigrated ?? {}).length) return false;
@@ -879,12 +885,12 @@ export class SourceUpdates {
       // Nothing was handed the database: remove the partial copy so Try again starts clean.
       try { await this.dropRestorePoint(j, late.database); }
       catch (cleanup) { console.error('Could not remove the incomplete database restore point', cleanup); }
-      throw this.restorePointError(error);
+      throw this.restorePointError(error, false);
     }
     // A failure here keeps the complete copy: unfenced it is made again, fenced it is finished.
     await this.databaseStarting();
     try { j.phase = 'ready'; await durableJson(this.journalFile, j); }
-    catch (error) { throw this.restorePointError(error); }
+    catch (error) { throw this.restorePointError(error, true); }
     return true;
   }
   /**
@@ -904,12 +910,27 @@ export class SourceUpdates {
       try { await db.validate(); }
       catch { await db.discard(); await db.snapshot(); }
       j.phase = 'ready'; await durableJson(this.journalFile, j);
-    } catch (error) { throw this.restorePointError(error); }
+    } catch (error) { throw this.restorePointError(error, true); }
     return true;
   }
-  private restorePointError(error: unknown): RestorePointError {
+  /**
+   * Plain advice by cause. `fenced`: this build already holds the database, so
+   * closing the app makes an old launcher ask to finish it, not run the previous version.
+   */
+  private restorePointError(error: unknown, fenced: boolean): RestorePointError {
     const reason = (error instanceof Error ? error.message : String(error)).replace(/\.\s*$/, '');
-    return new RestorePointError(`Could not prepare the update's database restore point: ${reason}. Free some disk space and choose Try again. If it still fails, close AI Shuffle and open it again; the update stays ready to install.`);
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? '';
+    const advice = code === 'ENOSPC' || /\bENOSPC\b|no space|disk (is )?full|not enough space/i.test(reason)
+      ? 'There is not enough free disk space for a copy of your database. Free some disk space, then choose Try again.'
+      : ['EBUSY', 'EPERM', 'EACCES'].includes(code) || /\b(EBUSY|EPERM|EACCES)\b|locked|in use/i.test(reason)
+        ? 'A file in the AI Shuffle data folder is in use. Close other programs that may be using it, such as a backup or an antivirus scan, then choose Try again.'
+        : /failed validation|changed while/i.test(reason)
+          ? 'The copy did not match your database. Choose Try again to make a new copy.'
+          : 'Choose Try again.';
+    const after = fenced
+      ? ' If you close AI Shuffle instead, it will say the last update did not finish starting: choose Try Again there to finish this update.'
+      : ' If it keeps failing, close AI Shuffle and open it again: the previous version opens and the update stays ready to install.';
+    return new RestorePointError(`Could not prepare the update's database restore point: ${reason}. ${advice}${after}`);
   }
   /** Cancel a point no build was handed (committed first, so a crash can only leave cleanup), then remove it. */
   private async dropRestorePoint(j: RestoreJournal, database: RestoreDatabaseFactory): Promise<void> {

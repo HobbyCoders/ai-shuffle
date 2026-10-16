@@ -476,14 +476,20 @@ test('an older launcher\'s update copies the database for its restore point befo
  assert.ok(states.includes('restore-point'),'the status page is told about the copy');
  assert.equal(main.window.sent.filter(([channel])=>channel==='desktop:worker-state').at(-1)[1].startupStep,undefined);
 });
-test('a failed late restore point stops before PostgreSQL and shows only its plain reason',async()=>{
+test('a failed late restore point stops before PostgreSQL, shows its plain reason, and Try again repeats it in this process',async()=>{
  const {RestorePointError}=createRequire(import.meta.url)('../dist/main/source-updates.js');
- const message='Could not prepare the update\'s database restore point: disk full. Free some disk space and choose Try again.';
- const updates={options:{root:'/isolated/source'},async requireRestorePoint(){throw new RestorePointError(message);},async databaseStarting(){assert.fail('must not lower the fence');}};
- const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates}});
- assert.equal(main.postgres.state.phase,'idle');
+ const message='Could not prepare the update\'s database restore point: disk full. There is not enough free disk space for a copy of your database.';
+ let attempts=0;const events=[];
+ const updates={options:{root:'/isolated/source'},async requireRestorePoint(){if(++attempts===1)throw new RestorePointError(message);events.push('copied');},
+  async databaseStarting(){events.push('floor');},async healthy(){},async finishRollback(){},async failed(){}};
+ const main=await launch({installed:{executable:path.resolve('Programs/AI Shuffle.exe'),updates},postgresStart:async()=>events.push('postgres')});
+ assert.equal(main.postgres.state.phase,'idle');assert.deepEqual(events,[]);
  const state=main.window.sent.filter(([channel])=>channel==='desktop:worker-state').at(-1)[1];
- assert.equal(state.phase,'failed');assert.equal(state.error,message);assert.equal(state.startupStep,undefined);
+ assert.equal(state.phase,'failed');assert.equal(state.error,message);assert.equal(state.startupStep,'restore-point');
+ // A relaunch would go through an old launcher, which runs the previous version instead.
+ await main.ipc.worker.restart();
+ assert.equal(main.app.relaunched,undefined);assert.equal(main.app.quits,0);
+ assert.deepEqual(events,['copied','floor','postgres']);assert.equal(main.worker.state.phase,'ready');
 });
 test('quitting a first boot before its database started lets the next launch retry it; after that it does not', async () => {
 	const applications = () => ({ options: { root: '/isolated/source' }, deferred: 0, async requireRestorePoint() {}, async finishRollback() {}, async deferBoot() { this.deferred++; }, async databaseStarting() { this.starting = (this.starting ?? 0) + 1; }, async healthy() {}, async failed() {} });

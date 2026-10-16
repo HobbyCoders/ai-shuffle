@@ -96,14 +96,15 @@ until it exits.
 launcher at or above its `desktop.launcher`. A missing
 `SHUFFLE_LAUNCHER_VERSION` means 0.
 
-A release must also start under a launcher that skips anything added after it,
-because the swap only happens once the release is healthy. The updated app
-never relies on the launcher alone for its first start:
+A release must also start under a launcher that lacks anything added after
+it, because the swap below only happens once the release is healthy. The next
+section is the one case so far.
 
 ## Launchers without restore points
 
 Launchers before 1.0.0 (0.9.6 and older, version 3 or lower) select a pending
-build without making a database restore point. The updated app checks for the
+build without making a database restore point. So does the source bootstrap
+(`scripts/bootstrap.mjs`, starter installs). The updated app checks for the
 point (`requireRestorePoint`) before it starts PostgreSQL for the first time.
 When there is none, it makes one itself (`lateRestorePoint`), the way the
 launcher would have:
@@ -111,8 +112,9 @@ launcher would have:
 - Only in the booting build's own process, before it started the database
   (`attach` wrote `waiting`), and only when the database floor is the previous
   build's own. The launcher's `select` marked that floor uncertain; `waiting`
-  proves nothing has started the database since. Any other state is refused
-  as before.
+  proves nothing has started the database since. Any other state (another
+  fence, an unexplained block, an unreadable floor, recovery required) is
+  refused as before.
 - The point is marked `late` in `restore-point.json`. The app copies the
   database, then fences itself (`databaseStarting`), then marks the point
   ready. A ready late point therefore always comes with the fence, so an old
@@ -121,15 +123,25 @@ launcher would have:
   not ready is checked (or made again) and finished.
 - The status page says "Preparing the update's database restore point…" while
   the copy runs.
-- If the copy fails, the update does not start. The partial copy is removed
-  and the window shows "Could not prepare the update's database restore point:
-  <reason>. Free some disk space and choose Try again." Try again repeats the
-  copy. Closing the app leaves the update staged and the previous version runs.
+- If the copy fails, the update does not start and the database is not
+  touched. The status page says "The update could not start yet" and gives the
+  reason with advice for its cause: free disk space (`ENOSPC`), close programs
+  holding a file (`EBUSY`, `EPERM`, `EACCES`), or make a new copy (failed
+  validation). **Try again** repeats the copy in the same process on Windows
+  and Linux; it does not relaunch, because a relaunch goes through the old
+  launcher.
+- Closing the app instead: before the fence, the old launcher runs the
+  previous version and the update stays ready to install. After the fence (the
+  copy was made but could not be marked ready), the old launcher says "The
+  last update did not finish starting" and offers **Try Again**, which runs the
+  update again and finishes the copy, or **Quit**.
 - When the previous version is the installer's bundled build (no source update
   was ever active), no point is made. Only a launcher that bundles that build
   could restore it, and that launcher never restores; the point would only
   block a newer installer's recovery. The update starts under its migration
-  fence, as every update did under these launchers.
+  fence, as every update did under these launchers. The same state checks
+  apply first: `attach` fences the bundled build's own floor (the managed
+  process has no baseline), and any other fence or block is refused.
 
 If the update then fails its first start, the app marks it failed and fenced
 (`failed`, `mayHaveMigrated`, the database floor) and relaunches the launcher.
@@ -143,6 +155,13 @@ Once the update is healthy, the launcher swap below replaces the old launcher.
 Linux installs share this check but have no launcher swap: under a 0.9.6
 installer, every update makes its own point until a current installer is
 installed.
+
+**Installs that already hit the refusal** (1.0.0 or a nightly before this
+change, started by a 0.9.6 launcher): the refused build is left staged, and
+0.9.6's updater offers a staged build again without checking the feed. Those
+installs never receive this change in-app; nothing in a newer release runs
+there. Installing a current installer recovers them: its launcher makes the
+restore point and starts the staged update.
 
 ## Replacing an older launcher
 

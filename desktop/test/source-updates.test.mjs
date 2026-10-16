@@ -288,7 +288,7 @@ test('older launcher: a failed late copy stays closed with a plain reason, and T
   o.db.snapshot=async()=>{throw Error('ENOSPC: no space left on device');};
   const child=await o.child();
   await assert.rejects(child.requireRestorePoint(undefined,o.late),error=>error instanceof RestorePointError &&
-   /^Could not prepare the update's database restore point: ENOSPC: no space left on device\. Free some disk space and choose Try again\./.test(error.message));
+   /^Could not prepare the update's database restore point: ENOSPC: no space left on device\. There is not enough free disk space for a copy of your database\. Free some disk space, then choose Try again\. If it keeps failing, close AI Shuffle and open it again: the previous version opens/.test(error.message));
   assert.deepEqual(o.calls,['discard']);await assert.rejects(fs.stat(o.journalFile),{code:'ENOENT'});
   assert.equal((await o.floor()).revision,A,'the database was not handed to B');
   o.db.snapshot=snapshot;
@@ -323,9 +323,40 @@ test('older launcher: leftovers of an earlier late copy are removed before a new
   o.db.snapshot=async()=>{throw Error('disk full');};o.db.discard=async()=>{throw Error('EBUSY: locked');};
   await assert.rejects((await o.child()).requireRestorePoint(undefined,o.late),/restore point: disk full\./);
   assert.equal((await o.journal()).phase,'committed','never restorable, only cleanup');
-  await assert.rejects((await o.child()).requireRestorePoint(undefined,o.late),/restore point: EBUSY: locked\. Free some disk space/);
+  await assert.rejects((await o.child()).requireRestorePoint(undefined,o.late),/restore point: EBUSY: locked\. A file in the AI Shuffle data folder is in use\. Close other programs/);
   o.db.snapshot=snapshot;o.db.discard=discard;
   await (await o.child()).requireRestorePoint(undefined,o.late);assert.equal((await o.journal()).phase,'ready');
+ });
+});
+test('older launcher: a failure after the fence says how the old launcher finishes it, not that the previous version opens',async t=>{
+ const o=await oldLauncherUpdate(t);await (await o.child()).requireRestorePoint(undefined,o.late);
+ await fs.writeFile(o.journalFile,JSON.stringify({...await o.journal(),phase:'preparing'}));
+ o.db.validate=async()=>{throw Error('Database restore point failed validation');};o.db.snapshot=async()=>{throw Error('Database changed while taking its restore point');};
+ await assert.rejects((await o.child()).requireRestorePoint(undefined,o.late),error=>error instanceof RestorePointError &&
+  /The copy did not match your database\. Choose Try again to make a new copy\. If you close AI Shuffle instead, it will say the last update did not finish starting: choose Try Again there/.test(error.message));
+});
+test('older launcher: interleavings around the fence (pinned from review probes)',async t=>{
+ await t.test('floor written but state not saved: 0.9.6 fences the update and its retry finishes the copy',async t=>{
+  const o=await oldLauncherUpdate(t);const child=await o.child();
+  child.databaseStarting=async function(){await this.writeMigrationFloor(B,101);throw Error('power loss');};
+  await assert.rejects(child.requireRestorePoint(undefined,o.late),/power loss/);
+  assert.equal((await o.journal()).phase,'preparing');
+  const launcher=new OldUpdates(o.f.options);await launcher.load();assert.equal(launcher.blocked,true);
+  await assert.rejects(launcher.select(),/No healthy source build|older code cannot run/);
+  assert.equal(await launcher.retryFailed(),true);assert.equal((await launcher.select()).revision,B);
+  await (await o.child()).requireRestorePoint(undefined,o.late);
+  assert.equal((await o.journal()).phase,'ready');assert.deepEqual(o.calls,['snapshot','validate']);
+ });
+ await t.test('fenced but still preparing, then a current installer: no restore, back to A, B marked failed',async t=>{
+  const o=await oldLauncherUpdate(t);await (await o.child()).requireRestorePoint(undefined,o.late);
+  await fs.writeFile(o.journalFile,JSON.stringify({...await o.journal(),phase:'preparing'}));
+  await new OldUpdates(o.f.options).load();
+  const current=new SourceUpdates({...o.f.options,baseline:{revision:C,sequence:50}});await current.load();
+  assert.equal(await current.recoverRollback(o.late.database),true);
+  assert.deepEqual(o.calls,['snapshot','discard'],'B never started PostgreSQL, so nothing is restored');
+  assert.deepEqual(await o.floor(),{schemaVersion:1,revision:A,sequence:100});
+  assert.ok(JSON.parse(await fs.readFile(path.join(o.f.root,'state.json'),'utf8')).failed.includes(B));
+  assert.equal((await current.select()).revision,A);
  });
 });
 test('older launcher: no late copy for any state it cannot prove, and fenced revisions keep their old behaviour',async t=>{
@@ -343,6 +374,25 @@ test('older launcher: no late copy for any state it cannot prove, and fenced rev
   const o=await oldLauncherUpdate(t);
   await fs.writeFile(o.journalFile,JSON.stringify({schemaVersion:1,phase:'ready',revision:C,previous:A,state:{schemaVersion:1,active:A},floor:{revision:A,sequence:100},...(late?{late:true}:{})}));
   await assert.rejects((await o.child()).requireRestorePoint(undefined,o.late),refuse);assert.deepEqual(o.calls,[]);
+ });
+ await t.test('a bundled previous build with an unrelated fence or block',async t=>{
+  for(const extra of [{mayHaveMigrated:{[E]:40},blocked:true},{blocked:true}]){
+   const o=await oldLauncherUpdate(t,{baseline:true});const file=path.join(o.f.root,'state.json');
+   await fs.writeFile(file,JSON.stringify({...JSON.parse(await fs.readFile(file,'utf8')),...extra},null,2)+'\n');
+   const child=await o.child();
+   if(extra.mayHaveMigrated)await assert.rejects(child.requireRestorePoint(undefined,{database:async()=>assert.fail('no copy')}),refuse);
+   else{
+    // attach fenced the bundled floor itself, which explains the block: still the plain bundled start.
+    await child.requireRestorePoint(undefined,{database:async()=>assert.fail('no copy')});
+   }
+  }
+ });
+ await t.test('an unreadable database floor',async t=>{
+  for(const baseline of [false,true]){
+   // attach itself refuses an unreadable floor; this pins the late path's own check behind it.
+   const o=await oldLauncherUpdate(t,{baseline});const child=await o.child();child.migrationFloor=null;
+   await assert.rejects(child.requireRestorePoint(undefined,{database:async()=>assert.fail('no copy')}),refuse);
+  }
  });
  await t.test('a revision that may already have migrated',async t=>{
   const o=await oldLauncherUpdate(t);const child=await o.child();

@@ -120,6 +120,8 @@ async function main(): Promise<void> {
 	let stackStarted = false;
 	/** Set while this build copies the database for its own update restore point. */
 	let preparingRestorePoint = false;
+	/** Why that copy failed; Try again repeats it in this process. */
+	let restorePointFailure: string | null = null;
 	async function initializeRuntime(): Promise<void> {
 		const repoDir = path.resolve(__dirname, '..', '..', '..');
 		const selected = managed?.application;
@@ -187,7 +189,8 @@ async function main(): Promise<void> {
 	};
 
 	const desktopState = (): DesktopState => ({
-		...(supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
+		...(restorePointFailure ? { ...failedState(restorePointFailure), startupStep: 'restore-point' as const }
+			: supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
 		...(preparingRestorePoint ? { startupStep: 'restore-point' as const } : {}),
 		postgres: postgresStatus()
 	});
@@ -216,8 +219,13 @@ async function main(): Promise<void> {
 		try { await applications?.requireRestorePoint(postgres.updateRestorePoint(), restorePoint); await applications?.databaseStarting(); }
 		catch (error) {
 			preparingRestorePoint = false;
-			runtimeError = error instanceof RestorePointError ? error.message : `Could not record the application start: ${error instanceof Error ? error.message : String(error)}`;
-			supervisor = null;
+			// Keep the supervisor: Try again repeats the copy here. A relaunch would go
+			// through an old launcher, which runs the previous version instead.
+			if (error instanceof RestorePointError) restorePointFailure = error.message;
+			else {
+				runtimeError = `Could not record the application start: ${error instanceof Error ? error.message : String(error)}`;
+				supervisor = null;
+			}
 			window.send('desktop:worker-state', desktopState());
 			return;
 		}
@@ -231,6 +239,7 @@ async function main(): Promise<void> {
 		state: desktopState,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
 		restart: async () => {
+			if (restorePointFailure) { restorePointFailure = null; window.send('desktop:worker-state', desktopState()); await startStack(); return; }
 			if (!supervisor) { app.relaunch(); app.quit(); return; }
 			if (window.currentPage !== 'status') await window.showPage('status');
 			try {

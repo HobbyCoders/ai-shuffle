@@ -53,6 +53,13 @@ test('an update\'s database restore point has its own splash step', async () => 
  assert.equal(p.el('status-detail').textContent, 'Preparing the update\'s database restore point…');
  assert.equal(p.el('restart').hidden, true);
 });
+test('a failed update restore point has its own failure heading and keeps Try again', async () => {
+ const p = page({ state: { phase: 'failed', startupStep: 'restore-point', error: 'Could not prepare the update\'s database restore point: disk full.', postgres: { phase: 'idle' } } }); await tick();
+ assert.equal(p.el('status-heading').textContent, 'The update could not start yet');
+ assert.match(p.el('status-detail').textContent, /Your data has not been changed/);
+ assert.match(p.el('status-error').textContent, /disk full/);
+ assert.equal(p.el('restart').hidden, false);
+});
 test('ordinary startup is quiet, reflects readiness, and loads logs only when requested', async () => {
  const p = page(); await tick();
  assert.equal(p.el('status').dataset.mode, 'starting');
