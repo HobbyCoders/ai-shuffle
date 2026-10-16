@@ -167,6 +167,15 @@ Persistence/upload producers: `app/core/turn_recorder.py`,
 
 Other App content declarations this app needs:
 
+- **Accessibility API — not in the Play build (owner, 2026-10-16):** the
+  Google Play bundle is built with `ANDROID_PLAY_STORE_BUILD=true`
+  (`android-play.yml`). That removes `ShuffleAccessibilityService` through the
+  release overlay `app/src/playStore/AndroidManifest.xml` and replaces the
+  App control settings with a note. `ci/check-play-manifest.py` fails the
+  Play build if the bundle still declares the service. The website APK
+  (`android.yml`) and local builds keep app control. So no Accessibility
+  declaration is needed on Play. The notes below apply if app control
+  ever goes to Play.
 - **Accessibility API — keep the feature, hold submission:** the reviewed
   `ShuffleAccessibilityService` requires fresh on-device approval for each
   cross-app read/action, but AI proposal/target planning is not a static

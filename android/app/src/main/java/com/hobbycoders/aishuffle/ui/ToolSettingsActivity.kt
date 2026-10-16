@@ -7,6 +7,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.Lifecycle
 import kotlinx.coroutines.launch
+import com.hobbycoders.aishuffle.BuildConfig
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.tools.*
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -56,6 +57,10 @@ class ToolSettingsActivity : NativeScreen() {
             else confirm("Allow phone tools?", "${selected.name} can request phone actions while Shuffle is visible. You can turn this off at any time.") { prefs.setEnabled(true); attachSelected(); render() }
         }
         text("App control", 23f)
+        if (!BuildConfig.APP_CONTROL) {
+            text("App control isn't part of the Google Play version. The APK from hobbycoders.com includes it.")
+            return
+        }
         text("${if (ShuffleAccessibilityService.current != null && prefs.accessibilityEnabled) "Accessibility connected" else "Accessibility not connected"}. Optional app control reads or changes only apps you select below. Every request, including reading the screen, shows the named app, exact action and Allow once / Deny. Password, payment, permission and security screens are blocked.")
         button("Open Android Accessibility settings") {
             confirm("Open Accessibility settings?", "Review the AI Shuffle app-control service in Android. Enabling that service does not start app control; return here to opt in.") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }

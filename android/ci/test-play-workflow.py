@@ -95,6 +95,40 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(self.jobs["bundle"]["needs"], "checks")
         self.assertEqual(self.jobs["publish"]["needs"], "bundle")
 
+    def test_play_bundle_leaves_out_app_control(self):
+        steps = self.jobs["bundle"]["steps"]
+        build = next(step for step in steps if step.get("name") == "Test and build signed bundle")
+        self.assertEqual(build["env"]["ANDROID_PLAY_STORE_BUILD"], "true")
+        self.assertIn("ci/check-play-manifest.py app/build/outputs/bundle/release/app-release.aab", build["run"])
+        # The website APK keeps app control: android.yml never sets the switch.
+        self.assertNotIn("ANDROID_PLAY_STORE_BUILD", (ROOT / ".github/workflows/android.yml").read_text())
+        overlay = (ROOT / "android/app/src/playStore/AndroidManifest.xml").read_text()
+        self.assertIn('android:name=".tools.ShuffleAccessibilityService" tools:node="remove"', overlay)
+        gradle = (ROOT / "android/app/build.gradle.kts").read_text()
+        self.assertIn('System.getenv("ANDROID_PLAY_STORE_BUILD") == "true"', gradle)
+        self.assertIn('sourceSets.getByName("release").manifest.srcFile("src/playStore/AndroidManifest.xml")', gradle)
+
+    def test_play_manifest_check_rejects_the_accessibility_service(self):
+        import importlib.util, tempfile, zipfile
+        spec = importlib.util.spec_from_file_location("check_play_manifest", ROOT / "android/ci/check-play-manifest.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            def bundle(manifest: bytes) -> Path:
+                path = Path(tmp) / f"{len(manifest)}.aab"
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("base/manifest/AndroidManifest.xml", manifest)
+                return path
+            clean = bundle(b"\x0a\x19com.hobbycoders.aishuffle\x12.MainActivity")
+            self.assertEqual(module.check(clean), [])
+            self.assertEqual(module.main(["check", str(clean)]), 0)
+            dirty = bundle(b"com.hobbycoders.aishuffle .tools.ShuffleAccessibilityService "
+                           b"android.accessibilityservice.AccessibilityService")
+            self.assertEqual(len(module.check(dirty)), 2)
+            self.assertEqual(module.main(["check", str(dirty)]), 1)
+            # A manifest that is not ours fails closed instead of passing.
+            self.assertEqual(len(module.check(bundle(b"com.example.other"))), 1)
+
     def test_release_bundle_uses_immutable_tag_and_matching_version(self):
         steps = self.jobs["bundle"]["steps"]
         checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))

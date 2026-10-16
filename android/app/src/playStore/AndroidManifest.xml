@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Release overlay for the Google Play bundle only (see app/build.gradle.kts).
+     Removes app control's AccessibilityService; the website APK keeps it. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <service android:name=".tools.ShuffleAccessibilityService" tools:node="remove" />
+    </application>
+</manifest>
