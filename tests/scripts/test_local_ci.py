@@ -769,11 +769,14 @@ def test_checks_never_inherit_the_pushing_repository_from_git(monkeypatch, tmp_p
     monkeypatch.setenv("GIT_AUTHOR_NAME", "kept")
     seen = {}
 
-    def fake_run(argv, **kwargs):
-        seen.update(kwargs["env"])
-        return subprocess.CompletedProcess(argv, 0)
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            seen.update(kwargs["env"])
 
-    monkeypatch.setattr(local_ci.subprocess, "run", fake_run)
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(local_ci.subprocess, "Popen", FakePopen)
     local_ci.run(["true"], env={"PYTHONPATH": "x"})
     assert not {"GIT_DIR", "GIT_INDEX_FILE", "GIT_CONFIG_KEY_0"} & set(seen)
     assert seen["GIT_AUTHOR_NAME"] == "kept" and seen["PYTHONPATH"] == "x" and "PATH" in seen
