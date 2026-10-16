@@ -201,15 +201,20 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
     assert "pass the name the user used" in guidance
     from fluid.tools.fragments import (
         SUBAGENT_WORKTREE_GUIDANCE, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING,
+        SWARM_ROUTING_BRIEF, SWARM_SCOPE_RULES,
     )
 
-    assert SWARM_ROUTING in guidance
+    # The app prompt carries the brief routing; Swarm's scope rules ride its
+    # own docs (harness_adapter._install_task_contract).
+    assert SWARM_ROUTING_BRIEF in guidance
+    assert SWARM_SCOPE_RULES not in guidance
     assert SWARM_ROUTING in contract.description
     # Standalone contracts retain the rules; app workflow prompts own them once.
     assert SUBAGENT_WORKTREE_GUIDANCE in guidance
     app_contract = build_task_contract("caller", None, workflow_guidance=True)
-    for rule in (SWARM_ROUTING, SUBAGENT_WORKTREE_GUIDANCE):
+    for rule in (SWARM_ROUTING_BRIEF, SUBAGENT_WORKTREE_GUIDANCE):
         assert (guidance + app_contract.description).count(rule) == 1
+    for rule in (SWARM_ROUTING, SUBAGENT_WORKTREE_GUIDANCE):
         assert contract.description.count(rule) == 1
     assert SUBAGENT_WORKTREE_SUMMARY not in parent_subagent_guidance(task_available=False)
 
@@ -728,7 +733,8 @@ def test_background_doctrine_is_its_own_top_level_block(mock_db):
     for producer in ("subagent", "Monitor"):
         assert producer in background
     assert "end your turn" in background
-    assert "No sleep loops or status polling" in background
+    # The END_TURN_ON_BACKGROUND fragment already forbids sleeping and polling.
+    assert "do not sleep, poll" in background
     # The Task block keeps its own contract and loses the doctrine.
     delegation = guidance.split("# Background work", 1)[0]
     assert "Never invent a subagent ID" in delegation

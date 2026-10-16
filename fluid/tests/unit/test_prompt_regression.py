@@ -231,7 +231,9 @@ def test_shared_fragments_appear_verbatim() -> None:
     register_builtins(registry)
     descs = {s.name: s.description for s in registry.list_tools(loaded_only=False)}
     carriers = {
-        "READ_BEFORE_EDIT": (fr.READ_BEFORE_EDIT, ("Read", "Edit", "Write")),
+        # Write no longer repeats the Edit gate: it is Edit's rule and Read is
+        # where the copyable text comes from (context-diet dedupe).
+        "READ_BEFORE_EDIT": (fr.READ_BEFORE_EDIT, ("Read", "Edit")),
         "NO_VERIFY_READBACK": (fr.NO_VERIFY_READBACK, ("Edit", "Write")),
         "FRESH_PROCESS": (fr.FRESH_PROCESS, ("Bash", "Monitor")),
         "DONT_PREDICT_PENDING": (fr.DONT_PREDICT_PENDING, ("Task", "Monitor")),

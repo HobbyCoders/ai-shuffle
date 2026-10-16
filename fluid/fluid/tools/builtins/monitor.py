@@ -130,11 +130,8 @@ def describe(
         "the command would end if the job died now; handle crashes, hangs and unexpected "
         "exits and cap total wait. Remote API watches should survive one failed request "
         "and check at human intervals (tens of seconds), not spin.\n\n"
-        "serves: true is only for a process MEANT to stay up: dev server, tunnel or queue "
-        "worker needed during other work, never a job whose result you await. It remains "
-        "registered/visible, notifies you if it dies, but does not park the session or "
-        "appear as pending awaited work; the starting turn ends normally. Use this "
-        "instead of making a server exit.\n\n"
+        "serves: true (see the parameter) keeps a process MEANT to stay up running "
+        "instead of making it exit; it never counts as pending awaited work.\n\n"
         "Output merges stdout/stderr; summaries keep head/tail and drop the middle. "
         "Filter noisy commands to actionable lines INCLUDING failure signatures, not "
         "only good news." + pipe_note + "\n\n" + FRESH_PROCESS
