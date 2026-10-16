@@ -5,9 +5,12 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 
 
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
-# Canonical CI recipe: native full=129070, eager=94923; delegated append=16307.
-MEASURED_FULL = 129_070
-MEASURED_EAGER = 94_923
+# Canonical CI recipe: native full=131778, eager=95975; delegated append=16307.
+# 1.0.1 growth: the deferred Emulator and EmulatorScreenshot tools add 250
+# eager chars (their name + one-liner announcements) and 1,906 to the full
+# catalog (schemas loaded on demand); fixes before them added 777 eager chars.
+MEASURED_FULL = 131_778
+MEASURED_EAGER = 95_975
 MEASURED_DELEGATED_APPEND = 16_307
 
 
@@ -104,7 +107,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    assert len(specs) == 103
+    assert len(specs) == 105
     assert first["totals"]["compiled_eager"] < first["totals"]["combined_full"]
     assert "# Deferred tools" in compiled.text
     # Discovery remains available; full schemas remain measurable on demand.
