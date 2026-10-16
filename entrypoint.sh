@@ -59,6 +59,23 @@ else
     echo "UID/GID already correct, skipping user modification" >&2
 fi
 
+# Android emulator: `--device /dev/kvm` keeps the host's group on the device.
+# Add appuser to that group so the emulator can open it (app/core/android_emulator).
+# A root-group device needs read/write for others on the host instead.
+if [ -c /dev/kvm ]; then
+    KVM_GID=$(stat -c %g /dev/kvm)
+    if [ "$KVM_GID" != "0" ] && ! id -G appuser | tr ' ' '\n' | grep -qx "$KVM_GID"; then
+        KVM_GROUP=$(getent group "$KVM_GID" | cut -d: -f1)
+        if [ -z "$KVM_GROUP" ]; then
+            KVM_GROUP=hostkvm
+            groupadd -g "$KVM_GID" "$KVM_GROUP" || KVM_GROUP=
+        fi
+        if [ -n "$KVM_GROUP" ] && usermod -aG "$KVM_GROUP" appuser; then
+            echo "Android emulator: appuser can use /dev/kvm (group ${KVM_GID})" >&2
+        fi
+    fi
+fi
+
 # Maintenance never starts provider setup, Chromium or application services.
 case "${1:-run}" in
     dump|restore) exec python /app/docker/container_runtime.py "$@" ;;

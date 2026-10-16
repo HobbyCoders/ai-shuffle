@@ -444,6 +444,7 @@ class ToolRegistry:
             spec = ToolSpec(
                 name=name, description=tool.description, input_schema=tool.input_schema,
                 risk=tool.risk, source="inproc",
+                classify_risk=getattr(tool, "classify_risk", None),
             )
             self._entries[name] = _Entry(
                 spec=spec, handler=tool.as_handler(), server=server.name,

@@ -30,7 +30,10 @@ def _input_schema(schema: Any) -> dict:
     return input_schema(schema)
 
 
-def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
+def sdk_tool_to_inproc(
+    sdk_tool: Any, *, risk: str = "safe",
+    classify_risk: Optional[Callable[[dict], str]] = None,
+) -> InprocTool:
     """Convert one Claude-Agent-SDK ``@tool`` object into a fluid ``InprocTool``.
 
     The SDK ``@tool`` decorator yields an object with ``.name``, ``.description``,
@@ -50,6 +53,7 @@ def sdk_tool_to_inproc(sdk_tool: Any, *, risk: str = "safe") -> InprocTool:
         input_schema=_input_schema(getattr(sdk_tool, "input_schema", None)),
         handler=handler,
         risk=risk,
+        classify_risk=classify_risk,
     )
 
 
@@ -63,6 +67,7 @@ def register_sdk_tools(
     default_risk: str = "safe",
     defer: bool = False,
     call_timeouts: Optional[Mapping[str, Optional[float]]] = None,
+    risk_classifiers: Optional[Mapping[str, Callable[[dict], str]]] = None,
 ) -> InprocServer:
     """Convert + register in one call. Each tool surfaces as
     ``mcp__<server_name>__<tool>`` (fluid's naming, matching Claude Code).
@@ -77,10 +82,17 @@ def register_sdk_tools(
 
     ``call_timeouts`` ({tool name: seconds or None}) replaces the registry's
     per-call bound for the named tools (see ``ToolRegistry.register_inproc``).
+
+    ``risk_classifiers`` ({tool name: fn(input) -> risk}) lowers the risk of
+    individual calls below the tool's static risk (``ToolSpec.classify_risk``).
     """
     risk_map = risk_map or {}
+    risk_classifiers = risk_classifiers or {}
     tools: List[InprocTool] = [
-        sdk_tool_to_inproc(t, risk=risk_map.get(getattr(t, "name", ""), default_risk))
+        sdk_tool_to_inproc(
+            t, risk=risk_map.get(getattr(t, "name", ""), default_risk),
+            classify_risk=risk_classifiers.get(getattr(t, "name", "")),
+        )
         for t in sdk_tools
     ]
     server = create_inproc_server(server_name, tools, version=version)
@@ -134,6 +146,11 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     # actions also wait for an on-phone Allow).
     "AndroidDevices": "safe",
     "AndroidAction": "write",
+    # This worker's emulator: actions change the device (and setup downloads
+    # the SDK), so the tool is gated; its read-only actions are classified
+    # safe per call (BUILTINS_RISK_CLASSIFIERS). A screenshot only looks.
+    "Emulator": "write",
+    "EmulatorScreenshot": "safe",
     # Monitor runs a host shell command; fluid rates its own Monitor "write".
     "Monitor": "write",
     "TaskOutput": "safe",
@@ -158,6 +175,17 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "RemoteTrigger": "write",
     # Dispatching an agent spawns a session that can act — gated like a write.
     "Task": "write",
+}
+
+def _emulator_risk(data: dict) -> str:
+    from app.mcp.emulator_tools import classify_risk
+
+    return classify_risk(data)
+
+
+# Per-call risk for builtins whose actions differ (``register_sdk_tools``).
+BUILTINS_RISK_CLASSIFIERS: Mapping[str, Callable[[dict], str]] = {
+    "Emulator": _emulator_risk,
 }
 
 # Dynamic gateway tools (per-connector, e.g. sending messages through a linked
@@ -290,6 +318,8 @@ NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
 NATIVE_DEFERRED_TOOLS: frozenset[str] = frozenset({
     "mcp__builtins__AndroidAction",
     "mcp__builtins__AndroidDevices",
+    "mcp__builtins__Emulator",
+    "mcp__builtins__EmulatorScreenshot",
     "mcp__builtins__CheckPlugin",
     "mcp__builtins__FindPlugins",
     "mcp__builtins__InstallPlugin",
@@ -565,6 +595,7 @@ def register_recorded_sdk_servers(
             default_risk=SERVER_DEFAULT_RISK.get(name, "write"),
             defer=name in (defer_servers or ()),
             call_timeouts=call_timeouts,
+            risk_classifiers=BUILTINS_RISK_CLASSIFIERS if name == "builtins" else None,
         )
         registered.append(name)
     return registered
