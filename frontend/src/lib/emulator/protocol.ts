@@ -186,7 +186,24 @@ export interface FrameMessage {
 	seq: number;
 }
 
-export type ServerMessage = FrameMessage | { type: 'state'; state: DeviceState };
+export interface StateMessage {
+	type: 'state';
+	state: DeviceState;
+	/** Error reason or progress text (may be empty). */
+	message: string;
+	/** Current device-pixel size, when the server sends it. */
+	width?: number;
+	height?: number;
+}
+
+/** An input the server could not apply. The socket stays open. */
+export interface ErrorMessage {
+	type: 'error';
+	message: string;
+	code: string;
+}
+
+export type ServerMessage = FrameMessage | StateMessage | ErrorMessage;
 
 /** Device pixels on the wire are integers inside the frame. */
 function px(v: number, max: number): number {
@@ -247,7 +264,16 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
 	}
 	if (!o || typeof o !== 'object') return null;
 	const m = o as Record<string, unknown>;
-	if (m.type === 'state') return isDeviceState(m.state) ? { type: 'state', state: m.state } : null;
+	if (m.type === 'state') {
+		if (!isDeviceState(m.state)) return null;
+		const out: StateMessage = { type: 'state', state: m.state, message: str(m.message) };
+		const width = num(m.width), height = num(m.height);
+		if (width > 0 && height > 0) { out.width = width; out.height = height; }
+		return out;
+	}
+	if (m.type === 'error') {
+		return { type: 'error', message: str(m.message) || 'The phone could not apply that input.', code: str(m.code) };
+	}
 	if (m.type === 'frame') {
 		if (m.format !== undefined && m.format !== 'jpeg') return null;
 		const width = num(m.width), height = num(m.height);
@@ -284,8 +310,9 @@ export function insideScreen(clientX: number, clientY: number, rect: CanvasRect,
 export const TAP_SLOP_PX = 8;
 /** A press held this long without moving is a long press. */
 export const LONG_PRESS_MS = 450;
-export const MIN_SWIPE_MS = 40;
-export const MAX_SWIPE_MS = 3000;
+/** The server clamps swipes to 50–5000 ms. */
+export const MIN_SWIPE_MS = 50;
+export const MAX_SWIPE_MS = 5000;
 
 export interface Gesture {
 	/** Client-space start / end and the matching device points. */
@@ -376,6 +403,27 @@ export function reconnectDelay(attempt: number, random: () => number = Math.rand
 	const base = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.max(0, attempt));
 	return Math.round(base * (0.8 + random() * 0.4));
 }
+
+/**
+ * Close codes after which reconnecting cannot help: the device does not exist
+ * (4004), the server rejected our input as malformed (4400), or the viewer is
+ * not allowed (4001/4003/4401/4403/1008). Each maps to what the panel says.
+ */
+export function terminalCloseMessage(code: number): string | null {
+	switch (code) {
+		case 4004: return 'This phone no longer exists on the worker.';
+		case 4400: return 'The phone closed the connection because it got input it could not read.';
+		case 1008:
+		case 4001:
+		case 4003:
+		case 4401:
+		case 4403: return 'This worker did not let this viewer control the phone.';
+		default: return null;
+	}
+}
+
+/** How long an input-error notice stays up. */
+export const NOTICE_MS = 4000;
 
 /** A frame older than this while the socket is down is called stale. */
 export const STALE_AFTER_MS = 1500;

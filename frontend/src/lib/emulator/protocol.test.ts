@@ -10,6 +10,7 @@ import {
 	parseStatus,
 	reconnectDelay,
 	statusPollMs,
+	terminalCloseMessage,
 	textMessages,
 	wheelPixels,
 	wheelSwipe,
@@ -66,7 +67,7 @@ describe('gestures', () => {
 	});
 	it('clamps swipe durations and endpoints into range', () => {
 		const m = gestureMessage({ ...g(500, 0, 10), end: { x: 5000, y: -9 } }, size);
-		expect(m).toMatchObject({ x2: 1079, y2: 0, duration_ms: 40 });
+		expect(m).toMatchObject({ x2: 1079, y2: 0, duration_ms: 50 });
 	});
 });
 
@@ -127,7 +128,12 @@ describe('message encoding', () => {
 	it('parses frames and states, and drops anything malformed', () => {
 		expect(parseServerMessage('{"type":"frame","format":"jpeg","data":"AAA","width":1080,"height":2400,"seq":7}'))
 			.toEqual({ type: 'frame', format: 'jpeg', data: 'AAA', width: 1080, height: 2400, seq: 7 });
-		expect(parseServerMessage({ type: 'state', state: 'booting' })).toEqual({ type: 'state', state: 'booting' });
+		expect(parseServerMessage({ type: 'state', state: 'booting' })).toEqual({ type: 'state', state: 'booting', message: '' });
+		expect(parseServerMessage({ type: 'state', state: 'error', message: 'Emulator crashed', width: 2400, height: 1080 }))
+			.toEqual({ type: 'state', state: 'error', message: 'Emulator crashed', width: 2400, height: 1080 });
+		expect(parseServerMessage({ type: 'error', message: 'Point is off the screen', code: 'bad_input' }))
+			.toEqual({ type: 'error', message: 'Point is off the screen', code: 'bad_input' });
+		expect(parseServerMessage({ type: 'error' })).toMatchObject({ type: 'error', code: '' });
 		expect(parseServerMessage('{"type":"frame","format":"png","data":"A","width":1,"height":1}')).toBeNull();
 		expect(parseServerMessage('{"type":"frame","data":"A","width":0,"height":1}')).toBeNull();
 		expect(parseServerMessage({ type: 'state', state: 'melting' })).toBeNull();
@@ -172,6 +178,15 @@ describe('status → what the panel shows', () => {
 		expect(statusPollMs(status({ devices: [{ id: 'pixel', name: 'P', state: 'booting', api: 35, width: 1, height: 1 }] }))).toBe(2000);
 		expect(statusPollMs(status())).toBeNull();
 		expect(statusPollMs(null)).toBeNull();
+	});
+});
+
+describe('terminal close codes', () => {
+	it('stops for an unknown device, malformed input and refused viewers only', () => {
+		expect(terminalCloseMessage(4004)).toMatch(/no longer exists/);
+		expect(terminalCloseMessage(4400)).toMatch(/could not read/);
+		expect(terminalCloseMessage(4001)).toMatch(/did not let/);
+		for (const code of [1000, 1006, 1011, 1012]) expect(terminalCloseMessage(code)).toBeNull();
 	});
 });
 

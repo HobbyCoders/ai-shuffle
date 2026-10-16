@@ -3,30 +3,37 @@
  *
  *   ws(s)://{host}/api/v1/emulator/devices/{id}/stream?token=…
  *
- *   server→client: frame · state   (ping is answered with pong)
+ *   server→client: state · frame · error   (ping is answered with pong)
  *   client→server: tap · swipe · text · key · rotate
  *
  * Reconnects with exponential backoff while it is wanted, and immediately when
- * the page comes back online or into view. Auth closes stop it for good.
+ * the page comes back online or into view. A close that reconnecting cannot
+ * fix (unknown device 4004, malformed input 4400, not allowed 4001/4403…) is
+ * terminal: the client stops and reports why, until `retry()`.
  */
 import { wsUrl } from '$lib/api/runtime';
 import {
 	encodeClientMessage,
 	parseServerMessage,
 	reconnectDelay,
+	terminalCloseMessage,
 	type ClientMessage,
-	type DeviceState,
+	type ErrorMessage,
 	type FrameMessage,
+	type StateMessage,
 } from './protocol';
 
-export type LinkState = 'connecting' | 'live' | 'reconnecting' | 'denied';
+export type LinkState = 'connecting' | 'live' | 'reconnecting' | 'failed';
 
 export interface EmulatorStreamConfig {
 	deviceId: string;
 	getAuthToken: () => string | null;
 	onFrame: (frame: FrameMessage) => void;
-	onState?: (state: DeviceState) => void;
-	onLink?: (state: LinkState, retryInMs?: number) => void;
+	onState?: (state: StateMessage) => void;
+	/** An input the server could not apply; the socket stays open. */
+	onError?: (error: ErrorMessage) => void;
+	/** `failure` explains a terminal stop (state `failed`). */
+	onLink?: (state: LinkState, detail?: { retryInMs?: number; failure?: string; code?: number }) => void;
 	/** Tests inject a fake socket. */
 	WebSocketImpl?: typeof WebSocket;
 	random?: () => number;
@@ -34,12 +41,12 @@ export interface EmulatorStreamConfig {
 
 export interface EmulatorStreamClient {
 	connect: () => void;
+	/** Leave a terminal stop and connect again. */
+	retry: () => void;
 	send: (msg: ClientMessage) => boolean;
 	isOpen: () => boolean;
 	destroy: () => void;
 }
-
-const AUTH_CLOSE_CODES = new Set([1008, 4001, 4003, 4401, 4403]);
 
 export function streamPath(deviceId: string): string {
 	return `/api/v1/emulator/devices/${encodeURIComponent(deviceId)}/stream`;
@@ -51,10 +58,10 @@ export function createEmulatorStream(config: EmulatorStreamConfig): EmulatorStre
 	let attempts = 0;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	let destroyed = false;
-	let denied = false;
+	let failed = false;
 
 	const revive = () => {
-		if (destroyed || denied) return;
+		if (destroyed || failed) return;
 		if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
 		if (ws && (ws.readyState === WS.OPEN || ws.readyState === WS.CONNECTING)) return;
 		if (timer) clearTimeout(timer);
@@ -68,10 +75,10 @@ export function createEmulatorStream(config: EmulatorStreamConfig): EmulatorStre
 	}
 
 	function schedule() {
-		if (destroyed || denied || timer) return;
+		if (destroyed || failed || timer) return;
 		const delay = reconnectDelay(attempts, config.random);
 		attempts += 1;
-		config.onLink?.('reconnecting', delay);
+		config.onLink?.('reconnecting', { retryInMs: delay });
 		timer = setTimeout(() => {
 			timer = null;
 			open();
@@ -79,7 +86,7 @@ export function createEmulatorStream(config: EmulatorStreamConfig): EmulatorStre
 	}
 
 	function open() {
-		if (destroyed || denied) return;
+		if (destroyed || failed) return;
 		config.onLink?.(attempts ? 'reconnecting' : 'connecting');
 		const socket = new WS(wsUrl(streamPath(config.deviceId), { token: config.getAuthToken() }));
 		ws = socket;
@@ -101,27 +108,37 @@ export function createEmulatorStream(config: EmulatorStreamConfig): EmulatorStre
 			const msg = parseServerMessage(event.data);
 			if (!msg) return;
 			if (msg.type === 'frame') config.onFrame(msg);
-			else config.onState?.(msg.state);
+			else if (msg.type === 'state') config.onState?.(msg);
+			else config.onError?.(msg);
 		};
 		socket.onclose = (event: CloseEvent) => {
 			if (socket !== ws) return;
 			ws = null;
 			if (destroyed) return;
-			if (AUTH_CLOSE_CODES.has(event.code)) {
-				denied = true;
-				config.onLink?.('denied');
+			const failure = terminalCloseMessage(event.code);
+			if (failure) {
+				failed = true;
+				config.onLink?.('failed', { failure, code: event.code });
 				return;
 			}
 			schedule();
 		};
-		socket.onerror = () => { /* onclose follows and schedules the retry */ };
+		socket.onerror = () => { /* onclose follows and decides */ };
 	}
 
 	return {
 		connect() {
-			if (destroyed || denied) return;
+			if (destroyed || failed) return;
 			if (ws || timer) return;
 			open();
+		},
+		retry() {
+			if (destroyed) return;
+			failed = false;
+			attempts = 0;
+			if (timer) clearTimeout(timer);
+			timer = null;
+			if (!ws) open();
 		},
 		send(msg) {
 			if (!ws || ws.readyState !== WS.OPEN) return false;

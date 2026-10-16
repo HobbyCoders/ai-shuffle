@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 	config: null as EmulatorStreamConfig | null,
 	sent: [] as unknown[],
 	open: true,
+	retry: vi.fn(),
 }));
 vi.mock('$lib/api/emulator', async (orig) => {
 	const real = await orig<typeof import('$lib/api/emulator')>();
@@ -29,6 +30,7 @@ vi.mock('$lib/emulator/stream-client', () => ({
 			connect: () => config.onLink?.('connecting'),
 			send: (m: unknown) => { if (!mocks.open) return false; mocks.sent.push(m); return true; },
 			isOpen: () => mocks.open,
+			retry: mocks.retry,
 			destroy: () => {},
 		};
 	},
@@ -77,7 +79,9 @@ describe('setup and host states', () => {
 		const button = screen.getByRole('button', { name: 'Set up Android emulator' }) as HTMLButtonElement;
 		expect(button.disabled).toBe(true);
 		expect(screen.getByRole('link', { name: /License Agreement/ }).getAttribute('href')).toBe('https://example.test/license');
-		expect(screen.getByText(/3–4 GB/)).toBeTruthy();
+		expect(screen.getByText('2.1 GB')).toBeTruthy();
+		expect(screen.getByText('6.5 GB')).toBeTruthy();
+		expect(screen.getByText('8.6 GB')).toBeTruthy();
 
 		await fireEvent.click(screen.getByRole('checkbox'));
 		expect(button.disabled).toBe(false);
@@ -198,6 +202,49 @@ describe('device view', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it('shows an input error as a notice that goes away, and keeps the phone usable', async () => {
+		await mount(ready());
+		await goLive();
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			mocks.config!.onError?.({ type: 'error', message: 'Point is off the screen', code: 'bad_input' });
+			await tick();
+			expect(screen.getByText('Point is off the screen')).toBeTruthy();
+			expect((screen.getByRole('button', { name: 'Home' }) as HTMLButtonElement).disabled).toBe(false);
+			vi.advanceTimersByTime(4100);
+			await tick();
+			expect(screen.queryByText('Point is off the screen')).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('stops on a terminal close and reconnects only when asked', async () => {
+		await mount(ready());
+		await goLive();
+		mocks.config!.onLink?.('failed', { failure: 'This phone no longer exists on the worker.', code: 4004 });
+		await tick();
+		const alert = screen.getByRole('alert');
+		expect(alert.textContent).toContain('Disconnected from the phone');
+		expect(alert.textContent).toContain('This phone no longer exists on the worker.');
+		expect(screen.queryByText(/Reconnecting · last image/)).toBeNull();
+		expect((screen.getByRole('button', { name: 'Home' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+		expect(mocks.retry).toHaveBeenCalledOnce();
+		await waitFor(() => expect(emulatorApi.fetchEmulatorStatus).toHaveBeenCalledTimes(2));
+		mocks.config!.onLink?.('live');
+		await tick();
+		expect(screen.queryByText('Disconnected from the phone')).toBeNull();
+	});
+
+	it('shows the device error the stream reports', async () => {
+		await mount(ready());
+		mocks.config!.onState?.({ type: 'state', state: 'error', message: 'Emulator process exited (code 1)' });
+		await tick();
+		expect(screen.getByText('The phone stopped with an error')).toBeTruthy();
+		expect(screen.getByText('Emulator process exited (code 1)')).toBeTruthy();
 	});
 
 	it('stops a running phone', async () => {

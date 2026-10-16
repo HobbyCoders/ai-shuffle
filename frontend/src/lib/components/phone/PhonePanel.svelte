@@ -35,6 +35,7 @@
 		X,
 		ExternalLink,
 		MousePointer2,
+		HardDrive,
 	} from 'lucide-svelte';
 	import PhoneScreen from './PhoneScreen.svelte';
 	import {
@@ -51,6 +52,7 @@
 		installPercent,
 		keyMessage,
 		STALE_AFTER_MS,
+		NOTICE_MS,
 		type AndroidKey,
 		type ClientMessage,
 		type DeviceState,
@@ -184,6 +186,19 @@
 	// ── Stream ─────────────────────────────────────────────────────────────
 	let frame = $state.raw<FrameMessage | null>(null);
 	let link = $state<LinkState | 'idle'>('idle');
+	/** Why the stream stopped for good (unknown device, bad input, not allowed). */
+	let linkFailure = $state<string | null>(null);
+	/** The device's own words for its state (error reason, progress). */
+	let stateMessage = $state('');
+	/** An input the phone could not apply: shown briefly, the stream carries on. */
+	let notice = $state<string | null>(null);
+	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+	function showNotice(text: string) {
+		notice = text;
+		clearTimeout(noticeTimer);
+		noticeTimer = setTimeout(() => (notice = null), NOTICE_MS);
+	}
+	onDestroy(() => clearTimeout(noticeTimer));
 	let client: EmulatorStreamClient | null = null;
 	const wantStream = $derived(!!device && (deviceState === 'booting' || deviceState === 'running'));
 	const streamDeviceId = $derived(wantStream ? device!.id : null);
@@ -207,10 +222,15 @@
 				WebSocketImpl,
 				onFrame: (f) => { frame = f; },
 				onState: (s) => {
-					liveState = s;
-					if (s === 'stopped') frame = null;
+					liveState = s.state;
+					stateMessage = s.message;
+					if (s.state === 'stopped') frame = null;
 				},
-				onLink: (s) => { link = s; },
+				onError: (e) => showNotice(e.message),
+				onLink: (s, detail) => {
+					link = s;
+					linkFailure = s === 'failed' ? (detail?.failure ?? 'The connection to the phone was closed.') : null;
+				},
 			});
 			client = c;
 			c.connect();
@@ -218,6 +238,7 @@
 				c.destroy();
 				if (client === c) client = null;
 				link = 'idle';
+				linkFailure = null;
 			};
 		});
 	});
@@ -225,15 +246,22 @@
 	const live = $derived(link === 'live');
 	const interactive = $derived(live && deviceState === 'running');
 	// Debounced like the Browser panel's badge: a sub-second blip is not news.
+	// A terminal stop is stale at once (and says so in its own card).
 	let stale = $state(false);
 	$effect(() => {
 		if (live || !frame) { stale = false; return; }
+		if (linkFailure) { stale = true; return; }
 		const t = setTimeout(() => (stale = true), STALE_AFTER_MS);
 		return () => clearTimeout(t);
 	});
 
 	function send(msg: ClientMessage) {
-		if (!client?.send(msg)) actionError = 'Not connected to the phone yet.';
+		if (!client?.send(msg)) showNotice('Not connected to the phone yet.');
+	}
+	function reconnect() {
+		linkFailure = null;
+		client?.retry();
+		void refresh();
 	}
 	const press = (key: AndroidKey) => send(keyMessage(key));
 
@@ -286,6 +314,7 @@
 	};
 	const dotTone = $derived(
 		!deviceState ? 'off'
+			: linkFailure ? 'bad'
 			: deviceState === 'running' ? (live ? 'ok' : 'warn')
 			: deviceState === 'booting' ? 'warn'
 			: deviceState === 'error' ? 'bad' : 'off',
@@ -361,6 +390,13 @@
 				<button onclick={() => (actionError = '')} aria-label="Dismiss"><X size={13} /></button>
 			</div>
 		{/if}
+		{#if notice}
+			<div class="banner notice" role="status">
+				<TriangleAlert size={14} strokeWidth={1.75} />
+				<span>{notice}</span>
+				<button onclick={() => (notice = null)} aria-label="Dismiss notice"><X size={13} /></button>
+			</div>
+		{/if}
 		{#if installed || installError}
 			<div class="banner" class:bad={!!installError} class:ok={!!installed} role="status">
 				{#if installError}<TriangleAlert size={14} strokeWidth={1.75} /><span>{installError}</span>
@@ -420,7 +456,8 @@
 					<h2 id="phone-setup-title">Set up a virtual Android phone</h2>
 					<p>Run and test Android apps here: tap, swipe and type on a live phone screen, and install your own APKs.</p>
 					<ul class="facts">
-						<li><Download size={13} strokeWidth={1.75} aria-hidden="true" /><span>Downloads about <strong>3–4 GB</strong> (the Android SDK and a system image) to this worker, once.</span></li>
+						<li><Download size={13} strokeWidth={1.75} aria-hidden="true" /><span>Downloads about <strong>2.1 GB</strong> (the Android SDK and a system image) to this worker, once.</span></li>
+						<li><HardDrive size={13} strokeWidth={1.75} aria-hidden="true" /><span>Takes about <strong>6.5 GB</strong> on disk once unpacked; have about <strong>8.6 GB</strong> free before you start.</span></li>
 					</ul>
 					<label class="consent">
 						<input type="checkbox" bind:checked={licenseAccepted} />
@@ -471,10 +508,17 @@
 					{#if deviceState === 'running' || (deviceState === 'booting' && frame)}
 						<div class="screen-frame" style:--aspect={frame ? `${frame.width} / ${frame.height}` : aspect}>
 							<PhoneScreen bind:this={screen} bind:keyboardOpen {frame} {interactive} {stale} onSend={send} />
-							{#if !frame}
+							{#if !frame && !linkFailure}
 								<div class="screen-wait" role="status"><LoaderCircle class="spin" size={20} strokeWidth={1.5} /><span>{live ? 'Waiting for the first frame…' : 'Connecting to the phone…'}</span></div>
 							{/if}
-							{#if stale}
+							{#if linkFailure}
+								<div class="link-fail" role="alert">
+									<PlugZap size={20} strokeWidth={1.6} />
+									<p class="fail-title">Disconnected from the phone</p>
+									<p class="fail-copy">{linkFailure}</p>
+									<button class="pill-btn primary" onclick={reconnect}>Reconnect</button>
+								</div>
+							{:else if stale}
 								<div class="stream-badge" role="status"><LoaderCircle class="spin" size={12} strokeWidth={2} /><span>Reconnecting · last image is stale</span></div>
 							{:else if deviceState === 'booting'}
 								<div class="stream-badge" role="status"><LoaderCircle class="spin" size={12} strokeWidth={2} /><span>Starting Android…</span></div>
@@ -482,14 +526,19 @@
 						</div>
 					{:else}
 						<div class="device-ghost" class:booting={deviceState === 'booting'} style:--aspect={aspect}>
-							{#if deviceState === 'booting'}
+							{#if deviceState === 'booting' && linkFailure}
+								<PlugZap size={24} strokeWidth={1.5} />
+								<p class="empty-title">Disconnected from the phone</p>
+								<p class="empty-copy">{linkFailure}</p>
+								<button class="pill-btn primary" onclick={reconnect}>Reconnect</button>
+							{:else if deviceState === 'booting'}
 								<LoaderCircle class="spin" size={24} strokeWidth={1.5} />
 								<p class="empty-title">Starting Android</p>
-								<p class="empty-copy">The first boot can take a few minutes.</p>
+								<p class="empty-copy">{stateMessage || 'The first boot can take a few minutes.'}</p>
 							{:else if deviceState === 'error'}
 								<TriangleAlert size={24} strokeWidth={1.5} />
 								<p class="empty-title">The phone stopped with an error</p>
-								<p class="empty-copy">{status?.message || 'Start it again to retry.'}</p>
+								<p class="empty-copy">{stateMessage || status?.message || 'Start it again to retry.'}</p>
 								<button class="pill-btn primary" onclick={start} disabled={powerBusy}><Play size={11} strokeWidth={2.25} /><span>Start again</span></button>
 							{:else}
 								<Power size={24} strokeWidth={1.5} />
@@ -652,6 +701,34 @@
 		animation: drop 200ms ease-out;
 	}
 	.banner + .banner { top: 48px; }
+	.banner + .banner + .banner { top: 88px; }
+	.banner.notice :global(svg:first-child) { color: var(--warning); }
+
+	/* A stop that reconnecting can't fix: a card over the greyed screen. */
+	.link-fail {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		transform: translate(-50%, -50%);
+		z-index: 3;
+		width: min(86%, 300px);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 6px;
+		padding: 18px 16px 16px;
+		text-align: center;
+		border-radius: var(--radius);
+		border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border));
+		background: color-mix(in oklch, var(--popover, var(--background)) 94%, transparent);
+		backdrop-filter: blur(8px);
+		color: var(--foreground);
+		box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.55);
+		animation: rise 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
+	}
+	.link-fail :global(svg) { color: var(--destructive); }
+	.fail-title { margin: 2px 0 0; font-size: 0.8125rem; font-weight: 600; }
+	.fail-copy { margin: 0 0 6px; font-size: 0.75rem; line-height: 1.45; color: var(--muted-foreground); }
 	.banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 	.banner.bad { border-color: color-mix(in oklch, var(--destructive) 45%, var(--border)); }
 	.banner.bad :global(svg:first-child) { color: var(--destructive); }
@@ -897,6 +974,6 @@
 	@keyframes drop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
 	@media (prefers-reduced-motion: reduce) {
-		.dot[data-tone='warn'], .progress-fill, .device-ghost.booting, .card, .banner, .phone-panel :global(.spin) { animation: none; }
+		.dot[data-tone='warn'], .progress-fill, .device-ghost.booting, .card, .banner, .link-fail, .phone-panel :global(.spin) { animation: none; }
 	}
 </style>
