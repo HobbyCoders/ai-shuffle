@@ -209,8 +209,13 @@ def test_reused_image_requires_exact_revision_tree_sequence_and_contract(transit
     with pytest.raises(ValueError):verify_image.verify_record(t.new,image_record(t.initial,1001))
 
 
-def test_real_private_launcher_delta_needs_its_own_old_pr_label(transition, tmp_path):
+@pytest.mark.parametrize("bump", [True, False])
+def test_real_private_launcher_delta_needs_its_own_old_pr_label(transition, tmp_path, bump):
     t=transition
+    if bump:
+        # A deliberate launcher change raises launcher.json with it (#97).
+        (t.old/"desktop").mkdir(exist_ok=True)
+        (t.old/"desktop/launcher.json").write_text('{"version": 1, "minimum": 0}')
     changed=commit(t.old,"desktop/src/main/managed-entry.ts","export const x = 2;")
     fresh=tmp_path/"new-public";initialize(fresh)
     shutil.copytree(t.old,fresh,dirs_exist_ok=True,ignore=shutil.ignore_patterns(".git"))
@@ -228,7 +233,13 @@ def test_real_private_launcher_delta_needs_its_own_old_pr_label(transition, tmp_
         bridge(t,github=api([]))
     with pytest.raises(ValueError,match="windows-launcher"):
         bridge(t,github=api(["update-reach:docker-image"]))
-    assert bridge(t,github=api(["update-reach:windows-launcher"]))[1]==changed
+    if bump:
+        assert bridge(t,github=api(["update-reach:windows-launcher"]))[1]==changed
+    else:
+        # Without the bump the label alone is refused; only the stated reason accepts it.
+        with pytest.raises(ValueError,match="no-launcher-change"):
+            bridge(t,github=api(["update-reach:windows-launcher"]))
+        assert bridge(t,github=api(["update-reach:no-launcher-change"]))[1]==changed
 
 
 def test_workflow_canary_reuse_and_final_promotion_order():
