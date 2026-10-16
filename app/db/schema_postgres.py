@@ -1854,6 +1854,13 @@ def create_postgres_schema(cursor) -> None:
         "WHERE event_type = 'task.updated'"
     )
     create_session_events_recall_index(cursor)
+    # SessionSearch's maintained text projection: only its own (empty) table
+    # and functions here. The triggers on the transcript tables and the copy
+    # of existing rows come from the startup task (session_recall.run_backfill),
+    # in short transactions, never from a blocking migration.
+    from app.db import session_recall
+
+    session_recall.install_objects(cursor)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS session_event_counters (

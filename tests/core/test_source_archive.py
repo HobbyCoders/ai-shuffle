@@ -114,6 +114,7 @@ def test_owner_maintenance_commands_ship_in_the_update_archive():
         cwd=source_archive.ROOT, check=True, capture_output=True, text=True,
     ).stdout.splitlines()
     assert "app/maintenance/session_recall_cache.py" in shipped
+    assert "app/maintenance/session_recall_projection.py" in shipped
     assert "app/maintenance/__init__.py" in shipped
     assert not (source_archive.ROOT / "scripts/session_recall_cache.py").exists()
 
