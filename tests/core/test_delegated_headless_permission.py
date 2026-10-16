@@ -269,3 +269,19 @@ async def test_a_bypass_worker_gets_its_answer_while_the_store_writes(monkeypatc
     text = await _headless_turn_text(monkeypatch, tmp_path, "bypassPermissions")
     assert "It is sunny in Paris." in text
     assert time.monotonic() - started < 5
+
+
+@pytest.mark.asyncio
+async def test_bypass_denies_a_safety_check_with_no_approver(monkeypatch):
+    """#105: the CLI asks for its safety checks even in Bypass; with nobody
+    attached the answer is an immediate denial with the CLI's reason."""
+    from dataclasses import replace
+
+    adapter, event, answers = _headless_adapter("bypassPermissions")
+    reason = "This removal's target is a shell variable that may be unset"
+    event = replace(event, reason=reason, reason_type="subcommandResults",
+                    classifier_approvable=False)
+    await adapter._answer_without_approver(event)
+    ((tool_use_id, allow, message),) = answers
+    assert (tool_use_id, allow) == ("tu-1", False)
+    assert reason in message and "Bypass mode refuses it" in message

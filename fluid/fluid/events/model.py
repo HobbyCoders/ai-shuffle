@@ -282,6 +282,11 @@ class PermissionRequest(Event):
     # Why the engine is asking, when it is not simply the policy: e.g. the
     # doom-loop guard. Responders fold it into their denial text.
     reason: str | None = None
+    # The claude CLI's ``decision_reason_type`` and ``classifier_approvable``
+    # (delegated leg): a ``safetyCheck`` that is not classifier-approvable
+    # needs a person, and the CLI asks for it even in bypassPermissions.
+    reason_type: str | None = None
+    classifier_approvable: bool | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

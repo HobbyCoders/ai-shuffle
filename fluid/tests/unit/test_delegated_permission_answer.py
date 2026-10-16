@@ -87,12 +87,26 @@ def test_the_clis_reason_for_asking_rides_the_request() -> None:
         "request": {
             "subtype": "can_use_tool", "tool_name": "Bash", "tool_use_id": "tu_5",
             "input": {"command": "rm -rf $S/$r"}, "decision_reason": reason,
-            "decision_reason_type": "safetyCheck",
+            "decision_reason_type": "safetyCheck", "classifier_approvable": False,
         },
     })
     assert mapped.permission.reason == reason
     (event,) = mapped.events
     assert isinstance(event, PermissionRequest) and event.reason == reason
+    assert event.reason_type == "safetyCheck"
+    assert event.classifier_approvable is False
+
+
+def test_the_reason_is_stripped_of_terminal_escapes() -> None:
+    mapped = _mapper().feed({
+        "type": "control_request", "request_id": "cli_6",
+        "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "tool_use_id": "tu_6",
+            "input": {}, "decision_reason": "\x1b[31mdangerous rm\x1b[0m",
+        },
+    })
+    assert mapped.permission.reason == "dangerous rm"
+    assert mapped.permission.classifier_approvable is None
 
 
 async def test_a_decision_for_no_open_request_is_logged_not_silent(caplog) -> None:
@@ -102,3 +116,24 @@ async def test_a_decision_for_no_open_request_is_logged_not_silent(caplog) -> No
     with caplog.at_level("WARNING", logger="fluid.engine.delegated"):
         await loop.submit(RespondPermission(request_id="perm_gone", decision="allow"))
     assert "matched no open request" in caplog.text
+
+
+async def test_a_request_whose_save_fails_leaves_no_pending_wait() -> None:
+    """Armed before publishing: when saving the request raises, the turn
+    ends with the error and the armed wait is dropped, not leaked."""
+
+    class FailingStore(MemoryStore):
+        async def append_event(self, session_id, event):
+            if isinstance(event, PermissionRequest):
+                raise OSError("disk full")
+            return await super().append_event(session_id, event)
+
+    store = FailingStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        assert not loop._pending_permissions
+    finally:
+        await loop.aclose()

@@ -2630,6 +2630,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 sid, turn_id, mapper, user_node, held_snapshots,
             )
         except BaseException:
+            # A request armed before its event was published, whose publish
+            # or save then failed, never reached ``_handle_permission`` (the
+            # one place that drops it). Nothing can answer it any more.
+            for fut in self._pending_permissions.values():
+                fut.cancel()
+            self._pending_permissions.clear()
             try:
                 await self._release_held_usage(mapper, held_snapshots)
             except Exception:

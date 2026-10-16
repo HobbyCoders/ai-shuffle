@@ -455,3 +455,53 @@ async def test_prompt_raised_mid_stream_is_answered_and_the_turn_completes(tmp_p
     # The pooled client keeps the callback but drops this turn's socket.
     assert bounds.pool.state.callback_refs["broadcast_func"] is None
     assert bounds.pool.state.adapter is adapter
+
+
+# ─── Claude Code safety checks (#105) ──────────────────────────────────────
+
+_RM = ("Bash", {"command": "rm -rf $S/$r"})
+_REMOVAL = "This removal's target is a shell variable that may be unset"
+
+
+def _safety_ctx(**extra):
+    return _ctx(
+        decision_reason=_REMOVAL, decision_reason_type="safetyCheck",
+        classifier_approvable=False, delegated=True, **extra,
+    )
+
+
+async def test_bypass_denies_a_safety_check_at_once_with_the_reason(tmp_path):
+    cb, broadcast, bounds = await _callback(
+        tmp_path, overrides={"permission_mode": "bypassPermissions"},
+    )
+    with patch.object(qe, "sync_engine", new=bounds.sync_engine):
+        result = await asyncio.wait_for(cb(*_RM, _safety_ctx()), 2)
+    assert not _allowed(result)
+    assert result.message.startswith("Claude Code's safety check needs a person")
+    assert _REMOVAL in result.message and "Bypass mode refuses it" in result.message
+    assert _prompt_count(broadcast) == 0
+
+
+@pytest.mark.parametrize("ctx", [
+    _ctx(delegated=True),
+    # A safety check a classifier may pass (a sensitive path) is not refused.
+    _ctx(decision_reason="sensitive file", decision_reason_type="safetyCheck",
+         classifier_approvable=True, delegated=True),
+], ids=["ordinary", "classifier-approvable"])
+async def test_bypass_still_allows_other_calls(tmp_path, ctx):
+    cb, broadcast, bounds = await _callback(
+        tmp_path, overrides={"permission_mode": "bypassPermissions"},
+    )
+    with patch.object(qe, "sync_engine", new=bounds.sync_engine):
+        assert _allowed(await asyncio.wait_for(cb(*_RM, ctx), 2))
+    assert _prompt_count(broadcast) == 0
+
+
+async def test_ask_still_puts_a_safety_check_to_a_person(tmp_path):
+    cb, broadcast, bounds = await _callback(tmp_path)
+    with patch.object(qe, "sync_engine", new=bounds.sync_engine):
+        call = asyncio.create_task(cb(*_RM, _safety_ctx()))
+        prompt = await _next_prompt(broadcast)
+        assert prompt["decision_reason"] == _REMOVAL
+        await permission_handler.respond(prompt["request_id"], SID, "allow")
+        assert _allowed(await asyncio.wait_for(call, 5))
