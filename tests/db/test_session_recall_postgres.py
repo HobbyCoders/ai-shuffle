@@ -255,6 +255,36 @@ def test_a_missing_projection_object_never_fails_the_write_and_is_rebuilt(drop):
         assert _projection(cur, "e", sid) == {PREFIX + "fe": "survives too"}
 
 
+def test_a_writer_without_the_schema_on_its_search_path_is_still_projected():
+    """``pg_restore --data-only`` writes with an empty search_path: the
+    triggers must neither fail that write nor skip it while search reads the
+    projection."""
+    from app.db import base, session_recall
+
+    sid = PREFIX + "nopath"
+    _backfill_all()
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT quote_ident(current_schema()) AS s")
+        schema = cur.fetchone()["s"]
+        cur.execute("SET LOCAL search_path = ''")
+        cur.execute(f"INSERT INTO {schema}.fluid_session_nodes(session_id,node_id,ts,message) VALUES (%s,%s,%s,%s)",
+                    (sid, "a", 1.0, _node("user", [{"kind": "text", "text": "Restored NODE"}])))
+        cur.execute(f"INSERT INTO {schema}.session_store_entries(project_key,session_id,entry) VALUES (%s,%s,%s)",
+                    ("p", sid, Json({"type": "user", "message": {"content": "Restored ENTRY"}})))
+        cur.execute(f"INSERT INTO {schema}.session_events(id,session_id,seq,event_type,payload) "
+                    "VALUES (%s,%s,%s,%s,%s)", (PREFIX + "np", sid, 1, "message.user", Json({"content": "Restored EVENT"})))
+        cur.execute(f"DELETE FROM {schema}.session_events WHERE id = %s", (PREFIX + "np",))
+        cur.execute(f"INSERT INTO {schema}.session_events(id,session_id,seq,event_type,payload) "
+                    "VALUES (%s,%s,%s,%s,%s)", (PREFIX + "np2", sid, 2, "message.user", Json({"content": "Again"})))
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert session_recall.ready(cur)
+        assert _projection(cur, "n", sid) == {"a": "restored node"}
+        assert list(_projection(cur, "s", sid).values()) == ["restored entry"]
+        assert _projection(cur, "e", sid) == {PREFIX + "np2": "again"}
+
+
 def test_an_older_version_is_rebuilt_and_its_triggers_replaced():
     """An install from an earlier shape (here: no ``chars`` column, older
     trigger names) must never meet the current functions."""
