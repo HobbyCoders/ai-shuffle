@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from time import monotonic
 import uuid
 
 from app.core import checkout_transfer, project_resolver, checkout_manager
@@ -42,6 +43,29 @@ _TRANSFER_FILTERS = {"pending_interactions": _RECEIPTS_SQL, "turns": _LAUNCH_SQL
 
 def _aad(sid, target):
     return ("shuffle-session-handoff-v1:" + sid + ":" + target).encode()
+
+
+class _Timing:
+    """Where one side of a move spent its time, logged once when it ends.
+
+    A move polls status every ten seconds while the work runs, so the access
+    log shows only those polls, not which step was slow (#2305).
+    """
+
+    def __init__(self, role, sid):
+        self.role, self.sid = role, sid
+        self.start = self.last = monotonic()
+        self.steps = []
+
+    def step(self, name, **facts):
+        now = monotonic()
+        detail = "".join(f" {key}={value}" for key, value in facts.items())
+        self.steps.append(f"{name}={now - self.last:.1f}s{detail}")
+        self.last = now
+
+    def log(self, outcome):
+        logger.info("Hand-off %s for session %s %s after %.1fs: %s", self.role, self.sid, outcome,
+                    monotonic() - self.start, ", ".join(self.steps) or "no steps")
 
 
 def _has_live_tasks(cursor, sid):
@@ -439,6 +463,11 @@ def _checkout_users(session, project, path, branch):
 
     Hidden sessions and legacy project aliases are included. Sessions another
     worker executes run in that worker's checkout, not this one.
+
+    A long-used project has a thousand or more sessions, nearly all bound to
+    other branch folders. Validating each one's checkout runs Git, and a move
+    scans at least twice on each worker, so compare the registered folder
+    first and validate only a session whose folder is this one (#2305).
     """
     from app.db.sessions import list_sessions_for_cleanup
     target = Path(path).resolve() if path else None
@@ -450,7 +479,13 @@ def _checkout_users(session, project, path, branch):
         if branch and _bound_branch(row) == branch:
             users.append(sid)
             continue
-        cwd = _session_cwd(row) if target else None
+        if target is None:
+            continue
+        if not row.get("worktree_id"):
+            folder = project_resolver.existing_checkout_path(row)
+            if not folder or Path(folder).resolve() != target:
+                continue
+        cwd = _session_cwd(row)
         if cwd and Path(cwd).resolve() == target:
             users.append(sid)
     return users
@@ -603,12 +638,16 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
     if not run:
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
     held = {}
+    timing = _Timing("export", sid)
     try:
         if project:
             # Publication commits and pushes the shared checkout. Exclude other
             # sessions working there; they keep their files and work.
             _hold_checkout(session, project, cwd, branch, HOLD + run["id"], held)
+            timing.step("checkout_guard", holds=len(held))
         state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
+        if project:
+            timing.step("git_publish")
         if note is not None:
             note()
         from app.db import session_moves
@@ -624,9 +663,15 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
                     project_id=project["id"] if project else None, token=run["id"],
                     wakes=wakes, wake_barrier=barrier)
         raw = json.dumps(data, default=str).encode()
+        timing.step("history", rows=sum(len(rows) for rows in data["history"].values()),
+                    mb=f"{len(raw) / 1e6:.1f}")
         ctx = engine.require_context()
-        return {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
+        reply = {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
+        timing.step("encrypt")
+        timing.log("exported")
+        return reply
     except BaseException:
+        timing.log("failed")
         _release(held)
         runs.release_run(run["id"], run["fence_token"])
         raise
@@ -1077,16 +1122,35 @@ def _reserve_mirror(sid, holder, held):
 
 
 async def _pull(session, owner, ctx, project, base, remote, held, holder):
+    timing = _Timing("import", session["id"])
+    try:
+        cwd = await _pull_steps(session, owner, ctx, project, base, remote, held, holder, timing)
+    except BaseException:
+        timing.log("failed")
+        raise
+    timing.log("committed")
+    return cwd
+
+
+def _open_export(ctx, reply, sid):
+    blob = reply.get("payload", "")
+    raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
+    return json.loads(raw), len(blob)
+
+
+async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, timing):
     sid = session["id"]
     expected_branch = project_resolver._effective_branch(session) if project else None
     if expected_branch:
         # Refuse a busy receiving checkout before the owner commits or pushes.
         _, path = await run_sync(_receiving_path, base, expected_branch)
         await run_sync(_hold_checkout, session, project, str(path), expected_branch, holder, held)
+        timing.step("early_checkout_guard", holds=len(held))
     reply = await _call(owner, {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}, timeout=600)
-    blob = reply.get("payload", "")
-    raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
-    data = json.loads(raw)
+    timing.step("owner_export")
+    # A long chat's export is tens of megabytes; never decode it on the event loop.
+    data, size = await run_sync(_open_export, ctx, reply, sid)
+    timing.step("decode", mb=f"{size / 1e6:.1f}")
     token = data["token"]
     committed = False
     try:
@@ -1103,11 +1167,13 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
             await run_sync(install_history, sid, data, cwd)
             if data.get("wake_barrier"):
                 await run_sync(_stage_wakes, sid, owner, data, None)
+            timing.step("install_history")
             result = await control.call(owner, "handoff", {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
                 **_moving_wakes(data),
             }, timeout=180)
+            timing.step("owner_commit")
             if not result.get("committed"):
                 raise ValueError("The owning worker did not confirm the transfer.")
             committed = True
@@ -1121,9 +1187,12 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
         # Exclude other sessions working in the checkout this import changes.
         await run_sync(_reserve_mirror, sid, holder, held)
         await run_sync(_hold_checkout, session, project, str(path), state["branch"], holder, held)
+        timing.step("checkout_guard", holds=len(held))
         cwd = await run_sync(checkout_transfer.import_checkout, base, dest, state)
+        timing.step("git_fetch")
         # Keep placement on the original owner while preparing local context.
         await run_sync(install_history, sid, data, cwd)
+        timing.step("install_history")
         await run_sync(checkout_transfer._branch, cwd, state["branch"])
         if await run_sync(checkout_transfer.fingerprint, cwd) != state["head"]:
             raise ValueError("The receiving checkout changed during context sync; ownership was not moved.")
@@ -1142,6 +1211,7 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
             "session_branch": session_branch,
             **_moving_wakes(data),
         }, timeout=180)
+        timing.step("owner_commit")
         if not result.get("committed"):
             raise ValueError("The owning worker did not confirm the transfer.")
         committed = True
