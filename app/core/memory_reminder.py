@@ -13,9 +13,12 @@ The rule now:
   current one), after a rewind or fork that left it off the active path, after
   a delegated slash command other than ``/compact``, and on a fresh adapter
   that cannot prove what the history holds. A native compaction does not need
-  it: fluid's compactor carries the newest snapshot and its change lists onto
+  it: fluid's compactor carries the snapshot and its change lists onto
   whatever digest, epoch or summary folds them
   (``CompactionConfig.pinned_reminder``), in the same request, mid-turn too.
+  Each fold carries the chain as it stood when the fold was decided, so a
+  later full snapshot never rewrites an older fold (the cached prefix stays
+  intact); a superseded copy can stay in view, with the newer one after it.
 * **Nothing** while the snapshot's facts are unchanged. A pure reorder (the
   snapshot ranks facts by recent use) is not a change.
 * **A compact change list** (:data:`CHANGES_HEADER`) when facts were added,
@@ -74,19 +77,47 @@ def wrap(body: str) -> str:
     return f"{_OPEN}{body}{_CLOSE}"
 
 
+def native_compaction_keeps_snapshot() -> bool:
+    """Whether the installed fluid carries this module's snapshot through its
+    folds (``CompactionConfig.pinned_reminder`` naming both headers).
+
+    The app and fluid ship together, but a checkout or an upgrade that pairs
+    this app with an older fluid (one without the pin) would otherwise trust
+    a snapshot that a digest has already stripped. Without the pin every
+    native compaction counts as folding, so the snapshot is re-sent.
+    """
+    global _NATIVE_PINS
+    if _NATIVE_PINS is None:
+        try:
+            from fluid.context.compaction import CompactionConfig
+
+            pin = getattr(CompactionConfig(), "pinned_reminder", None)
+        except Exception:  # noqa: BLE001 - any doubt means re-send
+            pin = None
+        _NATIVE_PINS = tuple(pin or ()) == (MEMORY_HEADER, CHANGES_HEADER)
+    return _NATIVE_PINS
+
+
+_NATIVE_PINS: Optional[bool] = None
+
+
 def compaction_may_fold_snapshot(reason: Any) -> bool:
     """Whether a ``ContextCompaction`` can have removed the snapshot from the
     model's context.
 
     A Claude Code compaction summarizes everything before it. A native one
-    never does: tier 1 only trims tool results, and digests, epochs and
-    checkpoint summaries carry the newest snapshot chain verbatim
-    (``fluid.context.compaction.pinned_reminder_chain``). An event of unknown
-    shape counts as folding, so the snapshot is re-sent.
+    does not: tier 1 only trims tool results, and each digest, epoch and
+    checkpoint summary carries the snapshot chain as it stood when the fold
+    was decided, verbatim (``CompactionConfig.pinned_reminder``), which
+    always includes whatever part of the newest chain it covers. That holds only with a fluid that pins
+    (:func:`native_compaction_keeps_snapshot`). An event of unknown shape
+    counts as folding, so the snapshot is re-sent.
     """
     if not isinstance(reason, str):
         return True
-    return reason in CLI_COMPACTION_REASONS or reason.startswith("cli_")
+    if reason in CLI_COMPACTION_REASONS or reason.startswith("cli_"):
+        return True
+    return not native_compaction_keeps_snapshot()
 
 
 def section_items(section: str) -> tuple[str, ...]:

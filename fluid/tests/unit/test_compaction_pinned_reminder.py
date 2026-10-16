@@ -64,10 +64,27 @@ def test_a_digest_carries_the_folded_snapshot_verbatim():
     assert FULL not in _view_text(compactor, nodes)
 
 
-def test_only_the_newest_chain_is_carried():
+def test_a_snapshot_superseded_before_the_fold_is_not_carried():
     compactor, nodes = _digested(f"one\n\n{FULL}", f"two\n\n{FULL2}", "three", "four")
     text = _view_text(compactor, nodes)
     assert FULL2 in text and FULL not in text
+
+
+def test_a_session_with_a_snapshot_on_every_turn_carries_none_onto_its_folds():
+    # Sessions from before send-once carry a full snapshot on every message.
+    # Each was superseded by the time its turn folded: no fold grows by one.
+    snapshots = [FULL.replace("8001", str(9000 + k)) for k in range(6)]
+    compactor, nodes = _digested(*(f"turn {k}\n\n{snap}" for k, snap in enumerate(snapshots)))
+    assert compactor._digest_by_start, "nothing was folded"
+    view = compactor.view(nodes)
+    live = [n for n in nodes if n.node_id not in compactor._digest_by_start]
+    text = "\n".join(m.text() or "" for m in view)
+    assert sum(text.count(snap) for snap in snapshots) < len(snapshots)
+    assert snapshots[-1] in text
+    folded_text = "\n".join(
+        m.text() or "" for m, n in zip(view, nodes) if n.node_id in compactor._digest_by_start
+    )
+    assert "# Memory" not in folded_text and live
 
 
 def test_a_live_snapshot_is_not_duplicated():
@@ -85,3 +102,63 @@ def test_an_intake_stub_carries_the_snapshot():
     nodes = _path("x" * 500 + f"\n\n{FULL}")
     text = _view_text(compactor, nodes)
     assert "large user attachment" in text and text.count(FULL) == 1
+
+
+def test_a_later_full_snapshot_never_rewrites_an_older_fold():
+    # The host sends a new full snapshot once change lists outgrow half of
+    # one (or after a rewind). The fold made earlier keeps carrying the copy
+    # it folded, so the rendered prefix (and the provider's cache) is intact.
+    compactor, nodes = _digested(f"a\n\n{FULL}", f"b\n\n{CHANGES}", "c", "d", "e")
+    assert compactor._digest_by_start or compactor._epoch_by_start, "nothing was folded"
+    before = [m.to_dict() for m in compactor.view(nodes)]
+    later = nodes + _path(f"f\n\n{FULL2}")[:1]
+    later[-1] = replace(later[-1], node_id="n_later", parent_id=nodes[-1].node_id)
+    after = [m.to_dict() for m in compactor.view(later)]
+    assert after[:len(before)] == before
+    text = _view_text(compactor, later)
+    # The newest snapshot is in view; the superseded one stays in its fold.
+    assert text.count(FULL2) == 1 and text.count(FULL) == 1 and text.count(CHANGES) == 1
+
+
+def test_a_fold_spanning_two_snapshots_carries_only_the_newer_one():
+    compactor = Compactor(config=CompactionConfig(summary_enabled=True))
+    nodes = _path(f"one\n\n{FULL}", f"two\n\n{FULL2}", f"three\n\n{CHANGES}", "four")
+    promotion = compactor.apply_summary(nodes, (nodes[0].node_id, nodes[5].node_id, "Summary."))
+    assert promotion is not None, "the summary was not committed"
+    text = _view_text(compactor, nodes)
+    assert "Summary." in text
+    assert FULL2 in text and FULL not in text and text.count(CHANGES) == 1
+
+
+def test_a_fold_after_the_snapshot_carries_its_change_lists():
+    from fluid.context.compaction import _PinScan
+
+    headers = CompactionConfig().pinned_reminder
+    nodes = _path(f"a\n\n{FULL}", f"b\n\n{CHANGES}", "c", f"d\n\n{FULL2}")
+    scan = _PinScan(nodes, headers)
+    assert scan.chain(2, 5) == {2: [CHANGES]}
+    assert scan.chain(0, 1) == {0: [FULL]}
+    # As of the path end, FULL2 supersedes both: nothing before it is carried.
+    assert scan.chain(0, 5, as_of=7) == {}
+    assert scan.chain(6, 7, as_of=7) == {6: [FULL2]}
+    # Change lists with no snapshot before them belong to no chain.
+    assert _PinScan(_path(f"b\n\n{CHANGES}"), headers).chain(0, 1) == {}
+
+
+def test_a_resumed_compactor_renders_the_same_pins():
+    # The engine persists each decision with the path's last node (the
+    # ContextCompaction event's node_id) and passes it back as path_end.
+    config = CompactionConfig(trigger_tokens=500, keep_recent_turns=1)
+    compactor = Compactor(config=config)
+    nodes = _path(f"one\n\n{FULL}", f"two\n\n{FULL2}", f"three\n\n{CHANGES}", "four")
+    _, promotions = compactor.apply(nodes, context_window=None)
+    assert promotions, "nothing was folded"
+    expected = [m.to_dict() for m in compactor.view(nodes)]
+
+    resumed = Compactor(config=config)
+    resumed.rehydrate(replace(p, path_end=nodes[-1].node_id) for p in promotions)
+    assert [m.to_dict() for m in resumed.view(nodes)] == expected
+    # An unknown end (no node id) still keeps the snapshot in view.
+    legacy = Compactor(config=config)
+    legacy.rehydrate(promotions)
+    assert FULL2 in _view_text(legacy, nodes)

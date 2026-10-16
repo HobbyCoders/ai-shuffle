@@ -97,7 +97,16 @@ def test_change_lists_give_way_to_a_full_snapshot_past_their_budget():
     ("cli_auto_compact", True), ("cli_manual_compact", True), ("cli_compact", True), (None, True),
 ])
 def test_which_compactions_can_fold_the_snapshot(reason, folds):
+    assert mr.native_compaction_keeps_snapshot() is True
     assert mr.compaction_may_fold_snapshot(reason) is folds
+
+
+def test_a_fluid_without_the_pin_makes_every_native_compaction_fold(monkeypatch):
+    # An app paired with an older fluid (mixed versions, a stale install)
+    # must not trust a snapshot its digests strip: re-send instead.
+    monkeypatch.setattr(mr, "_NATIVE_PINS", False)
+    assert mr.compaction_may_fold_snapshot("trigger") is True
+    assert mr.compaction_may_fold_snapshot("cli_compact") is True
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +253,80 @@ async def test_automatic_native_compaction_inside_a_turn_keeps_the_snapshot(monk
     loop._compactor.config = __import__("dataclasses").replace(
         loop._compactor.config, pinned_reminder=None)
     assert _snapshots_in(type("R", (), {"messages": loop._compactor.view(nodes)})) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_later_full_snapshot_keeps_the_folded_prefix_byte_identical(monkeypatch):
+    """The budget fallback (or a large rewrite) sends a new full snapshot
+    after a digest folded the old one. The fold keeps the copy it carried, so
+    the next request extends the previous view instead of re-billing it from
+    message 0, and the new snapshot is in view."""
+    from dataclasses import replace
+
+    from fluid.context.compaction import CompactionConfig
+
+    provider = _Recording("reply " * 300)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="fake",
+        compaction=CompactionConfig(trigger_tokens=4_000, keep_recent_turns=1),
+    )
+    memory = {"section": _section(*FACTS)}
+    adapter, loop = await _adapter(monkeypatch, memory, loop=loop)
+    for i in range(10):
+        await _turn(adapter, f"turn {i} " + "words " * 400)
+    nodes = await loop.store.load_path(loop.session_id)
+    folded = {**loop._compactor._digest_by_start, **loop._compactor._epoch_by_start}
+    assert nodes[0].node_id in folded, "the snapshot's turn was not folded"
+    # No further fold from here on: only the new snapshot may change the view.
+    loop._compactor.config = replace(loop._compactor.config, trigger_tokens=10**9)
+    view = loop._compactor.view(nodes)
+    assert _snapshots_in(type("R", (), {"messages": view})) == 1
+    before = [m.to_dict() for m in view]
+    memory["section"] = _section(*(f.replace("r1", "r2") for f in FACTS))
+    await _turn(adapter, "after the rewrite")
+    assert (await _memory_kinds(loop))[-1] == "full"
+    request = [m.to_dict() for m in provider.requests[-1].messages]
+    assert request[:len(before)] == before
+    newest = mr.wrap(memory["section"])
+    assert newest in "\n".join(m.text() or "" for m in provider.requests[-1].messages)
+    # A restarted engine renders the same bytes: each fold's pin end is read
+    # back from its ContextCompaction event.
+    fresh = NativeLoop(provider=_Recording(), store=loop.store, model="fake",
+                       session_id=loop.session_id, compaction=loop._compactor.config)
+    await fresh._rehydrate_compaction(loop.session_id)
+    nodes = await loop.store.load_path(loop.session_id)
+    assert ([m.to_dict() for m in fresh._compactor.view(nodes)]
+            == [m.to_dict() for m in loop._compactor.view(nodes)])
+
+
+@pytest.mark.asyncio
+async def test_a_restart_renders_folds_of_superseded_snapshots_byte_identically(monkeypatch):
+    """A fold decided after a newer full snapshot carries nothing for the
+    superseded one. The restarted engine must decide the same way, from the
+    path end each ContextCompaction event recorded."""
+    from fluid.context.compaction import CompactionConfig
+
+    provider = _Recording("reply " * 300)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="fake",
+        compaction=CompactionConfig(trigger_tokens=4_000, keep_recent_turns=1),
+    )
+    memory = {"section": _section(*FACTS)}
+    adapter, loop = await _adapter(monkeypatch, memory, loop=loop)
+    await _turn(adapter, "turn 0 " + "words " * 400)
+    memory["section"] = _section(*(f.replace("r1", "r2") for f in FACTS))
+    for i in range(1, 10):
+        await _turn(adapter, f"turn {i} " + "words " * 400)
+    assert (await _memory_kinds(loop))[:2] == ["full", "full"]
+    nodes = await loop.store.load_path(loop.session_id)
+    folded = {**loop._compactor._digest_by_start, **loop._compactor._epoch_by_start}
+    assert nodes[0].node_id in folded, "the first snapshot's turn was not folded"
+    live = [m.to_dict() for m in loop._compactor.view(nodes)]
+    assert _snapshots_in(type("R", (), {"messages": loop._compactor.view(nodes)})) == 1
+    fresh = NativeLoop(provider=_Recording(), store=loop.store, model="fake",
+                       session_id=loop.session_id, compaction=loop._compactor.config)
+    await fresh._rehydrate_compaction(loop.session_id)
+    assert [m.to_dict() for m in fresh._compactor.view(nodes)] == live
 
 
 @pytest.mark.asyncio
