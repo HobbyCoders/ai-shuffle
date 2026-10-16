@@ -10,6 +10,50 @@ from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 
 pytestmark = requires_real_pg
 
+# Rows this module writes, by session id. A run interrupted mid-test (or an
+# assertion failure before a test's own cleanup) must not leave them behind.
+_ROW_PREFIXES = ("recall-%", "ses_recall-%", "producer-%", "ses_producer-%",
+                 "generated-%", "ses_tied-%")
+_RECALL_TABLES = ("fluid_session_nodes", "session_store_entries", "session_events")
+
+
+def _reset_recall_state():
+    """Return the shared database to a fresh install's recall schema.
+
+    Several tests here run the explicit recall-cache maintenance, which adds a
+    stored ``recall_text`` column to three tables, builds the cache indexes and
+    drops the legacy ``idx_sse_entry_trgm`` and ``idx_session_events_recall_trgm``.
+    That is persistent DDL, so without this a second run on the same database
+    starts with the cache already applied and the bootstrap/upgrade tests fail.
+    """
+    from app.db import base
+    from app.db.database import MIGRATIONS_FINGERPRINT_KEY
+    from app.db.schema_postgres import create_postgres_schema
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        for table in _RECALL_TABLES:
+            # CASCADE drops the cache's partial GIN index with the column.
+            cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS recall_text CASCADE")
+        for name in ("incomplete_cache_index", "tied_incomplete_cache"):
+            cur.execute(f"DROP INDEX IF EXISTS {name}")
+        for prefix in _ROW_PREFIXES:
+            for table in _RECALL_TABLES + ("fluid_sessions", "session_store_summaries",
+                                           "session_event_counters"):
+                cur.execute(f"DELETE FROM {table} WHERE session_id LIKE %s", (prefix,))
+            cur.execute("DELETE FROM sessions WHERE id LIKE %s", (prefix,))
+        cur.execute("DELETE FROM session_store_entries WHERE project_key IN ('test', 'producer', 'tied')")
+        # With the cache gone, bootstrap recreates the legacy trigram indexes.
+        create_postgres_schema(cur)
+        cur.execute("DELETE FROM system_settings WHERE key = %s", (MIGRATIONS_FINGERPRINT_KEY,))
+
+
+@pytest.fixture(scope="module", autouse=True)
+def fresh_recall_schema(pg_schema):  # noqa: F811 — ordered after the pool and schema
+    _reset_recall_state()
+    yield
+    _reset_recall_state()
+
 
 @pytest.fixture(scope="module")
 def corpus():
@@ -78,6 +122,29 @@ def _index_names():
 def test_bootstrap_creates_all_agent_recall_indexes():
     assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"} <= _index_names()
     assert "idx_fluid_recall_text_trgm" not in _index_names()
+
+
+def test_module_reset_undoes_a_previous_runs_recall_cache():
+    """A second run on the same database starts from a fresh install's schema."""
+    from app.db import base
+    from app.maintenance.session_recall_cache import apply_cache
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions(id, title) VALUES ('recall-leftover', 'Left by a killed run')")
+        apply_cache(cur, 100 * 1024 ** 3)
+    assert {"idx_sse_entry_trgm", "idx_session_events_recall_trgm"}.isdisjoint(_index_names())
+
+    _reset_recall_state()
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        for table in _RECALL_TABLES:
+            assert not base.column_exists(cur, table, "recall_text")
+        cur.execute("SELECT COUNT(*) AS n FROM sessions WHERE id = 'recall-leftover'")
+        assert cur.fetchone()["n"] == 0
+    names = _index_names()
+    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"} <= names
+    assert {"idx_fluid_recall_text_trgm", "idx_sse_recall_text_trgm", "idx_events_recall_text_trgm"}.isdisjoint(names)
 
 
 def test_upgrade_creates_mirror_index_and_is_idempotent(monkeypatch):
@@ -177,7 +244,10 @@ def test_maintenance_cli_uses_real_database_capacity_check(monkeypatch, capsys):
     # DATA_DIR, so inject the fixture layout explicitly rather than inspecting
     # a connection descriptor (or a privileged SHOW setting).
     fixture_root = os.environ.get("RECALL_TEST_DATA_DIR")
-    assert fixture_root, "Set RECALL_TEST_DATA_DIR to the owned disposable cluster's managed layout root"
+    if not fixture_root:
+        pytest.skip("RECALL_TEST_DATA_DIR is not set: point it at a directory whose "
+                    "postgres/data is the TEST_POSTGRES_DSN cluster's data directory "
+                    "(the managed layout root) to run the real capacity check")
     fixture_data = Path(fixture_root)
     assert fixture_data.is_absolute()
     assert (fixture_data / "postgres" / "data" / "PG_VERSION").is_file()
