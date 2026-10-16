@@ -2,7 +2,7 @@
 
 The in-app update replaces the signed runtime source (scripts/source_archive.py)
 and rebuilds it on the worker. Some files are only ever read from the Docker
-image or the installed Windows launcher, so a change to them needs a new image
+image or the installed desktop launcher, so a change to them needs a new image
 or installer to take effect, and some changes stop the update for older
 installs altogether. See the review in the private archive
 
@@ -23,9 +23,22 @@ reads when it runs this check before a push):
   docker-image-copy A file the image copies and runs from /app or /usr/local/bin
                     that is neither an image input nor in the update archive.
                     The change never reaches an existing container.
-  windows-launcher  Code the installed AI Shuffle.exe runs from its app.asar on
-                    every launch before it hands over to the updated source. The
-                    change never reaches an existing install.
+  windows-launcher  Code the installed desktop app runs from its app.asar on
+                    every launch before it hands over to the updated source:
+                    AI Shuffle.exe on Windows, and the packaged Linux app (deb,
+                    AppImage), which updates in place but never replaces this
+                    code. The change never reaches an existing install's launcher.
+                    The label update-reach:windows-launcher accepts a deliberate
+                    launcher change only together with launcher-version below.
+  launcher-version  The launcher closure changed but desktop/launcher.json
+                    "version" was not raised (desktop/LAUNCHER.md). Older and
+                    newer launchers would report the same version, so neither
+                    the launcher swap nor the update's launcher checks can tell
+                    them apart. No label accepts this, except the owner's
+                    update-reach:no-launcher-change: the change does not alter
+                    what the launcher does (a move, a comment, dead code), so no
+                    install needs the new launcher. That label also accepts
+                    windows-launcher.
   update-trust-key  The application update public key. Images and installed
                     apps verify updates with the key they shipped; a new key
                     makes them refuse every later update.
@@ -35,8 +48,9 @@ images get it), the container supervisor and Chromium scripts (images built
 before the source-supervisor hand-over run their own copy; newer images run the
 updated one), owner tooling copied into the image (scripts/), Windows packaging
 (icons, NSIS options), Android native code (needs a Play build, which the owner
-accepts), and the macOS and Linux desktop apps, which have no in-place update
-and need a new installer for every change.
+accepts), and the macOS desktop app, which has no in-place update and needs a
+new installer for every change. Windows and Linux desktop installs take the
+updated source in-app; only their launcher (above) stays.
 
 Read-only: runs git diff and git show, never fetches, tags or writes.
 
@@ -45,6 +59,7 @@ Usage::
     python scripts/ci/update_reach.py                      # newest final tag .. HEAD
     python scripts/ci/update_reach.py --base v0.9.0 --head origin/main
     python scripts/ci/update_reach.py --allow docker-image # owner accepted a new base
+    python scripts/ci/update_reach.py --allow no-launcher-change  # behaviour-neutral launcher edit
     python scripts/ci/update_reach.py --base origin/main --labels "$LABELS"  # local_ci.py
     python scripts/ci/update_reach.py --json
 
@@ -73,6 +88,8 @@ FINAL_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 TRUST_KEY = "desktop/build/application-update-key.pem"
 CONTRACT = "docker/update_contract.py"
 LAUNCHER_ENTRY = "desktop/src/main/managed-entry.ts"
+# {"version": n, "minimum": m}: n must go up whenever the launcher closure changes.
+LAUNCHER_JSON = "desktop/launcher.json"
 # The installed launcher loads the full app (./index) only on a first run with
 # no source update yet; after the first update, ./index comes from the source.
 LAUNCHER_STOP = {"desktop/src/main/index.ts"}
@@ -97,9 +114,17 @@ CLOUD_LEGACY_PATHS = ("android/hub/*", "android/site/*", "android/license/*",
 IMAGE_SUPERVISOR = ("docker/*",)
 LABEL = "update-reach:"
 
-FAILING = ("docker-image", "image-pin", "docker-image-copy", "windows-launcher", "update-trust-key")
+FAILING = ("docker-image", "image-pin", "docker-image-copy", "windows-launcher", "launcher-version", "update-trust-key")
 GROUPS = FAILING + ("image-inputs", "image-supervisor", "image-tooling", "image-dev-tooling", "windows-packaging",
-                    "android-native", "macos-linux-desktop")
+                    "android-native", "macos-desktop")
+# What each owner acceptance (label update-reach:NAME, or --allow NAME) accepts.
+# A launcher closure change is accepted either as a deliberate launcher change
+# with its version raised (windows-launcher: launcher-version must be empty),
+# or as one that does not change the launcher at all (no-launcher-change).
+# launcher-version has no label of its own: the label must say which it is.
+NO_LAUNCHER_CHANGE = "no-launcher-change"
+ACCEPTS = {**{name: (name,) for name in FAILING if name != "launcher-version"},
+           NO_LAUNCHER_CHANGE: ("windows-launcher", "launcher-version")}
 
 Reader = Callable[[str], Optional[bytes]]
 
@@ -212,7 +237,13 @@ def image_only_copies(dockerfile: str, inputs: Iterable[str], runtime_paths: Ite
     return result
 
 
+# Relative modules a launcher file loads: static imports (not type-only), side-effect
+# imports, re-exports, dynamic import() (installed-entry.ts loads installer-updates
+# that way) and require().
 _IMPORT = re.compile(r"""(?:^|\n)\s*import\s+(?!type\b)[^'";]*?from\s+['"](\.{1,2}/[^'"]+)['"]"""
+                     r"""|(?:^|\n)\s*import\s*['"](\.{1,2}/[^'"]+)['"]"""
+                     r"""|(?:^|\n)\s*export\s+(?!type\b)[^'";]*?from\s+['"](\.{1,2}/[^'"]+)['"]"""
+                     r"""|\bimport\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)"""
                      r"""|require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
 
 
@@ -231,13 +262,32 @@ def launcher_files(read: Reader, entry: str = LAUNCHER_ENTRY) -> set:
         if not path.endswith((".ts", ".js", ".cjs", ".mjs")):
             continue
         for match in _IMPORT.finditer(data.decode("utf8", "replace")):
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), match.group(1) or match.group(2)))
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(path), next(group for group in match.groups() if group)))
             candidates = [target] if posixpath.splitext(target)[1] else [target + ".ts", target + ".js"]
             for candidate in candidates:
                 if candidate not in LAUNCHER_STOP and read(candidate) is not None:
                     queue.append(candidate)
                     break
     return seen
+
+
+def launcher_version(read: Reader) -> Optional[int]:
+    """desktop/launcher.json "version" at a revision; None when absent or not a valid contract."""
+    data = read(LAUNCHER_JSON)
+    if data is None:
+        return None
+    try:
+        value = json.loads(data)
+    except ValueError:
+        return None
+    version = value.get("version") if isinstance(value, dict) else None
+    return version if isinstance(version, int) and not isinstance(version, bool) and version >= 1 else None
+
+
+def launcher_raised(base: Reader, head: Reader) -> bool:
+    """The head's launcher version is valid and above the base's (any valid one when the base has none)."""
+    old, new = launcher_version(base), launcher_version(head)
+    return new is not None and (old is None or new > old)
 
 
 def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
@@ -274,12 +324,16 @@ def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
 
     launcher = launcher_files(base) | launcher_files(head)
     groups["windows-launcher"] = [p for p in changed if p in launcher]
+    # Every launcher reports desktop/launcher.json's version; a closure change
+    # that keeps it makes two different launchers indistinguishable (#97).
+    if groups["windows-launcher"] and not launcher_raised(base, head):
+        groups["launcher-version"] = list(groups["windows-launcher"])
     groups["update-trust-key"] = [p for p in changed if p == TRUST_KEY]
     groups["windows-packaging"] = [p for p in changed if matches(p, WINDOWS_PACKAGING) and p != TRUST_KEY]
     groups["android-native"] = [p for p in changed if matches(p, ANDROID_NATIVE) and not matches(p, CLOUD_LEGACY_PATHS)]
     # docker/ rides in the archive for containers only; desktops never run it.
-    groups["macos-linux-desktop"] = [p for p in changed if in_archive(p, archive.RUNTIME_PATHS, archive.EXCLUDED)
-                                     and not matches(p, IMAGE_SUPERVISOR)]
+    groups["macos-desktop"] = [p for p in changed if in_archive(p, archive.RUNTIME_PATHS, archive.EXCLUDED)
+                               and not matches(p, IMAGE_SUPERVISOR)]
     return groups
 
 
@@ -290,10 +344,25 @@ def in_archive(path: str, runtime_paths: Iterable[str], excluded: Iterable[str])
     return not any(path == item or path.startswith(item + "/") or fnmatch.fnmatchcase(path, item) for item in excluded)
 
 
+def accepted(allowed: Iterable[str]) -> set:
+    """The failing groups the owner's acceptances (group names or no-launcher-change) cover."""
+    return {group for name in allowed for group in ACCEPTS.get(name, ())}
+
+
 def verdict(groups: dict, allowed: Iterable[str] = ()) -> list:
     """Failing groups with changes that the owner has not acknowledged."""
-    allowed = set(allowed)
-    return [name for name in FAILING if groups.get(name) and name not in allowed]
+    covered = accepted(allowed)
+    return [name for name in FAILING if groups.get(name) and name not in covered]
+
+
+def labels_for(failing: Iterable[str]) -> list:
+    """The acceptance labels that would cover these groups (launcher-version has only no-launcher-change)."""
+    names = []
+    for name in failing:
+        option = NO_LAUNCHER_CHANGE if name == "launcher-version" else name
+        if option not in names:
+            names.append(option)
+    return names
 
 
 EXPLAIN = {
@@ -304,7 +373,13 @@ EXPLAIN = {
                  "depend on the change, run: python docker/update_contract.py --pin and commit. If it does, also "
                  "add a capability to REQUIRES.",
     "docker-image-copy": "The image runs its own copy; existing containers never see this change.",
-    "windows-launcher": "Installed Windows apps run their installer's copy before every hand-over; they never see this change.",
+    "windows-launcher": "Installed Windows and Linux desktop apps run their installer's copy (app.asar) before every "
+                        "hand-over; their launcher never sees this change. Raise desktop/launcher.json \"version\" "
+                        "(desktop/LAUNCHER.md) and have the owner accept the launcher change.",
+    "launcher-version": "The launcher closure changed but desktop/launcher.json \"version\" was not raised, so older "
+                        "and newer launchers report the same version (desktop/LAUNCHER.md). Raise it in this range. "
+                        "Only if the change leaves what the launcher does unchanged may the owner accept it with "
+                        "update-reach:no-launcher-change instead; update-reach:windows-launcher does not accept it.",
     "update-trust-key": "Images and installed apps verify updates with the key they shipped; they will refuse every later update.",
     "image-inputs": "Only new Docker images get this (pinned: older images keep taking updates without it).",
     "image-supervisor": "Images that hand over to the updated supervisor get this with the update; older images keep "
@@ -314,7 +389,8 @@ EXPLAIN = {
                          "running app never imports them. Only new images get the change.",
     "windows-packaging": "Only new Windows installs get packaging changes (icons, installer options).",
     "android-native": "Needs a Play build.",
-    "macos-linux-desktop": "macOS and Linux desktop apps have no in-place update; these need a new installer.",
+    "macos-desktop": "macOS desktop apps have no in-place update; these need a new installer (Windows and Linux "
+                     "installs take them in-app).",
 }
 
 
@@ -337,32 +413,35 @@ def render(base: str, head: str, groups: dict, failing: list, allowed: Iterable[
         lines.extend(f"    {p}" for p in paths[:8])
         if len(paths) > 8:
             lines.append(f"    ... and {len(paths) - 8} more")
+    options = labels_for(failing)
+    bump = ("raise desktop/launcher.json \"version\" for the launcher change, or " if "launcher-version" in failing
+            else "")
     if failing and draft:
         lines.append("NOTE — OUT OF REACH: " + ", ".join(failing) + ". Push/open a DRAFT PR only; "
-                     "before readiness/merge, move the change into updated source, add a migration path, "
-                     "or ask the owner to accept it with PR labels: "
-                     + ", ".join(LABEL + name for name in failing) + ".")
+                     "before readiness/merge, " + bump + "move the change into updated source, add a migration "
+                     "path, or ask the owner to accept it with PR labels: "
+                     + ", ".join(LABEL + name for name in options) + ".")
     elif failing:
-        lines.append("FAILED: move the change into the updated source, add a migration path, or have the owner "
-                     "accept it (pull request label " + ", ".join(LABEL + name for name in failing)
-                     + ", then re-run this check; locally --allow " + " --allow ".join(failing) + ").")
+        lines.append("FAILED: " + bump + "move the change into the updated source, add a migration path, or have "
+                     "the owner accept it (pull request label " + ", ".join(LABEL + name for name in options)
+                     + ", then re-run this check; locally --allow " + " --allow ".join(options) + ").")
     else:
-        lines.append("Passed: every change that existing Docker and Windows installs need reaches them in-app.")
+        lines.append("Passed: every change that existing Docker, Windows and Linux installs need reaches them in-app.")
     return "\n".join(lines)
 
 
 def allowed_by_labels(labels: str) -> list:
-    """Failing groups acknowledged by update-reach:GROUP labels."""
+    """Owner acceptances named by update-reach:NAME labels (a group, or no-launcher-change)."""
     names = [label.strip().removeprefix(LABEL) for label in labels.split(",") if label.strip().startswith(LABEL)]
-    return [name for name in names if name in FAILING]
+    return [name for name in names if name in ACCEPTS]
 
 
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--base", help="revision installs are on (default: newest final release tag)")
     parser.add_argument("--head", default="HEAD", help="candidate revision (default: HEAD)")
-    parser.add_argument("--allow", action="append", default=[], choices=FAILING,
-                        help="acknowledge an out-of-reach group the owner accepted (repeatable)")
+    parser.add_argument("--allow", action="append", default=[], choices=sorted(ACCEPTS),
+                        help="acknowledge an out-of-reach group the owner accepted, or no-launcher-change (repeatable)")
     parser.add_argument("--labels", default="",
                         help="comma-separated pull request labels; update-reach:GROUP acknowledges GROUP")
     parser.add_argument("--draft", action="store_true",

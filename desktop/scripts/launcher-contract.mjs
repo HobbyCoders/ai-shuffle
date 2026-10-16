@@ -5,7 +5,8 @@
 //   version  stamped into an installer's desktop-build.json as `launcher`, and
 //            passed by that launcher to the updated app as
 //            SHUFFLE_LAUNCHER_VERSION. Raise it whenever a file in the
-//            launcher's import closure (scripts/ci/update_reach.py) changes.
+//            launcher's import closure (scripts/ci/update_reach.py) changes;
+//            that check fails a range that does not (launcher-version).
 //   minimum  signed into every published manifest as desktop.launcher. 0 means
 //            any launcher, including those built before the stamp existed.
 //   start    signed as desktop.start: the oldest launcher that can START a

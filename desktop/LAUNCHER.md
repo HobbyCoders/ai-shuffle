@@ -19,7 +19,7 @@ and the release may replace an older launcher as described below.
 
 | Field | Meaning |
 |---|---|
-| `version` | The launcher this source packs into `app.asar`. Raise it whenever a file in the launcher closure changes. |
+| `version` | The launcher this source packs into `app.asar`. Raise it whenever a file in the launcher closure changes. `scripts/ci/update_reach.py` fails a range that changes the closure without raising it (`launcher-version`), unless the owner labels it `update-reach:no-launcher-change`. |
 | `minimum` | The oldest launcher a release built from this source needs. It is signed into every published manifest as `desktop.launcher`. A running launcher below it is replaced, but only after the release's first healthy start (below), so it cannot protect that first start. |
 | `start` | The oldest launcher that can start a release built from this source at all, before any replacement. It is signed as `desktop.start`. Optional, 0 to `version`; a manifest without it can be started by any launcher. |
 
