@@ -712,16 +712,63 @@ async def test_settlement_runtime_interrupt_does_not_sweep_new_permissions(chats
     assert interactions.get_interaction(fresh["id"])["state"] == "pending"
 
 
-async def test_local_delayed_settlement_revision_cannot_dismiss_a_new_settle(chats):
+@pytest.mark.parametrize("writer", ["single", "batch", "legacy"])
+async def test_local_delayed_settlement_revision_cannot_dismiss_a_new_settle(chats, monkeypatch, writer):
+    from datetime import datetime, timezone
     from app.db import interactions
     from app.network import session_active
 
-    stale = session_active.write_shared("target", False)
-    session_active.write_shared("target", True)
-    session_active.write_shared("target", False)
+    clock = Mock()
+    clock.now.return_value = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(session_active, "datetime", clock)
+    # An unenrolled worker (or a held outbox) has no signed membership clock.
+    monkeypatch.setattr(session_active.engine, "record", lambda *a, **kw: None)
+    monkeypatch.setattr(session_active.engine, "kick", lambda: None)
+
+    def write(active):
+        if writer == "batch":
+            return session_active.write_shared_many(["target"], active)[0]
+        if writer == "legacy":
+            return session_active._write("target", active, local=True)[0]
+        return session_active.write_shared("target", active)
+
+    stale = write(False)
+    write(True)
+    current = write(False)
+    assert current["_settled_revision"]["membership_revision"] > stale["_settled_revision"]["membership_revision"]
     fresh = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
     await session_active._apply_settle_change(stale, False)
     assert interactions.get_interaction(fresh["id"])["state"] == "pending"
+    await session_active._apply_settle_change(current, False)
+    assert interactions.get_interaction(fresh["id"])["state"] == "answered"
+
+    # A second settle in the same clock tick must not reuse the first receipt.
+    write(True)
+    newest = write(False)
+    later = interactions.create_interaction("target", "permission", {"request_id": "later"}, 300)
+    await session_active._apply_settle_change(newest, False)
+    assert interactions.get_interaction(later["id"])["state"] == "answered"
+
+async def test_recreated_membership_does_not_reuse_old_revision_or_receipt(chats, monkeypatch):
+    from app.core.session_settlement import dismiss_owner_waits
+    from app.db import interactions
+    from app.network import session_active
+
+    monkeypatch.setattr(session_active.engine, "kick", lambda: None)
+    old = session_active.write_shared("target", False)["_settled_revision"]
+    assert not await dismiss_owner_waits("target", expected_revision=old)
+    # Network reset/rejoin removes local membership metadata, not chat history.
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM network_session_active WHERE session_id=%s", ("target",))
+    new = session_active.write_shared("target", False)["_settled_revision"]
+    assert new["membership_revision"] == old["membership_revision"]
+    assert new["membership_epoch"] != old["membership_epoch"]
+    prompt = interactions.create_interaction("target", "permission", {"request_id": "fresh"}, 300)
+    assert not await dismiss_owner_waits("target", expected_revision=old)
+    assert interactions.get_interaction(prompt["id"])["state"] == "pending"
+    assert await dismiss_owner_waits("target", expected_revision=new)
+    assert interactions.get_interaction(prompt["id"])["state"] == "answered"
+
 
 @pytest.mark.parametrize("initial_wait", [True, False])
 async def test_repeated_settle_revision_preserves_post_snapshot_wait(chats, monkeypatch, initial_wait):
