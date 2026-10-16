@@ -149,8 +149,21 @@ def container_install():
     agents (shells, Monitor, hooks, MCP servers, the delegated CLI, the agent
     browser) shares the network namespace. The owner's browser reaches a
     published port from outside, through Docker's bridge, never as loopback.
+
+    A container marker the runtime creates as root (``/.dockerenv``,
+    ``/run/.containerenv``) can only tighten this: ``LOCAL_MODE`` read from a
+    ``.env`` an agent can write must not turn loopback ownership back on.
+    The one exception is a branch preview (``AI_SHUFFLE_PREVIEW=1`` in the
+    process's own environment, which no ``.env`` file sets): an agent starts
+    it, on throwaway data, so it is that agent's own instance.
     """
+    import os
+    if any(os.path.exists(marker) for marker in _CONTAINER_MARKERS):
+        return os.environ.get('AI_SHUFFLE_PREVIEW') != '1' or not settings.is_local_mode()
     return not settings.is_local_mode()
+
+
+_CONTAINER_MARKERS = ('/.dockerenv', '/run/.containerenv')
 
 
 def loopback_owner():

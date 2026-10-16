@@ -144,7 +144,9 @@ def test_desktop_loopback_needs_its_listener_token(monkeypatch, install):
 
 
 @pytest.mark.real_install_detection
-def test_container_install_follows_the_deployment_mode(monkeypatch):
+def test_container_install_follows_the_deployment_mode(monkeypatch, tmp_path):
+    monkeypatch.setattr(owner_auth, "_CONTAINER_MARKERS", (str(tmp_path / "no-marker"),))
+    monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
     monkeypatch.setattr(settings, "local_mode", False)
     assert owner_auth.container_install() is True
     assert owner_auth.loopback_owner() is False
@@ -154,6 +156,29 @@ def test_container_install_follows_the_deployment_mode(monkeypatch):
     monkeypatch.setattr(settings, "local_mode", True)
     assert owner_auth.container_install() is False
     assert owner_auth.loopback_owner() is True
+
+
+@pytest.mark.real_install_detection
+@pytest.mark.parametrize("marker", ["dockerenv", "containerenv"])
+def test_a_container_marker_outranks_local_mode_from_a_writable_env_file(monkeypatch, tmp_path, marker):
+    """LOCAL_MODE=true in a .env an agent can write must not reopen loopback."""
+    present = tmp_path / marker
+    present.touch()
+    monkeypatch.setattr(owner_auth, "_CONTAINER_MARKERS", (str(tmp_path / "absent"), str(present)))
+    monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
+    monkeypatch.setattr(settings, "local_mode", True)
+    assert owner_auth.container_install() is True
+    assert owner_auth.loopback_owner() is False
+    assert owner_auth.local_access(_request(peer="127.0.0.1", host="localhost:8000")) is False
+    # Only a branch preview (its own process environment, never a .env file)
+    # started in local mode keeps loopback: it is the agent's own instance.
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "1")
+    assert owner_auth.container_install() is False
+    monkeypatch.setattr(settings, "local_mode", False)
+    assert owner_auth.container_install() is True
+    monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "true")
+    monkeypatch.setattr(settings, "local_mode", True)
+    assert owner_auth.container_install() is True
 
 
 def test_own_addresses_lists_every_interface(monkeypatch):
