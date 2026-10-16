@@ -10,7 +10,7 @@
 	 * - edit: Edit an existing connector's configuration
 	 */
 
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount } from 'svelte';
 	import GoogleConnection from '$lib/components/plugins/GoogleConnection.svelte';
 	import PlaidConnection from '$lib/components/plugins/PlaidConnection.svelte';
 	import Banner from '$lib/components/Banner.svelte';
@@ -302,29 +302,65 @@
 		gmail: 'M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z'
 	};
 
-	// Load data on mount, then poll for status updates
+	// Status is presentation-only: keep intake elsewhere live, but do not poll
+	// this settings view while hidden or after navigation unmounts it.
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
+	let mounted = false;
+	let initialized = false;
+	let refreshing = false;
+	let resourceDirty = false;
+	const canRefresh = () => mounted && document.visibilityState !== 'hidden';
 
-	onMount(async () => {
-		await loadData();
-		pollInterval = setInterval(async () => {
-			try {
+	async function refreshStatus() {
+		if (!canRefresh() || refreshing) return;
+		refreshing = true;
+		try {
+			if (!initialized) {
+				resourceDirty = false;
+				await loadData();
+				initialized = canRefresh();
+			} else if (resourceDirty) {
+				resourceDirty = false;
+				await refreshRemoteData();
+			} else {
 				const updated = await getConnectors();
+				if (!canRefresh()) return;
 				connectors = updated.filter(c => !typeFilter || c.type === typeFilter);
-				// Refresh logs for any expanded connector
 				for (const cid of expandedLogs) {
+					if (!canRefresh()) break;
 					const logs = await getConnectorLogs(cid);
+					if (!canRefresh()) break;
 					connectorLogs.set(cid, logs);
 					connectorLogs = new Map(connectorLogs);
 				}
-			} catch {
-				// Silently ignore poll failures
 			}
-		}, 15_000);
-	});
+		} catch {
+			// Keep the last status on a transient poll failure.
+		} finally {
+			refreshing = false;
+			// Preserve invalidations received during a load without overlapping it.
+			if (resourceDirty && canRefresh()) void refreshStatus();
+		}
+	}
 
-	onDestroy(() => {
-		if (pollInterval) clearInterval(pollInterval);
+	onMount(() => {
+		mounted = true;
+		const syncVisibility = () => {
+			if (pollInterval !== null) clearInterval(pollInterval);
+			pollInterval = null;
+			if (!canRefresh()) return;
+			void refreshStatus();
+			pollInterval = setInterval(() => void refreshStatus(), 15_000);
+		};
+		document.addEventListener('visibilitychange', syncVisibility);
+		syncVisibility();
+		// Synchronous cleanup registration also covers a pending initial load.
+		return () => {
+			mounted = false;
+			document.removeEventListener('visibilitychange', syncVisibility);
+			if (pollInterval !== null) clearInterval(pollInterval);
+			pollInterval = null;
+		};
 	});
 
 	/**
@@ -408,6 +444,8 @@
 			loading = false;
 		}
 
+		if (!canRefresh()) return;
+
 		// Agents for a new connection's API user. Kept out of the bundle above
 		// so a failure here never hides the connectors list.
 		try {
@@ -416,6 +454,8 @@
 		} catch {
 			agents = [];
 		}
+
+		if (!canRefresh()) return;
 
 		// Best-effort: resolve this install's id + peer device names so the card
 		// can label connectors that run on another install. A failure here must
@@ -682,7 +722,11 @@
 	let remoteChange = $state('');
 	let remoteBaseline = '';
 	function remoteSnapshot() { return JSON.stringify([formName, formApiUserId, formConfig, formEvents, [...selectedGuildIds], [...selectedChannelIds], prefixMode, customPrefix]); }
-	watchResources(['connectors', 'api_users'], async () => {
+	watchResources(['connectors', 'api_users'], () => {
+		resourceDirty = true;
+		return refreshStatus();
+	});
+	async function refreshRemoteData() {
 		const selected = editingConnector;
 		const snapshot = remoteSnapshot();
 		await loadData(true);
@@ -696,7 +740,7 @@
 		}
 		if (fresh) startEdit(fresh);
 		else { cancelForm(); remoteChange = 'This item was deleted elsewhere.'; }
-	});
+	}
 </script>
 
 {#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
