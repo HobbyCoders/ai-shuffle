@@ -1,7 +1,7 @@
 """Strip harness-injected ``<system-reminder>`` blocks from user-message text.
 
 The harness appends private context to a user prompt before the model sees
-it: the saved-memory snapshot (``# Memory``), the per-turn environment facts,
+it: the saved-memory snapshot (``# Memory``) or its change list, the per-turn environment facts,
 the away-mode and assistant-confirmation notes, and on the native lane the
 ledger, notes, runtime-facts and deferred-tool catalog blocks. The model must
 keep seeing them, but they are not what the person typed, and the memory
@@ -37,6 +37,9 @@ HARNESS_REMINDER_OPENERS = (
     # app.core.provider.harness_adapter memory snapshot / fluid skills
     # render_memory_section (EMPTY_MEMORY_SECTION too).
     "# Memory\n",
+    # app.core.memory_reminder CHANGES_HEADER: the change list a turn carries
+    # instead of the full snapshot when saved facts changed mid-session.
+    "# Memory changes\n",
     # app.core.environment.TURN_ENV_HEADER
     "Environment facts that change while a session runs",
     # app.core.away_mode CONTEXT_NOTE, OWNER_BACK_NOTE, ASSISTANT_WORK_NOTE,

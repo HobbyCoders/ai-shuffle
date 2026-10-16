@@ -3237,6 +3237,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 spans=tuple((s, en, k) for s, en, k in e.spans),
                 render_version=e.render_version,
                 summary_text=e.summary,
+                path_end=e.node_id,
             )
             for e in events
             if isinstance(e, ContextCompaction)

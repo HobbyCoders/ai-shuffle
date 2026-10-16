@@ -172,6 +172,15 @@ class CompactionConfig:
     # epoch_fold_spans of them into one epoch stub.
     max_resident_span_digests: int = 20
     epoch_fold_spans: int = 10
+    # A harness reminder the model must keep seeing through any fold: the
+    # (full block, change list) headers of the chain. The host sends the full
+    # block once and change lists after it; when a digest, epoch, checkpoint
+    # summary or intake stub would hide part of the chain as it stood when
+    # the fold was decided (the path's last node then, persisted as the
+    # ContextCompaction event's node_id), the fold's message carries it
+    # verbatim (_PinScan.chain). A newer full block therefore never rewrites
+    # an older fold. None turns pinning off.
+    pinned_reminder: tuple[str, str] | None = ("# Memory\n", "# Memory changes\n")
     # Intake: user Text blocks longer than this always render as a stub.
     intake_stub_chars: int = 25_000
     intake_preview_chars: int = 500
@@ -407,6 +416,10 @@ class Promotion:
     # Compactor.rehydrate never replays above the compactor's own version.
     render_version: int = CURRENT_RENDER_VERSION
     summary_text: str = ""
+    # The path's last node when the decision was made (the event's node_id),
+    # read back on resume: a fold carries the pinned reminder chain as of it.
+    # None (an unknown end) falls back to the fold's own last node.
+    path_end: str | None = None
 
 
 def describe_promotions(
@@ -524,6 +537,109 @@ def strip_system_reminders(text: str) -> str:
     plumbing (deferred-tool catalogs, ledger recitations) that is re-derivable
     and re-injected on fresh turns — history copies are pure weight."""
     return _REMINDER_RE.sub("", text).strip()
+
+
+_PIN_OPEN = "<system-reminder>\n"
+_PIN_CLOSE = "\n</system-reminder>"
+
+
+def _reminder_blocks(node: SessionNode, headers: tuple[str, str]) -> list[tuple[str, str]]:
+    """``("full" | "changes", block)`` for every pinned-header reminder in a
+    user node's text, in order; each block is verbatim, tags included."""
+    if node.message.role != "user":
+        return []
+    text = "\n".join(b.text for b in node.message.content if isinstance(b, Text))
+    if _PIN_OPEN not in text:
+        return []
+    found: list[tuple[int, str, str]] = []
+    for kind, header in zip(("full", "changes"), headers):
+        marker = _PIN_OPEN + header
+        start = text.find(marker)
+        while start >= 0:
+            end = text.find(_PIN_CLOSE, start)
+            if end < 0:
+                break
+            found.append((start, kind, text[start:end + len(_PIN_CLOSE)]))
+            start = text.find(marker, end)
+    found.sort()
+    return [(kind, block) for _, kind, block in found]
+
+
+class _PinScan:
+    """Every pinned-header reminder on a path, scanned once per render."""
+
+    __slots__ = ("blocks", "newest_full")
+
+    def __init__(self, nodes: list[SessionNode], headers: tuple[str, str] | None) -> None:
+        self.blocks: list[list[tuple[str, str]]] = (
+            [_reminder_blocks(n, headers) for n in nodes] if headers else [[] for _ in nodes]
+        )
+        # newest_full[k]: index of the newest node at or before k carrying a
+        # full block, -1 when there is none.
+        self.newest_full: list[int] = []
+        newest = -1
+        for k, blocks in enumerate(self.blocks):
+            if any(kind == "full" for kind, _ in blocks):
+                newest = k
+            self.newest_full.append(newest)
+
+    def chain(self, first: int, last: int, as_of: int | None = None) -> dict[int, list[str]]:
+        """The chain as of node ``as_of`` (default ``last``): the newest full
+        block on ``nodes[:as_of + 1]`` and every change list after it,
+        restricted to nodes ``first..last``. Node index -> blocks.
+
+        A fold passes the path end its decision saw, so what it carries never
+        depends on anything appended later: a newer full block leaves the
+        fold's (now superseded) copy where it is and the cached prefix stays
+        byte-identical. Whatever the newest chain on the path holds inside
+        the fold is always among it.
+        """
+        if last < first or not self.blocks:
+            return {}
+        as_of = last if as_of is None else min(max(as_of, last), len(self.blocks) - 1)
+        newest = self.newest_full[as_of]
+        if newest < 0 or newest > last:
+            return {}
+        chain: dict[int, list[str]] = {}
+        if newest >= first:
+            blocks = self.blocks[newest]
+            last_full = max(k for k, (kind, _) in enumerate(blocks) if kind == "full")
+            chain[newest] = [block for _, block in blocks[last_full:]]
+        for k in range(max(newest + 1, first), last + 1):
+            changes = [block for kind, block in self.blocks[k] if kind == "changes"]
+            if changes:
+                chain[k] = changes
+        return chain
+
+
+def pinned_reminder_chain(
+    nodes: list[SessionNode], headers: tuple[str, str] | None,
+) -> dict[int, list[str]]:
+    """The newest pinned reminder chain on ``nodes``: node index -> blocks.
+
+    The chain is the newest full block and every change list after it: what
+    the model must see on this path. A fold carries the chain as of the path
+    end its decision saw (``_PinScan.chain``), which includes every part of
+    this chain that the fold covers.
+    """
+    return _PinScan(nodes, headers).chain(0, len(nodes) - 1)
+
+
+def _carry_pins(
+    message: Message, pins: _PinScan, first: int, last: int, as_of: int | None = None,
+) -> Message:
+    """``message`` (rendered from nodes ``first..last``) with every block of
+    the chain as of ``as_of`` that it covers but no longer shows appended,
+    verbatim, in order."""
+    chain = pins.chain(first, last, as_of)
+    blocks = [block for k in sorted(chain) for block in chain[k]]
+    if not blocks:
+        return message
+    shown = "\n".join(b.text for b in message.content if isinstance(b, Text))
+    missing = [block for block in blocks if block not in shown]
+    if not missing:
+        return message
+    return replace(message, content=[*message.content, Text("\n\n".join(missing))])
 
 
 def _user_text(node: SessionNode) -> str:
@@ -1022,6 +1138,9 @@ class Compactor:
     # Render version per promoted span key; a key made by this process
     # renders at config.render_version.
     _span_versions: dict = field(default_factory=dict)
+    # (start, end) -> the path's last node id when the span was decided; the
+    # fold carries the pinned reminder chain as of that node (_PinScan.chain).
+    _span_pin_ends: dict = field(default_factory=dict)
     # Span keys rehydrated from persisted decisions, in replay order. Live
     # promotion retires the decisions a new span contains (segment
     # retirement, epoch folds). That needs node order, which rehydrate does
@@ -1082,6 +1201,15 @@ class Compactor:
         elide = (
             elidable_call_ids(trimmed, index) if self.config.elide_old_args else None
         )
+        # A fold must not hide the pinned reminder chain (the host's # Memory
+        # snapshot): its message carries the chain as of the path end its
+        # decision saw, verbatim, so a later snapshot never rewrites it.
+        pins = _PinScan(nodes, self.config.pinned_reminder)
+
+        def as_of(start: str, end: str) -> int | None:
+            pin_end = self._span_pin_ends.get((start, end))
+            return index.get(pin_end) if pin_end is not None else None
+
         out: list[Message] = []
         i = 0
         while i < len(nodes):
@@ -1091,39 +1219,50 @@ class Compactor:
                           key=lambda item: index[item[0]], default=None)
             if summary is not None:
                 end, text = summary
-                out.append(self._summary_message(node.node_id, end, text))
-                i = index[end] + 1
+                j = index[end]
+                out.append(_carry_pins(
+                    self._summary_message(node.node_id, end, text), pins, i, j,
+                    as_of(node.node_id, end),
+                ))
+                i = j + 1
                 continue
             if not self.config.enabled:
                 # Trim-only: tier 2/3 decisions are never made here, and a
                 # persisted one rehydrated from a session that *did* run the
                 # ladder stays inert rather than digesting history behind the
                 # host app's back.
-                out.append(self._render_live(node, trimmed, consumed, calls, elide))
+                out.append(_carry_pins(
+                    self._render_live(node, trimmed, consumed, calls, elide), pins, i, i,
+                ))
                 i += 1
                 continue
             end_id = self._epoch_by_start.get(node.node_id)
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
-                out.append(
+                out.append(_carry_pins(
                     render_epoch_stub(
                         split_spans(nodes[i : j + 1]),
                         self._config_at(node.node_id, end_id),
-                    )
-                )
+                    ),
+                    pins, i, j, as_of(node.node_id, end_id),
+                ))
                 i = j + 1
                 continue
             end_id = self._digest_by_start.get(node.node_id)
             if end_id is not None and end_id in index and index[end_id] >= i:
                 j = index[end_id]
-                out.append(
+                out.append(_carry_pins(
                     render_span_digest(
                         nodes[i : j + 1], self._config_at(node.node_id, end_id)
-                    )
-                )
+                    ),
+                    pins, i, j, as_of(node.node_id, end_id),
+                ))
                 i = j + 1
                 continue
-            out.append(self._render_live(node, trimmed, consumed, calls, elide))
+            # An intake stub hides a long user text block, reminders included.
+            out.append(_carry_pins(
+                self._render_live(node, trimmed, consumed, calls, elide), pins, i, i,
+            ))
             i += 1
         return out
 
@@ -2609,7 +2748,7 @@ class Compactor:
         for key in list(self._digested):
             if key[0] in index and key[1] in index and index[start] <= index[key[0]] <= index[key[1]] <= index[end]:
                 self._retire(key)
-        self._mark_span(start, end, "summary")
+        self._mark_span(start, end, "summary", pin_end=nodes[-1].node_id)
         self._summaries[(start, end)] = text
         after = self._estimate(nodes, overhead_tokens)
         if after >= before:
@@ -2679,7 +2818,8 @@ class Compactor:
             for start, end, kind in promo.spans:
                 if not self.config.enabled and kind != "summary":
                     continue  # trim-only: tier 2/3 history is not re-armed
-                self._mark_span(start, end, kind, render_version=version)
+                self._mark_span(start, end, kind, render_version=version,
+                                pin_end=promo.path_end)
                 if kind == "summary":
                     self._summaries[(start, end)] = promo.summary_text
                 self._replayed_spans.append((start, end))
@@ -2719,6 +2859,7 @@ class Compactor:
         # Keep superseded checkpoint text for forks ending before its successor.
         # Only _digested counts residency; rendering chooses the widest on-path checkpoint.
         self._span_versions.pop(key, None)
+        self._span_pin_ends.pop(key, None)
         if self._digest_by_start.get(start) == end:
             self._digest_by_start.pop(start)
         if self._epoch_by_start.get(start) == end:
@@ -2738,6 +2879,7 @@ class Compactor:
         epochs = dict(self._epoch_by_start)
         digests = dict(self._digest_by_start)
         versions = dict(self._span_versions)
+        pin_ends = dict(self._span_pin_ends)
         summaries = dict(self._summaries)
         trimmed = set(self.trimmer._trimmed)
         consumed = set(self.trimmer._image_consumed)
@@ -2751,6 +2893,8 @@ class Compactor:
             self._digest_by_start.update(digests)
             self._span_versions.clear()
             self._span_versions.update(versions)
+            self._span_pin_ends.clear()
+            self._span_pin_ends.update(pin_ends)
             self._summaries.clear()
             self._summaries.update(summaries)
             self.trimmer._trimmed.clear()
@@ -2761,9 +2905,14 @@ class Compactor:
         return restore
 
     def _mark_span(
-        self, start: str, end: str, kind: str, *, render_version: int | None = None
+        self, start: str, end: str, kind: str, *, render_version: int | None = None,
+        pin_end: str | None = None,
     ) -> None:
         self._digested[(start, end)] = kind
+        if pin_end is None:
+            self._span_pin_ends.pop((start, end), None)
+        else:
+            self._span_pin_ends[(start, end)] = pin_end
         self._span_versions[(start, end)] = (
             self.config.render_version if render_version is None else render_version
         )
@@ -2927,7 +3076,7 @@ class Compactor:
             for start, end in list(self._digested):
                 if start in span_ids and end in span_ids:
                     self._retire((start, end))
-            self._mark_span(*key, SPAN_DIGEST)
+            self._mark_span(*key, SPAN_DIGEST, pin_end=nodes[-1].node_id)
             after = self._estimate(nodes, overhead_tokens)
             if after >= current:
                 restore()
@@ -2987,7 +3136,7 @@ class Compactor:
             for _pos, s, e in chunk:  # spans leave the digest tier
                 self._digested.pop((s, e), None)
                 self._digest_by_start.pop(s, None)
-            self._mark_span(start, end, EPOCH_STUB)
+            self._mark_span(start, end, EPOCH_STUB, pin_end=nodes[-1].node_id)
             folded.append((start, end))
             if force and not resident:
                 break
