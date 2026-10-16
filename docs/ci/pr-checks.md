@@ -113,7 +113,9 @@ command and every process it started (pytest-xdist workers, npm's node) are
 stopped, the stage gets no receipt, and the invocation exits 0 with
 `Stopped at the end of the … budget` and what happens next:
 
-- A stage that started late in the invocation runs first in the next one.
+- A stage that started late in the invocation, and so had only what was left
+  of the budget, runs first in the next one. Only a unit that ran first, with
+  the whole budget, is ever judged too long.
 - A **test stage** (each backend batch, and `fluid`) that could not finish in a
   whole budget is split. Test stages run as *shards*: sorted lists of test
   files dealt round robin, stored in the state file, so a resumed run uses
@@ -124,10 +126,17 @@ stopped, the stage gets no receipt, and the invocation exits 0 with
   the rate of this run's finished shards, never the 10-minute guess). A shard
   runs the suite's own command and directories, with the other files ignored
   (`scripts/ci/local_ci_batch.py`); a single shard runs the original command.
+  Time spent waiting for the machine's shared pytest lock counts toward the
+  shard's time, so a busy machine can make a shard look slower than it is.
 - A unit that cannot be split (a non-test stage such as `frontend`, or one test
-  file) and still does not fit a whole budget **fails** with `cannot be split
-  further`. Report it; do not retry in a loop or raise the budget past the
-  Monitor's.
+  file) and still does not fit a whole budget stops with exit 1 and `cannot be
+  split further`. That is a time limit, not a test failure: no receipt and no
+  failure status are recorded (a `pending` status from `--attest` stays). Run the
+  same command once with a larger `--budget` that still fits the job's time
+  limit (for example `--budget 44` in a 45-minute Monitor job), or with
+  `--budget 0` (that stage alone, no limit) where nothing limits the run's
+  time, then continue with the usual command. If it does not fit even then,
+  report it.
 
 **Interruption from outside** (the Monitor timing out, a closed terminal,
 Ctrl-C, a reboot) is handled too. The running unit is written to the state
@@ -135,11 +144,13 @@ file before it starts, and `full-stages.beat` is refreshed every 30 seconds
 while the invocation lives. SIGTERM, SIGHUP and Ctrl-C stop the process tree
 and record how long the unit ran. After an outright kill, the last heartbeat
 gives it. The next invocation reports `The previous invocation was stopped
-during …` and treats a unit that ran for 90% of a budget like one stopped at
-the budget. A unit that had a whole budget and was killed twice in a row is
-split (or fails, if it cannot be), whatever `--budget` says. A fresh heartbeat
-from a live process makes a second invocation in the same worktree refuse to
-start. A dead one does not block. State and receipts are written atomically and
+during …` and treats a unit that ran first and used 90% of the time it had like
+one stopped at the budget. A unit that had a whole budget and was killed twice
+in a row is split (or stops as above, if it cannot be), whatever `--budget`
+says. An invocation holds an OS file lock (`full-stages.lock`) for its whole
+life, so a second invocation in the same worktree refuses to start while one
+runs; the system releases the lock however the process ends, so a killed run
+never blocks the next. State and receipts are written atomically and
 flushed, and finished batches' map hits are kept beside them
 (`full-stages-hits/`), not in the system temp directory.
 
