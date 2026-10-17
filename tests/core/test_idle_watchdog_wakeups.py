@@ -424,6 +424,44 @@ async def test_watchdog_skips_session_with_active_turn(mock_db, monkeypatch):
     assert scheduled == []
 
 
+@pytest.mark.parametrize("reply_to", ["coord", None])
+async def test_watchdog_skips_only_a_parked_sendmessage_continuation(mock_db, monkeypatch, reply_to):
+    """A parked SendMessage continuation is not nudged (#123): the nudge would
+    become a new turn the unpark wake resumes instead of the continuation, and
+    the worker's parent would never hear back. A coordinator parked on its
+    sub-agents (no reply_to) still gets nudged, so it compacts before the edge."""
+    from app.core import wakeup_service
+    from app.db import database
+    from app.db import turns as turns_db
+
+    sid = f"wd-parked-{reply_to or 'coordinator'}"
+    database.create_session(session_id=sid, profile_id="default")
+    database.set_session_context_usage(session_id=sid, data=_usage(190_000))
+    turn = turns_db.enqueue_turn(
+        sid, "agent_message" if reply_to else "user", prompt="continue",
+        payload={"agent_message_reply_to": reply_to} if reply_to else None,
+    )
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.park_turn(turn["id"], ["monitor"])
+    database.set_session_parked_task_kind(sid, "agent")
+
+    scheduled = []
+
+    async def _fake_schedule(**kwargs):
+        scheduled.append(kwargs)
+        return {"id": "x", "fire_at": 0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+
+    nudged = await wakeup_service.scan_once()
+
+    if reply_to:
+        assert nudged == [] and scheduled == []
+    else:
+        assert nudged == [sid]
+        assert [s["session_id"] for s in scheduled] == [sid]
+
+
 async def test_watchdog_skips_session_with_pending_wakeup(mock_db, monkeypatch):
     from app.core import wakeup_service
     from app.db import database

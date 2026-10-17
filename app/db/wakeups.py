@@ -338,7 +338,13 @@ def idle_edge_candidates(
     * is ``status='active'`` (not streaming/parked/archived — i.e. no live turn);
     * was last touched within ``max_idle_seconds`` (when given);
     * has a persisted context-usage snapshot (``context_usage_json`` present);
-    * has NO in-flight turn (no ``turns`` row in a live state); and
+    * has NO in-flight turn (no ``turns`` row in a live state);
+    * is NOT a parked SendMessage continuation (a ``parked`` turn carrying
+      ``agent_message_reply_to``): a nudge there runs as a separate turn that
+      the unpark wake later resumes in place of the continuation, which is how
+      a continued worker lost its parent (#123). Other parked sessions (a
+      coordinator waiting on sub-agents) stay candidates, so long-lived ones
+      still compact before the edge; and
     * has NO pending wakeup already armed (so the watchdog never piles a second
       nudge on top of one it — or ScheduleWakeup — already scheduled).
 
@@ -374,6 +380,12 @@ def idle_edge_candidates(
                   SELECT 1 FROM turns t
                   WHERE t.session_id = s.id
                     AND t.state IN ({placeholders})
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM turns c
+                  WHERE c.session_id = s.id
+                    AND c.state = 'parked'
+                    AND c.payload ->> 'agent_message_reply_to' IS NOT NULL
               )
               AND NOT EXISTS (
                   SELECT 1 FROM pending_wakeups w
