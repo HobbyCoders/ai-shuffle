@@ -37,10 +37,11 @@ def assert_private(path, *, directory=False):
     system_root = env.get("SYSTEMROOT") or env.get("SystemRoot") or r"C:\Windows"
     env["PSModulePath"] = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "Modules")
     # A closed stdin: Windows PowerShell can wait on an inherited pipe that
-    # never closes (a CI step's stdin) instead of exiting.
+    # never closes (a CI step's stdin) instead of exiting. 90 seconds: its
+    # first start on a fresh machine (a hosted runner) can take over 30.
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
                             env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                            check=True, timeout=30)
+                            check=True, timeout=90)
     assert json.loads(result.stdout) == {
         "protected": True, "count": 1, "onlyUser": True, "fullControl": True, "inherited": False,
     }
