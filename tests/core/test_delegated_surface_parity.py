@@ -236,6 +236,19 @@ def test_chat_argv_grants_the_attachment_reader_as_the_cli_calls_it(tmp_path):
     assert not {"Read", "Glob", "Grep", "Bash", "WebFetch"} & set(granted)
 
 
+def test_chat_lane_keeps_the_clis_question_tool(tmp_path):
+    """Chat mode's AskUser reaches the delegated leg as the CLI's
+    AskUserQuestion: on its surface and never walled, while the CLI's shell
+    stays denied."""
+    from app.core.session_modes import CHAT_MODE_TOOL_SURFACE
+
+    options = _options(tmp_path, surface=list(CHAT_MODE_TOOL_SURFACE), lane="chat")
+    assert "AskUserQuestion" in ha._delegated_surface(options)
+    denied = set(ha._delegated_disallowed(options))
+    assert "AskUserQuestion" not in denied
+    assert "Bash" in denied
+
+
 # ─── Duplicate tools ────────────────────────────────────────────────────────
 
 
