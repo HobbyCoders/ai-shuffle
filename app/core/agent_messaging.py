@@ -422,12 +422,19 @@ def _inherited_continuation(session_id, settled):
     if carrier is None or carrier["id"] == settled["id"]:
         return None
     delivered = task_registry.is_woken(owner, session_id, completion_id=carrier["id"])
-    if carrier.get("stop_reason") == "parked_settled" and not delivered:
-        return owner, carrier, False
     if delivered and carrier.get("state") in ("completed", "aborted"):
-        return owner, carrier, True
+        return owner, carrier, True  # at most the quiet close of the task row
+    # Stop and archive settle parked rows 'parked_settled' too, and the user's
+    # next message clears the latch. A Stop or archive since this admission
+    # ended the continuation: what the user says afterwards is not its result.
+    if (record.stop_generation is None
+            or task_registry.stop_generation(session_id) != record.stop_generation
+            or task_registry.is_user_stopped(session_id)):
+        return None
+    if carrier.get("stop_reason") == "parked_settled":
+        return owner, carrier, False
     # Parked or live (it reports itself), or ended without a delivery this
-    # turn may not stand in for (Stop, archive): never a second report.
+    # turn may not stand in for: never a second report.
     return None
 
 
@@ -470,15 +477,16 @@ def _turn_report(session_id, turn, outcome, events):
     return status, report, summary
 
 
-async def _settle_delivered_continuation(session_id, owner, carrier, settled):
+async def _settle_delivered_continuation(session_id, owner, settled):
     """Close the task row of a continuation whose report already went out.
 
     Its own completion found the worker busy (a turn queued behind it), so the
-    row stayed running. Once that later turn is at rest, record the carrier's
-    report as the task's result, quietly: the parent already has it, so this
-    never wakes the parent again and never reports the later turn's text.
+    row stayed running. Once that later turn is at rest, record the report the
+    parent was sent as the task's result, quietly: the parent already has it,
+    so this never wakes the parent again and never reports the later turn's
+    text.
     """
-    from app.core import provider_agent, turn_scheduler
+    from app.core import turn_scheduler
     from app.core import provider_agent_supervisor as supervisor
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
@@ -493,16 +501,11 @@ async def _settle_delivered_continuation(session_id, owner, carrier, settled):
         latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
         if busy or parked or (latest and latest["id"] != settled["id"]):
             return
-        if record is not None and record.delivered_report is not None:
-            status, summary, report_path, report_chars = record.delivered_report
-        else:
-            # Delivered by an earlier process: rebuild it from the carrier.
-            events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
-            outcome = "aborted" if carrier.get("state") == "aborted" else "completed"
-            status, _, summary = _turn_report(session_id, carrier, outcome, events)
-            report_path, report_chars = await asyncio.to_thread(
-                _persist_continuation_report, owner, session_id, summary,
-            )
+        if record is None or record.delivered_report is None:
+            # Kept in memory only: after a restart there is nothing exact to
+            # record, and a guess could store the wrong text. Leave the row.
+            return
+        status, summary, report_path, report_chars = record.delivered_report
         task_registry.complete_task(
             owner, session_id, status, summary=summary,
             report_path=report_path, report_chars=report_chars,
@@ -539,7 +542,7 @@ async def finish_message_resume(session_id, settled, outcome):
             return
         owner, carrier, delivered = found
         if delivered:
-            await _settle_delivered_continuation(session_id, owner, carrier, settled)
+            await _settle_delivered_continuation(session_id, owner, settled)
             return
         logger.info(
             "agent_messaging: turn %s of %s carries no reply_to; it reports the "

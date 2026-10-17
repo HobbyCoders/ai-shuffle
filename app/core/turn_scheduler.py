@@ -1457,12 +1457,17 @@ async def _on_agent_message_locked(
             task_registry.resume_task(reply_to, session_id)
             task_registry.mark_background_launch(reply_to, session_id)
             record = supervisor.get_worker(reply_to, session_id)
+            # The worker's Stop generation at this admission: a turn that later
+            # stands in for this continuation must not cross a Stop or archive.
+            generation = task_registry.stop_generation(session_id)
             if record is None or not record.continuation_turn_id:
                 supervisor.register_worker(supervisor.WorkerRecord(
                     parent_session_id=reply_to, worker_session_id=session_id,
                     task_id=session_id, tool_use_id=session_id, background=True,
-                    continuation_turn_id=turn["id"],
+                    continuation_turn_id=turn["id"], stop_generation=generation,
                 ))
+            else:
+                record.stop_generation = generation
             # The running-tasks panel is built from the parent's task frames,
             # so a resumed worker needs a running one of its own (#1758).
             from app.core.turn_recorder import record_task_start_frame

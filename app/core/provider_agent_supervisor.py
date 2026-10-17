@@ -102,10 +102,15 @@ class WorkerRecord:
     background: bool = False
     #: Explicit message continuation; guarded against an earlier dispatch cleanup.
     continuation_turn_id: Optional[str] = None
+    #: The worker's ``task_registry.stop_generation`` when the latest
+    #: continuation was admitted. Stop and archive bump it, so a turn after
+    #: either can never stand in for the continuation.
+    stop_generation: Optional[int] = None
     #: The continuation's report as last sent to the parent while the task row
     #: had to stay running (the worker was busy): ``(status, summary,
     #: report_path, report_chars)``. Closing the row later records exactly
-    #: that, never a later turn's text.
+    #: that, never a later turn's text. In memory only, like the record: a
+    #: restart in between is not covered.
     delivered_report: Optional[tuple] = None
     #: The worker (device id) a Task child runs on when it is NOT this one
     #: (``app.core.remote_task``). Its session, process and prompts live

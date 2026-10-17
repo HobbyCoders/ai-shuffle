@@ -302,3 +302,30 @@ async def test_a_stand_in_report_is_delivered_once_per_continuation(env):
     task = env.reg.get_task(PARENT, WORKER)
     assert task["status"] == "completed"
     assert task["summary"] == FINAL
+
+
+@pytest.mark.parametrize("ending", ["stop", "archive"])
+async def test_a_turn_after_stop_or_archive_never_stands_in(env, ending):
+    """Stop and archive settle the parked continuation 'parked_settled' too, and
+    the user's next message (or a restore) clears the latch. What the user says
+    afterwards is not the continuation's result: the parent hears nothing."""
+    from app.core import archive_guard
+    from app.core.query_session_lifecycle import enter_user_stop
+
+    continuation = await _parked_continuation(env)
+    env.reg.complete_task(WORKER, "monitor", "killed")
+    if ending == "stop":
+        await enter_user_stop(WORKER)
+    else:
+        await archive_guard.stop_work(WORKER)
+    assert turns.get_turn(continuation["id"])["stop_reason"] == "parked_settled"
+    if ending == "stop":
+        env.reg.clear_user_stop(WORKER)  # the user's next message
+    else:
+        archive_guard.release_after_restore(WORKER)
+
+    chat = turns.enqueue_turn(WORKER, "user", prompt="what's up?", profile_id="default")
+    await _run(env.reg, chat, _text("USER CHAT ANSWER"), expect="completed")
+
+    assert _parent_completions(env) == []
+    assert turns.get_queued_turns(PARENT) == []
