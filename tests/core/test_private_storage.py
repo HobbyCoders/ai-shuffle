@@ -36,8 +36,11 @@ def assert_private(path, *, directory=False):
     # Get-Acl, which takes minutes on a machine with thousands of them.
     system_root = env.get("SYSTEMROOT") or env.get("SystemRoot") or r"C:\Windows"
     env["PSModulePath"] = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "Modules")
+    # A closed stdin: Windows PowerShell can wait on an inherited pipe that
+    # never closes (a CI step's stdin) instead of exiting.
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                            env=env, capture_output=True, text=True, check=True, timeout=30)
+                            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                            check=True, timeout=30)
     assert json.loads(result.stdout) == {
         "protected": True, "count": 1, "onlyUser": True, "fullControl": True, "inherited": False,
     }

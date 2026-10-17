@@ -424,7 +424,7 @@ def test_runtime_safe_node_links_and_offline_reuse(feed, requires_symlinks):
     updater.overlays.prepare([item])
     assert len(feed[3]) == requests
     env, _ = updater.overlays.environment([item], {"PATH": "/bin"})
-    assert "node/bin" in env["PATH"]
+    assert os.path.join("node", "bin") in env["PATH"]
 
 
 def test_runtime_prune_keeps_live_supervisor_previous_and_staged(feed, monkeypatch):
