@@ -202,9 +202,11 @@ def _busy_store(tmp_path, now):
             for i in range(46):
                 fh.write(json.dumps({"ts": start + i * 60, "kind": "synthesis", "changed": [],
                                      "consumed": 12}) + "\n")
+            # One skip run on each of the last 3 UTC calendar days (the check
+            # counts calendar days), ending just before `now` on day 0.
             for i in range(40):
                 fh.write(json.dumps({
-                    "ts": start + 4 * 3600 + i * 60, "kind": "synthesis", "changed": [],
+                    "ts": now - day * DAY - (i + 1) * 60, "kind": "synthesis", "changed": [],
                     "error": "InferenceBudgetExhausted: Daily inference-model budget reached",
                     "ran": False}) + "\n")
     store.note_learner_pass(True, now=now - 3600)
@@ -216,7 +218,10 @@ def _write_loss(store, dropped):
 
 
 def test_health_flags_a_journal_dropping_entries_while_the_budget_is_spent(tmp_path):
-    now = time.time()
+    # A fixed midday clock: the fixture's rows span 72 hours, and the check
+    # counts calendar days, so a wall clock just after UTC midnight pushes
+    # the oldest day out of the window.
+    now = MIDDAY
     store = _busy_store(tmp_path, now)
     _write_loss(store, 1_646)
     # The first run has nothing to compare with yet: it records a sample and
@@ -240,7 +245,10 @@ def test_health_flags_a_journal_dropping_entries_while_the_budget_is_spent(tmp_p
 
 
 def test_health_is_healthy_but_says_so_when_the_budget_ran_out_without_loss(tmp_path):
-    now = time.time()
+    # A fixed midday clock: the fixture's rows span 72 hours, and the check
+    # counts calendar days, so a wall clock just after UTC midnight pushes
+    # the oldest day out of the window.
+    now = MIDDAY
     store = _busy_store(tmp_path, now)
     _write_loss(store, 1_646)
     first = memory_health.check(store, now=now - 3 * DAY)
