@@ -63,16 +63,29 @@ async function collectLogs(){
   if(!report.success&&['worker.log','launch.log'].includes(name))console.error(`--- ${name} (last 60 lines) ---\n`+lines.slice(-60).join('\n'));}
 }
 async function until(fn,message,timeout=120000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,500));}throw Error(message);}
-// As verify-installed-desktop.mjs: the launcher and the updated app each pick a debugger port.
-async function connect(){await until(async()=>{
+// The launcher and the updated app each pick a debugger port, and both write
+// it to the profile's DevToolsActivePort. The launcher exits as the updated app
+// starts, so the app's write can fail ("being used by another process") and
+// leave the launcher's dead port there. The updated app also prints its port
+// to launch.log: try the ports it printed since this start, then the file.
+async function debuggerPorts(since){
+ const ports=[];
+ try{const text=(await fs.readFile(launchLog)).subarray(since).toString('utf8');
+  for(const match of text.matchAll(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d{1,5})\//g))ports.unshift(match[1]);}catch{}
+ try{ports.push((await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split(/\r?\n/)[0]);}catch{}
+ return [...new Set(ports)].filter(port=>/^[1-9]\d{0,4}$/.test(port));
+}
+let connectedPort=null;
+async function connect(since){await until(async()=>{
+ for(const port of await debuggerPorts(since)){
  let candidate;
  try{
-  const port=(await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split(/\r?\n/)[0];assert.match(port,/^[1-9]\d{0,4}$/);
   candidate=await chromium.connectOverCDP('http://127.0.0.1:'+port,{timeout:1500});
   const target=candidate.contexts().flatMap(c=>c.pages()).find(p=>p.url().startsWith('http://127.0.0.1:8000/'));
-  if(target&&await target.evaluate(()=>!!window.shuffleDesktop)){browser=candidate;page=target;return true;}
+  if(target&&await target.evaluate(()=>!!window.shuffleDesktop)){browser=candidate;page=target;connectedPort=port;return true;}
  }catch{}
  if(candidate)await candidate.close().catch(()=>{});
+ }
  return false;
 },'Installed desktop debugger and worker did not become ready',300000);}
 // What each start and close did, for a start that never opens (report.launches, report.closes).
@@ -100,7 +113,9 @@ async function launch(label,{probe=false}={}){
   if(!record.handedOver){await waitForDesktopExit();return launch(label+' (after the previous app exited)');}
  }
  const slow=setTimeout(()=>{record.after60s=snapshot();console.log(`${label}: not ready 60 s after it was started:\n`+describeSnapshot(record.after60s));},60000);
- try{await connect();record.readyAfterMs=Date.now()-started;}
+ try{await connect(launched);record.readyAfterMs=Date.now()-started;record.debuggerPort=connectedPort;
+  record.activePortFile=await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8').then(t=>t.split(/\r?\n/)[0],e=>e.code);
+  if(record.activePortFile!==connectedPort)console.log(`${label}: DevToolsActivePort holds ${record.activePortFile}, not the updated app's port ${connectedPort}`);}
  catch(error){record.notReady=snapshot();record.launchLogGrew=await size(launchLog)>launched;
   console.log(`${label}: not ready (launch.log ${record.launchLogGrew?'grew':'unchanged'}):\n`+describeSnapshot(record.notReady));throw error;}
  finally{clearTimeout(slow);}
