@@ -40,6 +40,7 @@ import { pathToFileURL } from 'node:url';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
 import { readLauncher } from './launcher-contract.mjs';
+import { desktopProcesses, waitForDesktopExit } from './installed-desktop-lifecycle.mjs';
 
 const [mode, ...args] = process.argv.slice(2);
 const desktop = path.resolve(import.meta.dirname, '..'), repo = path.resolve(desktop, '..');
@@ -263,7 +264,8 @@ async function close() {
   await until(async () => !await appRunning(), 'AI Shuffle did not exit after its window closed', 120000, 1000);
   await settle();
 }
-const appRunning = async () => /AI Shuffle\.exe/i.test(await run('tasklist.exe', ['/FI', 'IMAGENAME eq AI Shuffle.exe', '/NH'], { timeout: 30000 }));
+// The launcher (AI Shuffle.exe) or the updated app it started (electron.exe).
+const appRunning = async () => desktopProcesses().length > 0;
 /** Hard kill: the app's process tree at once, then anything else running from the install or the profile (worker, PostgreSQL). */
 async function kill() {
   try { await run('taskkill.exe', ['/F', '/T', '/IM', 'AI Shuffle.exe'], { timeout: 30000 }); } catch (error) { if (error.timedOut) throw error; /* none running */ }
@@ -273,8 +275,8 @@ async function kill() {
 }
 async function settle() {
   if (browser) await browser.close().catch(() => {}); browser = null; browserPort = null;
-  // The single-instance lock is held until the previous process has exited.
-  await sleep(5000);
+  // The single-instance lock is held until the launcher and the updated app (electron.exe) have exited.
+  await waitForDesktopExit();
 }
 /**
  * Press `button` in AI Shuffle's message box titled `title` and report how.
