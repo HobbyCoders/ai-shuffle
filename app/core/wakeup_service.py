@@ -876,17 +876,6 @@ def _watchdog_eligible(session_id: str, frac: float, now_monotonic: float) -> bo
     return True
 
 
-def _parked_on_background_work(session_id: str) -> bool:
-    """True while the session waits on its own background work (in memory)."""
-    try:
-        from app.core.task_registry import task_registry
-
-        return bool(task_registry.get_parking_background_work(session_id))
-    except Exception:  # noqa: BLE001 — unknown is not parked; the DB gate still applies.
-        logger.debug("idle-watchdog: park probe failed for %s", session_id, exc_info=True)
-        return False
-
-
 async def scan_once() -> List[str]:
     """One idle-at-edge sweep. Returns the session ids nudged this pass.
 
@@ -916,10 +905,6 @@ async def scan_once() -> List[str]:
     for cand in candidates:
         session_id = cand.get("id")
         if not session_id:
-            continue
-        # Parked on live background work the durable marker may not show yet:
-        # the unpark wake owns this session's next turn (#123).
-        if _parked_on_background_work(session_id):
             continue
         # A blocking DB read per candidate: keep it off the event loop, which
         # stalled long enough under disk pressure to fail readiness (#2112).

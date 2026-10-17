@@ -389,14 +389,17 @@ def live_continuation_owner(session_id):
     return None
 
 
-def _inherited_continuation_owner(session_id, settled):
-    """The live continuation owner a reply_to-less turn reports to, if any.
+def _inherited_continuation(session_id, settled):
+    """How a reply_to-less turn relates to the live continuation, if at all.
 
-    Only a turn queued AFTER the continuation inherits it (higher ``position``):
-    one already running when SendMessage queued the continuation (a first
-    dispatch, a user's turn) ended before the continuation's work began, and
-    must not report as its result. The parent's task row must still be running.
-    Blocking (one indexed read).
+    Returns ``(owner, carrier, delivered)`` or ``None``. ``carrier`` is the
+    latest turn before ``settled`` that carries the owner's reply_to (the
+    continuation's own turn); ``delivered`` says its report already reached
+    the parent. Only a turn queued AFTER the continuation qualifies (higher
+    ``position``): one already running when SendMessage queued it (a first
+    dispatch, a user's turn) ended before the continuation's work began. The
+    parent's task row must still be running, and the carrier must be at rest.
+    Blocking (indexed reads).
     """
     from app.core import provider_agent_supervisor as supervisor
     from app.core.task_registry import task_registry
@@ -415,7 +418,104 @@ def _inherited_continuation_owner(session_id, settled):
             return None
     except (KeyError, TypeError, ValueError):
         return None
-    return owner
+    carrier = turns_db.latest_reply_to_turn(session_id, owner, before_position=settled["position"])
+    if carrier is None or carrier["id"] == settled["id"]:
+        return None
+    delivered = task_registry.is_woken(owner, session_id, completion_id=carrier["id"])
+    if carrier.get("stop_reason") == "parked_settled" and not delivered:
+        return owner, carrier, False
+    if delivered and carrier.get("state") in ("completed", "aborted"):
+        return owner, carrier, True
+    # Parked or live (it reports itself), or ended without a delivery this
+    # turn may not stand in for (Stop, archive): never a second report.
+    return None
+
+
+def _turn_report(session_id, turn, outcome, events):
+    """``(status, report, summary)`` for ``turn``'s continuation report."""
+    from app.core import provider_agent
+
+    events = [event for event in events if event.get("turn_id") == turn["id"]]
+    pieces: list[tuple[bool, str]] = []
+    # Every text of the turn: the report when nothing follows the last
+    # input (a message delivered after the worker's closing text).
+    turn_text: list[tuple[bool, str]] = []
+    for event in events:
+        payload = event.get("payload") or {}
+        piece = provider_agent.assistant_text_piece(event)
+        if piece is not None:
+            pieces.append(piece)
+            turn_text.append(piece)
+        elif event.get("event_type") in ("tool.result", "message.user"):
+            # The report is what follows the last tool result or input (a
+            # parked worker's wake reuses this turn id).
+            pieces = []
+        elif event.get("event_type") == "turn.aborted":
+            pieces = [(False, payload.get("message") or "Worker continuation interrupted")]
+        elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
+            outcome = "error"
+            pieces = [(False, str(payload.get("errors") or "Worker continuation failed"))]
+    text = (provider_agent.join_assistant_text(pieces).strip()
+            or provider_agent.join_assistant_text(turn_text).strip())
+    status = "completed" if outcome == "completed" else "error"
+    report = text or "Worker continuation ended without a report"
+    summary, _ = provider_agent.bound_report(report)
+    # A worker a usage limit paused: its parent was not woken at the pause,
+    # so this report is where it hears, once, that it was paused (#1831).
+    from app.core.limit_resume import report_note
+    note = report_note(turn.get("payload"))
+    if note:
+        summary = f"{note}\n\n{summary}"
+        report = f"{note}\n\n{report}"
+    return status, report, summary
+
+
+async def _settle_delivered_continuation(session_id, owner, carrier, settled):
+    """Close the task row of a continuation whose report already went out.
+
+    Its own completion found the worker busy (a turn queued behind it), so the
+    row stayed running. Once that later turn is at rest, record the carrier's
+    report as the task's result, quietly: the parent already has it, so this
+    never wakes the parent again and never reports the later turn's text.
+    """
+    from app.core import provider_agent, turn_scheduler
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    settled_now = False
+    async with turn_scheduler.message_resume_lock(session_id):
+        record = supervisor.get_worker(owner, session_id)
+        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
+            return
+        parked = await asyncio.to_thread(turn_scheduler._session_has_parked_turn, session_id)
+        busy = await asyncio.to_thread(turns_db.session_has_unsettled_turns, session_id)
+        latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
+        if busy or parked or (latest and latest["id"] != settled["id"]):
+            return
+        if record is not None and record.delivered_report is not None:
+            status, summary, report_path, report_chars = record.delivered_report
+        else:
+            # Delivered by an earlier process: rebuild it from the carrier.
+            events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
+            outcome = "aborted" if carrier.get("state") == "aborted" else "completed"
+            status, _, summary = _turn_report(session_id, carrier, outcome, events)
+            report_path, report_chars = await asyncio.to_thread(
+                _persist_continuation_report, owner, session_id, summary,
+            )
+        task_registry.complete_task(
+            owner, session_id, status, summary=summary,
+            report_path=report_path, report_chars=report_chars,
+        )
+        from app.core.turn_recorder import record_task_settle_frame
+
+        await record_task_settle_frame(owner, session_id, status, summary, tool_use_id=session_id)
+        if record and record.continuation_turn_id and supervisor.get_worker(owner, session_id) is record:
+            supervisor.unregister_worker(owner, session_id)
+        settled_now = True
+    if settled_now:
+        from app.core.worker_checkout import reclaim_untouched_worker_checkout
+        await asyncio.to_thread(reclaim_untouched_worker_checkout, session_id)
 
 
 async def finish_message_resume(session_id, settled, outcome):
@@ -426,18 +526,27 @@ async def finish_message_resume(session_id, settled, outcome):
     if outcome == "parked":
         return
     owner = (settled.get("payload") or {}).get("agent_message_reply_to")
+    # Delivery dedupe key: this turn, or for a stand-in turn the continuation
+    # it reports, so one continuation never wakes its parent twice.
+    completion_id = settled["id"]
     if not owner:
         # The turn that ran the continuation's last step need not be the one
-        # SendMessage queued: a wakeup turn (idle watchdog, ScheduleWakeup) that
-        # parked beside it is what the unpark wake resumes (#123). Its parent
-        # is still the live continuation's owner.
-        owner = await asyncio.to_thread(_inherited_continuation_owner, session_id, settled)
-        if not owner:
+        # SendMessage queued: a wakeup turn (idle watchdog, ScheduleWakeup)
+        # that parked beside it is what the unpark wake resumes, and the
+        # continuation's own row was settled without reporting (#123).
+        found = await asyncio.to_thread(_inherited_continuation, session_id, settled)
+        if not found:
+            return
+        owner, carrier, delivered = found
+        if delivered:
+            await _settle_delivered_continuation(session_id, owner, carrier, settled)
             return
         logger.info(
-            "agent_messaging: turn %s of %s carries no reply_to; completing the "
-            "live continuation for %s", settled.get("id"), session_id, owner,
+            "agent_messaging: turn %s of %s carries no reply_to; it reports the "
+            "continuation %s settled unreported, for %s",
+            settled.get("id"), session_id, carrier["id"], owner,
         )
+        completion_id = carrier["id"]
     from app.core import provider_agent_supervisor as supervisor
     from app.db import turns as turns_db
 
@@ -446,43 +555,12 @@ async def finish_message_resume(session_id, settled, outcome):
         # Read only this turn's report: an interrupted continuation must never
         # report the previous successful turn as its new result.
         events = await asyncio.to_thread(provider_agent._load_session_events, session_id)
-        events = [event for event in events if event.get("turn_id") == settled["id"]]
-        pieces: list[tuple[bool, str]] = []
-        # Every text of the turn: the report when nothing follows the last
-        # input (a message delivered after the worker's closing text).
-        turn_text: list[tuple[bool, str]] = []
-        for event in events:
-            payload = event.get("payload") or {}
-            piece = provider_agent.assistant_text_piece(event)
-            if piece is not None:
-                pieces.append(piece)
-                turn_text.append(piece)
-            elif event.get("event_type") in ("tool.result", "message.user"):
-                # The report is what follows the last tool result or input (a
-                # parked worker's wake reuses this turn id).
-                pieces = []
-            elif event.get("event_type") == "turn.aborted":
-                pieces = [(False, payload.get("message") or "Worker continuation interrupted")]
-            elif event.get("event_type") == "turn.completed" and payload.get("is_error"):
-                outcome = "error"
-                pieces = [(False, str(payload.get("errors") or "Worker continuation failed"))]
-        text = (provider_agent.join_assistant_text(pieces).strip()
-                or provider_agent.join_assistant_text(turn_text).strip())
-        status = "completed" if outcome == "completed" else "error"
-        report = text or "Worker continuation ended without a report"
-        summary, _ = provider_agent.bound_report(report)
-        # A worker a usage limit paused: its parent was not woken at the pause,
-        # so this report is where it hears, once, that it was paused (#1831).
-        from app.core.limit_resume import report_note
-        note = report_note(settled.get("payload"))
-        if note:
-            summary = f"{note}\n\n{summary}"
-            report = f"{note}\n\n{report}"
+        status, report, summary = _turn_report(session_id, settled, outcome, events)
         from app.core.provider_agent_feed import record_continuation_report
 
         stopped = (record and record.torn_down) or task_registry.is_user_stopped(session_id)
         await record_continuation_report(
-            owner, session_id, settled["id"], "killed" if stopped else status, report,
+            owner, session_id, completion_id, "killed" if stopped else status, report,
         )
         if stopped:
             return  # Preserve Stop: a card update is not authority to wake anyone.
@@ -505,7 +583,7 @@ async def finish_message_resume(session_id, settled, outcome):
             return
         settled_now = False
         if (not busy and not parked and (not latest or latest["id"] == settled["id"])
-                and not task_registry.is_woken(owner, session_id, completion_id=settled["id"])):
+                and not task_registry.is_woken(owner, session_id, completion_id=completion_id)):
             settled_now = True
             task_registry.complete_task(
                 owner, session_id, status, summary=summary,
@@ -521,12 +599,16 @@ async def finish_message_resume(session_id, settled, outcome):
             if (record and record.continuation_turn_id
                     and supervisor.get_worker(owner, session_id) is record):
                 supervisor.unregister_worker(owner, session_id)
+        elif record is not None and record.continuation_turn_id:
+            # The row stays running for the turn behind it; remember what the
+            # parent was told so closing the row later records exactly this.
+            record.delivered_report = (status, summary, report_path, report_chars)
     # Completion dedupe is per turn, independent of the shared worker's status.
     # Deliver outside the admission lock: a parent's wake may itself enqueue.
     await turn_scheduler.on_task_terminal(owner, {
         "task_id": session_id, "tool_use_id": session_id,
         "status": status, "summary": summary,
-        "agent_message_turn_id": settled["id"],
+        "agent_message_turn_id": completion_id,
         **({"report_path": report_path} if report_path else {}),
     })
     if settled_now:

@@ -1065,6 +1065,27 @@ def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
         return _rows(cursor.fetchall() or [])
 
 
+def latest_reply_to_turn(
+    session_id: str, owner: str, *, before_position: float,
+) -> Optional[Dict[str, Any]]:
+    """The newest turn before ``before_position`` that reports to ``owner``.
+
+    That is the SendMessage continuation's own turn (``agent_message_reply_to``).
+    A queued row a parked turn absorbed (``stop_reason='steered'``) is skipped:
+    the turn it joined carries the reply_to and the report.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE session_id=%s "
+            "AND payload ->> 'agent_message_reply_to' = %s "
+            "AND position < %s AND COALESCE(stop_reason, '') <> 'steered' "
+            "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1",
+            (session_id, owner, before_position),
+        )
+        return _row(cursor.fetchone())
+
+
 def _inherit_reply_to(cursor: Any, turn_id: str, settled_rows: List[Any]) -> None:
     """Hand a settled continuation's parent link to the turn that goes on.
 

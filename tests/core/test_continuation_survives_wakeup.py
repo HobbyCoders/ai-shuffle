@@ -242,3 +242,63 @@ def test_sweeps_without_a_live_turn_change_no_payload(mock_db):
     turns.park_turn(parked["id"], ["monitor"])
     assert turns.settle_parked_turns("s") == 1
     assert turns.get_turn(parked["id"])["state"] == "completed"
+
+
+async def _continued(env):
+    """Round one done; SendMessage queued a continuation (not yet run)."""
+    reg = env.reg
+    parent_turn = turns.enqueue_turn(PARENT, "user", prompt="dispatch the fix", profile_id="default")
+    turns.start_turn(parent_turn["id"], None, "runner")
+    turns.settle_turn(parent_turn["id"], "completed")
+    reg.start_task(PARENT, WORKER, "agent", "Fix the updater", tool_use_id=WORKER)
+    first = turns.enqueue_turn(WORKER, "provider_agent", prompt="fix it", profile_id="default")
+    await _run(reg, first, _text("Round one done."), expect="completed")
+    reg.complete_task(PARENT, WORKER, "completed", summary="Round one done.")
+    turn_id = await ts.on_agent_message(WORKER, PARENT, "Now push it", reply_to=PARENT)
+    return turns.get_turn(turn_id)
+
+
+async def test_a_turn_behind_a_delivered_continuation_never_reports_again(env):
+    """The continuation completed with a turn queued behind it: its report went
+    to the parent but the task stayed running (busy). That later turn, with no
+    reply_to, must not send a second completion with its own text; it only
+    closes the task row with the continuation's report, quietly."""
+    continuation = await _continued(env)
+    later = turns.enqueue_turn(WORKER, "user", prompt="unrelated chat", profile_id="default")
+    await _run(env.reg, continuation, _text("CONTINUATION RESULT"), expect="completed")
+    assert env.reg.get_task(PARENT, WORKER)["status"] == "running"  # busy: `later` queued
+    assert [f["summary"] for f in _parent_completions(env)] == ["CONTINUATION RESULT"]
+
+    await _run(env.reg, later, _text("USER CHAT ANSWER"), expect="completed")
+
+    assert [f["summary"] for f in _parent_completions(env)] == ["CONTINUATION RESULT"]
+    task = env.reg.get_task(PARENT, WORKER)
+    assert task["status"] == "completed"
+    assert task["summary"] == "CONTINUATION RESULT"
+    from pathlib import Path
+    assert Path(task["reportPath"]).read_text() == "CONTINUATION RESULT"
+    assert supervisor.get_worker(PARENT, WORKER) is None
+    (parent_wake,) = turns.get_queued_turns(PARENT)
+    assert "USER CHAT ANSWER" not in parent_wake["prompt"]
+
+
+async def test_a_stand_in_report_is_delivered_once_per_continuation(env):
+    """A turn standing in for an unreported continuation reports it once; the
+    next reply_to-less turn finds that delivery and does not report again."""
+    continuation = await _parked_continuation(env)
+    env.reg.complete_task(WORKER, "monitor", "completed")
+    turns.settle_parked_turns(WORKER, turn_ids=[continuation["id"]])
+    stand_in = turns.enqueue_turn(WORKER, "wakeup", prompt="Check on CI.", profile_id="default")
+    after = turns.enqueue_turn(WORKER, "user", prompt="and another thing", profile_id="default")
+    await _run(env.reg, stand_in, _text(FINAL), expect="completed")
+    assert env.reg.get_task(PARENT, WORKER)["status"] == "running"  # busy: `after` queued
+    (completion,) = _parent_completions(env)
+    assert completion["summary"] == FINAL
+    assert completion["agent_message_turn_id"] == continuation["id"]
+
+    await _run(env.reg, after, _text("UNRELATED"), expect="completed")
+
+    assert len(_parent_completions(env)) == 1
+    task = env.reg.get_task(PARENT, WORKER)
+    assert task["status"] == "completed"
+    assert task["summary"] == FINAL
