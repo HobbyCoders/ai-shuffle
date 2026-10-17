@@ -4,7 +4,8 @@ Gathers every gate the owner otherwise has to be walked through one question at
 a time: what changed since the last final tag, whether the local full suites
 passed on the release candidate on Linux and on Windows (the ``local/full-suite``
 and ``local/windows-suite`` statuses ``scripts/local_ci.py full --attest``
-posts), whether edge publication caught up, the Play gates, and
+posts; a successful owner-dispatched ``windows-suite.yml`` run on main at the
+candidate also satisfies the Windows one), whether edge publication caught up, the Play gates, and
 which platforms actually need a new build, and the live smoke gate: a passing
 smoke result file for the candidate revision on every covered worker (see
 ``docs/internal/live-smoke.md``). Nothing is tagged, dispatched or published.
@@ -47,6 +48,13 @@ OWNER_ID = "76577322"
 REQUIRED_LOCAL = ("local/full-suite", "local/windows-suite")
 WINDOWS_CONTEXT = "local/windows-suite"
 EDGE_WORKFLOW = "Publish desktop source update"
+# The same Windows full suite on a GitHub-hosted runner (free in public
+# repositories). A successful run the owner dispatched on main at the exact
+# candidate counts as local/windows-suite, so a release need not wait for a
+# Windows PC.
+HOSTED_WINDOWS_WORKFLOW = "windows-suite.yml"
+HOSTED_WINDOWS_HINT = (f"or dispatch {HOSTED_WINDOWS_WORKFLOW} on main "
+                       f"(`gh workflow run {HOSTED_WINDOWS_WORKFLOW} --ref main`)")
 
 # Path prefixes -> platform that needs a fresh artifact when they change.
 # The phone UI is served by the worker (android/ only ships native shell and
@@ -167,6 +175,37 @@ def edge_state(runs: list, sha: str) -> str:
     return "success" if run.get("conclusion") == "success" else (run.get("conclusion") or "failed")
 
 
+def hosted_windows_runs(head: str) -> list:
+    """Owner-dispatchable hosted Windows suite runs on ``head``, newest first."""
+    if not head:
+        return []
+    data = _gh_json("api", f"repos/{REPOSITORY}/actions/workflows/{HOSTED_WINDOWS_WORKFLOW}/runs"
+                           f"?head_sha={head}&event=workflow_dispatch&per_page=20")
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    return runs if isinstance(runs, list) else []
+
+
+def hosted_windows_state(runs: list, head: str) -> tuple:
+    """Newest owner-dispatched hosted Windows run on main at ``head`` -> (state, url).
+
+    Only a manual run the owner started on main counts, the same authority as
+    the owner-posted local/windows-suite status; anyone else's run is ignored.
+    """
+    def owner(run: dict) -> bool:
+        actor = run.get("triggering_actor") or run.get("actor") or {}
+        return str(actor.get("id")) == OWNER_ID
+
+    mine = [r for r in runs if r.get("head_sha") == head and r.get("event") == "workflow_dispatch"
+            and r.get("head_branch") == "main" and owner(r)]
+    if not mine:
+        return "missing", None
+    run = mine[0]  # the API lists newest first
+    if run.get("status") != "completed":
+        return "pending", run.get("html_url")
+    return ("success" if run.get("conclusion") == "success" else (run.get("conclusion") or "failure"),
+            run.get("html_url"))
+
+
 def _gh_json(*args: str):
     out = _try("gh", *args)
     try:
@@ -228,6 +267,13 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
                     "--json", "workflowName,status,conclusion,headSha") or []
     statuses = (_gh_json("api", f"repos/{REPOSITORY}/commits/{head}/statuses?per_page=100") or []) if head else []
     local = local_state(statuses)
+    windows_source = {"source": "local" if local[WINDOWS_CONTEXT] == "success" else None, "url": None}
+    hosted_state = None
+    if local[WINDOWS_CONTEXT] != "success" and head:
+        hosted_state, hosted_url = hosted_windows_state(hosted_windows_runs(head), head)
+        if hosted_state == "success":
+            local[WINDOWS_CONTEXT] = "success"
+            windows_source = {"source": "hosted", "url": hosted_url}
     edge = edge_state(runs, head)
     gates = {
         "ANDROID_WORKERS_READY": _variable("ANDROID_WORKERS_READY"),
@@ -236,6 +282,8 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
     if ref and not commits:
         blockers.append("Nothing new on main since the last release tag.")
     notes = []
+    if windows_source["source"] == "hosted":
+        notes.append(f"Windows full suite: passed on a GitHub-hosted Windows runner ({windows_source['url']}).")
     for context in REQUIRED_LOCAL:
         if local[context] == "success":
             continue
@@ -243,9 +291,12 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
             notes.append(f"Windows full suite not run on this release (--skip-windows): {skip_windows}")
             continue
         if context == WINDOWS_CONTEXT:
-            run = f"{local_ci.WINDOWS_FULL_HINT} on DesktopWorker (Windows)"
-        else:
-            run = "`python scripts/local_ci.py full --attest` on a Linux worker"
+            hosted = f" (the hosted run on it is {hosted_state})" if hosted_state not in (None, "missing") else ""
+            blockers.append(
+                f"{context} on {head[:9]} is {local[context]}: run {local_ci.WINDOWS_FULL_HINT} "
+                f"on DesktopWorker (Windows) on a clean checkout of main, {HOSTED_WINDOWS_HINT}{hosted}.")
+            continue
+        run = "`python scripts/local_ci.py full --attest` on a Linux worker"
         blockers.append(f"{context} on {head[:9]} is {local[context]}: run {run} on a clean checkout of main.")
     smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir, skip_rows=skip_smoke_rows)
     blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
@@ -259,6 +310,7 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         "commits_since_release": len(commits),
         "commit_subjects": commits[:30],
         "local_suites_on_main_head": local,
+        "windows_suite": windows_source,
         "edge_published": edge == "success",
         "platform_builds": platforms_needing_builds(changed),
         "play_gates": gates,

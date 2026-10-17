@@ -380,8 +380,12 @@ also independently supports safe ancestors and rechecks its own pointer.
 - A full pass on Linux (`local/full-suite`, above) and on Windows: on
   DesktopWorker, `python scripts/local_ci.py full --step --attest` (repeated
   until it prints `COMPLETE`, see above) also posts `local/windows-suite`. The ship-release
-  skill checks both statuses on the release commit. If DesktopWorker is off, the
-  release waits, or the owner ships it with
+  skill checks both statuses on the release commit. Without DesktopWorker, the
+  owner can run the same suite on a GitHub-hosted Windows runner (free in public
+  repositories): `gh workflow run windows-suite.yml --ref main` on the release
+  commit. `ship_release_status.py` counts a successful run the owner dispatched
+  on main at the candidate as `local/windows-suite`, and the release notes name
+  the run. Otherwise the release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
   the release notes. Edge never waits for Windows.
 - Mac-only checks, when the release changes them: `ios.yml` and
