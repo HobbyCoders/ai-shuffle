@@ -8,8 +8,8 @@ mode          stored value    what it is
 ``code``      ``NULL``        the full agentic surface (projects, agents,
                               branches, worktrees, every tool)
 ``chat``      ``'chat'``      a lightweight chat: model, effort, attachments,
-                              transcription, usage — the web, plus the files
-                              you attach, and no checkout
+                              transcription, usage — the web, the files you
+                              attach, question cards, and no checkout
 ``voice``     ``'voice'``     an OpenAI Realtime call
 ============  ==============  ===========================================
 
@@ -77,11 +77,17 @@ CHAT_MODE_RESOURCE_TOOLS: List[str] = [
         "ChatHttpRequest",
     )
 ]
+# The question card. It only asks the owner and reaches no file, shell or
+# network, so a chat may use it like any other lane. Fluid's name; the
+# delegated leg's surface expansion adds the CLI's AskUserQuestion. Without it
+# a chat agent whose picker shows the question tool enabled could not call it,
+# and the model rightly answered "AskUser isn't available".
+CHAT_MODE_QUESTION_TOOLS: List[str] = ["AskUser"]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
     "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
     # Native generation stores only session-owned artifacts in chat mode.
     "GenerateNativeImage",
-    *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
+    *CHAT_MODE_QUESTION_TOOLS, *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
 ]
 
 # Where the chat lane's attachments land, under the workspace root. ONE shared
