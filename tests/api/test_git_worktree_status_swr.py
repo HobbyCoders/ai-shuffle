@@ -255,7 +255,9 @@ def test_backoff_is_capped(git):
     entry = gw._worktree_status_cache["p1"].entries["wt-0"]
     for _ in range(40):
         gw._record_status(entry, "wt-0", None, "boom")
-    assert entry.retry_at - time.monotonic() <= gw._WORKTREE_STATUS_BACKOFF_MAX_SECONDS
+    # No subtraction: on Windows both clock reads can land in one ~15.6 ms
+    # tick, and (t + 1800) - t rounds to 1800.0000000000002.
+    assert entry.retry_at <= time.monotonic() + gw._WORKTREE_STATUS_BACKOFF_MAX_SECONDS
 
 
 def test_native_partial_status_counts_as_failure(git, monkeypatch):
