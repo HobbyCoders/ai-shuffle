@@ -1,0 +1,64 @@
+name: Windows full suite
+
+# The stable-release Windows gate (`python scripts/local_ci.py full`) on a
+# GitHub-hosted Windows runner, so a release does not wait for an owner's
+# Windows PC. Standard GitHub-hosted runners are free in public repositories.
+#
+# Manual only. Dispatch it on main at the release candidate:
+#   gh workflow run windows-suite.yml --ref main
+# It posts nothing. scripts/ci/ship_release_status.py counts a successful run
+# the owner dispatched on main at the candidate as local/windows-suite.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-suite-${{ github.sha }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  PYTHONUTF8: '1'
+
+jobs:
+  suite:
+    name: local_ci full on Windows
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Confirm the tested revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && git status --short && git log -1 --format='%H %s'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/Scripts/python.exe" -m pip install --upgrade pip
+          "$RUNNER_TEMP/venv/Scripts/python.exe" -m pip install -r requirements.txt -r requirements-dev.txt
+          echo "LOCAL_CI_PYTHON=$RUNNER_TEMP/venv/Scripts/python.exe" >> "$GITHUB_ENV"
+      - name: Full suite
+        shell: bash
+        env:
+          PYTHONPATH: fluid
+        run: |
+          set -o pipefail
+          "$LOCAL_CI_PYTHON" scripts/local_ci.py full 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-suite-log
+          path: ${{ runner.temp }}/local-ci.log
+          retention-days: 7
