@@ -17,7 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { installPreview } from './install-preview.mjs';
 import { readLauncher } from './launcher-contract.mjs';
-import { closeInstalledDesktop, describeSnapshot, desktopProcesses, desktopSnapshot, waitForDesktopExit } from './installed-desktop-lifecycle.mjs';
+import { closeInstalledDesktop, debuggerPorts, describeSnapshot, desktopProcesses, desktopSnapshot, waitForDesktopExit } from './installed-desktop-lifecycle.mjs';
 assert(process.platform==='win32'&&process.env.CI==='true','Fresh Windows CI only');
 process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS='1';
 const require=createRequire(import.meta.url);
@@ -63,21 +63,14 @@ async function collectLogs(){
   if(!report.success&&['worker.log','launch.log'].includes(name))console.error(`--- ${name} (last 60 lines) ---\n`+lines.slice(-60).join('\n'));}
 }
 async function until(fn,message,timeout=120000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,500));}throw Error(message);}
-// The launcher and the updated app each pick a debugger port, and both write
-// it to the profile's DevToolsActivePort. The launcher exits as the updated app
-// starts, so the app's write can fail ("being used by another process") and
-// leave the launcher's dead port there. The updated app also prints its port
-// to launch.log: try the ports it printed since this start, then the file.
-async function debuggerPorts(since){
- const ports=[];
- try{const text=(await fs.readFile(launchLog)).subarray(since).toString('utf8');
-  for(const match of text.matchAll(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d{1,5})\//g))ports.unshift(match[1]);}catch{}
- try{ports.push((await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split(/\r?\n/)[0]);}catch{}
- return [...new Set(ports)].filter(port=>/^[1-9]\d{0,4}$/.test(port));
+// The launcher and the updated app each pick a debugger port (debuggerPorts says why the file alone is not enough).
+async function candidatePorts(since){
+ const launchText=await fs.readFile(launchLog).then(data=>data.subarray(since).toString('utf8'),()=>'');
+ return debuggerPorts(launchText,await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8').catch(()=>null));
 }
 let connectedPort=null;
 async function connect(since){await until(async()=>{
- for(const port of await debuggerPorts(since)){
+ for(const port of await candidatePorts(since)){
  let candidate;
  try{
   candidate=await chromium.connectOverCDP('http://127.0.0.1:'+port,{timeout:1500});
@@ -93,25 +86,15 @@ report.launches=[];report.closes=[];
 const snapshot=()=>desktopSnapshot([install,profile]);
 const launchLog=path.join(sourceRoot,'launch.log');
 const size=file=>fs.stat(file).then(s=>s.size,()=>0);
-async function launch(label,{probe=false}={}){
+async function launch(label){
  await fs.rm(path.join(profile,'DevToolsActivePort'),{force:true});
  const record={label,before:snapshot()};report.launches.push(record);
  const launched=await size(launchLog),started=Date.now();record.startedAt=new Date(started).toISOString();
  const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});record.pid=child.pid;
- let exited=false;
  child.on('error',e=>{record.spawnError=String(e);console.error(e);});
- child.on('exit',(code,signal)=>{exited=true;record.exit={code,signal,at:new Date().toISOString(),afterMs:Date.now()-started};
+ child.on('exit',(code,signal)=>{record.exit={code,signal,at:new Date().toISOString(),afterMs:Date.now()-started};
   console.log(`${label}: AI Shuffle.exe ${child.pid} exited with code ${code}${signal?` (${signal})`:''} ${Date.now()-started} ms after it was started`);});
  console.log(`${label}: started AI Shuffle.exe ${child.pid}; before it:\n`+describeSnapshot(record.before));
- if(probe){
-  // Experiment: did this start hand over to an updated app (launch.log grows) before its launcher exited?
-  try{await until(async()=>exited,`${label}: the launcher did not exit`,120000);}
-  catch(error){record.hung=snapshot();console.log(`${label}: launcher still running:\n`+describeSnapshot(record.hung));throw error;}
-  await new Promise(r=>setTimeout(r,10000));
-  record.handedOver=await size(launchLog)>launched;record.afterExit=snapshot();
-  console.log(`${label}: launcher ${record.handedOver?'started':'did NOT start'} an updated app; then:\n`+describeSnapshot(record.afterExit));
-  if(!record.handedOver){await waitForDesktopExit();return launch(label+' (after the previous app exited)');}
- }
  const slow=setTimeout(()=>{record.after60s=snapshot();console.log(`${label}: not ready 60 s after it was started:\n`+describeSnapshot(record.after60s));},60000);
  try{await connect(launched);record.readyAfterMs=Date.now()-started;record.debuggerPort=connectedPort;
   record.activePortFile=await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8').then(t=>t.split(/\r?\n/)[0],e=>e.code);
@@ -121,15 +104,8 @@ async function launch(label,{probe=false}={}){
  finally{clearTimeout(slow);}
 }
 const workerStopped=()=>until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
-async function close(label,{probe=false}={}){
+async function close(label){
  const record={label};report.closes.push(record);const start=Date.now();
- if(probe){
-  // Experiment: as main did before this fix, start again as soon as the worker stopped (no wait at all).
-  if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
-  await workerStopped();record.workerStoppedMs=Date.now()-start;record.atWorkerStop=desktopProcesses();
-  console.log(`${label}: worker stopped after ${record.workerStoppedMs} ms; still running: ${record.atWorkerStop.map(p=>`${p.image} ${p.pid}`).join(', ')||'nothing'}`);
-  browser=null;page=null;return;
- }
  await closeInstalledDesktop(page,browser,async()=>{await workerStopped();record.workerStoppedMs=Date.now()-start;record.atWorkerStop=desktopProcesses();},90000);
  record.disconnectedMs=Date.now()-start;browser=null;page=null;
  // The next start takes the single-instance lock, which the launcher AND the updated app (electron.exe) hold until they have exited.
@@ -205,21 +181,21 @@ try{
  assert.equal(await fileHash(appAsar),record.new);assert.equal(await fileHash(oldAsar),oldHash);assert(!await exists(newAsar));
  assert.equal(asarLauncher(appAsar),target);
  assert.equal(readAsarMember(require('node:fs'),appAsar,'package.json').toString(),readAsarMember(require('node:fs'),oldAsar,'package.json').toString());
- await close('Pending revision (old launcher)',{probe:true});
+ await close('Pending revision (old launcher)');
  passed(`The updated app replaced launcher ${report.installerLauncher} with ${target}, kept app.asar.old, and the self-test passed`);
 
  // 2. First start of the new launcher: on trial, then confirmed by the app it started.
- await launch('First start of the new launcher',{probe:true});
+ await launch('First start of the new launcher');
  assert.equal(await version(),'main@'+revision.slice(0,12));
  await until(async()=>(await marker())?.phase==='confirmed','The new launcher was not confirmed',60000);
  record=await marker();assert.equal(record.starts,1);
  const host=JSON.parse(await fs.readFile(path.join(sourceRoot,'installed-host.json'),'utf8'));
  assert.equal(host.executable,exe);assert.equal(host.userData,profile);
- await close('First start of the new launcher',{probe:true});
+ await close('First start of the new launcher');
  passed('The new launcher started the updated app with SHUFFLE_LAUNCHER_VERSION '+target+', which confirmed it, in the same profile');
 
  // 3. Second start: still the new launcher, nothing restored, the installer stamp untouched.
- await launch('Second start of the new launcher',{probe:true});
+ await launch('Second start of the new launcher');
  assert.equal(await version(),'main@'+revision.slice(0,12));
  assert.equal((await marker()).phase,'confirmed');
  assert.equal(await fileHash(appAsar),record.new);assert.equal(asarLauncher(appAsar),target);assert(await exists(oldAsar));

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { closeInstalledDesktop, desktopProcesses, parseTasklist, waitForDesktopExit } from '../scripts/installed-desktop-lifecycle.mjs';
+import { closeInstalledDesktop, debuggerPorts, describeSnapshot, desktopProcesses, desktopSnapshot, parseTasklist, waitForDesktopExit } from '../scripts/installed-desktop-lifecycle.mjs';
 const { QuitGuard } = createRequire(import.meta.url)('../dist/main/quit.js');
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -86,4 +86,24 @@ test('the next start waits for the updated app (electron.exe), not only for the 
 
 test('a desktop that never exits names what is still running', async () => {
  await assert.rejects(waitForDesktopExit(0, () => [{ image: 'electron.exe', pid: 6532 }], 1), /still running .*electron\.exe 6532.*single-instance lock/);
+});
+
+test("the updated app's own debugger port wins over a DevToolsActivePort the launcher left behind", () => {
+ // Run 38983878672: the app's write failed with a sharing violation, so the file kept the launcher's port 57484.
+ const launch = '\r\nDevTools listening on ws://127.0.0.1:57520/devtools/browser/3e93bb74\r\n[2516:ERROR:devtools_http_handler.cc:305] Error writing DevTools active port to file\r\n';
+ assert.deepEqual(debuggerPorts(launch, '57484\n/devtools/browser/56969aac'), ['57520', '57484']);
+ assert.deepEqual(debuggerPorts('DevTools listening on ws://127.0.0.1:1111/a\nDevTools listening on ws://127.0.0.1:2222/b\n', null), ['2222', '1111']);
+ // The older installer runs its app in the launcher itself: only the file names a port.
+ assert.deepEqual(debuggerPorts('', '59010\n/devtools'), ['59010']);
+ assert.deepEqual(debuggerPorts('', 'garbage'), []);
+});
+
+test('a snapshot failure is recorded, never thrown', () => {
+ const failed = desktopSnapshot(['C:\\install'], () => { throw Error('powershell missing'); });
+ assert.match(failed.error, /powershell missing/);
+ assert.match(describeSnapshot(failed), /snapshot failed/);
+ const one = desktopSnapshot(['C:\\install'], () => JSON.stringify({ processes: { pid: 5, parent: 4, name: 'electron.exe', started: 't', command: 'electron.exe app' }, windows: '5 visible Chrome_WidgetWin_1 \'AI Shuffle\'' }));
+ assert.equal(one.processes.length, 1);
+ assert.match(describeSnapshot(one), /electron\.exe 5 \(parent 4.*\n.*window 5 visible/);
+ assert.equal(describeSnapshot({ processes: [], windows: [] }), '  no AI Shuffle process is running');
 });

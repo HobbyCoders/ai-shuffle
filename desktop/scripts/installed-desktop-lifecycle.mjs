@@ -60,6 +60,7 @@ export async function waitForDesktopExit(timeout = 120000, list = desktopProcess
 // as hidden, so a message box nobody can see still shows up here.
 const SNAPSHOT_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $dirs = @($env:SNAPSHOT_DIRS -split ';' | Where-Object { $_ })
 Add-Type @'
 using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
@@ -109,7 +110,7 @@ export function desktopSnapshot(dirs, run = execFileSync) {
  const at = new Date().toISOString();
  try {
   const text = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(SNAPSHOT_SCRIPT, 'utf16le').toString('base64')],
-   { encoding: 'utf8', timeout: 60000, windowsHide: true, env: { ...process.env, SNAPSHOT_DIRS: dirs.join(';') } });
+   { encoding: 'utf8', timeout: 60000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, SNAPSHOT_DIRS: dirs.join(';') } });
   const value = JSON.parse(text);
   return { at, processes: [].concat(value.processes ?? []), windows: [].concat(value.windows ?? []), tasklist: [].concat(value.tasklist ?? []) };
  } catch (error) {
@@ -122,4 +123,17 @@ export function describeSnapshot(snapshot) {
  const lines = snapshot.processes.map(p => `  ${p.name} ${p.pid} (parent ${p.parent}, started ${p.started}): ${p.command}`);
  lines.push(...snapshot.windows.map(w => `  window ${w}`));
  return lines.length ? lines.join('\n') : '  no AI Shuffle process is running';
+}
+
+/**
+ * Debugger ports to try for an updated app, newest first: the ones it printed
+ * to launch.log since this start ("DevTools listening on ..."), then the
+ * profile's DevToolsActivePort. The launcher and the updated app both write
+ * that file, and the launcher exits as the app starts, so the app's write can
+ * fail ("being used by another process") and leave the launcher's dead port.
+ */
+export function debuggerPorts(launchText, activePortText) {
+ const ports = [...(launchText ?? '').matchAll(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d{1,5})\//g)].map(match => match[1]).reverse();
+ if (activePortText !== undefined && activePortText !== null) ports.push(activePortText.split(/\r?\n/)[0]);
+ return [...new Set(ports)].filter(port => /^[1-9]\d{0,4}$/.test(port));
 }
