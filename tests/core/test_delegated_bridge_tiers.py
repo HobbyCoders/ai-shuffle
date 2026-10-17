@@ -30,6 +30,15 @@ from app.core.provider.fluid_tool_bridge import (
 )
 from app.core.provider.types import SessionOptions
 
+
+@pytest.fixture(autouse=True)
+def _emulator_tools_listed(monkeypatch):
+    """Count the full catalog on every host: the emulator tools are only listed
+    where an emulator backend exists (Linux x86_64 today), so a Windows or macOS
+    run would otherwise see two tools fewer."""
+    monkeypatch.setattr("app.mcp.emulator_tools.emulator_tools_supported", lambda: True)
+
+
 SID = "11111111-1111-1111-1111-111111111111"
 CLI_PREFIX = "mcp__fluid_bundled__"
 # The loaded tier, priced with the app's estimator (chars/4) over the CLI's

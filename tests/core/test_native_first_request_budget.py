@@ -99,6 +99,7 @@ async def _first_request(monkeypatch, tmp_path, *, code_mode: bool,
     home.mkdir()
     cwd.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
     monkeypatch.setattr(settings, "fluid_code_mode", code_mode)
     provider = _RecordingProvider()
