@@ -11,7 +11,9 @@ no call, and the health signal for a journal that drops entries.
 from __future__ import annotations
 
 import json
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from fluid.codemode import SkillStore, Synthesizer, memory_health
@@ -448,7 +450,9 @@ def test_worker_reports_and_reads_outside_the_checkout_are_shown(tmp_path):
     store.journal_append({**read_cell(2), "code": "Read(file_path='/home/u/.config/app.toml')"})
     store.journal_append({"kind": "tool", "name": "Read", "input": '{"file_path": "/home/u/notes.md"}',
                           "output": "x"})
-    store.journal_append({**read_cell(3), "code": "Read(file_path='/tmp/clone-1/repo/a.py')"})
+    # The platform's temp folder (not /tmp on Windows) counts as scratch.
+    scratch_file = str(Path(tempfile.gettempdir()) / "clone-1" / "repo" / "a.py")
+    store.journal_append({**read_cell(3), "code": f"Read(file_path={scratch_file!r})"})
     inside, home, notes, scratch = store.journal_entries()
     assert low_value_entry(inside) and "outside_cwd" not in inside
     assert low_value_entry(scratch) and "outside_cwd" not in scratch

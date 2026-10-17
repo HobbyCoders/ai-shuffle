@@ -4,6 +4,14 @@ import pytest
 from scripts.measure_prompt_catalog import compile_fixture, measure
 
 
+@pytest.fixture(autouse=True)
+def _emulator_tools_listed(monkeypatch):
+    """Count the full catalog on every host: the emulator tools are only listed
+    where an emulator backend exists (Linux x86_64 today), so a Windows or macOS
+    run would otherwise see two tools fewer."""
+    monkeypatch.setattr("app.mcp.emulator_tools.emulator_tools_supported", lambda: True)
+
+
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
 # Canonical CI recipe: native full=126278, eager=51071; delegated append=12761,
 # delegated always-loaded bridge tools=7258.

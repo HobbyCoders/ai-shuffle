@@ -326,7 +326,10 @@ def windows_known_files() -> set[str]:
     """Whole test files listed as failing on Windows; empty elsewhere."""
     if os.name != "nt":
         return set()
-    lines = (ROOT / "scripts/ci/windows_known_failures.txt").read_text(encoding="utf-8").splitlines()
+    listing = ROOT / "scripts/ci/windows_known_failures.txt"
+    if not listing.is_file():
+        return set()
+    lines = listing.read_text(encoding="utf-8").splitlines()
     return {entry for line in lines if (entry := line.split("#", 1)[0].strip()) and "::" not in entry}
 
 
