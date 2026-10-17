@@ -8,9 +8,23 @@ name: Windows full suite
 #   gh workflow run windows-suite.yml --ref main
 # It posts nothing. scripts/ci/ship_release_status.py counts a successful run
 # the owner dispatched on main at the candidate as local/windows-suite.
+#
+# To check a fix on a branch first, run only some tests (refused on main, so
+# every successful main run is the full suite):
+#   gh workflow run windows-suite.yml --ref <branch> -f tests="tests/core/test_x.py"
+#
+# The runner is not set up like an owner's PC: it may create symlinks (so
+# symlink tests run instead of skipping), it has thousands of PowerShell
+# modules, and the first `bash` Windows finds is WSL's. The environment below
+# mirrors a desktop install: requirements, the native extras, fluid editable.
 
 on:
   workflow_dispatch:
+    inputs:
+      tests:
+        description: Branch only. Space-separated test paths to run instead of the full suite.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -41,20 +55,38 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Refuse a partial run on main
+        if: inputs.tests != '' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: echo "::error::The tests input is for branches; main always runs the full suite." && exit 1
       - name: Test environment
         shell: bash
         run: |
           python -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/Scripts/python.exe" -m pip install --upgrade pip
-          "$RUNNER_TEMP/venv/Scripts/python.exe" -m pip install -r requirements.txt -r requirements-dev.txt
-          echo "LOCAL_CI_PYTHON=$RUNNER_TEMP/venv/Scripts/python.exe" >> "$GITHUB_ENV"
+          py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --upgrade pip
+          "$py" -m pip install -r requirements.txt -r requirements-native.txt -r requirements-dev.txt
+          "$py" -m pip install -e ./fluid
+          echo "LOCAL_CI_PYTHON=$py" >> "$GITHUB_ENV"
+          # The long form of the temp folder: the default is an 8.3 short
+          # name (RUNNER~1) that resolved paths never compare equal to.
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Full suite
+        if: inputs.tests == ''
         shell: bash
-        env:
-          PYTHONPATH: fluid
         run: |
           set -o pipefail
           "$LOCAL_CI_PYTHON" scripts/local_ci.py full 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+      - name: Selected tests
+        if: inputs.tests != ''
+        shell: bash
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086 # word splitting is the point
+          "$LOCAL_CI_PYTHON" -m pytest $TESTS -o addopts= -q -p no:cacheprovider --timeout=120 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
       - name: Keep the log
         if: always()
         uses: actions/upload-artifact@v4

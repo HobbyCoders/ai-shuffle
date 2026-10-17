@@ -176,14 +176,23 @@ def read_journal_loss(path: Path) -> dict | None:
     """The loss record at ``path`` with only its known, well-typed fields, or
     None when it is missing, unreadable, linked, not a regular file or not a
     JSON object. Never follows links or blocks on a FIFO placed there."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        # Windows has no O_NOFOLLOW: refuse a link or reparse point by name,
+        # then check the opened file is that same entry.
+        entry = None if nofollow else os.lstat(path)
+        if entry is not None and (not stat.S_ISREG(entry.st_mode)
+                                  or getattr(entry, "st_file_attributes", 0) & 0x400):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow)
     except OSError:
         return None
     try:
         with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            if entry is not None and (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
                 return None
             raw = stream.read(JOURNAL_LOSS_MAX_BYTES + 1)
     except OSError:

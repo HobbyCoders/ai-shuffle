@@ -5,6 +5,7 @@ openat walk on macOS); Windows pins each directory without FILE_SHARE_DELETE and
 opens entries with OPEN_REPARSE_POINT. Other platforms fail closed.
 """
 from contextlib import contextmanager, ExitStack
+import errno
 import os
 from pathlib import Path
 
@@ -73,6 +74,37 @@ def _windows_handle(path: Path, *, directory: bool):
             close(handle)
 
 
+def _windows_create(path: Path) -> int:
+    """A new file at ``path``, as a writable descriptor, never through a link.
+
+    os.open's O_CREAT | O_EXCL follows a dangling link on Windows and creates
+    its target, wherever that is. CREATE_NEW with OPEN_REPARSE_POINT treats any
+    entry already at the name, a link included, as taken.
+    """
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                       ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # GENERIC_WRITE, no sharing, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | OPEN_REPARSE_POINT.
+    handle = create(str(path), 0x40000000, 0, None, 1, 0x80 | 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        if error in (80, 183):  # ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS
+            raise FileExistsError(errno.EEXIST, 'File exists', str(path))
+        raise ctypes.WinError(error)
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+
+
 @contextmanager
 def _windows_directory(root: Path, names: list[str], *, create: bool = False):
     if not root.is_absolute() or not root.drive or str(root).startswith('\\'):
@@ -111,7 +143,7 @@ def upload(root: Path, directory: str, filename: str, content: bytes) -> Path:
         if os.name == 'nt':
             parent = stack.enter_context(_windows_directory(root, names, create=True))
             def create(name):
-                return os.open(parent / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o600)
+                return _windows_create(parent / name)
         else:
             fd = stack.enter_context(_linux_root(root))
             for i, name in enumerate(names):

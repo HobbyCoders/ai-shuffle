@@ -298,6 +298,11 @@ MAX_TAR_METADATA_TOTAL = 64 * 1024
 MAX_TAR_HEADERS = 50000
 
 
+def _native_link(linkname):
+    """A runtime archive's relative link target (always "/"-separated) as this OS stores it."""
+    return linkname.replace("/", os.sep)
+
+
 class BoundedTarStream:
     """Validate raw tar records BEFORE tarfile can allocate extended metadata."""
     def __init__(self, stream, unpacked_size, stop):
@@ -533,14 +538,16 @@ class RuntimeOverlays:
                 raise UpdateError("Runtime archive has an escaping link")
             if verify:
                 if member.issym():
-                    if not path.is_symlink() or os.readlink(path) != member.linkname:
+                    if not path.is_symlink() or os.readlink(path) != _native_link(member.linkname):
                         raise UpdateError("Installed runtime link does not match signed archive")
                 elif not path.is_file() or file_digest(path) != file_digest(destination):
                     raise UpdateError("Installed runtime hard link does not match signed archive")
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if member.issym():
-                    path.symlink_to(member.linkname)
+                    # Native separators and the target's kind: Windows does not
+                    # resolve "/" in a relative link, nor a file link to a folder.
+                    path.symlink_to(_native_link(member.linkname), target_is_directory=destination.is_dir())
                 elif destination.is_file() and not destination.is_symlink():
                     os.link(destination, path)
                 else:

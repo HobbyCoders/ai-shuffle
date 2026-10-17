@@ -31,6 +31,11 @@ def assert_private(path, *, directory=False):
     env = {k: v for k, v in os.environ.items()
            if k.upper() in {"SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP"}}
     env["SHUFFLE_TEST_PATH"] = str(path)
+    # Only the built-in modules: with no module cache in this bare
+    # environment, PowerShell otherwise scans every installed module to find
+    # Get-Acl, which takes minutes on a machine with thousands of them.
+    system_root = env.get("SYSTEMROOT") or env.get("SystemRoot") or r"C:\Windows"
+    env["PSModulePath"] = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "Modules")
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
                             env=env, capture_output=True, text=True, check=True, timeout=30)
     assert json.loads(result.stdout) == {
