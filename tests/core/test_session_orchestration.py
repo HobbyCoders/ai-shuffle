@@ -689,7 +689,7 @@ def test_start_budget_survives_fresh_handler_and_retries(peers):
         orch._queue("caller", {**args, "request_id": "overflow"}, "start")
 
 
-def test_message_budget_and_hop_limit(peers, monkeypatch):
+def test_message_budget_and_no_hop_limit(peers, monkeypatch):
     monkeypatch.setattr(orch, "MAX_ACTIONS", 2)
     args = {"session_id": "peer", "message": "go"}
     for i in range(2):
@@ -697,9 +697,11 @@ def test_message_budget_and_hop_limit(peers, monkeypatch):
     with pytest.raises(ValueError, match="budget"):
         orch._queue("caller", {**args, "request_id": "third"}, "message")
     original = orch._context("caller")
-    monkeypatch.setattr(orch, "_context", lambda sid: {**original, "payload": {"orchestration_depth": 8}})
-    with pytest.raises(ValueError, match="hop"):
-        orch._queue("caller", {**args, "request_id": "hop"}, "message")
+    # A deep chain is not refused for its depth, only for the action budget.
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 100)
+    monkeypatch.setattr(orch, "_context", lambda sid, **kw: {**original, "payload": {"orchestration_depth": 50}})
+    receipt = orch._queue("caller", {**args, "request_id": "deep"}, "message")
+    assert turns.get_turn(receipt["turn_id"])["payload"]["orchestration_depth"] == 51
 
 
 @pytest.mark.parametrize("delivery", ["queued", "parked", "live"])
@@ -717,13 +719,15 @@ async def test_question_answer_peer_budget_boundary(peers, monkeypatch, delivery
     monkeypatch.setattr(away_mode, "record_answers", AsyncMock())
 
     # Produce the exhausted chain, rather than seeding the field the guard reads.
+    chain_actions = 8
+    monkeypatch.setattr(orch, "MAX_ACTIONS", chain_actions)
     sender, target = "caller", "peer"
-    for hop in range(orch.MAX_HOPS):
+    for hop in range(chain_actions):
         receipt = orch._queue(sender, {"session_id": target, "message": "Coordinate",
                                       "request_id": f"hop-{hop}"}, "message")
         current = turns.start_turn(receipt["turn_id"])
         assert current
-        if hop < orch.MAX_HOPS - 1 or delivery == "queued":
+        if hop < chain_actions - 1 or delivery == "queued":
             turns.settle_turn(current["id"], "completed")
         elif delivery == "parked":
             turns.park_turn(current["id"], ["background-task"])
@@ -731,7 +735,7 @@ async def test_question_answer_peer_budget_boundary(peers, monkeypatch, delivery
     assert sender == "caller"
     original_root = orch._context(sender)["payload"]["orchestration_root"]
     args = {"session_id": "peer", "message": "Report the result", "request_id": "stable-report"}
-    with pytest.raises(ValueError, match="8 hops"):
+    with pytest.raises(ValueError, match="budget"):
         orch._queue(sender, args, "message")
 
     await user_question_handler.post_question(
@@ -755,7 +759,7 @@ async def test_question_answer_peer_budget_boundary(peers, monkeypatch, delivery
     if answerer in ("dismissed", "unauthorized"):
         assert not turns.get_queued_turns(sender)
         assert orch._context(sender)["payload"]["orchestration_root"] == original_root
-        with pytest.raises(ValueError, match="8 hops"):
+        with pytest.raises(ValueError, match="budget"):
             orch._queue(sender, args, "message")
         return
     (answer,) = turns.get_queued_turns(sender)
@@ -772,7 +776,7 @@ async def test_question_answer_peer_budget_boundary(peers, monkeypatch, delivery
     context = orch._context(sender)
     if answerer == "away":
         assert context["payload"]["orchestration_root"] == original_root
-        with pytest.raises(ValueError, match="8 hops"):
+        with pytest.raises(ValueError, match="budget"):
             orch._queue(sender, args, "message")
         return
 

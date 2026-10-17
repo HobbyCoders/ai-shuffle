@@ -19,7 +19,6 @@ from fluid.tools.registry import ToolOutcome
 log = logging.getLogger(__name__)
 MAX_ACTIONS = 32
 MAX_STARTS = 4
-MAX_HOPS = 8
 # A StartSession on another worker is recorded here as a settled receipt turn
 # under the chain's origin, so dedupe and the chain budget stay on the caller.
 # The prefix keeps the row off every real session (including the new chat's
@@ -733,7 +732,7 @@ def accept_remote_start(body, from_device):
     sender_session = _remote_text(body, "sender_session_id", 200)
     sender_label = _remote_text(body, "sender_label", 400)
     depth = body.get("depth")
-    if type(depth) is not int or not 1 <= depth <= MAX_HOPS:
+    if type(depth) is not int or depth < 1:
         raise ValueError("Invalid peer-chain depth")
     profile_id = _remote_text(body, "profile_id", 200)
     project_v2_id = _remote_text(body, "project_v2_id", 200, required=False)
@@ -1006,7 +1005,7 @@ def accept_remote_message(body, from_device):
     sender_session = _remote_text(body, "sender_session_id", 200)
     sender_label = _remote_text(body, "sender_label", 400)
     depth = body.get("depth")
-    if type(depth) is not int or not 1 <= depth <= MAX_HOPS:
+    if type(depth) is not int or depth < 1:
         raise ValueError("Invalid peer-chain depth")
     # A retry may read its receipt after Stop; fresh work is refused below.
     target = _target({"id": sender_session}, session_id, allow_stopped=True, owner=_OWNER_CHAT)
@@ -1115,9 +1114,10 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     # Human input starts a fresh budget; all automated descendants share it.
     ancestry = context.get("payload") or {}
     root_id = ancestry.get("orchestration_root") or context["id"]
+    # The depth is recorded for tracing only: the owner decided chains have no
+    # hop limit (guardrails such as Stop, settle and the action and start
+    # budgets are theirs to use).
     depth = int(ancestry.get("orchestration_depth") or 0)
-    if depth >= MAX_HOPS:
-        raise ValueError("Peer-chain limit reached (8 hops); ask the user to continue.")
     # A chain begun by another worker's StartSession has its budget over there;
     # it may message local peers but never fan out into more chats.
     remote_origin = ancestry.get("orchestration_remote_origin")

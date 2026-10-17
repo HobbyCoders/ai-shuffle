@@ -59,7 +59,7 @@ _START_DESCRIPTION = (
     "session when possible. No automatic parent completion notification is registered; "
     "ask it to report back with MessageSession. In the owner's assistant conversation it reports "
     "back automatically instead. Use a stable request_id and reuse it on retries. "
-    "Autonomous chains are bounded to 4 new sessions, 32 total actions and 8 hops; "
+    "Autonomous chains are bounded to 4 new sessions and 32 total actions; "
     "only new user input starts a fresh budget. "
     "Omit worker to start on this worker. Pass worker (an exact worker name or device id) "
     "only when the user wants the work run on another online worker of this account, for "
