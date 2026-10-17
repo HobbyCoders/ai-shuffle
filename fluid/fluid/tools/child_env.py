@@ -184,15 +184,36 @@ def claude_program_env(environ: Mapping[str, str] | None = None) -> dict[str, st
     return env
 
 
-if __name__ == "__main__":
-    # MCP launch trampoline. Its config masks CLI auth values before Python
-    # starts; remove even those empty names before executing the actual server.
-    import sys
+def run_trampoline(command: list[str], environ: Mapping[str, str] | None = None) -> int:
+    """MCP launch trampoline. Its config masks CLI auth values before Python
+    starts; remove even those empty names before starting the actual server.
 
-    command = sys.argv[1:]
+    POSIX replaces this process with the server (``exec``). Windows has no
+    exec: ``os.exec*`` starts a new process and ends this one, so the CLI would
+    be left watching a process that already exited (and the emulation can
+    crash outright with a large environment, 0xC0000005). There the server runs
+    as a child with this process's stdio, and its exit code is passed on.
+    """
     if not command:
         raise SystemExit("missing child command")
-    env = scrub_claude_auth_env(os.environ)
+    env = scrub_claude_auth_env(os.environ if environ is None else environ)
     if env.get("ANTHROPIC_API_KEY") == "":
         env.pop("ANTHROPIC_API_KEY")
-    os.execvpe(command[0], command, env)
+    if os.name != "nt":
+        os.execvpe(command[0], command, env)
+    import shutil
+    import subprocess
+
+    # CreateProcess searches the parent's PATH and ignores PATHEXT; resolve
+    # against the child's PATH so `npx` finds npx.cmd as exec would.
+    program = shutil.which(command[0], path=env.get("PATH")) or command[0]
+    try:
+        return subprocess.call([program, *command[1:]], env=env)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(run_trampoline(sys.argv[1:]))

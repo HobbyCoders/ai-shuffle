@@ -389,3 +389,50 @@ def test_claude_program_env_carries_the_oauth_token_and_nothing_else_secret() ->
     env = claude_program_env({OAUTH: OAUTH_VALUE, "ADMIN_PASSWORD": "pw", "PATH": "/bin"})
     assert env == {OAUTH: OAUTH_VALUE, "PATH": "/bin"}
     assert claude_program_env({"PATH": "/bin"}) == {"PATH": "/bin"}
+
+
+def test_trampoline_runs_the_server_as_a_child_on_windows(monkeypatch):
+    # Windows has no exec: os.execvpe would end the trampoline while the CLI
+    # still watches it (and can crash with 0xC0000005), so the server runs as
+    # a child and its exit code is passed on.
+    import shutil
+    import subprocess
+
+    from fluid.tools import child_env
+
+    calls = []
+    monkeypatch.setattr(child_env.os, "name", "nt")
+    monkeypatch.setattr(child_env.os, "execvpe", lambda *a: pytest.fail("exec on Windows"))
+    monkeypatch.setattr(shutil, "which", lambda name, path=None: "C:\\node\\npx.cmd" if name == "npx" else None)
+    monkeypatch.setattr(subprocess, "call", lambda argv, env: calls.append((argv, env)) or 7)
+    environ = {"PATH": "C:\\node", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": "", "KEEP": "1"}
+    assert child_env.run_trampoline(["npx", "server", "--flag"], environ) == 7
+    (argv, env), = calls
+    assert argv == ["C:\\node\\npx.cmd", "server", "--flag"]
+    assert env == {"PATH": "C:\\node", "KEEP": "1"}
+
+
+def test_trampoline_execs_the_server_on_posix(monkeypatch):
+    from fluid.tools import child_env
+
+    class Replaced(Exception):
+        pass
+
+    calls = []
+
+    def execvpe(*args):  # a real exec never returns
+        calls.append(args)
+        raise Replaced
+
+    monkeypatch.setattr(child_env.os, "name", "posix")
+    monkeypatch.setattr(child_env.os, "execvpe", execvpe)
+    with pytest.raises(Replaced):
+        child_env.run_trampoline(["server", "a"], {"ANTHROPIC_AUTH_TOKEN": "", "KEEP": "1"})
+    assert calls == [("server", ["server", "a"], {"KEEP": "1"})]
+
+
+def test_trampoline_needs_a_command():
+    from fluid.tools import child_env
+
+    with pytest.raises(SystemExit):
+        child_env.run_trampoline([], {})
