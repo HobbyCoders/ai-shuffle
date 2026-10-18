@@ -711,6 +711,7 @@ export const appData = {
 		await trackCatalogRequest('cluster', async () => {
 			try {
 				const result = await listClusterProjects();
+				activeSession.linkDiscoveredProjects(result.projects);
 				_update(s => ({ ...s, clusterProjects: result.projects }));
 				settleCatalogHalf('cluster', true);
 				return true;

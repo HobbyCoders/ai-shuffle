@@ -161,11 +161,12 @@ class WebSessionReservationSmokeTest {
             }
         }) {
             try {
+                lateinit var chatWeb: WebView
                 launched().use { scenario ->
                     assertTrue("Request A never reached the held phase", firstStarted.await(5, TimeUnit.SECONDS))
                     lateinit var firstJob: Job
                     lateinit var firstActivity: ChatActivity
-                    scenario.onActivity { firstActivity = it; firstJob = sessionField.get(it) as Job }
+                    scenario.onActivity { firstActivity = it; firstJob = sessionField.get(it) as Job; chatWeb = web(it) }
                     scenario.moveToState(Lifecycle.State.CREATED)
                     assertTrue(firstJob.isCancelled)
                     scenario.moveToState(Lifecycle.State.RESUMED)
@@ -185,6 +186,8 @@ class WebSessionReservationSmokeTest {
                     unchanged()
                     println("RESERVED_MINT_PROOF: held=${if (blockReserve) "reserve" else "commit"}; commits=B; token=B; server_session=B; late_commit_status=${if (blockReserve) "not_sent" else "409"}; reload=ok; credentials_unchanged=true")
                 }
+                // close() returns once the activity is destroyed: its WebView left the view system before destroy().
+                instrumentation.runOnMainSync { assertNull("Chat destroyed its WebView while still attached", chatWeb.parent) }
             } finally { releaseFirst.countDown() }
         }
     }

@@ -180,10 +180,11 @@ jobs:
             cores: 2
             memory: 2048
             advisory: false
-          # Report only: on hosted runners the API 36 guest failed three
-          # release runs in a row in emulator start-up, not in AI Shuffle, and
-          # blocked every release. It still runs and uploads its report; API 34
-          # stays the blocking device check. Internal tracking: #2375.
+          # Keep API 36 advisory until several release runs prove the targeted
+          # infrastructure workarounds stable. Its app failures still fail the
+          # test step and are reported visibly; API 34 gates publication.
+          # Making API 36 gate promotion is a separate owner decision.
+          # Internal tracking: #2375.
           - api: 36
             target: default
             cores: 4
@@ -234,6 +235,7 @@ jobs:
           bash ci/emulator-diagnostics.sh before-boot
           bash ci/emulator-storage.sh check
       - name: Exercise native onboarding and tool permissions
+        id: emulator_tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
@@ -253,11 +255,30 @@ jobs:
             -camera-back emulated -no-snapshot -memory ${{ matrix.memory }} -cores ${{ matrix.cores }}
             -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
           script: bash ci/run-android-ui-tests.sh
+      - name: Report emulator leg outcome
+        if: always()
+        env:
+          RESULT: ${{ steps.emulator_tests.outcome }}
+          API: ${{ matrix.api }}
+          ADVISORY: ${{ matrix.advisory }}
+        run: |
+          printf '%s\n' "- API $API emulator step: $RESULT (release advisory: $ADVISORY). App failures are never retried or excused." >> "$GITHUB_STEP_SUMMARY"
       - name: Collect emulator host diagnostics
         if: always()
         run: bash ci/emulator-diagnostics.sh after-emulator
-      # Diagnostics only: a passing run is proven by the job result, so keep
-      # reports, logcat and screenshots only when verification fails.
+      # Keep small readiness/provider and recovery captures even on green runs:
+      # a pass with a workaround must remain distinguishable from a clean pass.
+      - name: Upload emulator readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 3
+          name: android-ui-readiness-api-${{ matrix.api }}
+          path: |
+            ${{ runner.temp }}/android-emulator/readiness/
+            ${{ runner.temp }}/android-emulator/launcher-recovery*/
+          if-no-files-found: warn
+      # Full reports, logcat and screenshots remain failure-only diagnostics.
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v4

@@ -120,6 +120,30 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _confirmed_handoff_context(session_id: str, payload: Dict[str, Any]) -> Optional[str]:
+    """Do not claim a failed, cancelled or unfinished move in a card's answer.
+
+    Only the moved note for this exact handoff_id confirms its context.
+    """
+    handoff_id = payload.get("handoff_id")
+    context = payload.get("handoff_context")
+    if not payload.get("handoff_detached") or not handoff_id or not isinstance(context, str) or not context:
+        return None
+    from app.db.base import get_db
+
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM session_events WHERE session_id=%s AND event_type='system.note' "
+                "AND payload->>'subtype'='handoff' AND payload->'data'->>'handoff_id'=%s "
+                "AND payload->'data'->>'status'='moved' LIMIT 1", (session_id, handoff_id))
+            return context if cur.fetchone() else None
+    except Exception:  # An optional context lookup must never prevent the owner's answer.
+        logger.warning("Could not confirm question hand-off context for %s", session_id, exc_info=True)
+        return None
+
+
 def fluid_answer_from_envelope(answers: Any) -> str:
     """The single string fluid RespondQuestion wants from a modal envelope.
 
@@ -603,6 +627,9 @@ class UserQuestionHandler:
             f"{key}\n{', '.join(map(str, value)) if isinstance(value, list) else value}"
             for key, value in answers.items()
         )
+        handoff_context = await asyncio.to_thread(_confirmed_handoff_context, session_id, row["payload"])
+        if handoff_context:
+            prompt = handoff_context + "\n\n" + prompt
         # Inherit the latest runnable context, not settings from when a days-old
         # question was posted. Keep only transport attribution from its payload.
         context = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id) or {}

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
 				subscribers.add(run);
 				return () => subscribers.delete(run);
 			},
+			get current() { return value; },
 			set(next: T) {
 				value = next;
 				for (const run of subscribers) run(value);
@@ -60,6 +61,7 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	currentBranch: mocks.currentBranch,
 	git: {
 		...mocks.git,
+		get current() { return mocks.git.current; },
 		loadWorktrees: mocks.loadWorktrees,
 		loadBranches: mocks.loadBranches,
 		createBranch: mocks.createBranch,
@@ -84,6 +86,7 @@ afterAll(() => vi.unstubAllGlobals());
 
 beforeEach(() => {
 	Object.assign(activeSession.current, { sessionId: null, project: 'repo', projectV2Id: null, messages: [] });
+	composerPreferences.set('project', {projectId:'repo',projectV2Id:null});
 	mocks.git.set({ projectId: 'repo', worktreeId: null, sessionId: null, hydrated: true, status: { is_git_repo: true } });
 	activeSession.setDeviceIntent(null);
 	activeSession.setWorktreeIntent('worktree');
@@ -174,14 +177,14 @@ describe('automatic non-git fallback', () => {
 		await tick();
 		expect(activeSession.current.worktreeIntent).toBe('local');
 		expect(composerPreferences.current.worktreeIntent).toBe('worktree');
-		expect(getPersistedWorktreeIntent()).toBe('worktree');
-		expect(JSON.parse(localStorage.getItem('ai-shuffle-composer:worktreeIntent')!)).toBe('worktree');
+		expect(composerPreferences.worktreeForProject({projectId:'repo',projectV2Id:null}).intent).toBe('worktree');
+		expect(getPersistedWorktreeIntent('repo')).toBe('local');
 		expect(screen.queryByRole('checkbox')).toBeNull();
 
 		activeSession.setProject('another-repo', null);
 		await tick();
-		expect(activeSession.current.worktreeIntent).toBe('worktree');
-		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+		expect(activeSession.current.worktreeIntent).toBe('local');
+		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
 	});
 
 	it.each([
@@ -194,7 +197,7 @@ describe('automatic non-git fallback', () => {
 		mocks.git.set({ ...nonGit, ...stale });
 		await tick();
 		expect(activeSession.current.worktreeIntent).toBe('worktree');
-		expect(getPersistedWorktreeIntent()).toBe('worktree');
+		expect(composerPreferences.worktreeForProject({projectId:'repo',projectV2Id:null}).intent).toBe('worktree');
 		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
 	});
 
@@ -215,7 +218,7 @@ describe('automatic non-git fallback', () => {
 		render(ExecutionModeBar);
 		await tick();
 		expect(activeSession.current.worktreeIntent).toBe('worktree');
-		expect(getPersistedWorktreeIntent()).toBe('worktree');
+		expect(composerPreferences.worktreeForProject({projectId:'repo',projectV2Id:null}).intent).toBe('worktree');
 	});
 
 	it('still persists explicit checkbox changes in both directions', async () => {
@@ -223,11 +226,11 @@ describe('automatic non-git fallback', () => {
 		await fireEvent.click(screen.getByRole('checkbox'));
 		expect(activeSession.current.worktreeIntent).toBe('local');
 		expect(composerPreferences.current.worktreeIntent).toBe('local');
-		expect(getPersistedWorktreeIntent()).toBe('local');
+		expect(getPersistedWorktreeIntent('repo')).toBe('local');
 		await fireEvent.click(screen.getByRole('checkbox'));
 		expect(activeSession.current.worktreeIntent).toBe('worktree');
 		expect(composerPreferences.current.worktreeIntent).toBe('worktree');
-		expect(getPersistedWorktreeIntent()).toBe('worktree');
+		expect(composerPreferences.worktreeForProject({projectId:'repo',projectV2Id:null}).intent).toBe('worktree');
 	});
 });
 

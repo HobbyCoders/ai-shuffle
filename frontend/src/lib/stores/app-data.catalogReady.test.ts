@@ -3,13 +3,13 @@
 // have answered. This pins that readiness signal.
 import { beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), listClusterProjects: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), listClusterProjects: vi.fn(), linkDiscoveredProjects:vi.fn() }));
 vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get, post: vi.fn(), put: vi.fn(), delete: vi.fn() },
 	searchSessionsPaginated: vi.fn(), renameSession: vi.fn(), setSessionActive: vi.fn(),
 }));
 vi.mock('$lib/api/installs', () => ({ listClusterProjects: mocks.listClusterProjects }));
-vi.mock('./active-session', () => ({ activeSession: { current: { sessionId: null } } }));
+vi.mock('./active-session', () => ({ activeSession: { current: { sessionId: null }, linkDiscoveredProjects:mocks.linkDiscoveredProjects } }));
 
 let appData: (typeof import('./app-data.svelte'))['appData'];
 beforeEach(async () => {
@@ -31,6 +31,7 @@ it('is ready only once both catalog halves have answered', async () => {
 	local.resolve([{ id: 'p' }]); await Promise.resolve(); await Promise.resolve();
 	expect(appData.projectCatalogLoaded).toBe(false); expect(ready).toBe(false);
 	cluster.resolve({ projects: [{ project_v2_id: 'repo', local_project_id: 'p' }] }); await loads; await Promise.resolve();
+	expect(mocks.linkDiscoveredProjects).toHaveBeenCalledWith([{project_v2_id:'repo',local_project_id:'p'}]);
 	expect(appData.projectCatalogLoaded).toBe(true); expect(ready).toBe(true); expect(appData.projectCatalogFailed).toBe(false);
 	await expect(appData.whenProjectCatalogLoaded()).resolves.toBeUndefined();
 });

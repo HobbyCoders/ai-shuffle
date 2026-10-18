@@ -30,7 +30,7 @@ import { createMessageHandlers, type InternalMutableState } from './session/ws-m
 import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
-	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
+	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
 	reconciledSessionMode,
@@ -389,7 +389,7 @@ function defaultState(): ActiveSessionState {
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
-		worktreeIntent: getPersistedWorktreeIntent(),
+		worktreeIntent: getPersistedWorktreeIntent(getPersistedProject(), composerPreferences.current.project.projectV2Id),
 		deviceIntent: getPersistedDeviceIntent(),
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
@@ -753,7 +753,7 @@ feedController.attach({
 
 /** Remember the staged branch until a session is created on it (one-time, #1528). */
 function rememberBranchIntent() {
-	composerPreferences.set('checkout', _state.worktreeBranch ? {
+	composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, _state.worktreeBranch ? {
 		kind:'branch', projectId:_state.project, projectV2Id:_state.projectV2Id,
 		branch:_state.worktreeBranch, baseBranch:_state.worktreeBaseBranch,
 		createNew:_state.worktreeCreateNewBranch,
@@ -850,12 +850,13 @@ function sameCheckout(a: CheckoutSnapshot, b: CheckoutSnapshot) {
 }
 
 /** The project and checkout fields the remembered composer picks resolve to. */
-function composerCheckoutDefaults(code: boolean) {
-	const picks = composerPreferences.current;
-	const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
+function composerCheckoutDefaults(code: boolean, selectedProject = composerPreferences.current.project, resolvedProject?: {project:string; projectV2Id:string | null}) {
+	const picks = composerPreferences.worktreeForProject(selectedProject);
+	const project = resolvedProject ?? resolveComposerProject(selectedProject, appData.current.projects, appData.current.clusterProjects);
+	const intent = code ? getPersistedWorktreeIntent(project.project, project.projectV2Id) : 'local';
 	// A branch choice spoken for by a create still in flight belongs to that
 	// session, not to this new compose.
-	const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout && !composerPreferences.checkoutClaimed
+	const checkout = intent === 'worktree' && picks.checkout && !composerPreferences.checkoutClaimed
 		&& (picks.checkout.projectV2Id ? picks.checkout.projectV2Id === project.projectV2Id : picks.checkout.projectId === project.project)
 		? picks.checkout : null;
 	// A legacy worktree ID belongs to its original checkout. Never transplant
@@ -871,7 +872,7 @@ function composerCheckoutDefaults(code: boolean) {
 	const localCheckout = existing && existing.projectId === project.project && !!project.project;
 	return {
 		...(code ? project : {project:'', projectV2Id:null}),
-		worktreeIntent:code ? picks.worktreeIntent : 'local' as const,
+		worktreeIntent:intent,
 		worktreeId:localCheckout ? existing!.worktreeId : null,
 		selectedWorktreeBranch:existing?.branch ?? null,
 		worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? 'main',
@@ -1049,23 +1050,13 @@ export const activeSession = {
 		}
 		_update(s => ({
 			...s,
-			project: projectId,
-			projectV2Id: nextV2,
 			workspaceProjectIds: (s.workspaceProjectIds ?? []).filter(id => id !== projectId),
-			// Keep the user's preferred mode; only the project-specific worktree
-			// selection below is reset since it doesn't apply to the new project.
-			worktreeIntent: getPersistedWorktreeIntent(),
-			// Keep the worker pick; the routing API validates the new project's checkout.
-			worktreeBranch: '',
-			worktreeBaseBranch: 'main',
-			worktreeCreateNewBranch: false,
-			worktreeId: null,
-			worktreeMode: 'new' as const,
-			selectedWorktreeBranch: null,
+			// Re-read this project's defaults without clearing the project we left.
+			...(s.sessionId ? {project:projectId, projectV2Id:nextV2}
+				: composerCheckoutDefaults(s.mode !== 'chat', {projectId, projectV2Id:nextV2}, {project:projectId, projectV2Id:nextV2})),
 			isCreatingWorktree: false,
 			worktreeError: null,
 		}));
-		composerPreferences.set('checkout', null);
 		persistSession();
 	},
 
@@ -1188,8 +1179,12 @@ export const activeSession = {
 	// ── Execution Mode & Worktree ───────────────────────────────────
 
 	setWorktreeIntent(mode: ExecutionMode, { persist = true }: { persist?: boolean } = {}) {
-		// Only explicit choices change the default for future chats.
-		if (persist) setPersistedWorktreeIntent(mode);
+		// Only explicit choices change this project's default for future chats.
+		if (mode === 'worktree' && !_state.sessionId && projectRejectsWorktrees(_state.project, _state.projectV2Id)) {
+			_update(s => ({...s, worktreeIntent:'local'}));
+			return;
+		}
+		if (persist) setPersistedWorktreeIntent(mode, _state.project, _state.projectV2Id);
 		_update(s => ({
 			...s,
 			worktreeIntent: mode,
@@ -1217,12 +1212,12 @@ export const activeSession = {
 	setWorktreeCreateNewBranch(val: boolean) { _update(s => ({ ...s, worktreeCreateNewBranch: val })); if (_state.worktreeBranch) rememberBranchIntent(); },
 
 	selectWorktreeBranch(branch: string, worktreeId: string) {
-		composerPreferences.set('checkout', {kind:'existing',projectId:_state.project, projectV2Id:_state.projectV2Id, worktreeId, branch});
+		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, {kind:'existing',projectId:_state.project, projectV2Id:_state.projectV2Id, worktreeId, branch});
 		_update(s => ({ ...s, worktreeId, worktreeBranch:'', selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
 	},
 
 	clearWorktreeSelection() {
-		composerPreferences.set('checkout', null);
+		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, null);
 		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeMode: 'new' as const }));
 	},
 
@@ -1265,7 +1260,19 @@ export const activeSession = {
 	 * leave on an auto-named branch. Anything the user changed since keeps the
 	 * ordinary rules. Idempotent.
 	 */
+	linkDiscoveredProjects(projects: {local_project_id:string | null; project_v2_id:string}[]) {
+		for (const project of projects) {
+			if (!project.local_project_id) continue;
+			const pick = {projectId:project.local_project_id, projectV2Id:project.project_v2_id};
+			composerPreferences.linkWorktreeProject(pick);
+			const selected = composerPreferences.current.project;
+			if (selected.projectId === pick.projectId && !selected.projectV2Id) composerPreferences.set('project', pick);
+			if (!_state.sessionId && !composerBusy() && _state.project === pick.projectId && !_state.projectV2Id)
+				_update(s => ({...s, projectV2Id:pick.projectV2Id}));
+		}
+	},
 	resolveComposerDefaultsAfterCatalog() {
+		activeSession.linkDiscoveredProjects(appData.current.clusterProjects);
 		const before = _checkoutBeforeCatalog;
 		if (!before || !appData.projectCatalogLoaded) { activeSession.applyComposerDefaults(); return; }
 		_checkoutBeforeCatalog = null;
@@ -1396,3 +1403,11 @@ export const activeSessionUsage = createDerived(
 );
 
 composerPreferences.onRemote(() => activeSession.applyComposerDefaults());
+// Git loads independently of the catalog. Resolve a saved On once this project's
+// existing status proves it is a repo; never change an existing session.
+git.subscribe(state => {
+	if (_state.sessionId || composerBusy() || (state.projectId !== _state.project && state.projectId !== _state.projectV2Id) || !state.hydrated || state.worktreeId || state.sessionId || !state.status) return;
+	const intent = getPersistedWorktreeIntent(_state.project, _state.projectV2Id);
+	if (intent === _state.worktreeIntent) return;
+	_update(s => ({...s, ...composerCheckoutDefaults(s.mode !== 'chat', {projectId:s.project, projectV2Id:s.projectV2Id}, {project:s.project, projectV2Id:s.projectV2Id})}));
+});

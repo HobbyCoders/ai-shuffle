@@ -128,6 +128,43 @@ async def test_nested_instructions_ride_tool_result_once(tmp_path) -> None:
     assert "<system-reminder>" in joined
 
 
+async def test_reading_home_and_fluid_never_reinjects_global_instructions(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    config = home / ".fluid"
+    config.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    (config / "AGENTS.md").write_text("Global rule must not be reinjected.")
+    (config / "AGENTS.local.md").write_text("Home local project rule.")
+    (home / "AGENTS.md").write_text("Home root project rule.")
+    targets = [home / "plain.txt", config / "plain.txt"]
+    for target in targets:
+        target.write_text("data")
+    project = tmp_path / "outside-home"
+    project.mkdir()
+    (project / ".git").mkdir()
+    registry = ToolRegistry()
+    register_builtins(registry)
+    provider = ScriptedProvider([
+        *[_tool_call(f"t{i}", "Read", json.dumps({"file_path": str(target)}))
+          for i, target in enumerate(targets)],
+        _text("done"),
+    ])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="m", session_id=sid,
+        registry=registry, permissions=PermissionEngine("never_ask"),
+        ctx=ToolCtx(cwd=str(project)),
+    )
+    await loop.submit(UserTurn(content="read both"))
+    await loop.wait_turn()
+    joined = "\n".join(_all_text(n.message) for n in await store.load_path(sid))
+    assert "Global rule must not be reinjected." not in joined
+    assert joined.count("Home root project rule.") == 1
+    assert joined.count("Home local project rule.") == 1
+
+
 async def test_project_root_instructions_not_reinjected(tmp_path) -> None:
     project = tmp_path / "proj"
     project.mkdir()

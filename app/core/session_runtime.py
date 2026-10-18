@@ -1313,6 +1313,11 @@ class SessionRuntime:
             # Lease left active — re-check + broadcast the OFF diff now rather
             # than waiting for the sweep loop (mirrors TurnRecorder.close).
             _notify_run_change(sid)
+            # Normal finalize schedules before settlement, but an escalated
+            # drain bypasses finalize entirely. Arm the move after releasing
+            # the lease on EVERY exit, without requiring another owner send.
+            from app.core import session_handoff
+            session_handoff.schedule(sid)
 
         # 8. Settlement callback (the scheduler seam) — after the lease is free,
         #    and ONLY when finalize actually performed the DB transition. A racer

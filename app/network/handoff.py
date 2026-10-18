@@ -33,9 +33,10 @@ TABLES = {
 }
 JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload", "answer"}
 APP_TABLES = {"session_messages", "session_events", "pending_interactions", "turns"}
-# Only settled model receipts move. Live permission/question/access prompts have
-# no move behaviour and stay on the source worker; never replace those here.
-_RECEIPTS_SQL = " AND kind IN ('model_switch_approval', 'model_switch_named') AND state='answered'"
+# Only settled model receipts and relay-free question cards move. A question
+# answer queues a fresh turn; permission callbacks and private grants stay local.
+_RECEIPTS_SQL = (" AND ((kind IN ('model_switch_approval', 'model_switch_named') AND state='answered')"
+                 " OR (kind='question' AND state='pending' AND payload->'nonblocking'='true'))")
 _LAUNCH_SQL = (" AND command_id LIKE 'orchestration:start:%%' AND source='agent_message' "
                "AND state NOT IN ('queued','running','interrupting','draining')")
 _TRANSFER_FILTERS = {"pending_interactions": _RECEIPTS_SQL, "turns": _LAUNCH_SQL}
@@ -94,15 +95,19 @@ def _has_live_tasks(cursor, sid):
 OPEN_PROMPT = "Answer or dismiss the open prompt first."
 
 
-def open_prompt(cursor, sid):
-    """Whether ``sid`` shows the owner an open approval, question or access card.
-
-    Those cards live only on this worker and do not move (#1819), so a move
-    with one open would leave the agent waiting for an answer nobody can give.
+def open_prompt(cursor, sid, *, allow_questions=False):
+    """A local-only prompt. Queue admission may also allow blocking questions;
+    the transfer itself allows only durable questions with no live callback.
     """
-    cursor.execute("SELECT 1 FROM pending_interactions WHERE session_id=%s AND state='pending' "
-                   "AND (expires_at IS NULL OR expires_at >= NOW()) LIMIT 1", (sid,))
-    if cursor.fetchone():
+    cursor.execute("SELECT kind, payload FROM pending_interactions WHERE session_id=%s AND state='pending' "
+                   "AND (expires_at IS NULL OR expires_at >= NOW())", (sid,))
+    from app.db.base import parse_jsonb
+
+    for row in cursor.fetchall():
+        payload = parse_jsonb(row["payload"]) or {}
+        if (row["kind"] == "question" and payload.get("questions")
+                and (allow_questions or payload.get("nonblocking") is True)):
+            continue
         return True
     from app.core.chat_access import broker
 
@@ -161,6 +166,16 @@ def wake_carry(target):
     if not capabilities:
         return None
     return int(capabilities.get("move_wakes") or 0) >= 1
+
+
+def question_carry(target):
+    """True for a question-capable receiver, False for older, None until known."""
+    from app.network import runners
+
+    capabilities = (runners.find(target) or {}).get("capabilities") or {}
+    if not capabilities:
+        return None
+    return int(capabilities.get("move_questions") or 0) >= 1
 
 
 def carries_wakes(target):
@@ -634,6 +649,14 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
             branch = checkout_transfer.git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip()
     with get_db() as conn:
         _idle(conn.cursor(), sid)
+    from app.db import interactions
+
+    if any(r["kind"] == "question" for r in interactions.get_pending_interactions(sid)):
+        carry = question_carry(target)
+        if carry is None:
+            raise ValueError("Wait for the target worker to report its capabilities before moving an unanswered question.")
+        if not carry:
+            raise ValueError("Update the target worker before moving an unanswered question.")
     run = runs.claim_run(sid, HANDOFF + target, TTL)
     if not run:
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
@@ -913,7 +936,9 @@ async def _handle(payload, peer_device_id):
         try:
             return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note,
                                   payload.get("wake_barrier") is True)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, (ValueError, PermissionError, LookupError)):
+                logger.warning("Refused hand-off begin for session %s: %s", sid, exc)
             _wake_queued()
             raise
     if payload.get("phase") in ("commit", "cancel"):
@@ -979,7 +1004,12 @@ def install_history(sid, data, cwd):
             for row in data["history"].get(table, []):
                 if table == "pending_interactions":
                     from app.core.model_override import RECEIPT_KINDS
-                    if row.get("kind") not in RECEIPT_KINDS or row.get("state") != "answered":
+                    payload = row.get("payload") or {}
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    question = (row.get("kind") == "question" and row.get("state") == "pending"
+                                and payload.get("nonblocking") is True and payload.get("questions"))
+                    if not question and (row.get("kind") not in RECEIPT_KINDS or row.get("state") != "answered"):
                         continue
                 if table == "turns" and (
                         row.get("source") != "agent_message"
