@@ -1660,13 +1660,6 @@ class HarnessAdapter(ProviderAdapter):
         # older than this turn. The memory snapshot rides only when the model
         # does not already hold it (see _memory_turn_note).
         source = self._take_turn_source()
-        if source == "user":
-            # A pasted transcript is owner text, not a harness-authored memory
-            # block. Do this before appending our note, on both harness legs.
-            # Peer/wake wrappers are generated separately from defanged text.
-            from fluid.tools.hardening import defang_harness_markers
-
-            prompt = defang_harness_markers(prompt)
         # Claude Code takes any slash command as typed; a native session takes
         # only a bare "/compact", which its engine runs as a compaction.
         command = (
@@ -1704,6 +1697,7 @@ class HarnessAdapter(ProviderAdapter):
         # so the cast bridges the vendor annotation without touching the value.
         await self._engine.submit(UserTurn(
             content=cast(Any, content), source=source,
+            context_pin=self._memory_context_pin(content),
         ))
         # Set after acceptance: a concurrent/rejected submit must not replace
         # the running turn's snapshot. The engines reject overlapping turns.
@@ -1949,7 +1943,16 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_plan = plan
         return plan.note
 
-    async def _fresh_memory_note(self, content: List[Any]) -> Optional[str]:
+    def _memory_context_pin(self, content: str) -> Optional[Tuple[int, int]]:
+        # Only the plan this adapter appended can confer provenance. The
+        # owner/voice/peer/command bytes before it remain exactly as supplied.
+        note = getattr(self._memory_plan, "note", None)
+        start = content.rfind(note) if note else -1
+        return (start, start + len(note)) if start >= 0 else None
+
+    async def _fresh_memory_note(
+        self, content: List[Any], context_pin: Optional[Tuple[int, int]] = None,
+    ) -> Optional[str]:
         """Restore missing memory on a fresh or just-compacted CLI.
         Called before its first frame, including a failed --resume retry, or
         after a between-turn drain observed compaction without a put-back.
@@ -1958,8 +1961,11 @@ class HarnessAdapter(ProviderAdapter):
         """
         from app.core.memory_reminder import memory_blocks, wrap
 
-        text = "\n".join(getattr(block, "text", "") for block in content)
-        if any(kind == "full" for kind, _ in memory_blocks(text)):
+        from fluid.messages import Message
+
+        message = Message(role="user", content=content, context_pin=context_pin)
+        text = message.text()
+        if any(kind == "full" for kind, _ in memory_blocks(message.pinned_text())):
             return None
         self._memory_rehydrated = True
         self._memory_trusted_node = None

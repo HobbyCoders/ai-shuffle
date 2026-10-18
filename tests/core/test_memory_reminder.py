@@ -139,7 +139,7 @@ async def _memory_kinds(loop):
     for node in nodes:
         if node.message.role != "user":
             continue
-        blocks = mr.memory_blocks(node.message.text() or "")
+        blocks = mr.memory_blocks(node.message.pinned_text())
         out.append(blocks[0][0] if blocks else None)
     return out
 

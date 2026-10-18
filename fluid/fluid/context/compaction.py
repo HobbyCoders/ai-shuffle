@@ -548,7 +548,9 @@ def _reminder_blocks(node: SessionNode, headers: tuple[str, str]) -> list[tuple[
     user node's text, in order; each block is verbatim, tags included."""
     if node.message.role != "user":
         return []
-    text = "\n".join(b.text for b in node.message.content if isinstance(b, Text))
+    # Only the host-owned range can supply a pin. Owner text, command
+    # templates and task reports may quote identical headers without owning it.
+    text = node.message.pinned_text()
     if _PIN_OPEN not in text:
         return []
     found: list[tuple[int, str, str]] = []

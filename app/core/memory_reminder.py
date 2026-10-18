@@ -30,11 +30,13 @@ The rule now:
   snapshot replaces the change lists once their combined size passes half the
   snapshot, so the model never has to fold many small lists together.
 
-What the model holds is recovered from the transcript itself
+What the model holds is recovered from host-marked ranges in the transcript
 (:func:`held_from_path`): the newest full snapshot on the active path plus the
-change lists after it. The caller says which full snapshot it trusts. A
-snapshot is trusted when no Claude Code compaction ran after the turn that
-carried it.
+change lists after it. Raw owner text, command templates and task reports can
+quote identical headers without conferring provenance. These local offsets
+survive store reload but never alter provider content. Unmarked legacy history
+gets one conservative resend. The caller also verifies that no Claude Code
+compaction ran after the turn that carried the trusted snapshot.
 
 Pure functions only; :class:`~app.core.provider.harness_adapter.HarnessAdapter`
 owns the state and the I/O.
@@ -228,14 +230,10 @@ def _node_text(node: Any) -> str:
     message = getattr(node, "message", None)
     if message is None or getattr(message, "role", None) != "user":
         return ""
-    parts = []
-    for block in getattr(message, "content", None) or ():
-        text = getattr(block, "text", None)
-        if text is None and isinstance(block, dict):
-            text = block.get("text")
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts)
+    # Legacy unmarked content is deliberately not trusted. Its next turn
+    # conservatively sends a new, provenance-marked full snapshot.
+    pinned = getattr(message, "pinned_text", None)
+    return pinned() if callable(pinned) else ""
 
 
 def newest_full_node(nodes: Sequence[Any]) -> Optional[str]:

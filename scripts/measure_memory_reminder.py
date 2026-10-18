@@ -154,8 +154,14 @@ def _patches(stack, store, legacy: bool):
     stack.enter_context(patch.object(ha.HarnessAdapter, "_scratch_note", lambda self: ""))
     if legacy:
         # The behavior before this change: the full snapshot on every message.
-        stack.enter_context(patch.object(ha.HarnessAdapter, "_memory_turn_note",
-                                         lambda self: self._memory_snapshot()))
+        def legacy_note(adapter):
+            from app.core.memory_reminder import MemoryPlan
+
+            note = adapter._memory_snapshot()
+            adapter._memory_plan = MemoryPlan("full", note)
+            return note
+
+        stack.enter_context(patch.object(ha.HarnessAdapter, "_memory_turn_note", legacy_note))
 
 
 def _user_text(turn: int) -> str:
@@ -232,7 +238,13 @@ async def _native(store, legacy: bool, prefix_chars: int) -> tuple[list[dict], i
     for request in provider.requests:
         elements = [request.system or ""]
         elements += [json.dumps(t, sort_keys=True) for t in request.tools]
-        elements += [json.dumps(m, sort_keys=True, default=lambda o: getattr(o, "__dict__", str(o)))
+        def prompt_fields(obj):
+            # Durable local pin offsets do not go to the provider and must
+            # not inflate the measured prompt or its cache-prefix bytes.
+            fields = getattr(obj, "__dict__", None)
+            return {k: v for k, v in fields.items() if k != "context_pin"} if fields else str(obj)
+
+        elements += [json.dumps(m, sort_keys=True, default=prompt_fields)
                      for m in request.messages]
         requests.append(elements)
         texts.append([_message_text(m) for m in request.messages])

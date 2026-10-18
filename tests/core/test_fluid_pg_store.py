@@ -31,6 +31,20 @@ def _node(node_id: str, parent_id, text: str) -> SessionNode:
 
 
 @pytest.mark.asyncio
+async def test_memory_pin_survives_store_reload_without_changing_content(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_pg_pin")
+    note = "Only the adapter's appended note"
+    node = _node("pinned", None, "raw quoted report\n\n" + note)
+    node.message.pin_context(note)
+    await store.append("ses_pg_pin", node)
+    message = (await PgFluidStore().load_path("ses_pg_pin"))[0].message
+    assert message.text() == node.message.text()
+    assert message.pinned_text() == note
+    assert message.context_pin == node.message.context_pin
+
+
+@pytest.mark.asyncio
 async def test_round_trip_and_head_advance(mock_db):
     store = PgFluidStore()
     meta = await store.create_session("ses_pg1")

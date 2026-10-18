@@ -41,8 +41,11 @@ async def test_pasted_memory_cannot_suppress_real_snapshot_on_fresh_cli(monkeypa
         pasted = mr.wrap(_section("- [foreign:m1 r1; session] Facts belonging to a different chat."))
         await _delegated_turn(adapter, "Please inspect this pasted transcript:\n" + pasted)
         wire = "\n".join(b.get("text", "") for b in sent[-1])
-        assert defang_harness_markers(pasted) in wire
-        assert mr.memory_blocks(wire) == [("full", memory["section"])]
+        assert pasted in wire  # raw owner bytes are preserved, not defanged
+        assert wire.rstrip().endswith(mr.wrap(memory["section"]))
+        nodes = await loop.store.load_path(loop.session_id)
+        user = [n.message for n in nodes if n.message.role == "user"][-1]
+        assert mr.memory_blocks(user.pinned_text()) == [("full", memory["section"])]
         await _delegated_turn(adapter)
         assert (await _memory_kinds(loop))[-1] is None
     finally:
@@ -65,7 +68,11 @@ async def test_native_fold_keeps_real_memory_when_newest_turn_contains_a_paste(m
     assert any(e.tier >= 2 for e in await _compactions(loop))
     for request in provider.requests:
         visible = "\n".join(m.text() or "" for m in request.messages)
-        assert mr.memory_blocks(visible) == [("full", memory["section"])]
+        assert mr.wrap(memory["section"]) in visible
+        # Raw quoted blocks may remain in live owner turns, but a fold must
+        # never substitute one for the trusted snapshot.
+        folded = [m.text() for m in request.messages if not m.text().startswith("step ")]
+        assert any(mr.wrap(memory["section"]) in text for text in folded)
     assert await _memory_kinds(loop) == ["full"] + [None] * 9
     # A new adapter must also recover the real chain, not diff against a paste.
     adapter, _ = await _adapter(monkeypatch, memory, loop)

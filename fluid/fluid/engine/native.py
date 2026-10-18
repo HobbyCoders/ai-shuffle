@@ -2473,7 +2473,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if op.context_note:
                 head = SessionNode(
                     node_id=new_id("node"), parent_id=head.node_id,
-                    message=Message(role="user", content=[Text(op.context_note)]),
+                    message=Message(
+                        role="user", content=[Text(op.context_note)],
+                    ).pin_context(op.context_note),
                 )
                 await self.store.append(sid, head)
             await self._emit(TurnStarted(
@@ -2539,7 +2541,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         user_node = SessionNode(
             node_id=node_id,
             parent_id=op.parent_node_id or meta.head_node_id,
-            message=Message(role="user", content=content),
+            message=Message(role="user", content=content, context_pin=op.context_pin),
         )
         await self.store.append(sid, user_node)
         await self._mark_questions_delivered(question_ids)

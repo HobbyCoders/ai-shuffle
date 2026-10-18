@@ -30,7 +30,8 @@ def _path(*user_texts: str) -> list[SessionNode]:
         for role, content in (("user", text), ("assistant", f"reply {i} " + "r " * 400)):
             node_id = f"n{len(nodes)}"
             nodes.append(SessionNode(node_id=node_id, parent_id=parent,
-                                     message=Message(role=role, content=[Text(content)])))
+                                     message=Message(role=role, content=[Text(content)]).pin_context(
+                                         content if role == "user" else None)))
             parent = node_id
     return nodes
 

@@ -688,7 +688,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         claude_mod: bool | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
-        fresh_context: Callable[[list[Any]], Awaitable[str | None]] | None = None,
+        fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
@@ -1826,11 +1826,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         return
             op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
-            content = await self._fresh_turn_content(content)
+            content, context_pin = await self._fresh_turn_content(content, op.context_pin)
             user_node = SessionNode(
                 node_id=new_id("node"),
                 parent_id=op.parent_node_id or meta.head_node_id,
-                message=Message(role="user", content=content),
+                message=Message(role="user", content=content, context_pin=context_pin),
             )
             await self.store.append(sid, user_node)
             await self._mark_questions_delivered(question_ids)
@@ -1871,7 +1871,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # resume handle above.
             await self._flush_events(sid)
 
-    async def _fresh_turn_content(self, content: list[Any]) -> list[Any]:
+    async def _fresh_turn_content(
+        self, content: list[Any], context_pin: tuple[int, int] | None,
+    ) -> tuple[list[Any], tuple[int, int] | None]:
         """A fresh CLI does not see the host's stored transcript. Restore
         missing context at the tail, never by changing its cached system prompt.
         A valid --resume (or a later turn) needs no put-back unless a drained
@@ -1879,10 +1881,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         fresh = self._spawn_resume is None and not self._proc_results
         if (not fresh and not self._context_restore_pending) or self.fresh_context is None:
-            return content
-        note = await self.fresh_context(content)
+            return content, context_pin
+        note = await self.fresh_context(content, context_pin)
         self._context_restore_pending = False
-        return [*content, Text(note)] if note else content
+        if not note:
+            return content, context_pin
+        restored = [*content, Text(note)]
+        pin = Message(role="user", content=restored).pin_context(note).context_pin
+        return restored, pin
 
     async def _drive_turn(
         self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any],
@@ -1909,7 +1915,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                     ))
                     return mapper
-                restored = await self._fresh_turn_content(content)
+                restored, context_pin = await self._fresh_turn_content(
+                    content, user_node.message.context_pin,
+                )
                 if restored is not content:
                     # The rejected frame never reached a model. Keep the old
                     # stored node immutable; record the replacement actually
@@ -1917,7 +1925,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     content = restored
                     user_node = SessionNode(
                         node_id=new_id("node"), parent_id=user_node.node_id,
-                        message=Message(role="user", content=content),
+                        message=Message(role="user", content=content, context_pin=context_pin),
                     )
                     await self.store.append(sid, user_node)
                     await self._emit(TurnStarted(
@@ -3691,6 +3699,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )
         if main:
             self._main_boundary_due = False
+            self._context_restore_pending = not self._compaction_context_restored
+            # Consume credit with its boundary, not with a future status. A
+            # later boundary must not inherit a previous cycle's put-back.
+            self._compaction_context_restored = False
         return main
 
     async def _keep_between_turn_compaction_line(self, text: str) -> bool:
@@ -3733,7 +3745,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return True
         if self._session is None:
             return True  # nothing to attach it to; not reachable with a CLI running
-        self._context_restore_pending = not self._compaction_context_restored
         try:
             await self._emit(await self._with_compaction_summary(compaction_from_boundary(
                 frame, session_id=self._session.session_id, turn_id=self._active_turn_id,
