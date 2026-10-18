@@ -486,6 +486,31 @@ def _owner_calls(a, b, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_question_card_moves_with_history_and_is_visible_on_receiver(pair, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core.user_question_handler import user_question_handler
+    from app.network import runners
+
+    a, b, _, _ = pair
+    questions = [{"question": "Which option?", "options": [{"label": "Keep", "description": "Keep it"}],
+                  "multiSelect": False, "header": "Choice"}]
+    real_find = runners.find
+    monkeypatch.setattr(runners, "find", lambda target: {
+        **(real_find(target) or {}), "capabilities": {"move_questions": 1}})
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    with a.active():
+        await user_question_handler.post_question(
+            request_id="move-question", tool_use_id="ask", session_id="handoff-test",
+            questions=questions, broadcast_func=AsyncMock())
+        assert await handoff.move(database.get_session("handoff-test"), b.device_id) is True
+    with b.active():
+        [card] = user_question_handler.get_pending_questions("handoff-test")
+        assert card["questions"] == questions
+        assert card["nonblocking"] is True
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+
+
+@pytest.mark.asyncio
 async def test_an_open_prompt_refuses_the_move(pair, monkeypatch):
     """#1819 rule 4: an open approval card cannot follow the chat."""
     from app.db import interactions
