@@ -51,14 +51,14 @@ async def test_stop_keeps_followup_as_durable_unsent_message(compact_chat, compa
     assert row["state"] == "aborted"
     assert turns.pop_ready("compact-chat") is None
     messages = database.get_session_messages("compact-chat")
-    assert [m["content"] for m in messages] == ["Not sent (stopped)\n\nKeep these exact words"]
+    assert [m["content"] for m in messages] == ["Keep these exact words"]
     assert messages[0]["metadata"]["upload_paths"] == ["/uploads/proof.png"]
     assert row["payload"]["upload_paths"] == ["/uploads/proof.png"]
     events = session_events.get_events("compact-chat")
     unsent = [e for e in events if e["event_type"] == "message.user"]
     assert len(unsent) == 1
     assert unsent[0]["payload"]["content"] == messages[0]["content"]
-    assert unsent[0]["payload"]["not_sent"] == "stopped"
+    assert unsent[0]["payload"]["not_sent"] is True
     assert unsent[0]["payload"]["upload_paths"] == ["/uploads/proof.png"]
     # A second Stop/reload/lost-ack retry cannot duplicate the transcript or
     # resume the stopped message. Every client replays this same durable event.
@@ -77,6 +77,47 @@ async def test_stop_preserves_remote_upload_blobs(compact_chat):
     await query_session_lifecycle.enter_user_stop("compact-chat")
     assert turns.get_turn(row["id"])["state"] == "aborted"
     assert database.get_session_messages("compact-chat")[0]["metadata"]["upload_blob_ids"] == ["blob-proof"]
+
+
+def test_stop_locks_counter_before_session_and_notifies_only_after_commit(compact_chat, monkeypatch):
+    from contextlib import contextmanager
+    pair = send(compact_chat, {"then_send": query()}).json()
+    real_get_db = turns.get_db
+    trace = []
+
+    class Cursor:
+        def __init__(self, cursor): self.cursor = cursor
+        def __getattr__(self, name): return getattr(self.cursor, name)
+        def execute(self, sql, *args, **kwargs):
+            trace.append(sql)
+            return self.cursor.execute(sql, *args, **kwargs)
+
+    class Connection:
+        def __init__(self, conn):
+            self.conn = conn
+            self._connection = getattr(conn, "_connection", conn)
+        def __getattr__(self, name): return getattr(self.conn, name)
+        def cursor(self, *args, **kwargs): return Cursor(self.conn.cursor(*args, **kwargs))
+
+    @contextmanager
+    def traced_db():
+        with real_get_db() as conn:
+            yield Connection(conn)
+        trace.append("committed")
+
+    def notified(sid, scope):
+        assert sid == "compact-chat" and scope == "session_events"
+        assert trace[-1] == "committed"
+        trace.append("notified")
+
+    monkeypatch.setattr(turns, "get_db", traced_db)
+    monkeypatch.setattr(session_events, "notify_session_write", notified)
+    turns.remove_queued_turn(pair["queued_turn_id"], preserve_compact_first=True)
+    counter = next(i for i, sql in enumerate(trace) if "FROM session_event_counters" in sql and "FOR UPDATE" in sql)
+    session = next(i for i, sql in enumerate(trace) if "FROM sessions" in sql and "FOR UPDATE" in sql)
+    abort = next(i for i, sql in enumerate(trace) if "UPDATE turns SET state='aborted'" in sql)
+    assert counter < session < abort
+    assert trace[-2:] == ["committed", "notified"]
 
 
 async def test_stop_record_failure_rolls_back_withdrawal(compact_chat, monkeypatch):

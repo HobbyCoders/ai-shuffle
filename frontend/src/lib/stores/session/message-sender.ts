@@ -10,6 +10,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
 import { api } from '$lib/api/client';
 import { compactSession } from '$lib/api/limit-resume';
+import { compactRetryId, clearCompactRetry } from './compact-first-retry';
 import { isCallActiveFor, sendVoiceText } from '$lib/services/voiceCall';
 import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
@@ -157,25 +158,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		sessionEphemeralCache,
 		appData, persistSession, stopTimeout, getActiveSession,
 	} = deps;
-
-	// Keep an ambiguous HTTP request's command id with the exact draft/options.
-	// sessionStorage survives a reload in this tab; successful acknowledgement
-	// clears it so an intentional later send of the same text is a new message.
-	const compactRetries = new Map<string, { fingerprint: string; id: string }>();
-	function compactRetryId(sid: string, fingerprint: string): string {
-		let previous = compactRetries.get(sid);
-		try { previous ??= JSON.parse(sessionStorage.getItem(`compact-first-retry:${sid}`) || 'null'); } catch { /* storage unavailable */ }
-		const id = previous?.fingerprint === fingerprint && /^client-[0-9a-f]{32}$/.test(previous.id)
-			? previous.id : newLocalPendingId();
-		const pending = { fingerprint, id };
-		compactRetries.set(sid, pending);
-		try { sessionStorage.setItem(`compact-first-retry:${sid}`, JSON.stringify(pending)); } catch { /* memory still retains it */ }
-		return id;
-	}
-	function compactAcknowledged(sid: string) {
-		compactRetries.delete(sid);
-		try { sessionStorage.removeItem(`compact-first-retry:${sid}`); } catch { /* storage unavailable */ }
-	}
 
 	// ─── Internal helper for worktree existing branch sessions ──────
 
@@ -528,7 +510,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			delete retryOverrides.context_window_base;
 			const clientMessageId = options?.compactFirst
 				? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: _state.profile,
-					project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }))
+					project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
 				: newLocalPendingId();
 			const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
 			const optimisticQueuedId = queuedEcho
@@ -629,7 +611,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					if (!result.queued_turn_id) {
 						throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
 					}
-					compactAcknowledged(_state.sessionId!);
+					clearCompactRetry(_state.sessionId!);
 				} catch (error) {
 					// Remove only our optimistic echo, never a newer session's draft
 					// or an authoritative queue snapshot that arrived in the meantime.
@@ -663,6 +645,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				feedController.clearOptimisticSend(_state.sessionId);
 				return false;
 			}
+			clearCompactRetry(_state.sessionId!);
 			// The pick is spent: the session now exists and its row carries the
 			// ownership, so follow-up sends must not re-assert a target. (Left
 			// intact on a failed send so a retry still goes to the chosen device.)

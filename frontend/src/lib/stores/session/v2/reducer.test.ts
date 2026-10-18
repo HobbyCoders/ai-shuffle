@@ -39,6 +39,12 @@ function fold(events: WireEvent[]) {
 
 
 
+it('preserves not_sent metadata while keeping original user text', () => {
+	const state = fold([ev('message.user', { content: 'My original words', not_sent: true })]);
+	expect(state.messages[0].content).toBe('My original words');
+	expect(state.messages[0].metadata?.not_sent).toBe(true);
+});
+
 describe('user rewind capability', () => {
 	it('retains the checkpoint identity and explicit capability during replay', () => {
 		const state = fold([

@@ -1005,8 +1005,8 @@ def remove_queued_turn(
                 and (row.get("payload") or {}).get("compact_before_turn_id")):
             from app.db import sessions, session_events
             payload = row["payload"]
-            content = "Not sent (stopped)\n\n" + (row.get("prompt") or "")
-            metadata = {"not_sent": "stopped", "queued_turn_id": row["id"],
+            content = row.get("prompt") or ""
+            metadata = {"not_sent": True, "queued_turn_id": row["id"],
                         "upload_paths": payload.get("upload_paths") or [],
                         "upload_blob_ids": payload.get("upload_blob_ids") or []}
             sessions.add_session_message(row["session_id"], "user", content,
@@ -1015,6 +1015,8 @@ def remove_queued_turn(
                 "type": "message.user", "turn_id": row["id"], "command_id": row.get("command_id"),
                 "payload": {"content": content, "profile_id": row.get("profile_id"), **metadata},
             }], _conn=conn)
+    if row and preserve_compact_first and (row.get("payload") or {}).get("compact_before_turn_id"):
+        session_events.notify_session_write(row["session_id"], "session_events")
     return row
 
 

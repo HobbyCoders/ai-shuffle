@@ -2731,6 +2731,14 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		};
 	}
 
+	it('retires a retry id when the authoritative queue confirms its command', () => {
+		const id = 'client-' + 'a'.repeat(32);
+		sessionStorage.setItem('compact-first-retry:session-1', JSON.stringify({id, fingerprint:'continue', createdAt:Date.now()}));
+		const row = {id:'queued', content:'continue', client_message_id:id};
+		handlers.handleMessage(frame([row]));
+		expect(sessionStorage.getItem('compact-first-retry:session-1')).toBeNull();
+	});
+
 	function pendingIds(): string[] {
 		return state.queuedMessages.map((m) => m.id);
 	}

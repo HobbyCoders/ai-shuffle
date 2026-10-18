@@ -2152,6 +2152,7 @@
 			messageUuid={message.jsonlUuid}
 			userPromptOccurrence={userPromptOccurrence(messageIndex)}
 			rewindEligible={rewindEligible[messageIndex]}
+			notSent={!!message.metadata?.not_sent}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}

@@ -60,6 +60,16 @@ def chat():
     return "question"
 
 
+def test_unsent_message_does_not_answer_question_or_advance_user_revision(chat):
+    session_events.append_events(chat, [event("message.user", content="Start"), event(content="Which?")])
+    before = row()
+    session_events.append_events(chat, [event("message.user", content="Original unsent words", not_sent=True)])
+    after = row()
+    assert after["last_user_message_seq"] == before["last_user_message_seq"]
+    assert after["last_user_message_at"] == before["last_user_message_at"]
+    assert after["last_assistant_question_seq"] == before["last_assistant_question_seq"]
+
+
 def test_last_prose_only_and_non_prose_ignored(chat):
     with patch.object(global_events, "lifecycle") as publish:
         session_events.append_events(chat, [event("message.user", content="Start"), event(content="Which?")])

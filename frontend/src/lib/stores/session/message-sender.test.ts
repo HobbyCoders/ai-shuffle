@@ -148,6 +148,16 @@ describe('compact first send', () => {
 		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).not.toBe(firstId);
 	});
 
+	it('clears an ambiguous compact id after a successful normal send', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		apiMocks.post.mockRejectedValueOnce(new Error('offline'));
+		await expect(sender.sendMessage('continue', { compactFirst: true })).rejects.toThrow('offline');
+		expect(sessionStorage.getItem('compact-first-retry:s1')).not.toBeNull();
+		expect(await sender.sendMessage('normal message')).toBe(true);
+		expect(sessionStorage.getItem('compact-first-retry:s1')).toBeNull();
+	});
+
 	it('does not reuse a refused draft id after its text or attachments change', async () => {
 		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
 		const sender = createMessageSender(deps);
