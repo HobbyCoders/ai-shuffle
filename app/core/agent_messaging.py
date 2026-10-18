@@ -521,11 +521,50 @@ async def _settle_delivered_continuation(session_id, owner, settled):
         await asyncio.to_thread(reclaim_untouched_worker_checkout, session_id)
 
 
+async def _finish_displaced_continuations(session_id, settled):
+    """Fail self-healed continuations whose parent cannot inherit this turn.
+
+    The durable hand-off survives another park/self-heal. Report only the
+    routing failure, never the live turn's text belonging to a different parent.
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.core.turn_recorder import record_task_settle_frame
+    from app.db import turns as turns_db
+
+    for item in (settled.get("payload") or {}).get("agent_message_displaced", []):
+        owner, completion_id = item["owner"], item["turn_id"]
+        summary = "Worker continuation interrupted: the continuing turn reports to a different parent."
+        async with turn_scheduler.message_resume_lock(session_id):
+            if task_registry.is_woken(owner, session_id, completion_id=completion_id):
+                continue
+            record = supervisor.get_worker(owner, session_id)
+            if record and record.continuation_turn_id:
+                current = await asyncio.to_thread(turns_db.get_turn, record.continuation_turn_id)
+                if current and float(current["position"]) > item["position"]:
+                    continue  # A newer admitted continuation owns the shared task row.
+            task = task_registry.get_task(owner, session_id)
+            if not task or task.get("status") != "running":
+                continue
+            task_registry.complete_task(owner, session_id, "error", summary=summary)
+            await record_task_settle_frame(owner, session_id, "error", summary, tool_use_id=session_id)
+            if record and record.continuation_turn_id:
+                supervisor.unregister_worker(owner, session_id)
+        await turn_scheduler.on_task_terminal(owner, {
+            "task_id": session_id, "tool_use_id": session_id,
+            "status": "error", "summary": summary,
+            "agent_message_turn_id": completion_id,
+        })
+
+
 async def finish_message_resume(session_id, settled, outcome):
     """Complete a resumed worker through the same parent wake gate as Task."""
     from app.core import provider_agent, turn_scheduler
     from app.core.task_registry import task_registry
 
+    # Displaced parents are owed a terminal even if the kept continuation parks.
+    await _finish_displaced_continuations(session_id, settled)
     if outcome == "parked":
         return
     owner = (settled.get("payload") or {}).get("agent_message_reply_to")
