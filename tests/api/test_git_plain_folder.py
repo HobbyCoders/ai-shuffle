@@ -1,6 +1,6 @@
 """Plain project folders are positive non-repos, not unavailable checkouts."""
 import subprocess
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -205,6 +205,49 @@ def test_existing_session_status_only_confirms_readable_plain_folder(plain_proje
     finally:
         if state == "unreadable-git":
             (folder / ".git").chmod(0o700)
+
+
+@pytest.mark.parametrize("scope", ["project", "session", "worker"])
+def test_real_repo_with_failed_status_never_becomes_plain(plain_project, monkeypatch, scope):
+    from app.db import database
+    project, folder, client = plain_project
+    git_at(folder, "init", "-b", "main")
+    failed_status = Mock(return_value={"is_git_repo": False})
+    monkeypatch.setattr(git.git_service, "get_status", failed_status)
+    query = ""
+    target_id = project["id"]
+    if scope == "project":
+        # An unscoped project read resolves the registered legacy project path,
+        # rather than using a session or selected-worker checkout scope.
+        legacy = database.create_project("failed-status-project", "Failed status", None, str(folder))
+        target_id = legacy["id"]
+    elif scope == "session":
+        database.create_session("failed-git-chat", "default", project_v2_id=project["id"])
+        query = "?session_id=failed-git-chat"
+    elif scope == "worker":
+        query = "?worker_id=local"
+    response = client.get(f"/api/v1/projects/{target_id}/git/status{query}")
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+    failed_status.assert_called_once_with(str(folder))
+
+
+@pytest.mark.parametrize("requested_branch", [None, "feature/missing"])
+async def test_branch_bound_plain_checkout_never_uses_plain_fallback(plain_project, monkeypatch, requested_branch):
+    from app.api import git_owner
+    project, folder, client = plain_project
+    checkouts.upsert_checkout(project["id"], "worker-b", str(folder), branch="feature/missing")
+    classify = Mock(return_value=True)
+    monkeypatch.setattr(git_owner, "_is_plain_project_folder", classify)
+    result = await control.handle("project-git", {
+        "action": "get_git_status", "project_id": project["id"], "branch": requested_branch,
+        "params": {"project_id": project["id"]},
+    }, from_device="viewer")
+    assert result["status"] == 409
+    assert result["detail"] == "Selected checkout is missing or ambiguous on this worker"
+    # A named checkout must be refused before any non-repository fallback,
+    # even if later branch-identity guards would also reject the folder.
+    classify.assert_not_called()
 
 
 @pytest.mark.parametrize("new_branch", [False, True])

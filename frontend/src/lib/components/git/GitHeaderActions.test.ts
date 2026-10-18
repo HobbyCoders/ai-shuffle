@@ -510,11 +510,15 @@ describe('GitHeaderActions untracked-only changes', () => {
 
 describe('GitHeaderActions panel rows', () => {
 	it.each(['branch', 'mode'])('keeps unavailable Git and Check again for a bound %s checkout', async source => {
-		setSnapshot({ status: { is_git_repo: false } });
+		setSnapshot({ status: { is_git_repo: false, current_branch: 'feature/gone' } });
 		if (source === 'mode') mocks.gitMode.set('worktree');
 		renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
 		expect(trigger().textContent).toContain('unavailable');
 		await openPanel();
+		const panel = screen.getByRole('dialog', { name: 'Git actions' });
+		expect(panel.querySelector('.gp-branch-name')?.textContent).toContain('feature/gone');
+		expect(screen.queryByRole('button', { name: /^Commit/ })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Ship It/ })).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
 		expect(mocks.retryLoad).toHaveBeenCalledOnce();
 		expect(screen.queryByText('Init Repo')).toBeNull();

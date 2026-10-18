@@ -97,6 +97,18 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(container.querySelector('.branch-name')?.textContent).toBe('main');
 		expect(container.querySelector('.wt-indicator')).not.toBeNull();
 	});
+	it('keeps Git context visible when a plain-folder answer fails revalidation', async () => {
+		session.store.set(base);
+		const knownPlain = { projectId: 'project', sessionId: 'saved-session', worktreeId: null,
+			hydrated: true, status: { is_git_repo: false }, error: null as string | null };
+		(git as any).set(knownPlain);
+		(gitStatus as any).set({ current_branch: null, is_git_repo: false });
+		const { container } = render(ContextPillBar, { sheetMode });
+		expect(container.querySelector('.branch-wt-row')).toBeNull();
+		(git as any).set({ ...knownPlain, error: 'Git checkout is unavailable. Check again.' });
+		await tick();
+		expect(container.querySelector('.branch-wt-row')).not.toBeNull();
+	});
 	it.each(['project', 'session', 'worktree', 'unhydrated'])('ignores another context’s non-repo status (%s)', async mismatch => {
 		session.store.set(base);
 		(git as any).set({ projectId: mismatch === 'project' ? 'other-project' : 'project',
