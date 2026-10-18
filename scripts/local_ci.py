@@ -345,7 +345,7 @@ def pytest_args(python: str, timeout: int = 120, parallel: bool = True) -> list[
     if has_module(python, "pytest_timeout"):
         args += [f"--timeout={timeout}"]
     if os.name == "nt":
-        # Skips the tests in scripts/ci/windows_known_failures.txt (issue #2215).
+        # Skips the tests in scripts/ci/windows_known_failures.txt (kept empty).
         args += ["-p", "windows_known_failures"]
     return args
 
@@ -640,6 +640,7 @@ SUITES = [
                         "tests/scripts/test_security_gate.py"], workflows, "Workflow and publication policy tests"),
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
                            "desktop/scripts/*", "desktop/build/*", "desktop/electron-builder.yml",
+                           "desktop/src/pages/*", "desktop/package-lock.json", "desktop/launcher.json",
                            "scripts/source_archive.py", "scripts/ci/update_reach.py"],
           update_reach_checks, "Update-reach regression tests and installed-app update verdict"),
 ]

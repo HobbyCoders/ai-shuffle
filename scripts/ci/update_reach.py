@@ -277,6 +277,27 @@ def launcher_files(read: Reader, entry: str = LAUNCHER_ENTRY) -> set:
     return seen
 
 
+LAUNCHER_LOCK = "desktop/package-lock.json"
+# Runtime reads in launcherMembers(), not edges the TypeScript import walk can see.
+LAUNCHER_RUNTIME = ("desktop/src/pages/*", "desktop/build/icon.png",
+                    TRUST_KEY, "desktop/scripts/source-profile.cjs")
+
+
+def launcher_dependencies(read: Reader) -> dict:
+    """Production packages packed by launcherMembers/electron-builder, including nested deps.
+
+    Ignore root metadata and dev/devOptional packages: changing build tooling does
+    not change the installed node_modules. Paths also identify renamed packages.
+    """
+    data = read(LAUNCHER_LOCK)
+    if data is None:
+        return {}
+    packages = json.loads(data).get("packages", {})
+    return {path: {key: package.get(key) for key in ("name", "version", "integrity")}
+            for path, package in packages.items()
+            if path.startswith("node_modules/") and not package.get("dev") and not package.get("devOptional")}
+
+
 def launcher_version(read: Reader) -> Optional[int]:
     """desktop/launcher.json "version" at a revision; None when absent or not a valid contract."""
     data = read(LAUNCHER_JSON)
@@ -286,8 +307,15 @@ def launcher_version(read: Reader) -> Optional[int]:
         value = json.loads(data)
     except ValueError:
         return None
-    version = value.get("version") if isinstance(value, dict) else None
-    return version if isinstance(version, int) and not isinstance(version, bool) and version >= 1 else None
+    if not isinstance(value, dict):
+        return None
+    count = lambda n: type(n) is int and 0 <= n <= 2**53 - 1
+    version, minimum = value.get("version"), value.get("minimum")
+    if not count(version) or version < 1 or not count(minimum) or minimum > version:
+        return None
+    if "start" in value and (not count(value["start"]) or value["start"] > version):
+        return None
+    return version
 
 
 def launcher_raised(base: Reader, head: Reader, released: Optional[int] = None) -> bool:
@@ -360,12 +388,26 @@ def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optio
         groups["linux-electron"] = ["desktop/package-lock.json"]
 
     launcher = launcher_files(base) | launcher_files(head)
-    groups["windows-launcher"] = [p for p in changed if p in launcher]
+    groups["windows-launcher"] = [p for p in changed if p in launcher or matches(p, LAUNCHER_RUNTIME)]
+    if LAUNCHER_LOCK in changed and launcher_dependencies(base) != launcher_dependencies(head):
+        groups["windows-launcher"].append(LAUNCHER_LOCK)
+    # A version-only bump is not a code change. Other contract fields affect
+    # launch policy and must not silently reuse an already released version.
+    if LAUNCHER_JSON in changed and launcher_version(base) is not None and launcher_version(head) is not None:
+        policy = lambda read: {k: v for k, v in json.loads(read(LAUNCHER_JSON)).items() if k != "version"}
+        if policy(base) != policy(head):
+            groups["windows-launcher"].append(LAUNCHER_JSON)
+    groups["windows-launcher"] = sorted(set(groups["windows-launcher"]))
     # Every launcher reports desktop/launcher.json's version; a closure change
     # that keeps it makes two different launchers indistinguishable (#97).
     # Unless no installer has that version yet: then the change ships in it.
     if groups["windows-launcher"] and not launcher_raised(base, head, released):
         groups["launcher-version"] = list(groups["windows-launcher"])
+    # Validate both endpoints even when no imported source changed. Absence at
+    # the base predates the contract and remains a valid first-version transition.
+    if (any(read(LAUNCHER_JSON) is not None and launcher_version(read) is None for read in (base, head))
+            or (base(LAUNCHER_JSON) is not None and head(LAUNCHER_JSON) is None)):
+        groups["launcher-version"] = sorted(set(groups["launcher-version"]) | {LAUNCHER_JSON})
     groups["update-trust-key"] = [p for p in changed if p == TRUST_KEY]
     groups["windows-packaging"] = [p for p in changed if matches(p, WINDOWS_PACKAGING) and p != TRUST_KEY]
     groups["android-native"] = [p for p in changed if matches(p, ANDROID_NATIVE) and not matches(p, CLOUD_LEGACY_PATHS)]
@@ -414,8 +456,9 @@ EXPLAIN = {
     "windows-launcher": "Installed Windows and Linux desktop apps run their installer's copy (app.asar) before every "
                         "hand-over; their launcher never sees this change. Raise desktop/launcher.json \"version\" "
                         "(desktop/LAUNCHER.md) and have the owner accept the launcher change.",
-    "launcher-version": "The launcher closure changed but desktop/launcher.json \"version\" was not raised, so older "
-                        "and newer launchers report the same version (desktop/LAUNCHER.md). Raise it in this range. "
+    "launcher-version": "The launcher inputs changed without a version raise, or desktop/launcher.json is invalid "
+                        "at an endpoint (minimum and optional start must be 0..version). Validate the contract and "
+                        "raise desktop/launcher.json \"version\" for changed inputs (desktop/LAUNCHER.md). "
                         "Only if the change leaves what the launcher does unchanged may the owner accept it with "
                         "update-reach:no-launcher-change instead; update-reach:windows-launcher does not accept it.",
     "linux-electron": "The locked Electron version changed. Packaged Linux updates keep the installed Electron sandbox "

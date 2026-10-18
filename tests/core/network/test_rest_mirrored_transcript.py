@@ -15,6 +15,31 @@ from app.network import engine
 from tests.core.network.harness import converge, join
 
 
+def _event_run(worker):
+    rows = worker.sql(
+        "SELECT seq, event_type, payload FROM session_events WHERE session_id = ? ORDER BY seq",
+        ("remote-chat",),
+    )
+    return [(r["seq"], r["event_type"], json.loads(r["payload"])) for r in rows]
+
+
+def _mirror_recorded_chat(viewer, owner, *, max_rounds=10):
+    # exchange() only transfers already-published ops. One scan may stop after
+    # 400 events when catalog.EVENT_PASS_SECONDS expires; converge() alone then
+    # leaves 397 text deltas on the viewer forever. Drive scanner + transport
+    # until the entire recorded run (not just its first DB page) is mirrored.
+    expected = _event_run(owner)
+    for _ in range(max_rounds):
+        with owner.active():
+            engine.scan_all(strict=True)
+        converge([viewer, owner])
+        actual = _event_run(viewer)
+        if actual == expected:
+            return
+    pytest.fail(f"transcript did not converge after {max_rounds} scans; "
+                f"owner events={expected!r}; viewer events={actual!r}")
+
+
 @pytest.fixture
 def mirrored_chat(workers, request):
     viewer, owner = workers("unraid"), workers("remote")
@@ -59,8 +84,7 @@ def mirrored_chat(workers, request):
             session_events.append_events("remote-chat", [
                 _build_event(TranscriptRewound, "remote-chat", from_seq=1),
             ])
-        engine.scan_all()
-    converge([viewer, owner])
+    _mirror_recorded_chat(viewer, owner)
     with viewer.active():
         row = database.get_session("remote-chat")
         assert row["owner_device_id"] == owner.device_id
@@ -115,7 +139,37 @@ def test_mirrored_tool_result_updates_its_card(mirrored_chat, suffix):
 def test_event_pages_do_not_split_a_reply(mirrored_chat, suffix):
     response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix + "?message_limit=1")
     assert response.status_code == 200, response.text
-    assert [m["content"] for m in response.json()["messages"]] == ["x" * 505]
+    messages = response.json()["messages"]
+    assert [m["content"] for m in messages] == ["x" * 505], [
+        (m["role"], len(m["content"])) for m in messages
+    ]
+
+
+def test_mirror_wait_fails_with_both_event_runs(workers, monkeypatch):
+    viewer, owner = workers("viewer"), workers("owner")
+    with owner.active():
+        engine.create_network("Home", device_name="Owner")
+        database.create_session(session_id="remote-chat", profile_id="default")
+        session_events.append_events("remote-chat", [
+            {"type": "assistant.text_delta", "payload": {"text": "not delivered"}},
+        ])
+    monkeypatch.setattr(__name__ + ".converge", lambda workers: None)
+    with pytest.raises(pytest.fail.Exception, match=r"owner events=.*not delivered.*viewer events=\[\]"):
+        _mirror_recorded_chat(viewer, owner, max_rounds=1)
+
+
+@pytest.fixture
+def budget_limited_catalog(monkeypatch):
+    # Deterministic slow-scanner case: publish_owned may legally stop after its
+    # first 400-event batch if the one-second wall-clock budget has elapsed.
+    monkeypatch.setattr("app.network.catalog.EVENT_PASS_SECONDS", 0)
+
+
+@pytest.mark.usefixtures("budget_limited_catalog")
+@pytest.mark.parametrize("suffix", ["", "/live"])
+@pytest.mark.parametrize("mirrored_chat", ["long"], indirect=True)
+def test_event_pages_after_budget_limited_scan(mirrored_chat, suffix):
+    test_event_pages_do_not_split_a_reply(mirrored_chat, suffix)
 
 
 def test_metadata_only_live_does_not_read_events(mirrored_chat, monkeypatch):

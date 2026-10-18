@@ -24,6 +24,14 @@ name: Publish a platform installer
 # is unchanged.
 
 on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+      build_run_id:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       platform:
