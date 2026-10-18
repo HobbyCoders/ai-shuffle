@@ -652,5 +652,13 @@ try {
   await writeEvidence(true);
   console.log('\n' + await fs.readFile(path.join(output, 'summary.txt'), 'utf8'));
   if (!report.success) process.exitCode = 1;
+  // The verdict is written. Something left open (a DevTools connection, an
+  // app process, a helper) must not keep this run going until the job's
+  // time limit: name what is still open, then exit.
+  setTimeout(() => {
+    const open = process._getActiveHandles?.().map(handle => handle?.constructor?.name ?? typeof handle) ?? [];
+    console.error(`Exiting with ${open.length} handle(s) still open: ${[...new Set(open)].join(', ')}`);
+    process.exit();
+  }, 10000).unref();
 }
 function readMarker() { return readJson(markerFile); }
