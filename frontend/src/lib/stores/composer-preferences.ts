@@ -204,6 +204,25 @@ function saveWorktree(project: ProjectPick, value: WorktreePick) {
  applyWorktree(key, value);
  preferenceSync.save(key, projectWorktrees[key]);
 }
+// Git discovery can link a local project after its first compose pick. Promote
+// only that proven pair; bootstrap uses only_if_missing so a saved shared choice
+// on another device wins. Never move a branch while its create is in flight.
+function linkWorktreeProject(project: ProjectPick) {
+ if (!project.projectId || !project.projectV2Id) return;
+ const localKey = projectWorktreeKey({...project, projectV2Id:null});
+ const key = projectWorktreeKey(project);
+ const local = projectWorktrees[localKey];
+ if (!local || (local.intent === 'local' && !local.checkout)
+  || [...claims].some(claim => claim.key === localKey && claim.ownerEpoch === sessionOwnerEpoch())) return;
+ const promote = !projectWorktrees[key];
+ if (promote) {
+  applyWorktree(key, {...local, checkout:local.checkout ? {...local.checkout, ...project} : null});
+  if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
+ }
+ applyWorktree(localKey, null);
+ preferenceSync.save(localKey, null);
+ if (promote) void preferenceSync.reconnect();
+}
 try {
  const cached = JSON.parse(localStorage.getItem(WORKTREE_CACHE_KEY) || '{}');
  if (cached && typeof cached === 'object' && !Array.isArray(cached))
@@ -366,6 +385,7 @@ export const composerPreferences = {
    const checkout = normalize('checkout', value);
    composerPreferences.rememberCheckout(checkout ?? values.project, checkout); return;
   }
+  if (key === 'project') linkWorktreeProject(value as ProjectPick);
   store(key, value); preferenceSync.save(`composer.${key}`, values[key]);
  },
  /**

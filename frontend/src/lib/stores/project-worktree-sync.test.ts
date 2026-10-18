@@ -39,6 +39,33 @@ it('syncs only the chosen project and restores on a second device by shared UUID
  otherSync.stop();
  expect(other.worktreeForProject(a)).toEqual({intent:'local',checkout:null});
 });
+it.each([false,true])('links a just-discovered project without losing its pick or overwriting an existing shared choice (saved=%s)',async saved=>{
+ const {p,key,sync}=await device();
+ const local={projectId:'a',projectV2Id:null};
+ const shared={projectId:'a',projectV2Id:'shared-a'};
+ p.rememberWorktreeIntent(local,'worktree');
+ p.rememberCheckout(local,{...local,kind:'branch',branch:'topic/a',baseBranch:'develop',createNew:true});
+ await sync.hydrate();
+ if (saved) values[key(shared)]={intent:'local',checkout:null};
+ p.set('project',shared);
+ await sync.hydrate();
+ expect(p.worktreeForProject(shared)).toEqual(saved ? {intent:'local',checkout:null}
+  : {intent:'worktree',checkout:expect.objectContaining({...shared,branch:'topic/a',baseBranch:'develop',createNew:true})});
+ expect(p.worktreeForProject(local)).toEqual({intent:'local',checkout:null});
+ sync.stop();
+});
+it('does not move a one-time branch while its create is in flight',async()=>{
+ const {p,sync}=await device();
+ const local={projectId:'a',projectV2Id:null}, shared={...local,projectV2Id:'shared-a'};
+ p.set('project',local);
+ p.rememberCheckout(local,{...local,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true});
+ const claim=p.claimBranchChoice(local,'topic/a',true);
+ p.set('project',shared);
+ claim.consume();
+ expect(p.worktreeForProject(local).checkout).toBeNull();
+ expect(p.worktreeForProject(shared).checkout).toBeNull();
+ sync.stop();
+});
 it('ignores old server-wide values instead of migrating them into every project',async()=>{
  values={'composer.worktreeIntent':'worktree','composer.checkout':{kind:'branch',projectId:'a',projectV2Id:null,branch:'old',baseBranch:'main',createNew:true}};
  const {p,sync}=await device();
