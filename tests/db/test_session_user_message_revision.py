@@ -1,4 +1,5 @@
 """User-message revisions are persisted and delivered without opening the chat."""
+import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -195,6 +196,9 @@ async def test_delivered_steer_broadcasts_to_unopened_tabs():
     database.create_session("steer", "default")
     database.add_session_message("steer", "user", "Initial prompt")
     before = stamp("steer")
+    # Past one tick of Windows' ~15.6 ms clock, as any real second message is:
+    # otherwise both messages can carry the same timestamp.
+    await asyncio.sleep(0.05)
     sockets = [Socket(), Socket(), Socket()]
     ids = [global_events.register(ws, kind, owner) for ws, kind, owner in zip(
         sockets, ["admin", "admin", "api_user"], ["tab-a", "tab-b", "other"]
