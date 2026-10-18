@@ -17,6 +17,21 @@ from app.db import session_questions as questions
 from tests.db import schema_lifecycle_helpers as lifecycle
 
 
+def test_lifecycle_lookup_fetches_one_row_and_repeats_only_after_rewind():
+    from unittest.mock import Mock
+    cursor = Mock()
+    cursor.fetchall.side_effect = [
+        [{"seq": 9, "event_type": "transcript.rewound", "payload": {"from_seq": 5}}],
+        [{"seq": 4, "event_type": "turn.completed", "payload": {}}],
+    ]
+    boundary = next(questions._tail(cursor, "question", lifecycle_only=True))
+    assert boundary == (4, "turn.completed", {})
+    assert cursor.execute.call_count == 2
+    for call in cursor.execute.call_args_list:
+        assert call.args[0].endswith("ORDER BY seq DESC LIMIT 1")
+    assert cursor.execute.call_args_list[1].args[1] == ("question", 5)
+
+
 CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_questions.json").read_text(encoding="utf-8"))
 
 
@@ -296,19 +311,39 @@ def test_http_surface_parity(chat, path, question):
     assert (type(epoch) is str) if question else epoch is None
 
 
+@pytest.mark.parametrize("boundary", ["turn.aborted", "turn.parked"])
+def test_old_terminal_boundary_does_not_hide_fresh_standalone_prose(chat, boundary):
+    session_events.append_events(chat, [event("turn.started"), event(content="Proceed?")])
+    assert row()["last_assistant_question_seq"] is None
+    session_events.append_events(chat, [event("turn.completed")])
+    assert row()["last_assistant_question_seq"] == 2
+    session_events.append_events(chat, [event(boundary)])
+    assert row()["last_assistant_question_seq"] is None
+    session_events.append_events(chat, [event(content="Try again?")])
+    assert row()["last_assistant_question_seq"] == 5
+
+
 @pytest.mark.asyncio
-async def test_real_recorder_stream_produces_question(chat):
+@pytest.mark.parametrize("content, expected", [
+    ("Which one?", True),
+    ("Why did this fail? Checking where the call sits in startup:", False),
+])
+async def test_real_recorder_stream_produces_question(chat, content, expected):
     from app.core.turn_recorder import TurnRecorder
     recorder = TurnRecorder(chat, None, None, None, "test-owner")
     try:
         await recorder.start("Start", profile_id="default")
-        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": "Which "})
+        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": content[:-1]})
         await recorder.on_event({"type": "provider_alive", "signal": "keepalive"})
         assert row()["last_assistant_question_seq"] is None
-        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": "one?"})
+        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": content[-1:]})
+        assert row()["last_assistant_question_seq"] is None
         await recorder.on_event({"type": "done", "metadata": {}})
         saved = row()
-        assert saved["last_assistant_question_seq"] > saved["last_user_message_seq"]
+        if expected:
+            assert saved["last_assistant_question_seq"] > saved["last_user_message_seq"]
+        else:
+            assert saved["last_assistant_question_seq"] is None
         assert saved["last_assistant_question_epoch"] == session_events.get_log_epoch(chat)
     finally:
         await recorder.close()

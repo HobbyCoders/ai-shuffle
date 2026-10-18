@@ -62,7 +62,7 @@ def test_question_revision_lock_allows_concurrent_suggestion_save(monkeypatch, a
         finally:
             append_at_advisory.set()
     after = database.get_session(sid)
-    assert after["last_assistant_question_seq"] == 3
+    assert after["last_assistant_question_seq"] == (None if activity == "turn.started" else 3)
     assert after["updated_at"] > before["updated_at"]
     if activity == "turn.started":
         assert composer_suggestions.get(sid) is None

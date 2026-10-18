@@ -117,6 +117,8 @@ export interface ChatMessage {
 	turnId?: string; // Turn this message belongs to (user messages, from the wire event). Two user messages sharing one turn id means the later one was steered into a turn already running — see work-log's splitTurns.
 	queuedTurnId?: string; // Queued row absorbed into an already-running turn.
 	streaming?: boolean;
+	/** Prose attention dismissed by an abort or a durable settle boundary. */
+	proseQuestionDismissedAt?: number;
 	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
 	systemData?: Record<string, unknown>; // Raw data from system message

@@ -158,6 +158,10 @@ export function openSessionNeeds(
 		pendingQuestions?: readonly unknown[] | null;
 		messages?: readonly ChatMessage[] | null;
 		isLoadingSession?: boolean;
+		isStreaming?: boolean;
+		optimisticStreaming?: boolean;
+		turnParked?: boolean;
+		activeTasks?: readonly unknown[] | null;
 	},
 	groupToolCalls: boolean,
 	rememberedProse = false,
@@ -166,7 +170,8 @@ export function openSessionNeeds(
 ): OpenSessionNeeds {
 	const permissions = state.pendingPermissions?.length ?? 0;
 	const questions = state.pendingQuestions?.length ?? 0;
-	const proseQuestion = groupToolCalls && !proseDismissed && (
+	const liveWork = state.isStreaming || state.optimisticStreaming || state.turnParked || !!state.activeTasks?.length;
+	const proseQuestion = groupToolCalls && !proseDismissed && !liveWork && (
 		state.isLoadingSession
 			? rememberedProse
 			: !!state.messages && scanProseQuestion(state.messages)
@@ -229,9 +234,8 @@ export function deriveStatus(input: {
 	// prompt. It is tracked apart from the run state, so it also outranks a
 	// mirror's owner state (which reads `working` while the tool call waits).
 	if (input.privateAccess) return 'needs_permission';
-	// The open session's own queues are authoritative for it, and anything it
-	// waits on beats Working (spec §5). A prose question parks it as Awaiting
-	// input until the next user message.
+	// Explicit prompt queues are authoritative and can block a running turn.
+	// Prose alone is only attention-worthy after all work has ended.
 	if (input.open) {
 		if (input.open.permissions > 0) return 'needs_permission';
 		if (input.open.questions > 0) return 'has_question';
@@ -241,8 +245,8 @@ export function deriveStatus(input: {
 	// streaming/attention maps when the remote turn settles.
 	if (input.remoteRuntimeState) {
 		switch (input.remoteRuntimeState) {
-			case 'working': return proseQuestion ? 'await' : 'working';
-			case 'parked': return proseQuestion ? 'await' : 'parked';
+			case 'working': return 'working';
+			case 'parked': return 'parked';
 			case 'permission': return 'needs_permission';
 			case 'question': return 'has_question';
 			case 'offline': return 'offline';
@@ -258,9 +262,6 @@ export function deriveStatus(input: {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
-	// A prose question parks the session as Awaiting input until the next
-	// user message; a prompt card outranks it, Working does not.
-	if (proseQuestion) return 'await';
 	// Working means a turn is actually running. A turn that ended with live
 	// background work (a Monitor shell, a sub-agent) is parked even when the
 	// durable marker is missing: some park paths never write it (durable agent
@@ -268,6 +269,7 @@ export function deriveStatus(input: {
 	// is best-effort.
 	if (input.streaming) return 'working';
 	if (input.parked || input.backgroundWork) return 'parked';
+	if (proseQuestion) return 'await';
 	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
 	if (input.prState === 'merged') return 'pr_merged';
 	if (input.isActive) return 'done';
@@ -807,7 +809,7 @@ export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardActio
  * views of the same queue rather than their sum.
  */
 export function needsYouCount(
-	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'>,
+	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'> & Partial<Pick<Session, 'has_running_tasks' | 'parked_task_kind'>>,
 	attention: { count: number } | null | undefined,
 	privateAccessPending = 0,
 	open: OpenSessionNeeds | null = null
@@ -816,12 +818,15 @@ export function needsYouCount(
 	const remoteWaiting = s.remote_runtime_state === 'permission' || s.remote_runtime_state === 'question' ? 1 : 0;
 	const background = s.is_remote ? remoteWaiting : Math.max(0, attention?.count ?? 0);
 	const prompts = open ? Math.max(background, open.permissions + open.questions) : background;
-	return Math.max(0, privateAccessPending) + prompts + (open?.proseQuestion ? 1 : 0);
+	const liveWork = s.is_remote
+		? !!s.remote_runtime_state && s.remote_runtime_state !== 'idle'
+		: s.has_running_tasks || !!s.parked_task_kind;
+	return Math.max(0, privateAccessPending) + prompts + (open?.proseQuestion && !liveWork ? 1 : 0);
 }
 
 /** Whether a session is waiting on the user right now (see `needsYouCount`). */
 export function sessionNeedsYou(
-	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'>,
+	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'> & Partial<Pick<Session, 'has_running_tasks' | 'parked_task_kind'>>,
 	attention: { count: number } | null | undefined,
 	privateAccessPending = 0,
 	open: OpenSessionNeeds | null = null

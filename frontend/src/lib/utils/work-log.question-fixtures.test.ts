@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import cases from '../../../../tests/fixtures/prose_questions.json';
 import { asksQuestion, lastProseAsksQuestion } from './work-log';
+import { openSessionNeeds } from '$lib/components/layout/session-card-data';
 import eventCases from '../../../../tests/fixtures/prose_question_events.json';
 import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
 
@@ -13,7 +14,10 @@ describe('backend/frontend shared event-sequence projection', () => {
 			const event = { ...step.payload, type: step.type, id: `event-${index + 1}`,
 				seq: index + 1, session_id: 'question' } as WireEvent;
 			state = reduce(state, event);
-			const asks = lastProseAsksQuestion(state.messages);
+			// The raw reducer owns mutable drafts until publication. Mirror the
+			// feed's published message array so memoized scans see each prefix.
+			const asks = openSessionNeeds({ messages: [...state.messages], isStreaming: state.isStreaming,
+				turnParked: state.parked, activeTasks: state.activeTaskSummaries.filter(t => t.status === 'running') }, true).proseQuestion;
 			const prose = state.messages.findLast((m) => m.role === 'assistant' &&
 				(m.type === 'text' || !m.type) && m.content?.trim());
 			expect(asks ? prose?.seq : null, `step ${index + 1}: ${step.type}`).toBe(step.question_seq);

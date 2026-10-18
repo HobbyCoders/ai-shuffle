@@ -79,8 +79,8 @@ This transport does not introduce any new sanitization.
 
 **Rule:**
 1. The four surfaces stay exactly as they are (they work). What is added is a **single "Needs you" count** derived from all of them, used in three existing places: the sidebar session row status (the pill already exists: Working / Needs you / Done / Failed), the `TurnNavigator` tick for that turn (an amber dot, the rail is unchanged otherwise), and the document title.
-2. Prose questions are protected (§3) so they never fold, and a turn whose last prose asks a question counts as "Needs you" until the next user message.
-3. "Needs you" always wins over "Working" in the sidebar.
+2. Prose questions are protected (§3) so they never fold. Only an idle, finished turn whose final prose sentence ends in a question counts as "Needs you" (a trailing simple list of choices is allowed). Aborted turns do not request prose attention. Earlier self-questions followed by narration do not count. Running turns, parked turns and live background work keep their runtime status and do not count prose toward attention. A user reply or settling the session dismisses the prose attention; settling a prose-only question leaves the turn parked-idle.
+3. Explicit question cards, permission prompts and private-access waits still win over "Working" in the sidebar. Prose questions never override "Working" or "Parked".
 
 ---
 

@@ -107,6 +107,7 @@ import { browserPanel } from '../../browser-panel.svelte';
 import { sidePanel, sessionPanelKey } from '../../side-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
 import type { ChatMessage } from '../../types';
+import { openSessionNeeds } from '$lib/components/layout/session-card-data';
 
 // ─── rAF stub: capture callbacks, flush on demand (never auto-fires) ──────────
 
@@ -298,6 +299,25 @@ describe('feedController live composer activity', () => {
 		const live = { ...activity, id: 'live', seq: 2 };
 		hoisted.onEvent!(live);
 		expect(onSessionActivity).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(live));
+	});
+});
+
+describe('published prose attention', () => {
+	it.each(['turn.completed', 'turn.aborted'])('uses published turnParked and %s state', (terminal) => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!({ type: 'turn.started', id: 'start', session_id: 's1', seq: 1 });
+		hoisted.onEvent!({ ...textDelta('question', 'Should I continue?'), seq: 2 });
+		hoisted.onEvent!({ type: 'turn.parked', id: 'park', session_id: 's1', seq: 3 });
+		hoisted.onEvent!(caughtUp(3));
+		expect(deps.state.turnParked).toBe(true);
+		expect(deps.state.activeTasks).toEqual([]);
+		expect(openSessionNeeds(deps.state, true).proseQuestion).toBe(false);
+		hoisted.onEvent!({ type: terminal, id: 'end', session_id: 's1', seq: 4, reason: 'error' });
+		flushRaf();
+		expect(deps.state.turnParked).toBe(false);
+		expect(openSessionNeeds(deps.state, true).proseQuestion).toBe(terminal === 'turn.completed');
 	});
 });
 

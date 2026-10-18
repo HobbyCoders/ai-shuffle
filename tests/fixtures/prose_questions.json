@@ -13,7 +13,7 @@
   },
   {
     "content": "Why? Done.",
-    "expected": true
+    "expected": false
   },
   {
     "content": "`x?`",
@@ -76,7 +76,7 @@
     "expected": false
   },
   {
-    "content": "ahttps://example.test/?q=x",
+    "content": "ahttps://example.test/?q=x?",
     "expected": true
   },
   {
@@ -84,7 +84,7 @@
     "expected": false
   },
   {
-    "content": "[link](path with?space)",
+    "content": "[link](path with space?)",
     "expected": true
   },
   {
@@ -93,6 +93,46 @@
   },
   {
     "content": "`\n?\n` done",
+    "expected": false
+  },
+  {
+    "content": "One more question: can someone already stuck on this error get v1.0.1 in-app, or do they need the installer? Checking where the failing call sits in startup:",
+    "expected": false
+  },
+  {
+    "content": "Why did it fail?\n\nI am checking the startup logs.",
+    "expected": false
+  },
+  {
+    "content": "Checks passed.\n\nWould you like me to open a draft PR?",
+    "expected": true
+  },
+  {
+    "content": "**Which option would you prefer?**",
+    "expected": true
+  },
+  {
+    "content": "He asked \"Why?\" Then I checked the logs.",
+    "expected": false
+  },
+  {
+    "content": "\"Which option would you prefer?\"",
+    "expected": true
+  },
+  {
+    "content": "Why? I have the answer.",
+    "expected": false
+  },
+  {
+    "content": "Which do you want?\n1. Red\n2. Blue",
+    "expected": true
+  },
+  {
+    "content": "Which do you want?\n\n- Red\n- Blue",
+    "expected": true
+  },
+  {
+    "content": "Why? I will compare these.\n1. Red\n2. Blue",
     "expected": false
   }
 ]
