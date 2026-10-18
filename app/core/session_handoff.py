@@ -484,6 +484,7 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
     # Only a detached BLOCKING question owns the next input. Ordinary posted
     # cards explicitly let the agent keep working and must not drop its note.
     if any(row["kind"] == "question" and row["payload"].get("handoff_detached")
+           and row["payload"].get("handoff_id") == pending.handoff_id
            for row in interactions.get_pending_interactions(session_id)):
         return "question"
     if pending.by != "agent":
@@ -859,7 +860,8 @@ def _busy_words(state: Dict[str, Any]) -> str:
 
 
 def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
-                          turn_id: Optional[str] = None, *, handoff_context: str = "") -> List[Dict[str, Any]]:
+                          turn_id: Optional[str] = None, *, handoff_context: str = "",
+                          handoff_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Cancel callbacks and save replacement cards in ONE transaction.
 
     No question can disappear if the process stops between detaching the turn
@@ -893,7 +895,7 @@ def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
             payload = {"request_id": request_id, "tool_use_id": request_id,
                        "questions": row["payload"]["questions"], "nonblocking": True,
                        "handoff_detached": True, "handoff_context": handoff_context,
-                       "handoff_turn_id": turn_id}
+                       "handoff_id": handoff_id, "handoff_turn_id": turn_id}
             iid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"))
             cur.execute("INSERT INTO pending_interactions (id,session_id,kind,payload,state) "
                         "VALUES (%s,%s,'question',%s,'pending') ON CONFLICT (id) DO NOTHING",
@@ -955,7 +957,8 @@ async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pendin
     if not blocking:
         # A transient failure after the detach transaction may have prevented
         # interrupt/notify. Retry those steps for the SAME captured turn only.
-        if live and runtime and any(r["payload"].get("handoff_turn_id") == live["id"] for r in rows):
+        if live and runtime and any(r["payload"].get("handoff_turn_id") == live["id"]
+                                    and r["payload"].get("handoff_id") == pending.handoff_id for r in rows):
             await runtime.interrupt("stop", source="session_handoff")
             interaction_wait.notify_changed(session_id)
         return True
@@ -986,13 +989,20 @@ async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pendin
                 for tool, payload in open_tools.items():
                     match = next((r for r in unmatched if r["payload"].get("tool_use_id") == tool), None)
                     if match is None and payload.get("name") in FLUID_QUESTION_TOOLS:
-                        # Without _ctx_tool_use_id the producer uses request_id
-                        # as the card id. Match its full normalized question,
-                        # not a generic permission/tool name or just its text.
+                        # Defensive compatibility: current Fluid always supplies
+                        # a tool id and posts nonblocking cards. Older adapters
+                        # may use request_id, with a rendered single-question
+                        # schema rather than the tool.use event's raw questions.
                         questions = questions_from_tool_input(payload.get("input"))
+                        shapes = [questions]
+                        if len(questions) == 1:
+                            from fluid.tools.builtins.ask_user import _render_message
+
+                            shapes.append(questions_from_tool_input({
+                                "question": _render_message(questions[0]), "schema": questions[0]}))
                         match = next((r for r in unmatched
                                       if r["payload"].get("tool_use_id") == r["payload"].get("request_id")
-                                      and questions and r["payload"].get("questions") == questions), None)
+                                      and questions and r["payload"].get("questions") in shapes), None)
                     if match is None:
                         return False
                     unmatched.remove(match)
@@ -1004,7 +1014,8 @@ async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pendin
         return True  # An active run without its question turn is not safe to stop.
     replacements = await asyncio.to_thread(_detach_question_rows, session_id, blocking,
                                           live["id"] if live else None,
-                                          handoff_context=_handoff_context(pending, pending.label))
+                                          handoff_context=_handoff_context(pending, pending.label),
+                                          handoff_id=pending.handoff_id)
     if not replacements:
         return True
     # Interrupt the live provider BEFORE explicitly waking the cancelled

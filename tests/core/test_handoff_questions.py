@@ -10,7 +10,13 @@ import pytest
 from app.core import session_handoff as sh
 from app.db import database, interactions, session_events, turns
 from app.network import handoff
-from tests.core.test_session_handoff import _chat, _clean, _settle  # noqa: F401
+from tests.core.test_session_handoff import _chat, _clean  # noqa: F401
+from tests.core.test_session_handoff import _settle as _poll_until
+
+
+async def _settle(predicate):
+    return await asyncio.wait_for(_poll_until(predicate), timeout=3)
+
 
 QUESTIONS = [
     {
@@ -26,20 +32,20 @@ QUESTIONS = [
 TARGET = {"capabilities": {"move_questions": 1}}
 
 
-async def _post(*, blocking=False, tool_use_id="ask-tool"):
+async def _post(*, blocking=False, tool_use_id="ask-tool", questions=QUESTIONS):
     from app.core.user_question_handler import user_question_handler
 
     if blocking:
         return asyncio.create_task(
             user_question_handler.request_answers(
-                "original", tool_use_id or "original", "s1", QUESTIONS, AsyncMock()
+                "original", tool_use_id or "original", "s1", questions, AsyncMock()
             )
         )
     await user_question_handler.post_question(
         request_id="original",
         tool_use_id="ask-tool",
         session_id="s1",
-        questions=QUESTIONS,
+        questions=questions,
         broadcast_func=AsyncMock(),
     )
 
@@ -135,7 +141,9 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
                 {"running": True, "tasks": [], "queued": 0, "wake": False},
                 pending,
             )
-        assert await callback == {"error": "No answers received"}
+        assert await asyncio.wait_for(callback, timeout=3) == {
+            "error": "No answers received"
+        }
         runtime.interrupt.assert_awaited_once()
         [replacement] = interactions.get_pending_interactions("s1")
         assert replacement["payload"]["questions"] == QUESTIONS
@@ -143,9 +151,15 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
         assert replacement["payload"]["request_id"] != "original"
         assert turns.get_turn(turn["id"])["state"] == "aborted"
         assert replacement["payload"]["handoff_detached"] is True
+        assert replacement["payload"]["handoff_id"] == pending.handoff_id
         assert sh.resume_plan("s1", pending, "dev-gaming") == "question"
+
+        async def record_moved(sid, owner, content, data):
+            await sh._record(sid, content, data)
+            return True
+
         with (
-            patch.object(sh, "_tell", AsyncMock()),
+            patch.object(sh, "_tell", side_effect=record_moved),
             patch.object(sh, "deliver_held", AsyncMock()) as deliver,
         ):
             assert "waits for your answer" in await sh._moved(
@@ -180,6 +194,165 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
     finally:
         callback.cancel()
         await asyncio.gather(callback, return_exceptions=True)
+
+
+@pytest.mark.parametrize("outcome", ["failure", "timeout"])
+@pytest.mark.parametrize("next_action", ["answer", "retry"])
+async def test_failed_detach_does_not_claim_move_or_suppress_a_later_resume(
+    outcome, next_action
+):
+    from app.core.user_question_handler import (
+        _confirmed_handoff_context,
+        user_question_handler,
+    )
+
+    _chat()
+    callback = await _post(blocking=True)
+    try:
+        assert await _settle(lambda: interactions.get_pending_interactions("s1"))
+        first = sh.request("s1", "DesktopWorker", "first move note")
+        pending = sh._pending["s1"]
+        if outcome == "timeout":
+            pending.expires_at = time.time() + 0.04
+        move = AsyncMock(side_effect=RuntimeError("target unavailable"))
+        with (
+            patch("app.network.runners.find", return_value=TARGET),
+            patch.object(sh, "_owner_now", return_value=None),
+            patch.object(sh, "_busy", return_value=outcome == "timeout"),
+            patch.object(sh, "POLL_S", 0.01),
+            patch("app.api.sessions.move_session_to", move),
+        ):
+            result = await asyncio.wait_for(sh.run_pending("s1"), timeout=3)
+        assert ("failed" if outcome == "failure" else "cancelled") in result
+        assert await asyncio.wait_for(callback, timeout=3) == {
+            "error": "No answers received"
+        }
+        [card] = interactions.get_pending_interactions("s1")
+        assert card["payload"]["handoff_id"] == first["handoff_id"]
+        assert card["payload"]["handoff_detached"] is True
+        assert _confirmed_handoff_context("s1", card["payload"]) is None
+        if next_action == "answer":
+            with (
+                patch(
+                    "app.core.user_question_handler.UserQuestionHandler._retire_native_question",
+                    AsyncMock(),
+                ),
+                patch("app.core.session_runtime.try_steer_pending", AsyncMock()),
+                patch(
+                    "app.core.session_runtime._broadcast_queue_after_start", AsyncMock()
+                ),
+            ):
+                assert await user_question_handler._answer_nonblocking(
+                    card, {"Which branch?": "Existing"}, None, human_input=True
+                )
+            [answer] = turns.get_queued_turns("s1")
+            assert (
+                answer["prompt"] == "Answer to your question:\nWhich branch?\nExisting"
+            )
+        else:
+            second = sh.request("s1", "DesktopWorker", "second move note must arrive")
+            assert second["handoff_id"] != first["handoff_id"]
+
+            async def record_moved(sid, owner, content, data):
+                await sh._record(sid, content, data)
+                return True
+
+            with (
+                patch("app.network.runners.find", return_value=TARGET),
+                patch("app.network.handoff.resume_carry", return_value=True),
+                patch("app.api.sessions.move_session_to", AsyncMock()),
+                patch.object(sh, "_tell", side_effect=record_moved),
+                patch.object(sh, "deliver_held", AsyncMock()) as deliver,
+            ):
+                result = await asyncio.wait_for(sh.run_pending("s1"), timeout=3)
+            assert "continues there" in result
+            resume = deliver.await_args.args[3]
+            assert (
+                "Your hand-off note: second move note must arrive" in resume["prompt"]
+            )
+            # Even a later moved record must not confirm the earlier attempt.
+            assert _confirmed_handoff_context("s1", card["payload"]) is None
+    finally:
+        callback.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(callback, return_exceptions=True), timeout=3
+        )
+
+
+@pytest.mark.parametrize("difference", [None, "question", "options"])
+async def test_defensive_fallback_uses_real_single_question_producer_shape(difference):
+    from fluid.tools.builtins.ask_user import _render_message
+
+    from app.core.user_question_handler import questions_from_tool_input
+
+    _chat()
+    # harness_adapter._translate builds exactly this input from QuestionRequest.
+    # The blocking normalizer replaces the schema's question with rendered text.
+    producer_input = {"question": _render_message(QUESTIONS[0]), "schema": QUESTIONS[0]}
+    card_questions = questions_from_tool_input(producer_input)
+    assert card_questions != QUESTIONS
+    callback = await _post(blocking=True, tool_use_id=None, questions=card_questions)
+    try:
+        assert await _settle(lambda: interactions.get_pending_interactions("s1"))
+        raw = {
+            **QUESTIONS[0],
+            "options": [dict(option) for option in QUESTIONS[0]["options"]],
+        }
+        if difference == "question":
+            raw["question"] = "A different question?"
+        elif difference == "options":
+            raw["options"][0]["description"] = "A different option"
+        turn = turns.enqueue_turn("s1", "user", prompt="ask me")
+        turns.start_turn(turn["id"], None, "runner")
+        session_events.append_events(
+            "s1",
+            [
+                {
+                    "type": "tool.use",
+                    "turn_id": turn["id"],
+                    "payload": {
+                        "tool_use_id": "real-fluid-tool-id",
+                        "name": "AskUser",
+                        "input": {"questions": [raw]},
+                    },
+                }
+            ],
+        )
+
+        async def interrupt(*args, **kwargs):
+            turns.settle_turn(turn["id"], "aborted")
+
+        runtime = SimpleNamespace(interrupt=AsyncMock(side_effect=interrupt))
+        pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time())
+        with (
+            patch("app.network.runners.find", return_value=TARGET),
+            patch("app.core.session_runtime.get_live_runtime", return_value=runtime),
+        ):
+            await asyncio.wait_for(
+                sh._prepare_questions(
+                    "s1",
+                    {"running": True, "tasks": [], "queued": 0, "wake": False},
+                    pending,
+                ),
+                timeout=3,
+            )
+        [row] = interactions.get_pending_interactions("s1")
+        assert row["payload"]["questions"] == card_questions
+        if difference is None:
+            runtime.interrupt.assert_awaited_once()
+            assert row["payload"]["handoff_id"] == pending.handoff_id
+            assert await asyncio.wait_for(callback, timeout=3) == {
+                "error": "No answers received"
+            }
+        else:
+            runtime.interrupt.assert_not_awaited()
+            assert row["payload"]["request_id"] == "original"
+            assert not callback.done()
+    finally:
+        callback.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(callback, return_exceptions=True), timeout=3
+        )
 
 
 @pytest.mark.parametrize("blocker", ["tasks", "queued", "wake", "tool"])
@@ -291,7 +464,7 @@ async def test_unknown_receiver_capabilities_wait_then_move_without_new_input(ca
         patch.object(sh, "_record", AsyncMock()),
         patch.object(sh, "POLL_S", 0.01),
     ):
-        assert await sh.run_pending("s1") == "moved"
+        assert await asyncio.wait_for(sh.run_pending("s1"), timeout=3) == "moved"
     assert find.call_count == 2
     move.assert_awaited_once()
     assert "Update the target worker" not in caplog.text
@@ -381,9 +554,13 @@ async def test_transient_question_failure_keeps_move_and_retries(failure, caplog
             patch.object(sh, "POLL_S", 0.01),
             patch("app.api.sessions.move_session_to", move),
         ):
-            assert "waits for your answer" in await sh.run_pending("s1")
+            assert "waits for your answer" in await asyncio.wait_for(
+                sh.run_pending("s1"), timeout=3
+            )
         move.assert_awaited_once()
-        assert await callback == {"error": "No answers received"}
+        assert await asyncio.wait_for(callback, timeout=3) == {
+            "error": "No answers received"
+        }
         [replacement] = interactions.get_pending_interactions("s1")
         assert replacement["payload"]["handoff_detached"] is True
         assert "retain this note" in replacement["payload"]["handoff_context"]
