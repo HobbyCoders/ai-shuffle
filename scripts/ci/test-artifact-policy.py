@@ -159,10 +159,12 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertEqual(jobs["android-ui"]["needs"], "build")
         legs = {str(leg["api"]): leg for leg in jobs["android-ui"]["strategy"]["matrix"]["include"]}
         self.assertEqual(set(legs), {"34", "36"})
-        # API 34 blocks a release; API 36 reports only (hosted-runner start-up failures).
-        self.assertEqual(str(legs["34"]["advisory"]).lower(), "false")
-        self.assertEqual(str(legs["36"]["advisory"]).lower(), "true")
-        self.assertEqual(jobs["android-ui"]["continue-on-error"], "${{ matrix.advisory }}")
+        # Both APIs block app defects; no matrix-wide failure exemption.
+        for leg in legs.values():
+            self.assertNotIn("advisory", leg)
+        self.assertNotIn("continue-on-error", jobs["android-ui"])
+        for step in jobs["android-ui"]["steps"]:
+            self.assertNotIn("continue-on-error", step)
         self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
 
     def test_manual_only_binary_upload_gates_execute(self):
