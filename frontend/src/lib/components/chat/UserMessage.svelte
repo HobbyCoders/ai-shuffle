@@ -19,13 +19,14 @@
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — rewind fallback when uuid is absent
 		rewindEligible?: boolean;
 		streaming?: boolean;
-		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		notSent?: boolean;
+		notSentMessageId?: string | null;
 		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false, midTurn = false, notSent = false }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false, midTurn = false, notSent = false, notSentMessageId = null }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -66,6 +67,7 @@
 				messageContent={content}
 				messageRole="user"
 				{messageUuid}
+				{notSentMessageId}
 				{userPromptOccurrence}
 				{rewindEligible}
 				{onRewindComplete}

@@ -265,6 +265,7 @@ export interface ActiveSessionState {
 	 *  target user message. ChatInput refills an EMPTY editor and clears this,
 	 *  so it fires exactly once and never clobbers typed text. */
 	pendingRestorePrompt: string | null;
+	pendingRestoreUploadPaths?: string[];
 	/** True from the moment init() adopts a persisted sessionId until that
 	 *  session's SSE history reaches its first caught_up boundary.
 	 *  During this window the UI looks like "New Chat" (messages=[]) while

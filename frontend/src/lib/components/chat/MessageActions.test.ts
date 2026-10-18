@@ -16,6 +16,17 @@ const rewindButton = () => screen.queryByTitle('Rewind to before this message');
 const dialog = () => screen.queryByRole('dialog');
 
 describe('MessageActions gating', () => {
+	it('restores a not-sent row and uploads without invoking transcript rewind semantics', async () => {
+		rewind.mockResolvedValue({success:true, unsent_restored:true, chat_rewound:false,
+			restored_prompt:'original words', restored_upload_paths:['/uploads/proof.png']});
+		const onRewindComplete = vi.fn();
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', onRewindComplete});
+		await fireEvent.click(screen.getByTitle('Restore unsent draft'));
+		expect(dialog()!.textContent).toContain('Sent history is unchanged');
+		await fireEvent.click(screen.getByRole('button', {name:'Rewind'}));
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'original words', ['/uploads/proof.png']));
+		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', false, null, null, 'unsent-id');
+	});
 	it('disables rewind for a steer with an explanation while preserving copy', async () => {
 		render(MessageActions, { ...base, rewindEligible: false, messageUuid: 'not-a-checkpoint' });
 		const button = screen.getByTitle('Mid-turn messages have no independent rewind checkpoint') as HTMLButtonElement;

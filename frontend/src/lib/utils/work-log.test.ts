@@ -398,6 +398,14 @@ describe('agent deliveries in settled work', () => {
 		expect(collapsedVisibleMessages(buildDisplayItems(messages.slice(0, -1), LIVE))).toEqual(messages.slice(0, -1));
 	});
 
+	it('unsent rows have a restore action but never consume sent-prompt ordinals', () => {
+		const messages = [user('again', undefined, 'first'),
+			{...user('again', undefined, 'stopped'), metadata:{not_sent:true}, checkpointBacked:false},
+			user('again', undefined, 'next')];
+		const model = buildTranscriptModel(messages, SETTLED);
+		expect(model.rewindEligible[1]).toBe(true);
+		expect(model.promptOccurrence[2]).toBe(1);
+	});
 	it('does not consume human checkpoint ordinals or turn navigation', () => {
 		const delivery = { ...peer(), turnId: 'next', checkpointBacked: true, jsonlUuid: 'not-a-human-checkpoint' };
 		const prompt = user('again', undefined, 'first');

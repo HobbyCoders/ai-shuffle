@@ -246,6 +246,7 @@ class RewindRequestV2(BaseModel):
     # that has seen an interrupt.)
     target_occurrence: Optional[int] = None
     target_content: Optional[str] = None
+    target_not_sent_id: Optional[str] = None  # durable message.user event id, not a model checkpoint
 
 
 class RewindResponseV2(BaseModel):
@@ -258,6 +259,10 @@ class RewindResponseV2(BaseModel):
     error: Optional[str] = None
     partial_success: bool = False  # True if chat rewound but files didn't (when files were requested)
     warning: Optional[str] = None  # Warning message for partial success scenarios
+    unsent_restored: bool = False
+    restored_prompt: Optional[str] = None
+    restored_upload_paths: List[str] = []
+    restored_upload_blob_ids: List[str] = []
 
 
 def _get_checkpoints(sdk_session_id: str, working_dir: str):
@@ -363,7 +368,7 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
 # v2 event-log rewind resolution (transcript.rewound)
 # ----------------------------------------------------------------------
 
-def _load_message_events(session_id: str) -> List[dict]:
+def _load_message_events(session_id: str, *, include_handled_unsent: bool = False) -> List[dict]:
     """All message.user / message.assistant rows of the event log, seq order.
 
     Rows logically erased by a later ``transcript.rewound`` (seq >= its
@@ -382,6 +387,10 @@ def _load_message_events(session_id: str) -> List[dict]:
             cursor = row["seq"]
             if row["event_type"] in ("message.user", "message.assistant"):
                 rows.append(row)
+            elif (not include_handled_unsent and row["event_type"] == "system.note"
+                  and (row.get("payload") or {}).get("subtype") == "unsent_restored"):
+                target = ((row.get("payload") or {}).get("data") or {}).get("message_id")
+                rows = [r for r in rows if r["id"] != target]
             elif row["event_type"] == "transcript.rewound":
                 from_seq = (row.get("payload") or {}).get("from_seq")
                 if isinstance(from_seq, int):
@@ -431,7 +440,7 @@ def _is_prompt_event(row: dict) -> bool:
     if row["event_type"] != "message.user":
         return False
     payload = row.get("payload") or {}
-    if payload.get("kind") == "command" or payload.get("checkpoint_backed") is False:
+    if payload.get("not_sent") or payload.get("kind") == "command" or payload.get("checkpoint_backed") is False:
         return False
     if _is_task_notification(payload.get("content") or ""):
         return False
@@ -567,6 +576,46 @@ def _resolve_rewind_from_seq(
     return int(events[target_idx]["seq"]), None
 
 
+def _restore_unsent_message(session_id: str, message_id: str) -> RewindResponseV2:
+    """Withdraw only an unsent row; never resolve or rewind a provider checkpoint."""
+    from app.db.base import get_db
+    from app.db import session_events
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Same counter -> session order as transcript writers and Stop.
+        cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
+                       "ON CONFLICT (session_id) DO NOTHING", (session_id,))
+        cursor.execute("SELECT session_id FROM session_event_counters WHERE session_id=%s FOR UPDATE", (session_id,))
+        cursor.fetchone()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        cursor.fetchone()
+        target = next((r for r in _load_message_events(session_id, include_handled_unsent=True)
+                       if r["id"] == message_id and r["event_type"] == "message.user"
+                       and (r.get("payload") or {}).get("not_sent")), None)
+        if target is None:
+            return RewindResponseV2(success=False, message="Cannot restore unsent message",
+                                    error="The unsent row is missing or was removed by a rewind.")
+        payload = target["payload"]
+        # The legacy mirror may have this same stopped row. Remove only it,
+        # never later real user/assistant messages.
+        for row in database.get_session_messages(session_id):
+            metadata = row.get("metadata") or {}
+            if (payload.get("queued_turn_id") and metadata.get("not_sent")
+                    and metadata.get("queued_turn_id") == payload["queued_turn_id"]):
+                cursor.execute("DELETE FROM session_messages WHERE session_id=%s AND id=%s", (session_id, row["id"]))
+        session_events.append_events(session_id, [{
+            "id": "unsent-restored-" + message_id, "type": "system.note",
+            "payload": {"subtype": "unsent_restored", "data": {"message_id": message_id}},
+        }], _conn=conn)
+    session_events.notify_session_write(session_id, "session_events")
+    return RewindResponseV2(success=True, message="Unsent message restored for editing",
+                            unsent_restored=True, messages_removed=1,
+                            restored_prompt=payload.get("content") or "",
+                            restored_upload_paths=payload.get("upload_paths") or [],
+                            restored_upload_blob_ids=payload.get("upload_blob_ids") or [])
+
+
 @router.post("/rewind/execute/{session_id}")
 async def execute_rewind(session_id: str, request: RewindRequestV2, http_request: Request = None):
     """
@@ -602,6 +651,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     remote = await forward_rewind(session, "execute", request.model_dump())
     if remote is not None:
         return RewindResponseV2.model_validate(remote)
+
+    if request.target_not_sent_id:
+        return await run_sync(_restore_unsent_message, session_id, request.target_not_sent_id)
 
     working_dir = None
     if session.get("sdk_session_id") and not request.target_uuid.startswith("db-"):

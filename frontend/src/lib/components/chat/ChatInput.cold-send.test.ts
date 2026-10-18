@@ -66,6 +66,18 @@ async function submit(withAttachment = false) {
 }
 
 describe('cold send warning', () => {
+	it('restores unsent words and file chips to the composer without sending', async () => {
+		activeSession.setDraft('');
+		const view = render(ChatInput);
+		activeSession.setPendingRestorePrompt('original words', ['/uploads/proof.png']);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(editor.textContent).toContain('original words'));
+		await waitFor(() => expect(editor.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(editor.textContent).toContain('proof.png');
+		expect(activeSession.current.pendingRestorePrompt).toBeNull();
+		expect(activeSession.current.pendingRestoreUploadPaths).toBeUndefined();
+		expect(sends).not.toHaveBeenCalled();
+	});
 	it('asks before a large cold send, and Send anyway sends and is remembered', async () => {
 		cache = { ...COLD, cost_comparison: {
 			model: 'claude-sonnet-5', cold_resume_usd: 1.69, compaction_usd: 1.73,

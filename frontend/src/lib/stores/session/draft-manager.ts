@@ -41,12 +41,12 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({ ...s, draft: text }));
 		},
 
-		setPendingRestorePrompt(prompt: string) {
-			update(s => ({ ...s, pendingRestorePrompt: prompt }));
+		setPendingRestorePrompt(prompt: string, uploadPaths?: string[]) {
+			update(s => ({ ...s, pendingRestorePrompt: prompt, pendingRestoreUploadPaths: uploadPaths }));
 		},
 
 		clearPendingRestorePrompt() {
-			update(s => s.pendingRestorePrompt ? { ...s, pendingRestorePrompt: null } : s);
+			update(s => s.pendingRestorePrompt ? { ...s, pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined } : s);
 		},
 
 		setScrollTop(pos: number) {

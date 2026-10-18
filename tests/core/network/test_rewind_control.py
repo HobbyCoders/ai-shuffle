@@ -48,6 +48,30 @@ async def pair(workers, monkeypatch):
     return owner, mirror, sdk, served
 
 
+async def test_mirror_restores_unsent_row_without_touching_owner_transcript(pair):
+    from app.db import turns
+    owner, mirror, sdk, served = pair
+    with owner.active():
+        before = load_fluid_path(sdk)
+        row = turns.enqueue_turn("s-rewind", "user", prompt="Original unsent words", payload={
+            "compact_first": True, "upload_paths": ["/uploads/proof.png"], "upload_blob_ids": ["blob-proof"]})
+        turns.remove_queued_turn(row["id"], preserve_compact_first=True)
+        unsent = next(r for r in session_events.get_events("s-rewind") if r["payload"].get("not_sent"))
+        catalog.publish_owned()
+    converge([owner, mirror])
+    with mirror.active():
+        result = await commands.execute_rewind("s-rewind", commands.RewindRequestV2(target_not_sent_id=unsent["id"]))
+        assert result.success and result.unsent_restored and not result.chat_rewound
+        assert result.restored_prompt == "Original unsent words"
+        assert result.restored_upload_paths == ["/uploads/proof.png"]
+        assert result.restored_upload_blob_ids == ["blob-proof"]
+        assert not any(r["payload"].get("not_sent") for r in commands._load_message_events("s-rewind"))
+        assert database.get_session("s-rewind")["sdk_session_id"] is None
+    with owner.active():
+        assert load_fluid_path(sdk) == before
+        assert not any(r["payload"].get("not_sent") for r in commands._load_message_events("s-rewind"))
+
+
 async def test_synced_mirror_rewinds_real_owner_and_replays_signed_event(pair):
     owner, mirror, sdk, served = pair
     with mirror.active():

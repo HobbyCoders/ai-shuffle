@@ -17,6 +17,10 @@ export interface RewindExecuteResponse {
 	error: string | null;
 	partial_success: boolean;  // True if chat rewound but files didn't (when files were requested)
 	warning: string | null;    // Warning message for partial success scenarios
+	unsent_restored?: boolean;
+	restored_prompt?: string;
+	restored_upload_paths?: string[];
+	restored_upload_blob_ids?: string[];
 }
 
 // ============================================================================
@@ -45,7 +49,8 @@ export async function executeRewind(
 	targetRole: 'user' | 'assistant' = 'user',
 	restoreFiles: boolean = false,
 	targetOccurrence: number | null = null,
-	targetContent: string | null = null
+	targetContent: string | null = null,
+	targetNotSentId: string | null = null
 ): Promise<RewindExecuteResponse> {
 	const payload: Record<string, unknown> = {
 		target_uuid: targetUuid,
@@ -54,7 +59,11 @@ export async function executeRewind(
 		include_response: includeResponse,
 		target_role: targetRole
 	};
-	if (!targetUuid && targetOccurrence != null) {
+	if (targetNotSentId) {
+		payload.target_not_sent_id = targetNotSentId;
+		payload.restore_chat = false;
+		payload.restore_files = false;
+	} else if (!targetUuid && targetOccurrence != null) {
 		payload.target_uuid = '';
 		payload.target_occurrence = targetOccurrence;
 		payload.target_content = targetContent;

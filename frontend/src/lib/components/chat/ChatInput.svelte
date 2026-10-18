@@ -402,6 +402,10 @@
 		} else {
 			setComposerDraft(joinDrafts(textDoc(pending), getDraftJSON()));
 		}
+		for (const path of $activeSession.pendingRestoreUploadPaths ?? []) {
+			editorRef?.insertFileChip({ path, fullPath: path, filename: path.split('/').pop() || 'attachment', size: 0,
+				type: 'file' });
+		}
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();

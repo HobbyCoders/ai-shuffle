@@ -20,6 +20,7 @@
 		/** 'plain' strips Markdown syntax (user prompts); 'markdown' copies the
 		 *  source verbatim (assistant replies, so formatting survives a paste). */
 		copyAs?: 'plain' | 'markdown';
+		notSentMessageId?: string | null;
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
 		rewindEligible?: boolean;
@@ -29,7 +30,7 @@
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
-		onRewindComplete?: (warning?: string, rewoundPrompt?: string) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success + the removed user message's text (chat-input restore)
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
@@ -38,6 +39,7 @@
 		messageContent,
 		messageRole,
 		copyAs = 'plain',
+		notSentMessageId = null,
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		userPromptOccurrence = null,
 		rewindEligible = true,
@@ -147,7 +149,7 @@
 		// have no content affordance (resolution spans user prompts only), so a
 		// missing uuid there still surfaces the refusal instead of guessing.
 		const useContent = !messageUuid && messageRole === 'user' && userPromptOccurrence != null;
-		if (!messageUuid && !useContent) {
+		if (!notSentMessageId && !messageUuid && !useContent) {
 			console.error('[Rewind] Refusing to rewind: message has no JSONL uuid.', { messageRole });
 			rewindError = 'Cannot rewind: this message is missing its checkpoint id. Try reloading the conversation.';
 			return;
@@ -162,7 +164,9 @@
 			// For user messages: include_response=false removes this message and everything after.
 			// For assistant messages: keeps this message, removes everything after.
 			const includeResponse = messageRole === 'assistant';
-			const result = useContent
+			const result = notSentMessageId
+				? await executeRewind(sessionId, '', false, 'user', false, null, null, notSentMessageId)
+				: useContent
 				? await executeRewind(sessionId, '', includeResponse, 'user', restoreFiles, userPromptOccurrence, messageContent)
 				: await executeRewind(sessionId, messageUuid!, includeResponse, messageRole, restoreFiles);
 
@@ -174,7 +178,11 @@
 				// transcript, so there is nothing to restore.
 				const rewoundPrompt = messageRole === 'user' ? messageContent : undefined;
 				// Pass warning to parent to show as system message (for partial success)
-				onRewindComplete?.(result.warning ?? undefined, rewoundPrompt);
+				if (result.unsent_restored) {
+						onRewindComplete?.(result.warning ?? undefined, result.restored_prompt ?? rewoundPrompt, result.restored_upload_paths);
+					} else {
+						onRewindComplete?.(result.warning ?? undefined, rewoundPrompt);
+					}
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}
@@ -265,7 +273,7 @@
 			class="action-btn disabled:opacity-40 disabled:cursor-not-allowed"
 			onclick={handleRewindClick}
 			disabled={!rewindEligible}
-			title={rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
+			title={notSentMessageId ? "Restore unsent draft" : rewindEligible ? "Rewind to before this message" : "Mid-turn messages have no independent rewind checkpoint"}
 		>
 			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
@@ -283,10 +291,12 @@
 			class="relative bg-card border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-4"
 			aria-labelledby="rewind-dialog-title"
 		>
-			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">Rewind Conversation?</h3>
+			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">{notSentMessageId ? 'Restore unsent draft?' : 'Rewind Conversation?'}</h3>
 
 			<p class="text-sm text-muted-foreground mb-3">
-				{#if messageRole === 'user'}
+				{#if notSentMessageId}
+					Only this not-sent row is removed. Its text and attachments return to the composer. Sent history is unchanged and nothing is sent automatically.
+				{:else if messageRole === 'user'}
 					This will remove this message and all messages after it. Cannot be undone.
 				{:else}
 					This will keep this response and remove all messages after it. Cannot be undone.
@@ -301,7 +311,7 @@
 			</div>
 
 			<!-- Rewind Mode Selection (only if file checkpointing is enabled) -->
-			{#if fileCheckpointingEnabled}
+			{#if fileCheckpointingEnabled && !notSentMessageId}
 				<div class="mb-4 space-y-2">
 					<p class="text-sm font-medium text-foreground">Rewind Options:</p>
 					<label class="flex items-center gap-2 cursor-pointer">

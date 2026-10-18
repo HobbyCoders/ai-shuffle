@@ -22,7 +22,7 @@ async def forward_rewind(session: dict, operation: str, params: Optional[dict] =
         raise HTTPException(409, "The owning device could not handle rewind. "
                             "Check that it is online and updated. " + str(exc)) from exc
     target_seq = result.pop("_rewind_seq", None)
-    if result.get("chat_rewound") and target_seq is not None:
+    if (result.get("chat_rewound") or result.get("unsent_restored")) and target_seq is not None:
         # The UI reloads immediately on success. Pull signed owner operations
         # before returning so it does not reload the old mirror. Sync is bounded
         # and never replays the mutating RPC if replication is temporarily down.
@@ -71,7 +71,7 @@ async def handle_rewind(body: dict, from_device: str) -> dict:
         if not isinstance(params, dict):
             raise ValueError("Rewind params must be an object")
         result = await execute_rewind(session_id, RewindRequestV2.model_validate(params))
-        if result.chat_rewound:
+        if result.chat_rewound or result.unsent_restored:
             # Publish the real owner's rewind through the signed event stream;
             # never manufacture transcript.rewound on the requesting mirror.
             try:
@@ -84,7 +84,7 @@ async def handle_rewind(body: dict, from_device: str) -> dict:
     else:
         raise ValueError("Unsupported rewind operation")
     response = result.model_dump()
-    if operation == "execute" and result.chat_rewound:
+    if operation == "execute" and (result.chat_rewound or result.unsent_restored):
         from app.db import session_events
         response["_rewind_seq"] = await run_sync(session_events.get_max_seq, session_id)
     return response

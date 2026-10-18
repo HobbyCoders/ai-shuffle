@@ -156,7 +156,7 @@
 	 * post-rewind state (which may be empty if all messages were rewound).
 	 * @param warning - Optional warning message for partial success (e.g., file restore failed)
 	 */
-	function handleRewindComplete(warning?: string, rewoundPrompt?: string) {
+	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) {
 		// If there's a warning (partial success), show it as a system message
 		if (warning) {
 			activeSession.addSystemMessage(warning, 'rewind_warning');
@@ -166,7 +166,7 @@
 		// so ChatInput refills the composer after the reload settles, letting the
 		// user edit or resend what they rewound away.
 		if (rewoundPrompt) {
-			activeSession.setPendingRestorePrompt(rewoundPrompt);
+			activeSession.setPendingRestorePrompt(rewoundPrompt, uploadPaths);
 		}
 
 		// Clear stale messages from the store before reloading.
@@ -2153,6 +2153,7 @@
 			userPromptOccurrence={userPromptOccurrence(messageIndex)}
 			rewindEligible={rewindEligible[messageIndex]}
 			notSent={!!message.metadata?.not_sent}
+			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			{fileCheckpointingEnabled}
 			onRewindComplete={handleRewindComplete}

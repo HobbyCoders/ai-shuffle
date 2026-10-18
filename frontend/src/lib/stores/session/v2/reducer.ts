@@ -1547,7 +1547,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				...(turnId ? { turnId } : {}),
 				...((startsAgentTurn || event.not_sent) ? { metadata: {
 					...(startsAgentTurn ? { agent_wake: true } : {}),
-					...(event.not_sent ? { not_sent: true } : {}),
+					...(event.not_sent ? { not_sent: true, not_sent_id: event.id } : {}),
 				} } : {}),
 				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
@@ -2228,6 +2228,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── System messages ─────────────────────────────────────────────
 		case 'system.note': {
+			if (str(event.subtype) === 'unsent_restored') {
+				const id = str(obj(event.data)?.message_id);
+				return { ...state, messages: own(state.messages.filter(m =>
+					!(m.metadata?.not_sent && m.metadata?.not_sent_id === id))) };
+			}
 			// `background_tasks_changed` is a CLI/SDK bookkeeping event that
 			// exists only to drive the active-tasks strip (which is fed from
 			// `task.updated` -> activeTaskSummaries, NOT from this note). It

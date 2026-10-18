@@ -176,7 +176,7 @@ def backfill_user_jsonl_uuids(
             return 0
 
         db_rows = database.get_session_messages(session_id)
-        db_user_rows = [r for r in db_rows if r.get("role") == "user"]
+        db_user_rows = [r for r in db_rows if r.get("role") == "user" and not (r.get("metadata") or {}).get("not_sent")]
         transcript_counts = Counter(_normalize(e["text"]) for e in jsonl_user)
         db_counts = Counter(_normalize(r.get("content")) for r in db_user_rows)
 
@@ -270,7 +270,7 @@ def _fallback_anchor_by_content(
                 and _normalize(jsonl_rewind_service._extract_message_text(e)) == want
             ]
             matches = [
-                r for r in db_rows if r.get("role") == "user"
+                r for r in db_rows if r.get("role") == "user" and not (r.get("metadata") or {}).get("not_sent")
                 and _normalize(r.get("content")) == want
             ]
             if len(matches) != len(prompts):
@@ -334,7 +334,7 @@ def _fallback_anchor_by_content(
             # as the target is in the transcript; otherwise refuse.
             later_prompts = sum(1 for e in entries[target_idx + 1:] if _is_user_prompt_entry(e))
             later_prompt_rows = sum(
-                1 for r in db_rows if r.get("role") == "user" and r["id"] > anchor["id"]
+                1 for r in db_rows if r.get("role") == "user" and not (r.get("metadata") or {}).get("not_sent") and r["id"] > anchor["id"]
             )
             if later_prompt_rows != later_prompts:
                 logger.warning(
