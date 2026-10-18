@@ -385,7 +385,13 @@ also independently supports safe ancestors and rechecks its own pointer.
   repositories): `gh workflow run windows-suite.yml --ref main` on the release
   commit. `ship_release_status.py` counts a successful run the owner dispatched
   on main at the candidate as `local/windows-suite`, and the release notes name
-  the run. Otherwise the release waits, or the owner ships it with
+  the run. The hosted run is split into parallel parts
+  (`scripts/ci/windows_parts.py`: eight backend parts, frontend, and the rest),
+  so it takes the time of the slowest part. A failed part does not stop the
+  others: `gh run rerun <run id> --failed` reruns only the failed parts, and the
+  run's newest attempt counts. A failed pytest command there reruns just its
+  failed tests once; a test that then passes is reported as flaky in the job
+  summary and should still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
   the release notes. Edge never waits for Windows.
 - Mac-only checks, when the release changes them: `ios.yml` and
