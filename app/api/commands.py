@@ -262,7 +262,6 @@ class RewindResponseV2(BaseModel):
     unsent_restored: bool = False
     restored_prompt: Optional[str] = None
     restored_upload_paths: List[str] = []
-    restored_upload_blob_ids: List[str] = []
 
 
 def _get_checkpoints(sdk_session_id: str, working_dir: str):
@@ -612,8 +611,7 @@ def _restore_unsent_message(session_id: str, message_id: str) -> RewindResponseV
     return RewindResponseV2(success=True, message="Unsent message restored for editing",
                             unsent_restored=True, messages_removed=1,
                             restored_prompt=payload.get("content") or "",
-                            restored_upload_paths=payload.get("upload_paths") or [],
-                            restored_upload_blob_ids=payload.get("upload_blob_ids") or [])
+                            restored_upload_paths=payload.get("upload_paths") or [])
 
 
 @router.post("/rewind/execute/{session_id}")

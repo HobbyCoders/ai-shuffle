@@ -20,7 +20,6 @@ export interface RewindExecuteResponse {
 	unsent_restored?: boolean;
 	restored_prompt?: string;
 	restored_upload_paths?: string[];
-	restored_upload_blob_ids?: string[];
 }
 
 // ============================================================================

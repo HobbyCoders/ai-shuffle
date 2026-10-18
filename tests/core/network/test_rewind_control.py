@@ -64,7 +64,6 @@ async def test_mirror_restores_unsent_row_without_touching_owner_transcript(pair
         assert result.success and result.unsent_restored and not result.chat_rewound
         assert result.restored_prompt == "Original unsent words"
         assert result.restored_upload_paths == ["/uploads/proof.png"]
-        assert result.restored_upload_blob_ids == ["blob-proof"]
         assert not any(r["payload"].get("not_sent") for r in commands._load_message_events("s-rewind"))
         assert database.get_session("s-rewind")["sdk_session_id"] is None
     with owner.active():

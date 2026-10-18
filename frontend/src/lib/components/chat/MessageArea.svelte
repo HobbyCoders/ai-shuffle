@@ -165,8 +165,8 @@
 		// A rewind to a user message removed that very message — queue its text
 		// so ChatInput refills the composer after the reload settles, letting the
 		// user edit or resend what they rewound away.
-		if (rewoundPrompt) {
-			activeSession.setPendingRestorePrompt(rewoundPrompt, uploadPaths);
+		if (rewoundPrompt || uploadPaths?.length) {
+			activeSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths);
 		}
 
 		// Clear stale messages from the store before reloading.

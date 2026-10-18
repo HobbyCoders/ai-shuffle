@@ -30,6 +30,7 @@
 	import { promptStash, type StashedPrompt } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
+	import { restoreMessageDocument } from './tiptap/serialization';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
@@ -393,34 +394,15 @@
 	$effect(() => {
 		const pending = $activeSession.pendingRestorePrompt;
 		if (!ownsComposer()) return;
-		if (!pending) return;
+		const paths = $activeSession.pendingRestoreUploadPaths ?? [];
+		if (!pending && paths.length === 0) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
-		if (current.length === 0) {
-			inputValue = pending;
-			plainTextValue = pending;
-			editorRef?.setContent(pending);
-		} else {
-			setComposerDraft(joinDrafts(textDoc(pending), getDraftJSON()));
-		}
-		for (const path of $activeSession.pendingRestoreUploadPaths ?? []) {
-			editorRef?.insertFileChip({ path, fullPath: path, filename: path.split('/').pop() || 'attachment', size: 0,
-				type: 'file' });
-		}
+		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths));
+		setComposerDraft(current.length === 0 ? restored : joinDrafts(restored, getDraftJSON()));
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
 	});
-
-	/** Plain text as a composer document, one paragraph per line. */
-	function textDoc(text: string): string {
-		return JSON.stringify({
-			type: 'doc',
-			content: text.split('\n').map(line => ({
-				type: 'paragraph',
-				...(line ? { content: [{ type: 'text', text: line }] } : {})
-			}))
-		});
-	}
 
 	/** Replace the composer's content and persist it at once. */
 	function setComposerDraft(draft: string) {

@@ -66,6 +66,18 @@ async function submit(withAttachment = false) {
 }
 
 describe('cold send warning', () => {
+	it.each(['see @/uploads/proof.png please', ''])('restores and sends attachments exactly once: %s', async (prompt) => {
+		cache = { ...COLD, cold:false, warn:false };
+		activeSession.setDraft('');
+		const view = render(ChatInput);
+		activeSession.setPendingRestorePrompt(prompt, ['/uploads/proof.png']);
+		await waitFor(() => expect(view.container.querySelectorAll('[data-file-chip]')).toHaveLength(1));
+		expect(sends).not.toHaveBeenCalled();
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(prompt || '@/uploads/proof.png', {
+			pendingUploadPaths:['/uploads/proof.png']
+		}));
+	});
 	it('restores unsent words and file chips to the composer without sending', async () => {
 		activeSession.setDraft('');
 		const view = render(ChatInput);
