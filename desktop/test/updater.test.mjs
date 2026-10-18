@@ -4,17 +4,24 @@ import vm from 'node:vm';
 import path from 'node:path';
 import { test } from 'node:test';
 
-function fixture(env = {}) {
+function fixture(env = {}, platform = 'win32') {
  const calls = []; const timers = [];
  const app = { relaunch: options => calls.push(options), quit: () => calls.push('quit') };
  const module = { exports: {} };
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
   exports: module.exports, module, require: id => id === 'electron' ? { app } : path,
-  process: { env }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
+  process: { env, platform, versions: {electron:'44.2.0'} }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
   setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date
  });
  return { updater: new module.exports.Updater(), calls, timers, app };
 }
+test('#99: only installed Linux updates opt into the installed Electron preflight', () => {
+ for (const [platform,executable,expected] of [['linux','/AI Shuffle.AppImage',['44.2.0']],['linux',undefined,[]],['win32','C:/AI Shuffle.exe',[]]]) {
+  const {updater}=fixture({},platform),versions=[];
+  updater.useApplications(source({useInstalledElectron:version=>versions.push(version)}),executable);
+  assert.deepEqual(versions,expected);
+ }
+});
 const available = { kind: 'available', version: 'bbbbbbbbbbbb' };
 const ready = { ...available, kind: 'ready' };
 function source(overrides = {}) { return {

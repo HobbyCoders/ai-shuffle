@@ -33,7 +33,7 @@ for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regr
   // #1821 D5: the minimum launcher from desktop/launcher.json is signed with the release.
   // #97: desktop.start, the oldest launcher that can start the release, is signed beside it.
   const contract=JSON.parse(readFileSync(new URL('../launcher.json',import.meta.url),'utf8'));
-  assert.deepEqual(manifest.desktop,{launcher:contract.minimum,start:contract.start});assert(events.includes('publish'));
+  assert.deepEqual(manifest.desktop,{launcher:contract.minimum,start:contract.start,electron:'99.2.1'});assert(events.includes('publish'));
   assert.equal(manifest.tree,'c'.repeat(64));assert(events.includes('archive'));
   if(stable(scenario)){
    assert.equal(row.channel,'stable');assert.equal(manifest.channel,'stable');assert.equal(manifest.version,'1.2.3');assert.equal(manifest.notes,'Faster startup.');

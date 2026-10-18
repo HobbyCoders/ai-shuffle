@@ -175,8 +175,11 @@ try {
   // revision runs under (desktop/launcher.json, #1821 D5). Clients before it ignore the field.
   // start: the oldest launcher that can start it at all; updaters refuse it before download below that (#97).
   const { minimum: launcher, start } = readLauncher(git('show', `${revision}:desktop/launcher.json`));
+  // Read the locked runtime at the published revision, not this control checkout.
+  const electron = JSON.parse(git('show', `${revision}:desktop/package-lock.json`)).packages?.['node_modules/electron']?.version;
+  if (typeof electron !== 'string' || !/^\d+\.\d+\.\d+$/.test(electron)) throw Error('Invalid locked desktop Electron version');
   const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends, ...(overlays === undefined ? {} : { overlays }) },
-   desktop: { launcher, ...(start === undefined ? {} : { start }) }, channel, version, notes, tree }));
+   desktop: { launcher, ...(start === undefined ? {} : { start }), electron }, channel, version, notes, tree }));
   const signature = sign(null, payload, key);
   if (!trustedKeys(await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8')).some(key => verify(null, payload, key, signature))) throw new Error('Signing key does not match launcher trust key');
   const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });

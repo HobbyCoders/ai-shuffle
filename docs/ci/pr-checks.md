@@ -212,6 +212,12 @@ accept it. The only other way through is the owner's
 change leaves what the launcher does unchanged, such as a move or a comment.
 That label accepts both groups.
 
+Changing the locked `node_modules/electron` version in `desktop/package-lock.json`
+also fails `linux-electron`. Packaged Linux source updates keep the installed
+Electron and its sandbox, so the owner must accept that a matching installer is
+needed with `update-reach:linux-electron`. Unrelated lockfile changes do not
+trigger this gate, and it does not by itself require a launcher version bump.
+
 
 ## Local security checks
 

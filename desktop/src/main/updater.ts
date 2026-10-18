@@ -110,6 +110,7 @@ export class Updater {
   useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
+    if (process.platform === 'linux' && installedExecutable) applications.useInstalledElectron?.(process.versions.electron);
     applications.stageDownloads?.();
     this.installedExecutable = installedExecutable;
     this.restartArgs = restartArgs;

@@ -1302,6 +1302,35 @@ test('#97: desktop.start is validated like desktop.launcher and is absent from o
  assert.equal(startLauncher(verifySourceManifest(signed({desktop:{launcher:4,start:3}}),publicKey)),3);
  for(const start of [-1,1.5,'3',null])assert.throws(()=>verifySourceManifest(signed({desktop:{launcher:4,start}}),publicKey),/release fields/,String(start));
 });
+test('#99: installed Linux refuses a different signed Electron before offering or downloading',async t=>{
+ const f=await fixture(t),u=f.create();await u.load();u.useInstalledElectron('44.2.0');
+ await f.release(A,undefined,{desktop:{electron:'44.2.0'}});
+ assert.equal((await u.check()).kind,'available');
+ await f.release(B,undefined,{version:'1.2.0',desktop:{electron:'44.2.1'}});f.requests.length=0;
+ for(const run of [()=>u.check(),()=>u.download()])await assert.rejects(run(),/AI Shuffle 1.2.0 needs Electron 44.2.1; this Linux install has 44.2.0.*Install the latest AI Shuffle installer.*Your files and data have been kept.*No update was downloaded/);
+ assert.deepEqual(f.requests,Array(2).fill('https://hobbycoders.com/v1/desktop/manifest'));
+ assert.equal(f.builds,0);assert.equal(u.pendingVersion,null);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ // Windows/profile managers never opt in; old manifests remain compatible.
+ assert.equal((await f.create().check()).kind,'available');
+ await f.release(C);assert.equal((await u.check()).kind,'available');
+});
+test('#99: an incompatible newer Electron keeps the earlier staged build intact',async t=>{
+ const {f,u}=await stagedOver(t);u.useInstalledElectron('44.2.0');
+ await f.release(C,undefined,{desktop:{electron:'45.0.0'}});f.requests.length=0;
+ await assert.rejects(u.download(),/Install the latest AI Shuffle installer/);
+ assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,1);
+ assert((await fs.stat(path.join(f.root,'versions',B,'release.json'))).isFile());
+});
+test('#99: optional desktop.electron must be an exact locked version',async()=>{
+ const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
+ for(const electron of ['44.2.0',null,44,'^44.2.0','44.2',{},'44.2.0-beta.1']){
+  const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,desktop:{electron}}));
+  const signed=JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});
+  if(electron==='44.2.0')assert.equal(verifySourceManifest(signed,publicKey).desktop.electron,electron);
+  else assert.throws(()=>verifySourceManifest(signed,publicKey),/release fields/);
+ }
+});
 async function stagedOver(t){
  const f=await fixture(t);await f.release(A);const u=f.create();await u.load();await u.download();await u.select();await u.databaseStarting();await u.healthy();
  u.stageDownloads();const b=await f.release(B,undefined,{version:'1.0.0'});assert.equal((await u.download()).kind,'ready');

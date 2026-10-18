@@ -59,7 +59,7 @@ export interface SourceManifest {
    * start: the oldest installed launcher (app.asar) that can start the release at all, before any
    * replacement (desktop/LAUNCHER.md). Absent means any.
    */
-  desktop?: { launcher?: number; start?: number };
+  desktop?: { launcher?: number; start?: number; electron?: string };
 }
 /** The launcher version a release needs; 0 for manifests signed before desktop.launcher existed. */
 export function requiredLauncher(manifest: SourceManifest): number { return manifest.desktop?.launcher ?? 0; }
@@ -143,7 +143,8 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
     || ('notes' in m && !(typeof m.notes === 'string' && m.notes.length <= MAX_NOTES))
     || ('desktop' in m && !(m.desktop && typeof m.desktop === 'object' && !Array.isArray(m.desktop)
       && (!('launcher' in m.desktop) || (Number.isSafeInteger(m.desktop.launcher) && m.desktop.launcher! >= 0))
-      && (!('start' in m.desktop) || (Number.isSafeInteger(m.desktop.start) && m.desktop.start! >= 0))))) throw new Error('Invalid source manifest release fields');
+      && (!('start' in m.desktop) || (Number.isSafeInteger(m.desktop.start) && m.desktop.start! >= 0))
+      && (!('electron' in m.desktop) || (typeof m.desktop.electron === 'string' && /^\d+\.\d+\.\d+$/.test(m.desktop.electron)))))) throw new Error('Invalid source manifest release fields');
   return m;
 }
 
@@ -223,6 +224,18 @@ export class SourceUpdates {
   }
   private checking = false;
   private explicitActivation = false;
+  // Opted into by the running UI updater, not the installed launcher. Windows
+  // source updates carry their own Electron; Linux keeps the installed sandbox.
+  private installedElectron: string | undefined;
+  useInstalledElectron(version: string): void { this.installedElectron = version; }
+  private requireElectron(manifest: SourceManifest): void {
+    const needed = manifest.desktop?.electron;
+    if (this.installedElectron !== undefined && needed !== undefined && needed !== this.installedElectron) {
+      throw new Error(`AI Shuffle ${manifest.version ?? manifest.revision.slice(0, 12)} needs Electron ${needed}; this Linux install has ${this.installedElectron}. ` +
+        'Install the latest AI Shuffle installer from hobbycoders.com to preserve the Linux Electron sandbox. ' +
+        'Your files and data have been kept. No update was downloaded.');
+    }
+  }
   private rollbackDatabase: RestoreDatabaseFactory | null = null;
   private cleanupFailure: string | null = null;
   get cleanupError(): string | null { return this.cleanupFailure; }
@@ -741,6 +754,7 @@ export class SourceUpdates {
       if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer update. Previous files and data have been retained.');
       // Before anything is offered or downloaded: a release this launcher cannot start would fail at restart (#97).
       this.requireLauncher(manifest);
+      this.requireElectron(manifest);
       if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
       await this.stage(manifest, signed, progress, staged ?? undefined);
       if (staged) await this.dropReplaced(staged);
