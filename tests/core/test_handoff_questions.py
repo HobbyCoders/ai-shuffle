@@ -26,13 +26,13 @@ QUESTIONS = [
 TARGET = {"capabilities": {"move_questions": 1}}
 
 
-async def _post(*, blocking=False):
+async def _post(*, blocking=False, tool_use_id="ask-tool"):
     from app.core.user_question_handler import user_question_handler
 
     if blocking:
         return asyncio.create_task(
             user_question_handler.request_answers(
-                "original", "ask-tool", "s1", QUESTIONS, AsyncMock()
+                "original", tool_use_id or "original", "s1", QUESTIONS, AsyncMock()
             )
         )
     await user_question_handler.post_question(
@@ -49,34 +49,45 @@ async def test_question_only_move_keeps_answerable_card(by):
     _chat()
     await _post()
     move = AsyncMock()
+    deliver = AsyncMock()
     with (
         patch("app.network.runners.find", return_value=TARGET),
+        patch("app.network.handoff.resume_carry", return_value=True),
         patch.object(sh, "_record", AsyncMock()),
+        patch.object(sh, "deliver_held", deliver),
         patch("app.api.sessions.move_session_to", move),
     ):
         if by == "owner":
             await sh.queue_move("s1", "DesktopWorker")
         else:
-            sh.request("s1", "DesktopWorker")
+            sh.request("s1", "DesktopWorker", "Keep implementing the reviewed change")
             sh.schedule("s1")
-        assert await _settle(lambda: move.await_count)
+        assert await _settle(lambda: deliver.await_count)
+    move.assert_awaited_once()
+    resume = deliver.await_args.args[3]
+    if by == "agent":
+        assert (
+            "Your hand-off note: Keep implementing the reviewed change"
+            in resume["prompt"]
+        )
+        assert "Continue the work" in resume["prompt"]
+    else:
+        assert resume is None
     [row] = interactions.get_pending_interactions("s1")
     assert row["payload"]["questions"] == QUESTIONS
-    assert (
-        sh.resume_plan(
-            "s1",
-            sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time()),
-            "dev-gaming",
-        )
-        is None
-    )
+    assert not row["payload"].get("handoff_detached")
     with handoff.get_db() as conn:
         handoff._idle(conn.cursor(), "s1")
 
 
-async def test_blocking_producer_is_cancelled_and_same_question_reasked():
+@pytest.mark.parametrize("missing_tool_id", [False, True])
+async def test_blocking_producer_is_cancelled_and_same_question_reasked(
+    missing_tool_id,
+):
     _chat()
-    callback = await _post(blocking=True)
+    callback = await _post(
+        blocking=True, tool_use_id=None if missing_tool_id else "ask-tool"
+    )
     try:
         assert await _settle(lambda: interactions.get_pending_interactions("s1"))
         turn = turns.enqueue_turn("s1", "user", prompt="ask me")
@@ -89,21 +100,35 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked():
                     "turn_id": turn["id"],
                     "payload": {
                         "tool_use_id": "ask-tool",
-                        "name": "AskUserQuestion",
+                        "name": "AskUser",
                         "input": {"questions": QUESTIONS},
                     },
                 }
             ],
         )
 
+        notifications = []
+
         async def interrupt(*args, **kwargs):
+            assert not notifications  # Stop the provider before waking its callback.
             turns.settle_turn(turn["id"], "aborted")
 
         runtime = SimpleNamespace(interrupt=AsyncMock(side_effect=interrupt))
-        pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time())
+        pending = sh.PendingHandoff(
+            "dev-gaming", "DesktopWorker", "Finish the regression tests", time.time()
+        )
+        from app.core import interaction_wait
+
+        notify = interaction_wait.notify_changed
+
+        def notified(sid):
+            notifications.append(sid)
+            notify(sid)
+
         with (
             patch("app.network.runners.find", return_value=TARGET),
             patch("app.core.session_runtime.get_live_runtime", return_value=runtime),
+            patch("app.core.interaction_wait.notify_changed", side_effect=notified),
         ):
             await sh._prepare_questions(
                 "s1",
@@ -117,6 +142,41 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked():
         assert replacement["payload"]["nonblocking"] is True
         assert replacement["payload"]["request_id"] != "original"
         assert turns.get_turn(turn["id"])["state"] == "aborted"
+        assert replacement["payload"]["handoff_detached"] is True
+        assert sh.resume_plan("s1", pending, "dev-gaming") == "question"
+        with (
+            patch.object(sh, "_tell", AsyncMock()),
+            patch.object(sh, "deliver_held", AsyncMock()) as deliver,
+        ):
+            assert "waits for your answer" in await sh._moved(
+                "s1", pending, "dev-gaming"
+            )
+            assert deliver.await_args.args[3] is None
+        # Rehydrate on a receiver with no callback, then answer the card. The
+        # hand-off context/note must reach that fresh answer turn, not vanish.
+        from app.core.user_question_handler import user_question_handler
+
+        snapshot = {
+            "sdk_session_id": None,
+            "history": handoff._history(database.get_session("s1")),
+        }
+        handoff.install_history("s1", snapshot, ".")
+        [received] = interactions.get_pending_interactions("s1")
+        with (
+            patch(
+                "app.core.user_question_handler.UserQuestionHandler._retire_native_question",
+                AsyncMock(),
+            ),
+            patch("app.core.session_runtime.try_steer_pending", AsyncMock()),
+            patch("app.core.session_runtime._broadcast_queue_after_start", AsyncMock()),
+        ):
+            assert await user_question_handler._answer_nonblocking(
+                received, {"Which branch?": "Existing"}, None, human_input=True
+            )
+        [answer] = turns.get_queued_turns("s1")
+        assert answer["prompt"].startswith("[hand-off] Moved from ")
+        assert "Your hand-off note: Finish the regression tests" in answer["prompt"]
+        assert "Answer to your question:\nWhich branch?\nExisting" in answer["prompt"]
     finally:
         callback.cancel()
         await asyncio.gather(callback, return_exceptions=True)
@@ -206,8 +266,10 @@ async def test_old_receiver_refuses_without_losing_question():
     _chat()
     await _post()
     with (
-        patch("app.network.runners.find", return_value={}),
-        pytest.raises(ValueError, match="Update the target worker"),
+        patch(
+            "app.network.runners.find", return_value={"capabilities": {"move_wakes": 3}}
+        ),
+        pytest.raises(sh.QuestionMoveUnsupported, match="Update the target worker"),
     ):
         await sh._prepare_questions(
             "s1",
@@ -215,6 +277,134 @@ async def test_old_receiver_refuses_without_losing_question():
             sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time()),
         )
     assert len(interactions.get_pending_interactions("s1")) == 1
+
+
+async def test_unknown_receiver_capabilities_wait_then_move_without_new_input(caplog):
+    _chat()
+    await _post()
+    sh.request("s1", "DesktopWorker")
+    move = AsyncMock()
+    with (
+        patch("app.network.runners.find", side_effect=[{}, TARGET]) as find,
+        patch("app.api.sessions.move_session_to", move),
+        patch.object(sh, "_moved", AsyncMock(return_value="moved")),
+        patch.object(sh, "_record", AsyncMock()),
+        patch.object(sh, "POLL_S", 0.01),
+    ):
+        assert await sh.run_pending("s1") == "moved"
+    assert find.call_count == 2
+    move.assert_awaited_once()
+    assert "Update the target worker" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "failure", ["read", "before_detach", "after_detach", "interrupt", "publication"]
+)
+async def test_transient_question_failure_keeps_move_and_retries(failure, caplog):
+    _chat()
+    callback = await _post(blocking=True)
+    try:
+        assert await _settle(lambda: interactions.get_pending_interactions("s1"))
+        turn = turns.enqueue_turn("s1", "user", prompt="ask me")
+        turns.start_turn(turn["id"], None, "runner")
+        session_events.append_events(
+            "s1",
+            [
+                {
+                    "type": "tool.use",
+                    "turn_id": turn["id"],
+                    "payload": {
+                        "tool_use_id": "ask-tool",
+                        "name": "AskUser",
+                        "input": {"questions": QUESTIONS},
+                    },
+                }
+            ],
+        )
+        sh.request("s1", "DesktopWorker", "retain this note")
+        detach = sh._detach_question_rows
+        detach_calls = 0
+
+        def flaky_detach(*args, **kwargs):
+            nonlocal detach_calls
+            detach_calls += 1
+            if detach_calls == 1 and failure == "before_detach":
+                raise RuntimeError("transient before detach")
+            replacements = detach(*args, **kwargs)
+            if detach_calls == 1 and failure == "after_detach":
+                raise RuntimeError("transient after detach committed")
+            return replacements
+
+        attempts = 0
+
+        async def interrupt(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1 and failure == "interrupt":
+                raise RuntimeError("transient provider interrupt")
+            turns.settle_turn(turn["id"], "aborted")
+
+        runtime = SimpleNamespace(interrupt=AsyncMock(side_effect=interrupt))
+        from app.core.user_question_handler import user_question_handler
+
+        post = user_question_handler.post_question
+
+        async def flaky_post(**kwargs):
+            if failure == "publication":
+                raise RuntimeError("transient publication after detach committed")
+            return await post(**kwargs)
+
+        read_pending = interactions.get_pending_interactions
+        reads = 0
+
+        def flaky_read(sid):
+            nonlocal reads
+            reads += 1
+            if reads == 1 and failure == "read":
+                raise ValueError("transient pending-interaction read")
+            return read_pending(sid)
+
+        move = AsyncMock()
+        with (
+            patch("app.network.runners.find", return_value=TARGET),
+            patch(
+                "app.db.interactions.get_pending_interactions", side_effect=flaky_read
+            ),
+            patch("app.core.session_runtime.get_live_runtime", return_value=runtime),
+            patch.object(sh, "_detach_question_rows", side_effect=flaky_detach),
+            patch.object(
+                user_question_handler, "post_question", side_effect=flaky_post
+            ),
+            patch.object(sh, "_record", AsyncMock()),
+            patch.object(sh, "_tell", AsyncMock()),
+            patch.object(sh, "deliver_held", AsyncMock()),
+            patch.object(sh, "POLL_S", 0.01),
+            patch("app.api.sessions.move_session_to", move),
+        ):
+            assert "waits for your answer" in await sh.run_pending("s1")
+        move.assert_awaited_once()
+        assert await callback == {"error": "No answers received"}
+        [replacement] = interactions.get_pending_interactions("s1")
+        assert replacement["payload"]["handoff_detached"] is True
+        assert "retain this note" in replacement["payload"]["handoff_context"]
+        assert turns.get_turn(turn["id"])["state"] == "aborted"
+        assert "will retry" in caplog.text
+    finally:
+        callback.cancel()
+        await asyncio.gather(callback, return_exceptions=True)
+
+
+async def test_begin_refusal_logs_phase_and_reason(caplog):
+    reason = (
+        "Wait for this session's queued or active turn to finish before resuming here."
+    )
+    with (
+        patch.object(handoff, "begin", side_effect=ValueError(reason)),
+        patch.object(handoff, "_wake_queued"),
+        pytest.raises(ValueError, match="queued or active turn"),
+    ):
+        await handoff._handle({"phase": "begin", "session_id": "s1"}, "test-peer")
+    assert "Refused hand-off begin for session s1: " + reason in caplog.text
 
 
 async def test_wait_logs_reason_without_question_contents(caplog):

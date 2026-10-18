@@ -168,6 +168,16 @@ def wake_carry(target):
     return int(capabilities.get("move_wakes") or 0) >= 1
 
 
+def question_carry(target):
+    """True for a question-capable receiver, False for older, None until known."""
+    from app.network import runners
+
+    capabilities = (runners.find(target) or {}).get("capabilities") or {}
+    if not capabilities:
+        return None
+    return int(capabilities.get("move_questions") or 0) >= 1
+
+
 def carries_wakes(target):
     return wake_carry(target) is True
 
@@ -640,11 +650,13 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
     with get_db() as conn:
         _idle(conn.cursor(), sid)
     from app.db import interactions
-    from app.network import runners
 
-    if (any(r["kind"] == "question" for r in interactions.get_pending_interactions(sid))
-            and not (runners.find(target) or {}).get("capabilities", {}).get("move_questions")):
-        raise ValueError("Update the target worker before moving an unanswered question.")
+    if any(r["kind"] == "question" for r in interactions.get_pending_interactions(sid)):
+        carry = question_carry(target)
+        if carry is None:
+            raise ValueError("Wait for the target worker to report its capabilities before moving an unanswered question.")
+        if not carry:
+            raise ValueError("Update the target worker before moving an unanswered question.")
     run = runs.claim_run(sid, HANDOFF + target, TTL)
     if not run:
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
@@ -924,7 +936,9 @@ async def _handle(payload, peer_device_id):
         try:
             return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note,
                                   payload.get("wake_barrier") is True)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, (ValueError, PermissionError, LookupError)):
+                logger.warning("Refused hand-off begin for session %s: %s", sid, exc)
             _wake_queued()
             raise
     if payload.get("phase") in ("commit", "cancel"):

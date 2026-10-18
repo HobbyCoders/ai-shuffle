@@ -470,19 +470,23 @@ def _self_label() -> str:
 def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optional[str]:
     """Whether the move of ``session_id`` to ``owner`` resumes the chat there (#2012).
 
-    ``None``: no resume is due (the owner's own move, a cancelled one, or a
+    ``None``: no resume is due (an ordinary owner's move, a cancelled one, or a
     chat the owner stopped). ``"send"``: one resume turn follows the held
-    messages. ``"unsupported"`` / ``"unknown"``: due, but ``owner`` runs an
+    messages. ``"question"``: a detached blocking card waits for its answer,
+    which carries the hand-off note. ``"unsupported"`` / ``"unknown"``: due, but ``owner`` runs an
     older version (or has not reported its capabilities), so the chat stays
     idle there as before and the outcome says so. Sync (capability lookup).
     """
-    if pending.by != "agent" or pending.cancelled:
+    if pending.cancelled:
         return None
     from app.db import interactions
 
-    # The carried card, not an automatic continuation, owns the next input.
-    # Its answer queues a fresh turn on the receiver with the question context.
-    if any(row["kind"] == "question" for row in interactions.get_pending_interactions(session_id)):
+    # Only a detached BLOCKING question owns the next input. Ordinary posted
+    # cards explicitly let the agent keep working and must not drop its note.
+    if any(row["kind"] == "question" and row["payload"].get("handoff_detached")
+           for row in interactions.get_pending_interactions(session_id)):
+        return "question"
+    if pending.by != "agent":
         return None
     from app.core.task_registry import task_registry
 
@@ -500,6 +504,13 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
     return "send" if carry else "unsupported"
 
 
+def _handoff_context(pending: PendingHandoff, label: str) -> str:
+    prompt = f"[hand-off] Moved from {_self_label()} to {label} at the owner's request."
+    if pending.note:
+        prompt += f" Your hand-off note: {pending.note}"
+    return prompt
+
+
 def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[str, Any]:
     """The turn that resumes an agent's hand-off on ``label`` (``control.submit_turn`` kwargs).
 
@@ -511,9 +522,7 @@ def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[s
 
     session = database.get_session(session_id) or {}
     source = _self_label()
-    prompt = f"[hand-off] Moved from {source} to {label} at the owner's request."
-    if pending.note:
-        prompt += f" Your hand-off note: {pending.note}"
+    prompt = _handoff_context(pending, label)
     prompt += (" Continue the work from where you left off. If it was already complete, "
                "stop after a brief acknowledgement; do not invent new work.")
     return {"prompt": prompt, "source": "wakeup", "profile_id": session.get("profile_id"),
@@ -850,7 +859,7 @@ def _busy_words(state: Dict[str, Any]) -> str:
 
 
 def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
-                          turn_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                          turn_id: Optional[str] = None, *, handoff_context: str = "") -> List[Dict[str, Any]]:
     """Cancel callbacks and save replacement cards in ONE transaction.
 
     No question can disappear if the process stops between detaching the turn
@@ -882,46 +891,77 @@ def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
                 continue
             request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "handoff-question:" + row["id"]))
             payload = {"request_id": request_id, "tool_use_id": request_id,
-                       "questions": row["payload"]["questions"], "nonblocking": True}
+                       "questions": row["payload"]["questions"], "nonblocking": True,
+                       "handoff_detached": True, "handoff_context": handoff_context,
+                       "handoff_turn_id": turn_id}
             iid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"))
             cur.execute("INSERT INTO pending_interactions (id,session_id,kind,payload,state) "
                         "VALUES (%s,%s,'question',%s,'pending') ON CONFLICT (id) DO NOTHING",
                         (iid, session_id, json.dumps(payload)))
             replacements.append({"old": row, "payload": payload})
         if replacements and turn_id:
-            # Close steering BEFORE waking a cancelled callback. Its tool
-            # result must not let the same turn start more work here.
+            # Fence turn admission/steering in this transaction. The live
+            # provider still needs interrupting before we notify its callback.
             turns.interrupt_turn(session_id, "stop", turn_id=turn_id,
                                  source="session_handoff", _conn=conn)
     return replacements
 
 
-async def _prepare_questions(session_id: str, state: Dict[str, Any], pending: PendingHandoff) -> None:
-    """Detach only a foreground question wait, never a live tool or background work.
+class QuestionMoveUnsupported(ValueError):
+    """A known older receiver cannot keep an unanswered question."""
 
-    Native nonblocking cards already have no callback. Blocking CLI cards are
-    cancelled and re-asked as durable cards whose answer queues a fresh turn.
+
+async def _prepare_questions(session_id: str, state: Dict[str, Any], pending: PendingHandoff) -> bool:
+    """Retry transient preparation failures without dropping a queued move.
+
+    Cancellation still propagates. Only a deliberate mixed-version refusal
+    ends the move; committed replacement cards survive all other failures.
+    """
+    try:
+        return await _prepare_questions_once(session_id, state, pending)
+    except QuestionMoveUnsupported:
+        raise
+    except Exception:  # noqa: BLE001 — retain the durable move and retry
+        logger.warning("Could not prepare question cards for hand-off of %s; will retry",
+                       session_id, exc_info=True)
+        return False
+
+
+async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pending: PendingHandoff) -> bool:
+    """Detach only a foreground question wait, never live tools/background work.
+
+    CLI AskUserQuestion and Fluid AskUser with _nonblocking are already posted
+    cards. Only Fluid AskUser without _nonblocking holds a callback to cancel
+    and re-ask as a durable card whose answer queues a fresh turn.
     """
     if state["tasks"] or state.get("queued") or state.get("wake"):
-        return
+        return True
     from app.db import interactions, turns
     from app.core import interaction_events, interaction_wait, session_runtime
     from app.core.user_question_handler import user_question_handler, publish_session_attention
-    from app.network import runners
+    from app.network.handoff import question_carry
 
     rows = await asyncio.to_thread(interactions.get_pending_interactions, session_id)
     if not rows or await asyncio.to_thread(_open_prompt, session_id):
-        return
-    if not (runners.find(pending.target_id) or {}).get("capabilities", {}).get("move_questions"):
-        raise ValueError("Update the target worker before moving an unanswered question.")
+        return True
+    carry = await asyncio.to_thread(question_carry, pending.target_id)
+    if carry is None:
+        return False  # Presence has not reported capabilities yet; keep waiting.
+    if not carry:
+        raise QuestionMoveUnsupported("Update the target worker before moving an unanswered question.")
     blocking = [r for r in rows if not r["payload"].get("nonblocking")]
-    if not blocking:
-        return
     live = await asyncio.to_thread(turns.get_live_turn, session_id)
     runtime = session_runtime.get_live_runtime(session_id)
+    if not blocking:
+        # A transient failure after the detach transaction may have prevented
+        # interrupt/notify. Retry those steps for the SAME captured turn only.
+        if live and runtime and any(r["payload"].get("handoff_turn_id") == live["id"] for r in rows):
+            await runtime.interrupt("stop", source="session_handoff")
+            interaction_wait.notify_changed(session_id)
+        return True
     if live:
         if runtime is None or not interaction_wait.has_waiters(session_id):
-            return
+            return True
         # A question may be one member of a parallel tool batch. Only stop the
         # turn when every unreturned tool is one of the captured questions.
         from app.db.base import get_db, parse_jsonb
@@ -932,26 +972,46 @@ async def _prepare_questions(session_id: str, state: Dict[str, Any], pending: Pe
                 cur.execute("SELECT event_type,payload FROM session_events WHERE session_id=%s "
                             "AND turn_id=%s AND event_type IN ('tool.use','tool.result') ORDER BY seq",
                             (session_id, live["id"]))
-                open_tools = set()
+                from app.core.user_question_handler import FLUID_QUESTION_TOOLS, questions_from_tool_input
+
+                open_tools = {}
                 for event in cur.fetchall():
-                    tool = (parse_jsonb(event["payload"]) or {}).get("tool_use_id")
+                    payload = parse_jsonb(event["payload"]) or {}
+                    tool = payload.get("tool_use_id")
                     if event["event_type"] == "tool.use":
-                        open_tools.add(tool)
+                        open_tools[tool] = payload
                     else:
-                        open_tools.discard(tool)
-                return bool(open_tools) and open_tools <= {r["payload"].get("tool_use_id") for r in blocking}
+                        open_tools.pop(tool, None)
+                unmatched = list(blocking)
+                for tool, payload in open_tools.items():
+                    match = next((r for r in unmatched if r["payload"].get("tool_use_id") == tool), None)
+                    if match is None and payload.get("name") in FLUID_QUESTION_TOOLS:
+                        # Without _ctx_tool_use_id the producer uses request_id
+                        # as the card id. Match its full normalized question,
+                        # not a generic permission/tool name or just its text.
+                        questions = questions_from_tool_input(payload.get("input"))
+                        match = next((r for r in unmatched
+                                      if r["payload"].get("tool_use_id") == r["payload"].get("request_id")
+                                      and questions and r["payload"].get("questions") == questions), None)
+                    if match is None:
+                        return False
+                    unmatched.remove(match)
+                return bool(open_tools)
 
         if not await asyncio.to_thread(only_questions):
-            return
+            return True
     elif state["running"]:
-        return  # An active run without its question turn is not safe to stop.
+        return True  # An active run without its question turn is not safe to stop.
     replacements = await asyncio.to_thread(_detach_question_rows, session_id, blocking,
-                                          live["id"] if live else None)
+                                          live["id"] if live else None,
+                                          handoff_context=_handoff_context(pending, pending.label))
     if not replacements:
-        return
-    interaction_wait.notify_changed(session_id)
+        return True
+    # Interrupt the live provider BEFORE explicitly waking the cancelled
+    # callback. A failed interrupt is retried from the durable replacement.
     if live:
         await runtime.interrupt("stop", source="session_handoff")
+    interaction_wait.notify_changed(session_id)
     from app.core.sync_engine import sync_engine
     from app.db import database
 
@@ -968,6 +1028,7 @@ async def _prepare_questions(session_id: str, state: Dict[str, Any], pending: Pe
             session_id=session_id, request_id=payload["request_id"], tool_use_id=payload["tool_use_id"],
             questions=payload["questions"], broadcast_func=broadcast)
     await publish_session_attention(session_id)
+    return True
 
 
 async def _wait_idle(session_id: str, pending: PendingHandoff) -> bool:
@@ -976,12 +1037,13 @@ async def _wait_idle(session_id: str, pending: PendingHandoff) -> bool:
         if pending.cancelled:
             return False
         state = await asyncio.to_thread(busy_state, session_id)
-        await _prepare_questions(session_id, state, pending)
-        if not await asyncio.to_thread(_busy, session_id):
+        prepared = await _prepare_questions(session_id, state, pending)
+        if prepared and not await asyncio.to_thread(_busy, session_id):
             return True
         now = time.monotonic()
         if not last_log or now - last_log >= 60:
-            logger.info("Hand-off waiting for session %s: %s", session_id, _busy_words(state))
+            logger.info("Hand-off waiting for session %s: %s", session_id,
+                        _busy_words(state) or "preparing question cards or target capabilities")
             last_log = now
         await asyncio.sleep(POLL_S)
     return False
@@ -1051,6 +1113,8 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     outcome = f"Handed off to {label}. Open this chat there to continue on the same branch."
     if plan == "send":
         outcome = f"Handed off to {label}. This chat continues there on the same branch."
+    elif plan == "question":
+        outcome = f"Handed off to {label}. This chat waits for your answer to the question card there."
     elif plan == "unsupported":
         outcome += f" {label} runs an older version that cannot resume it by itself: send a message there."
     elif plan == "unknown":

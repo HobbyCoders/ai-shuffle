@@ -603,6 +603,10 @@ class UserQuestionHandler:
             f"{key}\n{', '.join(map(str, value)) if isinstance(value, list) else value}"
             for key, value in answers.items()
         )
+        if row["payload"].get("handoff_detached"):
+            handoff_context = row["payload"].get("handoff_context")
+            if isinstance(handoff_context, str) and handoff_context:
+                prompt = handoff_context + "\n\n" + prompt
         # Inherit the latest runnable context, not settings from when a days-old
         # question was posted. Keep only transport attribution from its payload.
         context = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id) or {}
