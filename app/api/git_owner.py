@@ -261,7 +261,20 @@ def _has_git_marker(path):
         if not os.access(current, os.X_OK):
             raise PermissionError(f"Cannot search Git ancestor: {current}")
         try:
-            os.lstat(os.path.join(current, ".git"))
+            marker = os.path.join(current, ".git")
+            marker_stat = os.lstat(marker)
+            required = os.R_OK | (os.X_OK if stat.S_ISDIR(marker_stat.st_mode) else 0)
+            if not os.access(marker, required):
+                raise PermissionError(f"Cannot read Git metadata: {marker}")
+            if stat.S_ISREG(marker_stat.st_mode):
+                # Linked worktrees/submodules point outside the working folder.
+                # Validate the target cheaply even if native handles are warm.
+                with open(marker, encoding="utf-8") as stream:
+                    gitdir = stream.readline().strip()
+                if gitdir.startswith("gitdir: "):
+                    target = os.path.join(current, gitdir[len("gitdir: "):])
+                    if not os.access(target, os.R_OK | os.X_OK):
+                        raise PermissionError(f"Cannot read Git metadata: {target}")
             return True
         except FileNotFoundError:
             pass

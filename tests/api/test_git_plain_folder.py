@@ -116,6 +116,14 @@ def test_linked_worktree_git_file_is_a_repository(plain_project):
     assert response.status_code == 200, response.text
     assert response.json()["is_git_repo"] is True
     assert response.json()["current_branch"] == "linked"
+    target = folder / (folder / ".git").read_text().strip().removeprefix("gitdir: ")
+    previous = target.stat().st_mode
+    target.chmod(0)
+    try:
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+        assert response.status_code == 503, response.text
+    finally:
+        target.chmod(previous)
 
 
 def test_structural_git_marker_never_classifies_as_plain(plain_project, monkeypatch):
@@ -125,7 +133,8 @@ def test_structural_git_marker_never_classifies_as_plain(plain_project, monkeypa
     def unexpected(*args, **kwargs):
         raise AssertionError("A malformed or inaccessible Git entry must never be called a plain folder")
     monkeypatch.setattr(git.git_service, "_run_git", unexpected)
-    assert _is_plain_project_folder(str(folder)) is False
+    with pytest.raises(PermissionError, match="Cannot read Git metadata"):
+        _is_plain_project_folder(str(folder))
 
 
 @pytest.mark.parametrize("failure", [PermissionError("denied"), FileNotFoundError("git missing"),
@@ -181,6 +190,10 @@ def test_existing_session_status_only_confirms_readable_plain_folder(plain_proje
         folder.rmdir()
     elif state == "unreadable-git":
         git_at(folder, "init", "-b", "main")
+        # Warm native handles and the session resolver before changing access.
+        warm = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
+        assert warm.status_code == 200, warm.text
+        assert warm.json()["is_git_repo"] is True
         (folder / ".git").chmod(0)
     try:
         response = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
