@@ -179,21 +179,15 @@ jobs:
             target: default
             cores: 2
             memory: 2048
-            advisory: false
-          # Report only: the API 36 guest failed three release attempts in a row
-          # and blocked the release. Two were the image's frozen WebView 133
-          # aborting on its own dangling-pointer check (now turned off by
-          # ci/prepare-android-ui.py). One was an Espresso dialog-focus race
-          # (dialogs now use onDialogView). It still runs and uploads its
-          # report; API 34 stays the blocking device check until API 36 is
-          # proven stable again. Internal tracking: #2375.
+          # Both APIs block on app failures. Only exact pre-install boot ANRs
+          # and the known image/WebView debug check have targeted workarounds
+          # in ci/prepare-android-ui.py, each logged visibly. No suite retries
+          # or blanket exemptions. Internal tracking: #2375.
           - api: 36
             target: default
             cores: 4
             memory: 4096
-            advisory: true
     needs: build
-    continue-on-error: ${{ matrix.advisory }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     defaults:

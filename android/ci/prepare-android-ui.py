@@ -121,6 +121,17 @@ WEBVIEW_FLAGS = "_ --disable-features=PartitionAllocUnretainedDanglingPtr"
 
 def configure_webview(adb, out: Path):
     out.mkdir(parents=True, exist_ok=True)
+    # Never disable a check on an unrecognized image or provider. In particular,
+    # API 34 and newer WebViews must exercise their normal crash checks.
+    sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
+    build_id = adb("shell", "getprop", "ro.build.id").strip()
+    provider = adb("shell", "dumpsys", "webviewupdate")
+    (out / "webview.txt").write_text(provider, encoding="utf-8")
+    current = re.findall(r"^\s*Current WebView package \(name, version\): \(com\.android\.webview, 133\.0\.6943\.137\)\s*$",
+                         provider, re.MULTILINE)
+    if sdk != "36" or build_id != "BE2A.250530.026.D1" or len(current) != 1:
+        print(f"No WebView workaround for SDK {sdk!r}, build {build_id!r}; keeping crash checks enabled", flush=True)
+        return
     # WebView reads the flags file only on debuggable (userdebug/eng) builds.
     build_type = adb("shell", "getprop", "ro.build.type").strip()
     if build_type not in ("userdebug", "eng"):
@@ -129,9 +140,7 @@ def configure_webview(adb, out: Path):
     written = adb("shell", "cat", WEBVIEW_FLAGS_FILE).strip()
     if written != WEBVIEW_FLAGS:
         raise RuntimeError(f"WebView flags file reads back as {written!r}")
-    # Keep the exact WebView provider and version with the run's evidence.
-    (out / "webview.txt").write_text(adb("shell", "dumpsys", "webviewupdate"), encoding="utf-8")
-    print(f"WebView flags for this emulator: {WEBVIEW_FLAGS}", flush=True)
+    print(f"Known emulator WebView 133 debug-check workaround (SDK {sdk}, build {build_id}): {WEBVIEW_FLAGS}", flush=True)
 
 
 def main():

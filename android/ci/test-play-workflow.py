@@ -169,6 +169,37 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertNotIn("sold separately", full)
         self.assertIn("https://hobbycoders.com/delete-account", full)
 
+    def test_emulator_jobs_block_app_failures_on_both_apis(self):
+        workflow = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
+        job = workflow["jobs"]["android-ui"]
+        self.assertNotIn("continue-on-error", job)
+        self.assertNotIn("if", job)
+        self.assertEqual(job["strategy"]["fail-fast"], "false")
+        matrix = job["strategy"]["matrix"]["include"]
+        self.assertEqual({"34", "36"}, {entry["api"] for entry in matrix})
+        self.assertTrue(all("advisory" not in entry for entry in matrix))
+        for android_job in workflow["jobs"].values():
+            for step in android_job.get("steps", []):
+                if "run" in step:
+                    result = subprocess.run(["/bin/bash", "-n"], input=step["run"], text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+        steps = job["steps"]
+        self.assertTrue(all("continue-on-error" not in step for step in steps))
+        runner = next(step for step in steps if step.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
+        self.assertNotIn("if", runner)
+        self.assertEqual(runner["with"]["script"], "bash ci/run-android-ui-tests.sh")
+        checks = next(step["run"] for step in steps if step.get("name") == "Check emulator readiness and instrumentation result parsers")
+        for script in ("test-emulator-readiness.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
+            self.assertIn(script, checks)
+        reports = next(step for step in steps if step.get("name") == "Upload test reports")
+        self.assertEqual(reports["if"], "failure()")
+        self.assertIn("android-emulator/", reports["with"]["path"])
+        self.assertIn("android-ui", workflow["jobs"]["publish"]["needs"])
+        release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        apk = release["jobs"]["android-apk"]
+        self.assertEqual(apk["uses"], "./.github/workflows/android.yml")
+        self.assertNotIn("continue-on-error", apk)
+
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():
             for step in job["steps"]:
