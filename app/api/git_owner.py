@@ -248,6 +248,30 @@ async def _route_project_git(endpoint, values, worker_id, branch):
     return result["result"]
 
 
+def _has_git_marker(path):
+    """Walk Git's discovery boundary without mistaking unreadable paths for absent ones."""
+    current = os.path.realpath(path)
+    ceilings = {os.path.realpath(value) for value in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep)
+                if value and os.path.isabs(value)}
+    across_filesystems = os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM", "").lower() in {"1", "true", "yes", "on"}
+    while True:
+        # Opening the directory proves readability; exists()/is_dir() alone
+        # suppress some permission failures. lstat also sees broken .git links.
+        with os.scandir(current):
+            pass
+        try:
+            os.lstat(os.path.join(current, ".git"))
+            return True
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(current)
+        if parent == current or parent in ceilings:
+            return False
+        if not across_filesystems and os.stat(parent).st_dev != os.stat(current).st_dev:
+            return False
+        current = parent
+
+
 def _is_plain_project_folder(path):
     """Only a real non-repository is an empty Git status, never a failed probe.
 
@@ -258,7 +282,7 @@ def _is_plain_project_folder(path):
     from app.core.git_service import git_service
 
     try:
-        if not stat.S_ISDIR(os.stat(path).st_mode):
+        if not stat.S_ISDIR(os.stat(path).st_mode) or _has_git_marker(path):
             return False
     except FileNotFoundError:
         return False

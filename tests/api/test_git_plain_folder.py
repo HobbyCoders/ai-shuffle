@@ -79,6 +79,7 @@ def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
     ("fatal: not a git repository (or any parent up to mount point /home/appuser)\n"
      "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", True),
     ("fatal: cannot change to directory: Permission denied\n", False),
+    ("fatal: detected dubious ownership in repository at '/project'\n", False),
 ])
 def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, monkeypatch, diagnostic, is_plain):
     project, folder, client = plain_project
@@ -88,6 +89,43 @@ def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, 
     assert response.status_code == (200 if is_plain else 500)
     if is_plain:
         assert response.json()["is_git_repo"] is False
+
+
+def test_non_english_environment_uses_c_locale_for_confirmation(plain_project, monkeypatch):
+    project, folder, client = plain_project
+    monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+    original = git.git_service._run_git
+    def run(*args, **kwargs):
+        assert kwargs["env"]["LC_ALL"] == "C"
+        return original(*args, **kwargs)
+    monkeypatch.setattr(git.git_service, "_run_git", run)
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    assert response.status_code == 200, response.text
+    assert response.json()["is_git_repo"] is False
+
+
+def test_linked_worktree_git_file_is_a_repository(plain_project):
+    project, folder, client = plain_project
+    base = folder.parent / "base-repo"
+    base.mkdir()
+    git_at(base, "init", "-b", "main")
+    git_at(base, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
+    git_at(base, "worktree", "add", "-b", "linked", str(folder))
+    assert (folder / ".git").is_file()
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    assert response.status_code == 200, response.text
+    assert response.json()["is_git_repo"] is True
+    assert response.json()["current_branch"] == "linked"
+
+
+def test_structural_git_marker_never_classifies_as_plain(plain_project, monkeypatch):
+    from app.api.git_owner import _is_plain_project_folder
+    project, folder, client = plain_project
+    (folder / ".git").write_text("gitdir: missing\n")
+    def unexpected(*args, **kwargs):
+        raise AssertionError("A malformed or inaccessible Git entry must never be called a plain folder")
+    monkeypatch.setattr(git.git_service, "_run_git", unexpected)
+    assert _is_plain_project_folder(str(folder)) is False
 
 
 @pytest.mark.parametrize("failure", [PermissionError("denied"), FileNotFoundError("git missing"),
