@@ -6,6 +6,9 @@ KeyguardService bind times out while the cold image is still optimizing; runs
 38343028922 and 38347338129). Recover only those exact first-boot failures,
 each once, before any Shuffle code is installed. Never dismiss an application
 ANR, never recover during instrumentation, and never turn off Android's dialogs.
+
+Then set the emulator WebView's debug flags (configure_webview) before the app
+is installed.
 """
 
 import os
@@ -17,6 +20,20 @@ from pathlib import Path
 
 LAUNCHER = "com.android.launcher3"
 SYSTEMUI = "com.android.systemui"
+
+
+def report_workaround(adb, message):
+    sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
+    build_id = adb("shell", "getprop", "ro.build.id").strip()
+    provider = adb("shell", "dumpsys", "webviewupdate")
+    current = next((line.strip() for line in provider.splitlines()
+                    if line.strip().startswith("Current WebView package (name, version):")), "WebView unknown")
+    detail = f"{message}; SDK {sdk or 'unknown'}, build {build_id or 'unknown'}; {current}"
+    print(detail, flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as output:
+            output.write(f"- {detail}\n")
 
 
 def readiness(displays: str, policy: str, power: str) -> str:
@@ -69,7 +86,7 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
         if state == "launcher_anr":
             if recovered:
                 raise RuntimeError("The Android launcher hung again after its single pre-test restart")
-            print("First-boot launcher ANR detected before app installation; retaining diagnostics and restarting Quickstep once", flush=True)
+            report_workaround(adb, "First-boot launcher ANR detected before app installation; retaining diagnostics and restarting Quickstep once")
             for name, data in (("displays", displays), ("policy", policy), ("power", power)):
                 (out / f"launcher-anr-{name}.txt").write_text(data, encoding="utf-8")
             diagnostics()
@@ -80,7 +97,7 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
         elif state == "systemui_anr":
             if systemui_recovered:
                 raise RuntimeError("SystemUI hung again after its single pre-test restart")
-            print("First-boot SystemUI ANR detected before app installation; retaining diagnostics and restarting SystemUI once", flush=True)
+            report_workaround(adb, "First-boot SystemUI ANR detected before app installation; retaining diagnostics and restarting SystemUI once")
             for name, data in (("displays", displays), ("policy", policy), ("power", power)):
                 (out / f"systemui-anr-{name}.txt").write_text(data, encoding="utf-8")
             diagnostics()
@@ -104,6 +121,42 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
     raise RuntimeError("Emulator never reached a stable unlocked launcher before app verification")
 
 
+# The emulator's built-in AOSP WebView is never updated and gets no variations
+# seed, so it runs Chromium's code defaults. In Chromium 133 (API 36 image
+# BE2A.250530.026.D1) PartitionAllocUnretainedDanglingPtr defaults to mode=crash:
+# a dangling base::Unretained inside WebView's own IO thread aborted the app
+# process with SIGTRAP mid-suite (release run 38824056427, attempts 1 and 2;
+# Chromium's own field-trial testing config runs this study as
+# dump_without_crashing). Turn off only that internal check. Every other
+# WebView, renderer or app crash still fails the run.
+WEBVIEW_FLAGS_FILE = "/data/local/tmp/webview-command-line"
+WEBVIEW_FLAGS = "_ --disable-features=PartitionAllocUnretainedDanglingPtr"
+
+
+def configure_webview(adb, out: Path):
+    out.mkdir(parents=True, exist_ok=True)
+    # Never disable a check on an unrecognized image or provider. In particular,
+    # API 34 and newer WebViews must exercise their normal crash checks.
+    sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
+    build_id = adb("shell", "getprop", "ro.build.id").strip()
+    provider = adb("shell", "dumpsys", "webviewupdate")
+    (out / "webview.txt").write_text(provider, encoding="utf-8")
+    current = re.findall(r"^\s*Current WebView package \(name, version\): \(com\.android\.webview, 133\.0\.6943\.137\)\s*$",
+                         provider, re.MULTILINE)
+    if sdk != "36" or build_id != "BE2A.250530.026.D1" or len(current) != 1:
+        print(f"No WebView workaround for SDK {sdk!r}, build {build_id!r}; keeping crash checks enabled", flush=True)
+        return
+    # WebView reads the flags file only on debuggable (userdebug/eng) builds.
+    build_type = adb("shell", "getprop", "ro.build.type").strip()
+    if build_type not in ("userdebug", "eng"):
+        raise RuntimeError(f"WebView ignores {WEBVIEW_FLAGS_FILE} on a {build_type or 'unknown'} build")
+    adb("shell", f"echo '{WEBVIEW_FLAGS}' > {WEBVIEW_FLAGS_FILE} && chmod 644 {WEBVIEW_FLAGS_FILE}")
+    written = adb("shell", "cat", WEBVIEW_FLAGS_FILE).strip()
+    if written != WEBVIEW_FLAGS:
+        raise RuntimeError(f"WebView flags file reads back as {written!r}")
+    report_workaround(adb, f"Known emulator WebView 133 debug-check workaround: {WEBVIEW_FLAGS}")
+
+
 def main():
     serial = os.environ.get("ANDROID_SERIAL", "emulator-5554")
     if not re.fullmatch(r"emulator-\d+", serial):
@@ -117,7 +170,10 @@ def main():
         subprocess.run(["bash", "ci/emulator-diagnostics.sh", "launcher-recovery"],
                        check=False, timeout=240)
 
-    prepare(adb, Path(os.environ["RUNNER_TEMP"]) / "android-emulator" / "readiness", diagnostics=diagnostics)
+    out = Path(os.environ["RUNNER_TEMP"]) / "android-emulator" / "readiness"
+    prepare(adb, out, diagnostics=diagnostics)
+    # Before the app is installed: WebView reads its flags when it first loads in a process.
+    configure_webview(adb, out)
 
 
 if __name__ == "__main__":
