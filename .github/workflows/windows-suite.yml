@@ -75,6 +75,13 @@ jobs:
       - name: Full suite
         if: inputs.tests == ''
         shell: bash
+        env:
+          # The runner ships an Android SDK; an owner's Windows PC does not, so
+          # local_ci skips android-app there. Do the same: the Android app is
+          # built and tested by android-play.yml, which first generates the
+          # offline demo assets the unit-test build needs.
+          ANDROID_HOME: ''
+          ANDROID_SDK_ROOT: ''
         run: |
           set -o pipefail
           "$LOCAL_CI_PYTHON" scripts/local_ci.py full 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
