@@ -38,7 +38,7 @@
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 
 	import { api, getErrorMessage, type FileUploadResponse } from '$lib/api/client';
-	import { cancelLimitResume, compactSession, getCacheState, type CacheState } from '$lib/api/limit-resume';
+	import { cancelLimitResume, getCacheState, type CacheState } from '$lib/api/limit-resume';
 	import { pausedChat, pausedLabel } from './limit-resume';
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify } from '$lib/stores/notifications';
@@ -217,7 +217,7 @@
 
 	function sendAnyway() {
 		const notice = coldNotice;
-		if (!notice) return;
+		if (!notice || compacting) return;
 		acknowledge(notice.sessionId, notice.tokens);
 		coldNotice = null;
 		coldCheckWaived = true;
@@ -229,11 +229,9 @@
 		if (!notice || compacting) return;
 		compacting = true;
 		try {
-			await compactSession(notice.sessionId);
-			coldNotice = null;
-			notify('Compacting this chat. Send your message when it finishes.', { severity: 'info' });
-		} catch (e) {
-			notify(getErrorMessage(e, 'Could not compact this chat.'), { severity: 'error' });
+			// The server owns both turns, so closing the tab cannot lose the
+			// follow-up. Reuse normal send clearing and failure restoration.
+			await handleSubmit(true);
 		} finally {
 			compacting = false;
 		}
@@ -312,7 +310,7 @@
 	let isUploading = $state(false);
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
-	const sendState = $derived(sendButtonState({
+	const availableSendState = $derived(sendButtonState({
 		hasContent: hasMessageContent,
 		hasCredential: $anyCredential,
 		isUploading,
@@ -320,6 +318,9 @@
 		isTranscribing,
 		autoBranch: $activeSession.worktreeIntent === 'worktree' && !$activeSession.worktreeId
 	}));
+	const sendState = $derived(compacting
+		? { ...availableSendState, disabled: true, title: 'Starting compaction…' }
+		: availableSendState);
 	let editorRef = $state<TiptapEditor | null>(null);
 	let prevSessionId = $state($activeSession.sessionId);
 
@@ -791,8 +792,8 @@
 	}
 
 	// Handle form submission
-	async function handleSubmit() {
-		if (!ownsComposer() || heldForCatalog) return;
+	async function handleSubmit(compactBeforeSend = false) {
+		if (!ownsComposer() || heldForCatalog || (compacting && !compactBeforeSend)) return;
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
 		}
@@ -820,7 +821,7 @@
 
 		// A large chat with a cold provider cache: ask first (#1831).
 		const sendingTo = $activeSession.sessionId;
-		if (sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
+		if (!compactBeforeSend && sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
 
 		// Append any legacy uploaded files (from file upload button) to the end
 		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
@@ -830,8 +831,8 @@
 			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
 		}
 
-		// Send the message
-		sendMessage(messageToSend);
+		// Send the message, optionally queued behind a server-owned compaction.
+		await sendMessage(messageToSend, compactBeforeSend);
 	}
 
 	/**
@@ -876,7 +877,7 @@
 	// turn still goes out, and the backend decides when the model sees it (mid-turn
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
-	async function sendMessage(finalPrompt: string) {
+	async function sendMessage(finalPrompt: string, compactBeforeSend = false) {
 		if (!ownsComposer()) return;
 		composerSuggestion.invalidate();
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
@@ -988,10 +989,13 @@
 		try {
 			const sent = await activeSession.sendMessage(
 				finalPrompt,
-				pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
+				compactBeforeSend || pendingPaths?.length
+					? { pendingUploadPaths: pendingPaths, ...(compactBeforeSend ? { compactFirst: true } : {}) }
+					: undefined,
 			);
 			if (sent === false) restoreOnFailure();
 			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
+				if (compactBeforeSend) coldNotice = null;
 				// A first send can adopt a new session id before it resolves (notably
 				// worktree creation). Only actual navigation retires its drawer close.
 				collapseMobileComposer();
@@ -1366,10 +1370,10 @@
 		{#if coldNotice && coldNotice.sessionId === $activeSession.sessionId}
 			<Banner
 				severity="warning"
-				message={coldNotice.text}
-				action={{ label: compacting ? 'Compacting…' : 'Compact first', onClick: compactFirst }}
-				secondaryAction={{ label: 'Send anyway', onClick: sendAnyway }}
-				dismissible
+				message={compacting ? 'Starting compaction. Queuing your message to send next…' : coldNotice.text}
+				action={compacting ? undefined : { label: 'Compact first', onClick: compactFirst }}
+				secondaryAction={compacting ? undefined : { label: 'Send anyway', onClick: sendAnyway }}
+				dismissible={!compacting}
 				onDismiss={() => (coldNotice = null)}
 			/>
 		{/if}
