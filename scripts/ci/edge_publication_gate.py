@@ -169,11 +169,12 @@ def update_reach_readiness(revision, *, api=None, base=None, root=None, reposito
                                "(see docs/ci/release-channels.md).")
 
         commits = git("rev-list", "--first-parent", "--reverse", f"{base}..{revision}").splitlines()
+        released = reach.released_launcher(git, reader)
         refusals = []
         for commit in commits:
             parent = git("rev-parse", f"{commit}^1")
             changed = git("diff", "--name-only", parent, commit).splitlines()
-            groups = reach.classify(changed, reader(parent), reader(commit))
+            groups = reach.classify(changed, reader(parent), reader(commit), released)
             failing = reach.verdict(groups)
             if not failing:
                 continue

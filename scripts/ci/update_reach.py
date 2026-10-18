@@ -31,7 +31,8 @@ reads when it runs this check before a push):
                     The label update-reach:windows-launcher accepts a deliberate
                     launcher change only together with launcher-version below.
   launcher-version  The launcher closure changed but desktop/launcher.json
-                    "version" was not raised (desktop/LAUNCHER.md). Older and
+                    "version" was not raised (desktop/LAUNCHER.md), and the
+                    version is one a release tag already carries. Older and
                     newer launchers would report the same version, so neither
                     the launcher swap nor the update's launcher checks can tell
                     them apart. No label accepts this, except the owner's
@@ -84,6 +85,8 @@ from typing import Callable, Iterable, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
 FINAL_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# Every tag release.yml builds installers from (v*), prereleases included.
+RELEASE_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+([-.+].*)?")
 
 TRUST_KEY = "desktop/build/application-update-key.pem"
 CONTRACT = "docker/update_contract.py"
@@ -284,14 +287,32 @@ def launcher_version(read: Reader) -> Optional[int]:
     return version if isinstance(version, int) and not isinstance(version, bool) and version >= 1 else None
 
 
-def launcher_raised(base: Reader, head: Reader) -> bool:
-    """The head's launcher version is valid and above the base's (any valid one when the base has none)."""
+def launcher_raised(base: Reader, head: Reader, released: Optional[int] = None) -> bool:
+    """The head's launcher version is valid and above the base's (any valid one when the base has none),
+    or above every released launcher (released): no installer carries the head's version yet, so a
+    further change to that unreleased launcher ships inside it and needs no second bump."""
     old, new = launcher_version(base), launcher_version(head)
-    return new is not None and (old is None or new > old)
+    if new is None:
+        return False
+    return old is None or new > old or (released is not None and new > released)
 
 
-def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
-    """Group the changed paths of base..head by how far the in-app update reaches them."""
+def released_launcher(run: Optional[Callable[..., str]] = None,
+                      read: Optional[Callable[[str], Reader]] = None) -> Optional[int]:
+    """The highest desktop/launcher.json version of any release tag (a v* tag release.yml builds
+    installers from). None when there are no such tags here, which keeps the strict per-range rule.
+    run and read default to this module's git and reader (a caller may bind them to another root)."""
+    run, read = run or git, read or reader
+    versions = [launcher_version(read(tag))
+                for tag in run("tag", "--list").splitlines() if RELEASE_TAG.fullmatch(tag)]
+    known = [v for v in versions if v is not None]
+    return max(known) if known else None
+
+
+def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optional[int] = None) -> dict:
+    """Group the changed paths of base..head by how far the in-app update reaches them.
+
+    released: the highest launcher version any installer shipped (released_launcher), if known."""
     changed = sorted(set(changed))
     archive = _load("source_archive", "scripts/source_archive.py")
     groups = {name: [] for name in GROUPS}
@@ -326,7 +347,8 @@ def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
     groups["windows-launcher"] = [p for p in changed if p in launcher]
     # Every launcher reports desktop/launcher.json's version; a closure change
     # that keeps it makes two different launchers indistinguishable (#97).
-    if groups["windows-launcher"] and not launcher_raised(base, head):
+    # Unless no installer has that version yet: then the change ships in it.
+    if groups["windows-launcher"] and not launcher_raised(base, head, released):
         groups["launcher-version"] = list(groups["windows-launcher"])
     groups["update-trust-key"] = [p for p in changed if p == TRUST_KEY]
     groups["windows-packaging"] = [p for p in changed if matches(p, WINDOWS_PACKAGING) and p != TRUST_KEY]
@@ -453,7 +475,7 @@ def main(argv: Optional[list] = None) -> int:
     if not base:
         parser.error("no final release tag found; pass --base")
     changed = git("diff", "--name-only", f"{base}...{args.head}").splitlines()
-    groups = classify(changed, reader(base), reader(args.head))
+    groups = classify(changed, reader(base), reader(args.head), released_launcher())
     failing = verdict(groups, args.allow)
     if args.json:
         print(json.dumps({"base": base, "head": args.head, "groups": groups, "failing": failing}, indent=2))
