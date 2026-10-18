@@ -110,11 +110,17 @@ const readJson = async p => { try { return JSON.parse(await fs.readFile(p, 'utf8
  * Read state.json sparingly while a launcher may be writing it. Windows refuses
  * to replace a file another process has open, and the 0.9.6 launcher renames
  * state.json.tmp over state.json once, with no retry: a read at that instant
- * stops it with "AI Shuffle could not start ... EPERM ... rename". So the loops
- * below read it only after their other conditions hold, and at most once a
- * second (STATE_POLL_MS); the sampler only when the journal or PostgreSQL changes.
+ * stops it with "AI Shuffle could not start ... EPERM ... rename". It writes
+ * state.json as it starts, on Try Again, and when the update turns healthy. So
+ * nothing reads it at those moments: the sampler only once PostgreSQL runs or
+ * the point is ready (watch), and the other waits only after their other
+ * conditions hold, a few seconds after health, at most once a second (untilState).
  */
-const STATE_POLL_MS = 1000;
+const STATE_POLL_MS = 1000, STATE_SETTLE_MS = 3000;
+async function untilState(fn, message, timeout) {
+  await sleep(STATE_SETTLE_MS);
+  return until(fn, message, timeout, STATE_POLL_MS);
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 /**
  * Run a helper program with a time limit, never blocking the event loop (a
@@ -150,8 +156,8 @@ const note = message => { (current.notes ??= []).push(message); console.log('NOT
 const fail = message => { (current.failures ??= []).push(message); console.log('FAIL: ' + message); void writeEvidence(); };
 const expect = (ok, message, failure = message) => { if (ok) pass(message); else fail(failure); return !!ok; };
 /** A wait that is not a safety check: on timeout record it and go on. */
-async function expectWithin(fn, message, failure, timeout, every) {
-  try { await until(fn, failure, timeout, every); pass(message); return true; } catch (error) { fail(String(error?.message ?? error)); return false; }
+async function expectWithin(fn, message, failure, timeout, wait = until) {
+  try { await wait(fn, failure, timeout); pass(message); return true; } catch (error) { fail(String(error?.message ?? error)); return false; }
 }
 async function finish() { current.result = current.failures?.length ? 'fail' : 'pass'; await writeEvidence(true); }
 /**
@@ -441,17 +447,18 @@ async function lock(file) {
   holder.removeAllListeners('exit'); holders.add(holder);
   return () => new Promise(resolve => { holder.on('exit', resolve); holder.stdin.end('\n'); });
 }
-/** Samples of the update files while the app starts. */
-function watch() {
+/** Samples of the update files while the app starts; with state, state.json where the checks look at it. */
+function watch({ state: withState = true } = {}) {
   const samples = []; let stopped = false, seen = null;
   const loop = (async () => {
     while (!stopped) {
       try {
         const [journal, floor, pg, manifest] = await Promise.all([readJson(journalFile), readJson(floorFile),
           exists(path.join(pgData, 'postmaster.pid')), fs.stat(path.join(snapshotDir, 'manifest.json')).then(s => s.mtimeMs, () => null)]);
-        // state.json only where the checks look at it: the first sample of each journal/PostgreSQL state.
+        // state.json only where the checks look at it: the first sample with PostgreSQL running or
+        // a ready point, for each journal/PostgreSQL state. Never the first sample of a launch.
         const key = JSON.stringify([journal?.late, journal?.phase, journal?.revision, pg]);
-        const state = key === seen ? undefined : await readJson(stateFile);
+        const state = withState && key !== seen && (pg || journal?.phase === 'ready') ? await readJson(stateFile) : undefined;
         samples.push({ at: Date.now(), journal, state, floor, pg, manifest });
         seen = key;
       } catch { /* a file mid-rename; sample again */ }
@@ -516,7 +523,7 @@ try {
   step('P: an update over the bundled build starts with no copy');
   await stage('P', 3);
   let w = watch(); await launch(); await ready(P); await w.stop();
-  await until(async () => (await readJson(stateFile)).active === P, 'P did not become healthy', 120000, STATE_POLL_MS);
+  await untilState(async () => (await readJson(stateFile)).active === P, 'P did not become healthy', 120000);
   expect(!w.samples.some(s => s.journal), 'P started healthy; no restore-point.json at any time', 'A restore point was made for a bundled previous build');
   // Safety: the update is fenced (floor P) before PostgreSQL starts.
   const firstStart = w.samples.find(s => s.pg);
@@ -571,7 +578,7 @@ try {
   expect([...details.seen].some(text => /Preparing the update's database restore point/.test(text)), 'The status page showed "Preparing the update\'s database restore point…"',
     'The status page did not show "Preparing the update\'s database restore point…" during the copy; it showed: ' + JSON.stringify([...details.seen]));
   await expectWithin(async () => !await exists(journalFile) && !await exists(snapshotDir) && (await readJson(stateFile)).active === N1,
-    'With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy', 'N1 did not become active with the point removed', 120000, STATE_POLL_MS);
+    'With the lock released, Try again copied and started N1 in its own process; the point and update-snapshot were removed once healthy', 'N1 did not become active with the point removed', 120000, untilState);
   expect(await readJson(markerFile) === null, 'Launcher 3 releases do not swap the launcher', 'A launcher 3 release swapped the launcher');
   await close();
   await finish(); last = N1;
@@ -599,7 +606,7 @@ try {
   // (The booting build dropping a leftover itself is unit-tested; here the previous build removed it.)
   assert(fresh && fresh.manifest > reinstalled, 'N2 started without a copy made after it was installed again');
   pass('Installing N2 again made a new copy before N2 started');
-  await expectWithin(async () => !await exists(journalFile) && (await readJson(stateFile)).active === N2, 'N2 started and its point was removed once healthy', 'N2 did not finish', 120000, STATE_POLL_MS);
+  await expectWithin(async () => !await exists(journalFile) && (await readJson(stateFile)).active === N2, 'N2 started and its point was removed once healthy', 'N2 did not finish', 120000, untilState);
   await close();
   await finish(); last = N2;
   }
@@ -609,7 +616,7 @@ try {
   await stage('N3', target);
   await launch();
   // Fast, so the kill lands between PostgreSQL starting and the update turning healthy; no
-  // state.json reads here (see STATE_POLL_MS). The launcher fences before it starts PostgreSQL.
+  // state.json reads here (see untilState). The launcher fences before it starts PostgreSQL.
   const fenced = await until(async () => {
     const [j, pg] = await Promise.all([readJson(journalFile).catch(() => null), exists(path.join(pgData, 'postmaster.pid'))]);
     return j?.late && j.phase === 'ready' && j.revision === N3 && pg ? j : null;
@@ -636,11 +643,11 @@ try {
     'The old launcher offered: ' + JSON.stringify(dialog.buttons) + ' (window children ' + JSON.stringify(dialog.children) + ', UI Automation ' + JSON.stringify(dialog.automation) + ')');
   if (!dialog.closed) { await screenEvidence('try-again-not-pressed'); throw Error('Could not press Try Again: ' + JSON.stringify(dialog.attempts)); }
   pass(`Pressed Try Again (${dialog.method})`);
-  w = watch(); await ready(N3); await w.stop();
+  w = watch({ state: false }); await ready(N3); await w.stop();  // only the copy's manifest is checked here
   // Safety: the retry keeps the copy taken before the database started.
   assert(w.samples.every(s => s.manifest === null || s.manifest === copied), 'Try Again made a second copy');
   pass('Try Again ran N3 without a second copy');
-  await expectWithin(async () => !await exists(journalFile) && !await exists(snapshotDir) && (await readJson(stateFile)).active === N3, 'The point was removed once N3 was healthy', 'The point was not removed after the healthy retry', 120000, STATE_POLL_MS);
+  await expectWithin(async () => !await exists(journalFile) && !await exists(snapshotDir) && (await readJson(stateFile)).active === N3, 'The point was removed once N3 was healthy', 'The point was not removed after the healthy retry', 120000, untilState);
   let swap = null;
   try {
     swap = await until(async () => { const m = await readMarker(); if (m?.phase === 'rejected') throw Error('Self-test rejected the new launcher: ' + m.reason); return m?.phase === 'trial' ? m : null; }, 'The launcher was not replaced', 300000);
