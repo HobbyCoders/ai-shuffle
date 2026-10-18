@@ -12,10 +12,10 @@
  *   (project / worktree / session) is aliased onto that identity as soon as a
  *   status response tells us which branch it resolves to.
  *
- * - **Never reset to empty on a switch** (G4). An unknown context keeps the
- *   last-known values as a *stale placeholder* (`stale: true`,
- *   `hydrated: false`) while it revalidates, so the header greys out the
- *   previous real state instead of flashing "no repo / Init Repo".
+ * - **Keep same-project placeholders on a switch** (G4). An unknown context
+ *   keeps that project's last-known values as a *stale placeholder* while it
+ *   revalidates. Never carry another project's branches into a new context.
+ *   A positive non-repo answer is cached too, so returning hides Git at once.
  *
  * - **One coherent snapshot** (G4). `gitSnapshot` exposes status + branches +
  *   diff + PR state together with the coherence flags, so the header's primary
@@ -274,6 +274,19 @@ function _isServerError(e: unknown): boolean {
 // ============================================================================
 
 const _cache = new Map<string, CachedState>();
+// A base-folder non-repo answer survives per-checkout LRU eviction. It is only
+// a revalidating fallback, never a reason to skip the next status request.
+const _nonRepoProjects = new Map<string, CachedState>();
+// A session with a named checkout must never borrow project-level plain state.
+const _branchSessions = new Set<string>();
+function _rememberNonRepo(projectId: string, empty: CachedState) {
+	_nonRepoProjects.delete(projectId);
+	_nonRepoProjects.set(projectId, empty);
+	if (_nonRepoProjects.size > MAX_CACHE_ENTRIES) {
+		_nonRepoProjects.delete(_nonRepoProjects.keys().next().value!);
+	}
+}
+
 /** scope key → resolved checkout identity (learned from status responses). */
 const _scopeAlias = new Map<string, string>();
 
@@ -486,19 +499,20 @@ async function _loadCore(
 	_worktreeGone = false; // Reset on context switch
 	_clearServerBackoff(); // Reset backoff on context switch
 	let key = _identityFor(scope);
-	const cached = _restoreFromCache(key);
+	const cached = _restoreFromCache(key) ?? (!worktreeId && !_branchSessions.has(sessionId ?? '') ? _nonRepoProjects.get(projectId) : undefined);
 	_loadedScope = scope;
 	_loadedKey = key;
 	_update((s) => ({
 		...s,
+		...(s.projectId !== projectId ? _cacheableSlice(EMPTY_STATE) : {}),
 		projectId,
 		worktreeId: worktreeId ?? null,
 		sessionId: sessionId ?? null,
 		mode,
 		...(cached ?? {}),
 		contextKey: key,
-		// A cache hit is real data for THIS checkout; a miss leaves whatever was
-		// on screen as a placeholder. Either way we are revalidating.
+		// Only this project's state can be a placeholder. Revalidate cache hits
+		// (including positive non-repo answers) just like misses.
 		stale: true,
 		hydrated: cached ? true : s.contextKey === key && s.hydrated,
 		loading: true,
@@ -515,7 +529,11 @@ async function _loadCore(
 		key = _learnIdentity(scope, projectId, status.current_branch);
 		_loadedKey = key;
 
+		if (!status.is_git_repo && (worktreeId || _branchSessions.has(sessionId ?? ''))) {
+			throw new Error('Git checkout is unavailable. Check again.');
+		}
 		if (status.is_git_repo) {
+			_nonRepoProjects.delete(projectId);
 			// Opening a chat: only what the header renders goes out now. Nothing
 			// renders the commit graph, the worktree list belongs to the new-chat
 			// branch picker (which refreshes it when opened), and the PR lookup
@@ -583,7 +601,7 @@ async function _loadCore(
 			// cached diffStats/prState/branches from a previous load must not
 			// persist) and mark the context hydrated.
 			if (!_acceptSeq('status', statusSeq)) return;
-			_claimSeq('diffStats', 'branches', 'prState', 'changedFiles');
+			_claimSeq('diffStats', 'branches', 'prState', 'changedFiles', 'commits', 'worktrees');
 			_update((s) => ({
 				...s,
 				status,
@@ -599,9 +617,9 @@ async function _loadCore(
 				hydrated: true,
 				prStateStale: false
 			}));
-			// Evict any stale cache entry for this checkout so
-			// restoreCacheImmediate() won't resurrect old data.
-			_cache.delete(key);
+			const empty = _cacheableSlice(_state);
+			_saveToCache(key, empty);
+			if (!worktreeId && !_branchSessions.has(sessionId ?? '')) _rememberNonRepo(projectId, empty);
 			_lastPrStateFetch.delete(key);
 		}
 	} catch (e) {
@@ -856,9 +874,9 @@ export const git = {
 	 * session switch.
 	 *
 	 * Two sessions on the same checkout resolve to the same identity, so the
-	 * switch is instant and lossless. A context we have never loaded KEEPS the
-	 * values already on screen and marks them `stale` + not `hydrated` — the
-	 * header greys the previous state out instead of flashing an empty repo.
+	 * switch is instant and lossless. Unknown scopes keep a same-project
+	 * placeholder, but a different project starts unknown/loading. A cached
+	 * non-repo answer hides Git immediately while status revalidates.
 	 */
 	restoreCacheImmediate(
 		projectId: string,
@@ -867,6 +885,10 @@ export const git = {
 		sessionId?: string | null,
 		branchHint?: string | null
 	) {
+		if (sessionId) {
+			if (branchHint) _branchSessions.add(sessionId);
+			else _branchSessions.delete(sessionId);
+		}
 		const scope = _scopeKey(projectId, worktreeId ?? undefined, sessionId ?? undefined);
 		// A caller that already knows the session's branch (the host has it on the
 		// session row) resolves the checkout identity in the same frame, so the
@@ -875,7 +897,7 @@ export const git = {
 		const key = branchHint ? _learnIdentity(scope, projectId, branchHint) : _identityFor(scope);
 		_loadedScope = scope;
 		_loadedKey = key;
-		const cached = _cache.get(key);
+		const cached = _cache.get(key) ?? (!worktreeId && !_branchSessions.has(sessionId ?? '') ? _nonRepoProjects.get(projectId) : undefined);
 		// untrack: this runs synchronously inside component $effects (the session
 		// switch effect in MainPanel). Reading _state tracked there while _set
 		// replaces it would make that effect re-trigger itself forever
@@ -901,10 +923,10 @@ export const git = {
 				hydrated: true
 			});
 		} else {
-			// NEVER blank the UI on a switch: carry the last-known values over as a
-			// placeholder while the real load runs.
+			// Preserve G4's no-flash behavior within a project, never across them.
 			_set({
 				...prev,
+				...(prev.projectId !== projectId ? _cacheableSlice(EMPTY_STATE) : {}),
 				...base,
 				changedFilesLoading: false,
 				stale: true,
@@ -1016,12 +1038,33 @@ export const git = {
 			_clearServerBackoff();
 			// Discard a response that a newer one has already superseded.
 			if (!_acceptSeq('status', seq)) return;
+			// git init / clone changes the capability, not just the branch name.
+			// Reload coherently so branches, diffs and PR state return together.
+			// A positive non-repo answer clears state below immediately, without
+			// requiring a second status request to confirm the same finding.
+			if (status.is_git_repo && !_state.status?.is_git_repo) {
+				await git.retryLoad();
+				return;
+			}
 			_learnIdentity(scope, projectId, status.current_branch);
+			if (!status.is_git_repo && (_state.worktreeId || _branchSessions.has(_state.sessionId ?? ''))) {
+				throw new Error('Git checkout is unavailable. Check again.');
+			}
+			if (!status.is_git_repo) {
+				const empty = { ..._cacheableSlice(EMPTY_STATE), status };
+				_claimSeq('diffStats', 'branches', 'prState', 'changedFiles', 'commits', 'worktrees');
+				_update((s) => ({ ...s, ...empty, hydrated: true, stale: false, error: null }));
+				_saveToCache(key, empty);
+				if (!_state.worktreeId && !_branchSessions.has(_state.sessionId ?? '')) _rememberNonRepo(projectId, empty);
+				_lastPrStateFetch.delete(key);
+				return;
+			}
+			_nonRepoProjects.delete(projectId);
 			// Skip the write when nothing changed — with the canonical flat status
 			// this genuinely suppresses the poll, instead of comparing fresh array
 			// references that never match.
-			if (gitApi.gitStatusEqual(status, _state.status)) return;
-			_update((s) => ({ ...s, status }));
+			if (gitApi.gitStatusEqual(status, _state.status) && !_state.error) return;
+			_update((s) => ({ ...s, status, error: null }));
 			_syncToCache({ status });
 		} catch (e) {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
@@ -1597,6 +1640,8 @@ export const git = {
 		_loadedKey = null;
 		_loadedScope = null;
 		_cache.clear();
+		_nonRepoProjects.clear();
+		_branchSessions.clear();
 		_scopeAlias.clear();
 		_lastPrStateFetch.clear();
 		_appliedSeq.clear();
@@ -1685,9 +1730,11 @@ export const git = {
 		_diffStatsInFlight = false;
 		_branchesInFlight = false;
 		git.refreshStatus();
-		git.refreshDiffStats();
-		git.loadBranches();
-		git.refreshPrState(true).catch(() => {});
+		if (_state.status?.is_git_repo) {
+			git.refreshDiffStats();
+			git.loadBranches();
+			git.refreshPrState(true).catch(() => {});
+		}
 	}
 };
 

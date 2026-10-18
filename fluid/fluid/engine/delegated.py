@@ -688,6 +688,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         claude_mod: bool | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
+        fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
@@ -739,6 +740,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # callable returning the text, or None. The CLI folds the user
         # message that carried it into its summary when it compacts mid-turn.
         self.compact_context = compact_context
+        # Tail context for a fresh CLI conversation, including a rejected
+        # --resume retry. The host decides what is missing from this turn.
+        self.fresh_context = fresh_context
         # Registry names of bridge tools the CLI keeps behind its ToolSearch
         # (listed with ``_meta`` ``anthropic/alwaysLoad`` false): announced by
         # name, schema loaded on demand, every one still callable. None loads
@@ -755,6 +759,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # after the null status, so ``_main_compacting`` is already off by
         # then; this is what says the boundary is the main conversation's.
         self._main_boundary_due = False
+        # Whether the current compaction's hook restored host context. A
+        # boundary drained between turns may otherwise invalidate the note
+        # the host planned before this drain; restore it on this turn's tail.
+        self._compaction_context_restored = False
+        self._context_restore_pending = False
         # The running turn is a typed ``/compact``, how many main-conversation
         # compactions it reported, and the error a failed one gave. A
         # ``/compact`` turn that ends without a boundary says why in a
@@ -1817,10 +1826,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         return
             op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+            content, context_pin = await self._fresh_turn_content(content, op.context_pin)
             user_node = SessionNode(
                 node_id=new_id("node"),
                 parent_id=op.parent_node_id or meta.head_node_id,
-                message=Message(role="user", content=content),
+                message=Message(role="user", content=content, context_pin=context_pin),
             )
             await self.store.append(sid, user_node)
             await self._mark_questions_delivered(question_ids)
@@ -1861,6 +1871,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # resume handle above.
             await self._flush_events(sid)
 
+    async def _fresh_turn_content(
+        self, content: list[Any], context_pin: tuple[int, int] | None,
+    ) -> tuple[list[Any], tuple[int, int] | None]:
+        """A fresh CLI does not see the host's stored transcript. Restore
+        missing context at the tail, never by changing its cached system prompt.
+        A valid --resume (or a later turn) needs no put-back unless a drained
+        compaction lost context after the host planned this turn's note.
+        """
+        fresh = self._spawn_resume is None and not self._proc_results
+        if (not fresh and not self._context_restore_pending) or self.fresh_context is None:
+            return content, context_pin
+        note = await self.fresh_context(content, context_pin)
+        self._context_restore_pending = False
+        if not note:
+            return content, context_pin
+        restored = [*content, Text(note)]
+        pin = Message(role="user", content=restored).pin_context(note).context_pin
+        return restored, pin
+
     async def _drive_turn(
         self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any],
     ) -> StreamJsonMapper | None:
@@ -1886,6 +1915,23 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                     ))
                     return mapper
+                restored, context_pin = await self._fresh_turn_content(
+                    content, user_node.message.context_pin,
+                )
+                if restored is not content:
+                    # The rejected frame never reached a model. Keep the old
+                    # stored node immutable; record the replacement actually
+                    # sent to the new CLI, under the same turn id.
+                    content = restored
+                    user_node = SessionNode(
+                        node_id=new_id("node"), parent_id=user_node.node_id,
+                        message=Message(role="user", content=content, context_pin=context_pin),
+                    )
+                    await self.store.append(sid, user_node)
+                    await self._emit(TurnStarted(
+                        session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
+                        model=self.model, provider=self.provider,
+                    ))
             if self._interrupted.is_set():
                 # Stopped while the CLI was still starting (or being drained):
                 # never hand it the turn, or it would run the whole thing,
@@ -3624,6 +3670,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._main_boundary_due = True
             if was_compacting:
                 return None
+            # A SessionStart hook can complete after its boundary. Any such
+            # late credit belongs to that cycle, not this new status interval.
+            self._compaction_context_restored = False
             return ContextCompacting(
                 session_id="", turn_id=None, active=True, trigger=trigger,
             )
@@ -3652,6 +3701,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         )
         if main:
             self._main_boundary_due = False
+            self._context_restore_pending = not self._compaction_context_restored
+            # Consume credit with its boundary, not with a future status. A
+            # later boundary must not inherit a previous cycle's put-back.
+            self._compaction_context_restored = False
         return main
 
     async def _keep_between_turn_compaction_line(self, text: str) -> bool:
@@ -3828,6 +3881,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if len(text) > COMPACT_CONTEXT_MAX_CHARS:
             cut = _COMPACT_CONTEXT_CUT.format(limit=COMPACT_CONTEXT_MAX_CHARS)
             text = text[:COMPACT_CONTEXT_MAX_CHARS - len(cut)].rstrip() + cut
+        self._compaction_context_restored = True
+        self._context_restore_pending = False
         return text
 
     def _ledger_context(self) -> str | None:

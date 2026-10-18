@@ -17,6 +17,7 @@ Sub-modules:
 
 import asyncio
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -122,22 +123,35 @@ async def get_git_status(
 
     # A v2 branch session has session_id but no legacy worktree_id. Resolve
     # its own checkout, just like diff-stats and the other git endpoints.
-    # A removed or not-yet-materialized checkout has an empty status too, but
-    # must never fall back to another checkout or be recreated by this read.
+    # An unavailable checkout is an error, never a confirmed plain folder.
+    # Never fall back to another checkout or recreate it from this read.
     if worktree_id or session_id:
         try:
             working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
-        except SessionCheckoutUnavailable:
-            return GitStatusResponse(is_git_repo=False)
+        except SessionCheckoutUnavailable as exc:
+            raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
     else:
         working_dir = get_project_path(project_id, allow_missing=True)
         if working_dir is None:
-            return GitStatusResponse(is_git_repo=False)
+            raise HTTPException(503, "Git checkout is unavailable. Check again.")
+
+    # Check the filesystem before native status: an already-open native repo
+    # handle can outlive a permission change to .git. Never hide that failure
+    # behind either a cached success or a false non-repository answer.
+    from app.api.git_owner import _is_plain_project_folder
+    try:
+        plain_folder = await run_git(_is_plain_project_folder, working_dir)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
+    if plain_folder:
+        return GitStatusResponse(is_git_repo=False)
 
     # Coalesced: concurrent polls for the same dir share one in-flight call
     status_data = await _coalescer.get_or_run(
         f"status:{working_dir}", git_service.get_status, working_dir
     )
+    if not status_data.get("is_git_repo", False):
+        raise HTTPException(503, "Git checkout is unavailable. Check again.")
 
     # Convert staged files to proper format
     staged_files = [

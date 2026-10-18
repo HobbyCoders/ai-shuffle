@@ -87,6 +87,22 @@ it('uses the same project’s cached Git capability before a refresh or a quick 
  active.newChat();
  expect(active.current).toMatchObject({project:'a',worktreeIntent:'worktree'});
 });
+it('restores A’s saved On when its stale Git status arrives after selecting A from B', () => {
+ status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
+ status('b',true); active.setProject('b');
+ active.setProject('a');
+ expect(active.current).toMatchObject({project:'a',worktreeIntent:'local'});
+ status('a',true,true);
+ expect(active.current).toMatchObject({project:'a',worktreeIntent:'worktree'});
+});
+it('does not borrow same-project Git status scoped to an existing session', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ p.rememberWorktreeIntent({projectId:'a',projectV2Id:null},'worktree');
+ status('a',true);
+ Object.assign(mocks.git,{sessionId:'another-session'});
+ active.setProject('a');
+ expect(active.current).toMatchObject({project:'a',sessionId:null,worktreeIntent:'local'});
+});
 it('keeps an explicit On while Git is unknown, but refuses a confirmed non-repo', async () => {
  active.setProject('a'); active.setWorktreeIntent('worktree');
  const {composerPreferences:p}=await import('./composer-preferences');
@@ -106,6 +122,15 @@ it('applies B’s remembered branch while A has a branch claim in flight', async
  expect(p.checkoutClaimed).toBe(false);
  expect(active.current).toMatchObject({project:'b',worktreeIntent:'worktree',worktreeBranch:'topic/b',worktreeBaseBranch:'develop',worktreeCreateNewBranch:true});
  claim.release();
+});
+it('links A’s discovered shared ID while B is selected without switching the composer to A', async () => {
+ status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
+ status('b',true); active.setProject('b');
+ active.linkDiscoveredProjects([{local_project_id:'a',project_v2_id:'shared-a'}]);
+ const {composerPreferences:p}=await import('./composer-preferences');
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:'shared-a'}).intent).toBe('worktree');
+ expect(p.current.project).toEqual({projectId:'b',projectV2Id:null});
+ expect(active.current).toMatchObject({project:'b',projectV2Id:null,worktreeIntent:'local'});
 });
 it('links a catalog-discovered shared ID without reselecting the project or touching an existing chat', async () => {
  status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');

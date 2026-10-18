@@ -373,6 +373,21 @@ it('consumes only A after switching to B while creation is in flight', async () 
  expect(p.current.checkout?.branch).toBe('topic/b');
 });
 
+it('does not revive a deferred local branch after a newer explicit clear on the shared project', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const local={projectId:'a',projectV2Id:null}, shared={...local,projectV2Id:'shared-a'};
+ p.set('project',local);
+ p.rememberWorktreeIntent(local,'worktree');
+ p.rememberCheckout(local,{...local,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true});
+ const claim=p.claimBranchChoice(local,'topic/a',true);
+ p.linkWorktreeProject(shared);
+ expect(p.worktreeForProject(shared)).toEqual({intent:'worktree',checkout:null});
+ // This is a new user decision even though the deferred checkout is already null.
+ p.rememberCheckout(shared,null);
+ claim.release();
+ expect(p.worktreeForProject(shared)).toEqual({intent:'worktree',checkout:null});
+ expect(p.worktreeForProject(local).checkout).toBeNull();
+});
 it('migrates the legacy fast flag only for the last selected model', async () => {
  localStorage.setItem('aihub_lastModel','prov:api:claude-opus-5'); localStorage.setItem('aihub_lastFastMode','1');
  const {composerPreferences:p} = await import('./composer-preferences');

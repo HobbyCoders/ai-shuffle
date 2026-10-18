@@ -22,7 +22,6 @@
 			onClickCreatePR={noop}
 			onClickPush={noop}
 			onClickPull={noop}
-			onClickInitRepo={noop}
 			onClickShipIt={noop}
 			onOpenDiffReview={noop}
 		/>

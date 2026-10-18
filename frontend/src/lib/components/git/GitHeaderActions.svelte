@@ -19,16 +19,15 @@
 	 * progress share the same surface, with Back returning to the overview.
 	 *
 	 * On narrow screens (the mobile shell, or a narrow web window) the panel
-	 * becomes a bottom sheet behind a scrim. Init Repo (non-repo projects) and
-	 * the "Git unavailable" retry stay as direct header buttons: there is no
-	 * panel to open for them.
+	 * becomes a bottom sheet behind a scrim. A real Git load failure keeps a
+	 * direct "Git unavailable" retry. Confirmed non-repositories render nothing.
 	 */
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
+	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
 	import { autoMerge } from '$lib/stores/auto-merge.svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
@@ -73,7 +72,6 @@
 		onClickCreatePR: (opts?: CreatePROptions) => void;
 		onClickPush: (opts?: PushOptions) => void;
 		onClickPull: (opts?: PullOptions) => void;
-		onClickInitRepo?: () => void;
 		/** Are the GitHub-backed actions usable? The header itself no longer
 		 *  requires GitHub auth (local git must work without it), so this gates
 		 *  ONLY the gh-dependent actions — Create PR / Ship It. Pass the
@@ -93,7 +91,7 @@
 		compact?: boolean;
 	}
 
-	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, showChatExports = false, compact = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickShipIt, onOpenDiffReview, showChatExports = false, compact = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -112,6 +110,10 @@
 	// is false the values on screen belong to the previous context (or are a
 	// cache hit mid-revalidation) and must not be used to derive a NEW action.
 	const snapshotPending = $derived(!snapshot.hydrated);
+	// A confirmed plain folder is not a broken repository. Keep the component
+	// mounted for refreshes, but render no git surface (including Retry / Init).
+	const repositoryAbsent = $derived(!error && !worktreeBranch && $gitMode !== 'worktree'
+		&& snapshot.hydrated && snapshot.status?.is_git_repo === false);
 	// The mutating actions are ALSO disabled while the snapshot is still
 	// resolving for this context: what's rendered is the previous coherent
 	// action, greyed out, so the user can't fire it against state we haven't
@@ -139,6 +141,9 @@
 	const GIT_ACTION_IDS = new Set<string>(['git-commit', 'git-push', 'git-pull', 'git-pr', 'git-shipit']);
 	const isPanelId = (id: string | null) => id === 'git-panel' || GIT_ACTION_IDS.has(id ?? '');
 	const panelOpen = $derived(isPanelId($openHeaderDropdown));
+	$effect(() => {
+		if (repositoryAbsent && panelOpen) closePanel();
+	});
 	const editorId = $props.id();
 	const activeEditor = $derived($openHeaderDropdown === 'git-commit' ? 'commit' : $openHeaderDropdown === 'git-push' ? 'push' : $openHeaderDropdown === 'git-pull' ? 'pull' : $openHeaderDropdown === 'git-pr' ? 'pr' : $openHeaderDropdown === 'git-shipit' ? 'shipit' : null);
 	const progressActive = $derived($gitOperationState.active);
@@ -509,6 +514,7 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
+{#if !repositoryAbsent}
 <div class="git-actions" class:sheet-layout={sheetLayout}>
 	{#if error}
 		{#if compact}
@@ -833,32 +839,9 @@
 		</div>
 	{/if}
 
-	{:else}
-		<!-- Only non-repo projects reach here: a worktree or branch session keeps
-		     the panel button above, and its checkout is never initialized. -->
-		{#if compact}
-			<!-- The bar's subline already names the project. -->
-			<button class="git-btn compact-btn init-btn" onclick={onClickInitRepo} title="Initialize a git repository for this project" aria-label="Initialize a git repository">
-				<span class="cg-glyph"><FolderGit2 size={20} strokeWidth={1.5} /></span>
-			</button>
-		{:else}
-		{#if projectName}
-			<span class="git-btn project-only-badge" title="Project: {projectName}">
-				<FolderClosed size={13} strokeWidth={1.5} />
-				<span class="btn-label project-name">{projectName}</span>
-			</span>
-		{/if}
-		<button
-			class="git-btn init-btn"
-			onclick={onClickInitRepo}
-			title="Initialize a git repository for this project"
-		>
-			<FolderGit2 size={14} strokeWidth={1.5} />
-			<span class="btn-label">Init Repo</span>
-		</button>
-		{/if}
 	{/if}
 </div>
+{/if}
 
 <style>
 	.git-actions {

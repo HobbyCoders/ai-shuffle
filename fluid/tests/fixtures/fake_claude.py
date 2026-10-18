@@ -52,6 +52,8 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             the first block's deltas; =interrupt parks there
                             until an ``interrupt`` control_request, then closes
                             the block and returns a success result.
+  x  compact on request:    like (a), but a user message containing
+                            ``[compact-now]`` gets the compacting turn of (p).
   u  hooked tool turn:      a Bash tool_use, then a ``hook_callback``
                             control_request for the PreToolUse callback the
                             harness registered at ``initialize``; a
@@ -162,11 +164,17 @@ def turn_simple(sid: str) -> None:
     emit(result_frame(sid))
 
 
-def turn_compacting(sid: str) -> None:
+def turn_compacting(sid: str, *, trigger: str = "auto") -> None:
     """A turn the CLI compacts its own context in the middle of, in the frame
     order 2.1.289 writes for the main conversation: ``compacting`` status,
     null status with the result, then the boundary."""
     emit(assistant_frame(sid, [{"type": "text", "text": "Reading everything."}], "end_turn"))
+    emit_compaction_boundary(sid, trigger=trigger)
+    emit(assistant_frame(sid, [{"type": "text", "text": "Carrying on."}], "end_turn"))
+    emit(result_frame(sid))
+
+
+def emit_compaction_boundary(sid: str, *, trigger: str = "auto") -> None:
     emit({"type": "system", "subtype": "status", "status": "compacting", "session_id": sid})
     emit({"type": "system", "subtype": "status", "status": None,
           "compact_result": "success", "session_id": sid})
@@ -174,11 +182,9 @@ def turn_compacting(sid: str) -> None:
         "type": "system", "subtype": "compact_boundary", "session_id": sid,
         "uuid": "uuid-compact-1",
         "compact_metadata": {
-            "trigger": "auto", "pre_tokens": 166397, "post_tokens": 34856,
+            "trigger": trigger, "pre_tokens": 166397, "post_tokens": 34856,
         },
     })
-    emit(assistant_frame(sid, [{"type": "text", "text": "Carrying on."}], "end_turn"))
-    emit(result_frame(sid))
 
 
 def turn_tool(sid: str, *, question: bool = False) -> None:
@@ -592,6 +598,16 @@ def main() -> int:
             emit(result_frame(session_id, "error_max_turns"))
         elif scenario == "p":
             turn_compacting(session_id)
+        elif scenario == "x":
+            content = (msg.get("message") or {}).get("content") or []
+            manual = content == [{"type": "text", "text": "/compact"}]
+            if "[compact-idle]" in json.dumps(msg):
+                turn_simple(session_id)
+                emit_compaction_boundary(session_id)
+            elif manual or "[compact-now]" in json.dumps(msg):
+                turn_compacting(session_id, trigger="manual" if manual else "auto")
+            else:
+                turn_simple(session_id)
         elif scenario == "j":
             turn_inline_context(session_id)
         elif scenario == "q":

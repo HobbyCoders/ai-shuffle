@@ -11,6 +11,9 @@
 	 * - Group assignment with select + plus/delete buttons + new group input
 	 */
 	import { untrack } from 'svelte';
+	import { getGitStatus } from '$lib/api/git';
+	import { git } from '$lib/stores/git.svelte';
+	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import { appData, projects } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { FolderGit2, Check, Plus, Trash2, Loader2 } from 'lucide-svelte';
@@ -27,6 +30,25 @@
 
 	// Groups data
 	const groups = $derived($groupsStore);
+
+	// Initialization belongs to project management, not the chat's Git header.
+	let canInitialize = $state(false);
+	let showInitRepoModal = $state(false);
+	let capabilityVersion = $state(0);
+	$effect(() => {
+		const id = projectId;
+		void capabilityVersion;
+		let cancelled = false;
+		canInitialize = false;
+		getGitStatus(id).then(status => {
+			if (!cancelled) canInitialize = status.is_git_repo === false;
+		}).catch(() => { /* An unavailable checkout is not an initialization offer. */ });
+		return () => { cancelled = true; };
+	});
+	function repositoryInitialized() {
+		capabilityVersion++;
+		void git.refreshStatus();
+	}
 
 	// Name editing state
 	let editName = $state('');
@@ -128,6 +150,11 @@
 	}
 </script>
 
+{#if showInitRepoModal}
+	<InitRepoModal open={showInitRepoModal} {projectId} projectName={project?.name ?? ''}
+		onClose={() => (showInitRepoModal = false)} onInitialized={repositoryInitialized} />
+{/if}
+
 {#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 {#if !project && remoteChange}
 	<label class="block p-4">Unsaved name<input class="inp" bind:value={editName} /></label>
@@ -137,6 +164,13 @@
 	<div class="ptab">
 		<div class="set-group">
 			<div class="set-grouphead"><h3><FolderGit2 />Identity</h3></div>
+
+			{#if canInitialize}
+				<div class="set-row">
+					<div class="lab"><h4>Version control</h4><p>This folder is not a Git repository.</p></div>
+					<div class="ctl"><button class="btn" onclick={() => (showInitRepoModal = true)}>Initialize Git repository</button></div>
+				</div>
+			{/if}
 
 			<!-- Project Name -->
 			<div class="set-row">

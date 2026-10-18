@@ -615,7 +615,9 @@ def _ensure_branch_checkout(
     base_path = _ensure_base_checkout(project_id, runner_id, project_v2_row)
     if not base_path:
         return None
-
+    # A stale client can request a worktree for a plain project folder. Refuse
+    # before planning a branch, creating directories or adopting any checkout.
+    _require_checkout_root(base_path)
 
     # Fast path: an existing branch checkout row whose dir is a live worktree.
     row = checkouts_db.get_checkout(project_id, runner_id, branch=branch)
