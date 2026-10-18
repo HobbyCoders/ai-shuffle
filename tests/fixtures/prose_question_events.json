@@ -34,7 +34,7 @@
       {
         "type": "turn.completed",
         "payload": {},
-        "question_seq": 4
+        "question_seq": null
       }
     ]
   },
@@ -350,7 +350,7 @@
             "attempt": 1
           }
         },
-        "question_seq": 4
+        "question_seq": null
       },
       {
         "type": "assistant.text_delta",
@@ -417,6 +417,99 @@
       },
       {
         "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "working prose cannot request attention before the turn ends",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Would you like a draft PR?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Bash",
+          "tool_use_id": "push",
+          "input": {
+            "command": "git push"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 2
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "All done. Would you like a summary?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 7
+      }
+    ]
+  },
+  {
+    "name": "self-question followed by narration never asks the owner",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "One more question: can someone already stuck on this error get v1.0.1 in-app, or do they need the installer? Checking where the failing call sits in startup:"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Bash",
+          "tool_use_id": "push",
+          "input": {
+            "command": "git push"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "turn.parked",
         "payload": {},
         "question_seq": null
       }

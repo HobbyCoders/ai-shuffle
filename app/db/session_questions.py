@@ -17,12 +17,13 @@ _TRIM = re.compile(f"^{_SPACE}+|{_SPACE}+$")
 
 
 def asks_question(content: str) -> bool:
-    """Question punctuation outside inline code and URL/link targets."""
+    """A final question, not an earlier self-question followed by narration."""
     prose = re.sub(r"`[^`]*`", "", content)
     prose = re.sub(r"\]\([^\)" + _JS_SPACE + r"]*\)", "]", prose)
     prose = re.sub(r"<https?://[^>" + _JS_SPACE + r"]*>", "", prose)
     prose = re.sub(r"(?<![a-zA-Z0-9_])https?://" + _NONSPACE + r"*[^" + _JS_SPACE + r".,;:!?)\]'\"]", "", prose)
-    return "?" in prose
+    # Markdown emphasis, link labels and quotes may wrap the last sentence.
+    return re.search(r"\?[\"'’”)*_\]" + _JS_SPACE + r"]*$", prose) is not None
 
 
 # These events close the reducer's open text bubble. Other cards/usage do not
@@ -35,12 +36,14 @@ _CLOSE_TEXT = {
 }
 
 
-def _tail(cursor, session_id):
+def _tail(cursor, session_id, *, lifecycle_only=False):
     """Newest surviving events first, bounded pages; skip rewound branches."""
     before = None
     while True:
         sql = "SELECT seq, event_type, payload FROM session_events WHERE session_id = %s"
         params = [session_id]
+        if lifecycle_only:
+            sql += " AND event_type IN ('turn.started', 'turn.parked', 'turn.completed', 'turn.aborted', 'transcript.rewound')"
         if before is not None:
             sql += " AND seq < %s"
             params.append(before)
@@ -84,6 +87,15 @@ def trailing_question_seq(cursor, session_id):
     attempt boundary, not a bubble spanning a mid-stream delivery/steer.
     """
     from app.db.sessions import is_user_message
+
+    # Closing a text bubble (e.g. for a tool call) is not ending a turn.
+    # Respect the newest surviving run boundary, including after a rewind.
+    # Marker-less legacy/voice transcripts remain eligible as before.
+    for _, kind, _ in _tail(cursor, session_id, lifecycle_only=True):
+        if kind in ("turn.started", "turn.parked", "turn.completed", "turn.aborted"):
+            if kind != "turn.completed":
+                return None
+            break
 
     closed = False
     pieces = []

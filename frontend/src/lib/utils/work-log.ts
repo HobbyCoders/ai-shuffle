@@ -281,22 +281,24 @@ export function isProtectedProse(content: string): boolean {
 	if (!text) return false;
 	if (text.split('\n').filter((line) => line.trim()).length >= 2) return true;
 	if (/^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|~~~)/m.test(text)) return true;
-	return asksQuestion(text);
+	return questionProse(text).includes('?');
 }
 
-/**
- * Prose that asks the reader something (spec §3's question rule, shared by
- * `isProtectedProse` and the "Needs you" count, spec §5). A question mark
- * inside a link target, a bare URL or inline code is not a question;
- * punctuation that ends the sentence after a URL still counts.
- */
-export function asksQuestion(content: string): boolean {
-	const prose = content
+/** Strip code and URL targets without mistaking their punctuation for prose. */
+function questionProse(content: string): string {
+	return content
 		.replace(/`[^`]*`/g, '')
 		.replace(/\]\([^)\s]*\)/g, ']')
 		.replace(/<https?:\/\/[^>\s]*>/g, '')
 		.replace(/\bhttps?:\/\/\S*[^\s.,;:!?)\]'"]/g, '');
-	return prose.includes('?');
+}
+
+/** A final prose question; callers must also check that all work has ended. */
+export function asksQuestion(content: string): boolean {
+	const prose = questionProse(content);
+	// Only the final sentence can ask for an answer. An earlier self-question
+	// followed by more narration does not stop the work or need the owner.
+	return /\?["'’”)*_\]\s]*$/.test(prose);
 }
 
 /**

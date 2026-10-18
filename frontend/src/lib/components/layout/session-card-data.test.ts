@@ -668,14 +668,41 @@ describe('needsYouCount (spec §5)', () => {
 		expect(needsYouCount(local, null, 1, prefOff)).toBe(2);
 	});
 
-	it('lets Needs you beat Working, a prose question reading as Awaiting input', () => {
+	it('keeps live work ahead of prose attention, but not explicit prompts', () => {
 		const working = { streaming: true, attention: null, isActive: true };
-		expect(deriveStatus({ ...working, open: open({ messages: asked }) })).toBe('await');
+		expect(deriveStatus({ ...working, open: open({ messages: asked }) })).toBe('working');
 		expect(deriveStatus({ ...working, open: open({ pendingQuestions: [{}] }) })).toBe('has_question');
 		expect(deriveStatus({ ...working, open: open({ pendingPermissions: [{}], messages: asked }) })).toBe('needs_permission');
-		expect(deriveStatus({ ...working, remoteRuntimeState: 'working', open: open({ messages: asked }) })).toBe('await');
+		expect(deriveStatus({ ...working, remoteRuntimeState: 'working', open: open({ messages: asked }) })).toBe('working');
 		expect(deriveStatus({ ...working, open: NO_OPEN_NEEDS })).toBe('working');
 		expect(isAttentionStatus('await')).toBe(true);
+	});
+
+	it.each([
+		{ isStreaming: true }, { optimisticStreaming: true }, { parked: true },
+		{ activeTasks: [{ kind: 'shell' }] }, { activeTasks: [{ kind: 'agent' }] }
+	])('does not count prose while work is live: %j', (runtime) => {
+		const needs = openSessionNeeds({ messages: asked, ...runtime }, true);
+		expect(needs.proseQuestion).toBe(false);
+		expect(needsYouCount(local, null, 0, needs)).toBe(0);
+		// A loading tab's remembered question cannot override its live run either.
+		expect(openSessionNeeds({ isLoadingSession: true, ...runtime }, true, true).proseQuestion).toBe(false);
+		expect(openSessionNeeds({ messages: asked, ...runtime, pendingQuestions: [{}] }, true).questions).toBe(1);
+	});
+
+	it('only shows idle prose questions as awaiting input, including on mirrors', () => {
+		const needs = open({ messages: asked });
+		const idle = { streaming: false, attention: null, isActive: true, open: needs };
+		expect(deriveStatus(idle)).toBe('await');
+		expect(needsYouCount({ ...local, has_running_tasks: true }, null, 0, needs)).toBe(0);
+		expect(needsYouCount({ ...local, parked_task_kind: 'shell' }, null, 0, needs)).toBe(0);
+		for (const runtime of [{ parked: true }, { backgroundWork: true }]) {
+			expect(deriveStatus({ ...idle, ...runtime })).toBe('parked');
+		}
+		for (const remoteRuntimeState of ['working', 'parked'] as const) {
+			expect(deriveStatus({ ...idle, remoteRuntimeState })).toBe(remoteRuntimeState);
+			expect(needsYouCount({ ...local, is_remote: true, remote_runtime_state: remoteRuntimeState }, null, 0, needs)).toBe(0);
+		}
 	});
 
 	it('titles the tab with the summed count', () => {
@@ -836,10 +863,10 @@ describe('the three Needs-you consumers agree (spec §5)', () => {
 			.toEqual({ sidebar: true, title: 1, rail: ['u1'] });
 	});
 
-	it('a remembered prose question on a background session outranks Working but not a prompt', () => {
+	it('a remembered prose question never outranks Working or a prompt', () => {
 		const base = { remoteRuntimeState: null, streaming: true, isActive: true, open: REMEMBERED_PROSE_NEEDS };
-		expect(deriveStatus({ ...base, attention: null })).toBe('await');
+		expect(deriveStatus({ ...base, attention: null })).toBe('working');
 		expect(deriveStatus({ ...base, attention: { count: 1, kind: 'permission' } })).toBe('needs_permission');
-		expect(deriveStatus({ ...base, remoteRuntimeState: 'working', attention: null })).toBe('await');
+		expect(deriveStatus({ ...base, remoteRuntimeState: 'working', attention: null })).toBe('working');
 	});
 });

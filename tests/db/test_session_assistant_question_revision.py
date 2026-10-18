@@ -297,18 +297,26 @@ def test_http_surface_parity(chat, path, question):
 
 
 @pytest.mark.asyncio
-async def test_real_recorder_stream_produces_question(chat):
+@pytest.mark.parametrize("content, expected", [
+    ("Which one?", True),
+    ("Why did this fail? Checking where the call sits in startup:", False),
+])
+async def test_real_recorder_stream_produces_question(chat, content, expected):
     from app.core.turn_recorder import TurnRecorder
     recorder = TurnRecorder(chat, None, None, None, "test-owner")
     try:
         await recorder.start("Start", profile_id="default")
-        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": "Which "})
+        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": content[:-1]})
         await recorder.on_event({"type": "provider_alive", "signal": "keepalive"})
         assert row()["last_assistant_question_seq"] is None
-        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": "one?"})
+        await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": content[-1:]})
+        assert row()["last_assistant_question_seq"] is None
         await recorder.on_event({"type": "done", "metadata": {}})
         saved = row()
-        assert saved["last_assistant_question_seq"] > saved["last_user_message_seq"]
+        if expected:
+            assert saved["last_assistant_question_seq"] > saved["last_user_message_seq"]
+        else:
+            assert saved["last_assistant_question_seq"] is None
         assert saved["last_assistant_question_epoch"] == session_events.get_log_epoch(chat)
     finally:
         await recorder.close()
