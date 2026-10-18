@@ -5,6 +5,7 @@ Each recipient independently checks its own policy, phase and live sessions.
 """
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -346,6 +347,35 @@ def classify(row, all_workers, offers=(), refusals=None):
             or "No update offered"}
 
 
+# The desktop launcher's own words when only a newer installer can finish the
+# update (desktop/src/main/source-updates.ts and installed-entry.ts). The shell
+# reports them as free text, so they are read here, on the worker that builds
+# the snapshot: peers on older builds get the same answer.
+_INSTALLER = re.compile(r"install the latest (?:ai shuffle installer|desktop launcher)"
+                        r"|install a verified newer (?:build|release)|this revision failed to start", re.I)
+# Said only when the launcher kept the previous files and database: "Previous
+# files and data have been retained", "Your files and data have been kept", or
+# a missing restore point, which requireRestorePoint refuses before the update's
+# first database start, so the database was never opened by the new build.
+_KEPT = re.compile(r"(?:previous files and|your files and) data have been (?:retained|kept)"
+                   r"|no verified database restore point exists", re.I)
+
+
+def remedy(row):
+    """What only the owner can do for a worker: ``{"remedy", "data_kept"}``.
+
+    ``remedy`` is "installer" when the in-app updater cannot finish and the
+    latest installer must be run (a desktop that cannot update itself, or one
+    whose update needs a newer installer or launcher), else None. ``data_kept``
+    is True only when the launcher said the previous data was kept.
+    """
+    if row.get("kind") != "desktop" or not row.get("online", True):
+        return {"remedy": None, "data_kept": False}
+    text = " ".join(str(row.get(key) or "") for key in ("error", "message"))
+    needed = row.get("phase") == "unsupported" or bool(_INSTALLER.search(text))
+    return {"remedy": "installer" if needed else None, "data_kept": needed and bool(_KEPT.search(text))}
+
+
 def plan(rows, operation=None):
     """What one click does next, from rows already carrying ``role`` and ``label``."""
     targets = [row for row in rows if row["role"] != "excluded"]
@@ -413,12 +443,13 @@ async def snapshot(*, fresh=False):
     all_workers = local["update_all_workers"]
     offers = _offers(rows, all_workers)
     for row in rows:
-        row.update(classify(row, all_workers, offers, _refusals))
+        row.update(classify(row, all_workers, offers, _refusals), **remedy(row))
     if all_workers:
         _discover(rows, verifying)
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
-              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice")
+              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice",
+              "remedy", "data_kept")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
     return {"allow_updates": local["allow_updates"], "update_all_workers": all_workers,
@@ -494,6 +525,12 @@ async def _send(action, mode=None, scope=None):
         previous = await snapshot()
         if previous.get("operation") and previous["operation"]["phase"] == "waiting":
             raise ValueError("Waiting on workers to finish the previous update")
+        if previous.get("operation") and previous["operation"]["phase"] == "error" and action != "install":
+            # A new check or download moves past a failed install. Live worker
+            # errors still show on their rows; the old error could otherwise
+            # stay on the button for good when its target can never run (the
+            # worker was reinstalled).
+            await run_sync(progress.discard, operation["id"])
     listing = await run_sync(runners.directory)
     all_workers = await _in_scope(scope)
     request_id = uuid.uuid4().hex
@@ -523,7 +560,8 @@ async def _send(action, mode=None, scope=None):
                 async with semaphore:
                     if action == "install":
                         state = await _remote(row, {"operation": "status"})
-                        await run_sync(progress.record, request_id, row["device_id"], target_version=state.get("version"))
+                        await run_sync(progress.record, request_id, row["device_id"], target_version=state.get("version"),
+                                       from_version=state.get("running_version"))
                     body = {"operation": "action", "action": action, "request_id": request_id, "expires_at": time.time() + 10}
                     if mode:
                         body["mode"] = mode
@@ -535,7 +573,8 @@ async def _send(action, mode=None, scope=None):
     # Queue the initiating worker LAST so its restart cannot strand the fanout.
     if action == "install":
         state = await run_sync(updates.status)
-        await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"))
+        await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"),
+                       from_version=state.get("running_version"))
     local = local_action(action, request_id, mode)
     if action == "install":
         await run_sync(progress.record, request_id, self_row["device_id"], result=_tracked(local))

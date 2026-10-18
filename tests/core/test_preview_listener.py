@@ -1,7 +1,8 @@
 """The agent browser's own listener.
 
 The browser is refused the worker's local and protected ports, because a
-request from the same host to them is the owner. Without another door no
+page there must never act as the owner (on a desktop or native install a
+loopback request still is). Without another door no
 agent could look at the running UI at all. The preview listener is that door:
 it never confers local-owner trust, and nothing passes it except the token
 redirect and requests that carry a live session grant.
@@ -149,10 +150,13 @@ def test_nothing_passes_without_a_grant():
 
 
 def test_a_same_host_peer_is_never_the_owner_here():
-    """The whole reason the browser is refused :8000: there, this peer is the
-    owner without presenting anything. Here it gets a grant and no more."""
+    """A same-host peer is not the owner on :8000 either, even with trusted LAN
+    on (the worker's own address is never the LAN); another LAN machine is.
+    Here the same-host peer gets a grant and no more."""
     on_local = _client(LOCAL).get("/api/v1/whoami").json()
-    assert on_local == {"ingress": "local", "local_owner": True, "grant": None, "https": False}
+    assert on_local == {"ingress": "local", "local_owner": False, "grant": None, "https": False}
+    lan_machine = _client(LOCAL, peer="192.168.1.50").get("/api/v1/whoami").json()
+    assert lan_machine["local_owner"] is True
 
     on_preview = _client(PREVIEW, cookies=_cookie()).get("/api/v1/whoami").json()
     assert on_preview == {"ingress": "preview", "local_owner": False, "grant": SESSION, "https": False}

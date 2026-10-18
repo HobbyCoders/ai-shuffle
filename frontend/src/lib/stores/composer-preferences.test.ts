@@ -6,6 +6,26 @@ vi.mock('$lib/services/preferences', () => ({preferenceSync:{
 }}));
 beforeEach(() => {vi.resetModules(); localStorage.clear(); mocks.adapters.clear(); mocks.prefixes.clear(); mocks.save.mockClear(); mocks.epoch=0;});
 
+it('uses the server benchmark default only before any per-model choice, including null', async () => {
+ const {hydrateModelRegistry} = await import('$lib/constants/models');
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const {api} = await import('$lib/api/client');
+ vi.spyOn(api,'get').mockResolvedValue({models:[], default:'', legacy_map:{}, providers:[{
+  id:'codex',name:'Subscription',provider_type:'chatgpt',default_model:'gpt-6.1-sol', models:[
+   {id:'gpt-6.1-sol',label:'Sol',effort_levels:['low','high'],default_effort:'low',initial_effort:'high'},
+   {id:'other',label:'Other',effort_levels:['low','high'],default_effort:'high'}]}]});
+ await hydrateModelRegistry();
+ const {resolveModelEffort} = await import('$lib/constants/model-effort');
+ expect(resolveModelEffort('prov:codex:gpt-6.1-sol').defaultValue).toBe('low'); // Auto slider, web + mobile
+ expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBe('high');
+ expect(p.effortForModel('prov:codex:other')).toBeNull();
+ expect(p.current.modelEfforts).toEqual({}); // implicit default never saves a pick
+ p.rememberEffort('prov:codex:gpt-6.1-sol','low');
+ expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBe('low');
+ p.rememberEffort('prov:codex:gpt-6.1-sol',null);
+ expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBeNull();
+});
+
 it('migrates the legacy effort only for the last selected model', async () => {
  localStorage.setItem('aihub_lastModel','prov:old:sol'); localStorage.setItem('aihub_lastEffort','xhigh');
  const {composerPreferences:p} = await import('./composer-preferences');

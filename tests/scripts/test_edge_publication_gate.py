@@ -244,10 +244,15 @@ def reach_history(tmp_path, monkeypatch):
     git("config", "user.email", "test@example.invalid")
     git("config", "commit.gpgsign", "false")
     git("config", "core.hooksPath", str(tmp_path / "disabled-hooks"))
-    def commit(path, text):
+    def commit(path, text, bump=True):
         target = tmp_path / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
+        launcher = tmp_path / "desktop/launcher.json"
+        if bump and path.startswith("desktop/src/main/"):
+            # A deliberate launcher change raises launcher.json's version with it (#97).
+            version = json.loads(launcher.read_text())["version"] + 1 if launcher.exists() else 1
+            launcher.write_text(json.dumps({"version": version, "minimum": 0}))
         git("add", ".")
         git("commit", "-qm", "Reach fixture\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>")
         return git("rev-parse", "HEAD")
@@ -282,6 +287,42 @@ def test_main_reach_requires_label_on_merged_pr(reach_history, labels, accepted)
     if not accepted:
         assert "PR #42" in reason and "update-reach:windows-launcher" in reason
         assert "OUT OF REACH" in reason
+
+
+@pytest.mark.parametrize("labels,accepted", [(["update-reach:windows-launcher"], False),
+                                            (["update-reach:no-launcher-change"], True)])
+def test_main_launcher_change_without_a_version_bump_needs_its_reason(reach_history, labels, accepted):
+    """#97: a launcher closure change that keeps launcher.json's version is not accepted by the label alone."""
+    base, commit = reach_history
+    head = commit("desktop/src/main/managed-entry.ts", "export const version = 2;", bump=False)
+    ready, reason = gate.update_reach_readiness(head, api=lambda endpoint: [merged_pr(head, labels)])
+    assert ready is accepted, reason
+    if not accepted:
+        assert "PR #42" in reason and "update-reach:no-launcher-change" in reason
+
+
+@pytest.mark.parametrize("tagged,labels,accepted", [
+    (False, ["update-reach:windows-launcher"], True), (False, [], False),
+    (True, ["update-reach:windows-launcher"], False)])
+def test_main_second_change_to_an_unreleased_launcher_needs_only_the_launcher_label(
+        reach_history, tagged, labels, accepted):
+    """#150: after #89 raised launcher 4, which no release tag had, a further closure change shipped in it."""
+    base, commit = reach_history
+    reach = gate.load_update_reach()
+    reach.git("tag", "v1.0.0", base)  # the release carries launcher 1
+    raised = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")  # launcher 2
+    if tagged:
+        reach.git("tag", "v1.0.1", raised)  # now a release carries launcher 2 too
+    head = commit("desktop/src/main/managed-entry.ts", "export const version = 3;", bump=False)
+    def api(endpoint):
+        sha = endpoint.split("/")[1]
+        return [merged_pr(sha, ["update-reach:windows-launcher"] if sha == raised else labels)]
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert ready is accepted, reason
+    if not accepted:
+        missing = reason.split("PR #42 (" + head[:9] + "): owner must add ")[1]
+        assert ("update-reach:no-launcher-change" in missing) is tagged
+        assert ("update-reach:windows-launcher" in missing) is (not labels)
 
 
 def test_in_reach_main_needs_no_pr_api(reach_history):

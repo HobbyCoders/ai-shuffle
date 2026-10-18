@@ -56,8 +56,11 @@ async def test_blocked_loop_dumps_sleeping_frame(caplog, diagnostic_logs):
         await asyncio.sleep(0.15)  # let the first ping be answered normally
         assert wd.dump_count == 0
         _block_the_loop_for(0.5)  # the loop is frozen here
-        # Give the watchdog a tick to observe the answered ping.
-        await asyncio.sleep(0.2)
+        # Let the watchdog observe the answered ping. A fixed 0.2 s was too
+        # short on a loaded Windows machine, so wait for it, up to 5 s.
+        deadline = time.monotonic() + 5
+        while wd.last_stall_seconds is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
     finally:
         wd.stop()
 

@@ -43,7 +43,7 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
     """
     inputs = dict(publish_download=True, publish_to_play=True, workers_ready=True,
                   confirm_existing_key_export=True, build_macos=True,
-                  release_tag="v0.8.19", candidate_run_id="", launcher_acceptance=False,
+                  release_tag="v0.8.19", candidate_run_id="", launcher_acceptance=False, old_installer_sha256="",
                   stage_only=False, promote="")
     inputs.update(input_changes)
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
@@ -186,6 +186,34 @@ def test_launcher_acceptance_is_owner_only_and_publishes_nothing():
         assert forbidden not in text, forbidden
     uploads = [step["with"]["name"] for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact")]
     assert uploads == ["launcher-swap-evidence"]
+    assert "windows" in job["runs-on"]
+    assert not permits(job["if"], launcher_acceptance=True, old_installer_sha256="a" * 64)
+
+
+def test_late_restore_acceptance_is_owner_only_and_reads_only_its_installer_url():
+    """The late restore point under a 0.9.6 launcher, proven on Windows from a branch."""
+    job = workflow("desktop-installer.yml")["jobs"]["late-restore-acceptance"]
+    sha = "a" * 64
+    assert permits(job["if"], launcher_acceptance=True, old_installer_sha256=sha)
+    assert permits(job["if"], launcher_acceptance=True, old_installer_sha256=sha, ref="refs/heads/fix/old-launcher-restore-point")
+    assert not permits(job["if"], launcher_acceptance=True)
+    assert not permits(job["if"], old_installer_sha256=sha)
+    for changes in [{"actor_id": "7"}, {"triggering_actor": "another-maintainer"}, {"repo": "someone/ai-shuffle"},
+                    {"event": "pull_request"}, {"event": "push"}, {"event": "workflow_run"}, {"event": "schedule"}]:
+        assert not permits(job["if"], launcher_acceptance=True, old_installer_sha256=sha, **changes), changes
+    assert job["permissions"] == {"contents": "read"}
+    assert "needs" not in job and "environment" not in job
+    text = yaml.safe_dump(job)
+    assert re.findall(r"secrets\.\w+", text) == ["secrets.OLD_INSTALLER_URL"] and "vars." not in text
+    # The secret reaches only the download step, which checks the file's hash.
+    download = job["steps"][0]
+    assert download["env"]["OLD_INSTALLER_URL"] == "${{ secrets.OLD_INSTALLER_URL }}"
+    assert "Get-FileHash" in download["run"] and "OLD_INSTALLER_SHA256" in download["run"]
+    assert "Write-Host $env:OLD_INSTALLER_URL" not in download["run"] and "echo" not in download["run"].lower()
+    for forbidden in ["gh release upload", "gh release create", "publish-installer", "wrangler", "git push", "git tag"]:
+        assert forbidden not in text, forbidden
+    uploads = [step["with"]["name"] for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact")]
+    assert uploads == ["late-restore-evidence"]
     assert "windows" in job["runs-on"]
 
 

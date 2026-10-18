@@ -18,6 +18,7 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { galleryMediaForTurn, type GalleryMedia } from './media-gallery';
 import { agentDelivery } from './agent-delivery';
+import { createPrefixFold } from './prefix-fold';
 import { canRewindUserMessage } from './message-presentation';
 import { isNavigableUserTurn } from './transcript-navigation';
 import { isTransientProviderRetry } from '$lib/utils/provider-retry';
@@ -683,17 +684,31 @@ function workLogKeys(anchor: Positioned): Pick<Extract<DisplayItem, { kind: 'wor
  * it to notice the moment a send or wake opens a newer turn.
  */
 export function latestTurnKey(messages: readonly ChatMessage[]): string | null {
-	let key: string | null = null;
-	let currentTurnId: string | undefined;
-	messages.forEach((message, index) => {
-		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
-		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
-		if (key === null || (opens && !(!idleAgentWake && !!message.turnId && message.turnId === currentTurnId))) {
-			key = message.id ?? String(index);
-			if (opens) currentTurnId = message.turnId;
-		}
-	});
-	return key;
+	let state = NO_TURN_KEY;
+	messages.forEach((message, index) => { state = stepTurnKey(state, message, index); });
+	return state.key;
+}
+
+interface TurnKeyScan { readonly key: string | null; readonly currentTurnId: string | undefined }
+const NO_TURN_KEY: TurnKeyScan = { key: null, currentTurnId: undefined };
+
+function stepTurnKey(state: TurnKeyScan, message: ChatMessage, index: number): TurnKeyScan {
+	const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
+	const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+	if (state.key === null || (opens && !(!idleAgentWake && !!message.turnId && message.turnId === state.currentTurnId))) {
+		return { key: message.id ?? String(index), currentTurnId: opens ? message.turnId : state.currentTurnId };
+	}
+	return state;
+}
+
+/**
+ * `latestTurnKey` for a view that asks again on every streaming fold: it
+ * rescans only the rows near the tail while the rows before them are the same
+ * objects as last time (see prefix-fold.ts), instead of the whole history.
+ */
+export function createLatestTurnKeyTracker(): (messages: readonly ChatMessage[]) => string | null {
+	const fold = createPrefixFold(() => NO_TURN_KEY, stepTurnKey);
+	return (messages) => fold(messages).key;
 }
 
 /**

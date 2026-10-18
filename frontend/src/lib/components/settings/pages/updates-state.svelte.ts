@@ -19,6 +19,9 @@ import { api, getErrorMessage } from '$lib/api/client';
 import { isForbidden } from '$lib/settings/access.svelte';
 import { flashSaved } from '$lib/settings/save-status.svelte';
 import type { StatusTone } from '$lib/settings/types';
+import { INSTALLER_LINK, installerHint } from './update-remedy';
+
+export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_URL, installerHint } from './update-remedy';
 
 /** One worker in GET /settings/application-updates/workers. */
 export interface UpdateWorker {
@@ -39,6 +42,10 @@ export interface UpdateWorker {
 	request_pending?: boolean;
 	/** A coming update needs a newer Docker image (docker/application_updates.py). */
 	notice?: string | null;
+	/** "installer": only the latest installer can finish this update (app/core/update_workers.py remedy()). */
+	remedy?: 'installer' | null;
+	/** The launcher said the previous files and data were kept. */
+	data_kept?: boolean;
 }
 
 /** One worker's answer to POST /settings/application-updates {action: 'check'}. */
@@ -56,6 +63,8 @@ export interface UpdateResultRow {
 	text: string;
 	/** What to do about it, shown once under the list. */
 	hint?: string;
+	/** The one action that goes with the hint. */
+	link?: { label: string; href: string };
 }
 
 const IMAGE_HOW =
@@ -76,6 +85,11 @@ export function imageHint(worker: UpdateWorker): string | undefined {
  * available, ready, error, image-required, unsupported.
  */
 export function describeWorker(worker: UpdateWorker, receipt?: UpdateReceipt): { tone: StatusTone; text: string } {
+	// The launcher's own reason (or the refusal it caused) is technical;
+	// installerHint() explains it under the list.
+	if (worker.online && worker.remedy === 'installer' && !worker.request_pending && worker.phase !== 'checking') {
+		return { tone: 'err', text: 'Needs the latest installer' };
+	}
 	if (receipt && receipt.accepted === false) return { tone: 'off', text: receipt.reason || 'Not checked' };
 	if (!worker.online) return { tone: 'off', text: 'Offline' };
 	if (worker.request_pending) return { tone: 'busy', text: 'Checking' };
@@ -250,7 +264,9 @@ export class UpdatesState {
 								elapsed >= CHECK_IDLE_SETTLE_MS));
 					if (!done) settled = false;
 					const view = done ? describeWorker(worker, receipt) : { tone: 'busy' as const, text: 'Checking' };
-					rows.push({ id, name, ...view, ...(done && imageHint(worker) ? { hint: imageHint(worker) } : {}) });
+					const hint = done ? (installerHint(worker) ?? imageHint(worker)) : undefined;
+					const link = done && installerHint(worker) ? INSTALLER_LINK : undefined;
+					rows.push({ id, name, ...view, ...(hint ? { hint } : {}), ...(link ? { link } : {}) });
 				}
 				this.rows = rows;
 			} else settled = false;

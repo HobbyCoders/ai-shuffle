@@ -154,7 +154,11 @@ def test_install_materializes_symlinked_skills_as_real_files(svc):
     _write_skill(clone / ".agents" / "skills", "foo")
     claude_skills = clone / ".claude" / "skills"
     claude_skills.mkdir(parents=True)
-    os.symlink("../../.agents/skills/foo", claude_skills / "foo")
+    # A directory link with native separators, as git makes one on checkout:
+    # Windows does not resolve "/" in a relative link, and a link made as a
+    # file link never opens as a directory.
+    os.symlink(os.path.join("..", "..", ".agents", "skills", "foo"), claude_skills / "foo",
+               target_is_directory=True)
 
     info = svc.install_plugin("remotion@remotion")
 

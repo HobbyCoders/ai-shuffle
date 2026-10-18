@@ -63,7 +63,8 @@ export type WorkerPhase = 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped'
 
 export interface WorkerState {
 	phase: WorkerPhase;
-	startupStep?: 'syncing';
+	/** syncing: checking other workers; restore-point: copying the database before an update's first start. */
+	startupStep?: 'syncing' | 'restore-point';
 	syncStatus?: string;
 	port: number;
 	url: string;

@@ -288,6 +288,28 @@ def test_collect_waits_for_both_local_suites(tmp_path, monkeypatch):
     assert "local/windows-suite=missing" in srs.render(report)
 
 
+def test_missing_windows_suite_names_the_staged_command(tmp_path, monkeypatch):
+    # A Windows full run (~75 min) outlasts one 45-minute Monitor job, so the blocker must
+    # name the checkpointed command documented in docs/ci/pr-checks.md, not `full --attest`.
+    _fake_collect(monkeypatch, [_status("local/full-suite")])
+    blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
+    assert blocker == (
+        "local/windows-suite on 123456789 is missing: run "
+        "`python scripts/local_ci.py full --step --attest` (one Monitor job per run; "
+        "repeat the same command until it prints COMPLETE) on DesktopWorker (Windows) "
+        "on a clean checkout of main, or dispatch windows-suite.yml on main "
+        "(`gh workflow run windows-suite.yml --ref main`).")
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "ci" / "pr-checks.md").read_text(encoding="utf-8")
+    assert "python scripts/local_ci.py full --step --attest" in docs and "COMPLETE" in docs
+
+
+def test_missing_linux_suite_keeps_the_one_shot_command(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/windows-suite")])
+    blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
+    assert blocker == ("local/full-suite on 123456789 is missing: run "
+                       "`python scripts/local_ci.py full --attest` on a Linux worker on a clean checkout of main.")
+
+
 def test_skip_windows_releases_with_a_note(tmp_path, monkeypatch):
     _fake_collect(monkeypatch, [_status("local/full-suite")])
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="DesktopWorker off")
@@ -331,3 +353,44 @@ def test_main_passes_skip_smoke_rows_through(monkeypatch, capsys):
     monkeypatch.setattr(srs, "render", lambda report: "ok")
     assert srs.main(["--skip-smoke-rows", "two_worker", "peer away", "--skip-smoke-rows", "x.2", "browser"]) == 0
     assert seen["args"][-1] == [["two_worker", "peer away"], ["x.2", "browser"]]
+
+
+def _hosted(conclusion="success", status="completed", head=CANDIDATE, actor=srs.OWNER_ID,
+            event="workflow_dispatch", branch="main"):
+    return {"head_sha": head, "status": status, "conclusion": conclusion, "event": event,
+            "head_branch": branch, "triggering_actor": {"id": int(actor)},
+            "html_url": "https://github.com/HobbyCoders/ai-shuffle/actions/runs/1"}
+
+
+def test_hosted_windows_state_counts_only_the_owners_manual_run_on_main():
+    assert srs.hosted_windows_state([_hosted()], CANDIDATE)[0] == "success"
+    assert srs.hosted_windows_state([_hosted(status="in_progress", conclusion=None)], CANDIDATE)[0] == "pending"
+    assert srs.hosted_windows_state([_hosted("failure"), _hosted()], CANDIDATE)[0] == "failure"
+    for stranger in (_hosted(actor="7"), _hosted(event="push"), _hosted(branch="fix/x"), _hosted(head="other")):
+        assert srs.hosted_windows_state([stranger], CANDIDATE) == ("missing", None)
+
+
+def test_a_hosted_windows_run_satisfies_the_windows_suite(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/full-suite")])
+    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: [_hosted()])
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
+    assert report["ready"]
+    assert report["local_suites_on_main_head"]["local/windows-suite"] == "success"
+    assert report["windows_suite"] == {"source": "hosted",
+                                       "url": "https://github.com/HobbyCoders/ai-shuffle/actions/runs/1"}
+    assert any("GitHub-hosted Windows runner" in line for line in report["release_notes_lines"])
+
+
+def test_a_failed_hosted_windows_run_still_blocks_and_says_so(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/full-suite")])
+    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: [_hosted("failure")])
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
+    assert not report["ready"]
+    assert report["blockers"][0].endswith("(the hosted run on it is failure).")
+
+
+def test_an_owner_windows_status_needs_no_hosted_run(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
+    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: pytest.fail("not consulted"))
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
+    assert report["ready"] and report["windows_suite"]["source"] == "local"

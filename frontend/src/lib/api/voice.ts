@@ -191,7 +191,8 @@ function invalidateVoiceSettings() {
 	settingsCache = null;
 }
 
-resourceSync.subscribe(['settings'], invalidateVoiceSettings);
+// Drops a cache only (no request), so a hidden tab still sees the change.
+resourceSync.subscribe(['settings'], invalidateVoiceSettings, { whileHidden: true });
 sessionOwnerBoundary.subscribe(invalidateVoiceSettings);
 
 const EXPIRED_SETTINGS_REQUEST = 'ExpiredVoiceSettingsRequest';

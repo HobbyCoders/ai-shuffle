@@ -778,6 +778,7 @@ async def test_a_socket_dropped_mid_reply_keeps_the_text_and_says_so(server):
     # No tool call closed, so the same request was re-sent within the budget.
     assert len(server.requests) == 1 + native_mod.TRANSPORT_DROP_MAX_RETRIES
     assert [r.cause for r in _of(events, ProviderRetry)] == ["connection_dropped"] * 2
+    assert all(u.raw.get("transport_failure") for u in _of(events, Usage))
 
 
 @pytest.mark.parametrize("kind", ["anthropic", "responses"])
@@ -922,6 +923,7 @@ async def test_a_complete_chat_stream_without_a_usage_chunk_is_still_an_answer(
     assert usage.input_tokens > 0 and usage.output_tokens > 0
     assert usage.raw["input_tokens_estimated"] is True
     assert usage.raw["output_tokens_estimated"] is True
+    assert usage.raw["partial_usage_reason"] == "provider_missing_usage"
 
 
 async def test_a_tool_loop_without_usage_chunks_runs_to_the_end(server):

@@ -91,7 +91,9 @@ def test_default_branch_probe_kills_slow_credential_helper(repositories, tmp_pat
 
     def short_probe(cwd, *args, **kwargs):
         if args == ("ls-remote", "--symref", "origin", "HEAD"):
-            kwargs["timeout"] = 1
+            # Long enough for Git to start the Python helper on a slow machine
+            # (1 s was not, on a hosted Windows runner); far below its 10 s sleep.
+            kwargs["timeout"] = 3
         return real_run(cwd, *args, **kwargs)
 
     monkeypatch.setattr(transfer, "_run", short_probe)
@@ -103,7 +105,7 @@ def test_default_branch_probe_kills_slow_credential_helper(repositories, tmp_pat
         started = time.monotonic()
         with pytest.raises(ValueError, match="cannot establish origin's default branch"):
             export_checkout(source, "feature/only-on-worker")
-        assert time.monotonic() - started < 5
+        assert time.monotonic() - started < 8
         assert marker.exists(), "The real Git credential-helper path must run"
         helper_pid = int(marker.read_text())
         try:

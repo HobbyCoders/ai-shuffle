@@ -148,8 +148,19 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
     if levels is not None:
         levels = [v for v in levels if v in allowed]
     default = cap["default_effort"]
-    return {"effort_levels": levels, "default_effort": default if levels is not None and default in levels else None,
-            "effort_metadata_version": version}
+    result = {"effort_levels": levels, "default_effort": default if levels is not None and default in levels else None,
+              "effort_metadata_version": version}
+    # Composer-only initial preference, never the child/home/vendor default:
+    # docs/benchmarks/effort-gpt-6.1-sol-2026-10-16.{md,json}: 60/60 in both arms,
+    # equal rounded medians; high had lower p95 and fewer argument-guard cutoffs.
+    # initial_effort is consumed only for a never-picked composer. A remembered
+    # string or NULL (provider default) still wins, and catalog support must exist.
+    if (model == "gpt-6.1-sol" and route == "openai_responses"
+            and provider and (provider.get("provider_type") == "chatgpt"
+                              or provider.get("auth_mode") == "chatgpt")
+            and levels is not None and "high" in levels):
+        result["initial_effort"] = "high"
+    return result
 
 
 def clamp_effort(value: Any, model: str | None, provider: Mapping[str, Any] | None = None,

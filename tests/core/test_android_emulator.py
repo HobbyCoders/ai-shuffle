@@ -27,6 +27,11 @@ from app.core.android_emulator.manager import Device, EmulatorError, EmulatorMan
 IMAGE = "system-images;android-35;google_apis;x86_64"
 BASE = sdk_repo.REPOSITORY_BASE
 SYS_BASE = BASE + "sys-img/google_apis/"
+
+# The emulator runs only on Linux x86_64 with KVM (host.check_host refuses
+# every other host). These tests pin Linux behaviour: symlinks inside the SDK
+# archive, POSIX file modes and process groups, which Windows lacks.
+linux_only = pytest.mark.skipif(os.name == "nt", reason="the Android emulator is Linux-only")
 LICENSE_TEXT = "\nTerms and Conditions\n\nThis is the Android Software Development Kit License Agreement\n"
 
 
@@ -179,6 +184,7 @@ def _run(layout, repo=None, download=None, cancel=None):
     return ok, message, progress
 
 
+@linux_only
 def test_install_verifies_extracts_and_records(layout, monkeypatch):
     monkeypatch.setattr(installer, "_free_bytes", lambda path: 100 * 1024 ** 3)
     download = _download()
@@ -541,6 +547,7 @@ async def test_setup_needs_the_license_and_reports_installing(manager, monkeypat
     assert manager.layout.read_record()["system_image"] == IMAGE
 
 
+@linux_only
 async def test_start_spawns_a_headless_emulator_and_waits_for_boot(manager, fake_adb, monkeypatch):
     from app.core.android_emulator import manager as manager_mod
 
@@ -685,6 +692,7 @@ async def test_start_is_refused_when_unavailable_or_full(manager, monkeypatch):
     assert exc.value.code == "device_limit"
 
 
+@linux_only
 async def test_boot_failure_keeps_its_reason(manager, fake_adb, monkeypatch):
     from app.core.android_emulator import manager as manager_mod
 

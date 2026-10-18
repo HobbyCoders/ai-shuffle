@@ -27,12 +27,30 @@ def _interrupt(_signum, _frame):
     raise KeyboardInterrupt
 
 
+def _read_token(path) -> str | None:
+    """The owner token from ``--token-file`` (its first line), or None."""
+    if not path:
+        return None
+    try:
+        value = Path(path).read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError, UnicodeDecodeError):
+        value = ""
+    if not value:
+        raise ValueError(f"--token-file {path} holds no token")
+    return value
+
+
 def cmd_run(args) -> int:
     from scripts.live_smoke.client import HttpWorkerClient
     from scripts.live_smoke.runner import Runner, SetupError
 
     data = scen.load(args.scenarios)
-    client = HttpWorkerClient(args.url)
+    try:
+        token = _read_token(args.token_file)
+    except ValueError as exc:
+        print(f"live smoke not started: {exc}", file=sys.stderr)
+        return 2
+    client = HttpWorkerClient(args.url, token=token)
     runner = Runner(
         client, data, results_base=results_mod.smoke_dir(args.results_dir), model=args.model,
         token_cap=args.token_cap, peer=args.peer, project=args.project, agent=args.agent,
@@ -127,6 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="drive the script rows on this worker")
     common(run)
     run.add_argument("--url", default="http://127.0.0.1:8000", help="this worker's loopback address")
+    run.add_argument("--token-file", help="file with an owner token from POST /api/v1/owner/login "
+                                          "(\"bearer\": true); needed on a Docker worker")
     run.add_argument("--model", help="model for every session (default: cheapest-looking usable model)")
     run.add_argument("--token-cap", type=int, help="stop the run past this many tokens (default 600000)")
     run.add_argument("--peer", help="the other worker's name (default: the only other paired worker)")

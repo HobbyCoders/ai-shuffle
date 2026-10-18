@@ -551,3 +551,42 @@ it('tells a Docker worker ahead of time that a coming update needs a newer image
  expect(button.title).toContain('Old: Needs a new Docker image; not included');
  expect(button.title).not.toContain('Old: Needs a new Docker image; not included; a coming');
 });
+
+// A failed desktop update that only the latest installer can finish says so,
+// links the installer, and never retries in the app (remedy from update_workers.py).
+const NO_BUILD='No healthy source build is available. Install the latest AI Shuffle installer to recover. Previous files and data have been retained.';
+it.each([true,false])('offers the latest installer instead of a retry (data kept=%s)', async kept => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'error',version:null,error:NO_BUILD,role:'unknown',label:NO_BUILD,remedy:'installer',data_kept:kept}]});
+ const open=vi.spyOn(window,'open').mockReturnValue(null);
+ try {
+  render(DesktopUpdateButton);
+  await fireEvent.click(await screen.findByRole('button',{name:'Update needs the latest installer'}));
+  const panel=await screen.findByRole('dialog',{name:'Update needs the latest installer'});
+  expect(panel.textContent).toContain('This update cannot finish inside the app.');
+  expect(panel.textContent).toContain(NO_BUILD);
+  expect(panel.textContent?.includes('Your data is kept as it was before the update.')).toBe(kept);
+  const link=screen.getByRole('link',{name:'Download the latest installer'});
+  expect(link.getAttribute('href')).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
+  expect(link.getAttribute('target')).toBe('_blank');
+  expect(api.post).not.toHaveBeenCalled();
+  // The desktop's ready notification asks the shared control; it opens the same panel.
+  await fireEvent.click(screen.getByRole('button',{name:'Not now'}));
+  window.dispatchEvent(new Event('application-update-request'));
+  await screen.findByRole('dialog',{name:'Update needs the latest installer'});
+  expect(api.post).not.toHaveBeenCalled();
+  expect(open).not.toHaveBeenCalled();
+ } finally { open.mockRestore(); }
+});
+it('puts the installer action on a manual check that finds the installer state', async () => {
+ vi.useFakeTimers({shouldAdvanceTime:true});
+ try {
+  api.get.mockResolvedValue({...state, workers:[{...worker,phase:'idle',version:null}]});
+  render(DesktopUpdateButtonHarness);
+  await waitFor(()=>expect(screen.getByTestId('can-check').textContent).toBe('yes'));
+  api.get.mockResolvedValue({...state, workers:[{...worker,phase:'error',version:null,error:NO_BUILD,role:'unknown',label:NO_BUILD,remedy:'installer',data_kept:true}]});
+  await fireEvent.click(screen.getByRole('button',{name:'Manual check'}));
+  await vi.advanceTimersByTimeAsync(6000);
+  await waitFor(()=>expect(notice.warning).toHaveBeenCalledWith(expect.stringContaining('Download the latest installer to finish it. Your data is kept'),
+   expect.objectContaining({title:'Update check needs attention',action:expect.objectContaining({label:'Download the latest installer'})})));
+ } finally { vi.useRealTimers(); }
+});

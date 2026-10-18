@@ -125,6 +125,12 @@ test('update snapshot requires a stopped cluster and a clean control file; resto
  assert.equal(execs('pg_controldata')[0].env.PGHOST,undefined);
  await pg.quiesce(false); assert.equal(execs('pg_controldata').length,1);
 });
+test('an update restore point can reap a leftover worker before it stops the cluster for a copy',async()=>{
+ const {rt,execs}=fakeRuntime({files:{[path.join(DATA,'PG_VERSION')]:'16'},results:{pg_ctl:{code:3},pg_controldata:{stdout:'Database cluster state:               shut down\n'}}});
+ const order=[];const point=supervisor(rt,credentialsStore().credentials).updateRestorePoint(async()=>{order.push(execs('pg_ctl').length);});
+ await point.quiesce(true);
+ assert.deepEqual(order,[0],'before any pg_ctl call');assert.equal(execs('pg_controldata').length,1);
+});
 test('update snapshot refuses live PostgreSQL, unclean shutdown and missing control tools',async()=>{
  for(const results of [{pg_ctl:{code:0}},{pg_ctl:{code:3},pg_controldata:{stdout:'Database cluster state: in production'}},{pg_ctl:{code:3},pg_controldata:{code:-2}}]){
   const {rt}=fakeRuntime({files:{[path.join(DATA,'PG_VERSION')]:'16'},results});

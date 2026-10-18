@@ -8,8 +8,8 @@ mode          stored value    what it is
 ``code``      ``NULL``        the full agentic surface (projects, agents,
                               branches, worktrees, every tool)
 ``chat``      ``'chat'``      a lightweight chat: model, effort, attachments,
-                              transcription, usage — the web, plus the files
-                              you attach, and no checkout
+                              transcription, usage — the web, the files you
+                              attach, question cards, and no checkout
 ``voice``     ``'voice'``     an OpenAI Realtime call
 ============  ==============  ===========================================
 
@@ -77,11 +77,17 @@ CHAT_MODE_RESOURCE_TOOLS: List[str] = [
         "ChatHttpRequest",
     )
 ]
+# The question card. It only asks the owner and reaches no file, shell or
+# network, so a chat may use it like any other lane. Fluid's name; the
+# delegated leg's surface expansion adds the CLI's AskUserQuestion. Without it
+# a chat agent whose picker shows the question tool enabled could not call it,
+# and the model rightly answered "AskUser isn't available".
+CHAT_MODE_QUESTION_TOOLS: List[str] = ["AskUser"]
 CHAT_MODE_TOOL_SURFACE: List[str] = [
     "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
     # Native generation stores only session-owned artifacts in chat mode.
     "GenerateNativeImage",
-    *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
+    *CHAT_MODE_QUESTION_TOOLS, *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
 ]
 
 # Where the chat lane's attachments land, under the workspace root. ONE shared
@@ -299,6 +305,37 @@ def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
     if permission_mode == "acceptEdits":
         return tool_name in ACCEPT_EDITS_TOOLS
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
+
+
+#: Claude Code ``decision_reason_type`` values that can carry one of its
+#: safety checks (``subcommandResults`` nests them inside a compound command).
+SAFETY_CHECK_REASON_TYPES = frozenset({"safetyCheck", "subcommandResults"})
+
+
+def safety_check_needs_person(reason_type: Any, classifier_approvable: Any) -> bool:
+    """Whether the claude CLI asks because of a safety check only a person
+    may pass (``classifier_approvable`` false, e.g. a removal whose target is
+    a shell variable). The CLI asks for these even in bypassPermissions."""
+    return reason_type in SAFETY_CHECK_REASON_TYPES and classifier_approvable is False
+
+
+def bypass_refuses(permission_mode: Any, reason_type: Any, classifier_approvable: Any) -> bool:
+    """Bypass approves every call the CLI asks about except a safety check
+    that needs a person: that one is denied at once (owner policy, #105).
+    Ask and Accept Edits put it to a person as any other prompt."""
+    return (
+        permission_mode == "bypassPermissions"
+        and safety_check_needs_person(reason_type, classifier_approvable)
+    )
+
+
+def safety_check_denial(reason: Optional[str]) -> str:
+    """What the model reads when Bypass refuses a safety-checked call."""
+    detail = f" ({reason})" if reason else ""
+    return (
+        f"Claude Code's safety check needs a person for this command{detail}. "
+        "Bypass mode refuses it; rewrite it with literal paths or a safer form."
+    )
 
 
 def narrow_tool_access_for_mode(access: ToolAccess, mode: Any) -> ToolAccess:

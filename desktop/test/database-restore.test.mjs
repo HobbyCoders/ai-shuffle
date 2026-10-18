@@ -5,7 +5,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import { afterRename } from './helpers/crash-rename.mjs';
-const { ColdClusterCopy, durableJson } = createRequire(import.meta.url)('../dist/main/database-restore.js');
+import { spawn } from 'node:child_process';
+const { ColdClusterCopy, durableJson, durableRename, WINDOWS_MOVE_SCRIPT } = createRequire(import.meta.url)('../dist/main/database-restore.js');
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-restore-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -84,4 +85,36 @@ test('journal replacement flushes its temporary file before publishing it', asyn
   assert.deepEqual(JSON.parse(await fs.readFile(file)), { phase: 'preparing' });
   await durableJson(file, { phase: 'ready' });
   assert.deepEqual(JSON.parse(await fs.readFile(file)), { phase: 'ready' });
+});
+
+test('the Windows move retries only transient sharing errors, for a bounded time', () => {
+  assert.match(WINDOWS_MOVE_SCRIPT, /MoveFileEx\(from, to, 9\)/);
+  assert.match(WINDOWS_MOVE_SCRIPT, /error != 5 && error != 32 && error != 33\) return error/);
+  assert.match(WINDOWS_MOVE_SCRIPT, /attempt <= 40/);
+  // Read in C#, right after the call: PowerShell overwrites the last error.
+  assert.match(WINDOWS_MOVE_SCRIPT, /Marshal\.GetLastWin32Error\(\)/);
+});
+const windowsOnly = { skip: process.platform !== 'win32' && 'MoveFileEx is Windows only' };
+test('a Windows move waits for a file another process holds open', windowsOnly, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-move-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'state.json.tmp'), target = path.join(root, 'state.json');
+  await fs.writeFile(file, '{}');
+  // No FILE_SHARE_DELETE, like a scanner's handle: the move fails until it closes.
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '$h = [IO.File]::Open($env:HELD, "Open", "Read", "Read"); [Console]::Out.WriteLine("held"); Start-Sleep -Seconds 3; $h.Close()'],
+  { env: { ...process.env, HELD: file }, stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => holder.kill());
+  await new Promise((resolve, reject) => { holder.stdout.on('data', d => { if (String(d).includes('held')) resolve(); }); holder.on('exit', reject); });
+  const started = Date.now();
+  await durableRename(file, target);
+  assert.ok(Date.now() - started >= 1000, 'the move waited for the handle');
+  assert.equal(await fs.readFile(target, 'utf8'), '{}');
+});
+test('a Windows move that cannot succeed reports the real Windows error at once', windowsOnly, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-move-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const started = Date.now();
+  await assert.rejects(durableRename(path.join(root, 'missing'), path.join(root, 'moved')), /Windows error 2: /);
+  assert.ok(Date.now() - started < 30_000);
 });

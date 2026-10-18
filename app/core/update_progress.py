@@ -38,14 +38,15 @@ def begin(request_id, rows):
 
 
 def discard(request_id):
-    """Forget an operation that never started any install (every worker busy)."""
+    """Forget an operation that never started any install (every worker busy),
+    or a failed one the owner moved past by asking for a new check."""
     with _lock:
         value = load()
         if value and value["id"] == request_id:
             _path().unlink(missing_ok=True)
 
 
-def record(request_id, device_id, *, target_version=None, result=None):
+def record(request_id, device_id, *, target_version=None, from_version=None, result=None):
     # Persist the target BEFORE enqueueing. A lost reply must not lose the cohort.
     with _lock:
         value = load()
@@ -56,6 +57,8 @@ def record(request_id, device_id, *, target_version=None, result=None):
                 continue
             if target_version:
                 row["target_version"] = target_version
+            if from_version:
+                row["from_version"] = from_version
             if result is not None:
                 row["accepted"] = result.get("accepted") if isinstance(result.get("accepted"), bool) else None
                 row["reason"] = result.get("reason", "")
@@ -64,12 +67,26 @@ def record(request_id, device_id, *, target_version=None, result=None):
         atomic_json(_path(), value)
 
 
+def _commit(value):
+    return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{7,64}", value) is not None
+
+
 def same_version(running, target):
     # Desktop displays a 12-character commit, while containers use the full SHA.
-    return (isinstance(running, str) and isinstance(target, str)
-            and re.fullmatch(r"[a-f0-9]{7,64}", running) is not None
-            and re.fullmatch(r"[a-f0-9]{7,64}", target) is not None
+    return (_commit(running) and _commit(target)
             and (running.startswith(target) or target.startswith(running)))
+
+
+def replaced(current, target):
+    """The worker now runs a third version: installed another way (an installer,
+    a new image, a later update), so this install has nothing left to do.
+
+    Needs the version it ran when the install began; without it a failed start
+    (still on the old version) cannot be told apart, so the error stands.
+    """
+    running, before = current.get("running_version"), target.get("from_version")
+    return (bool(current.get("online") and current.get("supported")) and _commit(running) and _commit(before)
+            and not same_version(running, before) and not same_version(running, target.get("target_version")))
 
 
 def observe(operation, rows):
@@ -89,6 +106,8 @@ def observe(operation, rows):
         if (current.get("online") and current.get("supported")
                 and same_version(current.get("running_version"), target.get("target_version"))):
             worker.update(status="verified", message="Updated and verified")
+        elif replaced(current, target):
+            worker.update(status="replaced", message=f"Now runs {current['running_version'][:12]}; nothing left to install")
         elif target["accepted"] is False:
             worker.update(status="skipped", message=target.get("reason") or "Not queued")
         elif current.get("error"):
@@ -98,7 +117,7 @@ def observe(operation, rows):
                                                       else "Waiting for startup…"))
         workers.append(worker)
     included = [worker for worker in workers if worker["status"] != "skipped"]
-    if included and all(worker["status"] == "verified" for worker in included):
+    if included and all(worker["status"] in ("verified", "replaced") for worker in included):
         phase = "complete"
     elif not included or any(worker["status"] == "error" for worker in included):
         phase = "error"
@@ -112,8 +131,9 @@ def observe(operation, rows):
     result = {**operation, "phase": phase, "workers": workers}
     if phase == "complete":
         # The UI only celebrates a recent completion, never one replayed from
-        # history into a fresh browser.
-        result["completed_at"] = time.time()
+        # history into a fresh browser, and never one this install did not make.
+        if any(worker["status"] == "verified" for worker in included):
+            result["completed_at"] = time.time()
         with _lock:
             current = load()
             if current and current["id"] == operation["id"]:

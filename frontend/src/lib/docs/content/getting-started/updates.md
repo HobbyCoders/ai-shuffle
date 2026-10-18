@@ -25,6 +25,8 @@ Most releases install from inside AI Shuffle:
 1. When a new release is out, the update button appears in the sidebar with its release notes.
 2. Choose **Download update**, then **Update and restart**. Agents stop, the update installs, and AI Shuffle starts again.
 
+On a Docker worker, a downloaded update that is waiting for **Update and restart** does not hide a newer release. Checking for updates still reads the feed: when a newer release is out, the button offers it, and **Download update** replaces the waiting one and removes its files. If that download fails, the earlier update stays ready to install. Nothing is replaced while an update is installing or starting.
+
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
 ### Runtime overlays
@@ -55,6 +57,10 @@ Updating the image always works, even when an in-app update would have, and it i
 The desktop app checks for new releases when it starts and once a day, and offers to install them.
 
 Before a source update first starts, a current desktop launcher stops the worker and managed PostgreSQL and saves one validated database restore point. If the copy fails (for example, the disk is full), the update does not start and the previous version is kept. Leave room for a database copy and temporary restore files.
+
+A Windows or Linux install whose launcher came from 0.9.6 or earlier does not make that copy itself. The update makes it at its first start instead, and the window shows **Preparing the update's database restore point…** while it runs. If the copy fails, the update does not start and your data is not changed: the window gives the reason and what to do (for example, free some disk space), then **Try again** makes the copy again. If you close AI Shuffle instead, the previous version opens and the update stays ready to install. If the previous version was the one your installer included, no copy is made and the update starts behind its migration fence, as updates always did under those launchers. On Windows, once the update has started successfully it replaces the old launcher, so later updates are protected as described above. On Linux, the update makes its own copy each time until you install a current installer.
+
+If an update stopped with "No verified database restore point exists", install the latest AI Shuffle installer from the downloads page. Your data is kept and the update finishes. An install in that state cannot get the fix through the in-app update.
 
 If the first start crashes, times out or is interrupted, the next launch restores that database copy before running the previous version. A notice names the failed update and the version restored; the failed update is not offered again automatically. The restore point is deleted once the new build is healthy. If cleanup is temporarily blocked, the healthy app still starts. Update checks show the reason and folder instead of offering a restart, and retry cleanup on each check and launch. Close other programs using that folder, check its permissions, then choose Retry; the update becomes installable after cleanup succeeds. Installing a newer desktop installer can still update the app while cleanup is blocked. This protects the update's first start, not later downgrades or switching from nightly back to stable.
 

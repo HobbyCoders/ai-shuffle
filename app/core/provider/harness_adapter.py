@@ -97,7 +97,12 @@ from app.core.provider.fluid_credentials import (
 )
 from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
-from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
+from app.core.session_modes import (
+    bypass_refuses,
+    effective_permission_mode,
+    mode_approves_without_prompt,
+    safety_check_denial,
+)
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
 # from here — but a session replayed through this adapter must be decodable,
@@ -550,7 +555,9 @@ class HarnessAdapter(ProviderAdapter):
         options.permission_mode = effective_permission_mode(
             options.permission_mode, delegated=self._is_delegated
         )
-        options.effort = await asyncio.to_thread(_effective_effort, options, options.effort, kind)
+        options.effort = await asyncio.to_thread(
+            _effective_effort, options, options.effort, kind, fit=True
+        )
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
 
@@ -837,7 +844,8 @@ class HarnessAdapter(ProviderAdapter):
             # matches the pricing table. The other native kinds run provider-native
             # ids that must pass through untouched.
             native_model = (
-                resolve_api_model_id(options.model) if kind == "anthropic" else options.model
+                _native_api_model(options.model, options)
+                if kind == "anthropic" else options.model
             )
             # The delegation catalog (CE6 + the app's own DB agents) — one
             # name+description index for the prompt, plus the matching
@@ -878,7 +886,9 @@ class HarnessAdapter(ProviderAdapter):
                     native_ctx.extra.setdefault("recall_store", skills)
                     native_ctx.extra.setdefault("memory_store", skills)
                     native_ctx.extra.setdefault("memory_project", memory_project)
-                    skills.journal_context(session_id=app_session_id, project=memory_project)
+                    skills.journal_context(
+                        session_id=app_session_id, project=memory_project, cwd=options.cwd,
+                    )
                     synthesizer = None
                     if settings.fluid_continual:
                         # Materialized HERE rather than letting NativeLoop
@@ -927,6 +937,14 @@ class HarnessAdapter(ProviderAdapter):
                             session_model=session_model,
                             guidance_snapshot=_session_guidance_snapshot(
                                 session_model
+                            ),
+                            # The session model's resolved window sizes the
+                            # learner's request; a pinned learner model has no
+                            # resolved window here and falls back to fluid's
+                            # table (and a local model to the small default).
+                            context_window=(
+                                None if settings.fluid_continual_model
+                                else _native_context_window(kind, options)
                             ),
                         )
 
@@ -2926,6 +2944,9 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.assistant_permissions import NO_OWNER_DENIAL
 
             allow, message = False, NO_OWNER_DENIAL
+        elif bypass_refuses(self.permission_mode, ev.reason_type, ev.classifier_approvable):
+            # A safety check only a person may pass: Bypass refuses it (#105).
+            allow, message = False, safety_check_denial(ev.reason)
         elif self.permission_mode != "bypassPermissions":
             try:
                 saved = await self._saved_rule_decision(ev.name, ev.input)
@@ -3049,6 +3070,11 @@ class HarnessAdapter(ProviderAdapter):
                     # A high-risk call in an owner's-assistant session goes to
                     # the owner whatever the mode (app.core.assistant_permissions).
                     assistant_owner=self._owner_needed(tool_name, ev.input, getattr(ev, "risk", None)),
+                    # The CLI's reason for asking: the approver refuses a
+                    # safety check under Bypass and shows the reason under Ask.
+                    decision_reason=ev.reason,
+                    decision_reason_type=ev.reason_type,
+                    classifier_approvable=ev.classifier_approvable,
                     **_prompt_enrichment(tool_name, ev),
                 ),
             )
@@ -3247,7 +3273,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._provider_kind == "anthropic":
             # Mid-session hot swap lands on NativeLoop's raw model attribute —
             # same verbatim-to-API path as connect, same canonicalization.
-            model = resolve_api_model_id(model) or model
+            model = _native_api_model(model, self._options) or model
         try:
             await self._engine.submit(SetModel(model=model))
         except NotImplementedError:
@@ -3761,6 +3787,9 @@ class HarnessAdapter(ProviderAdapter):
                     input=event.input,
                     risk=event.risk,
                     request_id=event.request_id,
+                    reason=getattr(event, "reason", None),
+                    reason_type=getattr(event, "reason_type", None),
+                    classifier_approvable=getattr(event, "classifier_approvable", None),
                 )
             ]
 
@@ -5225,7 +5254,20 @@ def _fluid_setting_sources(options: Any) -> Optional[tuple]:
     return valid
 
 
-def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] = None) -> Optional[str]:
+def _native_api_model(model: Optional[str], options: Optional[SessionOptions]) -> Optional[str]:
+    # A concrete id selected from a bound API catalog is not a legacy preset.
+    # Upgrading Opus 4.6 to the current "opus" alias also bypasses its effort
+    # clamp. Keep preset migration only on the unbound/short-alias path.
+    if (options is not None and options.extra.get("provider_id")
+            and (model or "").startswith("claude-")):
+        # Stored profiles may still carry the legacy context-window marker;
+        # Messages accepts the version pin, not the app-only [1m] suffix.
+        return model.removesuffix("[1m]")
+    return resolve_api_model_id(model)
+
+
+def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] = None,
+                      *, fit: bool = False) -> Optional[str]:
     from app.core.model_effort import normalize_effort
 
     # The assistant's home always runs at its model's own default effort,
@@ -5236,7 +5278,14 @@ def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] 
     row = _lookup_provider_row(provider_id) if provider_id else None
     if provider_id and row is None:
         return None
-    return normalize_effort(value, options.model, row, route=route or _decide_provider_kind(options))
+    route = route or _decide_provider_kind(options)
+    # Fit remembered Claude picks before metadata validation can drop them;
+    # the CLI has no serializer to provide the native API's safety clamp.
+    # Other routes and live explicit setting changes retain strict validation.
+    if fit and route in ("anthropic", "delegated") and value in ("low", "medium", "high", "xhigh", "max"):
+        from fluid.providers.anthropic.thinking import clamp_effort
+        value = clamp_effort(options.model, value)
+    return normalize_effort(value, options.model, row, route=route)
 
 
 def model_default_effort(options: SessionOptions, route: Optional[str] = None) -> Optional[str]:

@@ -398,8 +398,17 @@ def test_unauthenticated_surface(server):
     assert "/health" in paths and "/api/v1/sessions" in paths and "/api/v1/owner/login" in paths
 
     documentation = c.get("/api/v1/documentation")
-    assert documentation.status_code == 200
-    assert any(cat["id"] == "getting-started" for cat in documentation.json()["categories"])
+    from app.core.owner_auth import container_marker_present
+
+    if container_marker_present():
+        # In a container no loopback caller is the owner (#112), so the
+        # authenticated docs index refuses this anonymous request. The server
+        # never runs as a branch preview here (AI_SHUFFLE_PREVIEW is not passed).
+        assert documentation.status_code == 401
+    else:
+        # Native install: loopback is passwordless owner access.
+        assert documentation.status_code == 200
+        assert any(cat["id"] == "getting-started" for cat in documentation.json()["categories"])
 
 
 def test_owner_bootstrap(server):

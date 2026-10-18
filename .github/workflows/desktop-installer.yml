@@ -32,6 +32,20 @@ on:
         required: false
         type: boolean
         default: false
+      old_installer_sha256:
+        description: >-
+          With launcher_acceptance: instead check the late restore point (desktop/LAUNCHER.md)
+          on the installer at the OLD_INSTALLER_URL secret, which must have this SHA-256
+        required: false
+        type: string
+        default: ''
+      late_restore_steps:
+        description: >-
+          With old_installer_sha256: which late restore steps to run after the install and P
+          (comma-separated N1, N2, N3; empty runs all)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -299,7 +313,7 @@ jobs:
   launcher-acceptance:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor &&
-      github.event_name == 'workflow_dispatch' && inputs.launcher_acceptance == true
+      github.event_name == 'workflow_dispatch' && inputs.launcher_acceptance == true && inputs.old_installer_sha256 == ''
     runs-on: windows-latest
     timeout-minutes: 75
     permissions:
@@ -345,4 +359,79 @@ jobs:
           retention-days: 7
           name: launcher-swap-evidence
           path: ${{ runner.temp }}/launcher-swap-evidence/
+          if-no-files-found: ignore
+
+  # Late restore point acceptance (desktop/LAUNCHER.md, "Launchers without
+  # restore points"): an installer whose launcher makes no restore point (0.9.6)
+  # updated through builds of this branch, with a failed copy, a kill during
+  # the copy, a kill after PostgreSQL started and the launcher swap. Publishes
+  # nothing and holds a read-only token. Its one secret is a short-lived
+  # download URL for that installer, checked against old_installer_sha256 and
+  # never printed; the release key is ephemeral, as in launcher-acceptance.
+  late-restore-acceptance:
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor &&
+      github.event_name == 'workflow_dispatch' && inputs.launcher_acceptance == true && inputs.old_installer_sha256 != ''
+    runs-on: windows-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      # First, before the signed URL expires.
+      - name: Download the older installer
+        env:
+          OLD_INSTALLER_URL: ${{ secrets.OLD_INSTALLER_URL }}
+          OLD_INSTALLER_SHA256: ${{ inputs.old_installer_sha256 }}
+        run: |
+          if ($env:OLD_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'old_installer_sha256 must be 64 lowercase hex digits' }
+          if (-not $env:OLD_INSTALLER_URL) { throw 'The OLD_INSTALLER_URL secret is not set' }
+          $installer = Join-Path $env:RUNNER_TEMP 'old-installer\old-installer.exe'
+          New-Item -ItemType Directory -Force (Split-Path $installer) | Out-Null
+          # curl names no URL in its errors; the secret is masked as well.
+          curl.exe --fail --silent --show-error --location --retry 3 --max-time 900 --output $installer $env:OLD_INSTALLER_URL
+          if ($LASTEXITCODE -ne 0) { throw "The older installer could not be downloaded (curl exit $LASTEXITCODE)" }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($hash -ne $env:OLD_INSTALLER_SHA256) { throw "The older installer does not match old_installer_sha256 (got $hash)" }
+          Write-Host "Older installer matches $hash"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build this branch's launcher code
+        working-directory: desktop
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare this branch as signed revisions (ephemeral key)
+        run: |
+          node desktop/scripts/verify-late-restore-point.mjs prepare (Join-Path $env:RUNNER_TEMP 'late-restore-prepared')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Update the older install through the late restore point
+        # The script stops itself at 180 minutes and writes its evidence; this
+        # and the job's 240 leave time for the summary and the upload.
+        timeout-minutes: 200
+        env:
+          SHUFFLE_ACCEPTANCE_STEPS: ${{ inputs.late_restore_steps }}
+        run: |
+          node desktop/scripts/verify-late-restore-point.mjs run (Join-Path $env:RUNNER_TEMP 'old-installer\old-installer.exe') (Join-Path $env:RUNNER_TEMP 'late-restore-prepared') (Join-Path $env:RUNNER_TEMP 'late-restore-evidence')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Summary
+        if: always()
+        run: |
+          $summary = Join-Path $env:RUNNER_TEMP 'late-restore-evidence\summary.txt'
+          if (Test-Path $summary) { "``````", (Get-Content $summary), "``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
+          else { 'Late restore point acceptance: no summary was written (see the job log).' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 7
+          name: late-restore-evidence
+          path: ${{ runner.temp }}/late-restore-evidence/
           if-no-files-found: ignore

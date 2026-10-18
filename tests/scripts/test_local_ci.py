@@ -93,6 +93,18 @@ def test_desktop_always_runs_unit_tests(monkeypatch, platform_name):
     assert calls == [("desktop", "typecheck", "test")]
 
 
+def test_windows_not_covered_note_names_the_staged_command():
+    # Pinned text: a Windows full run outlasts one Monitor job (docs/ci/pr-checks.md).
+    notes = [note for _paths, note in local_ci.NOT_LOCAL if note.startswith("Windows:")]
+    if os.name == "nt":
+        assert notes == []
+        return
+    assert notes == [
+        "Windows: not tested on this machine. A stable release waits for "
+        "`python scripts/local_ci.py full --step --attest` (one Monitor job per run; "
+        "repeat the same command until it prints COMPLETE) on a Windows worker; edge does not."]
+
+
 def test_name_selection():
     assert local_ci.select_by_name(["requirements.txt"]) == "all"
     assert local_ci.select_by_name(["tests/conftest.py"]) == "all"
@@ -451,8 +463,11 @@ def test_update_reach_pr_policy(monkeypatch, capsys, state, labels, gh_error, ex
     spec.loader.exec_module(reach)
     # Drive the real classifier and CLI verdict using a changed launcher entry.
     monkeypatch.setattr(reach, "git", lambda *a: "desktop/src/main/managed-entry.ts")
+    # The head raises launcher.json's version, as a launcher change must (#97).
     monkeypatch.setattr(reach, "reader", lambda rev: lambda path:
-                        b"export const version = 2;" if path == reach.LAUNCHER_ENTRY else None)
+                        b"export const version = 2;" if path == reach.LAUNCHER_ENTRY
+                        else b'{"version": 2, "minimum": 0}' if path == reach.LAUNCHER_JSON and rev == "HEAD"
+                        else None)
     monkeypatch.setattr(local_ci.shutil, "which", lambda name: "/bin/gh")
     calls = []
 
@@ -757,11 +772,14 @@ def test_checks_never_inherit_the_pushing_repository_from_git(monkeypatch, tmp_p
     monkeypatch.setenv("GIT_AUTHOR_NAME", "kept")
     seen = {}
 
-    def fake_run(argv, **kwargs):
-        seen.update(kwargs["env"])
-        return subprocess.CompletedProcess(argv, 0)
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            seen.update(kwargs["env"])
 
-    monkeypatch.setattr(local_ci.subprocess, "run", fake_run)
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(local_ci.subprocess, "Popen", FakePopen)
     local_ci.run(["true"], env={"PYTHONPATH": "x"})
     assert not {"GIT_DIR", "GIT_INDEX_FILE", "GIT_CONFIG_KEY_0"} & set(seen)
     assert seen["GIT_AUTHOR_NAME"] == "kept" and seen["PYTHONPATH"] == "x" and "PATH" in seen

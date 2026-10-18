@@ -556,6 +556,18 @@ def test_read_is_on_the_chat_surface_and_the_host_tools_are_not():
     assert "Task" not in CHAT_MODE_TOOL_SURFACE
 
 
+def test_a_chat_agent_keeps_the_question_card():
+    """A chat agent whose picker shows the question tool enabled must be able to
+    call it: AskUser only asks the owner, so the chat ceiling keeps it instead
+    of clipping it away while the shell and the kernel stay out."""
+    assert "AskUser" in CHAT_MODE_TOOL_SURFACE
+    options = _build_for_mode("chat", {"model": "opus"})
+    assert "AskUser" in options.allowed_tools
+    assert not {"Bash", "Write", "Edit", "run_python"} & set(options.allowed_tools)
+    narrowed = narrow_tool_access_for_mode(ToolAccess(allowed=["AskUser", "Bash"]), "chat")
+    assert narrowed.allowed == ["AskUser"]
+
+
 def test_a_relative_path_is_read_against_the_workspace_root_only(chat_uploads):
     """One base, deliberately, even though a chat session's cwd is the uploads
     folder. Resolving from there too would let ``chat-uploads/../secret.env``

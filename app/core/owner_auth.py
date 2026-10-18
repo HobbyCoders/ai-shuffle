@@ -6,11 +6,15 @@ Who is the owner of an install:
   same token as a Bearer). The password is created in the first-run wizard,
   or seeded once from ``OWNER_PASSWORD``, and stored argon2id-hashed in the
   settings store.
-- A request from loopback on the local listener. When the desktop app started
-  this worker with a listener token (``app.core.desktop_listener``), loopback
-  also has to carry that token.
-- Any direct private-network request, but only when the owner turned on
-  "trusted LAN, no login" (off by default).
+- A request from loopback on the local listener, on a desktop or native
+  install. When the desktop app started this worker with a listener token
+  (``app.core.desktop_listener``), loopback also has to carry that token. In
+  the Docker image plain loopback is never the owner: every process inside the
+  container is the app or something it started for an agent (see
+  ``container_install``).
+- Any direct private-network request from another machine, but only when the
+  owner turned on "trusted LAN, no login" (off by default). The worker's own
+  addresses never count as the LAN.
 - Paired devices and hub-enrolled phones keep their own device keys and roles;
   explicit integration credentials keep their restricted roles.
 
@@ -124,12 +128,123 @@ def configure_installation():
 def local_access(request):
     """Passwordless owner access: loopback, or the LAN when the owner trusts it.
 
-    Explicit integration credentials always retain their own restricted role.
-    Header values can deny access, but cannot confer it.
+    A request from this machine (loopback or one of its own addresses) is the
+    owner only through ``loopback_request`` and only where loopback can be the
+    owner (``loopback_owner``). It never falls through to the trusted LAN:
+    an agent's shell runs on this machine and reaches every one of its
+    addresses. Explicit integration credentials always retain their own
+    restricted role. Header values can deny access, but cannot confer it.
     """
     if not settings.shuffle_local_access or not direct_local(request):
         return False
-    return loopback_request(request) or trusted_lan()
+    if worker_peer(request):
+        return loopback_owner() and loopback_request(request)
+    return trusted_lan()
+
+
+def container_install():
+    """Whether this worker runs in the Docker image (not desktop or native).
+
+    Inside the container nothing but the app and the processes it starts for
+    agents (shells, Monitor, hooks, MCP servers, the delegated CLI, the agent
+    browser) shares the network namespace. The owner's browser reaches a
+    published port from outside, through Docker's bridge, never as loopback.
+
+    A container marker the runtime creates as root (``/.dockerenv``,
+    ``/run/.containerenv``) can only tighten this: ``LOCAL_MODE`` read from a
+    ``.env`` an agent can write must not turn loopback ownership back on.
+    The one exception is a branch preview (``AI_SHUFFLE_PREVIEW=1`` in the
+    process's own environment, which no ``.env`` file sets): an agent starts
+    it, on throwaway data, so it is that agent's own instance.
+    """
+    import os
+    if container_marker_present():
+        return os.environ.get('AI_SHUFFLE_PREVIEW') != '1' or not settings.is_local_mode()
+    return not settings.is_local_mode()
+
+
+_CONTAINER_MARKERS = ('/.dockerenv', '/run/.containerenv')
+
+
+def container_marker_present():
+    """Whether a root-created container runtime marker exists on this machine."""
+    import os
+    return any(os.path.exists(marker) for marker in _CONTAINER_MARKERS)
+
+
+def loopback_owner():
+    """Whether a loopback request can be the owner at all on this install.
+
+    The desktop's own window proves itself with the per-launch listener token
+    (checked by ``loopback_request``). In the Docker image no loopback caller
+    is the owner, so loopback grants nothing there and the owner signs in, or
+    sends an owner token, like any other browser or script. A native install
+    without the desktop keeps loopback ownership: its agents run as the same
+    OS user and can already read its files (``SECURITY.md``).
+    """
+    return desktop_listener.configured() or not container_install()
+
+
+def _address(value):
+    """An ``ipaddress`` object for a socket address, IPv4-mapped IPv6 unwrapped."""
+    address = ipaddress.ip_address(str(value).split('%', 1)[0])
+    return getattr(address, 'ipv4_mapped', None) or address
+
+
+_OWN_ADDRESSES_TTL = 30.0
+_own_addresses_cache = (float('-inf'), frozenset())
+
+
+def own_addresses():
+    """Every address on this machine's network interfaces, cached briefly.
+
+    Includes the container's bridge address on Docker and the host's LAN
+    address with host networking. An unreadable interface list is empty;
+    ``worker_peer`` still recognizes loopback and the listening address.
+    """
+    global _own_addresses_cache
+    import socket
+    import time
+    stamp, cached = _own_addresses_cache
+    if time.monotonic() - stamp < _OWN_ADDRESSES_TTL:
+        return cached
+    found = set()
+    try:
+        import psutil
+        for entries in psutil.net_if_addrs().values():
+            for entry in entries:
+                if entry.family in (socket.AF_INET, socket.AF_INET6):
+                    try:
+                        found.add(_address(entry.address))
+                    except ValueError:
+                        pass
+    except Exception:
+        logger.warning('Could not list this machine\'s network addresses', exc_info=True)
+    _own_addresses_cache = (time.monotonic(), frozenset(found))
+    return _own_addresses_cache[1]
+
+
+def worker_peer(request):
+    """Whether the connection came from this machine rather than another one.
+
+    True for loopback (IPv4, IPv6 and IPv4-mapped), the address the listener
+    accepted the connection on, and any address of this machine's interfaces.
+    An unparseable peer counts as this machine, so it can never be the LAN.
+    """
+    try:
+        peer = _address(request.client.host)
+    except (ValueError, AttributeError, TypeError):
+        return True
+    if peer.is_loopback or peer.is_unspecified:
+        return True
+    server = getattr(request, 'scope', {}).get('server')
+    if server:
+        try:
+            if _address(server[0]) == peer:
+                return True
+        except (ValueError, TypeError, IndexError):
+            pass
+    return peer in own_addresses()
 
 
 def bootstrap_access(request):

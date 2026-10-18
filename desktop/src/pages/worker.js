@@ -63,10 +63,22 @@
   const pg = state.postgres;
   if (pg?.phase === 'failed' || state.phase === 'failed') {
    const databaseFailed = pg?.phase === 'failed';
+   if (!databaseFailed && state.startupStep === 'restore-point') {
+    showFailure('The update could not start yet', 'Before its first start, the update copies your database so it can go back if something goes wrong. That copy could not be made. Your data has not been changed.', state.error);
+    return;
+   }
    showFailure(databaseFailed ? 'Your local database could not start' : 'Your local worker could not start', 'Review the error below, then try again. Your setup will resume when startup succeeds.', databaseFailed ? pg.error : state.error);
    return;
   }
   const starting = pg?.phase === 'starting' || state.phase === 'starting' || state.phase === 'idle';
+  if (state.startupStep === 'restore-point') {
+   // Copying a large database can take minutes; this is progress, not a slow start.
+   resetWait();
+   status.section.dataset.mode = 'starting';
+   status.heading.textContent = 'Preparing the update';
+   status.detail.textContent = 'Preparing the update\'s database restore point…';
+   return;
+  }
   if (starting) {
    if (slowTimer === null && !slow) {
     // This is guidance about elapsed time, not a fabricated failure or readiness deadline.

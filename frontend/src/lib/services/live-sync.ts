@@ -37,6 +37,10 @@ const FIRST_SYNC_READS: Record<string, string> = {
  notifications: '/notifications'
 };
 
+/** A hide at least this long refreshes every resource on return, as the
+ * server's periodic sync_reconcile would have (app/core/global_events.py). */
+export const FULL_RESUME_AFTER_MS = 60_000;
+
 /** Root-layout lifetime, not chat lifetime. Cookie authentication also supports
  * HttpOnly sessions; no token is copied to storage or put into diagnostics. */
 export function startLiveSync() {
@@ -52,12 +56,25 @@ export function startLiveSync() {
  // When the current owner was bound: reads sent since then were made for it.
  const startedAt = performance.now();
  let boundAt = startedAt;
- // Keep lifecycle/permission delivery live; defer presentation-only catalogue
- // reads until resume invalidates the full set once. In-flight dirty work stays
- // coalesced by loadSessions/resourceSync, not queued per background event.
- const visible = (refresh: () => void | Promise<unknown>) => () => {
-  if (!document.hidden) return refresh();
+ // Keep lifecycle/permission delivery live. Catalogue reads wait while the
+ // tab is hidden: resourceSync keeps them dirty and refreshes each once on
+ // return, and loadSessions coalesces the two list subscribers into one load.
+ // The preference snapshot a reconcile asks for waits the same way.
+ let preferencesDeferred = false;
+ const reconcilePreferences = () => {
+  if (document.hidden) preferencesDeferred = true;
+  else void preferenceSync.reconnect();
  };
+ // When the tab was last hidden (Date.now()). A short hide catches up only
+ // on what the socket reported meanwhile; a long one (past a server reconcile
+ // period, a page that loaded hidden, or a network drop while hidden)
+ // refreshes everything once. Wall clock, not performance.now(): the
+ // monotonic clock stops during device sleep on Android, macOS and Linux.
+ let hiddenAt: number | null = document.hidden ? -Infinity : null;
+ // When the global socket last heard from the server. A socket that went
+ // quiet for a reconcile period may be half-open after a sleep, so what it
+ // "reported meanwhile" cannot be trusted either.
+ let lastSocketMessageAt = Date.now();
  // When the project catalog was last invalidated: a catalog request that
  // started after it (the boot load, at startup) already answers it.
  let projectsInvalidatedAt = 0;
@@ -66,20 +83,20 @@ export function startLiveSync() {
   resourceSync.invalidate(names);
  };
  const unsubscribeResources = [
-  resourceSync.subscribe(['sessions', 'tags'], visible(() => appData.loadSessions())),
-  resourceSync.subscribe(['projects'], visible(async () => {
+  resourceSync.subscribe(['sessions', 'tags'], () => appData.loadSessions()),
+  resourceSync.subscribe(['projects'], async () => {
    await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions()]);
    activeSession.applyComposerDefaults();
-  })),
-  resourceSync.subscribe(['agents'], visible(async () => {
+  }),
+  resourceSync.subscribe(['agents'], async () => {
    await appData.loadProfiles();
    activeSession.applyComposerDefaults();
-  })),
-  resourceSync.subscribe(['settings'], visible(async () => {
+  }),
+  resourceSync.subscribe(['settings'], async () => {
    await hydrateModelRegistry();
    activeSession.applyComposerDefaults();
-  })),
-  resourceSync.subscribe(['notifications'], visible(() => notify.loadHistory()))
+  }),
+  resourceSync.subscribe(['notifications'], () => notify.loadHistory())
  ];
  function disconnect(reset: boolean) {
   generation++; if (retry) clearTimeout(retry); if (heartbeat) clearInterval(heartbeat);
@@ -105,9 +122,10 @@ export function startLiveSync() {
   const ws = new WebSocket(wsUrl('/api/v1/ws/global', { device_id: getOrCreateDeviceId() }));
   socket = ws;
   let lastMessage = Date.now();
+  lastSocketMessageAt = lastMessage;
   ws.onmessage = event => {
    if (epoch !== generation || socket !== ws) return;
-   lastMessage = Date.now();
+   lastMessage = lastSocketMessageAt = Date.now();
    let data: Record<string, unknown>;
    try { data = JSON.parse(event.data); } catch { return; }
    if (data.type === 'sync_ready') {
@@ -130,10 +148,10 @@ export function startLiveSync() {
      if (stale.length) invalidate(stale);
      return;
     }
-    void preferenceSync.reconnect();
+    reconcilePreferences();
     invalidate();
    } else if (data.type === 'sync_reconcile') {
-    void preferenceSync.reconnect();
+    reconcilePreferences();
     invalidate();
    } else if (data.type === 'chat_access_changed' && typeof data.session_id === 'string') {
     resourceSync.invalidate([`chat-access:${data.session_id}`]);
@@ -185,18 +203,30 @@ export function startLiveSync() {
   connect();
  });
  const reconnect = () => { if (owner && (!socket || socket.readyState === WebSocket.CLOSED)) { if (retry) clearTimeout(retry); connect(); } };
- const resume = () => {
+ const resume = (full: boolean) => {
   if (!owner || document.visibilityState !== 'visible') return;
   reconnect();
-  void preferenceSync.reconnect();
-  invalidate();
+  if (full || preferencesDeferred) { preferencesDeferred = false; void preferenceSync.reconnect(); }
+  if (full) invalidate();
  };
- window.addEventListener('online', resume);
- document.addEventListener('visibilitychange', resume);
+ const online = () => {
+  // Hidden: resume() would skip it, so the next return catches up in full.
+  if (document.hidden) { hiddenAt = -Infinity; return; }
+  resume(true);
+ };
+ const visibility = () => {
+  if (document.hidden) { hiddenAt ??= Date.now(); return; }
+  const since = hiddenAt;
+  hiddenAt = null;
+  const now = Date.now();
+  resume(since === null || now - since >= FULL_RESUME_AFTER_MS || now - lastSocketMessageAt >= FULL_RESUME_AFTER_MS);
+ };
+ window.addEventListener('online', online);
+ document.addEventListener('visibilitychange', visibility);
  return () => {
   unsubscribeAuth(); unsubscribeResources.forEach(unsubscribe => unsubscribe());
-  window.removeEventListener('online', resume);
-  document.removeEventListener('visibilitychange', resume);
+  window.removeEventListener('online', online);
+  document.removeEventListener('visibilitychange', visibility);
   disconnect(false);
  };
 }

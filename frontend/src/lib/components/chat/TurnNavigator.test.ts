@@ -62,15 +62,21 @@ describe('TurnNavigator', () => {
 		const ticks = screen.getAllByRole('button');
 		expect(ticks).toHaveLength(1000);
 		expect(ticks.every((tick) => tick.classList.contains('tick'))).toBe(true);
+		// Every button is a tick named by its aria-label. Look names up in that
+		// list: a role+name query recomputes all 1000 accessible names each time,
+		// which alone outran the 5 s test timeout on a slower Windows machine.
+		const named = (label: string) => ticks.filter((tick) => tick.getAttribute('aria-label') === label);
 		expect(screen.queryByRole('searchbox')).toBeNull();
-		expect(screen.queryByRole('button', { name: /First user turn|Browse session timeline/ })).toBeNull();
+		expect(ticks.some((tick) => /First user turn|Browse session timeline/.test(tick.getAttribute('aria-label') ?? ''))).toBe(false);
 		expect(container.querySelector('.long-history')).toBeNull();
-		expect(screen.getByRole('button', { name: 'Turn 501 of 1000: Turn 500' }).getAttribute('aria-current')).toBe('true');
-		await fireEvent.click(screen.getByRole('button', { name: 'Turn 1 of 1000: Turn 0' }));
+		const [current] = named('Turn 501 of 1000: Turn 500');
+		expect(named('Turn 501 of 1000: Turn 500')).toHaveLength(1);
+		expect(current.getAttribute('aria-current')).toBe('true');
+		await fireEvent.click(named('Turn 1 of 1000: Turn 0')[0]);
 		expect(onSelect).toHaveBeenLastCalledWith(0);
-		await fireEvent.click(screen.getByRole('button', { name: 'Turn 1000 of 1000: Turn 999' }));
+		await fireEvent.click(named('Turn 1000 of 1000: Turn 999')[0]);
 		expect(onSelect).toHaveBeenLastCalledWith(999);
-	});
+	}, 20_000); // 1000 rendered ticks: the default 5 s is tight on a slow machine
 
 	it('moves focus with Home, End and arrows so keyboard users stay on a visible tick', async () => {
 		const onSelect = vi.fn();

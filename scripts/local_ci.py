@@ -54,6 +54,12 @@ MAP_PATH = Path(os.environ.get("LOCAL_CI_TEST_MAP")
                 or Path.home() / ".cache" / "ai-shuffle" / "backend-test-map.json.gz")
 # The shared worker hosts run other sessions: never more than two test workers.
 WORKERS = os.environ.get("LOCAL_CI_WORKERS", "2")
+# Hosted Windows parts only (scripts/ci/windows_parts.py): a failed pytest
+# command reruns just its failed tests once. Off everywhere else.
+RETRY_FAILED_ENV = "LOCAL_CI_RETRY_FAILED"
+MAX_RETRIED = 20
+# Tests that failed and then passed on that rerun, in this process.
+FLAKY: list[str] = []
 
 # The CI Backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
 FAST_SUBSET = [
@@ -73,6 +79,14 @@ class Failure(Exception):
     pass
 
 
+class OutOfTime(Failure):
+    """A command was stopped at the staged gate's deadline (see local_ci_stages)."""
+
+
+# time.monotonic() after which run() stops its command; set only by full --step.
+DEADLINE: float | None = None
+
+
 @dataclass
 class Context:
     mode: str                      # "changed" or "full"
@@ -81,7 +95,7 @@ class Context:
     python: str
     log: Callable[[str], None] = print
     notes: list[str] = field(default_factory=list)
-    backend_selected: list[str] | None = None
+    backend_selected: list[str] | None = None  # full --step: the test files of one shard
     map_hits: Path | None = None
 
     def changed(self, patterns: Iterable[str]) -> bool:
@@ -136,20 +150,111 @@ def child_env(env: dict | None = None) -> dict:
     return merged
 
 
+def _parents() -> list[tuple[int, int]]:
+    """(pid, parent pid) for every process: /proc on Linux (slim images lack ps), else ps."""
+    proc = Path("/proc")
+    if (proc / "self" / "stat").is_file():
+        pairs = []
+        for entry in proc.iterdir():
+            if entry.name.isdigit():
+                try:  # "pid (name) state ppid ..."; the name may contain spaces
+                    pairs.append((int(entry.name), int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])))
+                except (OSError, ValueError, IndexError):
+                    continue
+        return pairs
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+                                 text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [(int(parts[0]), int(parts[1])) for parts in map(str.split, listing.splitlines())
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit()]
+
+
+def descendants(pid: int) -> list[int]:
+    """Process IDs below ``pid``, best effort (pytest-xdist workers, npm's node)."""
+    children: dict[int, list[int]] = {}
+    for child, parent in _parents():
+        children.setdefault(parent, []).append(child)
+    found, queue = [], [pid]
+    while queue:
+        for child in children.get(queue.pop(), []):
+            if child not in found:
+                found.append(child)
+                queue.append(child)
+    return found
+
+
+def kill_tree(process: subprocess.Popen) -> None:
+    """Stop a command and everything it started, so nothing outlives a stopped stage."""
+    if process.poll() is None:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                           capture_output=True, check=False)
+        else:
+            below = descendants(process.pid)  # before the parent dies and they are reparented
+            for pid in [process.pid, *below]:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    process.wait()
+
+
 def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
-        timeout: float | None = None) -> None:
+        timeout: float | None = None, *, retry: bool = True) -> None:
     exe = shutil.which(argv[0]) or argv[0]
     shown = " ".join(argv)
     rel = cwd.relative_to(ROOT).as_posix() if cwd != ROOT else "."
+    stop_at_deadline = False
+    if DEADLINE is not None:
+        left = DEADLINE - time.monotonic()
+        if left <= 0:
+            raise OutOfTime(f"no time left in this invocation's budget for {shown}")
+        if timeout is None or left < timeout:
+            timeout, stop_at_deadline = left, True
     print(f"\n$ ({rel}) {shown}", flush=True)
     merged = child_env(env)
+    failed_file = None
+    if retry and os.environ.get(RETRY_FAILED_ENV) == "1" and argv[1:3] == ["-m", "pytest"]:
+        failed_file = Path(tempfile.mkdtemp(prefix="local-ci-failed-")) / "failed.txt"
+        merged["LOCAL_CI_FAILED_FILE"] = str(failed_file)
+        argv = [*argv, "-p", "scripts.ci.record_failures"]
+    process = subprocess.Popen([exe, *argv[1:]], cwd=cwd, env=merged, **low_priority_kwargs())
     try:
-        result = subprocess.run([exe, *argv[1:]], cwd=cwd, env=merged, timeout=timeout,
-                                **low_priority_kwargs())
+        returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        kill_tree(process)
+        if stop_at_deadline:
+            raise OutOfTime(f"stopped {shown} (in {rel}) at the end of this invocation's budget") from None
         raise Failure("local check timed out; push blocked") from None
-    if result.returncode:
-        raise Failure(f"{shown} (in {rel}) exited {result.returncode}")
+    except BaseException:
+        # Ctrl-C, or SIGTERM turned into SystemExit by full --step: leave no orphans.
+        kill_tree(process)
+        raise
+    if returncode and failed_file is not None:
+        failed = (list(dict.fromkeys(failed_file.read_text(encoding="utf-8").splitlines()))
+                  if failed_file.exists() else [])
+        shutil.rmtree(failed_file.parent, ignore_errors=True)
+        # Nothing recorded (a collection error, a crash) or many failures: a real break.
+        if failed and len(failed) <= MAX_RETRIED:
+            print(f"\n{len(failed)} failed test(s); running them once more.", flush=True)
+            rerun = [argv[0], "-m", "pytest", *failed, *pytest_args(argv[0], parallel=False)]
+            try:
+                run(rerun, cwd=cwd, env=env, timeout=timeout, retry=False)
+            except Failure:
+                raise Failure(f"{shown} (in {rel}) exited {returncode}; "
+                              f"its {len(failed)} failed test(s) failed again") from None
+            FLAKY.extend(failed)
+            return
+    elif failed_file is not None:
+        shutil.rmtree(failed_file.parent, ignore_errors=True)
+    if returncode:
+        raise Failure(f"{shown} (in {rel}) exited {returncode}")
 
 
 def git(*args: str) -> str:
@@ -249,7 +354,10 @@ def windows_known_files() -> set[str]:
     """Whole test files listed as failing on Windows; empty elsewhere."""
     if os.name != "nt":
         return set()
-    lines = (ROOT / "scripts/ci/windows_known_failures.txt").read_text(encoding="utf-8").splitlines()
+    listing = ROOT / "scripts/ci/windows_known_failures.txt"
+    if not listing.is_file():
+        return set()
+    lines = listing.read_text(encoding="utf-8").splitlines()
     return {entry for line in lines if (entry := line.split("#", 1)[0].strip()) and "::" not in entry}
 
 
@@ -365,8 +473,16 @@ def backend_linux(ctx: Context) -> None:
         ctx.notes.append("Linux-only backend steps were not run on this machine.")
 
 
+FLUID_TESTS = "fluid/tests/unit"
+
+
 def fluid(ctx: Context) -> None:
-    run([ctx.python, "-m", "pytest", "fluid/tests/unit", *pytest_args(ctx.python)], env=python_env())
+    env, extra = python_env(), []
+    if ctx.backend_selected is not None:
+        # One full --step shard: the same directory and hooks, other files ignored.
+        env = {**env, "LOCAL_CI_BACKEND_BATCH": json.dumps(ctx.backend_selected)}
+        extra = ["-p", "scripts.ci.local_ci_batch"]
+    run([ctx.python, "-m", "pytest", FLUID_TESTS, *extra, *pytest_args(ctx.python)], env=env)
 
 
 def frontend(ctx: Context) -> None:
@@ -528,6 +644,13 @@ SUITES = [
           update_reach_checks, "Update-reach regression tests and installed-app update verdict"),
 ]
 
+# The Windows full run (about 75 minutes) is longer than one Monitor job, so it
+# goes in checkpointed chunks (docs/ci/pr-checks.md, "Full gates longer than one
+# Monitor budget"). Release hints name this command, not the one-shot `full --attest`.
+WINDOWS_FULL_COMMAND = "python scripts/local_ci.py full --step --attest"
+WINDOWS_FULL_HINT = (f"`{WINDOWS_FULL_COMMAND}` (one Monitor job per run; "
+                     "repeat the same command until it prints COMPLETE)")
+
 # Covered only at release time or by hand: no hardware here, or a full image build.
 NOT_LOCAL = [
     (["ios/*"], "iOS app: needs a Mac. Runs only when the owner dispatches ios.yml before a release."),
@@ -538,7 +661,7 @@ NOT_LOCAL = [
      "`python scripts/verify_container_postgres.py` where Docker runs."),
 ] + ([] if os.name == "nt" else [
     (["desktop/*", "app/core/config.py", "app/core/process*.py", "app/core/*windows*", "run_local.*"],
-     "Windows: not tested on this machine. A stable release waits for `python scripts/local_ci.py full --attest` "
+     f"Windows: not tested on this machine. A stable release waits for {WINDOWS_FULL_HINT} "
      "on a Windows worker; edge does not."),
 ])
 
@@ -991,11 +1114,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", nargs="+", metavar="SUITE", help="run just these suites (not recorded as a pass)")
     parser.add_argument("--attest", action="store_true", help=f"with full on main: post {ATTEST_CONTEXT}")
     parser.add_argument("--step", action="store_true",
-                        help="with full: run one resumable stage; repeat until COMPLETE")
+                        help="with full: run resumable stages within --budget; repeat until COMPLETE")
     parser.add_argument("--restart", action="store_true", help="with full --step: discard prior stage receipts")
     parser.add_argument("--budget", type=float, metavar="MINUTES", default=None,
-                        help="with full --step: keep running stages while the next one fits in MINUTES "
-                             "(default 40, inside a 45-minute Monitor budget; 0 runs one stage)")
+                        help="with full --step: keep running stages while the next one fits in MINUTES, "
+                             "stop a stage at MINUTES and split test stages that do not fit "
+                             "(default 40, inside a 45-minute Monitor budget; 0 runs one stage, unlimited)")
     parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
     parser.add_argument("--strict-audit", action="store_true",
                         help="fail on Python advisories, npm high/critical findings, or unavailable audits")

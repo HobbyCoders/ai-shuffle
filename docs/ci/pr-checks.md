@@ -89,11 +89,12 @@ judged by that stage's last recorded duration on this machine
 (`full-stage-times.json` beside the backend test map; a stage never timed
 counts as 10 minutes, an unseen backend batch as the slowest batch timed).
 Run **one invocation per Monitor job**, inspect its completion, then repeat the
-same command. On Windows that is usually two or three invocations. An
-intermediate exit 0 means only that those stages passed, not a full pass or
+same command. On Windows that is usually three to five invocations. An
+intermediate exit 0 means only that the gate made progress, not a full pass or
 successful attestation. Do not wrap the commands in one long Monitor loop,
 detach processes, use `serves=true`, or increase the two-worker limit. Without
-publication, omit `--attest`. `--budget 0` runs exactly one stage.
+publication, omit `--attest`. `--budget 0` runs exactly one stage, without a
+time limit.
 
 `--attest` accepts a completed stage set: stages run without `--attest` (for
 example while main was being checked) can be attested afterwards with the same
@@ -106,27 +107,72 @@ batches of 20 files using the original directory collection and exclusions,
 each remaining suite, then final security/release checks and test-map merge.
 No tests are dropped to meet the time budget. Backend map hits accumulate across
 batches. Other suites keep their original commands and platform availability.
-If an estimate is too low and an invocation outlives its Monitor budget, the
-interrupted stage gets no receipt; the next invocation runs it first and
-records its real duration. A single stage longer than 45 minutes cannot pass
-this way; report it rather than treating an interrupted run as a pass.
+
+**The budget is enforced.** When an invocation reaches `--budget`, the running
+command and every process it started (pytest-xdist workers, npm's node) are
+stopped, the stage gets no receipt, and the invocation exits 0 with
+`Stopped at the end of the … budget` and what happens next:
+
+- A stage that started late in the invocation, and so had only what was left
+  of the budget, runs first in the next one. Only a unit that ran first, with
+  the whole budget, is ever judged too long.
+- A **test stage** (each backend batch, and `fluid`) that could not finish in a
+  whole budget is split. Test stages run as *shards*: sorted lists of test
+  files dealt round robin, stored in the state file, so a resumed run uses
+  exactly the same partition. The shard that did not fit is halved; finished
+  shards are kept. A stage this machine has timed above the budget starts as
+  several shards, so a second run splits up front and wastes nothing; a stage
+  never timed starts as one shard (up-front splits use measured durations, or
+  the rate of this run's finished shards, never the 10-minute guess). A shard
+  runs the suite's own command and directories, with the other files ignored
+  (`scripts/ci/local_ci_batch.py`); a single shard runs the original command.
+  Time spent waiting for the machine's shared pytest lock counts toward the
+  shard's time, so a busy machine can make a shard look slower than it is.
+- A unit that cannot be split (a non-test stage such as `frontend`, or one test
+  file) and still does not fit a whole budget stops with exit 1 and `cannot be
+  split further`. That is a time limit, not a test failure: no receipt and no
+  failure status are recorded (a `pending` status from `--attest` stays). Run the
+  same command once with a larger `--budget` that still fits the job's time
+  limit (for example `--budget 44` in a 45-minute Monitor job), or with
+  `--budget 0` (that stage alone, no limit) where nothing limits the run's
+  time, then continue with the usual command. If it does not fit even then,
+  report it.
+
+**Interruption from outside** (the Monitor timing out, a closed terminal,
+Ctrl-C, a reboot) is handled too. The running unit is written to the state
+file before it starts, and `full-stages.beat` is refreshed every 30 seconds
+while the invocation lives. SIGTERM, SIGHUP and Ctrl-C stop the process tree
+and record how long the unit ran. After an outright kill, the last heartbeat
+gives it. The next invocation reports `The previous invocation was stopped
+during …` and treats a unit that ran first and used 90% of the time it had like
+one stopped at the budget. A unit that had a whole budget and was killed twice
+in a row is split (or stops as above, if it cannot be), whatever `--budget`
+says. An invocation holds an OS file lock (`full-stages.lock`) for its whole
+life, so a second invocation in the same worktree refuses to start while one
+runs; the system releases the lock however the process ends, so a killed run
+never blocks the next. State and receipts are written atomically and
+flushed, and finished batches' map hits are kept beside them
+(`full-stages-hits/`), not in the system temp directory.
 
 Receipts live beside `passes.json` in `full-stages.json` in this worktree's Git
-directory. Only a successfully completed stage gets a receipt; an interrupted
-or failed stage is rerun. Every invocation requires a clean unchanged checkout
-and runs the Python preflight. Revision/tree, interpreter path, machine, worker
-count, audit mode and stage plan must match to reuse receipts.
-Changing any of those starts a new run. Run only one staged gate per worktree
-at a time. If dependencies or external tools change in place, use
+directory. Only a successfully completed stage or shard gets a receipt; an
+interrupted or failed one is rerun. Every invocation requires a clean unchanged
+checkout and runs the Python preflight. Revision/tree, interpreter path,
+machine, worker count, audit mode and stage plan (including every backend
+batch's and fluid's test files) must match to reuse receipts. Shards are not
+part of that identity: they partition the same files. Changing any of those
+starts a new run. If dependencies or external tools change in place, use
 `full --step --restart` (plus `--attest` if applicable) once, then omit `--restart`
 for subsequent stages. `--only` cannot attest or supply full-stage receipts.
 
 `--attest` retains the clean current-public-main and update-reach requirements,
 and checks them first, in seconds: right after the Python preflight, before
 any commit status and before any suite. Partial work posts only pending/failure
-statuses (one pending per invocation). Only after **all** stages pass does the
-final stage write the full pass and post success (including
-`local/windows-suite` on Windows). If main advances mid-run, update to it and
+statuses (one pending per invocation). Only after **all** stages pass, and the
+finished shards of every test stage cover its files exactly once, does the
+final stage write the full pass and post one success naming the tree (including
+`local/windows-suite` on Windows). Attesting a completed set later rechecks
+the same coverage. If main advances mid-run, update to it and
 start over; old receipts cannot authorize the new revision.
 
 The update-reach check walks the private archive's history across the public
@@ -156,6 +202,15 @@ The last lines of each run list what this machine did not cover:
 An update-reach failure is acknowledged as before, with a pull request label
 `update-reach:GROUP` (`local_ci.py` reads the PR's labels) or
 `--allow GROUP` when running `scripts/ci/update_reach.py` directly.
+
+A change to the installed desktop launcher's import closure (group
+`windows-launcher`, which covers the packaged Windows and Linux apps) must also
+raise `desktop/launcher.json` `version` in the same pull request. Otherwise the
+check also fails `launcher-version`, and `update-reach:windows-launcher` does not
+accept it. The only other way through is the owner's
+`update-reach:no-launcher-change` label (or `--allow no-launcher-change`): the
+change leaves what the launcher does unchanged, such as a move or a comment.
+That label accepts both groups.
 
 
 ## Local security checks
@@ -322,10 +377,21 @@ also independently supports safe ancestors and rechecks its own pointer.
 
 ## Before a stable release
 
-- A full pass on Linux (`local/full-suite`, above) and on Windows: the same
-  command on DesktopWorker also posts `local/windows-suite`. The ship-release
-  skill checks both statuses on the release commit. If DesktopWorker is off, the
-  release waits, or the owner ships it with
+- A full pass on Linux (`local/full-suite`, above) and on Windows: on
+  DesktopWorker, `python scripts/local_ci.py full --step --attest` (repeated
+  until it prints `COMPLETE`, see above) also posts `local/windows-suite`. The ship-release
+  skill checks both statuses on the release commit. Without DesktopWorker, the
+  owner can run the same suite on a GitHub-hosted Windows runner (free in public
+  repositories): `gh workflow run windows-suite.yml --ref main` on the release
+  commit. `ship_release_status.py` counts a successful run the owner dispatched
+  on main at the candidate as `local/windows-suite`, and the release notes name
+  the run. The hosted run is split into parallel parts
+  (`scripts/ci/windows_parts.py`: eight backend parts, frontend, desktop, and the rest),
+  so it takes the time of the slowest part. A failed part does not stop the
+  others: `gh run rerun <run id> --failed` reruns only the failed parts, and the
+  run's newest attempt counts. A failed pytest command there reruns just its
+  failed tests once; a test that then passes is reported as flaky in the job
+  summary and should still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
   the release notes. Edge never waits for Windows.
 - Mac-only checks, when the release changes them: `ios.yml` and

@@ -99,6 +99,11 @@ async def _first_request(monkeypatch, tmp_path, *, code_mode: bool,
     home.mkdir()
     cwd.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
+    # Instruction and skill discovery walks up from cwd to the git root, else
+    # the drive root. Windows temp folders sit inside the user profile, so
+    # without a boundary the walk picks up the real profile's .fluid files.
+    (cwd / ".git").mkdir()
     monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
     monkeypatch.setattr(settings, "fluid_code_mode", code_mode)
     provider = _RecordingProvider()

@@ -512,12 +512,18 @@ def test_obsolete_source_version_cannot_be_resigned_forward(candidate):
 
 
 def test_release_inline_shell_is_valid():
+    import shutil
     import subprocess
+    # The bash on PATH, by full path: Windows resolves a bare "bash" in
+    # System32 first, which is WSL's launcher where WSL is installed.
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not on PATH")
     wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     for name, job in wf["jobs"].items():
         for step in job.get("steps", []):
             if "run" in step:
-                result = subprocess.run(["bash", "-n"], input=step["run"].encode("utf-8"), capture_output=True)
+                result = subprocess.run([bash, "-n"], input=step["run"].encode("utf-8"), capture_output=True)
                 assert result.returncode == 0, (name, step.get("name"), result.stderr)
 
 

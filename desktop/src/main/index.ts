@@ -21,6 +21,8 @@ import { forgetServiceWorkers, installPermissionPolicy } from './navigation';
 import { installListenerHeader, type ListenerTarget } from './listener';
 import { AGENT_ACCESS, agentAccessDetail, DisclosureStore, ensureAgentAccessAcknowledged } from './disclosure';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
+import { RestorePointError } from './source-updates';
+import { quiesceRecordedWorker } from './worker-process';
 import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
@@ -116,6 +118,10 @@ async function main(): Promise<void> {
 	let initialization: Promise<void> | null = null;
 	/** Set once this launch starts the database; a first boot quit before then cannot have migrated it. */
 	let stackStarted = false;
+	/** Set while this build copies the database for its own update restore point. */
+	let preparingRestorePoint = false;
+	/** Why that copy failed; Try again repeats it in this process. */
+	let restorePointFailure: string | null = null;
 	async function initializeRuntime(): Promise<void> {
 		const repoDir = path.resolve(__dirname, '..', '..', '..');
 		const selected = managed?.application;
@@ -183,7 +189,9 @@ async function main(): Promise<void> {
 	};
 
 	const desktopState = (): DesktopState => ({
-		...(supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
+		...(restorePointFailure ? { ...failedState(restorePointFailure), startupStep: 'restore-point' as const }
+			: supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
+		...(preparingRestorePoint ? { startupStep: 'restore-point' as const } : {}),
 		postgres: postgresStatus()
 	});
 
@@ -205,13 +213,23 @@ async function main(): Promise<void> {
 		stackStarted = true;
 		// From here a first boot may migrate the database, so a crash must block it.
 		// Unrecorded, a crash would look harmless to the launcher: do not start.
-		try { await applications?.requireRestorePoint(postgres.updateRestorePoint()); await applications?.databaseStarting(); }
+		// A launcher from before restore points made none: this build makes it here (desktop/LAUNCHER.md).
+		// As the launcher does: reap a verified leftover worker before the cluster is stopped and copied.
+		const restorePoint = { database: async () => postgres.updateRestorePoint(() => quiesceRecordedWorker(path.join(userData, 'worker'))), preparing: () => { preparingRestorePoint = true; window.send('desktop:worker-state', desktopState()); } };
+		try { await applications?.requireRestorePoint(postgres.updateRestorePoint(), restorePoint); await applications?.databaseStarting(); }
 		catch (error) {
-			runtimeError = `Could not record the application start: ${error instanceof Error ? error.message : String(error)}`;
-			supervisor = null;
+			preparingRestorePoint = false;
+			// Keep the supervisor: Try again repeats the copy here. A relaunch would go
+			// through an old launcher, which runs the previous version instead.
+			if (error instanceof RestorePointError) restorePointFailure = error.message;
+			else {
+				runtimeError = `Could not record the application start: ${error instanceof Error ? error.message : String(error)}`;
+				supervisor = null;
+			}
 			window.send('desktop:worker-state', desktopState());
 			return;
 		}
+		finally { preparingRestorePoint = false; }
 		const state = await postgres.start();
 		if (quitting || state.phase !== 'ready') return;
 		await supervisor.start();
@@ -221,6 +239,7 @@ async function main(): Promise<void> {
 		state: desktopState,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
 		restart: async () => {
+			if (restorePointFailure) { restorePointFailure = null; window.send('desktop:worker-state', desktopState()); await startStack(); return; }
 			if (!supervisor) { app.relaunch(); app.quit(); return; }
 			if (window.currentPage !== 'status') await window.showPage('status');
 			try {

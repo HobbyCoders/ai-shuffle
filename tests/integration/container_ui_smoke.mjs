@@ -179,8 +179,11 @@ async function main() {
     await configurePersistenceFixture(page, '/workspace/container-onboarding-check');
     await page.reload({ waitUntil: 'domcontentloaded' });
     await verifyOfflineSetup(page);
+    // Creating the password signed this browser in. Loopback itself is never
+    // the owner in the container: only that session makes this page the owner.
     const auth = await workerJson(page, '/api/v1/auth/status');
-    assert.equal(auth.local_access, true);
+    assert.equal(auth.local_access, false, 'Loopback must not be passwordless owner access in the container');
+    assert.equal(auth.is_admin, true, 'The browser that created the owner password must be signed in');
     assert.equal('account_sign_in_available' in auth, false, 'Hub owner browser sign-in is not local owner authentication');
     for (const route of ['login', 'account/start', 'recovery']) {
       const removed = await context.request.post(`http://127.0.0.1:8000/api/v1/auth/${route}`, {

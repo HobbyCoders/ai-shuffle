@@ -299,13 +299,31 @@ def private_postgres(bindir: str, data_dir: Path):
 
     runtime = _load_container_runtime()
     runtime.STOP.clear()
+
+    class ThrowawayDatabase(runtime.Database):
+        """The supervisor's cluster without durability work nobody needs here.
+
+        ``close()`` gives PostgreSQL 30 s for a fast shutdown, whose shutdown
+        checkpoint fsyncs every relation file the schema created (thousands of
+        files; about 25 s on a loaded loop-device disk), so teardown could
+        miss the deadline. A throwaway cluster skips initdb's sync and runs
+        with ``fsync = off``; start-up and shutdown are otherwise the
+        supervisor's own."""
+
+        def command(self, args, **kwargs):
+            if Path(args[0]).name == "initdb" and "-D" in args:
+                args = [*args, "--no-sync"]
+            return super().command(args, **kwargs)
+
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    db = runtime.Database(SimpleNamespace(effective_data_dir=data_dir), port=port)
+    db = ThrowawayDatabase(SimpleNamespace(effective_data_dir=data_dir), port=port)
     try:
         with patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")}):
             db.open()
+            # fsync is a reload-time setting: no restart, the same process.
+            db.admin_script("ALTER SYSTEM SET fsync = off;\nSELECT pg_reload_conf();")
         db.publish_descriptor()
         yield json.loads((data_dir / "managed-postgres.json").read_text())
     finally:

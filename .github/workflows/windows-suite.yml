@@ -1,0 +1,153 @@
+name: Windows full suite
+
+# The stable-release Windows gate (`python scripts/local_ci.py full`) on a
+# GitHub-hosted Windows runner, so a release does not wait for an owner's
+# Windows PC. Standard GitHub-hosted runners are free in public repositories.
+#
+# Manual only. Dispatch it on main at the release candidate:
+#   gh workflow run windows-suite.yml --ref main
+# It posts nothing. scripts/ci/ship_release_status.py counts a successful run
+# the owner dispatched on main at the candidate as local/windows-suite.
+#
+# The suite runs as parallel parts (scripts/ci/windows_parts.py), each on its
+# own runner, so it takes the time of the slowest part. A part that fails does
+# not stop the others; rerun just the failed parts with
+#   gh run rerun <run id> --failed
+# and the run's newest attempt counts. A test that fails once and passes on an
+# immediate rerun passes its part and is listed under "Flaky tests" in the job
+# summary, to be fixed.
+#
+# To check a fix on a branch first, run only some tests (refused on main, so
+# every successful main run is the full suite):
+#   gh workflow run windows-suite.yml --ref <branch> -f tests="tests/core/test_x.py"
+#
+# The runner is not set up like an owner's PC: it may create symlinks (so
+# symlink tests run instead of skipping), it has thousands of PowerShell
+# modules, and the first `bash` Windows finds is WSL's. The environment below
+# mirrors a desktop install: requirements, the native extras, fluid editable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: Branch only. Space-separated test paths to run instead of the full suite.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-suite-${{ github.sha }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  PYTHONUTF8: '1'
+
+jobs:
+  suite:
+    name: Windows ${{ matrix.part }}
+    if: inputs.tests == ''
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # scripts/ci/windows_parts.py --list; tests/scripts/test_windows_parts.py keeps them equal.
+      matrix:
+        part: [backend-1, backend-2, backend-3, backend-4, backend-5, backend-6, backend-7, backend-8,
+               frontend, desktop, rest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Confirm the tested revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && git status --short && git log -1 --format='%H %s'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --upgrade pip
+          "$py" -m pip install -r requirements.txt -r requirements-native.txt -r requirements-dev.txt
+          "$py" -m pip install -e ./fluid
+          echo "LOCAL_CI_PYTHON=$py" >> "$GITHUB_ENV"
+          # The long form of the temp folder: the default is an 8.3 short
+          # name (RUNNER~1) that resolved paths never compare equal to.
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Suite part
+        shell: bash
+        env:
+          PART: ${{ matrix.part }}
+          # The runner ships an Android SDK; an owner's Windows PC does not, so
+          # local_ci skips android-app there. Do the same: the Android app is
+          # built and tested by android-play.yml, which first generates the
+          # offline demo assets the unit-test build needs.
+          ANDROID_HOME: ''
+          ANDROID_SDK_ROOT: ''
+        run: |
+          set -o pipefail
+          "$LOCAL_CI_PYTHON" scripts/ci/windows_parts.py "$PART" 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-suite-log-${{ matrix.part }}
+          path: ${{ runner.temp }}/local-ci.log
+          retention-days: 7
+
+  selected:
+    name: Selected tests on Windows
+    if: inputs.tests != ''
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a partial run on main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: echo "::error::The tests input is for branches; main always runs the full suite." && exit 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --upgrade pip
+          "$py" -m pip install -r requirements.txt -r requirements-native.txt -r requirements-dev.txt
+          "$py" -m pip install -e ./fluid
+          echo "LOCAL_CI_PYTHON=$py" >> "$GITHUB_ENV"
+          # The long form of the temp folder: the default is an 8.3 short
+          # name (RUNNER~1) that resolved paths never compare equal to.
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Selected tests
+        shell: bash
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086 # word splitting is the point
+          "$LOCAL_CI_PYTHON" -m pytest $TESTS -o addopts= -q -p no:cacheprovider --timeout=120 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-suite-log
+          path: ${{ runner.temp }}/local-ci.log
+          retention-days: 7

@@ -5046,6 +5046,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             elif chunk.kind == "error":
                 if payload.get("transport_failure"):
                     usage_totals["transport_failure"] = payload["transport_failure"]
+                    evidence = payload["transport_failure"]
+                    delivered = bool(blocks) or (isinstance(evidence, dict) and evidence.get("chunks_delivered") is True)
+                    usage_totals["partial_usage_reason"] = "dropped_stream" if delivered else "connection_failure"
                 if payload.get("provider_requests"):
                     usage_totals["provider_requests"] = payload["provider_requests"]
                 # No ErrorEvent here — _agent_loop decides whether this error
@@ -5133,6 +5136,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
 
         if interrupted or arg_stream_error is not None:
+            usage_totals["partial_usage_reason"] = "stop" if interrupted else "argument_guard"
             self._estimate_partial_usage(usage_totals, blocks, request)
         elif not any(key in usage_totals for key in _USAGE_TOKEN_KEYS) and any(
             b.get("text") or b.get("args") for b in blocks.values()
@@ -5141,7 +5145,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             # stream_options.include_usage). It was billed all the same, so
             # it is estimated the way an interrupted call is and flagged as
             # such. A reply with no content keeps its empty usage: that is
-            # what the empty-completion retry recognises.
+            # what the empty-completion retry recognises. Missing usage alone
+            # is not evidence of a cut-off stream: retain the distinction.
+            usage_totals["partial_usage_reason"] = (
+                "dropped_stream" if usage_totals.get("transport_failure") else "provider_missing_usage"
+            )
             self._estimate_partial_usage(usage_totals, blocks, request)
 
         # Reasoning-channel answer fallback (observed on GLM-4.5 via

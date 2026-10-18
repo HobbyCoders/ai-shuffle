@@ -75,6 +75,7 @@ import math
 import os
 import re
 import stat
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -175,14 +176,23 @@ def read_journal_loss(path: Path) -> dict | None:
     """The loss record at ``path`` with only its known, well-typed fields, or
     None when it is missing, unreadable, linked, not a regular file or not a
     JSON object. Never follows links or blocks on a FIFO placed there."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        # Windows has no O_NOFOLLOW: refuse a link or reparse point by name,
+        # then check the opened file is that same entry.
+        entry = None if nofollow else os.lstat(path)
+        if entry is not None and (not stat.S_ISREG(entry.st_mode)
+                                  or getattr(entry, "st_file_attributes", 0) & 0x400):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow)
     except OSError:
         return None
     try:
         with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            if entry is not None and (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
                 return None
             raw = stream.read(JOURNAL_LOSS_MAX_BYTES + 1)
     except OSError:
@@ -263,6 +273,39 @@ def journal_metrics() -> dict:
                 for pending in _JOURNAL_UNPERSISTED.values() for name in JOURNAL_LOSS_EVENTS
             ),
         }
+
+# A quoted absolute path in a cell's code or a tool call's JSON input: POSIX,
+# home-relative or a Windows drive.
+_ABS_PATH_RE = re.compile(r"""(['"])((?:/|~[/\\]|[A-Za-z]:[\\/])[^'"\n]*)\1""")
+
+
+def _norm_path(path: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.expanduser(path)))
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def names_path_outside(text: str, cwd: str | None) -> bool:
+    """True when ``text`` quotes an absolute path outside ``cwd`` (any path,
+    when ``cwd`` is unknown), other than the system temp directory: home
+    config, notes and other checkouts can carry facts; a scratch clone in
+    the temp directory is disposable."""
+    paths = [m.group(2) for m in _ABS_PATH_RE.finditer(text or "")]
+    if not paths:
+        return False
+    roots = {_norm_path(tempfile.gettempdir())}
+    if os.name != "nt":
+        roots.add(_norm_path("/tmp"))
+    if cwd:
+        roots.add(_norm_path(cwd))
+    for path in paths:
+        target = _norm_path(path.replace("\\\\", "\\"))
+        if not any(_under(target, root) for root in roots):
+            return True
+    return False
+
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
@@ -727,18 +770,25 @@ class SkillStore:
         self._journal_bytes = -1
         # Stamped onto every journal entry (see journal_context).
         self._journal_tag: dict[str, str] = {}
+        self._journal_cwd: str | None = None
         self._journal_backoff_key = os.path.normcase(os.path.realpath(self._journal_path))
 
     def journal_context(
         self, *, session_id: str | None = None, agent: str | None = None,
-        project: str | None = None,
+        project: str | None = None, cwd: str | None = None,
     ) -> None:
         """Stamp the entries this store journals with their session and, for
         a subagent, the agent name. Several engines share one journal (a
         parent and its workers, two shells on one machine); the stamps let
         the synthesizer read the braid one session at a time instead of as a
-        single narrative."""
+        single narrative.
+
+        ``cwd`` is not stamped: a cell or tool call that names an absolute
+        path outside it gets ``"outside_cwd": true`` instead (see
+        :func:`names_path_outside`), so the learner never skips a read of
+        home config or notes as repository content."""
         self._journal_tag = {}
+        self._journal_cwd = cwd
         if session_id:
             self._journal_tag["session"] = session_id
         if agent:
@@ -973,6 +1023,10 @@ class SkillStore:
         entry.setdefault("ts", time.time())
         for key, value in self._journal_tag.items():
             entry.setdefault(key, value)
+        if entry.get("kind", "cell") in ("cell", "tool") and names_path_outside(
+            str(entry.get("code") or entry.get("input") or ""), self._journal_cwd,
+        ):
+            entry["outside_cwd"] = True
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         explicit = entry.get("kind") in JOURNAL_EXPLICIT_KINDS
         line_bytes = len(line.encode("utf-8"))
