@@ -35,7 +35,11 @@ When you sign in to GitHub, you can also create pull requests, follow their chec
 
 A chat can work on its own branch in its own copy of the project (a Git worktree). The agent works there without touching your main folder, so several chats can work on different changes at once.
 
-Choose the branch in the new chat's branch picker, or pick **New branch…**. The choice applies to that one chat. The next new chat starts on **Auto** again.
+The composer remembers worktrees on or off separately for each project, including across devices. A project without a saved choice starts with worktrees off. Chats without a project and folders that are not Git repositories always use the main folder. Existing chats keep their own checkout.
+
+Choose the branch in the new chat's branch picker, or pick **New branch…**. Branch and base-branch choices stay with that project while you switch projects. The choice applies to that one chat; after it is created, the next new chat starts on **Auto** again.
+
+The old global worktree and branch defaults are discarded when upgrading, rather than copied to unrelated projects. Choose worktrees again for each project where you want them.
 
 ## Per-project settings
 
