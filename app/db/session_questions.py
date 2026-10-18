@@ -90,12 +90,15 @@ def trailing_question_seq(cursor, session_id):
 
     # Closing a text bubble (e.g. for a tool call) is not ending a turn.
     # Respect the newest surviving run boundary, including after a rewind.
-    # Marker-less legacy/voice transcripts remain eligible as before.
-    for _, kind, _ in _tail(cursor, session_id, lifecycle_only=True):
-        if kind in ("turn.started", "turn.parked", "turn.completed", "turn.aborted"):
-            if kind != "turn.completed":
-                return None
-            break
+    # Marker-less legacy/voice messages AFTER a terminal boundary are fresh
+    # prose, not part of that old turn (including after settle + reopen).
+    inactive_through = 0
+    for seq, kind, _ in _tail(cursor, session_id, lifecycle_only=True):
+        if kind == "turn.started":
+            return None
+        if kind in ("turn.parked", "turn.aborted"):
+            inactive_through = seq
+        break
 
     closed = False
     pieces = []
@@ -108,7 +111,7 @@ def trailing_question_seq(cursor, session_id):
         if not text or (dropped_since is not None and origin > dropped_since):
             return False, None
         answered_mid_stream = user_seq is not None and origin < user_seq < position
-        return True, position if closed and not answered_mid_stream and asks_question(text) else None
+        return True, position if closed and origin > inactive_through and not answered_mid_stream and asks_question(text) else None
 
     dismissed_through = 0
     for seq, kind, payload in _tail(cursor, session_id):
@@ -148,7 +151,7 @@ def trailing_question_seq(cursor, session_id):
         if kind == "message.assistant" and payload.get("kind") in (None, "text"):
             text = _TRIM.sub("", payload.get("content") or "")
             if text and not hidden:
-                return seq if asks_question(text) else None
+                return seq if seq > inactive_through and asks_question(text) else None
         if kind == "assistant.text_delta":
             # A live tail cannot ask yet. Read a stream only once it closes.
             if not closed and _TRIM.sub("", payload.get("text") or ""):

@@ -296,6 +296,18 @@ def test_http_surface_parity(chat, path, question):
     assert (type(epoch) is str) if question else epoch is None
 
 
+@pytest.mark.parametrize("boundary", ["turn.aborted", "turn.parked"])
+def test_old_terminal_boundary_does_not_hide_fresh_standalone_prose(chat, boundary):
+    session_events.append_events(chat, [event("turn.started"), event(content="Proceed?")])
+    assert row()["last_assistant_question_seq"] is None
+    session_events.append_events(chat, [event("turn.completed")])
+    assert row()["last_assistant_question_seq"] == 2
+    session_events.append_events(chat, [event(boundary)])
+    assert row()["last_assistant_question_seq"] is None
+    session_events.append_events(chat, [event(content="Try again?")])
+    assert row()["last_assistant_question_seq"] == 5
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content, expected", [
     ("Which one?", True),
