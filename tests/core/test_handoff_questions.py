@@ -162,7 +162,7 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
             patch.object(sh, "_tell", side_effect=record_moved),
             patch.object(sh, "deliver_held", AsyncMock()) as deliver,
         ):
-            assert "question-card answer" in await sh._moved(
+            assert "answering it carries the hand-off note" in await sh._moved(
                 "s1", pending, "dev-gaming"
             )
             assert deliver.await_args.args[3] is None
@@ -202,8 +202,9 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
         await asyncio.gather(callback, return_exceptions=True)
 
 
+@pytest.mark.parametrize("resolved_on_target", [False, True])
 @pytest.mark.parametrize("state", ["pending", "answered", "cancelled", "expired"])
-def test_detached_card_owns_resume_in_every_state(state):
+def test_only_pending_or_target_resolved_card_owns_resume(state, resolved_on_target):
     from app.db.base import get_db
 
     _chat()
@@ -214,6 +215,7 @@ def test_detached_card_owns_resume_in_every_state(state):
         {
             "handoff_detached": True,
             "handoff_id": pending.handoff_id,
+            "handoff_resolved_on_target": resolved_on_target,
             "questions": QUESTIONS,
         },
         None,
@@ -222,7 +224,13 @@ def test_detached_card_owns_resume_in_every_state(state):
         conn.cursor().execute(
             "UPDATE pending_interactions SET state=%s WHERE id=%s", (state, row["id"])
         )
-    assert sh.resume_plan("s1", pending, pending.target_id) == "question"
+    with patch("app.network.handoff.resume_carry", return_value=True):
+        assert sh.resume_plan("s1", pending, pending.target_id) == (
+            "question" if state == "pending" or resolved_on_target else "send"
+        )
+    assert interactions.has_detached_handoff_question(
+        "s1", pending.handoff_id, pending_only=True
+    ) == (state == "pending")
     new = sh.PendingHandoff(
         "dev-gaming", "DesktopWorker", "different note", time.time()
     )
@@ -276,6 +284,122 @@ async def test_legacy_detached_card_keeps_note_once_matching_moved_record_arrive
     [answer] = turns.get_queued_turns("s1")
     assert answer["prompt"].startswith(context + "\n\n")
     assert answer["prompt"].count("Your hand-off note:") == 1
+
+
+@pytest.mark.parametrize("resolution", ["answer", "cancel", "dismiss"])
+async def test_source_resolution_before_move_keeps_note(resolution):
+    """Port of the review probe: source input must not consume the handoff note."""
+    from app.core.user_question_handler import DISMISSED_KEY, user_question_handler
+
+    _chat()
+    callback = await _post(blocking=True)
+    try:
+        assert await _settle(lambda: interactions.get_pending_interactions("s1"))
+        sh.request("s1", "DesktopWorker", "note must arrive")
+        pending = sh._pending["s1"]
+        with patch("app.network.runners.find", return_value=TARGET):
+            assert await asyncio.wait_for(
+                sh._prepare_questions(
+                    "s1",
+                    {"running": False, "tasks": [], "queued": 0, "wake": False},
+                    pending,
+                ),
+                timeout=3,
+            )
+        assert await asyncio.wait_for(callback, timeout=3) == {
+            "error": "No answers received"
+        }
+        [card] = interactions.get_pending_interactions("s1")
+        with (
+            patch(
+                "app.core.user_question_handler.UserQuestionHandler._retire_native_question",
+                AsyncMock(),
+            ),
+            patch("app.core.session_runtime.try_steer_pending", AsyncMock()),
+            patch("app.core.session_runtime._broadcast_queue_after_start", AsyncMock()),
+        ):
+            if resolution == "cancel":
+                assert interactions.cancel_interaction(card["id"])
+            else:
+                envelope = (
+                    {"Which branch?": "Existing"}
+                    if resolution == "answer"
+                    else {DISMISSED_KEY: True}
+                )
+                assert await user_question_handler._answer_nonblocking(
+                    card, envelope, None, human_input=True
+                )
+        saved = interactions.get_interaction(card["id"])
+        assert not saved["payload"].get("handoff_resolved_on_target")
+        if resolution == "answer":
+            [answer] = turns.get_queued_turns("s1")
+            assert "hand-off note" not in answer["prompt"]
+        else:
+            assert turns.get_queued_turns("s1") == []
+        with (
+            patch("app.network.handoff.resume_carry", return_value=True),
+            patch.object(sh, "_tell", AsyncMock(return_value=True)),
+            patch.object(sh, "deliver_held", AsyncMock()) as deliver,
+        ):
+            assert sh.resume_plan("s1", pending, pending.target_id) == "send"
+            result = await asyncio.wait_for(
+                sh._moved("s1", pending, pending.target_id), timeout=3
+            )
+        assert "continues there" in result
+        resume = deliver.await_args.args[3]
+        assert resume["prompt"].count("Your hand-off note: note must arrive") == 1
+    finally:
+        callback.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(callback, return_exceptions=True), timeout=3
+        )
+
+
+@pytest.mark.parametrize("resolution", ["answer", "cancel"])
+def test_target_resolution_marker_rolls_back_with_transaction(resolution):
+    from app.db.base import get_db
+
+    _chat()
+    handoff._accept_owner("s1", "dev-gaming")
+    row = interactions.create_interaction(
+        "s1",
+        "question",
+        {
+            "handoff_detached": True,
+            "handoff_id": "move",
+            "handoff_target_id": "dev-gaming",
+            "request_id": "rollback",
+            "questions": QUESTIONS,
+        },
+        None,
+    )
+    with (
+        patch(
+            "app.network.engine.context",
+            return_value=SimpleNamespace(device_id="dev-gaming"),
+        ),
+        pytest.raises(RuntimeError, match="rollback"),
+    ):
+        if resolution == "answer":
+            with patch.object(
+                turns, "enqueue_turn", side_effect=RuntimeError("rollback")
+            ):
+                interactions.answer_question_and_enqueue(
+                    row,
+                    {"answer": "yes"},
+                    None,
+                    "confirmed context",
+                    {},
+                    handoff_context_confirmed=True,
+                )
+        else:
+            with get_db() as conn:
+                assert interactions.cancel_interaction(row["id"], _conn=conn)
+                raise RuntimeError("rollback")
+    saved = interactions.get_interaction(row["id"])
+    assert saved["state"] == "pending"
+    assert not saved["payload"].get("handoff_resolved_on_target")
+    assert turns.get_queued_turns("s1") == []
 
 
 @pytest.mark.parametrize("worker", ["source", "dev-gaming"])
@@ -710,7 +834,7 @@ async def test_transient_question_failure_keeps_move_and_retries(failure, caplog
             patch.object(sh, "POLL_S", 0.01),
             patch("app.api.sessions.move_session_to", move),
         ):
-            assert "question-card answer" in await asyncio.wait_for(
+            assert "answering it carries the hand-off note" in await asyncio.wait_for(
                 sh.run_pending("s1"), timeout=3
             )
         move.assert_awaited_once()

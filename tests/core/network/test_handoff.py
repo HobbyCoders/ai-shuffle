@@ -487,7 +487,8 @@ def _owner_calls(a, b, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tell_failed", [False, True])
-async def test_detached_answer_on_target_keeps_note_before_or_without_tell(pair, monkeypatch, tell_failed):
+@pytest.mark.parametrize("resolution", ["answer", "cancel", "dismiss", "settle"])
+async def test_detached_target_resolution_does_not_resume_after_mirroring(pair, monkeypatch, tell_failed, resolution):
     import asyncio
     import time
     from unittest.mock import AsyncMock
@@ -537,18 +538,32 @@ async def test_detached_answer_on_target_keeps_note_before_or_without_tell(pair,
             with patch("app.core.user_question_handler.UserQuestionHandler._retire_native_question", AsyncMock()), \
                     patch("app.core.session_runtime.try_steer_pending", AsyncMock()), \
                     patch("app.core.session_runtime._broadcast_queue_after_start", AsyncMock()):
-                assert await user_question_handler._answer_nonblocking(
-                    card, {"Which option?": "Keep"}, None, human_input=True)
-            [answer] = turns.get_queued_turns(sid)
-            assert answer["prompt"].startswith("[hand-off] Moved from ")
-            assert "Your hand-off note: Keep the owner's selected branch" in answer["prompt"]
-            assert "Answer to your question:\nWhich option?\nKeep" in answer["prompt"]
-            assert answer["prompt"].count("Your hand-off note:") == 1
+                if resolution == "answer":
+                    assert await user_question_handler._answer_nonblocking(
+                        card, {"Which option?": "Keep"}, None, human_input=True)
+                elif resolution == "dismiss":
+                    assert await user_question_handler._answer_nonblocking(
+                        card, {"__dismissed__": True}, None, human_input=True)
+                elif resolution == "cancel":
+                    assert interactions.cancel_interaction(card["id"])
+                else:
+                    from app.core.session_settlement import dismiss_owner_waits
+
+                    assert await asyncio.wait_for(dismiss_owner_waits(sid), timeout=3)
+            if resolution == "answer":
+                [answer] = turns.get_queued_turns(sid)
+                assert answer["prompt"].startswith("[hand-off] Moved from ")
+                assert "Your hand-off note: Keep the owner's selected branch" in answer["prompt"]
+                assert "Answer to your question:\nWhich option?\nKeep" in answer["prompt"]
+                assert answer["prompt"].count("Your hand-off note:") == 1
+            else:
+                assert turns.get_queued_turns(sid) == []
             from app.network import policy
 
             coll = policy.collection("pending_interactions")
             answered = interactions.get_interaction(card["id"])
-            assert answered["state"] == "answered"
+            assert answered["state"] == ("answered" if resolution == "answer" else "cancelled")
+            assert answered["payload"]["handoff_resolved_on_target"] is True
             record = engine.serialize_row(coll, answered)
         with a.active():
             # Real mirror materialization accepts the target's answered row
@@ -556,7 +571,8 @@ async def test_detached_answer_on_target_keeps_note_before_or_without_tell(pair,
             with get_db() as conn:
                 mirrored = engine.materialize(conn.cursor(), coll, card["id"], record,
                                               origin_device_id=b.device_id)
-            assert mirrored["state"] == "answered"
+            assert mirrored["state"] == answered["state"]
+            assert interactions.get_interaction(card["id"])["payload"]["handoff_resolved_on_target"] is True
             assert interactions.get_pending_interactions(sid) == []
             assert sh.resume_plan(sid, pending, b.device_id) == "question"
             # Drive lost-reply ownership recovery through the real _failed →
@@ -565,11 +581,14 @@ async def test_detached_answer_on_target_keeps_note_before_or_without_tell(pair,
                     patch.object(sh, "deliver_held", AsyncMock()) as deliver, \
                     patch.object(sh, "_resume_turn", wraps=sh._resume_turn) as automatic:
                 result = await asyncio.wait_for(sh._failed(sid, pending, ConnectionError("lost reply")), timeout=3)
-            assert "question-card answer" in result
+            assert "already answered or dismissed" in result
             automatic.assert_not_called()
             deliver.assert_awaited_once_with(sid, b.device_id, pending.label, None)
             assert report.await_args.args[3]["resume"] == "question"
     finally:
+        from app.core.task_registry import task_registry
+
+        task_registry.clear_user_stop(sid)
         if callback is not None:
             callback.cancel()
             await asyncio.wait_for(asyncio.gather(callback, return_exceptions=True), timeout=3)

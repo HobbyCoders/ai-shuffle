@@ -650,6 +650,7 @@ class UserQuestionHandler:
         accepted = await asyncio.to_thread(
             interactions.answer_question_and_enqueue, row, envelope,
             answered_by_device, prompt, context, human_input=human_input,
+            handoff_context_confirmed=bool(handoff_context),
         )
         if not accepted:
             return False

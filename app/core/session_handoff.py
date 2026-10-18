@@ -481,9 +481,9 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
         return None
     from app.db import interactions
 
-    # Detached BLOCKING cards own this handoff's continuation in every state:
-    # the target's answer already carries the note and may mirror back first.
-    # Ordinary posted cards and earlier handoffs must not drop the new note.
+    # Pending cards own the next input. A target-confirmed resolution still
+    # owns the continuation even if it mirrors back before the move reply.
+    # A source-side answer/cancel before commit did not carry the new note.
     if interactions.has_detached_handoff_question(session_id, pending.handoff_id):
         return "question"
     if pending.by != "agent":
@@ -1126,7 +1126,14 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     if plan == "send":
         outcome = f"Handed off to {label}. This chat continues there on the same branch."
     elif plan == "question":
-        outcome = f"Handed off to {label}. The hand-off note is carried by the question-card answer there."
+        from app.db import interactions
+
+        waiting = await asyncio.to_thread(interactions.has_detached_handoff_question,
+                                          session_id, pending.handoff_id, pending_only=True)
+        if waiting:
+            outcome = f"Handed off to {label}. Its question card is waiting there; answering it carries the hand-off note."
+        else:
+            outcome = f"Handed off to {label}. Its question card was already answered or dismissed there; no extra continue turn was added."
     elif plan == "unsupported":
         outcome += f" {label} runs an older version that cannot resume it by itself: send a message there."
     elif plan == "unknown":
