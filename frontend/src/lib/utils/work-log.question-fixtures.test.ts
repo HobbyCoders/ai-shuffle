@@ -16,7 +16,8 @@ describe('backend/frontend shared event-sequence projection', () => {
 			state = reduce(state, event);
 			// The raw reducer owns mutable drafts until publication. Mirror the
 			// feed's published message array so memoized scans see each prefix.
-			const asks = openSessionNeeds({ ...state, messages: [...state.messages], activeTasks: state.activeTaskSummaries }, true).proseQuestion;
+			const asks = openSessionNeeds({ messages: [...state.messages], isStreaming: state.isStreaming,
+				turnParked: state.parked, activeTasks: state.activeTaskSummaries.filter(t => t.status === 'running') }, true).proseQuestion;
 			const prose = state.messages.findLast((m) => m.role === 'assistant' &&
 				(m.type === 'text' || !m.type) && m.content?.trim());
 			expect(asks ? prose?.seq : null, `step ${index + 1}: ${step.type}`).toBe(step.question_seq);

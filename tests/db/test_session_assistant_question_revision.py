@@ -17,6 +17,21 @@ from app.db import session_questions as questions
 from tests.db import schema_lifecycle_helpers as lifecycle
 
 
+def test_lifecycle_lookup_fetches_one_row_and_repeats_only_after_rewind():
+    from unittest.mock import Mock
+    cursor = Mock()
+    cursor.fetchall.side_effect = [
+        [{"seq": 9, "event_type": "transcript.rewound", "payload": {"from_seq": 5}}],
+        [{"seq": 4, "event_type": "turn.completed", "payload": {}}],
+    ]
+    boundary = next(questions._tail(cursor, "question", lifecycle_only=True))
+    assert boundary == (4, "turn.completed", {})
+    assert cursor.execute.call_count == 2
+    for call in cursor.execute.call_args_list:
+        assert call.args[0].endswith("ORDER BY seq DESC LIMIT 1")
+    assert cursor.execute.call_args_list[1].args[1] == ("question", 5)
+
+
 CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_questions.json").read_text(encoding="utf-8"))
 
 

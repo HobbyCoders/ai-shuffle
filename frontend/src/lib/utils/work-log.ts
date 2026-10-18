@@ -295,7 +295,8 @@ function questionProse(content: string): string {
 
 /** A final prose question; callers must also check that all work has ended. */
 export function asksQuestion(content: string): boolean {
-	const prose = questionProse(content);
+	// A trailing list can contain the choices offered by the final question.
+	const prose = questionProse(content).replace(/(?:\r?\n[ \t]*(?:[-*+]|\d+[.)])[ \t]+[^\n]*)+[ \t\r\n]*$/, '');
 	// Only the final sentence can ask for an answer. An earlier self-question
 	// followed by more narration does not stop the work or need the owner.
 	return /\?["'’”)*_\]\s]*$/.test(prose);
@@ -316,7 +317,7 @@ export function lastProseAsksQuestion(messages: readonly ChatMessage[]): boolean
 		if (message.role === 'user' && !agentDelivery(message)) return false;
 		if (isAskingTool(message)) return false;
 		if (!isAssistantText(message)) continue;
-		return !message.streaming && asksQuestion(message.content.trim());
+		return !message.streaming && message.proseQuestionDismissedAt == null && asksQuestion(message.content.trim());
 	}
 	return false;
 }

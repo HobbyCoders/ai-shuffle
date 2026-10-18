@@ -160,7 +160,7 @@ export function openSessionNeeds(
 		isLoadingSession?: boolean;
 		isStreaming?: boolean;
 		optimisticStreaming?: boolean;
-		parked?: boolean;
+		turnParked?: boolean;
 		activeTasks?: readonly unknown[] | null;
 	},
 	groupToolCalls: boolean,
@@ -170,7 +170,7 @@ export function openSessionNeeds(
 ): OpenSessionNeeds {
 	const permissions = state.pendingPermissions?.length ?? 0;
 	const questions = state.pendingQuestions?.length ?? 0;
-	const liveWork = state.isStreaming || state.optimisticStreaming || state.parked || !!state.activeTasks?.length;
+	const liveWork = state.isStreaming || state.optimisticStreaming || state.turnParked || !!state.activeTasks?.length;
 	const proseQuestion = groupToolCalls && !proseDismissed && !liveWork && (
 		state.isLoadingSession
 			? rememberedProse
@@ -819,7 +819,7 @@ export function needsYouCount(
 	const background = s.is_remote ? remoteWaiting : Math.max(0, attention?.count ?? 0);
 	const prompts = open ? Math.max(background, open.permissions + open.questions) : background;
 	const liveWork = s.is_remote
-		? s.remote_runtime_state !== 'idle'
+		? !!s.remote_runtime_state && s.remote_runtime_state !== 'idle'
 		: s.has_running_tasks || !!s.parked_task_kind;
 	return Math.max(0, privateAccessPending) + prompts + (open?.proseQuestion && !liveWork ? 1 : 0);
 }

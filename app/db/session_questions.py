@@ -22,6 +22,8 @@ def asks_question(content: str) -> bool:
     prose = re.sub(r"\]\([^\)" + _JS_SPACE + r"]*\)", "]", prose)
     prose = re.sub(r"<https?://[^>" + _JS_SPACE + r"]*>", "", prose)
     prose = re.sub(r"(?<![a-zA-Z0-9_])https?://" + _NONSPACE + r"*[^" + _JS_SPACE + r".,;:!?)\]'\"]", "", prose)
+    # A trailing list can contain the choices offered by the final question.
+    prose = re.sub(r"(?:\r?\n[ \t]*(?:[-*+]|\d+[.)])[ \t]+[^\n]*)+[ \t\r\n]*$", "", prose)
     # Markdown emphasis, link labels and quotes may wrap the last sentence.
     return re.search(r"\?[\"'’”)*_\]" + _JS_SPACE + r"]*$", prose) is not None
 
@@ -47,7 +49,8 @@ def _tail(cursor, session_id, *, lifecycle_only=False):
         if before is not None:
             sql += " AND seq < %s"
             params.append(before)
-        cursor.execute(sql + " ORDER BY seq DESC LIMIT 128", tuple(params))
+        limit = 1 if lifecycle_only else 128
+        cursor.execute(sql + f" ORDER BY seq DESC LIMIT {limit}", tuple(params))
         rows = cursor.fetchall()
         if not rows:
             return

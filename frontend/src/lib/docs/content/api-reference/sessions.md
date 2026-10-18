@@ -82,10 +82,15 @@ The same row, list/detail, `/live` `session_meta`, `/state`, global
 `last_assistant_question_seq` (integer or `null`) and
 `last_assistant_question_epoch` (opaque string or `null`). They identify the
 newest nonempty assistant prose if it asks a question. The exact shared
-`asksQuestion` predicate ignores inline code and URL/link targets; any remaining
-ASCII `?` counts, not just one at the end. Thinking, routine tools and system
-cards are not prose. AskUser/AskUserQuestion tools suppress a prose preface so
-that a question is not counted twice.
+`asksQuestion` predicate ignores inline code and URL/link targets. An ASCII `?`
+counts only at the end of the final prose sentence (allowing closing quotes or
+Markdown emphasis). A simple trailing list of choices may follow that question;
+earlier self-questions followed by more narration do not count. Prose does not
+request attention while the turn is running or parked, or after it is aborted.
+An idle, finished turn can still show Awaiting input until answered or settled.
+Thinking, routine tools and system cards are not prose. AskUser/AskUserQuestion
+tools suppress a prose preface so that a question is not counted twice; explicit
+question cards and permission prompts still request attention during live work.
 
 The append transaction stamps closed `message.assistant` prose and settled
 streamed prose (using the last contributing text-delta sequence). Peer deliveries

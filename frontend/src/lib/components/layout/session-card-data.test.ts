@@ -679,7 +679,7 @@ describe('needsYouCount (spec §5)', () => {
 	});
 
 	it.each([
-		{ isStreaming: true }, { optimisticStreaming: true }, { parked: true },
+		{ isStreaming: true }, { optimisticStreaming: true }, { turnParked: true },
 		{ activeTasks: [{ kind: 'shell' }] }, { activeTasks: [{ kind: 'agent' }] }
 	])('does not count prose while work is live: %j', (runtime) => {
 		const needs = openSessionNeeds({ messages: asked, ...runtime }, true);
@@ -694,6 +694,7 @@ describe('needsYouCount (spec §5)', () => {
 		const needs = open({ messages: asked });
 		const idle = { streaming: false, attention: null, isActive: true, open: needs };
 		expect(deriveStatus(idle)).toBe('await');
+		expect(needsYouCount({ ...local, is_remote: true, remote_runtime_state: null }, null, 0, needs)).toBe(1);
 		expect(needsYouCount({ ...local, has_running_tasks: true }, null, 0, needs)).toBe(0);
 		expect(needsYouCount({ ...local, parked_task_kind: 'shell' }, null, 0, needs)).toBe(0);
 		for (const runtime of [{ parked: true }, { backgroundWork: true }]) {

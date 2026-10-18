@@ -514,5 +514,174 @@
         "question_seq": null
       }
     ]
+  },
+  {
+    "name": "settling parked prose stays dismissed after parked_settled completion",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I open a PR?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "session_settled",
+          "through_seq": 4
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {
+          "stop_reason": "parked_settled"
+        },
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "streamed question followed by park is not attention",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I open a PR?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "background_tasks_changed"
+        },
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "aborted error turn dismisses its prose but not future standalone prose",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "error",
+          "message": "Stopped"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Try again?"
+        },
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "aborted interrupt turn dismisses its prose but not future standalone prose",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "interrupt",
+          "message": "Stopped"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Try again?"
+        },
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "aborted unknown turn dismisses its prose but not future standalone prose",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "unknown",
+          "message": "Stopped"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Try again?"
+        },
+        "question_seq": 4
+      }
+    ]
   }
 ]

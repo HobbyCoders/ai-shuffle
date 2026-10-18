@@ -76,16 +76,16 @@
     "expected": false
   },
   {
-    "content": "ahttps://example.test/?q=x",
-    "expected": false
+    "content": "ahttps://example.test/?q=x?",
+    "expected": true
   },
   {
     "content": "[link](path?q=1)",
     "expected": false
   },
   {
-    "content": "[link](path with?space)",
-    "expected": false
+    "content": "[link](path with space?)",
+    "expected": true
   },
   {
     "content": "??",
@@ -121,6 +121,18 @@
   },
   {
     "content": "Why? I have the answer.",
+    "expected": false
+  },
+  {
+    "content": "Which do you want?\n1. Red\n2. Blue",
+    "expected": true
+  },
+  {
+    "content": "Which do you want?\n\n- Red\n- Blue",
+    "expected": true
+  },
+  {
+    "content": "Why? I will compare these.\n1. Red\n2. Blue",
     "expected": false
   }
 ]
