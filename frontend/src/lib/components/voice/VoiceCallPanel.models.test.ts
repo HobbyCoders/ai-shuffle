@@ -33,6 +33,7 @@ it.each([
   expect(screen.queryByText(/agents working/)).toBeNull();
  }
  if (model.startsWith('fal-ai/')) expect(screen.getByText('Audio connected')).toBeTruthy();
+ else expect(screen.getByRole('status').textContent).toBe('Listening');
  expect(screen.getByRole('button', {name:'Mute mic'})).toBeTruthy();
  expect(screen.getByRole('button', {name:'Mute agent audio'})).toBeTruthy();
 });

@@ -53,6 +53,13 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(
 const handlers = () => ({ caption: vi.fn(), speaking: vi.fn(), closed: vi.fn() });
 
 describe('voice PCM stream', () => {
+ it('forwards a server barge-in clear frame to the playback worklet', async () => {
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'clear' }) });
+  expect(playback().port.postMessage).toHaveBeenCalledWith({ type: 'clear' });
+  expect(capture().port.postMessage).not.toHaveBeenCalledWith({ type: 'clear' });
+  await stream.close();
+ });
  it('coalesces rapid devicechange bursts into one pending and one follow-up refresh', async () => {
   const devices = new EventTarget();
   Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: devices });

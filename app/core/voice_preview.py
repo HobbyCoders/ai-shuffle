@@ -115,7 +115,7 @@ async def _generate_grok(api_key: str, voice: str) -> bytes:
     async with connect(GROK_URL, additional_headers={"Authorization": f"Bearer {api_key}"},
                        open_timeout=10, close_timeout=2, max_size=2_000_000) as ws:
         session = grok_session({"voice": voice}, validate_options(GROK_MODEL, {}))
-        session["session"].update({"tools": [], "turn_detection": None,
+        session["session"].update({"tools": [], "turn_detection": {"type": None},
                                    "instructions": "Speak only the requested short greeting, then stay quiet."})
         await ws.send(json.dumps(session))
         while True:

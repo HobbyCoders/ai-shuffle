@@ -12,6 +12,8 @@ from app.core.voice_models import GROK_URL
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
 from app.core.voice_stream import VoiceStream
 
+SPEECH_STOP_GRACE_S = 0.15
+
 HANDOFF_TOOL = {
     "type": "function", "name": "delegate_to_chat_agent",
     "description": "Ask the user's selected chat agent to handle tools, research, private information, changes or careful reasoning. Call once per complete request; results arrive asynchronously.",
@@ -38,6 +40,23 @@ class GrokVoiceStream(VoiceStream):
         self.response_active = False
         self.speech_active = False
         self.speech_pending = False
+        self.speech_resume_task = None
+
+    async def cancel_speech_resume(self):
+        if self.speech_resume_task is not None:
+            self.speech_resume_task.cancel()
+            await asyncio.gather(self.speech_resume_task, return_exceptions=True)
+            self.speech_resume_task = None
+
+    async def close(self):
+        await self.cancel_speech_resume()
+        await super().close()
+
+    async def resume_pending_speech(self):
+        # Give server VAD a chance to start a reply that includes the note.
+        await asyncio.sleep(SPEECH_STOP_GRACE_S)
+        if self.speech_pending and not self.response_active and not self.speech_active:
+            await self.request_speech()
 
     def is_quiet(self):
         return not self.speech_active and super().is_quiet()
@@ -80,10 +99,11 @@ class GrokVoiceStream(VoiceStream):
                     "type": "function_call_output", "call_id": did,
                     "output": event["content"],
                 }})
-            await self.wire({"type": "conversation.item.create", "item": {
-                "type": "message", "role": "system",
-                "content": [{"type": "input_text", "text": "Work update (data): " + event["content"]}],
-            }})
+            else:
+                await self.wire({"type": "conversation.item.create", "item": {
+                    "type": "message", "role": "system",
+                    "content": [{"type": "input_text", "text": event["content"]}],
+                }})
             if kind == "session.commentary.append":
                 await self.request_speech()
 
@@ -113,8 +133,12 @@ class GrokVoiceStream(VoiceStream):
                     "content": [{"type": "input_text", "text": "Prior conversation (context only): " + text}],
                 }})
         opening = self.options["opening"]
-        if opening and self.config.get("greet", True):
-            await self.wire({"type": "response.create", "response": {"instructions": "Greet the caller: " + opening}})
+        if opening and not history and self.config.get("greet", True):
+            await self.wire({"type": "conversation.item.create", "item": {
+                "type": "message", "role": "system",
+                "content": [{"type": "input_text", "text": "Greet the caller: " + opening}],
+            }})
+            await self.request_speech()
 
     async def upstream_frames(self):
         # Translate only documented xAI events to the shared transcript and
@@ -130,17 +154,25 @@ class GrokVoiceStream(VoiceStream):
             elif kind == "conversation.item.input_audio_transcription.completed":
                 translated = {"type": "session.input_transcript.delta", "delta": event.get("transcript", "")}
             elif kind == "response.created":
+                if not self.response_active and not self.speech_active:
+                    # A new VAD response includes notes already sent to context.
+                    # Do not clear later notes queued behind our own response.
+                    self.speech_pending = False
                 self.response_active = True
             elif kind == "response.done":
                 self.response_active = False
                 if self.speech_pending:
                     await self.request_speech()
             elif kind == "input_audio_buffer.speech_started":
+                await self.cancel_speech_resume()
                 self.speech_active = True
                 # Drop queued audio in the browser on barge-in.
                 await self.emit({"type": "clear"})
             elif kind == "input_audio_buffer.speech_stopped":
                 self.speech_active = False
+                if self.speech_pending and not self.response_active:
+                    await self.cancel_speech_resume()
+                    self.speech_resume_task = asyncio.create_task(self.resume_pending_speech())
             elif kind == "response.function_call_arguments.done" and event.get("name") == HANDOFF_TOOL["name"]:
                 did = event.get("call_id")
                 if isinstance(did, str) and did and did not in self.delegations:

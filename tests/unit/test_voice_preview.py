@@ -74,12 +74,12 @@ async def test_grok_sample_uses_its_own_voice_protocol_and_key(monkeypatch):
         connections.append((url, kwargs))
         return socket
     monkeypatch.setattr(voice_preview, "connect", connect)
-    data = await voice_preview.generate_live_preview("xai-test-key", "eve", "grok-voice-latest")
+    data = await voice_preview.generate_live_preview("xai-test-key", "ara", "grok-voice-latest")
     assert connections[0][0] == "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
     assert connections[0][1]["additional_headers"] == {"Authorization": "Bearer xai-test-key"}
-    assert socket.sent[0]["session"]["voice"] == "eve"
+    assert socket.sent[0]["session"]["voice"] == "ara"
     assert socket.sent[0]["session"]["tools"] == []
-    assert socket.sent[0]["session"]["turn_detection"] is None
+    assert socket.sent[0]["session"]["turn_detection"] == {"type": None}
     assert socket.sent[-1] == {"type": "response.create"}
     with wave.open(io.BytesIO(data)) as wav:
         assert (wav.getframerate(), wav.getnframes()) == (24000, 2400)
