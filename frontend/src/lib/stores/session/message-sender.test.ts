@@ -120,6 +120,45 @@ function makeDeps(initial: ActiveSessionState) {
 }
 
 describe('compact first send', () => {
+	beforeEach(() => sessionStorage.clear());
+
+	it('keeps the draft and rejects an older server response without queued_turn_id', async () => {
+		const { deps, getState } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'only-compact', session_id: 's1' });
+		await expect(createMessageSender(deps).sendMessage('must not disappear', { compactFirst: true }))
+			.rejects.toThrow('needs an update');
+		expect(getState().queuedMessages).toEqual([]);
+		expect(getState().messages).toEqual([]);
+	});
+
+	it('reuses an ambiguous request id on retry, including a new sender after reload', async () => {
+		const state = baseState({ sessionId: 'retry-chat', title: 'Old chat' });
+		apiMocks.post.mockRejectedValueOnce(new Error('Timeout after the worker may have accepted it'));
+		const first = makeDeps(state);
+		await expect(createMessageSender(first.deps).sendMessage('send once', { compactFirst: true }))
+			.rejects.toThrow('Timeout');
+		const firstId = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id;
+		const retry = makeDeps(state);
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'c', queued_turn_id: 'q', session_id: 'retry-chat' });
+		const sender = createMessageSender(retry.deps);
+		await sender.sendMessage('send once', { compactFirst: true });
+		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).toBe(firstId);
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'new-c', queued_turn_id: 'new-q', session_id: 'retry-chat' });
+		await sender.sendMessage('send once', { compactFirst: true });
+		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).not.toBe(firstId);
+	});
+
+	it('does not reuse a refused draft id after its text or attachments change', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		apiMocks.post.mockRejectedValueOnce(new Error('offline'));
+		await expect(sender.sendMessage('old text', { compactFirst: true })).rejects.toThrow('offline');
+		const oldId = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id;
+		apiMocks.post.mockResolvedValueOnce({ turn_id: null, queued_turn_id: 'held-1', held: true, session_id: 's1' });
+		expect(await sender.sendMessage('new text', { compactFirst: true, pendingUploadPaths: ['/uploads/new.png'] })).toBe(true);
+		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).not.toBe(oldId);
+	});
+
 	it('posts the exact normal query payload and uses only a queued optimistic echo', async () => {
 		const settings = { sessionId: 'compact-chat', title: 'Old chat', modelOverride: 'sonnet',
 			effortLevelOverride: 'high', permissionModeOverride: 'default', fastMode: false };

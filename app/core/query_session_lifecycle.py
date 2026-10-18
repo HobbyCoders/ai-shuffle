@@ -411,7 +411,9 @@ async def enter_user_stop(session_id: str) -> dict:
             turn_id = turn.get("id")
             if not turn_id:
                 continue
-            removed = await asyncio.to_thread(turns_db.remove_queued_turn, turn_id)
+            removed = await asyncio.to_thread(
+                turns_db.remove_queued_turn, turn_id, preserve_compact_first=True,
+            )
             if removed is not None:
                 queued_aborted += 1
     except Exception:  # noqa: BLE001

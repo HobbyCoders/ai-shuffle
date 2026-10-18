@@ -486,6 +486,13 @@ def enqueue_turn(
         # Serialize admission with the pre-model filesystem breaker. Queued
         # automatic turns remain durable but cannot claim a live slot while held.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        # The same compact-first request can be retried after a lost HTTP reply.
+        # Check under the admission lock, before either row is inserted (and
+        # before clearing Stop), so concurrent retries cannot create two pairs.
+        if command_id and (payload or {}).get("compact_first"):
+            existing = get_turn_by_command(session_id, command_id, _conn=conn)
+            if existing is not None:
+                return existing
         if (_task_stop(cursor, session_id, owner=source in CWD_OWNER_SOURCES)
                 or _cwd_blocked(cursor, session_id, owner=source in CWD_OWNER_SOURCES)):
             return {"id": None, "session_id": session_id, "source": source}
@@ -963,7 +970,7 @@ def settle_turn(
 
 
 def remove_queued_turn(
-    turn_id: str, stop_reason: str = "removed_from_queue",
+    turn_id: str, stop_reason: str = "removed_from_queue", *, preserve_compact_first: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Atomically abort a still-``queued`` turn (queue-chip removal).
 
@@ -973,6 +980,19 @@ def remove_queued_turn(
     """
     with get_db() as conn:
         cursor = conn.cursor()
+        if preserve_compact_first:
+            # Use the transcript's lock order (counter -> session -> turn),
+            # so Stop and message delivery cannot deadlock or both record it.
+            cursor.execute("SELECT session_id FROM turns WHERE id=%s", (turn_id,))
+            target = cursor.fetchone()
+            if target:
+                sid = target["session_id"]
+                cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
+                               "ON CONFLICT (session_id) DO NOTHING", (sid,))
+                cursor.execute("SELECT session_id FROM session_event_counters WHERE session_id=%s FOR UPDATE", (sid,))
+                cursor.fetchone()
+                cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+                cursor.fetchone()
         cursor.execute(
             "UPDATE turns SET state='aborted', stop_reason=%s, "
             "ended_at=NOW() "
@@ -980,8 +1000,22 @@ def remove_queued_turn(
             "RETURNING *",
             (stop_reason, turn_id),
         )
-        row = cursor.fetchone()
-    return _row(row)
+        row = _row(cursor.fetchone())
+        if (row and preserve_compact_first
+                and (row.get("payload") or {}).get("compact_before_turn_id")):
+            from app.db import sessions, session_events
+            payload = row["payload"]
+            content = "Not sent (stopped)\n\n" + (row.get("prompt") or "")
+            metadata = {"not_sent": "stopped", "queued_turn_id": row["id"],
+                        "upload_paths": payload.get("upload_paths") or [],
+                        "upload_blob_ids": payload.get("upload_blob_ids") or []}
+            sessions.add_session_message(row["session_id"], "user", content,
+                                         profile_id=row.get("profile_id"), metadata=metadata, _conn=conn)
+            session_events.append_events(row["session_id"], [{
+                "type": "message.user", "turn_id": row["id"], "command_id": row.get("command_id"),
+                "payload": {"content": content, "profile_id": row.get("profile_id"), **metadata},
+            }], _conn=conn)
+    return row
 
 
 def absorb_queued_turn(turn_id: str) -> bool:
@@ -1294,9 +1328,9 @@ def get_turn(turn_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
-def get_turn_by_command(session_id: str, command_id: str) -> Optional[Dict[str, Any]]:
+def get_turn_by_command(session_id: str, command_id: str, *, _conn=None) -> Optional[Dict[str, Any]]:
     """The session's first turn queued with ``command_id``, or ``None``."""
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s AND command_id=%s ORDER BY created_at LIMIT 1",

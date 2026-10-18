@@ -46,9 +46,8 @@ class HTTPQuerySender(ChatWebSocketHandler):
 
 
 async def submit_http_query(request: Request, session_id: str, data: dict, *, compact_first: bool) -> dict:
-    from app.core import session_handoff
-    if session_handoff.holds(session_id):
-        raise HTTPException(status_code=409, detail="Wait for this chat to finish moving, then compact.")
+    # A move can start at any await. Intake treats held messages as accepted,
+    # just like a normal send, rather than trying to preflight that race here.
     from app.db.async_database import run_sync
     principal = await run_sync(_request_query_principal, request)
     sender = HTTPQuerySender(request, session_id, principal)

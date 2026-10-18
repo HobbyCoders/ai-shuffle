@@ -40,7 +40,7 @@ export function cancelLimitResume(sessionId: string, taskId?: string | null): Pr
  * The queued message still runs on the original context if compaction fails.
  */
 export function compactSession(sessionId: string, thenSend?: Record<string, unknown>): Promise<{
-	turn_id: string; session_id: string; queued_turn_id?: string;
+	turn_id: string | null; session_id: string; queued_turn_id?: string; held?: boolean;
 }> {
 	return api.post(`/sessions/${encodeURIComponent(sessionId)}/compact`,
 		thenSend ? { then_send: thenSend } : undefined);

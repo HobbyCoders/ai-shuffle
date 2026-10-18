@@ -1731,6 +1731,8 @@ class ChatWebSocketHandler:
         if compact_first:
             payload["compact_first"] = True
             payload["deferred_user_record"] = True
+            if upload_paths:
+                payload["upload_paths"] = upload_paths
         if request_id and is_new_session:
             payload["request_id"] = request_id
         if had_live or held_for_move:
@@ -1813,6 +1815,13 @@ class ChatWebSocketHandler:
             no_kick=placed_remote,
         )
 
+        if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
+            await self._v2_broadcast_queue(session_id)
+            await self.send_json({"type": "query_queued", "session_id": session_id})
+            # No compact turn exists yet; the held request will admit both
+            # turns together after the move. Do not invent a compact turn id.
+            return {"turn_id": turn_id, "compact_turn_id": None, "held": True}
+
         if compact_first:
             # Never steer the follow-up into the compact turn. It is the next
             # ordinary turn, even when compaction fails.
@@ -1827,12 +1836,6 @@ class ChatWebSocketHandler:
             "steer enqueue session=%s row=%s client_id=%s at=%.6f",
             session_id, turn_id, client_message_id, time.time(),
         )
-        if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
-            # Held for the queued move: a pending bubble until it is sent.
-            await self._v2_broadcast_queue(session_id)
-            await self.send_json({"type": "query_queued", "session_id": session_id})
-            return
-
         if placed_remote:
             # Wake the owning runner's claim loop NOW (latency only — its 5s
             # poll is the correctness path), then ack exactly like a queued

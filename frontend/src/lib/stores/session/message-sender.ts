@@ -158,6 +158,25 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		appData, persistSession, stopTimeout, getActiveSession,
 	} = deps;
 
+	// Keep an ambiguous HTTP request's command id with the exact draft/options.
+	// sessionStorage survives a reload in this tab; successful acknowledgement
+	// clears it so an intentional later send of the same text is a new message.
+	const compactRetries = new Map<string, { fingerprint: string; id: string }>();
+	function compactRetryId(sid: string, fingerprint: string): string {
+		let previous = compactRetries.get(sid);
+		try { previous ??= JSON.parse(sessionStorage.getItem(`compact-first-retry:${sid}`) || 'null'); } catch { /* storage unavailable */ }
+		const id = previous?.fingerprint === fingerprint && /^client-[0-9a-f]{32}$/.test(previous.id)
+			? previous.id : newLocalPendingId();
+		const pending = { fingerprint, id };
+		compactRetries.set(sid, pending);
+		try { sessionStorage.setItem(`compact-first-retry:${sid}`, JSON.stringify(pending)); } catch { /* memory still retains it */ }
+		return id;
+	}
+	function compactAcknowledged(sid: string) {
+		compactRetries.delete(sid);
+		try { sessionStorage.removeItem(`compact-first-retry:${sid}`); } catch { /* storage unavailable */ }
+	}
+
 	// ─── Internal helper for worktree existing branch sessions ──────
 
 	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
@@ -502,7 +521,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// landed since the send began: the server has described the queue for
 			// this window, so a local row added on top of it is a second copy that
 			// no later frame is guaranteed to replace.
-			const clientMessageId = newLocalPendingId();
+			const overrides = buildOverrides();
+			const retryOverrides = { ...overrides };
+			// The worker can acknowledge a newer pin before a lost reply is retried.
+			// Its revision precondition is not a new owner instruction.
+			delete retryOverrides.context_window_base;
+			const clientMessageId = options?.compactFirst
+				? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: _state.profile,
+					project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }))
+				: newLocalPendingId();
 			const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
 			const optimisticQueuedId = queuedEcho
 				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
@@ -594,11 +621,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// Adoption token — present only for a new-session query (see requestId).
 				// The backend echoes it in session_created + the first start frame.
 				request_id: requestId || undefined,
-				overrides: buildOverrides(),
+				overrides,
 			};
 			if (options?.compactFirst) {
 				try {
-					await compactSession(_state.sessionId!, query);
+					const result = await compactSession(_state.sessionId!, query);
+					if (!result.queued_turn_id) {
+						throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
+					}
+					compactAcknowledged(_state.sessionId!);
 				} catch (error) {
 					// Remove only our optimistic echo, never a newer session's draft
 					// or an authoritative queue snapshot that arrived in the meantime.

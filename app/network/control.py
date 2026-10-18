@@ -747,6 +747,9 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         # session's current mode.
         explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
         payload=payload or None, command_id=command_id)
+    if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
+        return {"turn_id": turn_id, "session_id": session_id,
+                "compact_turn_id": None, "held": True}
     if had_live and not payload.get("compact_first"):
         # A message sent from another device while this worker's turn runs
         # gets the same mid-turn delivery as a local send: steered in at the

@@ -1989,7 +1989,7 @@ async def compact_session(
             raise HTTPException(status_code=422, detail="then_send.prompt must be a string")
         result = await submit_http_query(request, session_id, then_send, compact_first=True)
         return {"turn_id": result["compact_turn_id"], "session_id": session_id,
-                "queued_turn_id": result["turn_id"]}
+                "queued_turn_id": result["turn_id"], **({"held": True} if result.get("held") else {})}
     result = await submit_http_query(
         request, session_id, {"prompt": limit_resume.COMPACT_PROMPT}, compact_first=False,
     )
