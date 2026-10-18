@@ -46,7 +46,8 @@ export function createDraftManager(deps: DraftManagerDeps) {
 		},
 
 		clearPendingRestorePrompt() {
-			update(s => s.pendingRestorePrompt ? { ...s, pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined } : s);
+			update(s => s.pendingRestorePrompt != null || s.pendingRestoreUploadPaths?.length
+				? { ...s, pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined } : s);
 		},
 
 		setScrollTop(pos: number) {

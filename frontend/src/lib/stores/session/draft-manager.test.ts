@@ -41,6 +41,13 @@ describe('draft manager — ephemeral state', () => {
 		expect(h.state.pendingRestoreUploadPaths).toBeUndefined();
 	});
 
+	it('clears an attachments-only restore as well as its empty text', () => {
+		const h = harness();
+		h.dm.setPendingRestorePrompt('', ['/uploads/proof.png']);
+		h.dm.clearPendingRestorePrompt();
+		expect(h.state.pendingRestorePrompt).toBeNull();
+		expect(h.state.pendingRestoreUploadPaths).toBeUndefined();
+	});
 	it('clearing an absent restore prompt keeps the same state object', () => {
 		const h = harness();
 		const before = h.state;
