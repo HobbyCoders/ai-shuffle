@@ -97,6 +97,24 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(container.querySelector('.branch-name')?.textContent).toBe('main');
 		expect(container.querySelector('.wt-indicator')).not.toBeNull();
 	});
+	it.each(['project', 'session', 'worktree', 'unhydrated'])('ignores another context’s non-repo status (%s)', async mismatch => {
+		session.store.set(base);
+		(git as any).set({ projectId: mismatch === 'project' ? 'other-project' : 'project',
+			sessionId: mismatch === 'session' ? 'other-session' : 'saved-session',
+			worktreeId: mismatch === 'worktree' ? 'other-worktree' : null,
+			hydrated: mismatch !== 'unhydrated', status: { is_git_repo: false } });
+		(gitStatus as any).set({ current_branch: null, is_git_repo: false });
+		const { container } = render(ContextPillBar, { sheetMode });
+		await tick();
+		expect(container.querySelector('.branch-wt-row')).not.toBeNull();
+	});
+	it.each(['worktreeId', 'worktreeBranch'])('never hides a bound checkout on false status (%s)', binding => {
+		session.store.set({ ...base, [binding]: 'bound-checkout' });
+		(git as any).set({ projectId: 'project', sessionId: 'saved-session', worktreeId: binding === 'worktreeId' ? 'bound-checkout' : null,
+			hydrated: true, status: { is_git_repo: false } });
+		const { container } = render(ContextPillBar, { sheetMode });
+		expect(container.querySelector('.branch-wt-row')).not.toBeNull();
+	});
 	it.each(['project', 'canonical'])('offers worker and branch selection without GitHub auth for %s', kind => {
 		execution.mockClear();
 		session.store.set({ ...base, sessionId: null, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });

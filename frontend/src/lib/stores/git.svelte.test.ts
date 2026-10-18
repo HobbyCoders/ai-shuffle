@@ -217,6 +217,35 @@ describe('git store — project isolation and positive non-repo cache', () => {
 		expect(git.current.branches).toEqual([]);
 	});
 
+	it.each([false, true])('restores project non-repo memory for an unbound existing session (evict=%s)', async evict => {
+		mocks.getGitStatus.mockResolvedValueOnce(status({ is_git_repo: false, current_branch: null }));
+		await git.loadRepository('plain-B', false, 'original-plain-chat');
+		for (let i = 0; i < (evict ? 11 : 1); i++) await git.loadRepository(`git-${i}`);
+		git.restoreCacheImmediate('plain-B', null, 'project', 'returning-plain-chat');
+		expect(git.current.status?.is_git_repo).toBe(false);
+		expect(git.current.hydrated).toBe(true);
+		expect(git.current.branches).toEqual([]);
+		const pending = deferred<GitStatus>();
+		mocks.getGitStatus.mockReturnValueOnce(pending.promise);
+		const load = git.loadRepository('plain-B', false, 'returning-plain-chat');
+		expect(git.current.status?.is_git_repo).toBe(false);
+		pending.resolve(status({ is_git_repo: false, current_branch: null }));
+		await load;
+	});
+
+	it('never lends project non-repo memory to a branch-bound session', async () => {
+		mocks.getGitStatus.mockResolvedValueOnce(status({ is_git_repo: false, current_branch: null }));
+		await git.loadRepository('plain-B');
+		await git.loadRepository('git-A');
+		git.restoreCacheImmediate('plain-B', null, 'project', 'bound-chat', 'feature/bound');
+		expect(git.current.status).toBeNull();
+		expect(git.current.hydrated).toBe(false);
+		mocks.getGitStatus.mockResolvedValueOnce(status({ is_git_repo: false, current_branch: null }));
+		await git.loadRepository('plain-B', false, 'bound-chat');
+		expect(git.current.error).toContain('unavailable');
+		expect(git.current.status?.is_git_repo).not.toBe(false);
+	});
+
 	it('switches between two git projects without a cross-project placeholder', async () => {
 		await git.loadRepository('git-A');
 		git.restoreCacheImmediate('git-C');

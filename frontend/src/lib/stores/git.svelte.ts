@@ -277,6 +277,8 @@ const _cache = new Map<string, CachedState>();
 // A base-folder non-repo answer survives per-checkout LRU eviction. It is only
 // a revalidating fallback, never a reason to skip the next status request.
 const _nonRepoProjects = new Map<string, CachedState>();
+// A session with a named checkout must never borrow project-level plain state.
+const _branchSessions = new Set<string>();
 function _rememberNonRepo(projectId: string, empty: CachedState) {
 	_nonRepoProjects.delete(projectId);
 	_nonRepoProjects.set(projectId, empty);
@@ -497,7 +499,7 @@ async function _loadCore(
 	_worktreeGone = false; // Reset on context switch
 	_clearServerBackoff(); // Reset backoff on context switch
 	let key = _identityFor(scope);
-	const cached = _restoreFromCache(key) ?? (!worktreeId && !sessionId ? _nonRepoProjects.get(projectId) : undefined);
+	const cached = _restoreFromCache(key) ?? (!worktreeId && !_branchSessions.has(sessionId ?? '') ? _nonRepoProjects.get(projectId) : undefined);
 	_loadedScope = scope;
 	_loadedKey = key;
 	_update((s) => ({
@@ -527,6 +529,9 @@ async function _loadCore(
 		key = _learnIdentity(scope, projectId, status.current_branch);
 		_loadedKey = key;
 
+		if (!status.is_git_repo && (worktreeId || _branchSessions.has(sessionId ?? ''))) {
+			throw new Error('Git checkout is unavailable. Check again.');
+		}
 		if (status.is_git_repo) {
 			_nonRepoProjects.delete(projectId);
 			// Opening a chat: only what the header renders goes out now. Nothing
@@ -614,7 +619,7 @@ async function _loadCore(
 			}));
 			const empty = _cacheableSlice(_state);
 			_saveToCache(key, empty);
-			if (!worktreeId && !sessionId) _rememberNonRepo(projectId, empty);
+			if (!worktreeId && !_branchSessions.has(sessionId ?? '')) _rememberNonRepo(projectId, empty);
 			_lastPrStateFetch.delete(key);
 		}
 	} catch (e) {
@@ -880,6 +885,10 @@ export const git = {
 		sessionId?: string | null,
 		branchHint?: string | null
 	) {
+		if (sessionId) {
+			if (branchHint) _branchSessions.add(sessionId);
+			else _branchSessions.delete(sessionId);
+		}
 		const scope = _scopeKey(projectId, worktreeId ?? undefined, sessionId ?? undefined);
 		// A caller that already knows the session's branch (the host has it on the
 		// session row) resolves the checkout identity in the same frame, so the
@@ -888,7 +897,7 @@ export const git = {
 		const key = branchHint ? _learnIdentity(scope, projectId, branchHint) : _identityFor(scope);
 		_loadedScope = scope;
 		_loadedKey = key;
-		const cached = _cache.get(key) ?? (!worktreeId && !sessionId ? _nonRepoProjects.get(projectId) : undefined);
+		const cached = _cache.get(key) ?? (!worktreeId && !_branchSessions.has(sessionId ?? '') ? _nonRepoProjects.get(projectId) : undefined);
 		// untrack: this runs synchronously inside component $effects (the session
 		// switch effect in MainPanel). Reading _state tracked there while _set
 		// replaces it would make that effect re-trigger itself forever
@@ -1038,12 +1047,15 @@ export const git = {
 				return;
 			}
 			_learnIdentity(scope, projectId, status.current_branch);
+			if (!status.is_git_repo && (_state.worktreeId || _branchSessions.has(_state.sessionId ?? ''))) {
+				throw new Error('Git checkout is unavailable. Check again.');
+			}
 			if (!status.is_git_repo) {
 				const empty = { ..._cacheableSlice(EMPTY_STATE), status };
 				_claimSeq('diffStats', 'branches', 'prState', 'changedFiles', 'commits', 'worktrees');
 				_update((s) => ({ ...s, ...empty, hydrated: true, stale: false, error: null }));
 				_saveToCache(key, empty);
-				if (!_state.worktreeId && !_state.sessionId) _rememberNonRepo(projectId, empty);
+				if (!_state.worktreeId && !_branchSessions.has(_state.sessionId ?? '')) _rememberNonRepo(projectId, empty);
 				_lastPrStateFetch.delete(key);
 				return;
 			}
@@ -1629,6 +1641,7 @@ export const git = {
 		_loadedScope = null;
 		_cache.clear();
 		_nonRepoProjects.clear();
+		_branchSessions.clear();
 		_scopeAlias.clear();
 		_lastPrStateFetch.clear();
 		_appliedSeq.clear();

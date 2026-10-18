@@ -72,7 +72,6 @@
 		onClickCreatePR: (opts?: CreatePROptions) => void;
 		onClickPush: (opts?: PushOptions) => void;
 		onClickPull: (opts?: PullOptions) => void;
-		onClickInitRepo?: () => void;
 		/** Are the GitHub-backed actions usable? The header itself no longer
 		 *  requires GitHub auth (local git must work without it), so this gates
 		 *  ONLY the gh-dependent actions — Create PR / Ship It. Pass the
@@ -92,7 +91,7 @@
 		compact?: boolean;
 	}
 
-	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, showChatExports = false, compact = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickShipIt, onOpenDiffReview, showChatExports = false, compact = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -113,7 +112,8 @@
 	const snapshotPending = $derived(!snapshot.hydrated);
 	// A confirmed plain folder is not a broken repository. Keep the component
 	// mounted for refreshes, but render no git surface (including Retry / Init).
-	const repositoryAbsent = $derived(snapshot.hydrated && snapshot.status?.is_git_repo === false);
+	const repositoryAbsent = $derived(!error && !worktreeBranch && $gitMode !== 'worktree'
+		&& snapshot.hydrated && snapshot.status?.is_git_repo === false);
 	// The mutating actions are ALSO disabled while the snapshot is still
 	// resolving for this context: what's rendered is the previous coherent
 	// action, greyed out, so the user can't fire it against state we haven't

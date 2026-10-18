@@ -208,7 +208,6 @@ function baseHandlers() {
 		onClickPush: vi.fn(),
 		onClickPull: vi.fn(),
 		onClickShipIt: vi.fn(),
-		onClickInitRepo: vi.fn(),
 		onOpenDiffReview: vi.fn()
 	};
 }
@@ -510,13 +509,15 @@ describe('GitHeaderActions untracked-only changes', () => {
 // ── Row visibility matrix inside the panel ──────────────────────────────────
 
 describe('GitHeaderActions panel rows', () => {
-	it.each(['branch', 'mode'])('hides git for a confirmed non-repository even with old %s metadata', source => {
+	it.each(['branch', 'mode'])('keeps unavailable Git and Check again for a bound %s checkout', async source => {
 		setSnapshot({ status: { is_git_repo: false } });
 		if (source === 'mode') mocks.gitMode.set('worktree');
-		const { container } = renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
-		expect(container.querySelector('.git-actions')).toBeNull();
-		expect(queryPanel()).toBeNull();
-		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
+		renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
+		expect(trigger().textContent).toContain('unavailable');
+		await openPanel();
+		await fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+		expect(mocks.retryLoad).toHaveBeenCalledOnce();
+		expect(screen.queryByText('Init Repo')).toBeNull();
 	});
 
 	it('names the branch while a placeholder from a non-repository session revalidates', () => {
@@ -530,9 +531,9 @@ describe('GitHeaderActions panel rows', () => {
 		expect(screen.queryByText('Init Repo')).toBeNull();
 	});
 
-	it('hides an open git panel for a non-repository, then restores controls after initialization', async () => {
+	it('hides an open git panel for an unbound non-repository, then restores controls after initialization', async () => {
 		dirtyFeatureBranch();
-		const { rerender } = renderHeader({ worktreeBranch: 'feature/x' });
+		const { rerender } = renderHeader({ worktreeBranch: null });
 		await openPanel();
 		expect(row('Commit').disabled).toBe(false);
 
@@ -554,9 +555,15 @@ describe('GitHeaderActions panel rows', () => {
 		expect(row('Commit').disabled).toBe(false);
 	});
 
-	it.each([false, true])('hides every header control and a stale error for a plain folder (compact=%s)', compact => {
+	it('does not conceal a failed revalidation behind earlier plain-folder status', () => {
 		setSnapshot({ status: { is_git_repo: false } });
-		const { container } = renderHeader({ compact, isGitRepo: false, error: 'Earlier branch lookup failed' });
+		renderHeader({ isGitRepo: false, error: 'Git checkout is unavailable. Check again.' });
+		expect(screen.getByRole('button', { name: 'Git unavailable · Retry' })).toBeTruthy();
+	});
+
+	it.each([false, true])('hides every header control for a confirmed plain folder (compact=%s)', compact => {
+		setSnapshot({ status: { is_git_repo: false } });
+		const { container } = renderHeader({ compact, isGitRepo: false });
 		expect(container.querySelector('.git-actions')).toBeNull();
 		expect(screen.queryByText('Init Repo')).toBeNull();
 		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();

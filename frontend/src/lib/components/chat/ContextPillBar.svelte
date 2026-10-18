@@ -93,7 +93,7 @@
 
 	// Only use a confirmed status for this composer; cache-miss placeholders
 	// can still describe the project the user just left.
-	const isGitRepo = $derived(!($git.hydrated
+	const isGitRepo = $derived(!(!$activeSession.worktreeId && !$activeSession.worktreeBranch && !$git.error && $git.hydrated
 		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
 		&& $git.sessionId === $activeSession.sessionId
 		&& $git.worktreeId === $activeSession.worktreeId

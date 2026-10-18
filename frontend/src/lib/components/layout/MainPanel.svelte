@@ -98,7 +98,6 @@
 		ChangedFilesPanelLazy,
 		TerminalSidePanel,
 		PhoneSidePanel,
-		InitRepoModalLazy,
 		type FeaturePanelKey
 	} from '$lib/components/deck/lazy/panels';
 
@@ -225,9 +224,6 @@
 		};
 	});
 
-	// Git dialogs mount on first use.
-	let initRepoEverOpened = $state(false);
-
 	// Get the active session state (if the conversation panel is open)
 	const activeTab = $derived(
 		$activeView?.type === 'session' ? $activeSession : null
@@ -303,9 +299,6 @@
 	// =========================================================================
 
 
-	// Init repo modal state
-	let showInitRepoModal = $state(false);
-
 	// Visibility is scoped, so switching sessions cannot show another checkout's diff.
 	function openDiffPanel() {
 		sidePanel.open(panelScope, 'changes');
@@ -318,10 +311,6 @@
 	function closeSidePanel() {
 		if (activeSidePanel.active === 'browser') browserPanel.closePanel(activeTab?.sessionId ?? null);
 		else sidePanel.close(panelScope);
-	}
-
-	function handleRepoInitialized() {
-		if (activeProject) git.loadRepository(activeProject, true, activeSessionId ?? undefined);
 	}
 
 	// PR lifecycle for the active session's branch. Fetched by the git store's
@@ -1001,7 +990,6 @@
 				onClickCreatePR={handleCreatePR}
 				onClickPush={handlePush}
 				onClickPull={handlePull}
-				onClickInitRepo={() => { initRepoEverOpened = true; showInitRepoModal = true; }}
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
 				showChatExports={!header}
@@ -1117,7 +1105,7 @@
 			</div>
 		{/if}
 		</div>
-		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && $git.hydrated && $gitStatus?.is_git_repo === false)}
+		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && !activeWorktreeId && !activeWorktreeBranch && !$git.error && $git.hydrated && $gitStatus?.is_git_repo === false)}
 			<SessionSidePanel active={activeSidePanel.active} expanded={activeSidePanel.expanded}
 				width={browserPanel.current.width} mobile={panelOverlay}
 				onClose={closeSidePanel}
@@ -1147,28 +1135,6 @@
 </div>
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
-<!--
-	Local-git surfaces: gated on a project, NOT on GitHub auth. A transient
-	`gh auth status` failure must not unmount an open diff review (G10c).
--->
-{#if activeProject}
-	{#if initRepoEverOpened}
-		<LazyPanel
-			handle={InitRepoModalLazy}
-			label="the init-repo dialog"
-			bare
-			props={{
-				open: showInitRepoModal,
-				projectId: activeProject,
-				projectName: headerProjectName ?? '',
-				onClose: () => (showInitRepoModal = false),
-				sessionId: activeSessionId ?? undefined,
-				onInitialized: handleRepoInitialized
-			}}
-		/>
-	{/if}
-{/if}
-
 <style>
 	.assistant-surface { height:100%; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }

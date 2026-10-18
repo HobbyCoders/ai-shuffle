@@ -149,6 +149,51 @@ def test_worker_mutations_keep_refusing_plain_folder(plain_project, action, body
     assert list(folder.iterdir()) == []
 
 
+def test_real_discovery_ceiling_ignores_repository_above_it(plain_project, monkeypatch):
+    project, folder, client = plain_project
+    git_at(folder.parent, "init", "-b", "main")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(folder.parent))
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    assert response.status_code == 200, response.text
+    assert response.json()["is_git_repo"] is False
+
+
+def test_exec_only_ancestor_does_not_make_readable_project_unavailable(plain_project):
+    project, folder, client = plain_project
+    parent = folder.parent
+    previous = parent.stat().st_mode
+    parent.chmod(0o311)
+    try:
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+        assert response.status_code == 200, response.text
+        assert response.json()["is_git_repo"] is False
+    finally:
+        parent.chmod(previous)
+
+
+@pytest.mark.parametrize("state", ["plain", "missing", "unreadable-git"])
+def test_existing_session_status_only_confirms_readable_plain_folder(plain_project, state):
+    from app.db import database
+    project, folder, client = plain_project
+    session_id = f"plain-chat-{state}"
+    database.create_session(session_id, "default", project_v2_id=project["id"])
+    if state == "missing":
+        folder.rmdir()
+    elif state == "unreadable-git":
+        git_at(folder, "init", "-b", "main")
+        (folder / ".git").chmod(0)
+    try:
+        response = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
+        assert response.status_code == (200 if state == "plain" else 503), response.text
+        if state == "plain":
+            assert response.json()["is_git_repo"] is False
+        else:
+            assert "unavailable" in response.json()["detail"].lower()
+    finally:
+        if state == "unreadable-git":
+            (folder / ".git").chmod(0o700)
+
+
 @pytest.mark.parametrize("new_branch", [False, True])
 async def test_worktree_creation_refused_before_side_effects(plain_project, monkeypatch, new_branch):
     from app.api import sessions_worktree
