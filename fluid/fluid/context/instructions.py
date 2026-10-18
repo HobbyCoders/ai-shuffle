@@ -278,6 +278,33 @@ def _agents_names_for(directory: Path) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _global_fluid_path(*parts: str) -> Path | None:
+    """Resolve a user-scope path without making HOME a project-walk boundary."""
+    try:
+        path = (Path.home() / ".fluid").joinpath(*parts)
+        path.resolve()  # Validate resolution, but preserve provenance spelling.
+        return path
+    except (OSError, RuntimeError):
+        return None
+
+
+def is_global_instruction_path(path: str | os.PathLike[str]) -> bool:
+    """The global file cannot also enter through project or nested discovery.
+
+    AGENTS.local.md remains a project file: global discovery loads only AGENTS.md.
+    """
+    global_path = _global_fluid_path("AGENTS.md")
+    return global_path is not None and Path(path).resolve() == global_path.resolve()
+
+
+def _project_roots(cwd: str | os.PathLike[str], kind: str) -> list[Path]:
+    """Keep the full project walk, except roots reserved for the user scope."""
+    global_root = _global_fluid_path(kind)
+    return [root for directory in _walk_up_dirs(Path(cwd))
+            for root in (directory / ".agents" / kind, directory / ".fluid" / kind)
+            if global_root is None or root.resolve() != global_root.resolve()]
+
+
 def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
     """Discover Fluid-native instruction files under ``directory``.
 
@@ -292,7 +319,7 @@ def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
     found: list[InstructionFile] = []
     for rel in _agents_names_for(directory):
         p = directory / rel
-        if p.is_file():
+        if p.is_file() and not is_global_instruction_path(p):
             content = screen(expand_imports(_read(p), p), str(p))
             found.append(
                 InstructionFile(
@@ -313,17 +340,13 @@ def _git_root(cwd: Path) -> Path | None:
 
 
 def _walk_up_dirs(cwd: Path) -> list[Path]:
-    """Project directories, least-specific first, bounded by git root or home.
-
-    Home itself is excluded: its .fluid tree belongs only to the user scope,
-    even for non-git projects (or a repository rooted at home).
-    """
+    """Directories from the outermost boundary (git root, else fs root) down to
+    ``cwd`` — so blocks end up ordered least-specific → most-specific."""
     cwd = cwd.resolve()
-    home = Path.home().resolve()
     root = _git_root(cwd) or Path(cwd.anchor or "/")
     chain: list[Path] = []
     d = cwd
-    while d != home:
+    while True:
         chain.append(d)
         if d == root or d.parent == d:
             break
@@ -343,8 +366,8 @@ def discover_global_instruction_files() -> list[InstructionFile]:
     """
     from fluid.context.screening import screen
 
-    path = Path.home() / ".fluid" / "AGENTS.md"
-    if not path.is_file():
+    path = _global_fluid_path("AGENTS.md")
+    if path is None or not path.is_file():
         return []
     content = screen(expand_imports(_read(path), path), str(path))
     return [
@@ -637,13 +660,9 @@ def skill_search_roots(
     """
     roots: list[tuple[Path, str]] = []
     if include_project:
-        for directory in _walk_up_dirs(Path(cwd)):
-            roots.extend((
-                (directory / ".agents" / "skills", "project"),
-                (directory / ".fluid" / "skills", "project"),
-            ))
-    if include_global:
-        roots.append((Path.home() / ".fluid" / "skills", "global"))
+        roots.extend((root, "project") for root in _project_roots(cwd, "skills"))
+    if include_global and (global_root := _global_fluid_path("skills")) is not None:
+        roots.append((global_root, "global"))
     if include_builtin:
         roots.append((builtin_skills_dir(), "builtin"))
     return roots
@@ -711,11 +730,10 @@ def discover_commands(
     """
     by_name: dict[str, Command] = {}
     if include_project:
-        for directory in _walk_up_dirs(Path(cwd)):
-            by_name.update(_commands_in(directory / ".agents" / "commands", "project"))
-            by_name.update(_commands_in(directory / ".fluid" / "commands", "project"))
-    if include_global:
-        for name, cmd in _commands_in(Path.home() / ".fluid" / "commands", "global").items():
+        for root in _project_roots(cwd, "commands"):
+            by_name.update(_commands_in(root, "project"))
+    if include_global and (global_root := _global_fluid_path("commands")) is not None:
+        for name, cmd in _commands_in(global_root, "global").items():
             by_name.setdefault(name, cmd)
     out = [by_name[name] for name in sorted(by_name)]
     if include_plugins:

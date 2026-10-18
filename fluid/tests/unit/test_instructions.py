@@ -36,7 +36,8 @@ def _set_home(monkeypatch, home) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(Path(home) / ".config"))
 
 
-def test_home_is_only_global_for_non_git_project(tmp_path, monkeypatch) -> None:
+def test_home_fluid_is_global_without_removing_home_project_files(tmp_path, monkeypatch) -> None:
+    from fluid.context.agents import discover_agents
     from fluid.context.instructions import skill_search_roots
 
     home = tmp_path / "home"
@@ -47,49 +48,116 @@ def test_home_is_only_global_for_non_git_project(tmp_path, monkeypatch) -> None:
     global_dir.mkdir()
     global_file = global_dir / "AGENTS.md"
     global_file.write_text("Global-only guidance.", encoding="utf-8")
-    skill = global_dir / "skills" / "example"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text(
-        "---\nname: example\ndescription: Global example.\n---\nbody", encoding="utf-8",
-    )
+    relatives = ["AGENTS.md", "AGENTS.local.md", "AGENT.md", ".fluid/AGENTS.local.md",
+                 ".agents/AGENTS.md"]
+    for rel in relatives:
+        path = home / rel
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f"Project guidance: {rel}", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("Above home.", encoding="utf-8")
     (home / "projects" / "AGENTS.md").write_text("Outer project.", encoding="utf-8")
-    # Even ancestors ABOVE home cannot contribute project instructions.
-    (tmp_path / "AGENTS.md").write_text("Outside home.", encoding="utf-8")
+    for base, name in [(global_dir, "global-example"), (home / ".agents", "home-example")]:
+        skill = base / "skills" / name / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(f"---\nname: {name}\ndescription: Example.\n---\nbody", encoding="utf-8")
+        command = base / "commands" / f"{name}.md"
+        command.parent.mkdir(parents=True)
+        command.write_text("command", encoding="utf-8")
+        agent = base / "agents" / f"{name}.md"
+        agent.parent.mkdir(parents=True)
+        agent.write_text(f"---\nname: {name}\ndescription: Example.\n---\nbody", encoding="utf-8")
 
-    files = discover_instruction_files(cwd)
-    assert [(f.path, f.scope) for f in files if f.path == str(global_file)] == [
-        (str(global_file), "global"),
-    ]
-    stack = build_instruction_stack(cwd)
-    assert stack.count("Global-only guidance.") == 1
-    assert "byte-identical" not in stack
-    assert "Outer project." in stack
-    assert "Outside home." not in stack
-    assert [(p, s) for p, s in skill_search_roots(cwd) if p == global_dir / "skills"] == [
-        (global_dir / "skills", "global"),
-    ]
-    assert [(s.name, s.scope) for s in discover_skills(cwd, include_builtin=False)] == [
-        ("example", "global"),
-    ]
-    assert discover_skills(cwd, include_global=False, include_builtin=False) == []
-    assert all(f.path != str(global_file) for f in discover_instruction_files(cwd, include_global=False))
-    assert [(f.path, f.scope) for f in discover_instruction_files(home)] == [(str(global_file), "global")]
-    # A git marker at home must not turn its user tree into project settings.
+    for directory in (cwd, home):
+        files = discover_instruction_files(directory)
+        assert [(f.path, f.scope) for f in files if f.path == str(global_file)] == [
+            (str(global_file), "global"),
+        ]
+        assert {str(home / rel) for rel in relatives} <= {f.path for f in files if f.scope == "project"}
+        stack = build_instruction_stack(directory)
+        assert stack.count("Global-only guidance.") == 1
+        assert "byte-identical" not in stack
+        assert "Above home." in stack
+        assert [(p, s) for p, s in skill_search_roots(directory) if p == global_dir / "skills"] == [
+            (global_dir / "skills", "global"),
+        ]
+        for discover in (discover_skills, discover_commands, discover_agents):
+            found = {s.name: s.scope for s in discover(directory)}
+            assert found["global-example"] == "global"
+            assert found["home-example"] == "project"
+            assert "global-example" not in {s.name for s in discover(directory, include_global=False)}
+        assert all(f.path != str(global_file) for f in discover_instruction_files(directory, include_global=False))
+    assert "Outer project." in build_instruction_stack(cwd)
     (home / ".git").mkdir()
-    assert [(f.path, f.scope) for f in discover_instruction_files(cwd)] == [
-        (f.path, f.scope) for f in files
-    ]
+    files = discover_instruction_files(cwd)
+    assert str(tmp_path / "AGENTS.md") not in {f.path for f in files}
+    assert {str(home / rel) for rel in relatives} <= {f.path for f in files}
+    assert [(f.path, f.scope) for f in files if f.path == str(global_file)] == [(str(global_file), "global")]
 
 
-def test_home_discovery_prefix_budget(monkeypatch) -> None:
-    from scripts.measure_home_discovery import measure
+def test_global_paths_are_deduped_through_project_symlinks(tmp_path, monkeypatch, requires_symlinks) -> None:
+    from fluid.context.agents import discover_agents
+    from fluid.context.instructions import skill_search_roots
 
-    result = measure()
-    # Synthetic fixture: 405 chars / 100 estimated tokens, with a small allowance.
-    assert result["total_chars"] <= 425
-    assert result["estimated_tokens"] <= 106
-    assert result["instruction_scopes"] == ["global"]
-    assert result["home_skill_scopes"] == ["global"]
+    home = tmp_path / "home"
+    global_dir = home / ".fluid"
+    global_dir.mkdir(parents=True)
+    _set_home(monkeypatch, home)
+    (global_dir / "AGENTS.md").write_text("Global guidance.", encoding="utf-8")
+    skill = global_dir / "skills" / "example" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: example\ndescription: Example.\n---\nbody", encoding="utf-8")
+    for kind in ("agents", "commands"):
+        path = global_dir / kind / "example.md"
+        path.parent.mkdir()
+        path.write_text("---\nname: example\ndescription: Example.\n---\nbody", encoding="utf-8")
+    project = _mk_project(tmp_path / "project")
+    (project / ".fluid").symlink_to(global_dir, target_is_directory=True)
+    (project / ".agents").symlink_to(global_dir, target_is_directory=True)
+    files = discover_instruction_files(project)
+    assert [(f.path, f.scope) for f in files] == [(str(global_dir / "AGENTS.md"), "global")]
+    assert [(p, scope) for p, scope in skill_search_roots(project)
+            if p.resolve() == (global_dir / "skills").resolve()] == [(global_dir / "skills", "global")]
+    for discover in (discover_skills, discover_commands, discover_agents):
+        assert [(item.name, item.scope) for item in discover(project) if item.name == "example"] == [("example", "global")]
+        assert "example" not in {item.name for item in discover(project, include_global=False)}
+
+
+def test_discovery_without_resolvable_home(tmp_path, monkeypatch) -> None:
+    from fluid.context.agents import discover_agents
+    from fluid.context.instructions import skill_search_roots
+
+    def unavailable(cls):
+        raise RuntimeError("No home for this account")
+
+    monkeypatch.setattr(Path, "home", classmethod(unavailable))
+    project = _mk_project(tmp_path)
+    (project / "AGENTS.md").write_text("Project still loads.", encoding="utf-8")
+    assert "Project still loads." in build_instruction_stack(project)
+    assert all(scope != "global" for _, scope in skill_search_roots(project))
+    assert discover_commands(project) == []
+    assert discover_agents(project) == []
+
+
+def test_home_discovery_prefix_budget(tmp_path, monkeypatch) -> None:
+    from fluid.context.compiler import PromptInputs, compile_prompt
+    from fluid.context.trim import estimate_tokens_of_text
+
+    home = tmp_path / "home"
+    cwd = home / "projects" / "foo"
+    cwd.mkdir(parents=True)
+    _set_home(monkeypatch, home)
+    config = home / ".fluid"
+    config.mkdir()
+    (config / "AGENTS.md").write_text("Keep every safety rule.\n", encoding="utf-8")
+    skill = config / "skills" / "example" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: example\ndescription: Example global skill.\n---\nDeferred body.\n", encoding="utf-8")
+    prompt = compile_prompt(PromptInputs(cwd=cwd, include_env=False, include_agents=False, include_plugins=False))
+    sections = [s.text.replace(str(home), "/tmp/h") for s in prompt.sections if s.kind in ("memory", "skills")]
+    # Same synthetic fixture as the script, independently usable from fluid/.
+    assert sum(map(len, sections)) <= 425  # measured 405 chars, with an allowance
+    assert sum(map(estimate_tokens_of_text, sections)) <= 106
+    assert [s.scope for s in prompt.sections if s.kind == "memory"] == ["global"]
 
 
 def test_claude_instructions_are_inert_until_imported(tmp_path) -> None:

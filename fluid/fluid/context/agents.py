@@ -24,9 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from fluid.context.instructions import (
+    _global_fluid_path,
+    _project_roots,
     _read_opt,
     _unquote,
-    _walk_up_dirs,
     parse_frontmatter,
 )
 
@@ -183,16 +184,11 @@ def discover_agents(
     """
     by_name: dict[str, AgentDefinition] = {}
     if include_project:
-        for directory in _walk_up_dirs(Path(cwd)):
-            # Nearest-wins: the walk is outermost → cwd, so the inner
-            # directory's entry replaces the outer one's under the same key —
-            # and ``.fluid`` is applied after ``.agents`` so it wins in-place.
-            by_name.update(_agents_in(directory / ".agents" / "agents", "project"))
-            by_name.update(_agents_in(directory / ".fluid" / "agents", "project"))
-    if include_global:
-        for name, definition in _agents_in(
-            Path.home() / ".fluid" / "agents", "global"
-        ).items():
+        for root in _project_roots(cwd, "agents"):
+            # Nearest project wins, but the home .fluid root is global only.
+            by_name.update(_agents_in(root, "project"))
+    if include_global and (global_root := _global_fluid_path("agents")) is not None:
+        for name, definition in _agents_in(global_root, "global").items():
             by_name.setdefault(name, definition)
     if include_plugins:
         if plugins is None:

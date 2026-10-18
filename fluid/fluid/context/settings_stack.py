@@ -108,7 +108,8 @@ def project_dirs(cwd: Path | str | os.PathLike[str]) -> list[Path]:
     would treat every ancestor (the home directory among them, so ``~/.fluid``
     twice: once as the user scope, once as a "project") as project config.
     The home directory is left out in both cases. Instruction files keep
-    their own, wider walk (:func:`_walk_up_dirs`).
+    their own, wider walk (:func:`_walk_up_dirs`); discovery excludes only
+    paths reserved for global instructions and user-scope catalogs.
     """
     resolved = Path(cwd).resolve()
     dirs = _walk_up_dirs(resolved) if _git_root(resolved) is not None else [resolved]

@@ -7,21 +7,46 @@ The other per-call sections and tools are unaffected by this discovery fix.
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import os
-from pathlib import Path
+import subprocess
+import sys
 import tempfile
-
-from fluid.context.compiler import PromptInputs, compile_prompt
-from fluid.context.instructions import discover_instruction_files, skill_search_roots
-from fluid.context.trim import estimate_tokens_of_text
+import types
+from pathlib import Path
 
 
-def measure():
+def load_discovery_revision(revision: str) -> None:
+    """Compare the same compiler/fixture against tracked discovery source only."""
+    repo = Path(__file__).resolve().parents[1]
+    for name in ("instructions", "agents"):
+        path = f"fluid/fluid/context/{name}.py"
+        source = subprocess.check_output(["git", "show", f"{revision}:{path}"], cwd=repo, text=True)
+        qualified = f"fluid.context.{name}"
+        module = types.ModuleType(qualified)
+        module.__file__ = str(repo / path)
+        sys.modules[qualified] = module
+        exec(compile(source, module.__file__, "exec"), module.__dict__)  # noqa: S102 — explicit tracked revision comparison
+
+
+def measure(outside: str | None = None):
+    from fluid.context.compiler import PromptInputs, compile_prompt
+    from fluid.context.instructions import (
+        discover_instruction_files,
+        skill_search_roots,
+    )
+    from fluid.context.trim import estimate_tokens_of_text
     with tempfile.TemporaryDirectory(prefix="fluid-home-budget-") as temp:
         home = Path(temp) / "home"
-        cwd = home / "projects" / "foo"
+        cwd = Path(temp) / "outside" if outside else home / "projects" / "foo"
         cwd.mkdir(parents=True)
+        home.mkdir(exist_ok=True)
+        if outside:
+            (cwd / "AGENTS.md").write_text("Outside project guidance.\n", encoding="utf-8")
+        if outside == "git":
+            (cwd / ".git").mkdir()
         config = home / ".fluid"
         config.mkdir()
         (config / "AGENTS.md").write_text("Keep every safety rule.\n", encoding="utf-8")
@@ -44,7 +69,10 @@ def measure():
             for section in sections:
                 text = section.pop("text")
                 section.update(chars=len(text), estimated_tokens=estimate_tokens_of_text(text))
+            normalized = (prompt.text or "").replace(str(home), "/tmp/h").replace(str(temp), "/tmp/fixture")
             return {
+                "compiled_sha256": hashlib.sha256(normalized.encode()).hexdigest(),
+                "compiled_chars": len(normalized),
                 "sections": sections,
                 "total_chars": sum(s["chars"] for s in sections),
                 "estimated_tokens": sum(s["estimated_tokens"] for s in sections),
@@ -61,4 +89,10 @@ def measure():
 
 
 if __name__ == "__main__":
-    print(json.dumps(measure(), indent=2))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--revision", help="load discovery modules from this git revision")
+    parser.add_argument("--outside", choices=("git", "non-git"), help="compare a cwd outside HOME")
+    args = parser.parse_args()
+    if args.revision:
+        load_discovery_revision(args.revision)
+    print(json.dumps(measure(args.outside), indent=2))
