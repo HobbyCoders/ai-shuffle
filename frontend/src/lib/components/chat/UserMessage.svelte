@@ -19,12 +19,14 @@
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — rewind fallback when uuid is absent
 		rewindEligible?: boolean;
 		streaming?: boolean;
-		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[]) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
+		notSent?: boolean;
+		notSentMessageId?: string | null;
 		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false, midTurn = false }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, fileCheckpointingEnabled = false, midTurn = false, notSent = false, notSentMessageId = null }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -41,6 +43,7 @@
 >
 	<div class="usercol">
 		<div class="bubble" title={formatMessageTime(timestamp)}>
+			{#if notSent}<div class="not-sent-label">Not sent (stopped)</div>{/if}
 			<div class="bubble-text" class:is-collapsed={collapsed}>{content}</div>
 			{#if collapsible}
 				<button
@@ -64,6 +67,7 @@
 				messageContent={content}
 				messageRole="user"
 				{messageUuid}
+				{notSentMessageId}
 				{userPromptOccurrence}
 				{rewindEligible}
 				{onRewindComplete}
@@ -75,6 +79,7 @@
 </div>
 
 <style>
+	.not-sent-label { font-weight: 600; margin-bottom: 0.5rem; }
 	.userrow {
 		display: flex;
 		justify-content: flex-end;

@@ -12,7 +12,7 @@ import asyncio
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Response, status, Request
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Depends, Query, Response, status, Request
 from pydantic import TypeAdapter
 
 from app.core.cli_sessions import (
@@ -1948,6 +1948,7 @@ async def resume_session(
 async def compact_session(
     request: Request,
     session_id: str,
+    body: Optional[dict] = Body(default=None),
     token: str = Depends(require_auth),
 ):
     """Compact this chat's context now: a ``/compact`` turn from the owner.
@@ -1955,39 +1956,44 @@ async def compact_session(
     Claude Code compacts with its own ``/compact``; a native chat runs the
     engine's own compaction (the ladder that runs near the limit). The chat
     shows "Context Compacted" only when it worked, else "Compaction failed"
-    with the reason. Refused with 409 while a turn runs or waits, 409 for an
-    archived chat, 400 for a chat that cannot compact (voice).
+    with the reason. With no follow-up, refused with 409 while a turn runs or
+    waits; 409 for an archived chat, 400 for a chat that cannot compact (voice).
+
+    Optional ``then_send`` is a normal WebSocket query payload. Both turns are
+    admitted atomically in order. The follow-up runs even if compaction fails,
+    on the original context; the compact turn retains its visible failure.
     """
     existing = await require_session(request, session_id)
     _refuse_archived(existing, "compact")
 
-    from app.core import limit_resume, turn_claim, turn_manager
+    from app.core import limit_resume
     from app.db import turns as turns_db
 
     leg = await run_sync(limit_resume.session_leg, existing)
     if leg not in limit_resume.COMPACTING_LEGS:
         raise HTTPException(status_code=400, detail="This chat cannot be compacted.")
-    if await run_sync(turns_db.session_has_unsettled_turns, session_id):
+    then_send = (body or {}).get("then_send")
+    if then_send is None and await run_sync(turns_db.session_has_unsettled_turns, session_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Wait for the current turn to finish, then compact.",
         )
-    payload: dict = {}
-    api_user = get_api_user_from_request(request)
-    if api_user:
-        payload["api_user_id"] = api_user["id"]
-    profile_id = existing.get("profile_id")
-    turn_id = await turn_manager.submit_async(
-        session_id,
-        "user",
-        prompt=limit_resume.COMPACT_PROMPT,
-        profile_id=None if profile_id == "claude-code" else profile_id,
-        project_id=existing.get("project_id"),
-        payload=payload or None,
-        no_kick=True,
+    from app.api.chat_query import submit_http_query
+
+    if then_send is not None and not isinstance(then_send, dict):
+        raise HTTPException(status_code=422, detail="then_send must be a chat query object")
+    if then_send is not None:
+        # Same wire shape as the composer's `query`, including upload_paths
+        # and overrides. The route id wins over any id inside the payload.
+        if not isinstance(then_send.get("prompt"), str):
+            raise HTTPException(status_code=422, detail="then_send.prompt must be a string")
+        result = await submit_http_query(request, session_id, then_send, compact_first=True)
+        return {"turn_id": result["compact_turn_id"], "session_id": session_id,
+                "queued_turn_id": result["turn_id"], **({"held": True} if result.get("held") else {})}
+    result = await submit_http_query(
+        request, session_id, {"prompt": limit_resume.COMPACT_PROMPT}, compact_first=False,
     )
-    await run_sync(turn_claim.notify_turns_changed, session_id)
-    return {"turn_id": turn_id, "session_id": session_id}
+    return {"turn_id": result["turn_id"], "session_id": session_id}
 
 
 @router.get("/{session_id}/cache-state")

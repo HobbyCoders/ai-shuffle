@@ -36,9 +36,14 @@ export function cancelLimitResume(sessionId: string, taskId?: string | null): Pr
 	return api.post(`/sessions/${encodeURIComponent(sessionId)}/limit-resume/cancel${query}`);
 }
 
-/** Compact a chat's context now (a `/compact` turn). 409 while a turn runs. */
-export function compactSession(sessionId: string): Promise<{ turn_id: string; session_id: string }> {
-	return api.post(`/sessions/${encodeURIComponent(sessionId)}/compact`);
+/** Compact now, optionally queueing the normal chat query as the next turn.
+ * The queued message still runs on the original context if compaction fails.
+ */
+export function compactSession(sessionId: string, thenSend?: Record<string, unknown>): Promise<{
+	turn_id: string | null; session_id: string; queued_turn_id?: string; held?: boolean;
+}> {
+	return api.post(`/sessions/${encodeURIComponent(sessionId)}/compact`,
+		thenSend ? { then_send: thenSend } : undefined);
 }
 
 /** API-price estimates for compaction plus one resumed call, not the whole turn. */

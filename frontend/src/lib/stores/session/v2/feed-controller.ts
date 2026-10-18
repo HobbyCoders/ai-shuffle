@@ -16,6 +16,7 @@
  * modules (session-switcher, ws-message-handlers) import the singleton directly.
  */
 
+import { clearCompactRetry } from '../compact-first-retry';
 import {
 	reduce,
 	parseWireEvent,
@@ -949,6 +950,7 @@ export const feedController: FeedController = {
 				// visibly rebuilding message by message.
 				if (caughtUp && sentinelPending) caughtUp = false;
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
+				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
 				// An empty log learns its epoch from this first row (sse-feed).
 				adoptLogEpoch();

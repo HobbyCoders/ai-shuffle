@@ -371,8 +371,10 @@ async def enter_user_stop(session_id: str) -> dict:
        second after the button. They are aborted here through the same guarded
        transition a dropped queue chip uses (``remove_queued_turn`` ->
        ``aborted``/``removed_from_queue``): the rows stay in history, a turn
-       that raced to live is left alone by the guard, and a message the user
-       still wants is one they re-send.
+       that raced to live is left alone by the guard. A compact-first follow-up
+       is preserved as a durable Not sent (stopped) transcript row with its
+       original words and attachments; it never auto-runs. Other queued messages
+       remain in turn history and must be re-sent if the user still wants them.
     4. **Stale parked rows.** With all background work dead, any ``parked`` turn
        is residue that would otherwise keep ``lifecycle_state`` reporting the
        session busy until some later turn's self-heal cleared it.
@@ -411,7 +413,9 @@ async def enter_user_stop(session_id: str) -> dict:
             turn_id = turn.get("id")
             if not turn_id:
                 continue
-            removed = await asyncio.to_thread(turns_db.remove_queued_turn, turn_id)
+            removed = await asyncio.to_thread(
+                turns_db.remove_queued_turn, turn_id, preserve_compact_first=True,
+            )
             if removed is not None:
                 queued_aborted += 1
     except Exception:  # noqa: BLE001

@@ -327,6 +327,11 @@ def _submit_blocking(
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
+    if command_id and (payload or {}).get("compact_first"):
+        from app.db import turns as turns_db
+        existing = turns_db.get_turn_by_command(session_id, command_id)
+        if existing is not None:
+            return existing["id"]
     from app.core import session_handoff
 
     # A move to another worker waits for this chat (#1819): the owner's

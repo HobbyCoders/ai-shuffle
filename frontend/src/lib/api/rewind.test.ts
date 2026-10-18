@@ -23,6 +23,11 @@ beforeEach(() => {
 });
 
 describe('executeRewind payload shape', () => {
+	it('restores an unsent row by durable id, never by transcript content', async () => {
+		await executeRewind('s1', '', false, 'user', false, null, null, 'unsent-id');
+		expect(apiPostMock.mock.calls[0][1]).toEqual({target_uuid:'', restore_chat:false, restore_files:false,
+			include_response:false, target_role:'user', target_not_sent_id:'unsent-id'});
+	});
 	it('uuid present → uuid payload, no content fields (existing callers unchanged)', async () => {
 		await executeRewind('sess-1', 'uuid-abc', true, 'assistant', false);
 

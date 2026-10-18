@@ -17,6 +17,7 @@ import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } 
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
 import { rateLimit } from '../rate-limit';
+import { clearCompactRetry } from './compact-first-retry';
 import { reportClientError } from '$lib/services/error-reporter';
 import { serverNotificationActions } from '$lib/services/error-actions';
 // The SSE-fed reducer store — the transcript authority for a session.
@@ -491,6 +492,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// clearing broadcast), so a pre-absorption snapshot can land last and
 				// resurrect an answered bubble. pendingQueue is what remembers.
 				const sid = state.sessionId;
+				if (sid) for (const row of rows) {
+					if (row.clientMessageId) clearCompactRetry(sid, row.clientMessageId);
+				}
 				pendingQueue.noteAuthoritative(sid, rows);
 				const reconciled = pendingQueue.reconcile(sid, rows);
 				const peers = (syncData?.pending_peer_messages ?? []) as Array<{

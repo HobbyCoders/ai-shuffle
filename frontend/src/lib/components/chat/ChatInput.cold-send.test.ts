@@ -55,15 +55,41 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-async function submit() {
+async function submit(withAttachment = false) {
 	const view = render(ChatInput);
 	const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
-	await waitFor(() => expect(editor.textContent).toBe(TEXT));
+	await waitFor(() => withAttachment
+		? expect(editor.querySelector('[data-file-chip]')).toBeTruthy()
+		: expect(editor.textContent).toBe(TEXT));
 	await fireEvent.submit(view.container.querySelector('form')!);
 	return { ...view, editor };
 }
 
 describe('cold send warning', () => {
+	it.each(['see @/uploads/proof.png please', ''])('restores and sends attachments exactly once: %s', async (prompt) => {
+		cache = { ...COLD, cold:false, warn:false };
+		activeSession.setDraft('');
+		const view = render(ChatInput);
+		activeSession.setPendingRestorePrompt(prompt, ['/uploads/proof.png']);
+		await waitFor(() => expect(view.container.querySelectorAll('[data-file-chip]')).toHaveLength(1));
+		expect(sends).not.toHaveBeenCalled();
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(prompt || '@/uploads/proof.png', {
+			pendingUploadPaths:['/uploads/proof.png']
+		}));
+	});
+	it('restores unsent words and file chips to the composer without sending', async () => {
+		activeSession.setDraft('');
+		const view = render(ChatInput);
+		activeSession.setPendingRestorePrompt('original words', ['/uploads/proof.png']);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(editor.textContent).toContain('original words'));
+		await waitFor(() => expect(editor.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(editor.textContent).toContain('proof.png');
+		expect(activeSession.current.pendingRestorePrompt).toBeNull();
+		expect(activeSession.current.pendingRestoreUploadPaths).toBeUndefined();
+		expect(sends).not.toHaveBeenCalled();
+	});
 	it('asks before a large cold send, and Send anyway sends and is remembered', async () => {
 		cache = { ...COLD, cost_comparison: {
 			model: 'claude-sonnet-5', cold_resume_usd: 1.69, compaction_usd: 1.73,
@@ -89,15 +115,60 @@ describe('cold send warning', () => {
 		expect(screen.queryByRole('button', { name: 'Send anyway' })).toBeNull();
 	});
 
-	it('Compact first runs the compaction and keeps the message', async () => {
+	it('Compact first submits the message for server-owned compaction and clears the composer', async () => {
 		cache = COLD;
 		const { editor } = await submit();
 		await waitFor(() => expect(screen.getByRole('button', { name: 'Compact first' })).toBeTruthy());
 		await fireEvent.click(screen.getByRole('button', { name: 'Compact first' }));
-		await waitFor(() => expect(calls.some((c) => c.startsWith('POST') && c.includes('/sessions/cold/compact'))).toBe(true));
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, {
+			compactFirst: true, pendingUploadPaths: undefined
+		}));
 		await waitFor(() => expect(screen.queryByRole('button', { name: 'Compact first' })).toBeNull());
-		expect(sends).not.toHaveBeenCalled();
-		expect(editor.textContent).toBe(TEXT);
+		expect(editor.textContent).toBe('');
+		expect(activeSession.current.draft).toBe('');
+	});
+
+	it('includes inline attachment paths in compact-and-send and clears the attachment chip', async () => {
+		cache = COLD;
+		activeSession.setDraft(JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [
+			{ type: 'text', text: TEXT + ' ' },
+			{ type: 'fileChip', attrs: { path: 'notes.txt', fullPath: '/uploads/notes.txt', filename: 'notes.txt', type: 'file' } }
+		] }] }));
+		const { editor } = await submit(true);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Compact first' }));
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT + ' @/uploads/notes.txt', {
+			compactFirst: true, pendingUploadPaths: ['/uploads/notes.txt']
+		}));
+		expect(editor.textContent).toBe('');
+	});
+
+	it('keeps a failed compact-and-send visible and allows retry', async () => {
+		cache = COLD;
+		sends.mockResolvedValueOnce(false);
+		const { editor } = await submit();
+		await fireEvent.click(await screen.findByRole('button', { name: 'Compact first' }));
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		await waitFor(() => expect(editor.textContent).toBe(TEXT));
+		expect(screen.getByRole('button', { name: 'Compact first' })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Compact first' }));
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+	});
+
+	it('does not send twice while compact-and-send is being accepted', async () => {
+		cache = COLD;
+		let accept!: (accepted: boolean) => void;
+		sends.mockImplementationOnce(() => new Promise<boolean>((resolve) => { accept = resolve; }));
+		const { editor, container } = await submit();
+		await fireEvent.click(await screen.findByRole('button', { name: 'Compact first' }));
+		await waitFor(() => expect(screen.getByText('Starting compaction. Queuing your message to send next…')).toBeTruthy());
+		expect(editor.textContent).toBe('');
+		expect(screen.queryByRole('button', { name: 'Send anyway' })).toBeNull();
+		expect(screen.getByRole('button', { name: 'Send' }).hasAttribute('disabled')).toBe(true);
+		await fireEvent.submit(container.querySelector('form')!);
+		expect(sends).toHaveBeenCalledOnce();
+		accept(true);
+		await waitFor(() => expect(screen.queryByText('Starting compaction. Queuing your message to send next…')).toBeNull());
 	});
 
 	it('sends at once when the cache is warm or the chat is small', async () => {

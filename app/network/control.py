@@ -320,7 +320,18 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
             body["uploads"] = await git.export_uploads(blob_ids)
         except ValueError as exc:
             raise ControlRefused(str(exc)) from exc
-    return await call(device_id, "turns", body)
+    compact_first = bool((payload or {}).get("compact_first"))
+    # A distinct action fails before admission on older peers. Sending the
+    # flag through their ordinary `turns` action would silently skip compact,
+    # admit the message, then leave this client unable to acknowledge it.
+    try:
+        return await call(device_id, "compact-first" if compact_first else "turns", body)
+    except ControlRefused as exc:
+        if compact_first and "Unknown control action" in str(exc):
+            raise ControlRefused(
+                "This worker needs an update to compact first. Send anyway or update the worker."
+            ) from exc
+        raise
 
 
 async def create_session(device_id: str, session: Dict[str, Any], turn: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -677,7 +688,10 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         existing = await run_sync(turns_db.get_turn_by_command, session_id, command_id)
         if existing is not None:
             # A resend after the first copy's reply was lost: it already ran or waits.
-            return {"turn_id": existing["id"], "session_id": session_id, "duplicate": True}
+            result = {"turn_id": existing["id"], "session_id": session_id, "duplicate": True}
+            if (existing.get("payload") or {}).get("compact_before_turn_id"):
+                result["compact_turn_id"] = existing["payload"]["compact_before_turn_id"]
+            return result
         return await _submit_forwarded_turn(body, from_device, command_id)
 
 
@@ -733,14 +747,21 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         # session's current mode.
         explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
         payload=payload or None, command_id=command_id)
-    if had_live:
+    if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
+        return {"turn_id": turn_id, "session_id": session_id,
+                "compact_turn_id": None, "held": True}
+    if had_live and not payload.get("compact_first"):
         # A message sent from another device while this worker's turn runs
         # gets the same mid-turn delivery as a local send: steered in at the
         # next tool boundary. Without this it sat "Not seen yet" until the turn
         # ended or the owner pressed Interrupt, which cancels the running tool.
         from app.core.session_runtime import try_steer_pending
         await try_steer_pending(session_id)
-    return {"turn_id": turn_id, "session_id": session_id}
+    result = {"turn_id": turn_id, "session_id": session_id}
+    if payload.get("compact_first"):
+        queued = await run_sync(turns_db.get_turn, turn_id)
+        result["compact_turn_id"] = queued["payload"]["compact_before_turn_id"]
+    return result
 
 
 async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
@@ -889,6 +910,7 @@ async def _hydrate(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
 
 _HANDLERS = {
     "turns": _turns,
+    "compact-first": _turns,
     "sessions": _sessions,
     "interrupt": _interrupt,
     "terminal-task-stop-state": _terminal_task_stop_state,

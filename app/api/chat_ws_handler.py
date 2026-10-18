@@ -1258,7 +1258,7 @@ class ChatWebSocketHandler:
         })
         return True
 
-    async def handle_query(self, data: dict) -> None:
+    async def handle_query(self, data: dict, *, compact_first: bool = False) -> Optional[dict]:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
@@ -1692,7 +1692,7 @@ class ChatWebSocketHandler:
         from app.core import session_handoff
 
         held_for_move = session_handoff.holds(session_id)
-        if not had_live and not held_for_move:
+        if not had_live and not held_for_move and not compact_first:
             try:
                 if not is_new_session:
                     _msg_role = "user"
@@ -1728,6 +1728,11 @@ class ChatWebSocketHandler:
                 )
 
         payload: Dict[str, Any] = {}
+        if compact_first:
+            payload["compact_first"] = True
+            payload["deferred_user_record"] = True
+            if upload_paths:
+                payload["upload_paths"] = upload_paths
         if request_id and is_new_session:
             payload["request_id"] = request_id
         if had_live or held_for_move:
@@ -1779,7 +1784,7 @@ class ChatWebSocketHandler:
             # submit_turn exports this send's lifted blobs; the owner imports
             # them before enqueuing so the prompt never names unavailable bytes.
             try:
-                await control.submit_turn(
+                submitted = await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
                     owner_send=True, command_id=client_message_id,
@@ -1791,7 +1796,7 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 return
             await self.send_json({"type": "query_queued", "session_id": session_id})
-            return
+            return submitted
 
         # ``submit`` performs up to three DB writes (run binding, wakeup
         # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
@@ -1810,16 +1815,27 @@ class ChatWebSocketHandler:
             no_kick=placed_remote,
         )
 
+        if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
+            await self._v2_broadcast_queue(session_id)
+            await self.send_json({"type": "query_queued", "session_id": session_id})
+            # No compact turn exists yet; the held request will admit both
+            # turns together after the move. Do not invent a compact turn id.
+            return {"turn_id": turn_id, "compact_turn_id": None, "held": True}
+
+        if compact_first:
+            # Never steer the follow-up into the compact turn. It is the next
+            # ordinary turn, even when compaction fails.
+            if placed_remote:
+                from app.core import turn_claim
+                await run_sync(turn_claim.notify_turns_changed, session_id)
+            await self._v2_broadcast_queue(session_id)
+            row = await run_sync(turns_db.get_turn, turn_id)
+            return {"turn_id": turn_id, "compact_turn_id": row["payload"]["compact_before_turn_id"]}
+
         logger.info(
             "steer enqueue session=%s row=%s client_id=%s at=%.6f",
             session_id, turn_id, client_message_id, time.time(),
         )
-        if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
-            # Held for the queued move: a pending bubble until it is sent.
-            await self._v2_broadcast_queue(session_id)
-            await self.send_json({"type": "query_queued", "session_id": session_id})
-            return
-
         if placed_remote:
             # Wake the owning runner's claim loop NOW (latency only — its 5s
             # poll is the correctness path), then ack exactly like a queued
@@ -1832,7 +1848,7 @@ class ChatWebSocketHandler:
             await self.send_json(
                 {"type": "query_queued", "session_id": session_id}
             )
-            return
+            return {"turn_id": turn_id}
 
         if had_live:
             # Queued behind the live turn: surface the pending bubble
@@ -1850,7 +1866,7 @@ class ChatWebSocketHandler:
             from app.core.session_runtime import try_steer_pending
 
             await try_steer_pending(session_id)
-        return
+        return {"turn_id": turn_id}
     # ------------------------------------------------------------------
     # handle_stop
     # ------------------------------------------------------------------

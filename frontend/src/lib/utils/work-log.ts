@@ -1289,7 +1289,7 @@ export function buildTranscriptModel(
 			if (realTurnId) promptTurnIds.add(realTurnId);
 			if (message.id) latestUserTurnId = message.id;
 		}
-		if (rewindEligible[index]) {
+		if (rewindEligible[index] && !message.metadata?.not_sent) {
 			const key = (message.content ?? '').trim();
 			const count = promptCounts.get(key) ?? 0;
 			promptOccurrence[index] = count;

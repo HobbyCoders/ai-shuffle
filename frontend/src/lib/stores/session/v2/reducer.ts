@@ -1553,7 +1553,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				timestamp: stamp || undefined,
 				...(turnId ? { turnId } : {}),
-				...(startsAgentTurn ? { metadata: { agent_wake: true } } : {}),
+				...((startsAgentTurn || event.not_sent) ? { metadata: {
+					...(startsAgentTurn ? { agent_wake: true } : {}),
+					...(event.not_sent ? { not_sent: true, not_sent_id: event.id } : {}),
+				} } : {}),
 				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
 				...(typeof event.checkpoint_backed === 'boolean' ? { checkpointBacked: event.checkpoint_backed } : {}),
@@ -2233,6 +2236,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── System messages ─────────────────────────────────────────────
 		case 'system.note': {
+			if (str(event.subtype) === 'unsent_restored') {
+				const id = str(obj(event.data)?.message_id);
+				return { ...state, messages: own(state.messages.filter(m =>
+					!(m.metadata?.not_sent && m.metadata?.not_sent_id === id))) };
+			}
 			if (str(event.subtype) === 'session_settled') {
 				const cutoff = typeof event.through_seq === 'number' ? event.through_seq : seq;
 				if (event.epoch == null || state.logEpoch == null || event.epoch === state.logEpoch) {

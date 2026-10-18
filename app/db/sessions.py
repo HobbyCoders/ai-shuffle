@@ -2027,7 +2027,7 @@ def is_user_message(role: str, metadata: Optional[Dict[str, Any]] = None) -> boo
     return role in ("user", "command") and metadata.get("source") not in {
         "agent_message", "wakeup", "unpark", "unpark_pump", "auto_continue",
         "promotion", "voice_system_note", "task_notification",
-    } and not metadata.get("agent_wake")
+    } and not metadata.get("agent_wake") and not metadata.get("not_sent")
 
 
 def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=None, *, seq=None):

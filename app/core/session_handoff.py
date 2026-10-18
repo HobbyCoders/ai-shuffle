@@ -264,6 +264,13 @@ def hold(session_id: str, source: str, submit: Dict[str, Any]) -> Optional[str]:
     with _hold_lock:
         if not holds(session_id):
             return None
+        # Retrying a compact-first request with a lost acknowledgement must
+        # find the held message too, not just turns already admitted to the DB.
+        if submit.get("command_id") and (submit.get("payload") or {}).get("compact_first"):
+            existing = next((entry for entry in held_view(session_id)
+                             if entry.get("command_id") == submit["command_id"]), None)
+            if existing:
+                return existing["id"]
         held_id = HELD_PREFIX + uuid.uuid4().hex
         entry = {"id": held_id, "source": source, "held_at": time.time(),
                  **{key: value for key, value in submit.items() if value is not None}}

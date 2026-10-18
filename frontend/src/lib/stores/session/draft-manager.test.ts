@@ -33,12 +33,21 @@ describe('draft manager — ephemeral state', () => {
 		const h = harness();
 		h.dm.setDraft('hello');
 		h.dm.setScrollTop(420);
-		h.dm.setPendingRestorePrompt('retry this');
+		h.dm.setPendingRestorePrompt('retry this', ['/uploads/proof.png']);
+		expect(h.state.pendingRestoreUploadPaths).toEqual(['/uploads/proof.png']);
 		expect(h.state).toMatchObject({ draft: 'hello', scrollTop: 420, pendingRestorePrompt: 'retry this' });
 		h.dm.clearPendingRestorePrompt();
 		expect(h.state.pendingRestorePrompt).toBeNull();
+		expect(h.state.pendingRestoreUploadPaths).toBeUndefined();
 	});
 
+	it('clears an attachments-only restore as well as its empty text', () => {
+		const h = harness();
+		h.dm.setPendingRestorePrompt('', ['/uploads/proof.png']);
+		h.dm.clearPendingRestorePrompt();
+		expect(h.state.pendingRestorePrompt).toBeNull();
+		expect(h.state.pendingRestoreUploadPaths).toBeUndefined();
+	});
 	it('clearing an absent restore prompt keeps the same state object', () => {
 		const h = harness();
 		const before = h.state;

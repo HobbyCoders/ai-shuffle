@@ -24,6 +24,12 @@ describe('UserMessage disclosure', () => {
 	});
 });
 
+it('renders the unsent label separately without changing the copyable content', () => {
+	const { container } = render(UserMessage, { props: { content: 'My original words', notSent: true } });
+	expect(screen.getByText('Not sent (stopped)')).toBeTruthy();
+	expect(container.querySelector('.bubble-text')?.textContent).toBe('My original words');
+});
+
 describe('UserMessage steer marker', () => {
 	it('marks a mid-turn message on its time line only', () => {
 		const timestamp = '2026-10-10T20:19:00.000Z';

@@ -41,6 +41,39 @@ export function extractAtMentionQuery(input: string): { query: string; atIndex: 
 	};
 }
 
+/** Restore serialized @path mentions as chips in place, preserving surrounding text. */
+export function restoreMessageDocument(text: string, uploadPaths: string[] = []): JSONContent {
+	const paths = [...new Set(uploadPaths.filter(Boolean))].sort((a, b) => b.length - a.length);
+	const found = new Set<string>();
+	const chip = (path: string): JSONContent => ({ type: 'fileChip', attrs: {
+		path, fullPath: path, filename: path.split(/[/\\]/).pop() || 'attachment', size: 0, type: 'file'
+	} });
+	const paragraphs = text.split('\n').map(line => {
+		const content: JSONContent[] = [];
+		let offset = 0;
+		while (offset < line.length) {
+			let at = -1;
+			let path = '';
+			for (const candidate of paths) {
+				const index = line.indexOf('@' + candidate, offset);
+				if (index !== -1 && (at === -1 || index < at)) { at = index; path = candidate; }
+			}
+			if (at === -1) { content.push({ type: 'text', text: line.slice(offset) }); break; }
+			if (at > offset) content.push({ type: 'text', text: line.slice(offset, at) });
+			content.push(chip(path));
+			found.add(path);
+			offset = at + path.length + 1;
+		}
+		return { type: 'paragraph', content };
+	});
+	const tail = paragraphs[paragraphs.length - 1].content;
+	for (const path of paths.filter(path => !found.has(path))) {
+		if (tail.length) tail.push({ type: 'text', text: ' ' });
+		tail.push(chip(path));
+	}
+	return { type: 'doc', content: paragraphs };
+}
+
 /**
  * Serialize editor content to plain text with @path references.
  *

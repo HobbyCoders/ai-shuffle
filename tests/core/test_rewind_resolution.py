@@ -404,6 +404,7 @@ async def test_execute_rewind_appends_transcript_rewound(rewind_env, monkeypatch
         _user_ev("first", uuid="u-1"),
         _asst_ev("reply one"),
         _user_ev("second", uuid="u-2"),
+        {"type": "message.user", "payload": {"content": "second", "not_sent": True}},
     ])
     _patch_checkpoints(monkeypatch, [])
 
@@ -418,6 +419,7 @@ async def test_execute_rewind_appends_transcript_rewound(rewind_env, monkeypatch
     assert rows[-1]["event_type"] == "transcript.rewound"
     assert rows[-1]["payload"]["from_seq"] == 3
     assert rows[-1]["run_id"] is None  # unfenced
+    assert all(not r["payload"].get("not_sent") for r in _load_message_events(SID))
 
 
 async def test_full_rewind_clears_sdk_session_pointer(rewind_env, monkeypatch):

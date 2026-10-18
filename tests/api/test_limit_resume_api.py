@@ -93,7 +93,7 @@ def session_row():
 
 @pytest.fixture
 def submit_seam():
-    with patch("app.core.turn_manager.submit_async", new=AsyncMock(return_value="turn-c")) as submit, \
+    with patch("app.api.chat_query.submit_http_query", new=AsyncMock(return_value={"turn_id": "turn-c"})) as submit, \
             patch("app.core.turn_claim.notify_turns_changed") as notify:
         yield submit, notify
 
@@ -108,9 +108,8 @@ def test_compact_now_submits_a_compact_turn(
         r = client.post("/api/v1/sessions/s1/compact")
     assert r.status_code == 200, r.text
     submit, notify = submit_seam
-    assert submit.call_args.args == ("s1", "user")
-    assert submit.call_args.kwargs["prompt"] == "/compact"
-    notify.assert_called_once_with("s1")
+    assert submit.call_args.args[1:] == ("s1", {"prompt": "/compact"})
+    assert submit.call_args.kwargs == {"compact_first": False}
 
 
 def test_compact_now_is_refused_while_a_turn_runs(

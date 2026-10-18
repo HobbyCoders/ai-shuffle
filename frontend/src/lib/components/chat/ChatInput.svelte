@@ -30,6 +30,7 @@
 	import { promptStash, type StashedPrompt } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
+	import { restoreMessageDocument } from './tiptap/serialization';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration } from '$lib/stores/session/session-init';
@@ -39,7 +40,7 @@
 	import { git } from '$lib/stores/git.svelte';
 
 	import { api, getErrorMessage, type FileUploadResponse } from '$lib/api/client';
-	import { cancelLimitResume, compactSession, getCacheState, type CacheState } from '$lib/api/limit-resume';
+	import { cancelLimitResume, getCacheState, type CacheState } from '$lib/api/limit-resume';
 	import { pausedChat, pausedLabel } from './limit-resume';
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify } from '$lib/stores/notifications';
@@ -218,7 +219,7 @@
 
 	function sendAnyway() {
 		const notice = coldNotice;
-		if (!notice) return;
+		if (!notice || compacting) return;
 		acknowledge(notice.sessionId, notice.tokens);
 		coldNotice = null;
 		coldCheckWaived = true;
@@ -230,11 +231,9 @@
 		if (!notice || compacting) return;
 		compacting = true;
 		try {
-			await compactSession(notice.sessionId);
-			coldNotice = null;
-			notify('Compacting this chat. Send your message when it finishes.', { severity: 'info' });
-		} catch (e) {
-			notify(getErrorMessage(e, 'Could not compact this chat.'), { severity: 'error' });
+			// The server owns both turns, so closing the tab cannot lose the
+			// follow-up. Reuse normal send clearing and failure restoration.
+			await handleSubmit(true);
 		} finally {
 			compacting = false;
 		}
@@ -313,7 +312,7 @@
 	let isUploading = $state(false);
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
-	const sendState = $derived(sendButtonState({
+	const availableSendState = $derived(sendButtonState({
 		hasContent: hasMessageContent,
 		hasCredential: $anyCredential,
 		isUploading,
@@ -321,6 +320,9 @@
 		isTranscribing,
 		autoBranch: $activeSession.worktreeIntent === 'worktree' && !$activeSession.worktreeId
 	}));
+	const sendState = $derived(compacting
+		? { ...availableSendState, disabled: true, title: 'Starting compaction…' }
+		: availableSendState);
 	let editorRef = $state<TiptapEditor | null>(null);
 	let prevSessionId = $state($activeSession.sessionId);
 
@@ -393,30 +395,15 @@
 	$effect(() => {
 		const pending = $activeSession.pendingRestorePrompt;
 		if (!ownsComposer()) return;
-		if (!pending) return;
+		const paths = $activeSession.pendingRestoreUploadPaths ?? [];
+		if (!pending && paths.length === 0) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
-		if (current.length === 0) {
-			inputValue = pending;
-			plainTextValue = pending;
-			editorRef?.setContent(pending);
-		} else {
-			setComposerDraft(joinDrafts(textDoc(pending), getDraftJSON()));
-		}
+		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths));
+		setComposerDraft(current.length === 0 ? restored : joinDrafts(restored, getDraftJSON()));
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
 	});
-
-	/** Plain text as a composer document, one paragraph per line. */
-	function textDoc(text: string): string {
-		return JSON.stringify({
-			type: 'doc',
-			content: text.split('\n').map(line => ({
-				type: 'paragraph',
-				...(line ? { content: [{ type: 'text', text: line }] } : {})
-			}))
-		});
-	}
 
 	/** Replace the composer's content and persist it at once. */
 	function setComposerDraft(draft: string) {
@@ -792,8 +779,8 @@
 	}
 
 	// Handle form submission
-	async function handleSubmit() {
-		if (!ownsComposer() || heldForCatalog) return;
+	async function handleSubmit(compactBeforeSend = false) {
+		if (!ownsComposer() || heldForCatalog || (compacting && !compactBeforeSend)) return;
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
 		}
@@ -821,7 +808,7 @@
 
 		// A large chat with a cold provider cache: ask first (#1831).
 		const sendingTo = $activeSession.sessionId;
-		if (sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
+		if (!compactBeforeSend && sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
 
 		// Append any legacy uploaded files (from file upload button) to the end
 		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
@@ -831,8 +818,8 @@
 			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
 		}
 
-		// Send the message
-		sendMessage(messageToSend);
+		// Send the message, optionally queued behind a server-owned compaction.
+		await sendMessage(messageToSend, compactBeforeSend);
 	}
 
 	/**
@@ -877,7 +864,7 @@
 	// turn still goes out, and the backend decides when the model sees it (mid-turn
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
-	async function sendMessage(finalPrompt: string) {
+	async function sendMessage(finalPrompt: string, compactBeforeSend = false) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
 		// remembered intent changes before the context bar's effect has flushed.
@@ -998,10 +985,13 @@
 		try {
 			const sent = await activeSession.sendMessage(
 				finalPrompt,
-				pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
+				compactBeforeSend || pendingPaths?.length
+					? { pendingUploadPaths: pendingPaths, ...(compactBeforeSend ? { compactFirst: true } : {}) }
+					: undefined,
 			);
 			if (sent === false) restoreOnFailure();
 			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
+				if (compactBeforeSend) coldNotice = null;
 				// A first send can adopt a new session id before it resolves (notably
 				// worktree creation). Only actual navigation retires its drawer close.
 				collapseMobileComposer();
@@ -1376,10 +1366,10 @@
 		{#if coldNotice && coldNotice.sessionId === $activeSession.sessionId}
 			<Banner
 				severity="warning"
-				message={coldNotice.text}
-				action={{ label: compacting ? 'Compacting…' : 'Compact first', onClick: compactFirst }}
-				secondaryAction={{ label: 'Send anyway', onClick: sendAnyway }}
-				dismissible
+				message={compacting ? 'Starting compaction. Queuing your message to send next…' : coldNotice.text}
+				action={compacting ? undefined : { label: 'Compact first', onClick: compactFirst }}
+				secondaryAction={compacting ? undefined : { label: 'Send anyway', onClick: sendAnyway }}
+				dismissible={!compacting}
 				onDismiss={() => (coldNotice = null)}
 			/>
 		{/if}

@@ -288,6 +288,14 @@ afterEach(() => {
 });
 
 describe('feedController live composer activity', () => {
+	it('retires a retry id when the authoritative feed shows its command', () => {
+		feedController.attach(makeDeps());
+		feedController.start('s1');
+		const id = 'client-' + 'a'.repeat(32);
+		sessionStorage.setItem('compact-first-retry:s1', JSON.stringify({id, fingerprint:'continue', createdAt:Date.now()}));
+		hoisted.onEvent!({ ...userMessage('confirmed', 't'), command_id:id });
+		expect(sessionStorage.getItem('compact-first-retry:s1')).toBeNull();
+	});
 	it.each(['turn.started', 'message.user'])('forwards live %s before folding, but not replayed history', type => {
 		const onSessionActivity = vi.fn();
 		feedController.attach({ ...makeDeps(), onSessionActivity });

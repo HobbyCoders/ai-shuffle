@@ -119,6 +119,86 @@ function makeDeps(initial: ActiveSessionState) {
 	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree };
 }
 
+describe('compact first send', () => {
+	beforeEach(() => sessionStorage.clear());
+
+	it('keeps the draft and rejects an older server response without queued_turn_id', async () => {
+		const { deps, getState } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'only-compact', session_id: 's1' });
+		await expect(createMessageSender(deps).sendMessage('must not disappear', { compactFirst: true }))
+			.rejects.toThrow('needs an update');
+		expect(getState().queuedMessages).toEqual([]);
+		expect(getState().messages).toEqual([]);
+	});
+
+	it('reuses an ambiguous request id on retry, including a new sender after reload', async () => {
+		const state = baseState({ sessionId: 'retry-chat', title: 'Old chat' });
+		apiMocks.post.mockRejectedValueOnce(new Error('Timeout after the worker may have accepted it'));
+		const first = makeDeps(state);
+		await expect(createMessageSender(first.deps).sendMessage('send once', { compactFirst: true }))
+			.rejects.toThrow('Timeout');
+		const firstId = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id;
+		const retry = makeDeps(state);
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'c', queued_turn_id: 'q', session_id: 'retry-chat' });
+		const sender = createMessageSender(retry.deps);
+		await sender.sendMessage('send once', { compactFirst: true });
+		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).toBe(firstId);
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'new-c', queued_turn_id: 'new-q', session_id: 'retry-chat' });
+		await sender.sendMessage('send once', { compactFirst: true });
+		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).not.toBe(firstId);
+	});
+
+	it('clears an ambiguous compact id after a successful normal send', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		apiMocks.post.mockRejectedValueOnce(new Error('offline'));
+		await expect(sender.sendMessage('continue', { compactFirst: true })).rejects.toThrow('offline');
+		expect(sessionStorage.getItem('compact-first-retry:s1')).not.toBeNull();
+		expect(await sender.sendMessage('normal message')).toBe(true);
+		expect(sessionStorage.getItem('compact-first-retry:s1')).toBeNull();
+	});
+
+	it('does not reuse a refused draft id after its text or attachments change', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		apiMocks.post.mockRejectedValueOnce(new Error('offline'));
+		await expect(sender.sendMessage('old text', { compactFirst: true })).rejects.toThrow('offline');
+		const oldId = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id;
+		apiMocks.post.mockResolvedValueOnce({ turn_id: null, queued_turn_id: 'held-1', held: true, session_id: 's1' });
+		expect(await sender.sendMessage('new text', { compactFirst: true, pendingUploadPaths: ['/uploads/new.png'] })).toBe(true);
+		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).not.toBe(oldId);
+	});
+
+	it('posts the exact normal query payload and uses only a queued optimistic echo', async () => {
+		const settings = { sessionId: 'compact-chat', title: 'Old chat', modelOverride: 'sonnet',
+			effortLevelOverride: 'high', permissionModeOverride: 'default', fastMode: false };
+		const normal = makeDeps(baseState(settings));
+		await createMessageSender(normal.deps).sendMessage('read my file', { pendingUploadPaths: ['/uploads/a.png'] });
+		const expected = normal.wsConn.send.mock.calls[0][0];
+		const compact = makeDeps(baseState(settings));
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'c', queued_turn_id: 'q', session_id: 'compact-chat' });
+		expect(await createMessageSender(compact.deps).sendMessage('read my file', {
+			compactFirst: true, pendingUploadPaths: ['/uploads/a.png'],
+		})).toBe(true);
+		expect(compact.wsConn.send).not.toHaveBeenCalled();
+		const [path, body] = apiMocks.post.mock.calls.at(-1)!;
+		expect(path).toBe('/sessions/compact-chat/compact');
+		expect(body.then_send).toEqual({ ...expected, client_message_id: expect.stringMatching(/^client-/) });
+		expect(compact.getState().messages).toHaveLength(0);
+		expect(compact.getState().queuedMessages).toEqual([expect.objectContaining({ content: 'read my file' })]);
+	});
+
+	it('rejects and removes its echo on an HTTP refusal so the composer restores the draft', async () => {
+		const { deps, getState, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		apiMocks.post.mockRejectedValueOnce(new Error('No capable device online'));
+		await expect(createMessageSender(deps).sendMessage('keep this', { compactFirst: true }))
+			.rejects.toThrow('No capable device online');
+		expect(getState().queuedMessages).toEqual([]);
+		expect(getState().messages).toEqual([]);
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
+
 describe('remembered permission on first send', () => {
 	it.each([
 		{}, { deviceIntent: { id: 'runner-1', name: 'Runner' } },

@@ -9,6 +9,8 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
 import { api } from '$lib/api/client';
+import { compactSession } from '$lib/api/limit-resume';
+import { compactRetryId, clearCompactRetry } from './compact-first-retry';
 import { isCallActiveFor, sendVoiceText } from '$lib/services/voiceCall';
 import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
@@ -145,6 +147,7 @@ interface SendMessageOptions {
 	skipWorktreeSetup?: boolean;
 	skipMessageAppend?: boolean;
 	pendingUploadPaths?: string[];
+	compactFirst?: boolean;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -426,7 +429,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				return false;
 			}
 
-			if (!wsConn.isConnected()) {
+			if (options?.compactFirst && !_state.sessionId) {
+				throw new Error('Open a chat before compacting it.');
+			}
+			if (!options?.compactFirst && !wsConn.isConnected()) {
 				wsConn.resetReconnectAttempts();
 				wsConn.connect();
 				const connected = await waitForConnection();
@@ -497,8 +503,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// landed since the send began: the server has described the queue for
 			// this window, so a local row added on top of it is a second copy that
 			// no later frame is guaranteed to replace.
-			const clientMessageId = newLocalPendingId();
-			const queuedEcho = sendWhileStreaming && !options?.skipMessageAppend;
+			const overrides = buildOverrides();
+			const retryOverrides = { ...overrides };
+			// The worker can acknowledge a newer pin before a lost reply is retried.
+			// Its revision precondition is not a new owner instruction.
+			delete retryOverrides.context_window_base;
+			const clientMessageId = options?.compactFirst
+				? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: _state.profile,
+					project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
+				: newLocalPendingId();
+			const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
 			const optimisticQueuedId = queuedEcho
 				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
 				? clientMessageId
@@ -566,7 +580,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 
 			const remoteOnly = !_state.project && !!_state.projectV2Id;
-			const querySent = wsConn.send({
+			const query = {
 				type: 'query',
 				client_message_id: clientMessageId,
 				prompt,
@@ -589,8 +603,27 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// Adoption token — present only for a new-session query (see requestId).
 				// The backend echoes it in session_created + the first start frame.
 				request_id: requestId || undefined,
-				overrides: buildOverrides(),
-			});
+				overrides,
+			};
+			if (options?.compactFirst) {
+				try {
+					const result = await compactSession(_state.sessionId!, query);
+					if (!result.queued_turn_id) {
+						throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
+					}
+					clearCompactRetry(_state.sessionId!);
+				} catch (error) {
+					// Remove only our optimistic echo, never a newer session's draft
+					// or an authoritative queue snapshot that arrived in the meantime.
+					update(s => s.sessionId === _state.sessionId ? {
+						...s, queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
+						error: error instanceof Error ? error.message : 'Could not compact and send.',
+					} : s);
+					throw error;
+				}
+				return true;
+			}
+			const querySent = wsConn.send(query);
 			if (!querySent) {
 				// WS dropped before the frame went out. Roll the optimistic echo back
 				// and surface an error so the caller can restore the input.
@@ -612,6 +645,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				feedController.clearOptimisticSend(_state.sessionId);
 				return false;
 			}
+			clearCompactRetry(_state.sessionId!);
 			// The pick is spent: the session now exists and its row carries the
 			// ownership, so follow-up sends must not re-assert a target. (Left
 			// intact on a failed send so a retry still goes to the chosen device.)

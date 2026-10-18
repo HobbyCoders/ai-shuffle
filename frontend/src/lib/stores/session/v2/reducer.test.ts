@@ -39,6 +39,22 @@ function fold(events: WireEvent[]) {
 
 
 
+it('preserves not_sent metadata while keeping original user text', () => {
+	const state = fold([ev('message.user', { content: 'My original words', not_sent: true })]);
+	expect(state.messages[0].content).toBe('My original words');
+	expect(state.messages[0].metadata?.not_sent).toBe(true);
+});
+
+it('replays an unsent-only removal without dropping sent history', () => {
+	const events = [ev('message.user', {id:'earlier', content:'earlier'}),
+		ev('message.user', {id:'unsent', content:'not sent', not_sent:true}),
+		ev('message.assistant', {id:'later', content:'later real reply'}),
+		ev('system.note', {subtype:'unsent_restored', data:{message_id:'unsent'}})];
+	const state = fold(events);
+	expect(state.messages.map(m=>m.content)).toEqual(['earlier','later real reply']);
+	expect(fold(events).messages).toEqual(state.messages);
+});
+
 describe('user rewind capability', () => {
 	it('retains the checkpoint identity and explicit capability during replay', () => {
 		const state = fold([

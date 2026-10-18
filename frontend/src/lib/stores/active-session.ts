@@ -265,6 +265,7 @@ export interface ActiveSessionState {
 	 *  target user message. ChatInput refills an EMPTY editor and clears this,
 	 *  so it fires exactly once and never clobbers typed text. */
 	pendingRestorePrompt: string | null;
+	pendingRestoreUploadPaths?: string[];
 	/** True from the moment init() adopts a persisted sessionId until that
 	 *  session's SSE history reaches its first caught_up boundary.
 	 *  During this window the UI looks like "New Chat" (messages=[]) while
@@ -915,7 +916,7 @@ export const activeSession = {
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) =>
+	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean }) =>
 		messageSender.sendMessage(prompt, options),
 
 	stopGeneration: () => messageSender.stopGeneration(),
