@@ -162,7 +162,7 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
             patch.object(sh, "_tell", side_effect=record_moved),
             patch.object(sh, "deliver_held", AsyncMock()) as deliver,
         ):
-            assert "waits for your answer" in await sh._moved(
+            assert "question-card answer" in await sh._moved(
                 "s1", pending, "dev-gaming"
             )
             assert deliver.await_args.args[3] is None
@@ -200,6 +200,82 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
     finally:
         callback.cancel()
         await asyncio.gather(callback, return_exceptions=True)
+
+
+@pytest.mark.parametrize("state", ["pending", "answered", "cancelled", "expired"])
+def test_detached_card_owns_resume_in_every_state(state):
+    from app.db.base import get_db
+
+    _chat()
+    pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "keep once", time.time())
+    row = interactions.create_interaction(
+        "s1",
+        "question",
+        {
+            "handoff_detached": True,
+            "handoff_id": pending.handoff_id,
+            "questions": QUESTIONS,
+        },
+        None,
+    )
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE pending_interactions SET state=%s WHERE id=%s", (state, row["id"])
+        )
+    assert sh.resume_plan("s1", pending, pending.target_id) == "question"
+    new = sh.PendingHandoff(
+        "dev-gaming", "DesktopWorker", "different note", time.time()
+    )
+    with patch("app.network.handoff.resume_carry", return_value=True):
+        assert sh.resume_plan("s1", new, new.target_id) == "send"
+
+
+async def test_legacy_detached_card_keeps_note_once_matching_moved_record_arrives():
+    from app.core.user_question_handler import (
+        _confirmed_handoff_context,
+        user_question_handler,
+    )
+
+    _chat()
+    context = "[hand-off] Moved from Source to Target. Your hand-off note: Keep the chosen branch"
+    payload = {
+        "handoff_detached": True,
+        "handoff_id": "legacy-move",
+        "handoff_context": context,
+        "nonblocking": True,
+        "request_id": "legacy-card",
+        "tool_use_id": "legacy-card",
+        "questions": QUESTIONS,
+    }
+    card = interactions.create_interaction("s1", "question", payload, None)
+    assert "handoff_target_id" not in card["payload"]
+    assert _confirmed_handoff_context("s1", payload) is None
+    await sh._record(
+        "s1", "Different move", {"handoff_id": "other-move", "status": "moved"}
+    )
+    assert _confirmed_handoff_context("s1", payload) is None
+    await sh._record(
+        "s1", "Attempt failed", {"handoff_id": "legacy-move", "status": "failed"}
+    )
+    assert _confirmed_handoff_context("s1", payload) is None
+    await sh._record(
+        "s1", "Move complete", {"handoff_id": "legacy-move", "status": "moved"}
+    )
+    assert _confirmed_handoff_context("s1", payload) == context
+    with (
+        patch(
+            "app.core.user_question_handler.UserQuestionHandler._retire_native_question",
+            AsyncMock(),
+        ),
+        patch("app.core.session_runtime.try_steer_pending", AsyncMock()),
+        patch("app.core.session_runtime._broadcast_queue_after_start", AsyncMock()),
+    ):
+        assert await user_question_handler._answer_nonblocking(
+            card, {"Which branch?": "Existing"}, None, human_input=True
+        )
+    [answer] = turns.get_queued_turns("s1")
+    assert answer["prompt"].startswith(context + "\n\n")
+    assert answer["prompt"].count("Your hand-off note:") == 1
 
 
 @pytest.mark.parametrize("worker", ["source", "dev-gaming"])
@@ -634,7 +710,7 @@ async def test_transient_question_failure_keeps_move_and_retries(failure, caplog
             patch.object(sh, "POLL_S", 0.01),
             patch("app.api.sessions.move_session_to", move),
         ):
-            assert "waits for your answer" in await asyncio.wait_for(
+            assert "question-card answer" in await asyncio.wait_for(
                 sh.run_pending("s1"), timeout=3
             )
         move.assert_awaited_once()

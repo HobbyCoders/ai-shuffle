@@ -481,11 +481,10 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
         return None
     from app.db import interactions
 
-    # Only a detached BLOCKING question owns the next input. Ordinary posted
-    # cards explicitly let the agent keep working and must not drop its note.
-    if any(row["kind"] == "question" and row["payload"].get("handoff_detached")
-           and row["payload"].get("handoff_id") == pending.handoff_id
-           for row in interactions.get_pending_interactions(session_id)):
+    # Detached BLOCKING cards own this handoff's continuation in every state:
+    # the target's answer already carries the note and may mirror back first.
+    # Ordinary posted cards and earlier handoffs must not drop the new note.
+    if interactions.has_detached_handoff_question(session_id, pending.handoff_id):
         return "question"
     if pending.by != "agent":
         return None
@@ -1127,7 +1126,7 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     if plan == "send":
         outcome = f"Handed off to {label}. This chat continues there on the same branch."
     elif plan == "question":
-        outcome = f"Handed off to {label}. This chat waits for your answer to the question card there."
+        outcome = f"Handed off to {label}. The hand-off note is carried by the question-card answer there."
     elif plan == "unsupported":
         outcome += f" {label} runs an older version that cannot resume it by itself: send a message there."
     elif plan == "unknown":

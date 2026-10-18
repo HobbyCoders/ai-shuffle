@@ -241,6 +241,22 @@ def mark_interaction_requeued(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def has_detached_handoff_question(session_id: str, handoff_id: str) -> bool:
+    """A detached card owns its handoff's continuation even after it is answered.
+
+    Do not filter state: a target's answered row can mirror back before the
+    source decides whether to send an automatic resume turn.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM pending_interactions WHERE session_id=%s AND kind='question' "
+            "AND payload->'handoff_detached'='true' AND payload->>'handoff_id'=%s LIMIT 1",
+            (session_id, handoff_id),
+        )
+        return cursor.fetchone() is not None
+
+
 def get_pending_interactions(session_id: str) -> List[Dict[str, Any]]:
     """List a session's pending, unexpired interactions oldest-first."""
     with get_db() as conn:

@@ -129,12 +129,24 @@ def _confirmed_handoff_context(session_id: str, payload: Dict[str, Any]) -> Opti
     handoff_id = payload.get("handoff_id")
     target_id = payload.get("handoff_target_id")
     context = payload.get("handoff_context")
-    if not payload.get("handoff_detached") or not handoff_id or not target_id or not isinstance(context, str) or not context:
+    if not payload.get("handoff_detached") or not handoff_id or not isinstance(context, str) or not context:
         return None
     from app.db import database
     from app.network import engine
 
     try:
+        if not target_id:
+            # Compatibility with cards detached by an older source (#169).
+            # Their destination was not saved; preserve the old exact-id proof.
+            from app.db.base import get_db
+
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT 1 FROM session_events WHERE session_id=%s AND event_type='system.note' "
+                    "AND payload->>'subtype'='handoff' AND payload->'data'->>'handoff_id'=%s "
+                    "AND payload->'data'->>'status'='moved' LIMIT 1", (session_id, handoff_id))
+                return context if cur.fetchone() else None
         ctx = engine.context()
         if ctx is None or ctx.device_id != target_id:
             return None

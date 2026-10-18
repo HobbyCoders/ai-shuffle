@@ -543,6 +543,32 @@ async def test_detached_answer_on_target_keeps_note_before_or_without_tell(pair,
             assert answer["prompt"].startswith("[hand-off] Moved from ")
             assert "Your hand-off note: Keep the owner's selected branch" in answer["prompt"]
             assert "Answer to your question:\nWhich option?\nKeep" in answer["prompt"]
+            assert answer["prompt"].count("Your hand-off note:") == 1
+            from app.network import policy
+
+            coll = policy.collection("pending_interactions")
+            answered = interactions.get_interaction(card["id"])
+            assert answered["state"] == "answered"
+            record = engine.serialize_row(coll, answered)
+        with a.active():
+            # Real mirror materialization accepts the target's answered row
+            # because this source no longer owns the chat.
+            with get_db() as conn:
+                mirrored = engine.materialize(conn.cursor(), coll, card["id"], record,
+                                              origin_device_id=b.device_id)
+            assert mirrored["state"] == "answered"
+            assert interactions.get_pending_interactions(sid) == []
+            assert sh.resume_plan(sid, pending, b.device_id) == "question"
+            # Drive lost-reply ownership recovery through the real _failed →
+            # _moved path; it must not add a second note/continue turn.
+            with patch.object(sh, "_tell", AsyncMock(return_value=True)) as report, \
+                    patch.object(sh, "deliver_held", AsyncMock()) as deliver, \
+                    patch.object(sh, "_resume_turn", wraps=sh._resume_turn) as automatic:
+                result = await asyncio.wait_for(sh._failed(sid, pending, ConnectionError("lost reply")), timeout=3)
+            assert "question-card answer" in result
+            automatic.assert_not_called()
+            deliver.assert_awaited_once_with(sid, b.device_id, pending.label, None)
+            assert report.await_args.args[3]["resume"] == "question"
     finally:
         if callback is not None:
             callback.cancel()
