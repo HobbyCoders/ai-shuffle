@@ -36,6 +36,62 @@ def _set_home(monkeypatch, home) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(Path(home) / ".config"))
 
 
+def test_home_is_only_global_for_non_git_project(tmp_path, monkeypatch) -> None:
+    from fluid.context.instructions import skill_search_roots
+
+    home = tmp_path / "home"
+    cwd = home / "projects" / "foo"
+    cwd.mkdir(parents=True)
+    _set_home(monkeypatch, home)
+    global_dir = home / ".fluid"
+    global_dir.mkdir()
+    global_file = global_dir / "AGENTS.md"
+    global_file.write_text("Global-only guidance.", encoding="utf-8")
+    skill = global_dir / "skills" / "example"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: example\ndescription: Global example.\n---\nbody", encoding="utf-8",
+    )
+    (home / "projects" / "AGENTS.md").write_text("Outer project.", encoding="utf-8")
+    # Even ancestors ABOVE home cannot contribute project instructions.
+    (tmp_path / "AGENTS.md").write_text("Outside home.", encoding="utf-8")
+
+    files = discover_instruction_files(cwd)
+    assert [(f.path, f.scope) for f in files if f.path == str(global_file)] == [
+        (str(global_file), "global"),
+    ]
+    stack = build_instruction_stack(cwd)
+    assert stack.count("Global-only guidance.") == 1
+    assert "byte-identical" not in stack
+    assert "Outer project." in stack
+    assert "Outside home." not in stack
+    assert [(p, s) for p, s in skill_search_roots(cwd) if p == global_dir / "skills"] == [
+        (global_dir / "skills", "global"),
+    ]
+    assert [(s.name, s.scope) for s in discover_skills(cwd, include_builtin=False)] == [
+        ("example", "global"),
+    ]
+    assert discover_skills(cwd, include_global=False, include_builtin=False) == []
+    assert all(f.path != str(global_file) for f in discover_instruction_files(cwd, include_global=False))
+    assert [(f.path, f.scope) for f in discover_instruction_files(home)] == [(str(global_file), "global")]
+    # A git marker at home must not turn its user tree into project settings.
+    (home / ".git").mkdir()
+    assert [(f.path, f.scope) for f in discover_instruction_files(cwd)] == [
+        (f.path, f.scope) for f in files
+    ]
+
+
+def test_home_discovery_prefix_budget(monkeypatch) -> None:
+    from scripts.measure_home_discovery import measure
+
+    result = measure()
+    # Synthetic fixture: 405 chars / 100 estimated tokens, with a small allowance.
+    assert result["total_chars"] <= 425
+    assert result["estimated_tokens"] <= 106
+    assert result["instruction_scopes"] == ["global"]
+    assert result["home_skill_scopes"] == ["global"]
+
+
 def test_claude_instructions_are_inert_until_imported(tmp_path) -> None:
     proj = _mk_project(tmp_path)
     (proj / ".claude").mkdir()

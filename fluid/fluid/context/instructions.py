@@ -313,13 +313,17 @@ def _git_root(cwd: Path) -> Path | None:
 
 
 def _walk_up_dirs(cwd: Path) -> list[Path]:
-    """Directories from the outermost boundary (git root, else fs root) down to
-    ``cwd`` — so blocks end up ordered least-specific → most-specific."""
+    """Project directories, least-specific first, bounded by git root or home.
+
+    Home itself is excluded: its .fluid tree belongs only to the user scope,
+    even for non-git projects (or a repository rooted at home).
+    """
     cwd = cwd.resolve()
+    home = Path.home().resolve()
     root = _git_root(cwd) or Path(cwd.anchor or "/")
     chain: list[Path] = []
     d = cwd
-    while True:
+    while d != home:
         chain.append(d)
         if d == root or d.parent == d:
             break
