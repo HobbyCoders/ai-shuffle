@@ -1029,11 +1029,11 @@ export const git = {
 			_clearServerBackoff();
 			// Discard a response that a newer one has already superseded.
 			if (!_acceptSeq('status', seq)) return;
-			// git init / clone (or removal) changes the capability, not just the
-			// branch name. Reload coherently so branches, diffs and PR state return
-			// together, or are all cleared for a plain folder. Reuse the existing
-			// focus/idle/post-turn refresh; no additional poll is needed.
-			if (status.is_git_repo !== _state.status?.is_git_repo) {
+			// git init / clone changes the capability, not just the branch name.
+			// Reload coherently so branches, diffs and PR state return together.
+			// A positive non-repo answer clears state below immediately, without
+			// requiring a second status request to confirm the same finding.
+			if (status.is_git_repo && !_state.status?.is_git_repo) {
 				await git.retryLoad();
 				return;
 			}
