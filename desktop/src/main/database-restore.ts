@@ -12,18 +12,33 @@ export async function syncDirectory(directory: string): Promise<void> {
   const fd = await fs.open(directory, 'r');
   try { await fd.sync(); } finally { await fd.close(); }
 }
+/**
+ * The Windows move: MoveFileEx with MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
+ * A file held open for a moment by another process (an antivirus or indexer
+ * scan, a PostgreSQL process still exiting) fails the move with access denied
+ * or a sharing or lock violation; those are retried with backoff for about a
+ * minute, as npm's graceful-fs does for renames. The error code is read in C#
+ * right after the call: PowerShell overwrites the last error before a script
+ * line can read it.
+ */
+export const WINDOWS_MOVE_SCRIPT = [
+  '$ErrorActionPreference = "Stop"',
+  `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Threading; public static class DurableMove { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool MoveFileEx(string from, string to, int flags); public static int Move(string from, string to) { int error = 0; for (int attempt = 1; attempt <= 40; attempt++) { if (MoveFileEx(from, to, 9)) return 0; error = Marshal.GetLastWin32Error(); if (error != 5 && error != 32 && error != 33) return error; Thread.Sleep(Math.Min(100 * attempt, 2000)); } return error; } }'`,
+  '$code = [DurableMove]::Move($env:SHUFFLE_MOVE_FROM, $env:SHUFFLE_MOVE_TO)',
+  'if ($code -ne 0) { [Console]::Error.WriteLine("Windows error " + $code + ": " + (New-Object ComponentModel.Win32Exception $code).Message); exit 1 }',
+].join('; ');
 export async function durableRename(from: string, to: string): Promise<void> {
   if (process.platform === 'win32') {
     // Node has no MOVEFILE_WRITE_THROUGH flag. Flush the rename itself before
     // advancing the journal; paths are passed as environment values, not code.
-    const script = [
-      '$ErrorActionPreference = "Stop"',
-      `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DurableMove { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string from, string to, int flags); }'`,
-      'if (![DurableMove]::MoveFileEx($env:SHUFFLE_MOVE_FROM, $env:SHUFFLE_MOVE_TO, 9)) { throw (New-Object ComponentModel.Win32Exception) }',
-    ].join('; ');
-    await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      env: { ...process.env, SHUFFLE_MOVE_FROM: from, SHUFFLE_MOVE_TO: to }, windowsHide: true, timeout: 30_000,
-    });
+    try {
+      await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_MOVE_SCRIPT], {
+        env: { ...process.env, SHUFFLE_MOVE_FROM: from, SHUFFLE_MOVE_TO: to }, windowsHide: true, timeout: 120_000,
+      });
+    } catch (error) {
+      const detail = String((error as { stderr?: string }).stderr ?? '').trim() || (error instanceof Error ? error.message : String(error));
+      throw new Error(`Could not move ${from} to ${to}: ${detail}`);
+    }
   } else {
     await fs.rename(from, to);
     await syncDirectory(path.dirname(to));
