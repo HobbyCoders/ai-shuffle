@@ -253,7 +253,12 @@ export class SourceUpdates {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     await this.retryCleanup();
     if (!this.state.staged) return;
-    await this.assertCanRun(this.state.staged);
+    let manifest: SourceManifest;
+    try { manifest = await this.release(this.state.staged); }
+    catch {
+      throw new Error('The downloaded update could not be verified. Check for and download a newer update before installing. Your files and data have been kept.');
+    }
+    await this.assertCanRun(this.state.staged, manifest.sequence);
     this.state.pending = this.state.staged;
     delete this.state.staged;
     await this.save();
@@ -737,27 +742,33 @@ export class SourceUpdates {
         return this.ready(staged);
       }
       const { signed, manifest } = feed;
+      let stagedNotice: string | undefined;
       if (staged) {
-        let stagedSequence: number;
+        let stagedSequence = 0;
         try { stagedSequence = (await this.release(staged)).sequence; }
         catch {
-          return this.ready(staged, "The downloaded update's release information could not be verified. It is still staged; check again before installing.");
+          // An unselected, unfenced download with bad metadata must not block
+          // recovery by a verified newer release. Retain it only if no new offer follows.
+          stagedNotice = "The downloaded update's release information could not be verified. It is still staged; download a newer update before installing.";
         }
-        if (manifest.revision === staged || manifest.sequence <= stagedSequence || this.state.failed?.includes(manifest.revision)) return this.ready(staged);
+        if (manifest.revision === staged || manifest.sequence <= stagedSequence || this.state.failed?.includes(manifest.revision)) return this.ready(staged, stagedNotice);
         try { this.requireLauncher(manifest); this.requireElectron(manifest); }
         catch (error) {
           // This refusal is about the newer release, not the compatible download
           // already waiting. Keep it installable and show a notice, not a remedy.
-          return this.ready(staged, `${(error as Error).message} The downloaded update remains ready to install.`);
+          const reason = (error as Error).message.replace(/ No update was downloaded\.$/, '');
+          const retained = stagedNotice ? `The newer release was not downloaded. ${stagedNotice}`
+            : 'The newer release was not downloaded; the earlier downloaded update remains ready to install.';
+          return this.ready(staged, `${reason} ${retained}`);
         }
       }
       const installed = this.state.pending ?? this.version;
-      if (manifest.revision === installed) return { kind: this.state.pending ? 'ready' : 'current', version: this.state.pending?.slice(0, 12) };
+      if (manifest.revision === installed) return staged ? this.ready(staged, stagedNotice) : { kind: this.state.pending ? 'ready' : 'current', version: this.state.pending?.slice(0, 12) };
       if (installed) {
         const old = installed === this.options.baseline?.revision && !this.state.active
           ? this.options.baseline
           : verifySourceManifest(await fs.readFile(path.join(this.directory(installed), 'release.json'), 'utf8'), this.options.publicKey);
-        if (manifest.sequence <= old.sequence) return { kind: 'current' };
+        if (manifest.sequence <= old.sequence) return staged ? this.ready(staged, stagedNotice) : { kind: 'current' };
       }
       if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer update. Previous files and data have been retained.');
       // Before anything is offered or downloaded: a release this launcher cannot start would fail at restart (#97).

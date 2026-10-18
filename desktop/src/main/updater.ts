@@ -174,7 +174,7 @@ export class Updater {
         return;
       }
       const result = await this.applications.check(undefined, interactive);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: [result.notes, result.notice].filter(Boolean).join('\n\n') || null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: [result.notice, result.notes].filter(Boolean).join('\n\n') || null });
     } catch (error) { this.set({ phase: 'error', error: String(error), message: null }); }
     finally { this.checking = false; }
   }
@@ -190,7 +190,7 @@ export class Updater {
         return;
       }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: [result.notes, result.notice].filter(Boolean).join('\n\n') || null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: [result.notice, result.notes].filter(Boolean).join('\n\n') || null });
     } catch (error) {
       // A newer release failed to download over a staged one: that one stays ready to install (#98).
       const staged = this.applications?.pendingVersion;

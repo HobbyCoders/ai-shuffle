@@ -1321,7 +1321,8 @@ test('#99: an incompatible newer Electron keeps the staged build ready with a no
  for(const run of [()=>u.check(),()=>u.download()]){
   const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
   assert.equal(result.release,'1.0.0');assert.equal(result.notes,'Notes for bbbb');
-  assert.match(result.notice,/needs Electron 45.0.0.*Install the latest AI Shuffle installer.*downloaded update remains ready to install/);
+  assert.match(result.notice,/needs Electron 45.0.0.*Install the latest AI Shuffle installer.*newer release was not downloaded; the earlier downloaded update remains ready to install/);
+  assert.doesNotMatch(result.notice,/No update was downloaded\./);
  }
  assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,2);
  assert((await fs.stat(path.join(f.root,'versions',B,'release.json'))).isFile());
@@ -1332,21 +1333,32 @@ test('#97: a newer start-floor refusal leaves the staged build ready with a noti
  await f.release(C,undefined,{version:'1.2.0',desktop:{start:5}});f.requests.length=0;
  for(const run of [()=>u.check(),()=>u.download()]){
   const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
-  assert.match(result.notice,/AI Shuffle 1.2.0 needs a newer desktop launcher.*launcher 4; it needs 5.*downloaded update remains ready/);
+  assert.match(result.notice,/AI Shuffle 1.2.0 needs a newer desktop launcher.*launcher 4; it needs 5.*newer release was not downloaded; the earlier downloaded update remains ready/);
+  assert.doesNotMatch(result.notice,/No update was downloaded\./);
  }
  assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,2);
 });
-test('#98: unreadable staged release information never hides the staged build',async t=>{
+test('#98: unreadable staged metadata stays visible but cannot block a newer verified download',async t=>{
  const {f,u}=await stagedOver(t);
  await fs.writeFile(path.join(f.root,'versions',B,'release.json'),'not json');
- for(const revision of [A,C]){
-  await f.release(revision,undefined,{sequence:revision===A?1:999});f.requests.length=0;
+ // Neither the running revision nor a different older feed can hide the bad download.
+ for(const revision of [A,E]){
+  await f.release(revision,undefined,{sequence:1});f.requests.length=0;
   for(const run of [()=>u.check(),()=>u.download()]){
    const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
-   assert.match(result.notice,/release information could not be verified.*still staged/);
+   assert.match(result.notice,/release information could not be verified.*still staged.*download a newer update/);
   }
   assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,2);
  }
+ await assert.rejects(u.prepareInstall(),error=>!(error instanceof SyntaxError)&&/downloaded update could not be verified.*download a newer update/.test(error.message));
+ assert.equal(u.pendingVersion,B);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).pending,undefined);
+ // A check remains metadata-only, but a successful newer download repairs the dead end.
+ await f.release(C,undefined,{sequence:999});f.requests.length=0;
+ assert.equal((await u.check()).kind,'available');assert.equal(u.pendingVersion,B);
+ assert.equal(f.requests.length,1);
+ const result=await u.download();assert.equal(result.kind,'ready');assert.equal(result.version,C.slice(0,12));
+ assert.equal(u.pendingVersion,C);await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ await u.prepareInstall();assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).pending,C);
 });
 test('#99: optional desktop.electron must be an exact locked version',async()=>{
  const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
