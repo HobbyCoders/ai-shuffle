@@ -326,8 +326,9 @@ def test_new_workflow_paths_hold_publication_and_never_rebuild_promotion():
     assert any(s.get("uses", "").startswith("actions/attest-build-provenance@") for s in jobs["stage-record"]["steps"])
 
 def test_default_release_graph_is_byte_semantically_unchanged():
-    # Canonical YAML digest of the pre-change release workflow on public main.
-    # Remove ONLY new opt-in inputs/jobs and guards that are true at defaults.
+    # Canonical YAML digest of the default release graph, including #157's
+    # automatic platform registration (pinned in test_release_download_instructions).
+    # Remove ONLY opt-in staging inputs/jobs and guards that are true at defaults.
     wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     del wf["on"]["workflow_dispatch"]["inputs"]["stage_only"]
     del wf["on"]["workflow_dispatch"]["inputs"]["promote"]
@@ -344,7 +345,7 @@ def test_default_release_graph_is_byte_semantically_unchanged():
     opt_in = next(s for s in steps if s.get("name") == "Validate opt-in two-phase request")
     assert opt_in["if"] == "inputs.stage_only || inputs.promote != ''"
     steps.remove(opt_in)
-    assert p.sha256(p.canonical(wf)) == "4734f1ce84ba9444098852f8935b25e1b915c78319819b9f706949ebfec080d7"
+    assert p.sha256(p.canonical(wf)) == "c07e32c780ca1a05470033a4cec84b8dd65e63f2f6ff1647b659ba29ae41467c"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):

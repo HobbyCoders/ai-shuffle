@@ -299,6 +299,41 @@ def test_docker_release_rebuild_keeps_container_verification_gate():
     assert steps["Checkout release source"]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"
 
 
+def test_stable_release_registers_every_platform_from_its_own_artifacts():
+    release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = release["jobs"]["platform-installers"]
+    assert job["needs"] == "promote-image"
+    gate = release["jobs"][job["needs"]]
+    assert "needs.create-release.outputs.promote_latest == 'true'" in gate["if"]
+    for required in ("buyer-install", "source-stable", "linux-release", "android-apk"):
+        assert required in gate["needs"]
+        assert f"needs.{required}.result == 'success'" in gate["if"]
+    assert job["uses"] == "./.github/workflows/platform-installer.yml"
+    assert job["strategy"]["matrix"]["platform"] == ["linux", "android"]
+    assert job["strategy"]["fail-fast"] == "false"
+    assert job["with"] == {"platform": "${{ matrix.platform }}",
+                           "build_run_id": "${{ format('{0}', github.run_id) }}"}
+    assert job["secrets"] == "inherit"
+    workflow = yaml.load((ROOT / ".github/workflows/platform-installer.yml").read_text(), Loader=yaml.BaseLoader)
+    assert set(workflow["on"]) == {"workflow_call", "workflow_dispatch"}
+    assert workflow["on"]["workflow_call"]["inputs"]["build_run_id"]["required"] == "true"
+    assert "inputs.build_run_id == ''" in workflow["jobs"]["android-build"]["if"]
+    publisher = workflow["jobs"]["publish"]
+    assert publisher["environment"] == "release-signing"
+    assert "needs.android-build.result == 'skipped'" in publisher["if"]
+    steps = publisher["steps"]
+    download = next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
+    assert download["with"]["run-id"] == "${{ inputs.build_run_id || github.run_id }}"
+    artifact = next(step for step in steps if step.get("id") == "artifact")["run"]
+    assert "name=android-download" in artifact
+    assert 'name=$prefix-desktop-${RELEASE_TAG#v}-$revision' in artifact
+    publish = next(step for step in steps if step.get("name") == "Sign and point the hub at the installer")
+    assert publish["run"] == 'node desktop/scripts/publish-platform-installer.mjs "$PLATFORM" artifact "$RELEASE_TAG"'
+    for secret in ("DESKTOP_APPLICATION_SIGNING_KEY", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"):
+        assert publish["env"][secret] == "${{ secrets." + secret + " }}"
+    assert publish["env"]["ACCOUNT_HUB_DATABASE_ID"] == "${{ vars.ACCOUNT_HUB_DATABASE_ID }}"
+
+
 def test_stable_update_is_signed_only_after_verification_in_a_protected_environment():
     release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     job = release["jobs"]["source-stable"]
