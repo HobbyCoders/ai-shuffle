@@ -177,6 +177,15 @@ async def get_git_status(
     )
 
 
+def _initial_commit_name() -> str:
+    from app.core.assistant_introduction import effective
+    from app.db import assistant
+
+    account = assistant.get_account() or {}
+    name = effective(account.get("introduction")).get("preferred_name")
+    return name.strip() if isinstance(name, str) and name.strip() else "AI Shuffle"
+
+
 @router.post("/init", response_model=InitRepoResponse)
 @session_git_action
 async def init_repository(
@@ -201,123 +210,137 @@ async def init_repository(
             detail="Project is already a git repository"
         )
 
-    # Step 1: git init
-    success = await run_git(
-        git_service.init_repo, working_dir, default_branch=body.default_branch
-    )
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to initialize git repository"
+    # Claim metadata atomically: concurrent requests and pre-existing (even
+    # invalid) .git entries must never be reinitialized or removed by rollback.
+    git_dir = Path(working_dir) / ".git"
+    try:
+        git_dir.mkdir()
+    except FileExistsError:
+        raise HTTPException(status_code=400, detail="Project already contains Git metadata")
+    metadata = git_dir.lstat()
+    metadata_identity = (metadata.st_dev, metadata.st_ino)
+    try:
+        # Step 1: git init
+        success = await run_git(
+            git_service.init_repo, working_dir, default_branch=body.default_branch
         )
-
-    github_repo_url = None
-    github_full_name = None
-
-    # Step 2: Optional initial commit
-    if body.create_initial_commit:
-        staged = await run_git(git_service.stage_files, working_dir, ["."])
-        if not staged:
+        if not success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to stage files for initial commit"
-            )
-        committed, commit_err = await run_git(
-            git_service.commit, working_dir, "Initial commit"
-        )
-        if not committed:
-            # Surface git identity errors clearly — common in container deployments
-            detail = f"Failed to create initial commit: {commit_err or 'unknown error'}"
-            if commit_err and "identity unknown" in commit_err.lower():
-                detail += (
-                    ". Configure git identity with "
-                    "'git config --global user.email \"you@example.com\"' and "
-                    "'git config --global user.name \"Your Name\"'."
-                )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=detail
+                detail="Failed to initialize git repository"
             )
 
-    # Step 3: Optional GitHub repo creation
-    if body.create_github_repo and body.github_repo_name:
-        from app.core.github_service import github_service
+        github_repo_url = None
+        github_full_name = None
 
-        if not await asyncio.to_thread(github_service.is_authenticated):
-            raise HTTPException(
-                status_code=400,
-                detail="GitHub CLI is not authenticated. Run 'gh auth login' in your terminal first."
-            )
-
-        repo_info = await run_git(
-            github_service.create_repo,
-            name=body.github_repo_name,
-            private=body.github_private,
-        )
-        if not repo_info:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create GitHub repository '{body.github_repo_name}'. Check logs for details."
-            )
-
-        github_repo_url = repo_info['url']
-        github_full_name = repo_info['full_name']
-        clone_url = repo_info['clone_url']
-
-        # Add remote origin
-        result = await run_git(
-            git_service._run_git,
-            working_dir,
-            ["remote", "add", "origin", clone_url],
-            timeout=10
-        )
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to add git remote: {result.stderr}"
-            )
-
-        # Push initial commit if we made one
+        # Step 2: Optional initial commit
         if body.create_initial_commit:
-            push_success, push_error = await run_git(
-                git_service.push,
-                working_dir,
-                remote="origin",
-                branch=body.default_branch,
-                set_upstream=True
+            staged = await run_git(git_service.stage_files, working_dir, ["."])
+            if not staged:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to stage files for initial commit"
+                )
+            fallback_name = await run_sync(_initial_commit_name)
+            committed, commit_err = await run_git(
+                git_service.commit, working_dir, "Initial commit",
+                allow_empty=True,
+                fallback_identity=(fallback_name, "noreply@ai-shuffle.invalid"),
             )
-            if not push_success:
+            if not committed:
+                detail = f"Failed to create initial commit: {commit_err or 'git commit failed'}"
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=detail
+                )
+
+        # Step 3: Optional GitHub repo creation
+        if body.create_github_repo and body.github_repo_name:
+            from app.core.github_service import github_service
+
+            if not await asyncio.to_thread(github_service.is_authenticated):
+                raise HTTPException(
+                    status_code=400,
+                    detail="GitHub CLI is not authenticated. Run 'gh auth login' in your terminal first."
+                )
+
+            repo_info = await run_git(
+                github_service.create_repo,
+                name=body.github_repo_name,
+                private=body.github_private,
+            )
+            if not repo_info:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to push to GitHub: {push_error or 'Unknown error'}"
+                    detail=f"Failed to create GitHub repository '{body.github_repo_name}'. Check logs for details."
                 )
 
-    # Step 4: Create database record
-    repo = await run_git(ensure_git_repository_record, project_id, working_dir)
+            github_repo_url = repo_info['url']
+            github_full_name = repo_info['full_name']
+            clone_url = repo_info['clone_url']
 
-    # Update record with GitHub info if we created a repo
-    if github_full_name and repo and repo.get("id"):
-        remote_url = await run_git(git_service.get_remote_url, working_dir)
-        await run_sync(
-            database.update_git_repository,
-            repo["id"],
-            remote_url=strip_url_userinfo(remote_url),
+            # Add remote origin
+            result = await run_git(
+                git_service._run_git,
+                working_dir,
+                ["remote", "add", "origin", clone_url],
+                timeout=10
+            )
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to add git remote: {result.stderr}"
+                )
+
+            # Push initial commit if we made one
+            if body.create_initial_commit:
+                push_success, push_error = await run_git(
+                    git_service.push,
+                    working_dir,
+                    remote="origin",
+                    branch=body.default_branch,
+                    set_upstream=True
+                )
+                if not push_success:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to push to GitHub: {push_error or 'Unknown error'}"
+                    )
+
+        # Step 4: Create database record
+        repo = await run_git(ensure_git_repository_record, project_id, working_dir)
+
+        # Update record with GitHub info if we created a repo
+        if github_full_name and repo and repo.get("id"):
+            remote_url = await run_git(git_service.get_remote_url, working_dir)
+            await run_sync(
+                database.update_git_repository,
+                repo["id"],
+                remote_url=strip_url_userinfo(remote_url),
+                github_repo_name=github_full_name,
+            )
+
+        message = "Git repository initialized"
+        if body.create_initial_commit:
+            message += " with initial commit"
+        if github_repo_url:
+            message += f" and linked to {github_full_name}"
+
+        return InitRepoResponse(
+            success=True,
+            message=message,
+            repository_id=repo["id"] if repo else None,
+            github_repo_url=github_repo_url,
             github_repo_name=github_full_name,
         )
-
-    message = "Git repository initialized"
-    if body.create_initial_commit:
-        message += " with initial commit"
-    if github_repo_url:
-        message += f" and linked to {github_full_name}"
-
-    return InitRepoResponse(
-        success=True,
-        message=message,
-        repository_id=repo["id"] if repo else None,
-        github_repo_url=github_repo_url,
-        github_repo_name=github_full_name,
-    )
+    except BaseException as exc:
+        try:
+            await run_git(git_service.rollback_init, working_dir, metadata_identity)
+        except Exception as rollback_error:
+            logger.exception("Failed to roll back Git initialization at %s", working_dir)
+            if isinstance(exc, HTTPException):
+                exc.detail = f"{exc.detail}. Git metadata rollback failed: {rollback_error}"
+        raise
 
 
 def _local_clone_source_served(source: str, working_dir: str) -> bool:

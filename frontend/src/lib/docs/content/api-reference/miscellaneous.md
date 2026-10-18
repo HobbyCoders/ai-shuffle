@@ -265,13 +265,15 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/init \
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `create_initial_commit` | boolean | `true` | Commit every file as "Initial commit" |
+| `create_initial_commit` | boolean | `true` | Commit every file as "Initial commit"; also creates a commit for an empty folder |
 | `create_github_repo` | boolean | `false` | Create a GitHub repository (needs `github_repo_name` and a signed-in GitHub CLI) and push the initial commit to it |
 | `github_repo_name` | string | | Up to 100 characters |
 | `github_private` | boolean | `true` | Make the GitHub repository private |
 | `default_branch` | string | `main` | Name of the first branch. Letters, digits, `.`, `_`, `/` and `-`, starting with a letter, digit or `_` (`422` otherwise) |
 
-Returns `success`, `message`, `repository_id`, `github_repo_url` and `github_repo_name`. Returns `400` if the folder is already a repository or GitHub is not signed in.
+Returns `success`, `message`, `repository_id`, `github_repo_url` and `github_repo_name`. Returns `400` if the folder already contains Git metadata or GitHub is not signed in.
+
+Missing Git identity fields use commit-scoped defaults: the owner's saved profile name (or `AI Shuffle`) and `noreply@ai-shuffle.invalid`. Configured fields are kept; no local or global Git identity is written. If initialization fails, only the `.git` metadata created by this request is rolled back, leaving project files intact so the action can be retried. Commit failures include Git's diagnostic text. A GitHub repository already created before a later failure is not deleted.
 
 ### POST /api/v1/projects/{project_id}/git/clone
 

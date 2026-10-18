@@ -74,6 +74,155 @@ def test_init_resolves_relative_project_under_the_workspace(env):
     assert not _is_repo(env.workspace) and not _is_repo(env.workspace / "apps")
 
 
+def _without_git_identity(monkeypatch):
+    for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_init_without_identity_creates_a_commit_even_for_an_empty_folder(env, monkeypatch, empty):
+    _without_git_identity(monkeypatch)
+    target = _project(env, "p-init", "no-identity", {} if empty else {"readme.md": "keep me\n"})
+    from app.db import assistant
+    monkeypatch.setattr(assistant, "get_account", lambda: None)
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 200, response.text
+    assert git(target, "log", "--format=%s") == "Initial commit"
+    assert git(target, "log", "--format=%an <%ae>|%cn <%ce>") == (
+        "AI Shuffle <noreply@ai-shuffle.invalid>|AI Shuffle <noreply@ai-shuffle.invalid>"
+    )
+    assert git(target, "status", "--porcelain") == ""
+    assert git(target, "config", "--local", "--get", "user.name", check=False) == ""
+    assert git(target, "config", "--local", "--get", "user.email", check=False) == ""
+    assert git(target, "config", "--global", "--list") == ""
+
+
+@pytest.mark.parametrize("name,email", [("Configured Owner", None), (None, "configured@example.invalid"), ("Configured Owner", "configured@example.invalid")])
+def test_init_uses_owner_profile_only_for_missing_git_identity_fields(env, monkeypatch, name, email):
+    _without_git_identity(monkeypatch)
+    target = _project(env, "p-init", "configured-identity", {"readme.md": "hi\n"})
+    if name:
+        git(target, "config", "--global", "user.name", name)
+    if email:
+        git(target, "config", "--global", "user.email", email)
+    original_config = git(target, "config", "--global", "--list")
+    from app.db import assistant
+    monkeypatch.setattr(assistant, "get_account", lambda: {
+        "introduction": {"detected": {"preferred_name": "Detected Owner"}, "corrections": {"preferred_name": "Profile Owner"}}
+    })
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 200, response.text
+    assert git(target, "log", "--format=%an <%ae>") == f"{name or 'Profile Owner'} <{email or 'noreply@ai-shuffle.invalid'}>"
+    assert git(target, "config", "--global", "--list") == original_config
+    assert git(target, "config", "--local", "--get", "user.name", check=False) == ""
+
+
+def test_init_empty_folder_with_an_existing_identity_still_creates_initial_commit(env):
+    target = _project(env, "p-init", "empty-configured", {})
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 200, response.text
+    assert git(target, "log", "--format=%s") == "Initial commit"
+    assert git(target, "log", "--format=%an <%ae>") == "Test Author <author@example.invalid>"
+    assert git(target, "ls-tree", "HEAD") == ""
+
+
+def test_init_uses_the_corrected_owner_name_without_persisting_it(env, monkeypatch):
+    _without_git_identity(monkeypatch)
+    target = _project(env, "p-init", "owner-name", {})
+    from app.db import assistant
+    monkeypatch.setattr(assistant, "get_account", lambda: {
+        "introduction": {"detected": {"preferred_name": "Detected Owner"}, "corrections": {"preferred_name": "Profile Owner"}}
+    })
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 200, response.text
+    assert git(target, "log", "--format=%an <%ae>") == "Profile Owner <noreply@ai-shuffle.invalid>"
+    assert git(target, "config", "--global", "--list") == ""
+
+
+@pytest.mark.parametrize("step", ["init", "stage", "commit", "record"])
+def test_init_rolls_back_only_its_metadata_after_a_later_failure_and_can_be_retried(env, monkeypatch, step):
+    target = _project(env, "p-init", "retry-init", {"readme.md": "keep me\n"})
+    from app.api import git as git_api
+    from app.core.git_service import git_service
+    with monkeypatch.context() as patch:
+        if step == "init":
+            patch.setattr(git_service, "init_repo", lambda *args, **kwargs: False)
+        elif step == "stage":
+            patch.setattr(git_service, "stage_files", lambda *args: False)
+        elif step == "commit":
+            patch.setattr(git_service, "commit", lambda *args, **kwargs: (False, "commit blocked by test"))
+        else:
+            def fail_record(*args):
+                raise RuntimeError("record write failed")
+            patch.setattr(git_api, "ensure_git_repository_record", fail_record)
+        if step == "record":
+            with pytest.raises(RuntimeError, match="record write failed"):
+                env.client.post("/api/v1/projects/p-init/git/init", json={})
+        else:
+            response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+            assert response.status_code == 500
+    assert not _is_repo(target)
+    assert (target / "readme.md").read_text() == "keep me\n"
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+    assert response.status_code == 200, response.text
+    assert git(target, "log", "--format=%s") == "Initial commit"
+
+
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
+def test_init_returns_the_real_commit_diagnostic_and_removes_new_metadata(env, monkeypatch, stream):
+    from subprocess import CompletedProcess
+    from app.core.git_service import git_service
+    target = _project(env, "p-init", "commit-diagnostic", {"readme.md": "keep me\n"})
+    run_git = git_service._run_git
+    def fail_commit(working_dir, args, **kwargs):
+        if "commit" in args:
+            return CompletedProcess(args, 1, stdout="commit diagnostic" if stream == "stdout" else "", stderr="commit diagnostic" if stream == "stderr" else "")
+        return run_git(working_dir, args, **kwargs)
+    monkeypatch.setattr(git_service, "_run_git", fail_commit)
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to create initial commit: commit diagnostic"
+    assert not _is_repo(target)
+    assert (target / "readme.md").read_text() == "keep me\n"
+
+
+def test_init_refuses_preexisting_invalid_metadata_without_touching_it(env):
+    target = _project(env, "p-init", "old-metadata", {"readme.md": "keep me\n", ".git/sentinel": "not ours\n"})
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 400
+    assert (target / ".git/sentinel").read_text() == "not ours\n"
+    assert (target / "readme.md").read_text() == "keep me\n"
+
+
+def test_init_rollback_keeps_metadata_replaced_by_another_actor(env, monkeypatch):
+    from app.core.git_service import git_service
+    target = _project(env, "p-init", "replaced-metadata", {"readme.md": "keep me\n"})
+    def replace_metadata(*args):
+        (target / ".git").rename(target / "original-metadata")
+        write(target / ".git/sentinel", "not ours\n")
+        return False
+    monkeypatch.setattr(git_service, "stage_files", replace_metadata)
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 500
+    assert (target / ".git/sentinel").read_text() == "not ours\n"
+    assert (target / "original-metadata/HEAD").exists()
+    assert (target / "readme.md").read_text() == "keep me\n"
+
+
 def test_init_without_initial_commit(env):
     target = _project(env, "p-init", "bare-init", {"a.txt": "a\n"})
 
@@ -155,10 +304,8 @@ def test_init_github_not_signed_in_is_400_after_the_local_init(env):
 
     assert response.status_code == 400
     assert response.json()["detail"] == GH_NOT_SIGNED_IN
-    # State left behind: the local repository and its initial commit exist,
-    # without a remote, so a retry hits "already a git repository".
-    assert git(target, "log", "--format=%s") == "Initial commit"
-    assert git(target, "remote") == ""
+    assert not _is_repo(target)
+    assert (target / "a.txt").read_text() == "a\n"
     assert env.gh.calls("repo") == []
 
 
@@ -189,7 +336,8 @@ def test_init_github_create_failure_is_500(env):
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Failed to create GitHub repository 'taken'. Check logs for details."
-    assert git(target, "remote") == ""
+    assert not _is_repo(target)
+    assert (target / "a.txt").read_text() == "a\n"
 
 
 # =============================================================================
