@@ -179,6 +179,42 @@ def test_launcher_version_must_go_up_not_merely_change():
     assert groups["launcher-version"] == []
 
 
+def test_a_further_change_to_an_unreleased_launcher_needs_no_second_bump():
+    """#150 changed the closure after #89 raised launcher 4, which no release had shipped yet."""
+    current = json.loads((ROOT / reach.LAUNCHER_JSON).read_text())["version"]
+    groups = reach.classify(["desktop/src/main/postgres.ts"], tree(),
+                            tree({"desktop/src/main/postgres.ts": b"changed"}), released=current - 1)
+    assert groups["windows-launcher"] == ["desktop/src/main/postgres.ts"]
+    assert groups["launcher-version"] == []
+    # Still a launcher change: only the owner's windows-launcher label accepts it.
+    assert reach.verdict(groups) == ["windows-launcher"]
+    assert reach.verdict(groups, reach.allowed_by_labels("update-reach:windows-launcher")) == []
+    # Once a release carries this version (or it is not known), the change needs its own bump again.
+    for released in (current, current + 1, None):
+        groups = reach.classify(["desktop/src/main/postgres.ts"], tree(),
+                                tree({"desktop/src/main/postgres.ts": b"changed"}), released=released)
+        assert groups["launcher-version"] == ["desktop/src/main/postgres.ts"], released
+    # An invalid head version is never above the released one.
+    groups = reach.classify(["desktop/src/main/postgres.ts"], tree(),
+                            tree({"desktop/src/main/postgres.ts": b"changed", reach.LAUNCHER_JSON: b"not json"}),
+                            released=0)
+    assert groups["launcher-version"] == ["desktop/src/main/postgres.ts"]
+
+
+def test_released_launcher_is_the_highest_version_of_any_release_tag(monkeypatch):
+    tags = {"v0.9.6": {"version": 3}, "v1.0.0": {"version": 3}, "v1.1.0-rc.1": {"version": 5},
+            "v6-phase1": {"version": 9}, "desktop-sources": {"version": 9}, "v0.1.0": None}
+    monkeypatch.setattr(reach, "git", lambda *args: "\n".join(tags))
+    monkeypatch.setattr(reach, "reader", lambda tag: lambda path: (
+        None if tags[tag] is None else json.dumps(tags[tag]).encode()))
+    # A prerelease installer is released too; non-version tags are not installers.
+    assert reach.released_launcher() == 5
+    del tags["v1.1.0-rc.1"]
+    assert reach.released_launcher() == 3
+    tags.clear()
+    assert reach.released_launcher() is None
+
+
 def test_launcher_version_alone_is_not_a_launcher_change():
     groups = groups_for({reach.LAUNCHER_JSON: raised_launcher()})
     assert groups["windows-launcher"] == [] and groups["launcher-version"] == []
