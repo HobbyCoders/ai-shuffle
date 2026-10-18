@@ -26,8 +26,8 @@ as the Stop button does, then moves. The rules (#1819):
   dropped there. When the move is cancelled, fails, expires or is refused,
   they are sent here instead. A message that cannot be sent is named in the
   chat; none is dropped silently.
-* An open approval, question or private-access card refuses the move: those
-  cards cannot follow the chat (``app.network.handoff.OPEN_PROMPT``).
+* Approval and private-access cards refuse the move. Question-only waits
+  detach their callback and carry a durable card; its answer starts a new turn.
 * Pending wake-ups move with the chat (``app.network.handoff``). They remain
   durably dormant on the receiver until holding ends; a held human message
   cancels them before any overdue wake can run (#1963).
@@ -478,6 +478,12 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
     """
     if pending.by != "agent" or pending.cancelled:
         return None
+    from app.db import interactions
+
+    # The carried card, not an automatic continuation, owns the next input.
+    # Its answer queues a fresh turn on the receiver with the question context.
+    if any(row["kind"] == "question" for row in interactions.get_pending_interactions(session_id)):
+        return None
     from app.core.task_registry import task_registry
 
     if task_registry.is_user_stopped(session_id):
@@ -843,12 +849,140 @@ def _busy_words(state: Dict[str, Any]) -> str:
     return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
+def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
+                          turn_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Cancel callbacks and save replacement cards in ONE transaction.
+
+    No question can disappear if the process stops between detaching the turn
+    and transferring it. An answer which won the race is never replaced.
+    """
+    from app.db.base import get_db
+    from app.db import interactions, turns
+    from app.network.handoff import open_prompt, _has_live_tasks
+
+    replacements = []
+    with get_db() as conn:
+        cur = conn.cursor()
+        # Share turn admission's lock: a queued turn or a later approval must
+        # not be swept into this question-only snapshot.
+        cur.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        cur.fetchone()
+        if open_prompt(cur, session_id, allow_questions=True) or _has_live_tasks(cur, session_id):
+            return []
+        cur.execute("SELECT 1 FROM turns WHERE session_id=%s AND state='queued' LIMIT 1", (session_id,))
+        if cur.fetchone():
+            return []
+        if turn_id:
+            cur.execute("SELECT state FROM turns WHERE id=%s AND session_id=%s FOR UPDATE", (turn_id, session_id))
+            turn = cur.fetchone()
+            if not turn or turn["state"] != "running":
+                return []
+        for row in rows:
+            if not interactions.cancel_interaction(row["id"], _conn=conn):
+                continue
+            request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "handoff-question:" + row["id"]))
+            payload = {"request_id": request_id, "tool_use_id": request_id,
+                       "questions": row["payload"]["questions"], "nonblocking": True}
+            iid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"))
+            cur.execute("INSERT INTO pending_interactions (id,session_id,kind,payload,state) "
+                        "VALUES (%s,%s,'question',%s,'pending') ON CONFLICT (id) DO NOTHING",
+                        (iid, session_id, json.dumps(payload)))
+            replacements.append({"old": row, "payload": payload})
+        if replacements and turn_id:
+            # Close steering BEFORE waking a cancelled callback. Its tool
+            # result must not let the same turn start more work here.
+            turns.interrupt_turn(session_id, "stop", turn_id=turn_id,
+                                 source="session_handoff", _conn=conn)
+    return replacements
+
+
+async def _prepare_questions(session_id: str, state: Dict[str, Any], pending: PendingHandoff) -> None:
+    """Detach only a foreground question wait, never a live tool or background work.
+
+    Native nonblocking cards already have no callback. Blocking CLI cards are
+    cancelled and re-asked as durable cards whose answer queues a fresh turn.
+    """
+    if state["tasks"] or state.get("queued") or state.get("wake"):
+        return
+    from app.db import interactions, turns
+    from app.core import interaction_events, interaction_wait, session_runtime
+    from app.core.user_question_handler import user_question_handler, publish_session_attention
+    from app.network import runners
+
+    rows = await asyncio.to_thread(interactions.get_pending_interactions, session_id)
+    if not rows or await asyncio.to_thread(_open_prompt, session_id):
+        return
+    if not (runners.find(pending.target_id) or {}).get("capabilities", {}).get("move_questions"):
+        raise ValueError("Update the target worker before moving an unanswered question.")
+    blocking = [r for r in rows if not r["payload"].get("nonblocking")]
+    if not blocking:
+        return
+    live = await asyncio.to_thread(turns.get_live_turn, session_id)
+    runtime = session_runtime.get_live_runtime(session_id)
+    if live:
+        if runtime is None or not interaction_wait.has_waiters(session_id):
+            return
+        # A question may be one member of a parallel tool batch. Only stop the
+        # turn when every unreturned tool is one of the captured questions.
+        from app.db.base import get_db, parse_jsonb
+
+        def only_questions():
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT event_type,payload FROM session_events WHERE session_id=%s "
+                            "AND turn_id=%s AND event_type IN ('tool.use','tool.result') ORDER BY seq",
+                            (session_id, live["id"]))
+                open_tools = set()
+                for event in cur.fetchall():
+                    tool = (parse_jsonb(event["payload"]) or {}).get("tool_use_id")
+                    if event["event_type"] == "tool.use":
+                        open_tools.add(tool)
+                    else:
+                        open_tools.discard(tool)
+                return bool(open_tools) and open_tools <= {r["payload"].get("tool_use_id") for r in blocking}
+
+        if not await asyncio.to_thread(only_questions):
+            return
+    elif state["running"]:
+        return  # An active run without its question turn is not safe to stop.
+    replacements = await asyncio.to_thread(_detach_question_rows, session_id, blocking,
+                                          live["id"] if live else None)
+    if not replacements:
+        return
+    interaction_wait.notify_changed(session_id)
+    if live:
+        await runtime.interrupt("stop", source="session_handoff")
+    from app.core.sync_engine import sync_engine
+    from app.db import database
+
+    session = await asyncio.to_thread(database.get_session, session_id) or {}
+    async def broadcast(event):
+        await sync_engine.broadcast_user_question(session.get("api_user_id") or "admin", event)
+
+    for replacement in replacements:
+        old = replacement["old"]
+        await interaction_events.emit_interaction_expired(
+            session_id, old["id"], old["payload"].get("request_id"), "cancelled")
+        payload = replacement["payload"]
+        await user_question_handler.post_question(
+            session_id=session_id, request_id=payload["request_id"], tool_use_id=payload["tool_use_id"],
+            questions=payload["questions"], broadcast_func=broadcast)
+    await publish_session_attention(session_id)
+
+
 async def _wait_idle(session_id: str, pending: PendingHandoff) -> bool:
+    last_log = 0.0
     while time.time() < pending.expires_at:
         if pending.cancelled:
             return False
+        state = await asyncio.to_thread(busy_state, session_id)
+        await _prepare_questions(session_id, state, pending)
         if not await asyncio.to_thread(_busy, session_id):
             return True
+        now = time.monotonic()
+        if not last_log or now - last_log >= 60:
+            logger.info("Hand-off waiting for session %s: %s", session_id, _busy_words(state))
+            last_log = now
         await asyncio.sleep(POLL_S)
     return False
 
@@ -858,7 +992,7 @@ def _open_prompt(session_id: str) -> bool:
     from app.network.handoff import open_prompt
 
     with get_db() as conn:
-        return open_prompt(conn.cursor(), session_id)
+        return open_prompt(conn.cursor(), session_id, allow_questions=True)
 
 
 def _sent_here(sent: int) -> str:
@@ -1025,8 +1159,8 @@ async def queue_move(session_id: str, target: str, *, stop: bool = False) -> Dic
     Queues the same hand-off HandOffSession does and starts waiting at once:
     the move runs when the turn, the queued messages and background work end.
     ``stop`` stops that work first, as the Stop button does ("Stop and move
-    now"). An open approval, question or access card refuses it, unless the
-    Stop dismisses it.
+    now"). An open approval or access card refuses it, unless the Stop
+    dismisses it. Question cards follow the chat once its other work ends.
     """
     from app.network import runners
     from app.network.handoff import OPEN_PROMPT, check_unfinished_wakes
