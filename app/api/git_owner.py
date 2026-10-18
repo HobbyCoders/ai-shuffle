@@ -266,7 +266,9 @@ def _is_plain_project_folder(path):
                                   env={**os.environ, "LC_ALL": "C"})
     if result.returncode == 0:
         return False  # An enclosing repository is not a plain project folder.
-    if "fatal: not a git repository (or any of the parent directories): .git" in result.stderr:
+    if (result.stderr.startswith("fatal: not a git repository (or any of the parent directories): .git")
+            or (result.stderr.startswith("fatal: not a git repository (or any parent up to mount point ")
+                and "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)." in result.stderr)):
         return True
     raise subprocess.CalledProcessError(result.returncode, result.args,
                                         output=result.stdout, stderr=result.stderr)

@@ -75,6 +75,21 @@ def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
     assert response.json()["detail"] == "Selected checkout is missing or ambiguous on this worker"
 
 
+@pytest.mark.parametrize("diagnostic,is_plain", [
+    ("fatal: not a git repository (or any parent up to mount point /home/appuser)\n"
+     "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", True),
+    ("fatal: cannot change to directory: Permission denied\n", False),
+])
+def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, monkeypatch, diagnostic, is_plain):
+    project, folder, client = plain_project
+    monkeypatch.setattr(git.git_service, "_run_git", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(["git", "rev-parse"], 128, stdout="", stderr=diagnostic))
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    assert response.status_code == (200 if is_plain else 500)
+    if is_plain:
+        assert response.json()["is_git_repo"] is False
+
+
 @pytest.mark.parametrize("failure", [PermissionError("denied"), FileNotFoundError("git missing"),
                                       subprocess.TimeoutExpired("git", 5),
                                       subprocess.CalledProcessError(128, "git", stderr="permission denied")])
