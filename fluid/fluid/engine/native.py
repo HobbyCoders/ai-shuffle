@@ -5549,7 +5549,9 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _nested_instruction_reminder(self, input: dict[str, Any]) -> str | None:
         from pathlib import Path
 
-        from fluid.context.instructions import _walk_up_dirs, nested_instructions
+        from fluid.context.instructions import (
+            _walk_up_dirs, is_global_instruction_path, nested_instructions,
+        )
 
         if not isinstance(input, dict):
             return None
@@ -5574,7 +5576,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             try:
                 for f in nested_instructions((base / target).resolve()):
                     directory = str(Path(f.path).parent)
-                    if directory in covered or f.path in self._nested_injected:
+                    if (is_global_instruction_path(f.path)
+                            or directory in covered or f.path in self._nested_injected):
                         continue
                     self._nested_injected.add(f.path)
                     if f.content.strip():
