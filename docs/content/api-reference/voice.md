@@ -8,9 +8,9 @@ order: 17
 
 Endpoints for voice mode: its settings, a voice preview, starting a voice session and controlling the call. A voice session is a normal session whose `mode` is `voice`; the voice agent in the call hands work to agents that run in that session.
 
-New calls use GPT Live 1 (`gpt-live-1`), and the call audio travels over the WebSocket `/api/v1/voice/sessions/{session_id}/audio`, which is not covered on this page. If that socket drops during a GPT Live call, the app keeps trying to reopen it for about 30 seconds with backoff, using `?resume=1`, which replaces the session's leftover audio connection instead of being refused with `4409`. While the server restores its own provider connection, it sends `{"type": "status", "state": "reconnecting"}` on the socket, then `"live"` once restored. Sessions pinned to an older OpenAI Realtime model instead connect from the browser with a short-lived client secret and then report the call with [POST /api/v1/voice/sessions/{session_id}/call](#post-apiv1voicesessionssession_idcall).
+New calls use the selected engine, GPT Live 1 (`gpt-live-1`) or Grok Voice (`grok-voice-latest`), and the call audio travels over the WebSocket `/api/v1/voice/sessions/{session_id}/audio`, which is not covered on this page. If that socket drops during a GPT Live call, the app keeps trying to reopen it for about 30 seconds with backoff, using `?resume=1`, which replaces the session's leftover audio connection instead of being refused with `4409`. While the server restores its own provider connection, it sends `{"type": "status", "state": "reconnecting"}` on the socket, then `"live"` once restored. Sessions pinned to an older OpenAI Realtime model instead connect from the browser with a short-lived client secret and then report the call with [POST /api/v1/voice/sessions/{session_id}/call](#post-apiv1voicesessionssession_idcall).
 
-Calls are paid for by an enabled OpenAI provider with a stored API key (Settings → Providers). ChatGPT-subscription logins cannot fund voice calls.
+Calls are paid for by an enabled OpenAI (GPT Live) or xAI (Grok Voice) provider with a stored API key (Settings → Providers). Subscription voice access is unverified and not offered. Grok uses a server-owned xAI socket, PCM16 mono at 24 kHz, `server_vad`, transcripts and function handoffs to the selected chat agent. No xAI key is sent to the browser. Grok calls end on provider disconnect; GPT Live reconnect behavior is described above.
 
 ## Voice settings
 
@@ -56,14 +56,14 @@ JSON body, all optional:
 | Field | Notes |
 |-------|-------|
 | `voice_mode_enabled` | Turns voice mode on or off |
-| `voice_model` | Only `"gpt-live-1"` is accepted |
+| `voice_model` | `"gpt-live-1"` or `"grok-voice-latest"`; defaults to GPT Live |
 | `voice_voice` | One of the ids in `model_details.voices` |
-| `voice_provider_id` | Only `null` is accepted, which clears a saved provider. Providers are picked automatically |
+| `voice_provider_id` | An enabled API-key provider for the selected engine, or `null` for automatic selection by name. Clear the pin when switching engines |
 | `voice_max_call_minutes` | Positive integer. A call is cut off at this length (default 240) |
 | `voice_input_model` | One of the ids in `voice_input_models` |
 | `voice_input_mode` | `auto` or `toggle` |
 | `voice_input_silence_seconds` | Integer from 1 to 60 |
-| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `opening` (up to 2000), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent to GPT Live as silence; -80 turns the gate off). Send `""` to reset a prompt. Other keys return `400` |
+| `voice_options` | Object merged into the saved options: `instructions` (up to 16000 characters), `opening` (up to 2000), `delegation_instructions` (up to 16000), `mic_threshold_db` (number from -80 to -20, default -42: microphone audio quieter than this many dBFS is sent as silence; -80 turns the gate off). Grok additionally accepts `turn_detection: "server_vad"` only. Send `""` to reset a prompt. Other keys return `400` |
 | `voice_options_model` | Optional guard: the model your `voice_options` were written for. A mismatch returns `409` |
 | `voice_app_tools_enabled` | Accepted and ignored |
 
@@ -82,7 +82,7 @@ Generate a short spoken sample of a voice. Returns `audio/wav` bytes.
 
 **Auth:** Required
 
-JSON body: `voice` (required, one of the ids in `model_details.voices`). Returns `400` for an unknown voice or when no OpenAI API-key provider is configured, and `502` when the sample cannot be generated.
+JSON body: `voice` (required, one of the ids in `model_details.voices`), `model` (`gpt-live-1` by default, or `grok-voice-latest`) and optional `provider_id`. Returns `400` for an unknown voice or when no matching API-key provider is configured, and `502` when the sample cannot be generated.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/voice/preview \

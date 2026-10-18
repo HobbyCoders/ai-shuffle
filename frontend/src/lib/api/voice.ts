@@ -33,6 +33,7 @@ import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-own
 /** Labels for current and already-pinned legacy calls, not model choices. */
 const voiceModelLabels: Record<string, string> = {
  'gpt-live-1': 'GPT Live 1',
+ 'grok-voice-latest': 'Grok Voice',
  'gpt-realtime-2.1': 'GPT Realtime 2.1',
  'gpt-realtime-2.1-mini': 'GPT Realtime 2.1 Mini',
  'gpt-realtime-2': 'GPT Realtime 2',
@@ -270,11 +271,11 @@ export async function isVoiceEnabled(): Promise<boolean> {
  * Returns the raw audio as a Blob — the ApiClient only speaks JSON, so this
  * goes through fetch directly (same cookie auth, same error shape).
  */
-export async function previewVoice(voice: string, signal?: AbortSignal): Promise<Blob> {
+export async function previewVoice(voice: string, signal?: AbortSignal, model = 'gpt-live-1'): Promise<Blob> {
 	const response = await fetch(`${apiBase()}/voice/preview`, withAuth({
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ voice }),
+		body: JSON.stringify({ voice, model }),
 		signal,
 	}));
 	if (!response.ok) {

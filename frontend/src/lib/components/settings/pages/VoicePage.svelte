@@ -73,7 +73,8 @@
 	const voiceLabel = $derived(voiceOptions.find((o) => o.value === s?.voice_voice)?.label ?? s?.voice_voice ?? '');
 
 	/** The provider a new call runs on: the pin when it is still eligible, else the first by name (server rule). */
-	const providers = $derived(voice.providers);
+	const grok = $derived(s?.voice_model === 'grok-voice-latest');
+	const providers = $derived(voice.providers?.filter((p) => (p.provider_type ?? 'openai') === (grok ? 'xai' : 'openai')) ?? null);
 	const effectiveProvider = $derived.by(() => {
 		if (!providers?.length) return null;
 		const pinned = providers.find((p) => p.id === s?.voice_provider_id);
@@ -191,11 +192,17 @@
 		>
 			<Switch checked={callsOn} disabled={locked} onchange={(v) => voice.save({ voice_mode_enabled: v })} />
 		</SettingRow>
+		<SettingRow id="voice.engine" value={s?.voice_model} onReset={() => voice.save({ voice_model: 'gpt-live-1', voice_provider_id: null })}>
+			<SelectField value={s?.voice_model ?? 'gpt-live-1'} options={[{ value: 'gpt-live-1', label: 'GPT Live 1' }, { value: 'grok-voice-latest', label: 'Grok Voice' }]} width={180} disabled={locked} onchange={(model) => { preview.stop(); void voice.save({ voice_model: model, voice_provider_id: null }); }} />
+		</SettingRow>
+		<SettingRow label="Voice access" hint="Subscription voice access is not verified; an API key is required.">
+			<ValueText value={grok ? 'xAI API key · server VAD' : 'OpenAI API key'} />
+		</SettingRow>
 		<SettingRow
 			id="voice.voice"
 			dim={!callsOn}
 			value={s?.voice_voice}
-			onReset={() => voice.save({ voice_voice: defaultOf<string>('voice.voice') })}
+			onReset={() => voice.save({ voice_voice: grok ? 'eve' : defaultOf<string>('voice.voice') })}
 		>
 			{#if s?.voice_voice}
 				<button
@@ -204,7 +211,7 @@
 					aria-label={preview.playing === s.voice_voice ? `Stop ${voiceLabel} sample` : `Play ${voiceLabel} sample`}
 					aria-pressed={preview.playing === s.voice_voice}
 					disabled={!details}
-					onclick={() => s && preview.toggle(s.voice_voice)}
+					onclick={() => s && preview.toggle(s.voice_voice, s.voice_model)}
 				>
 					{#if preview.playing === s.voice_voice && preview.loading}<LoaderCircle class="st-spin-icon" />{:else if preview.playing === s.voice_voice}<Square />{:else}<Play />{/if}
 				</button>
@@ -264,7 +271,7 @@
 					ariaLabel="Calls run on {effectiveProvider.name}. Open in Providers"
 				/>
 			{:else}
-				<LinkValue label="Add an OpenAI API key" target={{ category: 'providers' }} />
+				<LinkValue label={grok ? "Add an xAI API key" : "Add an OpenAI API key"} target={{ category: 'providers' }} />
 			{/if}
 		</SettingRow>
 		<SettingRow

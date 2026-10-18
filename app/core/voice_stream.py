@@ -230,8 +230,9 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # Only a live binding carries LiveOptions; a WebRTC binding stores the
     # realtime option set, which LiveOptions rejects as extra fields.
     instructions = DELEGATION_INSTRUCTIONS
-    if binding.get("model") == LIVE_MODEL:
-        options = validate_options(LIVE_MODEL, binding.get("options") or {})
+    from app.core.voice_models import GROK_MODEL
+    if binding.get("model") in (LIVE_MODEL, GROK_MODEL):
+        options = validate_options(binding["model"], binding.get("options") or {})
         instructions = options["delegation_instructions"] or DELEGATION_INSTRUCTIONS
     # Submit to the SAME session: reuse its history/client and normal queue,
     # approval, stop, placement and model-switch semantics. No worker creation.
@@ -424,6 +425,10 @@ class VoiceStream:
     @property
     def is_live(self):
         return self.config["model"] == LIVE_MODEL
+
+    @property
+    def upstream_url(self):
+        return LIVE_URL if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
 
     async def send(self, event: dict):
         if self.closed:
@@ -831,7 +836,7 @@ class VoiceStream:
                     await self.send({"type": "session.commentary.append", "delegation_id": None,
                                      "content": "Begin the conversation now, following the instructions provided."})
                 elif kind == "session.delegation.created":
-                    if self.options["delegation_type"] == "responses" and not self.config.get("conversation_surface"):
+                    if self.options.get("delegation_type", "client") == "responses" and not self.config.get("conversation_surface"):
                         continue  # Provider-owned: never also dispatch an app worker.
                     delegation = event.get("delegation") or {}
                     did = delegation.get("id")
@@ -898,7 +903,7 @@ class VoiceStream:
         if not text or len(event["text"].encode("utf-8")) > MAX_TEXT_BYTES:
             await reject("Voice messages must contain text and be at most 16,000 bytes. Your draft has been kept.")
             return
-        if not self.is_live or (self.options["delegation_type"] == "responses" and not self.config.get("conversation_surface")):
+        if not self.is_live or (self.options.get("delegation_type", "client") == "responses" and not self.config.get("conversation_surface")):
             await reject("This voice engine does not support text or attachments. End the call to send your draft in chat.")
             return
         key = "typed-" + identity
@@ -980,7 +985,7 @@ class VoiceStream:
             return
         seconds = len(data) / 48_000
         self.mic_voiced_s += seconds
-        if not self.is_live or self.restoring:
+        if self.config["model"] != LIVE_MODEL or self.restoring:
             return
         if self.last_out_at is not None and now - self.last_out_at < PROVIDER_DEAF_OUTPUT_QUIET_S:
             return  # The voice is talking; its own speech may be what the mic hears.
@@ -1223,7 +1228,7 @@ class VoiceStream:
     async def run(self):
         tasks = []
         provider = []
-        url = LIVE_URL if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
+        url = self.upstream_url
         auth = ("Bearer " if self.is_live else "Key ") + self.api_key
         if not self.is_live:
             self.api_key = ""  # PersonaPlex is never reconnected; Live keeps it to reconnect.
@@ -1239,7 +1244,7 @@ class VoiceStream:
                     history = await self.live_history()
                     if history:
                         self.transcript.append({"role": "history", "text": history[0]["content"][0]["text"], "offset_ms": 0})
-                    if self.options["delegation_type"] != "responses" or self.config.get("conversation_surface"):
+                    if self.options.get("delegation_type", "client") != "responses" or self.config.get("conversation_surface"):
                         from app.core.voice_progress import VoiceProgress
                         approvals = None
                         if self.config.get("conversation_surface"):

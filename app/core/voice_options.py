@@ -40,11 +40,20 @@ class LiveOptions(PromptOptions):
     mic_threshold_db: float = Field(default=-42.0, ge=-80, le=-20)
 
 
+class GrokOptions(PromptOptions):
+    opening: str = Field(default="", max_length=2000)
+    delegation_instructions: str = Field(default="", max_length=16000)
+    mic_threshold_db: float = Field(default=-42.0, ge=-80, le=-20)
+    turn_detection: Literal["server_vad"] = "server_vad"
+
+
 def validate_options(model: str, value: dict) -> dict:
-    from app.core.voice_models import LIVE_MODEL, PERSONAPLEX_MODEL
+    from app.core.voice_models import GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL
 
     cls = (
-        LiveOptions
+        GrokOptions
+        if model == GROK_MODEL
+        else LiveOptions
         if model == LIVE_MODEL
         else PromptOptions
         if model == PERSONAPLEX_MODEL

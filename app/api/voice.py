@@ -46,7 +46,7 @@ from app.api.sessions_helpers import check_session_access_for_api_user
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
-    FAL_PROVIDER_ID, LIVE_MODEL, PERSONAPLEX_MODEL, session_config, transport_for,
+    FAL_PROVIDER_ID, GROK_MODEL, LIVE_MODEL, PERSONAPLEX_MODEL, session_config, transport_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,21 +79,27 @@ MAX_REMEMBERED_SECRETS = 64
 # ============================================================================
 
 def _is_eligible_voice_provider(row: Dict[str, Any]) -> bool:
-    """Whether a provider row can fund an OpenAI Realtime call.
+    """Whether a provider row can fund an OpenAI or xAI voice call.
 
-    Requires an enabled ``provider_type='openai'`` row carrying a stored API
+    Requires an enabled ``openai`` or ``xai`` row carrying a stored API
     key. ChatGPT/Codex subscription rows are excluded via the same discriminator
     the fluid credential layer uses — Realtime has no subscription-OAuth path.
     """
     from app.core.provider.fluid_credentials import _is_codex_subscription
 
-    if row.get("provider_type") != "openai":
+    if row.get("provider_type") not in ("openai", "xai"):
         return False
     if not row.get("enabled"):
         return False
     if _is_codex_subscription(row):
         return False
     return bool(row.get("auth_token"))
+
+
+def provider_matches_model(row: dict, model: str) -> bool:
+    if model == PERSONAPLEX_MODEL:
+        return row.get("id") == FAL_PROVIDER_ID
+    return row.get("provider_type") == ("xai" if model == GROK_MODEL else "openai")
 
 
 def _fal_key_for(api_user: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
@@ -124,7 +130,7 @@ def list_eligible_voice_providers(
     """
     rows = database.get_enabled_model_providers(include_token=True)
     providers = [
-        {"id": row["id"], "name": row.get("name") or row["id"]}
+        {"id": row["id"], "name": row.get("name") or row["id"], "provider_type": row["provider_type"]}
         for row in rows
         if _is_eligible_voice_provider(row)
     ]
@@ -171,6 +177,7 @@ class VoiceProvider(BaseModel):
     """A provider row that can fund voice calls."""
     id: str
     name: str
+    provider_type: str = "openai"
 
 
 class VoiceAgent(BaseModel):
@@ -253,6 +260,7 @@ class VoicePreviewRequest(BaseModel):
     """Which voice to synthesise a short sample for."""
     voice: str
     provider_id: Optional[str] = None
+    model: str = LIVE_MODEL
 
 
 class VoiceHangupRequest(BaseModel):
@@ -347,16 +355,16 @@ async def preview_voice(
 ):
     """Generate a short sample on the same GPT Live model used by calls."""
     from app.api.settings import get_voice_settings
-    from app.core.voice_models import LIVE_VOICES
+    from app.core.voice_models import voices_for
     from app.core.voice_preview import generate_live_preview
 
     voice = (request.voice or "").strip()
-    if voice not in LIVE_VOICES:
-        raise HTTPException(400, f"voice must be one of {list(LIVE_VOICES)}")
+    if request.model not in (LIVE_MODEL, GROK_MODEL) or voice not in voices_for(request.model):
+        raise HTTPException(400, "Choose a supported voice and engine.")
     voice_settings = await run_sync(get_voice_settings)
     api_user = get_api_user_from_request(http_request)
     provider_row = await run_sync(
-        _resolve_provider_row, None, voice_settings["voice_provider_id"], api_user
+        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"], api_user, request.model
     )
     api_key = await _provider_api_key(provider_row, api_user=api_user)
 
@@ -371,7 +379,7 @@ async def preview_voice(
                 return
             await asyncio.sleep(.2)
 
-    generation = asyncio.create_task(generate_live_preview(api_key, voice))
+    generation = asyncio.create_task(generate_live_preview(api_key, voice, request.model))
     disconnect = asyncio.create_task(disconnected())
     try:
         done, _ = await asyncio.wait({generation, disconnect}, return_when=asyncio.FIRST_COMPLETED)
@@ -382,10 +390,10 @@ async def preview_voice(
     except HTTPException:
         raise
     except (ValueError, TimeoutError) as exc:
-        raise HTTPException(502, str(exc) or "GPT Live preview timed out. Try again.") from exc
+        raise HTTPException(502, str(exc) or "Voice preview timed out. Try again.") from exc
     except Exception as exc:
         logger.warning("GPT Live preview connection failed: %s", type(exc).__name__)
-        raise HTTPException(502, "Could not connect to GPT Live for a voice preview. Check your OpenAI API provider.") from exc
+        raise HTTPException(502, "Could not connect for a voice preview. Check the selected engine’s API-key provider.") from exc
     finally:
         finished.set()
         generation.cancel()
@@ -397,6 +405,7 @@ def _resolve_provider_row(
     requested_id: Optional[str],
     settings_provider_id: Optional[str],
     api_user: Optional[Dict[str, Any]] = None,
+    model: str = LIVE_MODEL,
 ) -> Dict[str, Any]:
     """Pick the provider row that funds this call, or raise a helpful 400.
 
@@ -407,33 +416,25 @@ def _resolve_provider_row(
     requested = (requested_id or "").strip()
     if requested:
         row = _eligible_provider_row(requested, api_user)
-        if row is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Provider {requested!r} cannot fund voice calls. Pick an "
-                    "enabled OpenAI API-key provider or configure a fal.ai API key. "
-                    "ChatGPT-subscription logins cannot fund voice calls."
-                ),
-            )
+        if row is None or not provider_matches_model(row, model):
+            raise HTTPException(400, "Choose an enabled API-key provider for this voice engine. Subscription voice access is not verified; an API key is required.")
         return row
 
     pinned = (settings_provider_id or "").strip()
     if pinned:
         row = _eligible_provider_row(pinned)
-        if row is not None and row["id"] != FAL_PROVIDER_ID:
+        if row is not None and provider_matches_model(row, model):
             return row
         # A stale/retired preference must not require a hidden selector to repair.
 
 
-    eligible = [p for p in list_eligible_voice_providers() if p["id"] != FAL_PROVIDER_ID]
+    eligible = [p for p in list_eligible_voice_providers(api_user) if provider_matches_model(p, model)]
     if not eligible:
         raise HTTPException(
             status_code=400,
             detail=(
-                "No OpenAI provider with a stored API key is configured. Add one "
-                "in Settings > Providers before starting a voice session "
-                "(Realtime does not support ChatGPT-subscription logins)."
+                f"No {'xAI' if model == GROK_MODEL else 'OpenAI'} provider with a stored API key is configured. "
+                "Add one in Settings > Providers. Subscription voice access is not verified; an API key is required."
             ),
         )
     eligible.sort(key=lambda p: (p["name"].casefold(), p["id"]))
@@ -803,7 +804,7 @@ async def create_voice_session(
 
     provider_row = await run_sync(
         _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"],
-        api_user,
+        api_user, voice_settings["voice_model"],
     )
 
     api_key = await _provider_api_key(provider_row, api_user=api_user)
@@ -813,8 +814,8 @@ async def create_voice_session(
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
     options = voice_settings.get("voice_options", {})
     selected_model, selected_effort = request.model, request.effort
-    if model == LIVE_MODEL and not (selected_model or "").strip():
-        raise HTTPException(400, "Choose a chat model in the composer before starting GPT Live.")
+    if model in (LIVE_MODEL, GROK_MODEL) and not (selected_model or "").strip():
+        raise HTTPException(400, "Choose a chat model in the composer before starting a voice call.")
     client_secret, expires_at = "", None
     if transport_for(model) == "webrtc":
         body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"], options)
@@ -839,8 +840,8 @@ async def create_voice_session(
     session_create_overrides = {
         "title": "Voice session",
         "is_active": True,
-        "provider_id": None if model == LIVE_MODEL else provider_row["id"],
-        "derive_provider_from_profile": model != LIVE_MODEL,
+        "provider_id": None if model in (LIVE_MODEL, GROK_MODEL) else provider_row["id"],
+        "derive_provider_from_profile": model not in (LIVE_MODEL, GROK_MODEL),
         "model": selected_model,
         "effort": selected_effort,
         "permission_mode": request.permission_mode,
@@ -1023,7 +1024,7 @@ async def prepare_voice_attachment(
     elif request.provider_id and request.provider_id != config.get("provider_id"):
         raise HTTPException(400, "This conversation already has a saved voice provider binding.")
     api_user = get_api_user_from_request(http_request)
-    provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user)
+    provider_row = await run_sync(_resolve_provider_row, config.get("provider_id"), None, api_user, config["model"])
     api_key = await _provider_api_key(provider_row, api_user=api_user)
     if (config["model"] == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
@@ -1063,7 +1064,7 @@ async def mint_voice_session_secret(
     _reject_when_capped(session_id)
 
     config = session_config(session_row, voice_settings)
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
     api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     model = config["model"]
@@ -1233,7 +1234,7 @@ async def attach_voice_call(
     config = session_config(session_row, voice_settings)
     if transport_for(config["model"]) != "webrtc":
         raise HTTPException(400, "This voice model uses the audio stream, not the Realtime sideband.")
-    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
     api_key = await _provider_api_key(provider_row, api_user=api_user)
 
     try:
@@ -1402,7 +1403,7 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
         config = session_config(row, settings)
         if transport_for(config["model"]) != "stream":
             raise HTTPException(400, "This voice model uses WebRTC.")
-        provider = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
+        provider = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user, config["model"])
         key = await _provider_api_key(provider, api_user=api_user)
         if resume == "1":
             # The caller already has access to this session, which is all the
@@ -1412,7 +1413,9 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             raise HTTPException(409, "This voice session already has an audio connection.")
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
             raise HTTPException(429, "Too many voice calls are connected.")
-        call = voice_stream.VoiceStream(websocket, row, config, key, settings["voice_max_call_minutes"],
+        from app.core.voice_grok import GrokVoiceStream
+        stream_cls = GrokVoiceStream if config["model"] == GROK_MODEL else voice_stream.VoiceStream
+        call = stream_cls(websocket, row, config, key, settings["voice_max_call_minutes"],
                                         api_user_id=(api_user or {}).get("id"))
         # Reserve before accepting: there is no await between capacity check
         # and reservation, so concurrent handshakes cannot exceed the bound.

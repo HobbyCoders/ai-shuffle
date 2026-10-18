@@ -37,7 +37,7 @@
 
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
-import { usesAudioStream } from '$lib/constants/voice-engines';
+import { usesAudioStream, usesDelegation } from '$lib/constants/voice-engines';
 import { createVoiceOutput } from './voiceVolume';
 import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
@@ -1130,7 +1130,7 @@ export function sendVoiceText(owner: string, text: string): boolean | Promise<bo
 	const state = get(voiceCallState);
 	if (state.sessionId !== owner || state.status !== 'live' || !text.trim()) return false;
 	if (audioStream) {
-		if (state.model !== 'gpt-live-1') throw new Error('This voice engine does not support text or attachments. End the call to send your draft in chat.');
+		if (!usesDelegation(state.model, state.options)) throw new Error('This voice engine does not support text or attachments. End the call to send your draft in chat.');
 		return audioStream.sendText(text);
 	}
 	if (connection?.dc.readyState !== 'open') return false;

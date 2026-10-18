@@ -851,7 +851,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # The realtime models a voice session may run on. Anything outside this
 # allowlist is rejected on write, so a typo can never reach OpenAI.
 from app.core.voice_models import (
-    FAL_PROVIDER_ID, voices_for,
+    FAL_PROVIDER_ID, GROK_MODEL, voices_for,
 )
 DEFAULT_VOICE_MODEL = "gpt-live-1"
 
@@ -959,12 +959,14 @@ def get_voice_settings() -> dict:
     if not 1 <= silence_seconds <= 60:
         silence_seconds = 5
 
-    # New calls are always GPT Live. Pinned session bindings remain readable.
-    model = DEFAULT_VOICE_MODEL
+    # Legacy bindings remain readable; new calls choose a supported engine.
+    model = database.get_system_setting(VOICE_MODEL_KEY)
+    if model not in (DEFAULT_VOICE_MODEL, GROK_MODEL):
+        model = DEFAULT_VOICE_MODEL
 
     voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
     if voice not in voices_for(model):
-        voice = DEFAULT_VOICE_VOICE
+        voice = "eve" if model == GROK_MODEL else DEFAULT_VOICE_VOICE
 
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
     if provider_id == FAL_PROVIDER_ID:
@@ -1034,15 +1036,18 @@ async def update_voice_settings(
         model = request.voice_model if "voice_model" in supplied else current["voice_model"]
         provider = request.voice_provider_id if "voice_provider_id" in supplied else current["voice_provider_id"]
         provider = (provider or "").strip() or None
-        if model != DEFAULT_VOICE_MODEL:
-            raise HTTPException(400, "Voice mode uses GPT Live 1.")
+        if model not in (DEFAULT_VOICE_MODEL, GROK_MODEL):
+            raise HTTPException(400, "Choose GPT Live 1 or Grok Voice.")
         if "voice_provider_id" in supplied and provider:
-            raise HTTPException(400, "Voice providers are selected automatically from configured OpenAI API providers.")
+            from app.api.voice import _eligible_provider_row, provider_matches_model
+            row = _eligible_provider_row(provider)
+            if not row or not provider_matches_model(row, model):
+                raise HTTPException(400, "Choose an API-key provider for the selected voice engine.")
         voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]
         if voice not in voices_for(model):
             if "voice_voice" in supplied:
                 raise HTTPException(400, f"voice_voice must be one of {list(voices_for(model))}")
-            voice = DEFAULT_VOICE_VOICE
+            voice = "eve" if model == GROK_MODEL else DEFAULT_VOICE_VOICE
         minutes = request.voice_max_call_minutes if "voice_max_call_minutes" in supplied else current["voice_max_call_minutes"]
         if minutes is None or minutes <= 0:
             raise HTTPException(400, "voice_max_call_minutes must be a positive integer")

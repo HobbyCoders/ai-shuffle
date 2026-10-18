@@ -35,7 +35,13 @@ class VoicePlayback extends AudioWorkletProcessor {
   this.speaking = false;
   this.step = INPUT_RATE / sampleRate;
   this.underruns = 0; this.droppedMs = 0; this.maxDepth = 0; this.sinceStats = 0;
-  this.port.onmessage = event => { if (event.data?.type === 'pcm') this.push(new Int16Array(event.data.pcm)); };
+  this.port.onmessage = event => {
+   if (event.data?.type === 'pcm') this.push(new Int16Array(event.data.pcm));
+   else if (event.data?.type === 'clear') {
+    this.read = this.written; this.state = 'idle'; this.waited = 0; this.starved = 0;
+    this.speaking = false; this.port.postMessage({ type: 'speaking', active: false });
+   }
+  };
  }
  depth() { return this.written - this.read; }
  push(pcm) {

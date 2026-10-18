@@ -1,21 +1,27 @@
 """Voice engines and their distinct transport/delegation contracts."""
 
 LIVE_MODEL = "gpt-live-1"
+GROK_MODEL = "grok-voice-latest"
+GROK_URL = "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
+# Built-ins shared by xAI speech-to-speech and TTS, checked 2026-10-18.
+GROK_VOICES = ("eve", "carina", "zagan", "helix", "orion", "luna", "iris", "altair", "zenith", "perseus", "helios", "lux", "kepler", "rigel", "cosmo", "celeste", "ursa", "sirius", "lumen", "castor", "naksh", "atlas", "aurora", "liora", "ara", "leo", "rex", "sal")
 PERSONAPLEX_MODEL = "fal-ai/personaplex/realtime"
 FAL_PROVIDER_ID = "__fal_voice__"
 REALTIME_VOICES = ("marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")
-LIVE_VOICES = REALTIME_VOICES + ("quartz", "ripple", "vesper", "willow", "stone", "gleam", "meridian", "bossa", "tempo", "beacon", "delta", "cinder")
+LIVE_VOICES = REALTIME_VOICES + ("quartz", "ripple", "vesper", "willow", "stone", "gleam", "meridian", "bossa", "tempo", "beacon", "delta", "cinder", "nuri", "juni", "flitz", "brise", "sillage", "nira", "harema", "shida", "noeul")
 FAL_VOICES = tuple(f"{prefix}{i}" for prefix, count in (("NATF", 4), ("NATM", 4), ("VARF", 5), ("VARM", 5)) for i in range(count))
 
 
 def voices_for(model: str) -> tuple[str, ...]:
+    if model == GROK_MODEL:
+        return GROK_VOICES
     if model == PERSONAPLEX_MODEL:
         return FAL_VOICES
     return LIVE_VOICES if model == LIVE_MODEL else REALTIME_VOICES
 
 
 def transport_for(model: str) -> str:
-    return "stream" if model in (LIVE_MODEL, PERSONAPLEX_MODEL) else "webrtc"
+    return "stream" if model in (LIVE_MODEL, GROK_MODEL, PERSONAPLEX_MODEL) else "webrtc"
 
 
 def model_details(model: str, options: dict | None = None) -> dict:
@@ -31,7 +37,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
     options = validate_options(model, options or {})
     prompts = []
     runtime = []
-    if model == LIVE_MODEL:
+    if model in (LIVE_MODEL, GROK_MODEL):
         prompts = [
             {"label": "Voice conversation prompt", "key": "instructions", "text": options["instructions"] or LIVE_INSTRUCTIONS, "default_text": LIVE_INSTRUCTIONS},
             {"label": "Chat agent prompt", "key": "delegation_instructions", "text": options["delegation_instructions"] or DELEGATION_INSTRUCTIONS, "default_text": DELEGATION_INSTRUCTIONS},
@@ -40,7 +46,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
             {"label": "Audio format", "value": "PCM16 · 24 kHz · mono"},
             {"label": "Reasoning and tools", "value": "Uses the model, effort and permissions selected in the chat composer"},
             {"label": "Opening words", "value": options["opening"] or "Wait for caller"},
-            {"label": "Turn detection", "value": "Managed by GPT Live; no VAD override is sent"},
+            {"label": "Turn detection", "value": "server_vad" if model == GROK_MODEL else "Managed by GPT Live; no VAD override is sent"},
             {"label": "Microphone gate", "value": f"Audio quieter than {options['mic_threshold_db']:g} dBFS is sent as silence"},
         ]
         note = "Task requests run in the existing chat session with its selected agent instructions, conversation, tools and approval rules. The voice prompt controls direct replies and when to ask the chat agent for help."
@@ -82,7 +88,7 @@ def model_details(model: str, options: dict | None = None) -> dict:
         "prompts": prompts,
         "prompt_note": note,
         # Preview generation uses the same Live transport and voice as new calls.
-        "preview_note": "Previews use GPT Live with the selected voice. Generating a sample uses your OpenAI API account.",
+        "preview_note": "Previews use the selected engine and voice with your API key. Subscription voice access is not verified; an API key is required.",
     }
 
 
