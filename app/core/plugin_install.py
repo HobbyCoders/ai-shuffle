@@ -17,8 +17,8 @@ from typing import Any, Dict, Optional
 from app.core.plugin_models import (
     PluginInfo,
     PluginScope,
-    _force_rmtree,
 )
+from app.core.fs_utils import force_rmtree as _force_rmtree
 from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 

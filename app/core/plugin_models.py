@@ -2,9 +2,6 @@
 Plugin Models - Data classes, enums, and helpers for the plugin system.
 """
 
-import os
-import stat
-import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -12,14 +9,6 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 from app.core.platform import is_docker_mode, get_claude_credentials_dir
-
-
-def _force_rmtree(path):
-    """Remove directory tree, handling read-only files on Windows (e.g. .git pack files)."""
-    def _on_error(_func, _path, _exc_info):
-        os.chmod(_path, stat.S_IWRITE)
-        os.unlink(_path)
-    shutil.rmtree(path, onerror=_on_error)
 
 
 def _get_claude_dir() -> Path:
