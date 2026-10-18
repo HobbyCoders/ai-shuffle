@@ -71,9 +71,6 @@ export const ChangedFilesPanelLazy = createLazyComponent('changed-files', () =>
 export const CreateBranchModalLazy = createLazyComponent('create-branch-modal', () =>
 	import('$lib/components/git/CreateBranchModal.svelte')
 );
-export const InitRepoModalLazy = createLazyComponent('init-repo-modal', () =>
-	import('$lib/components/git/InitRepoModal.svelte')
-);
 
 /** Feature-panel keys, i.e. the `{#if}` branches MainPanel used to hard-mount. */
 export type FeaturePanelKey =

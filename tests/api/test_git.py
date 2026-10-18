@@ -323,13 +323,7 @@ class TestGetGitStatus:
         assert data["default_branch"] == "main"
 
     def test_get_status_project_not_found(self, app, mock_database, mock_settings):
-        """Should return an empty (non-git) status, not 404, for a missing project.
-
-        The status endpoint intentionally resolves the project path with
-        ``allow_missing=True`` and returns ``is_git_repo=False`` when the record
-        doesn't exist yet, so the frontend poller can retry silently during the
-        startup race between polling and project creation (see git.py get_status).
-        """
+        """A missing project is unavailable, not a positive non-repository answer."""
         mock_database.get_project.return_value = None
 
         with (patch("app.api.git.database", mock_database),
@@ -339,13 +333,14 @@ class TestGetGitStatus:
                 client = TestClient(app)
                 response = client.get("/api/v1/projects/nonexistent/git/status")
 
-        assert response.status_code == 200
-        assert response.json()["is_git_repo"] is False
+        assert response.status_code == 503
+        assert "unavailable" in response.json()["detail"].lower()
 
     def test_get_status_not_a_git_repo(
-        self, app, mock_database, mock_git_service, mock_settings, sample_project
+        self, app, mock_database, mock_git_service, mock_settings, sample_project, tmp_path
     ):
-        """Should handle non-git repository."""
+        """Only a real existing plain folder is a confirmed non-repository."""
+        sample_project["path"] = str(tmp_path)
         mock_database.get_project.return_value = sample_project
         mock_git_service.get_status.return_value = {
             "is_git_repo": False,
