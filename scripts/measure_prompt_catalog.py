@@ -37,6 +37,7 @@ def compile_fixture(*, native=True):
     with ExitStack() as stack:
         fixed = {
             "app.db.database.get_all_profiles": [],
+            "app.core.claude_auth_mode.current_mode": "subscription",
             "app.core.agent_provider_models.available_subagents": [
                 agents.SubagentTarget("helper", "Helper", "Implement and test code.", "sonnet")],
             "app.core.agent_provider_models.caller_subagents_disabled": False,

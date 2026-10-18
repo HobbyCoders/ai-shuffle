@@ -12,6 +12,8 @@ vi.mock('$lib/stores/groups.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return { groups: writable({ projects: { groups: [], assignments: {} } }) };
 });
+vi.mock('$lib/api/git', () => ({ getGitStatus: vi.fn().mockResolvedValue({ is_git_repo: true }) }));
+vi.mock('$lib/stores/git.svelte', () => ({ git: { refreshStatus: vi.fn() } }));
 afterEach(cleanup);
 const list = projects as unknown as Writable<any[]>;
 describe('project general remote fields', () => {

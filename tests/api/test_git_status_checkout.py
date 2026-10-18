@@ -91,16 +91,15 @@ def test_unmaterialized_session_does_not_fall_back_to_dirty_base(checkout_client
     database.create_session(session_id="pending", profile_id="default", project_id="p1")
     database.set_session_branch("pending", "feature/pending", project["id"])
     response = client.get("/api/v1/projects/p1/git/status", params={"session_id": "pending"})
-    assert response.status_code == 200, response.text
-    assert response.json()["is_git_repo"] is False
-    assert response.json()["modified"] == []
+    assert response.status_code == 503, response.text
+    assert "unavailable" in response.json()["detail"].lower()
     assert checkouts.get_checkout(
         project["id"], config.settings.effective_instance_id, branch="feature/pending",
     ) is None
 
 
 @pytest.mark.parametrize("legacy_id", [None, "old-worktree"])
-def test_ship_cleanup_status_is_empty_and_resume_restores_it(checkout_client, legacy_id):
+def test_ship_cleanup_status_is_unavailable_and_resume_restores_it(checkout_client, legacy_id):
     import asyncio
     from app.api import git_operations
 
@@ -129,12 +128,8 @@ def test_ship_cleanup_status_is_empty_and_resume_restores_it(checkout_client, le
 
     for _ in range(2):
         response = client.get(url, params=params)
-        assert response.status_code == 200, response.text
-        data = response.json()
-        assert data["is_git_repo"] is False
-        assert data["current_branch"] is None
-        assert data["modified"] == []
-        assert data["ahead"] == 0
+        assert response.status_code == 503, response.text
+        assert "unavailable" in response.json()["detail"].lower()
     assert not (branch / ".git").exists()  # Reads never rematerialize it.
 
     # Mutations still fail closed, rather than touching the dirty base checkout.

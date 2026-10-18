@@ -49,6 +49,16 @@ def test_empty_memory_placeholder_is_removed():
     assert strip_harness_reminders(_note(block)) == PROMPT
 
 
+def test_memory_change_list_is_removed():
+    from app.core.memory_reminder import render_changes, wrap
+
+    held = ("# Memory", "- [m1 r1; session] The owner's private home server is 10.0.0.9.")
+    current = ("# Memory", "- [m1 r2; user] The owner's private home server is 10.0.0.10.")
+    block = wrap(render_changes(held, current))
+    assert strip_harness_reminders(_note(block)) == PROMPT
+    assert strip_harness_reminders(_note(block, MEMORY)) == PROMPT
+
+
 def test_turn_environment_note_is_removed():
     from app.core.environment import generate_turn_environment_note
 
