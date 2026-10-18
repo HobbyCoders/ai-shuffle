@@ -62,6 +62,19 @@ def test_other_lock_changes_do_not_need_a_linux_installer():
     assert groups_for({"desktop/package-lock.json": json.dumps(lock)})["linux-electron"] == []
 
 
+def test_launcher_dependencies_fail_closed_for_unparseable_or_malformed_lock():
+    for content in (b"not json", b"null", b"[]", b"{}", b'{"packages": []}',
+                    b'{"packages": {"node_modules/a": null}}'):
+        invalid = tree({reach.LAUNCHER_LOCK: content})
+        assert reach.launcher_dependencies(invalid) is None
+        groups = reach.classify([reach.LAUNCHER_LOCK], tree(), invalid)
+        assert groups["windows-launcher"] == [reach.LAUNCHER_LOCK]
+        assert "windows-launcher" in reach.verdict(groups)
+        # Even two unreadable endpoints cannot prove that the launcher is unchanged.
+        assert reach.classify([reach.LAUNCHER_LOCK], invalid, invalid)["windows-launcher"] == [reach.LAUNCHER_LOCK]
+    assert reach.launcher_dependencies(tree({reach.LAUNCHER_LOCK: None})) == {}
+
+
 def test_missing_or_invalid_electron_lock_cannot_hide_a_runtime_change():
     for content in (None, "not json", "{}", json.dumps({"packages": {"node_modules/electron": {"version": None}}})):
         assert groups_for({"desktop/package-lock.json": content})["linux-electron"] == ["desktop/package-lock.json"]

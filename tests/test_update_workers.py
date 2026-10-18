@@ -901,6 +901,10 @@ def test_desktop_states_only_an_installer_fixes_name_it(phase, error, kept):
     {"kind": "desktop", "phase": "error", "error": "Source archive checksum or size mismatch"},
     {"kind": "desktop", "phase": "ready", "error": "Busy with active sessions; retry when finished."},
     {"kind": "desktop", "phase": "available", "version": "abc"},
+    # A newer release's installer notice accompanies an installable staged build,
+    # in its notes, not message/error: the worker itself needs no installer.
+    {"kind": "desktop", "phase": "ready", "notes": LINUX_ELECTRON},
+    {"kind": "desktop", "phase": "ready", "notes": LAUNCHER_START},
     # Containers get a newer image, not an installer (imageHint in the web UI).
     {"phase": "error", "error": "An application update failed first boot. Install a newer image; "
                                 "older code cannot safely run over this database. Files retained."},

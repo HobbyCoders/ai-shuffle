@@ -56,7 +56,7 @@ Updating the image always works, even when an in-app update would have, and it i
 
 The desktop app checks for new releases when it starts and once a day, and offers to install them.
 
-A downloaded update that is waiting for **Update and restart** does not hide a newer release: a check still reads the feed, and **Download update** replaces the waiting update with the newer one. If that download fails, the earlier update stays ready. An update that is installing, starting or held back after a failed start is never replaced.
+A downloaded update that is waiting for **Update and restart** does not hide a newer release: a check still reads the feed, and **Download update** replaces the waiting update with the newer one. If that download fails, the earlier update stays ready. If the newer release needs a different launcher or Electron, a notice beside the release notes explains its installer requirement while the earlier download remains ready to install. An update that is installing, starting or held back after a failed start is never replaced.
 
 If a release cannot start on this install's desktop launcher, the app says so before it downloads anything: install the latest AI Shuffle installer from hobbycoders.com. Your data is kept.
 

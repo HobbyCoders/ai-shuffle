@@ -32,6 +32,33 @@ function source(overrides = {}) { return {
 }; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
+test('initial staged check keeps its notice without a parallel release-info overwrite',async()=>{
+ const {updater}=fixture();let metadataReads=0;
+ updater.useApplications(source({pendingVersion:ready.version,retryCleanup:async()=>{},
+  check:async()=>({...ready,notes:'Staged notes',notice:'A newer release needs the latest installer.'}),
+  releaseInfo:async()=>{metadataReads++;return {notes:'Staged notes'};}}));
+ await new Promise(setImmediate);
+ assert.equal(updater.current.phase,'ready');assert.equal(metadataReads,0);
+ assert.match(updater.current.notes,/A newer release needs the latest installer/);
+});
+
+test('a newer incompatible release is a notice beside the installable staged release, not an error',async()=>{
+ const {updater,calls}=fixture({},'linux');
+ const notice='Install the latest AI Shuffle installer for the newer release. The downloaded update remains ready to install.';
+ const result={...ready,release:'1.0.0',notes:'Staged release notes',notice};
+ const manager=source({check:async()=>result,download:async()=>result,retryCleanup:async()=>{}});
+ updater.useApplications(manager,'/AI Shuffle.AppImage');
+ await updater.check();assert.equal(updater.current.phase,'ready');assert.equal(updater.current.error,null);
+ assert.equal(updater.current.message,null);assert.equal(updater.current.version,ready.version);
+ assert.equal(updater.current.notes,'Staged release notes\n\n'+notice);
+ await updater.install();assert.equal(calls.at(-1),'quit');
+ // The same result arriving from a download must keep its notice too.
+ const second=fixture({},'linux').updater;
+ second.useApplications(source({download:async()=>result}),'/AI Shuffle.AppImage');
+ await second.check();await second.download();assert.equal(second.current.phase,'ready');
+ assert.equal(second.current.notes,'Staged release notes\n\n'+notice);
+});
+
 test('cleanup failing after ready refuses before stopping services and Retry re-enables installation',async()=>{
  const {updater,calls}=fixture();let locked=false;
  const manager=source({check:async()=>ready,cleanupError:null,retryCleanup:async()=>{if(locked){manager.cleanupError='Cleanup locked: close programs, then Retry';throw Error(manager.cleanupError);}manager.cleanupError=null;}});

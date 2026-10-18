@@ -14,13 +14,13 @@
 //            (which only happens after the first healthy start). Updaters
 //            refuse such a release before downloading it when their launcher
 //            is older, and say a newer installer is needed. Optional; 0..version.
-//            Start 3: launcher 3 (0.9.6, 1.0.x) starts these builds through the
+//            Start 3: launcher 3 (0.9.6, 1.0.0; 1.0.1 ships 4) starts these builds through the
 //            update's own late restore point; older launchers cannot verify them.
 //
 // When a launcher older than `minimum` starts a release, the release replaces
 // it from its own verified source (desktop/LAUNCHER.md). Minimum 3 is the
 // owner-accepted signing-key bridge. Minimum 4 replaces launchers without
-// database restore points (0.9.6) and the 1.0.x ones that report 3; every
+// database restore points (0.9.6) and the 1.0.0 ones that report 3; every
 // bump needs a Windows acceptance run. Version 5 adds the start-floor check
 // and staged-build replacement to the launcher's own updater (#97, #98);
 // minimum stays 4, so launcher-4 installs are not replaced for it.

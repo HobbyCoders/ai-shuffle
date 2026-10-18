@@ -39,7 +39,7 @@ Set `start` to the oldest launcher that can still start the release, not to
 `version`. A release that needs new launcher behaviour *before* its first
 healthy start must either do that work itself, as the late restore point does
 for launcher 3, or raise `start` and accept that older installs need an
-installer. Current value: 3. Launchers 3 (0.9.6 and 1.0.x) start these builds
+installer. Current value: 3. Launcher 3 (0.9.6 and 1.0.0; 1.0.1 ships launcher 4) starts these builds
 through the late restore point; older ones cannot verify them (the
 signing-key bridge).
 

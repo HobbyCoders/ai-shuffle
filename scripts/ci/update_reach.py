@@ -283,7 +283,7 @@ LAUNCHER_RUNTIME = ("desktop/src/pages/*", "desktop/build/icon.png",
                     TRUST_KEY, "desktop/scripts/source-profile.cjs")
 
 
-def launcher_dependencies(read: Reader) -> dict:
+def launcher_dependencies(read: Reader) -> Optional[dict]:
     """Production packages packed by launcherMembers/electron-builder, including nested deps.
 
     Ignore root metadata and dev/devOptional packages: changing build tooling does
@@ -292,10 +292,17 @@ def launcher_dependencies(read: Reader) -> dict:
     data = read(LAUNCHER_LOCK)
     if data is None:
         return {}
-    packages = json.loads(data).get("packages", {})
-    return {path: {key: package.get(key) for key in ("name", "version", "integrity")}
-            for path, package in packages.items()
-            if path.startswith("node_modules/") and not package.get("dev") and not package.get("devOptional")}
+    try:
+        packages = json.loads(data)["packages"]
+        if not isinstance(packages, dict) or any(not isinstance(package, dict) for package in packages.values()):
+            return None
+        return {path: {key: package.get(key) for key in ("name", "version", "integrity")}
+                for path, package in packages.items()
+                if path.startswith("node_modules/") and not package.get("dev") and not package.get("devOptional")}
+    except (ValueError, KeyError, TypeError):
+        # Unknown dependency contents are not an unchanged launcher. classify
+        # reports the lockfile through the normal verdict, never a traceback.
+        return None
 
 
 def launcher_version(read: Reader) -> Optional[int]:
@@ -389,8 +396,10 @@ def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optio
 
     launcher = launcher_files(base) | launcher_files(head)
     groups["windows-launcher"] = [p for p in changed if p in launcher or matches(p, LAUNCHER_RUNTIME)]
-    if LAUNCHER_LOCK in changed and launcher_dependencies(base) != launcher_dependencies(head):
-        groups["windows-launcher"].append(LAUNCHER_LOCK)
+    if LAUNCHER_LOCK in changed:
+        before, after = launcher_dependencies(base), launcher_dependencies(head)
+        if before is None or after is None or before != after:
+            groups["windows-launcher"].append(LAUNCHER_LOCK)
     # A version-only bump is not a code change. Other contract fields affect
     # launch policy and must not silently reuse an already released version.
     if LAUNCHER_JSON in changed and launcher_version(base) is not None and launcher_version(head) is not None:

@@ -122,7 +122,9 @@ export class Updater {
     this.set({ phase: cleanupError ? 'error' : pending && !needsCheck ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: cleanupError, message: null, percent: null, release: null, notes: null });
     if (needsCheck && !cleanupError) void this.check();
     // Older source managers have no releaseInfo; the prompt then shows no notes.
-    if (pending) void applications.releaseInfo?.(pending).then(info => {
+    // The modern check returns the staged notes and any compatibility notice.
+    // A parallel metadata read must not overwrite that notice after the check.
+    if (pending && !needsCheck) void applications.releaseInfo?.(pending).then(info => {
       if (this.state.phase === 'ready' && this.state.version === pending.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
     }).catch(() => {});
   }
@@ -172,7 +174,7 @@ export class Updater {
         return;
       }
       const result = await this.applications.check(undefined, interactive);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: [result.notes, result.notice].filter(Boolean).join('\n\n') || null });
     } catch (error) { this.set({ phase: 'error', error: String(error), message: null }); }
     finally { this.checking = false; }
   }
@@ -188,7 +190,7 @@ export class Updater {
         return;
       }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: [result.notes, result.notice].filter(Boolean).join('\n\n') || null });
     } catch (error) {
       // A newer release failed to download over a staged one: that one stays ready to install (#98).
       const staged = this.applications?.pendingVersion;

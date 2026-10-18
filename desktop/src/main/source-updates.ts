@@ -124,7 +124,7 @@ export function parseSourceState(text: string): SourceState {
 export type SourceProgress = (percent: number | null, message: string) => void;
 /** The signed release name and notes shown beside the update button. */
 export interface ReleaseInfo { release?: string; notes?: string }
-export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string } & ReleaseInfo;
+export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string; notice?: string } & ReleaseInfo;
 function releaseOf(manifest: SourceManifest): ReleaseInfo {
   return { ...(manifest.version ? { release: manifest.version } : {}), ...(manifest.notes ? { notes: manifest.notes } : {}) };
 }
@@ -682,8 +682,8 @@ export class SourceUpdates {
   async download(progress: SourceProgress = () => {}, interactive = true): Promise<SourceCheck> {
     return this.update(true, progress, interactive);
   }
-  private async ready(revision: string): Promise<SourceCheck> {
-    return { kind: 'ready', version: revision.slice(0, 12), ...await this.releaseInfo(revision) };
+  private async ready(revision: string, notice?: string): Promise<SourceCheck> {
+    return { kind: 'ready', version: revision.slice(0, 12), ...await this.releaseInfo(revision), ...(notice ? { notice } : {}) };
   }
   /**
    * A download nobody chose to install yet that never ran: the only build a newer
@@ -738,10 +738,18 @@ export class SourceUpdates {
       }
       const { signed, manifest } = feed;
       if (staged) {
-        let stagedSequence = 0;
-        try { stagedSequence = (await this.release(staged)).sequence; } catch { /* Unreadable: any newer release replaces it. */ }
-        if (manifest.revision === staged || manifest.sequence <= stagedSequence || this.state.failed?.includes(manifest.revision) ||
-            (this.options.launcher !== undefined && this.options.launcher < startLauncher(manifest))) return this.ready(staged);
+        let stagedSequence: number;
+        try { stagedSequence = (await this.release(staged)).sequence; }
+        catch {
+          return this.ready(staged, "The downloaded update's release information could not be verified. It is still staged; check again before installing.");
+        }
+        if (manifest.revision === staged || manifest.sequence <= stagedSequence || this.state.failed?.includes(manifest.revision)) return this.ready(staged);
+        try { this.requireLauncher(manifest); this.requireElectron(manifest); }
+        catch (error) {
+          // This refusal is about the newer release, not the compatible download
+          // already waiting. Keep it installable and show a notice, not a remedy.
+          return this.ready(staged, `${(error as Error).message} The downloaded update remains ready to install.`);
+        }
       }
       const installed = this.state.pending ?? this.version;
       if (manifest.revision === installed) return { kind: this.state.pending ? 'ready' : 'current', version: this.state.pending?.slice(0, 12) };
