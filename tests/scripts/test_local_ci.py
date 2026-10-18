@@ -42,6 +42,7 @@ def test_changes_reach_their_suites():
     "Dockerfile", "entrypoint.sh", "docker/update_contract.py", "requirements.txt",
     "desktop/src/main/installed-entry.ts", "desktop/scripts/publish-source.mjs",
     "desktop/build/installer.nsh", "desktop/electron-builder.yml",
+    "desktop/src/pages/recovery.html", "desktop/package-lock.json", "desktop/launcher.json",
     "scripts/source_archive.py", "scripts/ci/update_reach.py",
 ])
 def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
