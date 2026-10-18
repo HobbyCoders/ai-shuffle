@@ -299,6 +299,46 @@ async def test_control_retry_is_bounded_and_only_for_rejected_tokens(monkeypatch
     assert link.authenticate.await_count == auth_calls
 
 
+@pytest.mark.parametrize("old_peer", [True, False])
+async def test_compact_first_remote_protocol_refuses_old_peer_before_admission(workers, monkeypatch, old_peer):
+    from app.core import turn_manager
+    from app.db import turns
+
+    a, b = workers("compact-owner"), workers("compact-sender")
+    served = ServedBy(a, "http://compact-owner.local:8000")
+    real_async = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    monkeypatch.setattr(turn_manager, "_kick", lambda sid: None)
+    if old_peer:
+        monkeypatch.delitem(control._HANDLERS, "compact-first")
+    with a.active():
+        engine.create_network("Compact test")
+    join(a, b)
+    _new_session(a, "remote-compact", "Old chat")
+    converge([a, b])
+    with b.active():
+        store.touch_member(a.device_id, endpoints=["http://compact-owner.local:8000"])
+        kwargs = dict(prompt="send once", profile_id="default", payload={"compact_first": True},
+                      owner_send=True, command_id="client-" + "b" * 32)
+        if old_peer:
+            with pytest.raises(control.ControlRefused, match="needs an update to compact first"):
+                await control.submit_turn(a.device_id, "remote-compact", **kwargs)
+        else:
+            first = await control.submit_turn(a.device_id, "remote-compact", **kwargs)
+            duplicate = await control.submit_turn(a.device_id, "remote-compact", **kwargs)
+            assert duplicate["duplicate"]
+            assert first["turn_id"] == duplicate["turn_id"]
+            assert first["compact_turn_id"] == duplicate["compact_turn_id"]
+    with a.active():
+        queued = turns.get_queued_turns("remote-compact")
+        assert [r["prompt"] for r in queued] == ([] if old_peer else ["/compact", "send once"])
+
+
 async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monkeypatch):
     a, b = workers("a"), workers("b")
     served = ServedBy(a, "http://a.local:8000")

@@ -1956,8 +1956,8 @@ async def compact_session(
     Claude Code compacts with its own ``/compact``; a native chat runs the
     engine's own compaction (the ladder that runs near the limit). The chat
     shows "Context Compacted" only when it worked, else "Compaction failed"
-    with the reason. Refused with 409 while a turn runs or waits, 409 for an
-    archived chat, 400 for a chat that cannot compact (voice).
+    with the reason. With no follow-up, refused with 409 while a turn runs or
+    waits; 409 for an archived chat, 400 for a chat that cannot compact (voice).
 
     Optional ``then_send`` is a normal WebSocket query payload. Both turns are
     admitted atomically in order. The follow-up runs even if compaction fails,

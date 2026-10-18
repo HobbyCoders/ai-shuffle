@@ -137,6 +137,25 @@ def test_pair_rolls_back_if_followup_admission_fails(compact_chat, monkeypatch):
     assert turns.get_queued_turns("compact-chat") == []
 
 
+def test_old_peer_refusal_reaches_composer_without_admitting_message(compact_chat, monkeypatch):
+    from types import SimpleNamespace
+    from app.api.chat_ws_handler import ChatWebSocketHandler
+    from app.core import placement
+    from app.network import control
+
+    monkeypatch.setattr(placement, "resolve_placement", lambda row: SimpleNamespace(kind="runner", runner_id="old-worker"))
+    monkeypatch.setattr(ChatWebSocketHandler, "_try_auto_adopt", AsyncMock(return_value=False))
+    monkeypatch.setattr(ChatWebSocketHandler, "_network_owner", AsyncMock(return_value="old-worker"))
+    call = AsyncMock(side_effect=control.ControlRefused("Unknown control action"))
+    monkeypatch.setattr(control, "call", call)
+    result = send(compact_chat, {"then_send": {"prompt": "keep my draft"}})
+    assert result.status_code == 400
+    assert "needs an update to compact first" in result.json()["detail"]
+    assert "Send anyway or update" in result.json()["detail"]
+    assert call.call_args.args[1] == "compact-first"
+    assert turns.get_queued_turns("compact-chat") == []
+
+
 @pytest.mark.parametrize("lift_fails", [False, True])
 def test_remote_attachments_use_normal_lift_before_pair_admission(compact_chat, monkeypatch, lift_fails):
     from types import SimpleNamespace

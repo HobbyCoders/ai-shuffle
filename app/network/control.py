@@ -320,7 +320,18 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
             body["uploads"] = await git.export_uploads(blob_ids)
         except ValueError as exc:
             raise ControlRefused(str(exc)) from exc
-    return await call(device_id, "turns", body)
+    compact_first = bool((payload or {}).get("compact_first"))
+    # A distinct action fails before admission on older peers. Sending the
+    # flag through their ordinary `turns` action would silently skip compact,
+    # admit the message, then leave this client unable to acknowledge it.
+    try:
+        return await call(device_id, "compact-first" if compact_first else "turns", body)
+    except ControlRefused as exc:
+        if compact_first and "Unknown control action" in str(exc):
+            raise ControlRefused(
+                "This worker needs an update to compact first. Send anyway or update the worker."
+            ) from exc
+        raise
 
 
 async def create_session(device_id: str, session: Dict[str, Any], turn: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -896,6 +907,7 @@ async def _hydrate(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
 
 _HANDLERS = {
     "turns": _turns,
+    "compact-first": _turns,
     "sessions": _sessions,
     "interrupt": _interrupt,
     "terminal-task-stop-state": _terminal_task_stop_state,
