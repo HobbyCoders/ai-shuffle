@@ -128,6 +128,10 @@ def trailing_question_seq(cursor, session_id):
                 return question
             pieces = []
             position = origin = None
+        # Abort dismissal survives later tool-only wake turns. Any newer prose
+        # has already been considered above; never resurrect this older prefix.
+        if kind == "turn.aborted":
+            return None
         # Settlement dismisses the prose before this durable boundary. Keeping
         # the boundary in the log prevents later task/usage events resurrecting
         # the old question (and lets a new question after reopen project normally).
@@ -137,7 +141,7 @@ def trailing_question_seq(cursor, session_id):
             cursor.execute("SELECT id FROM session_events WHERE session_id=%s ORDER BY seq LIMIT 1", (session_id,))
             first = cursor.fetchone()
             epoch = str(first["id"]) if first else None
-            if payload.get("epoch", epoch) == epoch:
+            if payload.get("epoch") in (None, epoch):
                 cutoff = payload.get("through_seq", seq)
                 if isinstance(cutoff, int):
                     dismissed_through = max(dismissed_through, cutoff)

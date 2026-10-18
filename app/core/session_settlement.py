@@ -89,7 +89,22 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         # settle must still dismiss its prefix before parked_settled completes.
         from app.db.session_questions import _tail
         boundary = next(_tail(cur, session_id, lifecycle_only=True), None)
-        parked_prose = boundary is not None and boundary[1] == "turn.parked"
+        parked_prose = False
+        if boundary is not None and boundary[1] == "turn.parked":
+            for seq, kind, payload in _tail(cur, session_id):
+                if seq >= boundary[0]:
+                    continue
+                if kind in ("turn.started", "turn.completed", "turn.aborted", "turn.parked"):
+                    break
+                if kind == "assistant.text_delta":
+                    text = payload.get("text")
+                elif kind == "message.assistant" and payload.get("kind") in (None, "text"):
+                    text = payload.get("content")
+                else:
+                    continue
+                if text and text.strip():
+                    parked_prose = True
+                    break
         if not (waiting or prose or parked_prose):
             # An empty snapshot is still a processed revision. Otherwise a
             # delayed duplicate could capture a prompt that arrived afterwards.

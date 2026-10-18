@@ -683,5 +683,206 @@
         "question_seq": 4
       }
     ]
+  },
+  {
+    "name": "aborted question stays dismissed after tool-only task_notification turn",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "interrupt"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Background work finished",
+          "source": "task_notification"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "id": "bash",
+          "name": "Bash",
+          "input": {
+            "command": "true"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "bash",
+          "content": "Done"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "aborted question stays dismissed after tool-only wakeup turn",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "interrupt"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Background work finished",
+          "source": "wakeup"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "id": "bash",
+          "name": "Bash",
+          "input": {
+            "command": "true"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "bash",
+          "content": "Done"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "null-epoch settlement clears prose through later wake completion",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Proceed?"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "session_settled",
+          "epoch": null,
+          "through_seq": 2
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Wake",
+          "source": "wakeup"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "id": "bash",
+          "name": "Bash",
+          "input": {
+            "command": "true"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "bash",
+          "content": "Done"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
   }
 ]

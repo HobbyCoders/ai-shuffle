@@ -575,6 +575,33 @@ async def test_settle_prompt_keeps_background_agent_and_monitor(chats, monkeypat
     stop_all.assert_not_called()
 
 
+@pytest.mark.parametrize("content", [None, "", " \n", "thinking"])
+async def test_settle_empty_park_is_idle_noop(chats, content):
+    from app.db import session_events
+
+    # A question from an older turn must not make a new prose-free park pending.
+    session_events.append_events("target", [
+        {"type": "message.assistant", "payload": {"content": "An old question?"}},
+        {"type": "turn.completed", "payload": {}},
+    ])
+    turn = turns.enqueue_turn("target", "user", prompt="Run", profile_id="agent")
+    turns.start_turn(turn["id"])
+    events = [{"type": "turn.started", "payload": {}}]
+    if content is not None:
+        events.append({"type": "message.assistant", "payload": {
+            "kind": "thinking" if content == "thinking" else "text", "content": content,
+        }})
+    events.append({"type": "turn.parked", "payload": {}})
+    session_events.append_events("target", events)
+    turns.park_turn(turn["id"])
+    assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
+    receipt = session_events.get_latest_system_note("target", "session_settled")
+    assert receipt["empty_snapshot"] is True
+    assert receipt["content"] == "Session settled."
+    assert receipt["through_seq"] == 0
+    assert turns.get_turn(turn["id"])["state"] == "parked"
+
+
 async def test_settle_answered_prose_is_idle_noop(chats, monkeypatch):
     from app.core import turn_manager
     from app.db import session_events
