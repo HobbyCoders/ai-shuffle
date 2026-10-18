@@ -150,11 +150,15 @@ def test_opportunistic_band_commits_only_deep_cold_candidates() -> None:
 def test_warm_defer_accumulates_rent_and_commits_at_break_even() -> None:
     overhead, nodes = 20_000, _history(40)
     assert 120_000 <= _prompt(nodes, overhead) < 148_000  # the priced band
-    legacy = Compactor(config=CompactionConfig())
+    # The rent arithmetic fixture was designed around a shallow 35% rewrite.
+    # At 15% its buy price is paid by the first call; keep this test nontrivial.
+    cfg = CompactionConfig(deep_target_window_ratio=0.35,
+                           recency_tail_tokens=40_000, recency_tail_window_ratio=0.15)
+    legacy = Compactor(config=cfg)
     _, expected = _apply(legacy, nodes, overhead=overhead, cache=None)
     assert legacy.last_decision["reason"] == "meaningful_reclaim"
 
-    c = Compactor(config=CompactionConfig())
+    c = Compactor(config=cfg)
     warm = CacheSignal(reuse_floor=overhead, **_WARM)
     view = c.view(nodes)
     rents = []
@@ -291,7 +295,7 @@ def test_flaky_cache_behaves_like_the_unpriced_ladder() -> None:
     # per crossing: at most one warm deferral before each commit.
     overhead = 30_000
     legacy = _batches(overhead, None)
-    assert len(legacy) == 3
+    assert len(legacy) == 2  # deeper 15% batches need one fewer cache rewrite
     flaky = _batches(overhead, CacheSignal(p_cold=0.9, reuse_floor=overhead, **_WARM))
     assert flaky == legacy
     nearly = _batches(overhead, CacheSignal(p_cold=0.85, reuse_floor=overhead, **_WARM))
@@ -677,7 +681,8 @@ def test_sweep_first_changed_stays_inside_the_previous_turn() -> None:
     reaches anything an earlier sweep already decided.
     """
     overhead = 20_000
-    c = Compactor(config=CompactionConfig(sweep_mode="on"))
+    c = Compactor(config=CompactionConfig(sweep_mode="on", sweep_min_reclaim_tokens=100,
+                                              trim=TrimConfig(min_result_chars=100)))
     nodes: list[SessionNode] = []
     kept_before: list[int] = []
     for t in range(5):
@@ -707,19 +712,21 @@ def test_sweep_first_changed_stays_inside_the_previous_turn() -> None:
                 and isinstance(n.message.content[0], ToolResultBlock)
                 and (n.node_id, n.message.content[0].tool_use_id) not in trimmed
             ]
-            assert len(kept_before) == 5  # 20k tokens of 4k-token results
-        nodes.extend(_sweep_turn(t)[1:])
+            assert len(kept_before) == 5  # 1% of 200k holds five 400-token results
+        nodes.extend(_sweep_turn(t, result_chars=1600)[1:])
 
 
 def test_history_expand_pins_results_for_the_next_turn() -> None:
     overhead = 20_000
-    old = _sweep_turn(0)
+    # 0.5% of 200k is 1k: four 250-token pins fit, rather than four 4k pins.
+    old = _sweep_turn(0, result_chars=1000)
     target = old[4]  # the second result of turn 0
     expand = ("HistoryExpand", {"ref": target.node_id})
     cell = ("run_python", {"code": "print(HistoryExpand(ref=%r))" % old[6].node_id})
-    turn1 = _sweep_turn(1, tools=[expand, cell])
+    turn1 = _sweep_turn(1, tools=[expand, cell], result_chars=1000)
     nodes = old + turn1 + [_start(2)]
-    c = Compactor(config=CompactionConfig(sweep_mode="on"))
+    c = Compactor(config=CompactionConfig(sweep_mode="on", sweep_min_reclaim_tokens=100,
+                                              trim=TrimConfig(min_result_chars=100)))
     _, promotions = _apply(c, nodes, overhead=overhead,
                            cache=CacheSignal(**_COLD), boundary=True)
     swept = set(promotions[0].trimmed)
@@ -728,18 +735,19 @@ def test_history_expand_pins_results_for_the_next_turn() -> None:
     assert not pinned & swept
     d = c.last_decision
     assert d["pinned_results"] == 4
-    assert d["pinned_tokens"] == 16_000
-    # Pins do not count toward the keep: the newest five other results stay.
+    assert d["pinned_tokens"] == 1_000
+    # Pins do not count toward the 2k keep: the newest eight other results stay.
     unpinned = [p for p in _results(nodes) if p not in pinned]
-    assert [p for p in unpinned if p not in swept] == unpinned[-5:]
+    assert [p for p in unpinned if p not in swept] == unpinned[-8:]
     # The pin lasts one turn: with no expand in the turn that just ended,
     # the next sweep takes the pinned results too.
-    nodes = nodes + _sweep_turn(2)[1:] + [_start(3)]
+    nodes = nodes + _sweep_turn(2, result_chars=1000)[1:] + [_start(3)]
     _, later = _apply(c, nodes, overhead=overhead,
                       cache=CacheSignal(**_COLD), boundary=True)
     assert pinned <= set(later[0].trimmed)
     # The pin cap keeps the newest pins only.
-    capped = Compactor(config=CompactionConfig(sweep_mode="on", sweep_pin_tokens=9_000))
+    capped = Compactor(config=CompactionConfig(sweep_mode="on", sweep_pin_tokens=550,
+                                              trim=TrimConfig(min_result_chars=100)))
     _apply(capped, old + turn1 + [_start(2)], overhead=overhead,
            cache=CacheSignal(**_COLD), boundary=True)
     assert capped.last_decision["pinned_results"] == 2

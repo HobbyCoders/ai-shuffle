@@ -165,8 +165,8 @@ class CompactionConfig:
     # A batch reclaims down to target_ratio * threshold (hysteresis: batches
     # stay rare, renders stay byte-identical for long stretches).
     target_ratio: float = 0.7
-    # The newest K turns are never digested (the in-flight turn is always the
-    # newest).
+    # Legacy count guard (unknown window or token recency disabled). With a
+    # known window the tail budget replaces this count for completed turns.
     keep_recent_turns: int = 3
     # Tier 3: when more span digests than this are resident, fold the oldest
     # epoch_fold_spans of them into one epoch stub.
@@ -220,7 +220,7 @@ class CompactionConfig:
     # legacy target sat only 30% under the trigger, so a long turn regrew to
     # the trigger within a few calls and paid for another rebuild. 0 restores
     # the legacy target. With no known window the legacy target always holds.
-    deep_target_window_ratio: float = 0.35
+    deep_target_window_ratio: float = 0.15
     # Hard ceiling H = min(hard_window_ratio * window, L - hard_margin_tokens),
     # where L is the window-protection limit. Between H and L a batch skips
     # the shortfall watermark below (not the legacy floor watermark), and it
@@ -248,8 +248,8 @@ class CompactionConfig:
     # stay" (keep_recent_tool_results), which let one long turn grow past
     # the window with nothing the guarded rungs were allowed to touch. 0
     # restores the legacy guards, and so does an unknown window.
-    recency_tail_tokens: int = 40_000
-    recency_tail_window_ratio: float = 0.15
+    recency_tail_tokens: int = 8_000
+    recency_tail_window_ratio: float = 0.02
     recency_tail_calls: int = 2
     # The guarded in-flight rung (tier 1, reason "turn_budget"). When the
     # in-flight turn holds more than turn_budget_window_ratio * window live
@@ -420,6 +420,8 @@ class Promotion:
     # read back on resume: a fold carries the pinned reminder chain as of it.
     # None (an unknown end) falls back to the fold's own last node.
     path_end: str | None = None
+    # Frozen epoch intent budget; None replays legacy events with their config.
+    intent_pin_tokens: int | None = None
 
 
 def describe_promotions(
@@ -1143,6 +1145,8 @@ class Compactor:
     # (start, end) -> the path's last node id when the span was decided; the
     # fold carries the pinned reminder chain as of that node (_PinScan.chain).
     _span_pin_ends: dict = field(default_factory=dict)
+    _span_intent_budgets: dict = field(default_factory=dict)
+    _decision_window: int | None = None
     # Span keys rehydrated from persisted decisions, in replay order. Live
     # promotion retires the decisions a new span contains (segment
     # retirement, epoch folds). That needs node order, which rehydrate does
@@ -1272,9 +1276,10 @@ class Compactor:
         """The config a promoted span renders with: this compactor's own,
         with ``render_version`` set to the version the span was decided at."""
         version = self._span_versions.get((start, end), self.config.render_version)
-        if version == self.config.render_version:
+        budget = self._span_intent_budgets.get((start, end), self.config.intent_pin_tokens)
+        if version == self.config.render_version and budget == self.config.intent_pin_tokens:
             return self.config
-        return replace(self.config, render_version=version)
+        return replace(self.config, render_version=version, intent_pin_tokens=budget)
 
     def _render_live(
         self,
@@ -1388,6 +1393,7 @@ class Compactor:
         the hard ceiling until break-even (``warm_defer``). Every such
         decision logs the signal. ``cache=None`` runs the unpriced ladder.
         """
+        self._decision_window = context_window
         try:
             capped = self._cap_live_images(nodes)
             rendered, promotions = self._apply(
@@ -1398,8 +1404,10 @@ class Compactor:
                 measured_prompt_tokens=measured_prompt_tokens,
                 cache=cache,
             )
-            return rendered, capped + promotions
+            return rendered, [replace(p, intent_pin_tokens=self._intent_budget())
+                              for p in capped + promotions]
         finally:
+            self._decision_window = None
             self._tail_from = None
             self._turn_live = None
 
@@ -1585,7 +1593,7 @@ class Compactor:
             promotions.extend(self.escalate(
                 nodes, overhead_tokens=overhead_tokens, context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens, guarded_only=True,
-                scale=scale,
+                scale=scale, stop_tokens=self._candidate_target,
             ))
             rendered = self.view(nodes)
         after = overhead_tokens + estimate_tokens_of_messages(rendered)
@@ -1832,7 +1840,9 @@ class Compactor:
         # Rung 3: fold surplus digests into epoch stubs (residency rule —
         # keeps the resident cost of N turns near-constant).
         restore = self._tier_snapshot()
-        folded = self._fold_epochs(nodes)
+        folded = self._fold_epochs(
+            nodes, force=deep is not None and self._estimate(nodes, overhead_tokens) > target,
+        )
         if folded:
             before = estimate_tokens_of_messages(rendered)
             folded_render = self._render(nodes)
@@ -1854,7 +1864,47 @@ class Compactor:
                 # describing no change, and leaves the ladder a rung higher for
                 # the next batch. Roll it back; the digests stay digests.
                 restore()
+        if deep is not None:
+            promotions.extend(self._finish_target(nodes, overhead_tokens, target))
+            rendered = self._render(nodes)
         return rendered, promotions
+
+    def _finish_target(
+        self, nodes: list[SessionNode], overhead_tokens: int, target: int,
+    ) -> list[Promotion]:
+        """If recency alone prevents the target, fold completed turns too.
+
+        Never releases the in-flight turn. Originals remain recoverable and a
+        checkpoint can replace the remaining old residue. Count-based opt-outs
+        retain their legacy protection.
+        """
+        if self._tail_from is None or self._estimate(nodes, overhead_tokens) <= target:
+            return []
+        tail = self._tail_from
+        self._tail_from = len(nodes) - len(split_spans(nodes)[-1])
+        before = self._estimate(nodes, overhead_tokens)
+        try:
+            spans = self._digest_until(nodes, overhead_tokens=overhead_tokens, target=target)
+            out = []
+            if spans:
+                after = self._estimate(nodes, overhead_tokens)
+                out.append(Promotion(tier=2, spans=tuple((s, e, SPAN_DIGEST) for s, e in spans),
+                                     before_tokens=before, after_tokens=after,
+                                     reclaimed_chars=max(0, before - after) * 4))
+            if self._estimate(nodes, overhead_tokens) > target:
+                restore = self._tier_snapshot()
+                before = self._estimate(nodes, overhead_tokens)
+                folded = self._fold_epochs(nodes, force=True)
+                after = self._estimate(nodes, overhead_tokens)
+                if folded and after < before:
+                    out.append(Promotion(tier=3, spans=tuple((s, e, EPOCH_STUB) for s, e in folded),
+                                         before_tokens=before, after_tokens=after,
+                                         reclaimed_chars=(before - after) * 4))
+                else:
+                    restore()
+            return out
+        finally:
+            self._tail_from = tail
 
     def _boundary_sweep(
         self,
@@ -1932,7 +1982,8 @@ class Compactor:
                 nodes, spans[-2], candidates, sizes, scale,
             )
             pinned = set(pins)
-            keep = max(0, _in_estimate_units(self.config.sweep_keep_tokens, scale)) * 4
+            keep_tokens = self._window_budget(self.config.sweep_keep_tokens, 0.01)
+            keep = max(0, _in_estimate_units(keep_tokens, scale)) * 4
             kept = 0
             keeping = True
             swept: list[tuple[str, str]] = []
@@ -1983,7 +2034,8 @@ class Compactor:
         results of the nodes it expanded: the model asked for them and is
         likely still using them. Newest first, up to ``sweep_pin_tokens``.
         """
-        cap = max(0, _in_estimate_units(self.config.sweep_pin_tokens, scale)) * 4
+        pin_tokens = self._window_budget(self.config.sweep_pin_tokens, 0.005)
+        cap = max(0, _in_estimate_units(pin_tokens, scale)) * 4
         if cap <= 0:
             return [], 0
         index = {n.node_id: i for i, n in enumerate(nodes)}
@@ -2108,6 +2160,12 @@ class Compactor:
             headroom_tokens=self.config.headroom_tokens,
             output_reserve_tokens=output_reserve_tokens,
         )
+
+    def _window_budget(self, cap: int, ratio: float) -> int:
+        return min(cap, max(0, int(self._decision_window * ratio))) if self._decision_window else cap
+
+    def _intent_budget(self) -> int:
+        return self._window_budget(self.config.intent_pin_tokens, 0.005)
 
     def _deep_target(self, context_window: int | None, scale: float) -> int | None:
         """The deep batch target T in chars/4 units, or None for the legacy
@@ -2419,19 +2477,23 @@ class Compactor:
         # guarded rungs; the unguarded rungs follow them at once anyway. The
         # guarded escalation (window protection and the hard zone) uses the
         # recency tail ``apply`` set, or works one out when called alone.
+        previous_window = self._decision_window
+        self._decision_window = context_window
         owns_tail = guarded_only and self._tail_from is None
         if owns_tail:
             self._tail_from = self._recency_tail_start(nodes, context_window, scale)
             self._turn_live = int(self._inflight_estimate(nodes) * scale)
         try:
-            return self._escalate(
+            promotions = self._escalate(
                 nodes, overhead_tokens=overhead_tokens,
                 context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens,
                 guarded_only=guarded_only, scale=scale,
                 stop_tokens=stop_tokens, decision_reason=decision_reason,
             )
+            return [replace(p, intent_pin_tokens=self._intent_budget()) for p in promotions]
         finally:
+            self._decision_window = previous_window
             if owns_tail:
                 self._tail_from = None
                 self._turn_live = None
@@ -2618,6 +2680,9 @@ class Compactor:
             ))
             if target is None or after <= target:
                 break
+        if guarded_only and stop_tokens is not None:
+            promotions.extend(replace(p, decision_reason=decision_reason)
+                              for p in self._finish_target(nodes, overhead_tokens, stop_tokens))
         return promotions
 
     def compact_now(
@@ -2674,11 +2739,13 @@ class Compactor:
 
     def summary_region(
         self, nodes: list[SessionNode], *, context_window: int | None = None,
-        scale: float = 1.0, due_only: bool = False,
+        scale: float = 1.0, due_only: bool = False, for_target: bool = False,
     ) -> tuple[str, str, str] | None:
         """A whole-turn compacted prefix, frozen before starting the side call.
 
-        Never includes a protected turn or the recency tail. Input truncation
+        Normally excludes protected turns and the recency tail. ``for_target``
+        may include already-digested completed turns, never the in-flight turn.
+        Input truncation
         preserves an earlier checkpoint and the newest rendered material; the
         original nodes remain recoverable even when the input cap is reached.
         """
@@ -2691,7 +2758,9 @@ class Compactor:
         guard = min((index[spans[i][0].node_id] for i in protected), default=len(nodes))
         tail = self._recency_tail_start(nodes, context_window, scale)
         if tail is not None:
-            guard = min(guard, tail)
+            # A target-miss fallback may summarize already-digested completed
+            # turns beyond the ordinary tail, never the in-flight turn.
+            guard = (index[spans[-1][0].node_id] if for_target else min(guard, tail))
         ends = {span[-1].node_id for span in spans}
         eligible = [(start, end) for start, end in self._digested
                     if start in index and end in index and index[start] <= index[end] < guard]
@@ -2774,7 +2843,11 @@ class Compactor:
                               context_window=context_window,
                               output_reserve_tokens=output_reserve_tokens, scale=scale)
         ladder = candidate._estimate(nodes, overhead_tokens)
-        region = candidate.summary_region(nodes, context_window=context_window, scale=scale)
+        target = candidate._deep_target(context_window, scale)
+        region = candidate.summary_region(
+            nodes, context_window=context_window, scale=scale,
+            for_target=target is not None and ladder > target,
+        )
         if region is None:
             return int(ladder * scale)
         start, end, _ = region
@@ -2821,7 +2894,8 @@ class Compactor:
                 if not self.config.enabled and kind != "summary":
                     continue  # trim-only: tier 2/3 history is not re-armed
                 self._mark_span(start, end, kind, render_version=version,
-                                pin_end=promo.path_end)
+                                pin_end=promo.path_end,
+                                intent_pin_tokens=promo.intent_pin_tokens)
                 if kind == "summary":
                     self._summaries[(start, end)] = promo.summary_text
                 self._replayed_spans.append((start, end))
@@ -2862,6 +2936,7 @@ class Compactor:
         # Only _digested counts residency; rendering chooses the widest on-path checkpoint.
         self._span_versions.pop(key, None)
         self._span_pin_ends.pop(key, None)
+        self._span_intent_budgets.pop(key, None)
         if self._digest_by_start.get(start) == end:
             self._digest_by_start.pop(start)
         if self._epoch_by_start.get(start) == end:
@@ -2882,6 +2957,7 @@ class Compactor:
         digests = dict(self._digest_by_start)
         versions = dict(self._span_versions)
         pin_ends = dict(self._span_pin_ends)
+        intent_budgets = dict(self._span_intent_budgets)
         summaries = dict(self._summaries)
         trimmed = set(self.trimmer._trimmed)
         consumed = set(self.trimmer._image_consumed)
@@ -2897,6 +2973,8 @@ class Compactor:
             self._span_versions.update(versions)
             self._span_pin_ends.clear()
             self._span_pin_ends.update(pin_ends)
+            self._span_intent_budgets.clear()
+            self._span_intent_budgets.update(intent_budgets)
             self._summaries.clear()
             self._summaries.update(summaries)
             self.trimmer._trimmed.clear()
@@ -2908,8 +2986,12 @@ class Compactor:
 
     def _mark_span(
         self, start: str, end: str, kind: str, *, render_version: int | None = None,
-        pin_end: str | None = None,
+        pin_end: str | None = None, intent_pin_tokens: int | None = None,
     ) -> None:
+        if kind == EPOCH_STUB:
+            self._span_intent_budgets[(start, end)] = (
+                self._intent_budget() if intent_pin_tokens is None else intent_pin_tokens
+            )
         self._digested[(start, end)] = kind
         if pin_end is None:
             self._span_pin_ends.pop((start, end), None)
@@ -2947,7 +3029,10 @@ class Compactor:
         index = {n.node_id: i for i, n in enumerate(nodes)}
         old: list[list[SessionNode]] = []
         for i, span in enumerate(spans):
-            if i not in protected:
+            # With a known-window tail, completed turns outside it are in
+            # reach whole. A turn count must not add unbounded history on top
+            # of the token budget. Never digest the in-flight turn whole.
+            if i not in protected or (tail is not None and i < len(spans) - 1):
                 old.append(span)
             elif self.config.recall_tools:
                 segments = completed_segments(

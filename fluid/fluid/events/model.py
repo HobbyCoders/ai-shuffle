@@ -416,6 +416,9 @@ class ContextCompaction(Event):
     # to the cache_read it actually got. None when the batch has no
     # ``first_changed_message`` and on events written before the field.
     rewrite_tail_tokens_est: int | None = None
+    # Epoch intent budget frozen against the chosen session window. None on
+    # legacy events; replay must not resize old folds when the limit changes.
+    intent_pin_tokens: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

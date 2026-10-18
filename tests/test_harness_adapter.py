@@ -3061,6 +3061,14 @@ def test_native_context_window_resolves_through_the_bound_provider_row(monkeypat
     assert ha._native_context_window("openai_responses", other) == 272_000
 
 
+@pytest.mark.parametrize("window", [256_000, 400_000])
+def test_native_context_window_user_limit_beats_model_maximum(monkeypatch, window):
+    import app.core.provider.harness_adapter as ha
+    monkeypatch.setattr(ha, "resolve_provider_context_window", lambda *args: 1_000_000)
+    opts = SessionOptions(model="gpt-6-astra", extra={"provider_id": "pid", "context_window": window})
+    assert ha._native_context_window("openai_responses", opts) == window
+
+
 def test_native_context_window_survives_a_broken_row_lookup(monkeypatch):
     """A DB failure must never break connect: it degrades to the Claude
     registry (or None), it does not raise."""

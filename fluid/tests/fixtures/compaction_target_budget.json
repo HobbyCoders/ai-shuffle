@@ -1,0 +1,38 @@
+{
+  "baseline_commit": "d885520b05330b57e02e51315cb2956a06da4318",
+  "token_basis": "Fluid chars/4 estimate, offline deterministic provider, not billed tokens",
+  "static_overhead": 12000,
+  "before": {
+    "400000": {
+      "prompt": 293332,
+      "manual_after": 95644,
+      "automatic_after": 95644,
+      "summary_calls": 0,
+      "uncached_suffix": 83044
+    },
+    "256000": {
+      "prompt": 192055,
+      "manual_after": 76480,
+      "automatic_after": 76480,
+      "summary_calls": 0,
+      "uncached_suffix": 63880
+    },
+    "32000": {
+      "prompt": 57025,
+      "manual_after": 20060,
+      "automatic_after": 20060,
+      "summary_calls": 1,
+      "uncached_suffix": 8060
+    }
+  },
+  "after_allowance": {
+    "400000": {
+      "manual": 53000,
+      "automatic": 60000
+    },
+    "256000": {
+      "manual": 33000,
+      "automatic": 38400
+    }
+  }
+}

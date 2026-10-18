@@ -246,8 +246,11 @@ async def test_background_single_flight_does_not_block_turn_and_cancel_accounts(
     from fluid.events import Usage
     gate = asyncio.Event()
     provider = LoopProvider(gate=gate)
+    # Keep the main turn below compaction pressure: a due 15% batch is now
+    # allowed to await the background checkpoint, tested separately.
     loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="fixture",
-                      context_window=40_000, compaction=config(trigger_tokens=10_000_000))
+                      context_window=400_000, compaction=config(trigger_tokens=10_000_000,
+                                                               summary_trigger_window_ratio=0.001))
     await turn(loop, "start")
     # Seed through the store and mechanical producer, not summary consumer state.
     path = nodes(15)
