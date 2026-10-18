@@ -56,7 +56,7 @@ jobs:
       # scripts/ci/windows_parts.py --list; tests/scripts/test_windows_parts.py keeps them equal.
       matrix:
         part: [backend-1, backend-2, backend-3, backend-4, backend-5, backend-6, backend-7, backend-8,
-               frontend, rest]
+               frontend, desktop, rest]
     steps:
       - uses: actions/checkout@v4
         with:

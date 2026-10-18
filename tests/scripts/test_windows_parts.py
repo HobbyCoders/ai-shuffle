@@ -48,7 +48,7 @@ def test_the_backend_parts_cover_every_backend_file_exactly_once():
 def test_the_parts_cover_every_suite():
     names = [suite.name for suite in local_ci.SUITES]
     assert sorted([*windows_parts.SEPARATE, *windows_parts.rest_suites()]) == sorted(names)
-    assert "backend" in names and "frontend" in names
+    assert "backend" in names and set(windows_parts.OWN_PART) <= set(names)
 
 
 def test_an_unknown_part_is_refused(monkeypatch):

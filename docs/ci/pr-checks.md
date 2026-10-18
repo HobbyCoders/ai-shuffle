@@ -386,7 +386,7 @@ also independently supports safe ancestors and rechecks its own pointer.
   commit. `ship_release_status.py` counts a successful run the owner dispatched
   on main at the candidate as `local/windows-suite`, and the release notes name
   the run. The hosted run is split into parallel parts
-  (`scripts/ci/windows_parts.py`: eight backend parts, frontend, and the rest),
+  (`scripts/ci/windows_parts.py`: eight backend parts, frontend, desktop, and the rest),
   so it takes the time of the slowest part. A failed part does not stop the
   others: `gh run rerun <run id> --failed` reruns only the failed parts, and the
   run's newest attempt counts. A failed pytest command there reruns just its

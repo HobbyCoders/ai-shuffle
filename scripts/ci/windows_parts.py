@@ -6,7 +6,7 @@ reruns alone (`gh run rerun <id> --failed`). Together the parts run what
 `full` runs, each test file exactly once:
 
   backend-1 .. backend-N  the backend fast subset, files dealt round robin
-  frontend                the frontend suite (build, svelte-check, Vitest)
+  frontend, desktop       those suites alone (the two longest after the backend)
   rest                    the security gate, then every other suite
 
 A failed pytest command reruns only its failed tests, once (local_ci.run with
@@ -33,11 +33,13 @@ import local_ci as ci  # noqa: E402
 import local_ci_stages  # noqa: E402
 
 BACKEND_PARTS = 8
-SEPARATE = ("backend", "frontend")
+# Suites that get a part of their own; "rest" runs every other suite.
+OWN_PART = ("frontend", "desktop")
+SEPARATE = ("backend", *OWN_PART)
 
 
 def parts() -> list[str]:
-    return [*(f"backend-{i + 1}" for i in range(BACKEND_PARTS)), "frontend", "rest"]
+    return [*(f"backend-{i + 1}" for i in range(BACKEND_PARTS)), *OWN_PART, "rest"]
 
 
 def backend_files(index: int) -> list[str]:
@@ -82,8 +84,8 @@ def run_part(name: str, python: str) -> None:
                          map_hits=Path(tempfile.mkdtemp(prefix="local-ci-map-")))
         print(f"=== {name}: {len(ctx.backend_selected)} backend test files", flush=True)
         ci.backend(ctx)
-    elif name == "frontend":
-        ci.run_suites("full", ["frontend"], python)
+    elif name in OWN_PART:
+        ci.run_suites("full", [name], python)
     elif name == "rest":
         failures = []
         for step, call in [("security", lambda: ci.security_check(python)),
