@@ -96,9 +96,32 @@ def answer_interaction(
     return answered
 
 
+def _mark_handoff_resolved_on_target(cursor, interaction_id: str) -> None:
+    """Stamp target resolution inside its answer/cancel transaction, never on a mirror."""
+    cursor.execute(
+        "SELECT i.payload, s.owner_device_id FROM pending_interactions i "
+        "JOIN sessions s ON s.id=i.session_id WHERE i.id=%s AND i.kind='question'",
+        (interaction_id,),
+    )
+    row = cursor.fetchone()
+    payload = dict(_parse_json(row["payload"]) or {}) if row else {}
+    target_id = payload.get("handoff_target_id")
+    if not (payload.get("handoff_detached") and payload.get("handoff_id") and target_id):
+        return
+    from app.network import engine
+
+    ctx = engine.context()
+    if ctx is None or ctx.device_id != target_id or row["owner_device_id"] != target_id:
+        return
+    payload["handoff_resolved_on_target"] = True
+    cursor.execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
+                   (json.dumps(payload), interaction_id))
+
+
 def answer_question_and_enqueue(
     row: Dict[str, Any], answer: Dict[str, Any], answered_by_device: Optional[str],
     prompt: str, context: Dict[str, Any], *, human_input: bool = True,
+    handoff_context_confirmed: bool = False,
 ) -> bool:
     """Accept an answer and its user turn in one commit; retries cannot enqueue twice.
 
@@ -114,6 +137,8 @@ def answer_question_and_enqueue(
     with get_db() as conn:
         if not answer_interaction(row["id"], answer, answered_by_device, _conn=conn):
             return False
+        if handoff_context_confirmed:
+            _mark_handoff_resolved_on_target(conn.cursor(), row["id"])
         profile_id = context.get("profile_id")
         if not profile_id:
             # Legacy terminal turns can have no profile. Like a normal send or
@@ -161,8 +186,10 @@ def cancel_interaction(interaction_id: str, *, _conn: Any = None) -> bool:
             (interaction_id,),
         )
         cancelled = cursor.rowcount > 0
-        if cancelled and _conn is None:
-            session_id = _session_of(cursor, interaction_id)
+        if cancelled:
+            _mark_handoff_resolved_on_target(cursor, interaction_id)
+            if _conn is None:
+                session_id = _session_of(cursor, interaction_id)
     notify_session_write(session_id, "pending_interactions")
     return cancelled
 
@@ -239,6 +266,24 @@ def mark_interaction_requeued(interaction_id: str) -> bool:
             (json.dumps(answer), interaction_id),
         )
         return cursor.rowcount > 0
+
+
+def has_detached_handoff_question(session_id: str, handoff_id: str, *, pending_only: bool = False) -> bool:
+    """Pending or target-resolved cards own the handoff's continuation.
+
+    A source-side answer/cancel before commit did not carry the note. Only a
+    resolution stamped by the owning target suppresses the later resume.
+    """
+    state_filter = "state='pending'" if pending_only else "(state='pending' OR payload->'handoff_resolved_on_target'='true')"
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM pending_interactions WHERE session_id=%s AND kind='question' "
+            "AND payload->'handoff_detached'='true' AND payload->>'handoff_id'=%s "
+            "AND " + state_filter + " LIMIT 1",
+            (session_id, handoff_id),
+        )
+        return cursor.fetchone() is not None
 
 
 def get_pending_interactions(session_id: str) -> List[Dict[str, Any]]:

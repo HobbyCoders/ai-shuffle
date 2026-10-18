@@ -481,11 +481,10 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
         return None
     from app.db import interactions
 
-    # Only a detached BLOCKING question owns the next input. Ordinary posted
-    # cards explicitly let the agent keep working and must not drop its note.
-    if any(row["kind"] == "question" and row["payload"].get("handoff_detached")
-           and row["payload"].get("handoff_id") == pending.handoff_id
-           for row in interactions.get_pending_interactions(session_id)):
+    # Pending cards own the next input. A target-confirmed resolution still
+    # owns the continuation even if it mirrors back before the move reply.
+    # A source-side answer/cancel before commit did not carry the new note.
+    if interactions.has_detached_handoff_question(session_id, pending.handoff_id):
         return "question"
     if pending.by != "agent":
         return None
@@ -861,7 +860,8 @@ def _busy_words(state: Dict[str, Any]) -> str:
 
 def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
                           turn_id: Optional[str] = None, *, handoff_context: str = "",
-                          handoff_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                          handoff_id: Optional[str] = None,
+                          target_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Cancel callbacks and save replacement cards in ONE transaction.
 
     No question can disappear if the process stops between detaching the turn
@@ -895,7 +895,8 @@ def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
             payload = {"request_id": request_id, "tool_use_id": request_id,
                        "questions": row["payload"]["questions"], "nonblocking": True,
                        "handoff_detached": True, "handoff_context": handoff_context,
-                       "handoff_id": handoff_id, "handoff_turn_id": turn_id}
+                       "handoff_id": handoff_id, "handoff_turn_id": turn_id,
+                       "handoff_target_id": target_id}
             iid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"))
             cur.execute("INSERT INTO pending_interactions (id,session_id,kind,payload,state) "
                         "VALUES (%s,%s,'question',%s,'pending') ON CONFLICT (id) DO NOTHING",
@@ -1015,7 +1016,7 @@ async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pendin
     replacements = await asyncio.to_thread(_detach_question_rows, session_id, blocking,
                                           live["id"] if live else None,
                                           handoff_context=_handoff_context(pending, pending.label),
-                                          handoff_id=pending.handoff_id)
+                                          handoff_id=pending.handoff_id, target_id=pending.target_id)
     if not replacements:
         return True
     # Interrupt the live provider BEFORE explicitly waking the cancelled
@@ -1125,7 +1126,14 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     if plan == "send":
         outcome = f"Handed off to {label}. This chat continues there on the same branch."
     elif plan == "question":
-        outcome = f"Handed off to {label}. This chat waits for your answer to the question card there."
+        from app.db import interactions
+
+        waiting = await asyncio.to_thread(interactions.has_detached_handoff_question,
+                                          session_id, pending.handoff_id, pending_only=True)
+        if waiting:
+            outcome = f"Handed off to {label}. Its question card is waiting there; answering it carries the hand-off note."
+        else:
+            outcome = f"Handed off to {label}. Its question card was already answered or dismissed there; no extra continue turn was added."
     elif plan == "unsupported":
         outcome += f" {label} runs an older version that cannot resume it by itself: send a message there."
     elif plan == "unknown":

@@ -123,22 +123,35 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
 def _confirmed_handoff_context(session_id: str, payload: Dict[str, Any]) -> Optional[str]:
     """Do not claim a failed, cancelled or unfinished move in a card's answer.
 
-    Only the moved note for this exact handoff_id confirms its context.
+    The designated target must be this worker and own the session. These
+    committed facts arrive before the later, best-effort moved note (#176).
     """
     handoff_id = payload.get("handoff_id")
+    target_id = payload.get("handoff_target_id")
     context = payload.get("handoff_context")
     if not payload.get("handoff_detached") or not handoff_id or not isinstance(context, str) or not context:
         return None
-    from app.db.base import get_db
+    from app.db import database
+    from app.network import engine
 
     try:
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT 1 FROM session_events WHERE session_id=%s AND event_type='system.note' "
-                "AND payload->>'subtype'='handoff' AND payload->'data'->>'handoff_id'=%s "
-                "AND payload->'data'->>'status'='moved' LIMIT 1", (session_id, handoff_id))
-            return context if cur.fetchone() else None
+        if not target_id:
+            # Compatibility with cards detached by an older source (#169).
+            # Their destination was not saved; preserve the old exact-id proof.
+            from app.db.base import get_db
+
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT 1 FROM session_events WHERE session_id=%s AND event_type='system.note' "
+                    "AND payload->>'subtype'='handoff' AND payload->'data'->>'handoff_id'=%s "
+                    "AND payload->'data'->>'status'='moved' LIMIT 1", (session_id, handoff_id))
+                return context if cur.fetchone() else None
+        ctx = engine.context()
+        if ctx is None or ctx.device_id != target_id:
+            return None
+        session = database.get_session(session_id) or {}
+        return context if session.get("owner_device_id") == target_id else None
     except Exception:  # An optional context lookup must never prevent the owner's answer.
         logger.warning("Could not confirm question hand-off context for %s", session_id, exc_info=True)
         return None
@@ -637,6 +650,7 @@ class UserQuestionHandler:
         accepted = await asyncio.to_thread(
             interactions.answer_question_and_enqueue, row, envelope,
             answered_by_device, prompt, context, human_input=human_input,
+            handoff_context_confirmed=bool(handoff_context),
         )
         if not accepted:
             return False

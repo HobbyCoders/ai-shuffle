@@ -486,6 +486,115 @@ def _owner_calls(a, b, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tell_failed", [False, True])
+@pytest.mark.parametrize("resolution", ["answer", "cancel", "dismiss", "settle"])
+async def test_detached_target_resolution_does_not_resume_after_mirroring(pair, monkeypatch, tell_failed, resolution):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock
+    from app.core import session_handoff as sh
+    from app.core.user_question_handler import _confirmed_handoff_context, user_question_handler
+    from app.db import interactions, session_events, turns
+    from app.network import runners
+    from tests.core.test_session_handoff import _settle
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    questions = [{"question": "Which option?", "options": [{"label": "Keep", "description": "Keep it"}],
+                  "multiSelect": False, "header": "Choice"}]
+    real_find = runners.find
+    monkeypatch.setattr(runners, "find", lambda target: {
+        **(real_find(target) or {}), "capabilities": {"move_questions": 1}})
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    pending = sh.PendingHandoff(b.device_id, "Target worker", "Keep the owner's selected branch", time.time())
+    callback = None
+    try:
+        with a.active():
+            callback = asyncio.create_task(user_question_handler.request_answers(
+                "detached-move-question", "ask", sid, questions, AsyncMock()))
+            assert await asyncio.wait_for(_settle(lambda: interactions.get_pending_interactions(sid)), timeout=3)
+            assert await asyncio.wait_for(sh._prepare_questions(
+                sid, {"running": False, "tasks": [], "queued": 0, "wake": False}, pending), timeout=3)
+            assert await asyncio.wait_for(callback, timeout=3) == {"error": "No answers received"}
+            [source_card] = interactions.get_pending_interactions(sid)
+            assert source_card["payload"]["handoff_target_id"] == b.device_id
+            assert await handoff.move(database.get_session(sid), b.device_id) is True
+            # Match the source's real order: committed move, resume decision,
+            # then the later best-effort _tell (not yet run in the first case).
+            assert sh.resume_plan(sid, pending, b.device_id) == "question"
+            if tell_failed:
+                with patch.object(control, "call", AsyncMock(side_effect=ConnectionError("lost note reply"))):
+                    assert not await sh._tell(sid, b.device_id, "Moved", {
+                        "handoff_id": pending.handoff_id, "status": "moved", "worker": "Target worker"})
+                assert session_events.get_latest_system_note(sid, "handoff")["data"]["status"] == "moved"
+            # A mirrored owner row (or fallback moved note) on the source is
+            # not evidence that the answer is running on the designated target.
+            assert _confirmed_handoff_context(sid, source_card["payload"]) is None
+        with b.active():
+            assert database.get_session(sid)["owner_device_id"] == b.device_id
+            assert session_events.get_latest_system_note(sid, "handoff") is None
+            [card] = interactions.get_pending_interactions(sid)
+            assert card["payload"]["handoff_id"] == pending.handoff_id
+            with patch("app.core.user_question_handler.UserQuestionHandler._retire_native_question", AsyncMock()), \
+                    patch("app.core.session_runtime.try_steer_pending", AsyncMock()), \
+                    patch("app.core.session_runtime._broadcast_queue_after_start", AsyncMock()):
+                if resolution == "answer":
+                    assert await user_question_handler._answer_nonblocking(
+                        card, {"Which option?": "Keep"}, None, human_input=True)
+                elif resolution == "dismiss":
+                    assert await user_question_handler._answer_nonblocking(
+                        card, {"__dismissed__": True}, None, human_input=True)
+                elif resolution == "cancel":
+                    assert interactions.cancel_interaction(card["id"])
+                else:
+                    from app.core.session_settlement import dismiss_owner_waits
+
+                    assert await asyncio.wait_for(dismiss_owner_waits(sid), timeout=3)
+            if resolution == "answer":
+                [answer] = turns.get_queued_turns(sid)
+                assert answer["prompt"].startswith("[hand-off] Moved from ")
+                assert "Your hand-off note: Keep the owner's selected branch" in answer["prompt"]
+                assert "Answer to your question:\nWhich option?\nKeep" in answer["prompt"]
+                assert answer["prompt"].count("Your hand-off note:") == 1
+            else:
+                assert turns.get_queued_turns(sid) == []
+            from app.network import policy
+
+            coll = policy.collection("pending_interactions")
+            answered = interactions.get_interaction(card["id"])
+            assert answered["state"] == ("answered" if resolution == "answer" else "cancelled")
+            assert answered["payload"]["handoff_resolved_on_target"] is True
+            record = engine.serialize_row(coll, answered)
+        with a.active():
+            # Real mirror materialization accepts the target's answered row
+            # because this source no longer owns the chat.
+            with get_db() as conn:
+                mirrored = engine.materialize(conn.cursor(), coll, card["id"], record,
+                                              origin_device_id=b.device_id)
+            assert mirrored["state"] == answered["state"]
+            assert interactions.get_interaction(card["id"])["payload"]["handoff_resolved_on_target"] is True
+            assert interactions.get_pending_interactions(sid) == []
+            assert sh.resume_plan(sid, pending, b.device_id) == "question"
+            # Drive lost-reply ownership recovery through the real _failed →
+            # _moved path; it must not add a second note/continue turn.
+            with patch.object(sh, "_tell", AsyncMock(return_value=True)) as report, \
+                    patch.object(sh, "deliver_held", AsyncMock()) as deliver, \
+                    patch.object(sh, "_resume_turn", wraps=sh._resume_turn) as automatic:
+                result = await asyncio.wait_for(sh._failed(sid, pending, ConnectionError("lost reply")), timeout=3)
+            assert "already answered or dismissed" in result
+            automatic.assert_not_called()
+            deliver.assert_awaited_once_with(sid, b.device_id, pending.label, None)
+            assert report.await_args.args[3]["resume"] == "question"
+    finally:
+        from app.core.task_registry import task_registry
+
+        task_registry.clear_user_stop(sid)
+        if callback is not None:
+            callback.cancel()
+            await asyncio.wait_for(asyncio.gather(callback, return_exceptions=True), timeout=3)
+
+
+@pytest.mark.asyncio
 async def test_question_card_moves_with_history_and_is_visible_on_receiver(pair, monkeypatch):
     from unittest.mock import AsyncMock
     from app.core.user_question_handler import user_question_handler
