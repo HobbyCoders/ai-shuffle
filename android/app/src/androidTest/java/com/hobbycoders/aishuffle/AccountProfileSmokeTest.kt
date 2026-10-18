@@ -7,6 +7,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.Root
+import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.RootMatchers.withDecorView
 import androidx.test.espresso.action.ViewActions.*
 import androidx.test.espresso.assertion.ViewAssertions.*
@@ -65,6 +66,9 @@ class AccountProfileSmokeTest {
                         view.check(matches(isDisplayed()))
                         return@withTimeout
                     } catch (e: androidx.test.espresso.NoMatchingViewException) {
+                        lastFailure = e
+                    } catch (e: androidx.test.espresso.NoMatchingRootException) {
+                        // A dialog root that has not opened yet.
                         lastFailure = e
                     } catch (e: AssertionError) {
                         lastFailure = e
@@ -135,9 +139,9 @@ class AccountProfileSmokeTest {
                     onView(withText("Delete disposable-user")).check(matches(isDisplayed()))
                     assertNull("The review screen must not open a browser before confirmation", opened)
                     onView(withText("Continue to delete")).perform(scrollTo(), click())
-                    onView(withText("Delete your account?")).check(matches(isDisplayed()))
+                    onDialogView(withText("Delete your account?")).check(matches(isDisplayed()))
                     assertNull("The confirmation dialog must not open a browser by itself", opened)
-                    onView(withId(android.R.id.button1)).perform(click())
+                    onDialogView(withId(android.R.id.button1)).perform(click())
                     assertEquals("${AccountStore.DEFAULT_HUB}/delete-account", opened?.dataString)
                     assertNull(opened?.data?.query)
                     assertFalse(opened?.hasExtra("com.android.browser.headers") ?: true)
@@ -296,8 +300,8 @@ class AccountProfileSmokeTest {
             ActivityScenario.launch(AddServerActivity::class.java).use { scenario ->
                 onView(withHint("Pairing code")).perform(replaceText("ABCDEF234567"), closeSoftKeyboard())
                 onView(withText("Continue")).perform(scrollTo(), click())
-                awaitText("Add My worker?")
-                onView(withId(android.R.id.button1)).perform(click())
+                awaitText("Add My worker?", rootMatcher = isDialog())
+                onDialogView(withId(android.R.id.button1)).perform(click())
                 assertTrue(firstPoll.await(5, TimeUnit.SECONDS))
                 scenario.recreate()
                 awaitText("Worker approved. Tap Continue to reconnect, or return to Workers and refresh. No new code is needed.")
