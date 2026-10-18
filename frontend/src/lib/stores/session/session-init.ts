@@ -38,6 +38,7 @@ export interface SessionInitDeps {
 		loadPersistedSession: () => Promise<import('../active-session').PersistedSession | null>;
 		getPersistedProfile: () => string;
 		getPersistedProject: () => string;
+		getPersistedWorktreeIntent: (projectId:string, projectV2Id:string | null) => 'local' | 'worktree';
 		refreshSessionMetadata: (sessionId: string) => Promise<void>;
 		destroy: () => void;
 	};
@@ -223,7 +224,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 						contextWindowChoice:
 							persisted.contextWindowChoice ??
 							(persisted.sessionId ? DEFAULT_CONTEXT_WINDOW_CHOICE : s.contextWindowChoice),
-						worktreeIntent: persisted.worktreeIntent || 'local',
+						worktreeIntent: persisted.sessionId ? persisted.worktreeIntent || 'local'
+							: switcher.getPersistedWorktreeIntent(resolvePersistedProject(persisted, defaultProject).project, persisted.projectV2Id ?? null),
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
 						worktreeId: persisted.worktreeId ?? null,

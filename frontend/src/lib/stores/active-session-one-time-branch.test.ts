@@ -20,6 +20,7 @@ import { api } from '$lib/api/client';
 import { appData } from './app-data.svelte';
 import { appMode } from './sessionMode.svelte';
 import { composerPreferences } from './composer-preferences';
+import { git } from './git.svelte';
 import { sessionEphemeralCache } from './session-cache';
 
 const PROJECT = 'shuffle-scratch';
@@ -49,6 +50,7 @@ beforeEach(() => {
 	vi.spyOn(appData, 'loadSessions').mockResolvedValue(undefined as never);
 	vi.spyOn(appData, 'loadApiUserSessions').mockResolvedValue(undefined as never);
 	post = vi.spyOn(api, 'post');
+	vi.spyOn(git, 'current', 'get').mockReturnValue({projectId:PROJECT, hydrated:true, stale:false, status:{is_git_repo:true}} as typeof git.current);
 	composerPreferences.set('profile', 'claude-code');
 	composerPreferences.set('project', { projectId: PROJECT, projectV2Id: null });
 	composerPreferences.set('worktreeIntent', 'worktree');
@@ -81,7 +83,7 @@ describe('one-time branch choice (#1528)', () => {
 			project_id: PROJECT, branch_name: branch, base_branch: 'develop', create_new_branch: false }));
 		expect(activeSession.current).toMatchObject({ sessionId: 'session-c', worktreeBranch: branch });
 		expect(composerPreferences.current.checkout).toBeNull();
-		expect(JSON.parse(localStorage.getItem('ai-shuffle-composer:checkout')!)).toBeNull();
+		expect(composerPreferences.worktreeForProject({projectId:PROJECT,projectV2Id:null}).checkout).toBeNull();
 
 		activeSession.newChat();
 		// Auto from the default base: the picked branch's base was part of the spent choice.

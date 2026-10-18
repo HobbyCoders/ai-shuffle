@@ -556,7 +556,8 @@ def workflows(ctx: Context) -> None:
 
 
 def android_play(ctx: Context) -> None:
-    for script in ("test-version-name.py", "test-mobile-apk.py"):
+    for script in ("test-version-name.py", "test-mobile-apk.py", "test-emulator-readiness.py",
+                   "test-instrumentation-parser.py", "test-ui-runner.py"):
         run([ctx.python, f"android/ci/{script}"])
     # The workflow test parses each inline step with /bin/bash -n.
     if Path("/bin/bash").exists():
@@ -630,8 +631,8 @@ SUITES = [
     Suite("docs", ["docs/content/*", "frontend/src/lib/docs/content/*"], docs, "App docs copies match"),
     Suite("desktop", ["desktop/*"], desktop, "Desktop typecheck and unit tests"),
     Suite("android-bridge", ["android/app/src/test/js/*"], android_bridge, "Android download bridge tests"),
-    Suite("android-play", ["android/ci/*", ".github/workflows/android-play*.yml", ".github/workflows/release.yml"],
-          android_play, "Play workflow safety checks"),
+    Suite("android-play", ["android/ci/*", ".github/workflows/android.yml", ".github/workflows/android-play*.yml", ".github/workflows/release.yml"],
+          android_play, "Android emulator and Play workflow safety checks"),
     Suite("android-app", ["android/app/*", "android/build.gradle*", "android/settings.gradle*", "android/gradle*"],
           android_app, "Android unit tests (Gradle)", android_unavailable),
     Suite("workflows", [".github/workflows/*", "scripts/ci/*", "tests/scripts/test_owner_publication_policy.py",
@@ -640,6 +641,7 @@ SUITES = [
                         "tests/scripts/test_security_gate.py"], workflows, "Workflow and publication policy tests"),
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
                            "desktop/scripts/*", "desktop/build/*", "desktop/electron-builder.yml",
+                           "desktop/src/pages/*", "desktop/package-lock.json", "desktop/launcher.json",
                            "scripts/source_archive.py", "scripts/ci/update_reach.py"],
           update_reach_checks, "Update-reach regression tests and installed-app update verdict"),
 ]

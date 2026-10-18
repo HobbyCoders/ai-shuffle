@@ -31,6 +31,66 @@ def _node(node_id: str, parent_id, text: str) -> SessionNode:
 
 
 @pytest.mark.asyncio
+async def test_memory_pin_survives_store_reload_without_changing_content(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_pg_pin")
+    note = "Only the adapter's appended note"
+    node = _node("pinned", None, "raw quoted report\n\n" + note)
+    node.message.pin_context(note)
+    await store.append("ses_pg_pin", node)
+    message = (await PgFluidStore().load_path("ses_pg_pin"))[0].message
+    assert message.text() == node.message.text()
+    assert message.pinned_text() == note
+    assert message.context_pin == node.message.context_pin
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("odd", [
+    "postgres://example:synthetic-password@example.invalid/db", "nul\x00text", "surrogate\ud800text",
+])
+@pytest.mark.parametrize("location", ["before", "inside"])
+async def test_memory_pin_is_rebased_after_pg_scrubbing(mock_db, odd, location):
+    from app.core import memory_reminder as mr
+    from app.core.pg_session_store import _scrub_pg_illegal
+    from app.core.scrub import scrub_url_credentials
+    from fluid.context.compaction import CompactionConfig, Compactor
+
+    clean = lambda text: _scrub_pg_illegal(scrub_url_credentials(text))
+    note = mr.wrap("# Memory\n- [m1 r1; session] A synthetic fact " + (odd if location == "inside" else ""))
+    prefix = "Owner prompt " + (odd if location == "before" else "") + "\n\n"
+    # Include the exact note earlier too: write-boundary re-pinning must
+    # choose the host's appended copy, not a byte-identical owner's quote.
+    prefix += "Quoted note: " + note + "\nHost copy follows:\n"
+    store = PgFluidStore()
+    await store.create_session("ses_pg_scrubbed_pin")
+    node = _node("pinned", None, prefix + note)
+    node.message.pin_context(note)
+    reply = SessionNode(node_id="reply", parent_id="pinned",
+                        message=Message(role="assistant", content=[Text("long assistant reply " * 100)]))
+    recent = _node("recent", "reply", "continue")
+    for item in (node, reply, recent):
+        await store.append("ses_pg_scrubbed_pin", item)
+    path = await PgFluidStore().load_path("ses_pg_scrubbed_pin")
+    message = path[0].message
+    assert message.text() == clean(node.message.text())
+    assert message.pinned_text() == clean(note)
+    assert message.context_pin == (len(clean(prefix)), len(clean(prefix + note)))
+    assert mr.newest_full_node(path) == "pinned"
+    assert mr.held_from_path(path, "pinned") is not None
+    # Rehydrating a recorded fold must retain the pin. If the note itself
+    # was redacted, only the pre-existing privacy replacement may differ.
+    first = Compactor(config=CompactionConfig(summary_enabled=True, keep_recent_turns=1))
+    promotion = first.apply_summary([node, reply, recent], ("pinned", "reply", "Summary."))
+    assert promotion is not None
+    before = "\n".join(m.text() for m in first.view([node, reply, recent]))
+    restored = Compactor(config=CompactionConfig(summary_enabled=True, keep_recent_turns=1))
+    restored.rehydrate([promotion])
+    after = "\n".join(m.text() for m in restored.view(path))
+    assert after == clean(before)
+    assert clean(note) in after
+
+
+@pytest.mark.asyncio
 async def test_round_trip_and_head_advance(mock_db):
     store = PgFluidStore()
     meta = await store.create_session("ses_pg1")

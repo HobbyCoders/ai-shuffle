@@ -208,7 +208,6 @@ function baseHandlers() {
 		onClickPush: vi.fn(),
 		onClickPull: vi.fn(),
 		onClickShipIt: vi.fn(),
-		onClickInitRepo: vi.fn(),
 		onOpenDiffReview: vi.fn()
 	};
 }
@@ -333,11 +332,11 @@ describe('GitHeaderActions compact trigger (phone one-bar)', () => {
 		expect(btn.textContent).toContain('+5');
 	});
 
-	it('offers an icon-sized Initialize button for a project that is not a repository', () => {
+	it('renders no compact git control for a confirmed plain folder', () => {
 		setSnapshot({ status: { is_git_repo: false } });
-		renderHeader({ compact: true, isGitRepo: false });
-		const init = screen.getByRole('button', { name: 'Initialize a git repository' });
-		expect(init.classList.contains('compact-btn')).toBe(true);
+		const { container } = renderHeader({ compact: true, isGitRepo: false });
+		expect(container.querySelector('.git-actions')).toBeNull();
+		expect(screen.queryByRole('button')).toBeNull();
 	});
 });
 
@@ -510,28 +509,19 @@ describe('GitHeaderActions untracked-only changes', () => {
 // ── Row visibility matrix inside the panel ──────────────────────────────────
 
 describe('GitHeaderActions panel rows', () => {
-	// #1615: hiding the button here left only the standalone Swarm button in
-	// the header for a session that is on a worktree.
-	it.each([
-		['branch', 'feature/gone'],
-		['mode', 'Worktree']
-	])('keeps a labelled Git button for an unreadable worktree checkout (%s)', async (source, label) => {
-		setSnapshot({ status: { is_git_repo: false } });
+	it.each(['branch', 'mode'])('keeps unavailable Git and Check again for a bound %s checkout', async source => {
+		setSnapshot({ status: { is_git_repo: false, current_branch: 'feature/gone' } });
 		if (source === 'mode') mocks.gitMode.set('worktree');
 		renderHeader({ isGitRepo: false, worktreeBranch: source === 'branch' ? 'feature/gone' : null });
-		expect(screen.queryByText('Init Repo')).toBeNull();
-		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
-		expect(trigger().textContent).toContain(label);
 		expect(trigger().textContent).toContain('unavailable');
-		expect(trigger().classList.contains('stale')).toBe(false);
-
 		await openPanel();
-		expect(within(panel()).getByText(/can't be read right now/)).toBeTruthy();
-		expect(within(panel()).getByText('Git actions are paused until it can be read again.')).toBeTruthy();
-		expect(queryRow('Ship It')).toBeNull();
-		expect(queryRow('Commit')).toBeNull();
-		await fireEvent.click(within(panel()).getByRole('button', { name: 'Check again' }));
+		const panel = screen.getByRole('dialog', { name: 'Git actions' });
+		expect(panel.querySelector('.gp-branch-name')?.textContent).toContain('feature/gone');
+		expect(screen.queryByRole('button', { name: /^Commit/ })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Ship It/ })).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
 		expect(mocks.retryLoad).toHaveBeenCalledOnce();
+		expect(screen.queryByText('Init Repo')).toBeNull();
 	});
 
 	it('names the branch while a placeholder from a non-repository session revalidates', () => {
@@ -545,9 +535,9 @@ describe('GitHeaderActions panel rows', () => {
 		expect(screen.queryByText('Init Repo')).toBeNull();
 	});
 
-	it('pauses actions while a hydrated worktree reads as unreadable, then restores them', async () => {
+	it('hides an open git panel for an unbound non-repository, then restores controls after initialization', async () => {
 		dirtyFeatureBranch();
-		const { rerender } = renderHeader({ worktreeBranch: 'feature/x' });
+		const { rerender } = renderHeader({ worktreeBranch: null });
 		await openPanel();
 		expect(row('Commit').disabled).toBe(false);
 
@@ -559,26 +549,32 @@ describe('GitHeaderActions panel rows', () => {
 			changedFiles: [{ file: 'a.ts', status: 'M', category: 'modified', additions: 5, deletions: 2, is_binary: false }]
 		});
 		await rerender({ isGitRepo: false });
-		expect(trigger().textContent).toContain('feature/x');
-		expect(trigger().textContent).not.toContain('+5');
-		expect(queryPanel()).toBeTruthy();
-		expect(queryRow('Commit')).toBeNull();
-		expect(queryRow('Ship It')).toBeNull();
-		expect(row('Close Git panel')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /^Git actions:/ })).toBeNull();
+		expect(queryPanel()).toBeNull();
 
 		dirtyFeatureBranch();
 		await rerender({ isGitRepo: true });
 		expect(trigger().textContent).toContain('+5');
+		await openPanel();
 		expect(row('Commit').disabled).toBe(false);
 	});
 
-	it('still offers Init Repo for an ordinary non-repository project', () => {
+	it('does not conceal a failed revalidation behind earlier plain-folder status', () => {
 		setSnapshot({ status: { is_git_repo: false } });
-		renderHeader({ isGitRepo: false });
-		expect(screen.getByText('Init Repo')).toBeTruthy();
+		renderHeader({ isGitRepo: false, error: 'Git checkout is unavailable. Check again.' });
+		expect(screen.getByRole('button', { name: 'Git unavailable · Retry' })).toBeTruthy();
 	});
 
-	it('offers a retry when git is unavailable', async () => {
+	it.each([false, true])('hides every header control for a confirmed plain folder (compact=%s)', compact => {
+		setSnapshot({ status: { is_git_repo: false } });
+		const { container } = renderHeader({ compact, isGitRepo: false });
+		expect(container.querySelector('.git-actions')).toBeNull();
+		expect(screen.queryByText('Init Repo')).toBeNull();
+		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
+	});
+
+	it('offers a retry when a real repository is unavailable', async () => {
+		dirtyFeatureBranch();
 		renderHeader({ error: 'boom' });
 		await fireEvent.click(screen.getByText('Git unavailable · Retry'));
 		expect(mocks.retryLoad).toHaveBeenCalledOnce();

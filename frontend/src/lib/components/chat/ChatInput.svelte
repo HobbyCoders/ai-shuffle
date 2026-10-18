@@ -37,6 +37,7 @@
 	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
+	import { git } from '$lib/stores/git.svelte';
 
 	import { api, getErrorMessage, type FileUploadResponse } from '$lib/api/client';
 	import { cancelLimitResume, getCacheState, type CacheState } from '$lib/api/limit-resume';
@@ -865,6 +866,15 @@
 	// bubble at the tail of the transcript.
 	async function sendMessage(finalPrompt: string, compactBeforeSend = false) {
 		if (!ownsComposer()) return;
+		// Enforce the same capability as the hidden worktree checkbox, even if
+		// remembered intent changes before the context bar's effect has flushed.
+		const repository = git.current;
+		if (!$activeSession.sessionId && repository.hydrated
+			&& (repository.projectId === $activeSession.projectV2Id || repository.projectId === $activeSession.project)
+			&& repository.sessionId === null && repository.worktreeId === $activeSession.worktreeId
+			&& repository.status?.is_git_repo === false) {
+			activeSession.setWorktreeIntent('local', { persist: false });
+		}
 		composerSuggestion.invalidate();
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated

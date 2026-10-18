@@ -2431,9 +2431,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._resolve_session_thinking(sid)
 
         if isinstance(op, Resume):
-            # Nothing is appended: the head user node IS the prompt, so the
-            # request is byte-identical to the one that failed and the cache
-            # survives. Everything a fresh user turn carries (reminders, the
+            # Normally nothing is appended: the head user node IS the prompt,
+            # so the request is byte-identical and the cache survives. An
+            # explicit context_note restores missing state at the tail only.
+            # Everything a fresh user turn carries (reminders, the
             # background wake marker, the code-mode journal entry) belongs to
             # writing a node, so none of it applies here.
             path = await self.store.load_path(sid)
@@ -2469,6 +2470,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 self._active_turn_id = None
                 return
+            if op.context_note:
+                head = SessionNode(
+                    node_id=new_id("node"), parent_id=head.node_id,
+                    message=Message(
+                        role="user", content=[Text(op.context_note)],
+                    ).pin_context(op.context_note),
+                )
+                await self.store.append(sid, head)
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name, source=op.source,
@@ -2532,7 +2541,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         user_node = SessionNode(
             node_id=node_id,
             parent_id=op.parent_node_id or meta.head_node_id,
-            message=Message(role="user", content=content),
+            message=Message(role="user", content=content, context_pin=op.context_pin),
         )
         await self.store.append(sid, user_node)
         await self._mark_questions_delivered(question_ids)
@@ -3237,6 +3246,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 spans=tuple((s, en, k) for s, en, k in e.spans),
                 render_version=e.render_version,
                 summary_text=e.summary,
+                path_end=e.node_id,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -5549,7 +5559,9 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _nested_instruction_reminder(self, input: dict[str, Any]) -> str | None:
         from pathlib import Path
 
-        from fluid.context.instructions import _walk_up_dirs, nested_instructions
+        from fluid.context.instructions import (
+            _walk_up_dirs, is_global_instruction_path, nested_instructions,
+        )
 
         if not isinstance(input, dict):
             return None
@@ -5574,7 +5586,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             try:
                 for f in nested_instructions((base / target).resolve()):
                     directory = str(Path(f.path).parent)
-                    if directory in covered or f.path in self._nested_injected:
+                    if (is_global_instruction_path(f.path)
+                            or directory in covered or f.path in self._nested_injected):
                         continue
                     self._nested_injected.add(f.path)
                     if f.content.strip():

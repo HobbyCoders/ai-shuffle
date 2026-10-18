@@ -1617,6 +1617,13 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_session_events_session_seq "
         "ON session_events(session_id, seq)"
     )
+    # Bound lifecycle lookups independently of the number of events in a live
+    # turn. The migration fingerprint adds this once on existing databases.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_events_lifecycle "
+        "ON session_events(session_id, seq) "
+        "WHERE event_type IN ('turn.started', 'turn.parked', 'turn.completed', 'turn.aborted', 'transcript.rewound')"
+    )
     # Keep the incarnation MAX lookup index-backed while append_events holds
     # the session counter lock. The migration fingerprint installs this on
     # existing databases without a schema-version bump. First creation scans

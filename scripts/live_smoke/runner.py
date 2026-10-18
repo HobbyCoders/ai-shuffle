@@ -74,19 +74,41 @@ def tiny_png(path: Path) -> Path:
     return path
 
 
-def pick_model(models: dict) -> tuple[str | None, str]:
-    """Cheapest-looking usable model, by name; ``(None, why)`` when none looks cheap."""
+def pick_model(models: dict) -> tuple[str, str]:
+    """Pick only runnable registry entries; fail before creating smoke sessions.
+
+    Claude's ``enabled`` is merely "not switched off". Its cached auth probe
+    also has to succeed (including the CLI login for subscription mode). API
+    auth does not require a CLI. Provider ``usable`` includes credential gates;
+    an absent/unknown signal is not permission to spend tokens on that route.
+    """
     candidates = []
-    if (models.get("claude") or {}).get("enabled", True):
+    claude = models.get("claude") or {}
+    if claude.get("enabled") and claude.get("auth_kind") and claude.get("usable") is not False:
         candidates += [(m.get("value"), m.get("label") or "") for m in models.get("models") or []]
     for prov in models.get("providers") or []:
-        if prov.get("usable"):
-            candidates += [(f"prov:{prov['id']}:{m['id']}", m.get("label") or "") for m in prov.get("models") or []]
+        # /models normally omits disabled rows; still honor an explicit False.
+        if prov.get("enabled", True) and prov.get("usable") is True:
+            candidates += [(f"prov:{prov['id']}:{m['id']}", m.get("label") or "")
+                           for m in prov.get("models") or [] if m.get("id")]
     for hint in CHEAP_HINTS:
         for value, label in candidates:
             if value and (hint in value.lower() or hint in label.lower()):
                 return value, f"cheapest by name ('{hint}')"
-    return None, "worker default (no model name looked cheap)"
+    default = models.get("default")
+    if default and any(value == default for value, _ in candidates):
+        # Pin the validated selection rather than implicitly inheriting an
+        # agent's potentially different (and unauthenticated) model.
+        return default, "worker default (no model name looked cheap)"
+    cause = ("Claude is disabled" if not claude.get("enabled", True)
+             else "Claude has no confirmed auth (sign in/install its CLI for subscription, or configure API auth)")
+    if claude.get("auth_kind") and claude.get("enabled"):
+        cause = "Claude has no runnable catalog model"
+    if not candidates:
+        raise SetupError(f"no runnable model: {cause}; no enabled provider has usable models. "
+                         "Configure a provider before running live smoke, or give --model explicitly.")
+    raise SetupError(f"no cheap usable model and worker default {default!r} is not runnable: {cause}. "
+                     "Choose a usable worker default or give --model explicitly.")
 
 
 def checkout_state(root: Path = ROOT) -> dict:
@@ -264,7 +286,7 @@ class Runner:
         try:
             value, why = pick_model(self.client.models())
         except ClientError as exc:
-            value, why = None, f"worker default (models list failed: {exc})"
+            raise SetupError(f"could not select a runnable model: models list failed: {exc}") from None
         return {"model": value, "why": why}
 
     def resolve_agent(self) -> dict:

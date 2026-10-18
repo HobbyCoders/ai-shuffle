@@ -203,9 +203,14 @@ An update-reach failure is acknowledged as before, with a pull request label
 `update-reach:GROUP` (`local_ci.py` reads the PR's labels) or
 `--allow GROUP` when running `scripts/ci/update_reach.py` directly.
 
-A change to the installed desktop launcher's import closure (group
+A change to the installed desktop launcher's inputs (group
 `windows-launcher`, which covers the packaged Windows and Linux apps) must also
-raise `desktop/launcher.json` `version` in the same pull request. Otherwise the
+raise `desktop/launcher.json` `version` in the same pull request. These inputs
+include its import closure, runtime pages under `desktop/src/pages`, icon,
+update trust key, `scripts/source-profile.cjs`, launcher policy fields, and the
+production npm packages in `desktop/package-lock.json` (name, version and
+integrity). Dev-only dependency changes do not count. The check also validates
+`minimum <= version` and, when present, `start <= version` at both revisions. Otherwise the
 check also fails `launcher-version`, and `update-reach:windows-launcher` does not
 accept it. The only other way through is the owner's
 `update-reach:no-launcher-change` label (or `--allow no-launcher-change`): the

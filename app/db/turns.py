@@ -1159,17 +1159,22 @@ def _inherit_reply_to(cursor: Any, turn_id: str, settled_rows: List[Any]) -> Non
     if current is None:
         return
     payload = dict(_parse_json(current.get("payload")) or {})
-    kept = payload.get("agent_message_reply_to")
-    if kept:
-        dropped = sorted({owner for _, owner in owners if owner != kept})
-        if dropped:
-            # Never silent: these parents' continuations end with no report.
-            logger.warning(
-                "turns: turn %s keeps reply_to %s; settled parked continuation(s) "
-                "for %s have no turn left to report them", turn_id, kept, dropped,
-            )
-        return
-    payload["agent_message_reply_to"] = max(owners, key=lambda item: item[0])[1]
+    kept = payload.get("agent_message_reply_to") or max(owners, key=lambda item: item[0])[1]
+    payload["agent_message_reply_to"] = kept
+    # Carry explicit failures as durable context, not a second reply_to: the
+    # live turn's report must never be attributed to a different parent (#127).
+    displaced = {item["turn_id"]: item for item in payload.get("agent_message_displaced", [])}
+    for row in settled_rows:
+        previous = _parse_json(row.get("payload")) or {}
+        for item in previous.get("agent_message_displaced", []):
+            displaced[item["turn_id"]] = item
+        owner = previous.get("agent_message_reply_to")
+        if owner and owner != kept:
+            displaced[row["id"]] = {
+                "owner": owner, "turn_id": row["id"], "position": float(row.get("position") or 0),
+            }
+    if displaced:
+        payload["agent_message_displaced"] = list(displaced.values())
     cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), turn_id))
     logger.info(
         "turns: turn %s inherits reply_to %s from a settled parked continuation",

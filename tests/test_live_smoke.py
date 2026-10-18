@@ -56,7 +56,8 @@ class FakeWorker:
 
     def models(self):
         return {"models": [{"value": "opus", "label": "Opus"}, {"value": "haiku", "label": "Haiku"}],
-                "providers": [], "claude": {"enabled": True}}
+                "default": "sonnet", "providers": [],
+                "claude": {"enabled": True, "auth_kind": "subscription", "plan_type": "max"}}
 
     def projects(self):
         return [{"id": "proj1", "name": "ai-shuffle"}]
@@ -439,7 +440,81 @@ def test_pick_model_prefers_cheap_usable_models():
                                                                     {"id": "gpt-5-mini", "label": "mini"}]},
                             {"id": "x", "usable": False, "models": [{"id": "nano", "label": "nano"}]}]}
     assert pick_model(models)[0] == "prov:oa:gpt-5-mini"
-    assert pick_model({"models": [{"value": "opus"}]}) == (None, "worker default (no model name looked cheap)")
+    with pytest.raises(SetupError, match="Claude.*auth"):
+        pick_model({"models": [{"value": "opus"}]})
+
+
+@pytest.fixture
+def model_registry():
+    # Sanitized /api/v1/models shape from #138: enabled is NOT authentication.
+    return {
+        "models": [{"value": "haiku", "label": "Haiku"}, {"value": "sonnet", "label": "Sonnet"}],
+        "default": "prov:signed-in:gpt-5-mini",
+        "claude": {"enabled": True, "auth_kind": None, "plan_type": None},
+        "providers": [{"id": "signed-in", "enabled": True, "usable": True,
+                       "auth_kind": "subscription", "plan_type": "plus",
+                       "default_model": "gpt-5-mini",
+                       "models": [{"id": "gpt-5-mini", "label": "GPT-5 mini"}]}],
+    }
+
+
+def test_pick_model_skips_unauthenticated_claude(model_registry):
+    assert pick_model(model_registry)[0] == "prov:signed-in:gpt-5-mini"
+
+
+@pytest.mark.parametrize("claude_gate", [{"enabled": False}, {"usable": False}, {"auth_kind": None}])
+def test_pick_model_honors_claude_runnability(model_registry, claude_gate):
+    model_registry["claude"].update(auth_kind="subscription")
+    model_registry["claude"].update(claude_gate)
+    assert pick_model(model_registry)[0] == "prov:signed-in:gpt-5-mini"
+
+
+@pytest.mark.parametrize("auth_kind", ["api", "subscription"])
+def test_pick_model_allows_authenticated_claude(model_registry, auth_kind):
+    model_registry["claude"]["auth_kind"] = auth_kind
+    assert pick_model(model_registry)[0] == "haiku"
+
+
+@pytest.mark.parametrize("gate", [{"enabled": False}, {"usable": False}, {"usable": None}])
+def test_pick_model_rejects_unusable_provider(model_registry, gate):
+    model_registry["providers"][0].update(gate)
+    with pytest.raises(SetupError, match="no runnable.*Claude.*auth.*provider"):
+        pick_model(model_registry)
+
+
+def test_pick_model_falls_back_to_validated_worker_default(model_registry):
+    provider = model_registry["providers"][0]
+    provider["models"] = [{"id": "gpt-5", "label": "GPT-5"}]
+    model_registry["default"] = "prov:signed-in:gpt-5"
+    assert pick_model(model_registry) == ("prov:signed-in:gpt-5", "worker default (no model name looked cheap)")
+
+
+def test_pick_model_refuses_unusable_default(model_registry):
+    model_registry["providers"][0]["models"] = [{"id": "gpt-5"}]
+    model_registry["default"] = "sonnet"
+    with pytest.raises(SetupError, match="worker default.*not runnable"):
+        pick_model(model_registry)
+
+
+def test_model_setup_error_does_not_start_sessions(tmp_path, model_registry):
+    worker = FakeWorker()
+    model_registry["providers"] = []
+    worker.models = lambda: model_registry
+    with pytest.raises(SetupError, match="Claude.*auth"):
+        _run(worker, _data(_script("t.1")), tmp_path)
+    assert worker.sent == []
+
+
+def test_model_registry_failure_does_not_start_sessions(tmp_path):
+    worker = FakeWorker()
+
+    def unavailable():
+        raise ClientError("models endpoint unavailable")
+
+    worker.models = unavailable
+    with pytest.raises(SetupError, match="models endpoint unavailable"):
+        _run(worker, _data(_script("t.1")), tmp_path)
+    assert worker.sent == []
 
 
 def test_tiny_png_is_valid(tmp_path):

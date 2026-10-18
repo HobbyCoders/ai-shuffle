@@ -2873,8 +2873,12 @@ def create_builtin_tools_server(
             if args.get("cancel"):
                 return _ok(await session_handoff.cancel_move(session_id))
             from app.db.async_database import run_sync
-            return _ok(await run_sync(session_handoff.request, session_id,
-                                      str(args.get("worker") or ""), str(args.get("note") or "")))
+            result = await run_sync(session_handoff.request, session_id,
+                                    str(args.get("worker") or ""), str(args.get("note") or ""))
+            # request persists off-loop. Start waiting on this loop, including
+            # when the turn later ends through the draining path.
+            session_handoff.schedule(session_id)
+            return _ok(result)
         except ValueError as exc:
             return _err(str(exc))
 

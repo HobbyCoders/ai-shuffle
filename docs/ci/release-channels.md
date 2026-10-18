@@ -121,6 +121,15 @@ staging is not a claim that these other surfaces are staged.
    file, then attaches both packages, `SHA256SUMS-linux` and provenance to the
    GitHub release with digest/size read-back. The one-day Actions artifact is
    transport only, not the release download location.
+7. After **promote-image** succeeds for the newest stable release,
+   **platform-installers** reuses this release run's Linux and Android APK
+   artifacts to register both downloads on the account hub's download page.
+   It calls `platform-installer.yml` with the build run ID, using the same
+   `release-signing` environment, signing/checksum/provenance checks and optional
+   R2 copy as a manual publish. No separate Linux or Android dispatch is needed.
+   `platform-installer.yml` remains available from the tag for manual re-publishes
+   (and macOS publication). Staging and sealed-candidate promotion do not run
+   these artifact-based registrations.
 
 Complete release workflows are serialized without cancelling an active
 publish. A failed gate stops its dependent jobs; a partial release must not

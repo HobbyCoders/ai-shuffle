@@ -6,6 +6,13 @@ mkdir -p "$out"
 on_exit() {
   local status=$?
   trap - EXIT
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    if (( status == 0 )); then
+      printf '%s\n' '- Android emulator verification: PASSED (cold-start and full suite).' >> "$GITHUB_STEP_SUMMARY"
+    else
+      printf '%s\n' "- Android emulator verification: FAILED (exit $status). No app failure was retried or excused; release-advisory policy does not change this failed result." >> "$GITHUB_STEP_SUMMARY"
+    fi
+  fi
   # Keep timing evidence on success too, before emulator teardown loses logcat.
   timeout 15 adb -s emulator-5554 logcat -d -v threadtime ConsentTiming:I ProfileTiming:I DemoNavigation:I '*:S' > "$out/timing.txt" || true
   timeout 30 adb -s emulator-5554 pull /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke "$out/screenshots" || true

@@ -129,6 +129,10 @@ all: dropping `"user"` removes the global tree and plugins, dropping
 Each project directory (the walk from the git root down to the cwd, else the
 filesystem root) contributes, in this order: `AGENTS.md`, `AGENTS.local.md`,
 `AGENT.md`, `.fluid/AGENTS.md`, `.fluid/AGENTS.local.md`, `.agents/AGENTS.md`.
+The global `~/.fluid/AGENTS.md` and `~/.fluid/{skills,agents,commands}` roots
+are excluded from project/nested discovery by resolved path: they load only
+in the user scope. Other home-level files (including `.fluid/AGENTS.local.md`,
+which is not global) and ancestors above home still participate in the walk.
 `AGENTS.local.md` is the gitignored personal file that layers after the shared
 one, the role `CLAUDE.local.md` has in Claude Code; the settings import maps
 `CLAUDE.local.md` to it. `AGENTS.override.md` is the Codex convention and does

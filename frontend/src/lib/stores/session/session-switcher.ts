@@ -22,6 +22,7 @@ import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
+import { git } from '../git.svelte';
 import {
 	beginUserMessageRevisionSeed,
 	finishUserMessageRevisionSeed,
@@ -131,6 +132,7 @@ interface SessionSwitcher {
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
 	getPersistedProject: () => string;
+	getPersistedWorktreeIntent: typeof getPersistedWorktreeIntent;
 	loadSelectionFromBackend: () => Promise<{ selectedProfile: string; selectedProject: string } | null>;
 	saveSelectionToBackend: (profile: string, project: string) => void;
 	destroy: () => void;
@@ -147,30 +149,36 @@ export function getPersistedProject(): string {
 	return resolveComposerProject(composerPreferences.current.project, appData.current.projects, appData.current.clusterProjects).project;
 }
 
-/**
- * The last worktree intent (Local vs Worktree) the user toggled, persisted so it
- * survives starting a new session / page reload. Defaults to 'local'.
- *
- * This is a UI *preference* — distinct from a session's own worktreeIntent, which
- * is restored per-session from the persisted/backend session record. Only new
- * chats consult this preference.
- *
- * The localStorage key stays `aihub_executionMode` (unchanged) to avoid a
- * migration — only the in-memory/property naming changed.
- */
-export function getPersistedWorktreeIntent(): ExecutionMode {
-	if (typeof window !== 'undefined') {
-		const stored = localStorage.getItem('aihub_executionMode');
-		if (stored === 'worktree') return stored;
+/** Reuse the already-loaded Git status; never borrow another project's status. */
+export function projectSupportsWorktrees(projectId: string, projectV2Id: string | null = null): boolean {
+	const status = git.current;
+	if (status.projectId && (status.projectId === projectId || status.projectId === projectV2Id)) {
+		return status.hydrated && !status.worktreeId && !status.sessionId
+			&& status.status?.is_git_repo === true;
 	}
-	return 'local';
+	if (projectId) return false;
+	// Remote-only catalog entries describe a Git origin, not an arbitrary folder.
+	return !!projectV2Id && (appData.current.clusterProjects ?? []).some(p =>
+		p.project_v2_id === projectV2Id && p.remote_only && !!p.origin);
 }
 
-export function setPersistedWorktreeIntent(mode: ExecutionMode): void {
-	composerPreferences.set('worktreeIntent', mode);
-	if (typeof window !== 'undefined') {
-		localStorage.setItem('aihub_executionMode', mode);
-	}
+/** Unknown is not non-Git: keep explicit On picks while capability is loading. */
+export function projectRejectsWorktrees(projectId: string, projectV2Id: string | null = null): boolean {
+	if (!projectId && !projectV2Id) return true;
+	const status = git.current;
+	return !!status.projectId && (status.projectId === projectId || status.projectId === projectV2Id)
+		&& status.hydrated && !status.worktreeId && !status.sessionId && status.status?.is_git_repo === false;
+}
+
+/** New-chat defaults only. Existing sessions restore their own checkout binding. */
+export function getPersistedWorktreeIntent(projectId: string, projectV2Id: string | null = null): ExecutionMode {
+	return projectSupportsWorktrees(projectId, projectV2Id)
+		? composerPreferences.worktreeForProject({projectId, projectV2Id}).intent : 'local';
+}
+
+export function setPersistedWorktreeIntent(mode: ExecutionMode, projectId: string, projectV2Id: string | null = null): void {
+	if (mode === 'worktree' && projectRejectsWorktrees(projectId, projectV2Id)) return;
+	composerPreferences.rememberWorktreeIntent({projectId, projectV2Id}, mode);
 }
 
 /**
@@ -227,9 +235,10 @@ function newChatModeState(
 			selectedWorktreeBranch: null,
 		};
 	}
+	const project = resolveNewChatProject(ephemeral, fallbackProject);
 	return {
-		...resolveNewChatProject(ephemeral, fallbackProject),
-		worktreeIntent: getPersistedWorktreeIntent(),
+		...project,
+		worktreeIntent: getPersistedWorktreeIntent(project.project, project.projectV2Id),
 		worktreeId: null,
 		worktreeBranch: '',
 		selectedWorktreeBranch: null,
@@ -1062,7 +1071,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
 			...(mode === 'chat' ? {} : {
 				project:savedDraft.project, projectV2Id:savedDraft.projectV2Id,
-				worktreeIntent:savedDraft.worktreeIntent, worktreeId:savedDraft.worktreeId,
+				worktreeIntent:projectSupportsWorktrees(savedDraft.project, savedDraft.projectV2Id) ? savedDraft.worktreeIntent : 'local', worktreeId:savedDraft.worktreeId,
 				worktreeBranch:savedDraft.worktreeBranch, worktreeBaseBranch:savedDraft.worktreeBaseBranch,
 				selectedWorktreeBranch:savedDraft.selectedWorktreeBranch, worktreeMode:savedDraft.worktreeMode,
 				worktreeCreateNewBranch:savedDraft.worktreeCreateNewBranch ?? false,
@@ -1094,6 +1103,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		loadPersistedSession,
 		getPersistedProfile,
 		getPersistedProject,
+		getPersistedWorktreeIntent,
 		loadSelectionFromBackend,
 		saveSelectionToBackend,
 		destroy,

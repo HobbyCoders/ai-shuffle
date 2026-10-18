@@ -654,12 +654,11 @@ async def peer_control(action: str, request: Request,
         # A missing field inside a handler is a bad request, not an unknown action.
         logger.exception("Control action %s from %s failed on a missing field", action, device_id)
         raise HTTPException(400, f"Missing field: {exc.args[0] if exc.args else exc}") from exc
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    except (LookupError, PermissionError, ValueError) as exc:
+        if action in ("handoff", "session-move"):
+            logger.warning("Refused %s control for session %s: %s", action, body.get("session_id"), exc)
+        code = 404 if isinstance(exc, LookupError) else 409 if isinstance(exc, PermissionError) else 400
+        raise HTTPException(code, str(exc)) from exc
     finally:
         control.inbound_https.reset(secure)
 

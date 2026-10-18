@@ -34,7 +34,7 @@
       {
         "type": "turn.completed",
         "payload": {},
-        "question_seq": 4
+        "question_seq": null
       }
     ]
   },
@@ -350,7 +350,7 @@
             "attempt": 1
           }
         },
-        "question_seq": 4
+        "question_seq": null
       },
       {
         "type": "assistant.text_delta",
@@ -412,6 +412,469 @@
         "type": "assistant.text_delta",
         "payload": {
           "text": "Finished."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "working prose cannot request attention before the turn ends",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Would you like a draft PR?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Bash",
+          "tool_use_id": "push",
+          "input": {
+            "command": "git push"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 2
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "All done. Would you like a summary?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 7
+      }
+    ]
+  },
+  {
+    "name": "self-question followed by narration never asks the owner",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "One more question: can someone already stuck on this error get v1.0.1 in-app, or do they need the installer? Checking where the failing call sits in startup:"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Bash",
+          "tool_use_id": "push",
+          "input": {
+            "command": "git push"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "settling parked prose stays dismissed after parked_settled completion",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I open a PR?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "session_settled",
+          "through_seq": 4
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {
+          "stop_reason": "parked_settled"
+        },
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "streamed question followed by park is not attention",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Shall I open a PR?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.parked",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "background_tasks_changed"
+        },
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "aborted error turn dismisses its prose but not future standalone prose",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "error",
+          "message": "Stopped"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Try again?"
+        },
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "aborted interrupt turn dismisses its prose but not future standalone prose",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "interrupt",
+          "message": "Stopped"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Try again?"
+        },
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "aborted unknown turn dismisses its prose but not future standalone prose",
+    "events": [
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "unknown",
+          "message": "Stopped"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Try again?"
+        },
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "aborted question stays dismissed after tool-only task_notification turn",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "interrupt"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Background work finished",
+          "source": "task_notification"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "id": "bash",
+          "name": "Bash",
+          "input": {
+            "command": "true"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "bash",
+          "content": "Done"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "aborted question stays dismissed after tool-only wakeup turn",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I continue?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.aborted",
+        "payload": {
+          "reason": "interrupt"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Background work finished",
+          "source": "wakeup"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "id": "bash",
+          "name": "Bash",
+          "input": {
+            "command": "true"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "bash",
+          "content": "Done"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "null-epoch settlement clears prose through later wake completion",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Proceed?"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "session_settled",
+          "epoch": null,
+          "through_seq": 2
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Wake",
+          "source": "wakeup"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.started",
+        "payload": {},
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "id": "bash",
+          "name": "Bash",
+          "input": {
+            "command": "true"
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "bash",
+          "content": "Done"
         },
         "question_seq": null
       },

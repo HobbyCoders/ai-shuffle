@@ -34,6 +34,7 @@ def test_changes_reach_their_suites():
     assert suites_for(["frontend/src/lib/api.ts"]) >= {"frontend", "mobile"}
     assert suites_for(["fluid/fluid/loop.py"]) >= {"fluid", "backend"}
     assert suites_for([".github/workflows/release.yml"]) >= {"workflows", "android-play"}
+    assert suites_for([".github/workflows/android.yml"]) >= {"workflows", "android-play"}
     assert suites_for(["docs/content/setup.md"]) == {"docs"}
     assert suites_for(["README.md"]) == set()
 
@@ -42,6 +43,7 @@ def test_changes_reach_their_suites():
     "Dockerfile", "entrypoint.sh", "docker/update_contract.py", "requirements.txt",
     "desktop/src/main/installed-entry.ts", "desktop/scripts/publish-source.mjs",
     "desktop/build/installer.nsh", "desktop/electron-builder.yml",
+    "desktop/src/pages/recovery.html", "desktop/package-lock.json", "desktop/launcher.json",
     "scripts/source_archive.py", "scripts/ci/update_reach.py",
 ])
 def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
@@ -66,6 +68,16 @@ def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
     }
     assert kwargs["env"] == local_ci.python_env()
     assert verdicts == [ctx]
+
+
+def test_android_safety_suite_includes_emulator_contracts(monkeypatch):
+    commands = []
+    monkeypatch.setattr(local_ci, "run", lambda argv, **kwargs: commands.append(argv))
+    local_ci.android_play(context([".github/workflows/android.yml"]))
+    for script in ("test-emulator-readiness.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
+        assert [sys.executable, f"android/ci/{script}"] in commands
+    if Path("/bin/bash").exists():
+        assert [sys.executable, "android/ci/test-play-workflow.py"] in commands
 
 
 def test_cloud_split_keeps_android_bridge_and_app_docs_independent():

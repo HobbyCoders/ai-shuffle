@@ -634,9 +634,9 @@ describe('Sidebar Needs you lane', () => {
 		expect(document.querySelector('[data-group="settled"]')?.textContent).toContain('Remote chat');
 	});
 
-	// Spec §5: the open session's own queues and a prose question count, and
-	// Needs you beats Working while its turn streams on.
-	it('lifts the open, still-working session while it waits on you, until the next user message', async () => {
+	// Explicit prompts can block a running turn; prose only asks for attention
+	// after the turn ends (#155), until answered or dismissed.
+	it('keeps prose behind Working, then lifts an idle question until answered', async () => {
 		type OpenState = Parameters<typeof mocks.activeSession.set>[0] & Record<string, unknown>;
 		const set = (state: Record<string, unknown>) => mocks.activeSession.set({
 			sessionId: 'active', isStreaming: true, optimisticStreaming: true, activeTasks: [], ...state
@@ -648,9 +648,14 @@ describe('Sidebar Needs you lane', () => {
 		render(Sidebar, { props: sidebarProps });
 		set({ messages: asked, pendingPermissions: [], pendingQuestions: [] });
 		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+		expect(cardFrame('Active chat').textContent).not.toContain('Awaiting input');
+
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [], isStreaming: false, optimisticStreaming: false });
+		await tick();
 		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
 		expect(cardFrame('Active chat').textContent).toContain('Awaiting input');
-		expect(cardFrame('Active chat').textContent).not.toContain('Working');
 
 		set({ messages: asked, pendingPermissions: [], pendingQuestions: [{ request_id: 'q1' }] });
 		await tick();

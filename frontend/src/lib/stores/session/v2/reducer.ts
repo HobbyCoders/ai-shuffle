@@ -206,6 +206,14 @@ const COMPACTION_CLEARING_EVENTS = new Set([
 	'transcript.rewound',
 ]);
 
+/** Dismiss only captured prose; later messages and explicit cards stay intact. */
+function dismissProseThrough(state: V2SessionState, through: number, at = through): V2SessionState {
+	return { ...state, messages: state.messages.map((m) =>
+		m.role === 'assistant' && (!m.type || m.type === 'text') &&
+		(state.messageOriginSeq.get(m.id) ?? m.seq ?? Infinity) <= through
+			? { ...m, proseQuestionDismissedAt: m.proseQuestionDismissedAt ?? at } : m) };
+}
+
 export function initialState(): V2SessionState {
 	return {
 		messages: [],
@@ -1265,7 +1273,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		case 'turn.aborted': {
 			const reason = str(event.reason);
-			let next = closeOpen(state);
+			let next = dismissProseThrough(closeOpen(state), seq);
 			if (reason === 'interrupt') {
 				// Mark any still-running tool card as errored (mirrors the legacy
 				// interrupt cleanup in message-sender).
@@ -2233,6 +2241,12 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				return { ...state, messages: own(state.messages.filter(m =>
 					!(m.metadata?.not_sent && m.metadata?.not_sent_id === id))) };
 			}
+			if (str(event.subtype) === 'session_settled') {
+				const cutoff = typeof event.through_seq === 'number' ? event.through_seq : seq;
+				if (event.epoch == null || state.logEpoch == null || event.epoch === state.logEpoch) {
+					state = dismissProseThrough(state, cutoff, seq);
+				}
+			}
 			// `background_tasks_changed` is a CLI/SDK bookkeeping event that
 			// exists only to drive the active-tasks strip (which is fed from
 			// `task.updated` -> activeTaskSummaries, NOT from this note). It
@@ -2381,6 +2395,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				state.messages.filter((m) => {
 					const origin = state.messageOriginSeq.get(m.id);
 					return origin === undefined || origin < fromSeq;
+				}).map((m) => {
+					if (m.proseQuestionDismissedAt == null || m.proseQuestionDismissedAt < fromSeq) return m;
+					const { proseQuestionDismissedAt: _dismissed, ...rest } = m;
+					return rest;
 				})
 			);
 			const messageOriginSeq = own(new Map<string, number>());

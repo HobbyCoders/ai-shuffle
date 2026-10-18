@@ -109,6 +109,146 @@ def _parent_completions(env):
             if sid == PARENT and frame.get("task_id") == WORKER]
 
 
+@pytest.mark.parametrize("state", ["running", "parked"])
+async def test_restart_closes_continuation_and_tells_parent(env, monkeypatch, state):
+    from app.core import startup_reconcile, task_persistence
+    from app.core.config import settings
+    from app.core.task_registry import SERVER_RESTART_REASON
+    from app.db import background_tasks
+
+    monkeypatch.setattr(settings, "durable_task_state", True)
+    # Unlike the runtime fixture, exercise the actual durable mirror producer.
+    monkeypatch.setattr(env.reg, "_persist_task_state",
+                        TaskRegistry._persist_task_state.__get__(env.reg))
+    env.reg.start_task(PARENT, WORKER, "agent", "Round one", tool_use_id=WORKER)
+    env.reg.complete_task(PARENT, WORKER, "completed", summary="Old report, not the continuation")
+    env.reg.mark_terminal_notified(PARENT, WORKER)
+    await task_persistence.flush()
+    tid = await ts.on_agent_message(WORKER, PARENT, "Continue", reply_to=PARENT)
+    turns.start_turn(tid, None, "runner")
+    if state == "parked":
+        turns.park_turn(tid, ["monitor"])
+    await task_persistence.flush()
+    row = background_tasks.get_background_task(WORKER, PARENT)
+    assert row["status"] == "running"
+    with database.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT terminal_notified FROM background_tasks WHERE session_id=%s AND task_id=%s",
+                       (PARENT, WORKER))
+        assert not cursor.fetchone()["terminal_notified"]
+
+    # Abrupt restart: no WorkerRecord, delivery latch, pool, or live registry.
+    env.reg.reset_all()
+    supervisor.reset()
+    task_persistence.reset()
+    assert agent_messaging.live_continuation_owner(WORKER) is None
+    assert await startup_reconcile._mark_stale_background_task_rows() == 1
+    row = background_tasks.get_background_task(WORKER, PARENT)
+    assert row["status"] == "killed" and row["reason"] == SERVER_RESTART_REASON
+    assert "restart" in row["summary"]
+    assert env.reg.get_task(PARENT, WORKER)["status"] == "interrupted"
+    (wake,) = turns.get_queued_turns(PARENT)
+    assert "restarted" in wake["prompt"]
+    assert "Old report" not in wake["prompt"]
+    assert await startup_reconcile._mark_stale_background_task_rows() == 0
+    assert len(turns.get_queued_turns(PARENT)) == 1
+
+
+@pytest.mark.parametrize("park_again", [False, True])
+async def test_cross_parent_self_heal_fails_dropped_parent_only(env, park_again):
+    continuation = await _parked_continuation(env)
+    other = "other-parent"
+    database.create_session(session_id=other, profile_id="default")
+    env.reg.start_task(other, WORKER, "agent", "Other parent's work", tool_use_id=WORKER)
+    later = turns.enqueue_turn(WORKER, "agent_message", prompt="Other work", profile_id="default",
+                               payload={"agent_message_reply_to": other})
+    env.reg.complete_task(WORKER, "monitor", "completed")
+    if park_again:
+        env.reg.start_task(WORKER, "second-monitor", "shell", "Other CI")
+        env.reg.mark_monitor_shell_task(WORKER, "second-monitor")
+        # Production self-heal runs only when no background work remains at start.
+        # Settle the old parked continuation before the new Monitor starts.
+        turns.settle_parked_turns(WORKER, later["id"])
+    await _run(env.reg, later, _text("Private result for other parent"),
+               expect="parked" if park_again else "completed")
+
+    assert turns.get_turn(continuation["id"])["state"] == "completed"
+    assert turns.get_turn(later["id"])["payload"]["agent_message_reply_to"] == other
+    task = env.reg.get_task(PARENT, WORKER)
+    assert task["status"] == "error"
+    assert "different parent" in task["summary"]
+    assert "Private result" not in task["summary"]
+    (failure,) = _parent_completions(env)
+    assert failure["status"] == "error"
+    assert failure["agent_message_turn_id"] == continuation["id"]
+    (wake,) = turns.get_queued_turns(PARENT)
+    assert "different parent" in wake["prompt"]
+    assert "Private result" not in wake["prompt"]
+    assert env.reg.get_task(other, WORKER)["status"] == ("running" if park_again else "completed")
+    # Replay the settled hook; a durable displacement is not a second completion.
+    await agent_messaging.finish_message_resume(WORKER, turns.get_turn(later["id"]), "parked")
+    assert len(_parent_completions(env)) == 1
+
+
+@pytest.mark.parametrize("stopping", ["user_stop", "torn_down"])
+async def test_stop_prevents_displaced_parent_wake(env, stopping):
+    from app.core.query_session_lifecycle import enter_user_stop
+
+    await _parked_continuation(env)
+    other = "other-parent"
+    database.create_session(session_id=other, profile_id="default")
+    env.reg.start_task(other, WORKER, "agent", "Other work", tool_use_id=WORKER)
+    env.reg.mark_background_launch(other, WORKER)
+    later = turns.enqueue_turn(WORKER, "agent_message", prompt="Other work", profile_id="default",
+                               payload={"agent_message_reply_to": other})
+    turns.start_turn(later["id"], None, "runner")
+    turns.settle_parked_turns(WORKER, later["id"])
+    assert turns.get_turn(later["id"])["payload"]["agent_message_displaced"]
+    if stopping == "user_stop":
+        await enter_user_stop(WORKER)
+    else:
+        supervisor.get_worker(PARENT, WORKER).torn_down = True
+        supervisor.register_worker(supervisor.WorkerRecord(
+            parent_session_id=other, worker_session_id=WORKER, task_id=WORKER,
+            tool_use_id=WORKER, background=True, continuation_turn_id=later["id"], torn_down=True,
+        ))
+    turns.settle_turn(later["id"], "aborted")
+    await ts.on_turn_settled(WORKER, later["id"], "aborted")
+    assert env.terminals == []
+    assert turns.get_queued_turns(PARENT) == []
+    assert turns.get_queued_turns(other) == []
+
+
+@pytest.mark.parametrize("failure_at", ["settle_frame", "terminal_wake"])
+async def test_displaced_failure_never_drops_kept_parent_report(env, monkeypatch, caplog, failure_at):
+    from app.core import turn_recorder
+
+    await _parked_continuation(env)
+    other = "other-parent"
+    database.create_session(session_id=other, profile_id="default")
+    env.reg.start_task(other, WORKER, "agent", "Other work", tool_use_id=WORKER)
+    env.reg.mark_background_launch(other, WORKER)
+    later = turns.enqueue_turn(WORKER, "agent_message", prompt="Other work", profile_id="default",
+                               payload={"agent_message_reply_to": other})
+    env.reg.complete_task(WORKER, "monitor", "completed")
+    module, name = (turn_recorder, "record_task_settle_frame") if failure_at == "settle_frame" else (ts, "on_task_terminal")
+    real = getattr(module, name)
+
+    async def fail_displaced(owner, *args, **kwargs):
+        if owner == PARENT:
+            raise RuntimeError("Displaced path unavailable")
+        return await real(owner, *args, **kwargs)
+
+    monkeypatch.setattr(module, name, fail_displaced)
+    await _run(env.reg, later, _text("Kept parent's final report"), expect="completed")
+    task = env.reg.get_task(other, WORKER)
+    assert task["status"] == "completed"
+    assert task["summary"] == "Kept parent's final report"
+    (wake,) = turns.get_queued_turns(other)
+    assert "Kept parent's final report" in wake["prompt"]
+    assert "displaced continuation" in caplog.text
+
+
 @pytest.mark.parametrize("wakeup", ["idle_watchdog", "schedule_wakeup"])
 async def test_continuation_reports_after_a_wakeup_parks_beside_it(env, wakeup):
     continuation = await _parked_continuation(env)
@@ -222,7 +362,7 @@ def test_self_heal_hands_the_parent_link_to_the_turn_going_live(mock_db):
     assert turns.get_turn(live["id"])["payload"]["agent_message_reply_to"] == PARENT
 
 
-def test_self_heal_keeps_a_live_turns_own_parent(mock_db, caplog):
+def test_self_heal_keeps_a_live_turns_own_parent(mock_db):
     parked = turns.enqueue_turn("s", "agent_message", prompt="continue",
                                 payload={"agent_message_reply_to": "other-parent"})
     turns.start_turn(parked["id"], None, "runner")
@@ -232,7 +372,9 @@ def test_self_heal_keeps_a_live_turns_own_parent(mock_db, caplog):
     turns.start_turn(live["id"], None, "runner")
     assert turns.settle_parked_turns("s", live["id"]) == 1
     assert turns.get_turn(live["id"])["payload"]["agent_message_reply_to"] == PARENT
-    assert "other-parent" in caplog.text
+    assert turns.get_turn(live["id"])["payload"]["agent_message_displaced"] == [{
+        "owner": "other-parent", "turn_id": parked["id"], "position": float(parked["position"]),
+    }]
 
 
 def test_sweeps_without_a_live_turn_change_no_payload(mock_db):

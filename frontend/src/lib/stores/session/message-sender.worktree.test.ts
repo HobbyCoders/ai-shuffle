@@ -109,7 +109,11 @@ describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
 	});
 
 	it.each([false, true])('consumes the choice only after successful creation (remote=%s)', async (remote) => {
-		if (remote) composerPreferences.set('checkout', { ...choice, projectId: '', projectV2Id: 'shared-repo' });
+		const project = remote ? {projectId:'',projectV2Id:'shared-repo'} : {projectId:'proj-1',projectV2Id:null};
+		if (remote) {
+			composerPreferences.set('checkout', {...choice, ...project});
+			composerPreferences.set('project', project);
+		}
 		let finish!: (value: typeof created) => void;
 		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
 		const { sender, state } = setup({ worktreeBranch: choice.branch, worktreeCreateNewBranch: true,
@@ -120,7 +124,7 @@ describe('one-time remembered new-branch choice (#1598 / #1528)', () => {
 		await pending;
 		expect(composerPreferences.current.checkout).toBeNull();
 		expect(composerPreferences.current.model).toBe('preserved-model');
-		expect(composerPreferences.current.project).toEqual({ projectId: 'proj-1', projectV2Id: null });
+		expect(composerPreferences.current.project).toEqual(project);
 		expect(state()).toMatchObject({ sessionId: 'wt-1', worktreeBranch: choice.branch });
 	});
 

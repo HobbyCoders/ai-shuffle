@@ -1,20 +1,22 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
  adapters: new Map<string, { apply(value: unknown): void }>(),
+ prefixes: new Map<string, any>(),
  catalog: { projects: [] as {id: string}[], clusterProjects: [] as Record<string, unknown>[], profiles: [], sessions: [] },
  catalogLoaded: false,
 }));
 vi.mock('$lib/services/preferences', () => ({ preferenceSync: {
  register: (key: string, adapter: { apply(value: unknown): void }) => mocks.adapters.set(key, adapter),
- save: vi.fn(), registerPrefix: vi.fn(), reconnect: vi.fn(async () => {}),
+ save: vi.fn(), registerPrefix: (key:string, factory:any) => mocks.prefixes.set(key,factory), reconnect: vi.fn(async () => {}),
 } }));
 vi.mock('./app-data.svelte', () => ({ appData: { get current() { return mocks.catalog; }, get projectCatalogLoaded() { return mocks.catalogLoaded; } } }));
+vi.mock('./git.svelte', () => ({git:{get current() { return {projectId:'local-clone', hydrated:true, stale:false, status:{is_git_repo:true}}; }, subscribe:vi.fn()}}));
 vi.mock('./session/ws-connection', () => ({ createWsConnection: () => ({
  connect: vi.fn(), disconnect: vi.fn(), send: vi.fn(), isConnected: () => false,
  resetLastMessageTime: vi.fn(), resetReconnectAttempts: vi.fn(), destroy: vi.fn(),
 }) }));
 let active: (typeof import('./active-session'))['activeSession'];
-const linked = { project_v2_id: 'repo', local_project_id: 'local-clone', remote_only: false };
+const linked = { project_v2_id: 'repo', local_project_id: 'local-clone', remote_only: false, origin:'https://example.com/repo' };
 beforeEach(async () => {
  vi.resetModules(); localStorage.clear(); sessionStorage.clear(); mocks.adapters.clear();
  mocks.catalog.projects = []; mocks.catalog.clusterProjects = []; mocks.catalogLoaded = false;
@@ -23,9 +25,8 @@ beforeEach(async () => {
 });
 async function receiveDefaults(projectId = 'foreign-clone') {
  mocks.adapters.get('composer.project')!.apply({ projectId, projectV2Id: 'repo' });
- mocks.adapters.get('composer.worktreeIntent')!.apply('worktree');
- mocks.adapters.get('composer.checkout')!.apply({ kind: 'branch', projectId, projectV2Id: 'repo',
-  branch: 'topic/remote', baseBranch: 'develop', createNew: true });
+ mocks.prefixes.get('composer.projectWorktree.')('composer.projectWorktree.shared%3Arepo').apply({intent:'worktree', checkout:{ kind: 'branch', projectId, projectV2Id: 'repo',
+  branch: 'topic/remote', baseBranch: 'develop', createNew: true }});
  mocks.adapters.get('composer.model')!.apply('sonnet');
  mocks.adapters.get('composer.modelEfforts')!.apply({sonnet:'max'});
  await Promise.resolve();
@@ -46,7 +47,7 @@ it.each(['local-first', 'cluster-first'])('defers a branch until both catalog ha
 it('restores a known remote-only project branch without requiring a local clone', async () => {
  await receiveDefaults('');
  expect(active.current.worktreeBranch).toBe('');
- mocks.catalog.clusterProjects = [{ project_v2_id: 'repo', local_project_id: null, remote_only: true }];
+ mocks.catalog.clusterProjects = [{ project_v2_id: 'repo', local_project_id: null, remote_only: true, origin:'https://example.com/repo' }];
  active.applyComposerDefaults();
  expect(active.current).toMatchObject({ project: '', projectV2Id: 'repo', worktreeBranch: 'topic/remote' });
 });
