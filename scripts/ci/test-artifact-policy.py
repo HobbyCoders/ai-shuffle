@@ -159,10 +159,10 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertEqual(jobs["android-ui"]["needs"], "build")
         legs = {str(leg["api"]): leg for leg in jobs["android-ui"]["strategy"]["matrix"]["include"]}
         self.assertEqual(set(legs), {"34", "36"})
-        # Both APIs block app defects; no matrix-wide failure exemption.
-        for leg in legs.values():
-            self.assertNotIn("advisory", leg)
-        self.assertNotIn("continue-on-error", jobs["android-ui"])
+        # Preserve release gating: API 34 blocks, API 36 reports its failures.
+        self.assertEqual(legs["34"]["advisory"], "false")
+        self.assertEqual(legs["36"]["advisory"], "true")
+        self.assertEqual(jobs["android-ui"]["continue-on-error"], "${{ matrix.advisory }}")
         for step in jobs["android-ui"]["steps"]:
             self.assertNotIn("continue-on-error", step)
         self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
@@ -210,6 +210,16 @@ class ArtifactPolicyTests(unittest.TestCase):
             for mode in ("success", "empty", "denied", "stale"):
                 with self.subTest(workflow=file, mode=mode):
                     subprocess.run(["node", "-e", CLEANUP_RUNNER], input=json.dumps({"script": cleanup["with"]["script"], "names": names, "mode": mode}), text=True, check=True)
+
+    def test_emulator_readiness_evidence_survives_success(self):
+        step = next(s for s in uploads(workflow("android.yml")["jobs"]["android-ui"])
+                    if s["with"]["name"] == "android-ui-readiness-api-${{ matrix.api }}")
+        self.assertEqual(step["if"], "always()")
+        self.assertEqual(step["with"]["retention-days"], "3")
+        self.assertEqual(step["with"]["path"].splitlines(), [
+            "${{ runner.temp }}/android-emulator/readiness/",
+            "${{ runner.temp }}/android-emulator/launcher-recovery*/",
+        ])
 
     def test_ci_diagnostics_upload_only_on_failure(self):
         diagnostics = {

@@ -1,10 +1,12 @@
 from contextlib import redirect_stdout
 import io
+import json
 import re
 import runpy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 module = runpy.run_path(str(Path(__file__).with_name("prepare-android-ui.py")))
 readiness, prepare, configure_webview = module["readiness"], module["prepare"], module["configure_webview"]
@@ -12,6 +14,13 @@ readiness, prepare, configure_webview = module["readiness"], module["prepare"], 
 HOME = "mCurrentFocus=Window{18f6feb u0 com.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher}\n"
 LAUNCHER_ANR = "mCurrentFocus=Window{563c1f5 u0 Application Not Responding: com.android.launcher3}\n"
 UNLOCKED, AWAKE = "mInputRestricted=false\n", "mWakefulness=Awake\n"
+CAPTURE = json.loads((Path(__file__).parent / "fixtures/api36-webview133.json").read_text())
+SDK = re.fullmatch(r"\[ro.build.version.sdk\]: \[(.+)\]", CAPTURE["sdk_property"])[1]
+BUILD_ID = re.fullmatch(r"\[ro.build.id\]: \[(.+)\]", CAPTURE["build_id_property"])[1]
+PACKAGE, VERSION = re.search(r"Loading (\S+) version (\S+)", CAPTURE["webview_factory"]).groups()
+# The run captured getprop and WebViewFactory logcat, NOT dumpsys webviewupdate.
+# This dump-format sample is synthetic; the version/build match is real evidence.
+SYNTHETIC_PROVIDER = f"Current WebView package (name, version): ({PACKAGE}, {VERSION})\n"
 
 
 class EmulatorReadinessTest(unittest.TestCase):
@@ -65,6 +74,12 @@ class EmulatorReadinessTest(unittest.TestCase):
                 return UNLOCKED
             if args == ("shell", "dumpsys", "power"):
                 return AWAKE
+            if args == ("shell", "getprop", "ro.build.version.sdk"):
+                return SDK + "\n"
+            if args == ("shell", "getprop", "ro.build.id"):
+                return BUILD_ID + "\n"
+            if args == ("shell", "dumpsys", "webviewupdate"):
+                return SYNTHETIC_PROVIDER
             return ""
 
         def sleep(seconds):
@@ -74,14 +89,20 @@ class EmulatorReadinessTest(unittest.TestCase):
             self.diagnostics += 1
 
         with tempfile.TemporaryDirectory() as folder:
-            prepare(adb, Path(folder), deadline_seconds=deadline_seconds, sleep=sleep, clock=lambda: self.elapsed,
-                    diagnostics=diagnostics)
+            summary = Path(folder) / "summary"
+            with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}):
+                try:
+                    prepare(adb, Path(folder), deadline_seconds=deadline_seconds, sleep=sleep, clock=lambda: self.elapsed,
+                            diagnostics=diagnostics)
+                finally:
+                    self.summary = summary.read_text() if summary.exists() else ""
 
     def test_normal_boot_never_restarts_any_application(self):
         self.run_preparation([HOME])
         self.assertFalse(any("force-stop" in command for command in self.commands))
         self.assertEqual(0, self.diagnostics)
         self.assertEqual(4, self.elapsed)
+        self.assertEqual("", self.summary)
 
     def test_launcher_boot_anr_gets_one_restart_then_all_readiness_checks(self):
         self.run_preparation([LAUNCHER_ANR, "mCurrentFocus=null", HOME])
@@ -89,6 +110,9 @@ class EmulatorReadinessTest(unittest.TestCase):
                          [command for command in self.commands if "force-stop" in command])
         self.assertEqual(1, self.diagnostics)
         self.assertEqual(8, self.elapsed)
+        self.assertIn("restarting Quickstep once", self.summary)
+        self.assertIn("SDK 36, build BE2A.250530.026.D1", self.summary)
+        self.assertIn("com.android.webview, 133.0.6943.137", self.summary)
 
     def test_repeated_launcher_anr_fails_without_repeated_recovery(self):
         with self.assertRaisesRegex(RuntimeError, "hung again"):
@@ -114,6 +138,8 @@ class EmulatorReadinessTest(unittest.TestCase):
         self.run_preparation([systemui_anr, "mCurrentFocus=null", HOME], deadline_seconds=30)
         kills = [command for command in self.commands if any("kill" in part for part in command)]
         self.assertEqual([("shell", "su 0 kill -9 $(pidof com.android.systemui)")], kills)
+        self.assertIn("restarting SystemUI once", self.summary)
+        self.assertIn("SDK 36, build BE2A.250530.026.D1", self.summary)
         self.assertFalse(any("force-stop" in command for command in self.commands))
         self.assertEqual(1, self.diagnostics)
 
@@ -127,8 +153,8 @@ class EmulatorReadinessTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "never reached"):
             self.run_preparation([HOME, HOME, "mCurrentFocus=null", HOME, HOME, "mCurrentFocus=null"])
 
-    def run_webview(self, build_type="userdebug", readback=None, sdk="36", build_id="BE2A.250530.026.D1",
-                    provider="Current WebView package (name, version): (com.android.webview, 133.0.6943.137)\n"):
+    def run_webview(self, build_type="userdebug", readback=None, sdk=SDK, build_id=BUILD_ID,
+                    provider=SYNTHETIC_PROVIDER):
         commands, flags = [], {}
 
         def adb(*args):
@@ -147,8 +173,11 @@ class EmulatorReadinessTest(unittest.TestCase):
 
         self.webview_log = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, redirect_stdout(self.webview_log):
-            configure_webview(adb, Path(folder))
+            summary = Path(folder) / "summary"
+            with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}):
+                configure_webview(adb, Path(folder))
             evidence = (Path(folder) / "webview.txt").read_text()
+            self.summary = summary.read_text() if summary.exists() else ""
         return commands, flags, evidence
 
     def test_webview_turns_off_only_the_unretained_dangling_ptr_crash(self):
@@ -157,6 +186,9 @@ class EmulatorReadinessTest(unittest.TestCase):
         self.assertIn("133.0.6943.137", evidence)
         self.assertIn("Known emulator WebView 133 debug-check workaround", self.webview_log.getvalue())
         self.assertIn(module["WEBVIEW_FLAGS"], self.webview_log.getvalue())
+        self.assertIn(module["WEBVIEW_FLAGS"], self.summary)
+        self.assertIn("SDK 36, build BE2A.250530.026.D1", self.summary)
+        self.assertIn("com.android.webview, 133.0.6943.137", self.summary)
         # Only that one feature: no blanket crash, field-trial or sandbox switches.
         written = flags["/data/local/tmp/webview-command-line"].split()
         self.assertEqual(["_", "--disable-features=PartitionAllocUnretainedDanglingPtr"], written)

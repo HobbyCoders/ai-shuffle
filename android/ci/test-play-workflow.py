@@ -169,15 +169,16 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertNotIn("sold separately", full)
         self.assertIn("https://hobbycoders.com/delete-account", full)
 
-    def test_emulator_jobs_block_app_failures_on_both_apis(self):
+    def test_emulator_failures_stay_visible_with_api36_advisory(self):
         workflow = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
         job = workflow["jobs"]["android-ui"]
-        self.assertNotIn("continue-on-error", job)
+        self.assertEqual(job["continue-on-error"], "${{ matrix.advisory }}")
         self.assertNotIn("if", job)
         self.assertEqual(job["strategy"]["fail-fast"], "false")
-        matrix = job["strategy"]["matrix"]["include"]
-        self.assertEqual({"34", "36"}, {entry["api"] for entry in matrix})
-        self.assertTrue(all("advisory" not in entry for entry in matrix))
+        matrix = {entry["api"]: entry for entry in job["strategy"]["matrix"]["include"]}
+        self.assertEqual({"34", "36"}, set(matrix))
+        self.assertEqual(matrix["34"]["advisory"], "false")
+        self.assertEqual(matrix["36"]["advisory"], "true")
         for android_job in workflow["jobs"].values():
             for step in android_job.get("steps", []):
                 if "run" in step:
@@ -188,6 +189,12 @@ class PlayWorkflowTests(unittest.TestCase):
         runner = next(step for step in steps if step.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
         self.assertNotIn("if", runner)
         self.assertEqual(runner["with"]["script"], "bash ci/run-android-ui-tests.sh")
+        self.assertEqual(runner["id"], "emulator_tests")
+        summary = next(step for step in steps if step.get("name") == "Report emulator leg outcome")
+        self.assertEqual(summary["if"], "always()")
+        self.assertEqual(summary["env"]["RESULT"], "${{ steps.emulator_tests.outcome }}")
+        self.assertEqual(summary["env"]["ADVISORY"], "${{ matrix.advisory }}")
+        self.assertIn("GITHUB_STEP_SUMMARY", summary["run"])
         checks = next(step["run"] for step in steps if step.get("name") == "Check emulator readiness and instrumentation result parsers")
         for script in ("test-emulator-readiness.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
             self.assertIn(script, checks)

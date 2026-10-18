@@ -22,6 +22,20 @@ LAUNCHER = "com.android.launcher3"
 SYSTEMUI = "com.android.systemui"
 
 
+def report_workaround(adb, message):
+    sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
+    build_id = adb("shell", "getprop", "ro.build.id").strip()
+    provider = adb("shell", "dumpsys", "webviewupdate")
+    current = next((line.strip() for line in provider.splitlines()
+                    if line.strip().startswith("Current WebView package (name, version):")), "WebView unknown")
+    detail = f"{message}; SDK {sdk or 'unknown'}, build {build_id or 'unknown'}; {current}"
+    print(detail, flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as output:
+            output.write(f"- {detail}\n")
+
+
 def readiness(displays: str, policy: str, power: str) -> str:
     # Use `dumpsys window displays`, not the full window dump: the latter also
     # includes the previous ANR's historical focus, which is not current state.
@@ -72,7 +86,7 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
         if state == "launcher_anr":
             if recovered:
                 raise RuntimeError("The Android launcher hung again after its single pre-test restart")
-            print("First-boot launcher ANR detected before app installation; retaining diagnostics and restarting Quickstep once", flush=True)
+            report_workaround(adb, "First-boot launcher ANR detected before app installation; retaining diagnostics and restarting Quickstep once")
             for name, data in (("displays", displays), ("policy", policy), ("power", power)):
                 (out / f"launcher-anr-{name}.txt").write_text(data, encoding="utf-8")
             diagnostics()
@@ -83,7 +97,7 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
         elif state == "systemui_anr":
             if systemui_recovered:
                 raise RuntimeError("SystemUI hung again after its single pre-test restart")
-            print("First-boot SystemUI ANR detected before app installation; retaining diagnostics and restarting SystemUI once", flush=True)
+            report_workaround(adb, "First-boot SystemUI ANR detected before app installation; retaining diagnostics and restarting SystemUI once")
             for name, data in (("displays", displays), ("policy", policy), ("power", power)):
                 (out / f"systemui-anr-{name}.txt").write_text(data, encoding="utf-8")
             diagnostics()
@@ -140,7 +154,7 @@ def configure_webview(adb, out: Path):
     written = adb("shell", "cat", WEBVIEW_FLAGS_FILE).strip()
     if written != WEBVIEW_FLAGS:
         raise RuntimeError(f"WebView flags file reads back as {written!r}")
-    print(f"Known emulator WebView 133 debug-check workaround (SDK {sdk}, build {build_id}): {WEBVIEW_FLAGS}", flush=True)
+    report_workaround(adb, f"Known emulator WebView 133 debug-check workaround: {WEBVIEW_FLAGS}")
 
 
 def main():

@@ -1,0 +1,13 @@
+{
+  "provenance": {
+    "run": 38824056427,
+    "attempt": 1,
+    "artifact_id": 12014569432,
+    "artifact_name": "android-ui-verification-api-36",
+    "properties_path": "_temp/android-emulator/test-failure/properties.txt",
+    "logcat_path": "_temp/android-emulator/test-failure/logcat.txt"
+  },
+  "sdk_property": "[ro.build.version.sdk]: [36]",
+  "build_id_property": "[ro.build.id]: [BE2A.250530.026.D1]",
+  "webview_factory": "10-15 23:51:20.575  2661  2661 I WebViewFactory: Loading com.android.webview version 133.0.6943.137 (code 694313707)"
+}
