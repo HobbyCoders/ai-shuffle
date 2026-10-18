@@ -159,9 +159,30 @@ class Message:
     role: str  # "user" | "assistant" | "system"
     content: list[ContentBlock]
     provider_meta: dict[str, Any] = field(default_factory=dict)  # previous_response_id, model, ...
+    # Host-owned offsets into text(), never inferred from control-marker text.
+    # Durable local metadata only: serializers send the unchanged content.
+    context_pin: tuple[int, int] | None = None
+
+    def pin_context(self, note: str | None) -> Message:
+        """Mark the exact note the host just appended; do not scan raw headers."""
+        text = self.text()
+        start = text.rfind(note) if note else -1
+        self.context_pin = (start, start + len(note)) if start >= 0 else None
+        return self
+
+    def pinned_text(self) -> str:
+        pin = self.context_pin
+        if not isinstance(pin, (tuple, list)) or len(pin) != 2:
+            return ""
+        start, end = pin
+        text = self.text()
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text):
+            return ""
+        return text[start:end]
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"context_pin": list(self.context_pin)} if self.context_pin is not None else {}),
             "role": self.role,
             "content": [
                 {**b.to_dict(), "content": [c.to_dict() for c in b.content]}
@@ -178,6 +199,8 @@ class Message:
             role=d["role"],
             content=[block_from_dict(b) for b in d["content"]],
             provider_meta=d.get("provider_meta", {}),
+            context_pin=(tuple(d["context_pin"])
+                         if isinstance(d.get("context_pin"), (tuple, list)) else None),
         )
 
     def text(self) -> str:

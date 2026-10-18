@@ -290,6 +290,13 @@ paths = ['''^tests/core/test_scrub_url_edges\.py$''']
 regexes = ['''^[p]ostgres://u:p%40ss@db/app$''', '''^[p]ostgres://u:p@ss@db:5432/app$''', '''^[p]ostgres://u:p@ss@h/d$''', '''^[p]ostgres://u:x@y@h1/d$''']
 
 [[rules.allowlists]]
+description = "Synthetic credential URL for memory-pin scrub/reload regressions"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^(?:fluid/tests/unit/test_message_context_pin|tests/core/test_fluid_pg_store)\.py$''']
+regexes = ['''^[p]ostgres://example:synthetic\-password@example\.invalid/db$''']
+
+[[rules.allowlists]]
 description = "Existing synthetic PostgreSQL fixture or documentation example"
 condition = "AND"
 regexTarget = "match"

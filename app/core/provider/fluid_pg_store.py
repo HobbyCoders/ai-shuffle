@@ -156,6 +156,13 @@ def _last_event_seq_sync(session_id: str) -> int:
 def _append_node_sync(session_id: str, node: SessionNode) -> None:
     """Insert the node and advance the head in one transaction (JsonlStore
     parity: append implies head-move)."""
+    message = _scrub_pg_illegal(scrub_url_credentials(node.message.to_dict()))
+    if node.message.context_pin is not None:
+        # The privacy transforms can change lengths before or inside the
+        # trusted range. Locate the transformed copy of that exact slice in
+        # the transformed content, rather than persisting stale offsets.
+        pinned = _scrub_pg_illegal(scrub_url_credentials(node.message.pinned_text()))
+        message = Message.from_dict(message).pin_context(pinned).to_dict()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -163,9 +170,7 @@ def _append_node_sync(session_id: str, node: SessionNode) -> None:
             "(session_id, node_id, parent_id, ts, message) "
             "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (session_id, node_id) DO NOTHING",
-            (session_id, node.node_id, node.parent_id, node.ts,
-             Json(_scrub_pg_illegal(
-                 scrub_url_credentials(node.message.to_dict())))),
+            (session_id, node.node_id, node.parent_id, node.ts, Json(message)),
         )
         cur.execute(
             "UPDATE fluid_sessions SET head_node_id = %s WHERE session_id = %s",
