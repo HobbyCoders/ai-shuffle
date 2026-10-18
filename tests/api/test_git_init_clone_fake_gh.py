@@ -171,6 +171,9 @@ def test_init_rolls_back_only_its_metadata_after_a_later_failure_and_can_be_retr
             assert response.status_code == 500
     assert not _is_repo(target)
     assert (target / "readme.md").read_text() == "keep me\n"
+    status_response = env.client.get("/api/v1/projects/p-init/git/status")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["is_git_repo"] is False
     response = env.client.post("/api/v1/projects/p-init/git/init", json={})
     assert response.status_code == 200, response.text
     assert git(target, "log", "--format=%s") == "Initial commit"
@@ -341,6 +344,9 @@ def test_init_rollback_retries_a_windows_read_only_git_object(env, monkeypatch):
     assert len(denied) == 1
     assert not (target / ".git").exists()
     assert (target / "a.txt").read_text() == "keep me\n"
+    status_response = env.client.get("/api/v1/projects/p-init/git/status")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["is_git_repo"] is False
 
 
 def test_init_github_needs_a_name_else_it_is_skipped(env):
