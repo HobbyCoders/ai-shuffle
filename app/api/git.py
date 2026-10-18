@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.config import settings
+from app.core.detached_tasks import spawn_detached
 from app.core.git_service import classify_clone_url, git_service
 from app.core.scrub import redact_url_credentials, strip_url_userinfo
 from app.db import database
@@ -53,6 +54,8 @@ from app.api import git_worktrees as _git_worktrees_mod
 from app.api import git_ai as _git_ai_mod
 
 logger = logging.getLogger(__name__)
+
+_GIT_INIT_CANCEL_WAIT_SECONDS = 5.0
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/git", tags=["Git"])
 
@@ -203,6 +206,16 @@ async def init_repository(
     check_project_access(request, project_id)
     working_dir = await get_working_dir_async(project_id, session_id=session_id)
 
+    # Fail before creating local metadata when a requested GitHub action cannot run.
+    if body.create_github_repo and body.github_repo_name:
+        from app.core.github_service import github_service
+
+        if not await asyncio.to_thread(github_service.is_authenticated):
+            raise HTTPException(
+                status_code=400,
+                detail="GitHub CLI is not authenticated. Run 'gh auth login' in your terminal first."
+            )
+
     # Guard: don't re-init an existing repo
     if await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -219,9 +232,27 @@ async def init_repository(
         raise HTTPException(status_code=400, detail="Project already contains Git metadata")
     metadata = git_dir.lstat()
     metadata_identity = (metadata.st_dev, metadata.st_ino)
+    pending_step = None
+    keep_local = False
+
+    async def init_step(runner, fn, *args, keep_on_success=False, **kwargs):
+        # Shield the executor's asyncio wrapper, not just the request. The thread
+        # itself cannot be cancelled, and must settle before metadata is removed.
+        nonlocal pending_step
+
+        async def execute():
+            nonlocal keep_local
+            result = await runner(fn, *args, **kwargs)
+            if keep_on_success and result:
+                keep_local = True
+            return result
+
+        pending_step = spawn_detached(execute(), name=f"git-init:{project_id}")
+        return await asyncio.shield(pending_step)
+
     try:
         # Step 1: git init
-        success = await run_git(
+        success = await init_step(run_git,
             git_service.init_repo, working_dir, default_branch=body.default_branch
         )
         if not success:
@@ -235,14 +266,14 @@ async def init_repository(
 
         # Step 2: Optional initial commit
         if body.create_initial_commit:
-            staged = await run_git(git_service.stage_files, working_dir, ["."])
+            staged = await init_step(run_git, git_service.stage_files, working_dir, ["."])
             if not staged:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Failed to stage files for initial commit"
                 )
-            fallback_name = await run_sync(_initial_commit_name)
-            committed, commit_err = await run_git(
+            fallback_name = await init_step(run_sync, _initial_commit_name)
+            committed, commit_err = await init_step(run_git,
                 git_service.commit, working_dir, "Initial commit",
                 allow_empty=True,
                 fallback_identity=(fallback_name, "noreply@ai-shuffle.invalid"),
@@ -256,18 +287,11 @@ async def init_repository(
 
         # Step 3: Optional GitHub repo creation
         if body.create_github_repo and body.github_repo_name:
-            from app.core.github_service import github_service
-
-            if not await asyncio.to_thread(github_service.is_authenticated):
-                raise HTTPException(
-                    status_code=400,
-                    detail="GitHub CLI is not authenticated. Run 'gh auth login' in your terminal first."
-                )
-
-            repo_info = await run_git(
+            repo_info = await init_step(run_git,
                 github_service.create_repo,
                 name=body.github_repo_name,
                 private=body.github_private,
+                keep_on_success=True,
             )
             if not repo_info:
                 raise HTTPException(
@@ -280,7 +304,7 @@ async def init_repository(
             clone_url = repo_info['clone_url']
 
             # Add remote origin
-            result = await run_git(
+            result = await init_step(run_git,
                 git_service._run_git,
                 working_dir,
                 ["remote", "add", "origin", clone_url],
@@ -289,12 +313,13 @@ async def init_repository(
             if result.returncode != 0:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to add git remote: {result.stderr}"
+                    detail=(f"Created {github_full_name} on GitHub, but linking origin failed: "
+                            f"{redact_url_credentials(result.stderr)}. The local repository was kept.")
                 )
 
             # Push initial commit if we made one
             if body.create_initial_commit:
-                push_success, push_error = await run_git(
+                push_success, push_error = await init_step(run_git,
                     git_service.push,
                     working_dir,
                     remote="origin",
@@ -304,16 +329,18 @@ async def init_repository(
                 if not push_success:
                     raise HTTPException(
                         status_code=500,
-                        detail=f"Failed to push to GitHub: {push_error or 'Unknown error'}"
+                        detail=(f"Created and linked {github_full_name} on GitHub, but the push failed: "
+                                f"{redact_url_credentials(push_error or 'Unknown error')}. "
+                                "Push again from the Git panel.")
                     )
 
         # Step 4: Create database record
-        repo = await run_git(ensure_git_repository_record, project_id, working_dir)
+        repo = await init_step(run_git, ensure_git_repository_record, project_id, working_dir)
 
         # Update record with GitHub info if we created a repo
         if github_full_name and repo and repo.get("id"):
-            remote_url = await run_git(git_service.get_remote_url, working_dir)
-            await run_sync(
+            remote_url = await init_step(run_git, git_service.get_remote_url, working_dir)
+            await init_step(run_sync,
                 database.update_git_repository,
                 repo["id"],
                 remote_url=strip_url_userinfo(remote_url),
@@ -334,12 +361,25 @@ async def init_repository(
             github_repo_name=github_full_name,
         )
     except BaseException as exc:
-        try:
-            await run_git(git_service.rollback_init, working_dir, metadata_identity)
-        except Exception as rollback_error:
-            logger.exception("Failed to roll back Git initialization at %s", working_dir)
-            if isinstance(exc, HTTPException):
-                exc.detail = f"{exc.detail}. Git metadata rollback failed: {rollback_error}"
+        settled = pending_step is None or not pending_step.cancelled()
+        if pending_step is not None and not pending_step.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(pending_step), _GIT_INIT_CANCEL_WAIT_SECONDS)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                settled = False
+            except BaseException:
+                # The operation finished with an error; preserve the request's
+                # original error/cancellation, but it is now safe to clean up.
+                pass
+        if settled and not keep_local:
+            try:
+                await init_step(run_git, git_service.rollback_init, working_dir, metadata_identity)
+            except Exception as rollback_error:
+                logger.exception("Failed to roll back Git initialization at %s", working_dir)
+                if isinstance(exc, HTTPException):
+                    exc.detail = f"{exc.detail}. Git metadata rollback failed: {rollback_error}"
+        elif not settled:
+            logger.warning("Keeping Git metadata at %s: initialization operation is still running", working_dir)
         raise
 
 

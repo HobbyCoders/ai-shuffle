@@ -18,7 +18,6 @@ Implementation is split across mixin modules for maintainability:
 import logging
 import os
 import re
-import shutil
 import stat
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +38,7 @@ from app.core.git_cache import (
     _git_cache,
     _native_reader,
 )
+from app.core.fs_utils import force_rmtree
 from app.core.git_commit_ops import GitCommitMixin
 from app.core.git_diff_ops import GitDiffMixin
 from app.core.git_worktree_ops import GitWorktreeMixin
@@ -258,7 +258,7 @@ class GitService(
             return
         if _native_reader is not None:
             _native_reader.invalidate_repo(working_dir)
-        shutil.rmtree(git_dir)
+        force_rmtree(git_dir)
         self.invalidate_status_cache(working_dir)
 
     def clone_repo(self, working_dir: str, clone_url: str, timeout: int = 120) -> Tuple[bool, Optional[str]]:

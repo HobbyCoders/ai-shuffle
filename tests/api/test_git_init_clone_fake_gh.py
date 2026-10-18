@@ -284,6 +284,65 @@ def test_init_with_github_repo_creates_remote_and_pushes(env):
     assert git(bare, "rev-parse", "trunk") == git(target, "rev-parse", "HEAD")
 
 
+def test_init_push_failure_keeps_the_linked_repo_for_a_git_panel_retry(env, monkeypatch):
+    from app.core.git_service import git_service
+    target = _project(env, "p-init", "push-retry", {"a.txt": "keep me\n"})
+    bare = env.tmp / "created-for-retry.git"
+    git(env.tmp, "init", "-q", "--bare", str(bare))
+    env.gh.on("repo", "create", stdout={
+        "name": "my-app", "nameWithOwner": "acme/my-app",
+        "url": "https://github.com/acme/my-app", "sshUrl": str(bare),
+    })
+    with monkeypatch.context() as patch:
+        patch.setattr(git_service, "push", lambda *args, **kwargs: (False, "network unavailable"))
+        response = env.client.post("/api/v1/projects/p-init/git/init", json={
+            "create_github_repo": True, "github_repo_name": "my-app",
+        })
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "Created and linked acme/my-app on GitHub, but the push failed: network unavailable. "
+        "Push again from the Git panel."
+    )
+    assert git(target, "log", "--format=%s") == "Initial commit"
+    assert git(target, "remote", "get-url", "origin") == str(bare)
+    assert (target / "a.txt").read_text() == "keep me\n"
+    assert env.gh.argvs("repo", "create") == [
+        ["repo", "create", "my-app", "--private", "--json", "name,nameWithOwner,url,sshUrl"]
+    ]
+    success, error = git_service.push(str(target), remote="origin", branch="main", set_upstream=True)
+    assert success, error
+    assert git(bare, "rev-parse", "main") == git(target, "rev-parse", "HEAD")
+
+
+def test_init_rollback_retries_a_windows_read_only_git_object(env, monkeypatch):
+    import os
+    from app.core.git_service import git_service
+    target = _project(env, "p-init", "readonly-object", {"a.txt": "keep me\n"})
+    stage = git_service.stage_files
+    unlink = os.unlink
+    denied = []
+    def stage_then_fail(working_dir, paths):
+        assert stage(working_dir, paths)
+        obj = next(path for path in (target / ".git/objects").glob("*/*") if path.is_file())
+        def unlink_readonly_once(path, *args, **kwargs):
+            if not denied and os.path.basename(path) == obj.name:
+                denied.append(path)
+                raise PermissionError("simulated Git for Windows read-only object")
+            return unlink(path, *args, **kwargs)
+        monkeypatch.setattr(os, "unlink", unlink_readonly_once)
+        return False
+    monkeypatch.setattr(git_service, "stage_files", stage_then_fail)
+
+    response = env.client.post("/api/v1/projects/p-init/git/init", json={})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to stage files for initial commit"
+    assert len(denied) == 1
+    assert not (target / ".git").exists()
+    assert (target / "a.txt").read_text() == "keep me\n"
+
+
 def test_init_github_needs_a_name_else_it_is_skipped(env):
     _project(env, "p-init", "no-name", {"a.txt": "a\n"})
 
@@ -294,9 +353,13 @@ def test_init_github_needs_a_name_else_it_is_skipped(env):
     assert env.gh.calls("repo") == []
 
 
-def test_init_github_not_signed_in_is_400_after_the_local_init(env):
+def test_init_github_not_signed_in_fails_before_any_local_work(env, monkeypatch):
     target = _project(env, "p-init", "signed-out", {"a.txt": "a\n"})
     env.gh.signed_in(False)
+    from app.core.git_service import git_service
+    def must_not_init(*args, **kwargs):
+        pytest.fail("signed-out GitHub must fail before local initialization")
+    monkeypatch.setattr(git_service, "init_repo", must_not_init)
 
     response = env.client.post("/api/v1/projects/p-init/git/init", json={
         "create_github_repo": True, "github_repo_name": "my-app",

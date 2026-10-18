@@ -273,7 +273,7 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/init \
 
 Returns `success`, `message`, `repository_id`, `github_repo_url` and `github_repo_name`. Returns `400` if the folder already contains Git metadata or GitHub is not signed in.
 
-Missing Git identity fields use commit-scoped defaults: the owner's saved profile name (or `AI Shuffle`) and `noreply@ai-shuffle.invalid`. Configured fields are kept; no local or global Git identity is written. If initialization fails, only the `.git` metadata created by this request is rolled back, leaving project files intact so the action can be retried. Commit failures include Git's diagnostic text. A GitHub repository already created before a later failure is not deleted.
+Missing Git identity fields use commit-scoped defaults: the owner's saved profile name (or `AI Shuffle`) and `noreply@ai-shuffle.invalid`. Configured fields are kept; no local or global Git identity is written. If initialization fails before a GitHub repository is created, only this request's `.git` metadata is rolled back, leaving project files intact so the action can be retried. This is filesystem cleanup, not a database transaction; a registration record may remain and is reused on retry. Commit failures include Git's diagnostic text. GitHub authentication is checked before any local initialization. Once a GitHub repository is created, the local repository is kept too: a failed push names the created repository and tells the user to push again from the Git panel, with `origin` already configured. Neither repository is deleted. On cancellation, cleanup waits briefly for the running operation; if it has not finished, metadata is kept rather than deleted underneath Git.
 
 ### POST /api/v1/projects/{project_id}/git/clone
 
