@@ -3670,6 +3670,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._main_boundary_due = True
             if was_compacting:
                 return None
+            # A SessionStart hook can complete after its boundary. Any such
+            # late credit belongs to that cycle, not this new status interval.
             self._compaction_context_restored = False
             return ContextCompacting(
                 session_id="", turn_id=None, active=True, trigger=trigger,

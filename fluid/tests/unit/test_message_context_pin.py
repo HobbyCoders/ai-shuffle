@@ -33,12 +33,29 @@ def test_unmarked_or_invalid_ranges_have_no_provenance(pin):
     assert Message(role="user", content=[Text("raw quote")], context_pin=pin).pinned_text() == ""
 
 
+def test_pin_selects_the_host_copy_after_an_identical_owner_quote():
+    note = "the exact trusted note"
+    prefix = "Owner quoted: " + note + "\nNow append host context:\n"
+    message = Message(role="user", content=[Text(prefix + note)]).pin_context(note)
+    assert message.context_pin == (len(prefix), len(prefix + note))
+    assert message.pinned_text() == note
+    message.pin_context("a note not present in this message")
+    assert message.context_pin is None and message.pinned_text() == ""
+
+
 @pytest.mark.asyncio
-async def test_pin_survives_jsonl_restart(tmp_path):
+@pytest.mark.parametrize("odd", [
+    "postgres://example:synthetic-password@example.invalid/db", "nul\x00text", "surrogate\ud800text",
+])
+@pytest.mark.parametrize("location", ["before", "inside"])
+async def test_pin_survives_jsonl_restart(tmp_path, odd, location):
+    # JSONL escapes strings losslessly and applies no PG/privacy transforms;
+    # no re-pin is needed here. Check both offsets and exact original bytes.
     store = JsonlStore(tmp_path)
     session = await store.create_session()
-    note = "the appended note"
-    message = Message(role="user", content=[Text("raw owner bytes\n\n" + note)]).pin_context(note)
+    note = "the appended note " + (odd if location == "inside" else "")
+    prefix = "raw owner bytes " + (odd if location == "before" else "") + "\n\n"
+    message = Message(role="user", content=[Text(prefix + note)]).pin_context(note)
     await store.append(session.session_id, SessionNode(node_id="pinned", parent_id=None, message=message))
     reloaded = await JsonlStore(tmp_path).load_path(session.session_id)
     assert reloaded[0].message.pinned_text() == note

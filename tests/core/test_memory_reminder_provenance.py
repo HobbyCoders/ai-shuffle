@@ -138,3 +138,27 @@ async def test_compaction_credit_is_consumed_by_its_boundary(monkeypatch, tmp_pa
         assert loop._context_restore_pending
     finally:
         await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_late_sessionstart_credit_is_cleared_when_next_compaction_starts(monkeypatch, tmp_path):
+    memory = {"section": _section(*FACTS)}
+    adapter, loop = await _make(monkeypatch, tmp_path, "delegated", memory)
+    boundary = {"type": "system", "subtype": "compact_boundary", "compact_metadata": {"trigger": "auto"}}
+    try:
+        loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+        assert loop._take_main_boundary(boundary)
+        assert loop._context_restore_pending
+        # Some CLI versions can call SessionStart(compact) after the boundary
+        # but before the status interval closes. Credit only this interval.
+        result = await loop._cli_session_start({"source": "compact"})
+        assert mr.wrap(memory["section"]) in result["hookSpecificOutput"]["additionalContext"]
+        assert loop._compaction_context_restored
+        assert not loop._context_restore_pending
+        loop._track_main_compaction({"type": "system", "subtype": "status", "status": None})
+        loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+        assert not loop._compaction_context_restored
+        assert loop._take_main_boundary(boundary)
+        assert loop._context_restore_pending
+    finally:
+        await adapter.disconnect()
