@@ -1660,6 +1660,13 @@ class HarnessAdapter(ProviderAdapter):
         # older than this turn. The memory snapshot rides only when the model
         # does not already hold it (see _memory_turn_note).
         source = self._take_turn_source()
+        if source == "user":
+            # A pasted transcript is owner text, not a harness-authored memory
+            # block. Do this before appending our note, on both harness legs.
+            # Peer/wake wrappers are generated separately from defanged text.
+            from fluid.tools.hardening import defang_harness_markers
+
+            prompt = defang_harness_markers(prompt)
         # Claude Code takes any slash command as typed; a native session takes
         # only a bare "/compact", which its engine runs as a compaction.
         command = (
@@ -1943,8 +1950,9 @@ class HarnessAdapter(ProviderAdapter):
         return plan.note
 
     async def _fresh_memory_note(self, content: List[Any]) -> Optional[str]:
-        """A new CLI conversation has no transcript, even if fluid does.
-        Called before its first frame, including a failed --resume retry.
+        """Restore missing memory on a fresh or just-compacted CLI.
+        Called before its first frame, including a failed --resume retry, or
+        after a between-turn drain observed compaction without a put-back.
         The snapshot stays at the user-message tail. Slash commands must stay
         verbatim; invalidating trust makes their next normal turn carry it.
         """

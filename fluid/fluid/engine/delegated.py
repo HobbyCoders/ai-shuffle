@@ -759,6 +759,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # after the null status, so ``_main_compacting`` is already off by
         # then; this is what says the boundary is the main conversation's.
         self._main_boundary_due = False
+        # Whether the current compaction's hook restored host context. A
+        # boundary drained between turns may otherwise invalidate the note
+        # the host planned before this drain; restore it on this turn's tail.
+        self._compaction_context_restored = False
+        self._context_restore_pending = False
         # The running turn is a typed ``/compact``, how many main-conversation
         # compactions it reported, and the error a failed one gave. A
         # ``/compact`` turn that ends without a boundary says why in a
@@ -1869,11 +1874,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _fresh_turn_content(self, content: list[Any]) -> list[Any]:
         """A fresh CLI does not see the host's stored transcript. Restore
         missing context at the tail, never by changing its cached system prompt.
-        A valid --resume (or a later turn on this process) needs no put-back.
+        A valid --resume (or a later turn) needs no put-back unless a drained
+        compaction lost context after the host planned this turn's note.
         """
-        if self._spawn_resume is not None or self._proc_results or self.fresh_context is None:
+        fresh = self._spawn_resume is None and not self._proc_results
+        if (not fresh and not self._context_restore_pending) or self.fresh_context is None:
             return content
         note = await self.fresh_context(content)
+        self._context_restore_pending = False
         return [*content, Text(note)] if note else content
 
     async def _drive_turn(
@@ -3654,6 +3662,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self._main_boundary_due = True
             if was_compacting:
                 return None
+            self._compaction_context_restored = False
             return ContextCompacting(
                 session_id="", turn_id=None, active=True, trigger=trigger,
             )
@@ -3724,6 +3733,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return True
         if self._session is None:
             return True  # nothing to attach it to; not reachable with a CLI running
+        self._context_restore_pending = not self._compaction_context_restored
         try:
             await self._emit(await self._with_compaction_summary(compaction_from_boundary(
                 frame, session_id=self._session.session_id, turn_id=self._active_turn_id,
@@ -3858,6 +3868,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if len(text) > COMPACT_CONTEXT_MAX_CHARS:
             cut = _COMPACT_CONTEXT_CUT.format(limit=COMPACT_CONTEXT_MAX_CHARS)
             text = text[:COMPACT_CONTEXT_MAX_CHARS - len(cut)].rstrip() + cut
+        self._compaction_context_restored = True
+        self._context_restore_pending = False
         return text
 
     def _ledger_context(self) -> str | None:
