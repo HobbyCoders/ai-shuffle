@@ -7,7 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 const require = createRequire(import.meta.url);
-const { privateDirectory, writePrivateFile } = require('../dist/main/private-file.js');
+const { privateDirectory, protectDirectory, writePrivateFile, PRIVATE_DIRECTORY_SCRIPT } = require('../dist/main/private-file.js');
 
 test('private directories and credential writes survive reopening beneath a protected parent', async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-private-reopen-'));
@@ -47,6 +47,52 @@ test('private directories and credential writes survive reopening beneath a prot
 			assert.equal((await fs.stat(root)).mode & 0o777, 0o700);
 			assert.equal((await fs.stat(credential)).mode & 0o777, 0o600);
 		}
+	} finally {
+		// root is the exact unique temporary directory created by this test.
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
+test('the Windows ACL pass skips exactly the rule it would write', () => {
+	// The skip must compare the same owner, protection and rule the write sets;
+	// a looser skip would leave a shared directory holding credentials.
+	const lines = PRIVATE_DIRECTORY_SCRIPT.split('; ');
+	const skip = lines.find(line => line.startsWith('if ($current.AreAccessRulesProtected'));
+	assert.ok(skip, 'no skip check');
+	for (const part of ['GetOwner([System.Security.Principal.SecurityIdentifier]) -eq $sid', '$rules.Count -eq 1', '$rules[0].IdentityReference -eq $sid',
+		'$rules[0].AccessControlType -eq "Allow"', '$rules[0].FileSystemRights -eq "FullControl"', '$rules[0].InheritanceFlags -eq "ContainerInherit,ObjectInherit"',
+		'$rules[0].PropagationFlags -eq "None"'])
+		assert.ok(skip.includes(part), `the skip does not check ${part}`);
+	assert.ok(PRIVATE_DIRECTORY_SCRIPT.includes('$rules[0].PropagationFlags -eq "None") { "unchanged"; exit 0 }'), 'the skip does not exit with "unchanged"');
+	assert.ok(lines.includes('$acl.SetAccessRuleProtection($true, $false)'));
+	assert.ok(lines.some(line => line.includes('FileSystemAccessRule($sid, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")')));
+	// The skip comes before any write, and the write still happens after it.
+	assert.ok(lines.indexOf(skip) < lines.findIndex(line => line.includes('SetAccessControl')));
+	assert.equal(lines.at(-1), '"protected"');
+});
+
+test('an already private directory is not rewritten; a loosened one is', { skip: process.platform !== 'win32' && 'Windows ACLs' }, async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-private-skip-'));
+	try {
+		const directory = path.join(root, 'userData');
+		assert.equal(await protectDirectory(directory), true, 'the first pass did not protect the directory');
+		// Every later launch: nothing to write, so nothing re-propagates.
+		assert.equal(await protectDirectory(directory), false, 'an already private directory was rewritten');
+		assert.equal(await protectDirectory(directory), false);
+		// A directory someone loosened is still made private again.
+		const loosen = [
+			'$ErrorActionPreference = "Stop"',
+			'$acl = [System.IO.Directory]::GetAccessControl($env:SHUFFLE_TEST_DIRECTORY)',
+			'$everyone = New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")',
+			'$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, "Read", "ContainerInherit,ObjectInherit", "None", "Allow")))',
+			'[System.IO.Directory]::SetAccessControl($env:SHUFFLE_TEST_DIRECTORY, $acl)'
+		].join('; ');
+		const loosened = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', loosen], {
+			env: { ...process.env, SHUFFLE_TEST_DIRECTORY: directory }, windowsHide: true, encoding: 'utf8'
+		});
+		assert.equal(loosened.status, 0, loosened.stderr);
+		assert.equal(await protectDirectory(directory), true, 'a loosened directory was not made private again');
+		assert.equal(await protectDirectory(directory), false);
 	} finally {
 		// root is the exact unique temporary directory created by this test.
 		await fs.rm(root, { recursive: true, force: true });
