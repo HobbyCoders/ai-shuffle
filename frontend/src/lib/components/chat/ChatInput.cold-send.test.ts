@@ -55,10 +55,12 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-async function submit(expectedText = TEXT) {
+async function submit(withAttachment = false) {
 	const view = render(ChatInput);
 	const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
-	await waitFor(() => expect(editor.textContent).toBe(expectedText));
+	await waitFor(() => withAttachment
+		? expect(editor.querySelector('[data-file-chip]')).toBeTruthy()
+		: expect(editor.textContent).toBe(TEXT));
 	await fireEvent.submit(view.container.querySelector('form')!);
 	return { ...view, editor };
 }
@@ -106,9 +108,9 @@ describe('cold send warning', () => {
 		cache = COLD;
 		activeSession.setDraft(JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [
 			{ type: 'text', text: TEXT + ' ' },
-			{ type: 'fileChip', attrs: { path: 'notes.txt', fullPath: '/uploads/notes.txt', name: 'notes.txt', isImage: false } }
+			{ type: 'fileChip', attrs: { path: 'notes.txt', fullPath: '/uploads/notes.txt', filename: 'notes.txt', type: 'file' } }
 		] }] }));
-		const { editor } = await submit(TEXT + ' notes.txt');
+		const { editor } = await submit(true);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Compact first' }));
 		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT + ' @/uploads/notes.txt', {
 			compactFirst: true, pendingUploadPaths: ['/uploads/notes.txt']
