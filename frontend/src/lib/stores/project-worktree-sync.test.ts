@@ -54,16 +54,20 @@ it.each([false,true])('links a just-discovered project without losing its pick o
  expect(p.worktreeForProject(local)).toEqual({intent:'local',checkout:null});
  sync.stop();
 });
-it('does not move a one-time branch while its create is in flight',async()=>{
+it.each(['consume','release'] as const)('moves intent immediately but defers the claimed branch until %s',async action=>{
  const {p,sync}=await device();
  const local={projectId:'a',projectV2Id:null}, shared={...local,projectV2Id:'shared-a'};
  p.set('project',local);
+ p.rememberWorktreeIntent(local,'worktree');
  p.rememberCheckout(local,{...local,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true});
  const claim=p.claimBranchChoice(local,'topic/a',true);
- p.set('project',shared);
- claim.consume();
+ p.linkWorktreeProject(shared);
+ expect(p.worktreeForProject(shared)).toEqual({intent:'worktree',checkout:null});
+ claim[action]();
  expect(p.worktreeForProject(local).checkout).toBeNull();
- expect(p.worktreeForProject(shared).checkout).toBeNull();
+ expect(p.worktreeForProject(shared)).toEqual({intent:'worktree',checkout:action === 'consume' ? null : expect.objectContaining({...shared,branch:'topic/a'})});
+ await sync.hydrate();
+ expect(p.worktreeForProject(shared).intent).toBe('worktree');
  sync.stop();
 });
 it('ignores old server-wide values instead of migrating them into every project',async()=>{

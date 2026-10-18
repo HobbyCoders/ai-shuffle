@@ -30,7 +30,7 @@ import { createMessageHandlers, type InternalMutableState } from './session/ws-m
 import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
-	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectSupportsWorktrees,
+	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
 	reconciledSessionMode,
@@ -1180,7 +1180,7 @@ export const activeSession = {
 
 	setWorktreeIntent(mode: ExecutionMode, { persist = true }: { persist?: boolean } = {}) {
 		// Only explicit choices change this project's default for future chats.
-		if (mode === 'worktree' && !_state.sessionId && !projectSupportsWorktrees(_state.project, _state.projectV2Id)) {
+		if (mode === 'worktree' && !_state.sessionId && projectRejectsWorktrees(_state.project, _state.projectV2Id)) {
 			_update(s => ({...s, worktreeIntent:'local'}));
 			return;
 		}
@@ -1260,7 +1260,19 @@ export const activeSession = {
 	 * leave on an auto-named branch. Anything the user changed since keeps the
 	 * ordinary rules. Idempotent.
 	 */
+	linkDiscoveredProjects(projects: {local_project_id:string | null; project_v2_id:string}[]) {
+		for (const project of projects) {
+			if (!project.local_project_id) continue;
+			const pick = {projectId:project.local_project_id, projectV2Id:project.project_v2_id};
+			composerPreferences.linkWorktreeProject(pick);
+			const selected = composerPreferences.current.project;
+			if (selected.projectId === pick.projectId && !selected.projectV2Id) composerPreferences.set('project', pick);
+			if (!_state.sessionId && !composerBusy() && _state.project === pick.projectId && !_state.projectV2Id)
+				_update(s => ({...s, projectV2Id:pick.projectV2Id}));
+		}
+	},
 	resolveComposerDefaultsAfterCatalog() {
+		activeSession.linkDiscoveredProjects(appData.current.clusterProjects);
 		const before = _checkoutBeforeCatalog;
 		if (!before || !appData.projectCatalogLoaded) { activeSession.applyComposerDefaults(); return; }
 		_checkoutBeforeCatalog = null;
@@ -1394,7 +1406,7 @@ composerPreferences.onRemote(() => activeSession.applyComposerDefaults());
 // Git loads independently of the catalog. Resolve a saved On once this project's
 // existing status proves it is a repo; never change an existing session.
 git.subscribe(state => {
-	if (_state.sessionId || composerBusy() || (state.projectId !== _state.project && state.projectId !== _state.projectV2Id) || !state.hydrated || state.stale || state.worktreeId || state.sessionId || !state.status) return;
+	if (_state.sessionId || composerBusy() || (state.projectId !== _state.project && state.projectId !== _state.projectV2Id) || !state.hydrated || state.worktreeId || state.sessionId || !state.status) return;
 	const intent = getPersistedWorktreeIntent(_state.project, _state.projectV2Id);
 	if (intent === _state.worktreeIntent) return;
 	_update(s => ({...s, ...composerCheckoutDefaults(s.mode !== 'chat', {projectId:s.project, projectV2Id:s.projectV2Id}, {project:s.project, projectV2Id:s.projectV2Id})}));

@@ -330,13 +330,15 @@ it('keeps per-project settings across reload, explicit Off, and remote updates',
  for (const adapter of mocks.adapters.values()) adapter.apply(undefined);
  expect(reload.worktreeForProject(a)).toEqual({intent:'local',checkout:null});
 });
-it('drops legacy global defaults without seeding any project or registering their account keys', async () => {
+it('seeds legacy On only for the last selected project and moves checkout under its own tagged project', async () => {
  localStorage.setItem('aihub_executionMode','worktree');
  localStorage.setItem('ai-shuffle-composer:worktreeIntent',JSON.stringify('worktree'));
- localStorage.setItem('ai-shuffle-composer:checkout',JSON.stringify({kind:'branch',projectId:'a',projectV2Id:null,branch:'old',baseBranch:'main',createNew:true}));
+ localStorage.setItem('ai-shuffle-composer:checkout',JSON.stringify({kind:'branch',projectId:'b',projectV2Id:null,branch:'old',baseBranch:'main',createNew:true}));
  localStorage.setItem('ai-shuffle-composer:project',JSON.stringify({projectId:'a',projectV2Id:null}));
  const {composerPreferences:p}=await import('./composer-preferences');
- for (const projectId of ['a','b','']) expect(p.worktreeForProject({projectId,projectV2Id:null})).toEqual({intent:'local',checkout:null});
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:null})).toEqual({intent:'worktree',checkout:null});
+ expect(p.worktreeForProject({projectId:'b',projectV2Id:null})).toEqual({intent:'local',checkout:expect.objectContaining({branch:'old'})});
+ for (const projectId of ['c','']) expect(p.worktreeForProject({projectId,projectV2Id:null})).toEqual({intent:'local',checkout:null});
  expect(localStorage.getItem('aihub_executionMode')).toBeNull();
  expect(localStorage.getItem('ai-shuffle-composer:worktreeIntent')).toBeNull();
  expect(localStorage.getItem('ai-shuffle-composer:checkout')).toBeNull();
@@ -344,13 +346,27 @@ it('drops legacy global defaults without seeding any project or registering thei
  expect(mocks.adapters.has('composer.checkout')).toBe(false);
  expect(mocks.save).not.toHaveBeenCalled();
 });
+it('does not spread legacy On with no recorded project or overwrite new scoped choices', async () => {
+ localStorage.setItem('aihub_executionMode','worktree');
+ const {composerPreferences:p,projectWorktreeKey:key}=await import('./composer-preferences');
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:null}).intent).toBe('local');
+ p.set('project',{projectId:'a',projectV2Id:null}); p.rememberWorktreeIntent(p.current.project,'local');
+ localStorage.setItem('aihub_executionMode','worktree');
+ localStorage.setItem('ai-shuffle-composer:checkout',JSON.stringify({kind:'branch',projectId:'a',projectV2Id:null,branch:'old',baseBranch:'main',createNew:true}));
+ vi.resetModules();
+ const {composerPreferences:reload}=await import('./composer-preferences');
+ expect(reload.worktreeForProject({projectId:'a',projectV2Id:null})).toEqual({intent:'local',checkout:null});
+ expect(mocks.adapters.has(key({projectId:'a',projectV2Id:null}))).toBe(true);
+});
 it('consumes only A after switching to B while creation is in flight', async () => {
  const {composerPreferences:p}=await import('./composer-preferences');
  const a={projectId:'a',projectV2Id:null}, b={projectId:'b',projectV2Id:null};
  p.set('project',a);
  p.rememberCheckout(a,{...a,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true});
  const claim=p.claimBranchChoice(a,'topic/a',true);
+ expect(p.checkoutClaimed).toBe(true);
  p.set('project',b);
+ expect(p.checkoutClaimed).toBe(false);
  p.rememberCheckout(b,{...b,kind:'branch',branch:'topic/b',baseBranch:'develop',createNew:false});
  claim.consume();
  expect(p.worktreeForProject(a).checkout).toBeNull();

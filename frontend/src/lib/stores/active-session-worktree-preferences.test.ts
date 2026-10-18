@@ -56,7 +56,7 @@ it('never enables no-project, unknown, non-repo, or another project’s stale st
  status('notes',false); active.setWorktreeIntent('worktree');
  expect(active.current.worktreeIntent).toBe('local');
  status('notes',true,true); active.applyComposerDefaults();
- expect(active.current.worktreeIntent).toBe('local');
+ expect(active.current.worktreeIntent).toBe('worktree');
  status('notes',true); expect(active.current.worktreeIntent).toBe('worktree');
  status('notes',false); expect(active.current.worktreeIntent).toBe('local');
  active.setProject(''); expect(active.current.worktreeIntent).toBe('local');
@@ -78,4 +78,40 @@ it('does not change an existing session when Git or account defaults change', as
  p.rememberWorktreeIntent({projectId:'a',projectV2Id:null},'local');
  active.applyComposerDefaults(); status('a',false); active.setProject('b');
  expect(active.current).toMatchObject({sessionId:'existing',project:'b',worktreeIntent:'worktree',worktreeId:'wt',worktreeBranch:'session/branch'});
+});
+
+it('uses the same project’s cached Git capability before a refresh or a quick new-chat send', () => {
+ status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
+ status('b',true); active.setProject('b');
+ status('a',true,true); active.setProject('a');
+ active.newChat();
+ expect(active.current).toMatchObject({project:'a',worktreeIntent:'worktree'});
+});
+it('keeps an explicit On while Git is unknown, but refuses a confirmed non-repo', async () => {
+ active.setProject('a'); active.setWorktreeIntent('worktree');
+ const {composerPreferences:p}=await import('./composer-preferences');
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:null}).intent).toBe('worktree');
+ status('a',true,true); expect(active.current.worktreeIntent).toBe('worktree');
+ status('a',false); active.setWorktreeIntent('worktree');
+ expect(active.current.worktreeIntent).toBe('local');
+});
+it('applies B’s remembered branch while A has a branch claim in flight', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree'); active.setWorktreeBranch('topic/a');
+ const claim=p.claimBranchChoice({projectId:'a',projectV2Id:null},'topic/a',false);
+ const b={projectId:'b',projectV2Id:null};
+ p.rememberWorktreeIntent(b,'worktree');
+ p.rememberCheckout(b,{...b,kind:'branch',branch:'topic/b',baseBranch:'develop',createNew:true});
+ status('b',true); active.setProject('b');
+ expect(p.checkoutClaimed).toBe(false);
+ expect(active.current).toMatchObject({project:'b',worktreeIntent:'worktree',worktreeBranch:'topic/b',worktreeBaseBranch:'develop',worktreeCreateNewBranch:true});
+ claim.release();
+});
+it('links a catalog-discovered shared ID without reselecting the project or touching an existing chat', async () => {
+ status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
+ active.linkDiscoveredProjects([{local_project_id:'a',project_v2_id:'shared-a'}]);
+ const {composerPreferences:p}=await import('./composer-preferences');
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:'shared-a'}).intent).toBe('worktree');
+ expect(p.current.project).toEqual({projectId:'a',projectV2Id:'shared-a'});
+ expect(active.current).toMatchObject({project:'a',projectV2Id:'shared-a',worktreeIntent:'worktree'});
 });

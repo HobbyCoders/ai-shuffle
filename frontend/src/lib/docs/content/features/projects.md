@@ -39,7 +39,7 @@ The composer remembers worktrees on or off separately for each project, includin
 
 Choose the branch in the new chat's branch picker, or pick **New branch…**. Branch and base-branch choices stay with that project while you switch projects. The choice applies to that one chat; after it is created, the next new chat starts on **Auto** again.
 
-The old global worktree and branch defaults are discarded when upgrading, rather than copied to unrelated projects. Choose worktrees again for each project where you want them.
+When upgrading, an old global worktree **On** is remembered only for the last selected project recorded on this device. An old branch choice stays with the project already recorded in that choice. Other projects still start **Off**; existing chats keep their own checkout.
 
 ## Per-project settings
 

@@ -153,13 +153,21 @@ export function getPersistedProject(): string {
 export function projectSupportsWorktrees(projectId: string, projectV2Id: string | null = null): boolean {
 	const status = git.current;
 	if (status.projectId && (status.projectId === projectId || status.projectId === projectV2Id)) {
-		return status.hydrated && !status.stale && !status.worktreeId && !status.sessionId
+		return status.hydrated && !status.worktreeId && !status.sessionId
 			&& status.status?.is_git_repo === true;
 	}
 	if (projectId) return false;
 	// Remote-only catalog entries describe a Git origin, not an arbitrary folder.
 	return !!projectV2Id && (appData.current.clusterProjects ?? []).some(p =>
 		p.project_v2_id === projectV2Id && p.remote_only && !!p.origin);
+}
+
+/** Unknown is not non-Git: keep explicit On picks while capability is loading. */
+export function projectRejectsWorktrees(projectId: string, projectV2Id: string | null = null): boolean {
+	if (!projectId && !projectV2Id) return true;
+	const status = git.current;
+	return !!status.projectId && (status.projectId === projectId || status.projectId === projectV2Id)
+		&& status.hydrated && !status.worktreeId && !status.sessionId && status.status?.is_git_repo === false;
 }
 
 /** New-chat defaults only. Existing sessions restore their own checkout binding. */
@@ -169,7 +177,7 @@ export function getPersistedWorktreeIntent(projectId: string, projectV2Id: strin
 }
 
 export function setPersistedWorktreeIntent(mode: ExecutionMode, projectId: string, projectV2Id: string | null = null): void {
-	if (mode === 'worktree' && !projectSupportsWorktrees(projectId, projectV2Id)) return;
+	if (mode === 'worktree' && projectRejectsWorktrees(projectId, projectV2Id)) return;
 	composerPreferences.rememberWorktreeIntent({projectId, projectV2Id}, mode);
 }
 
