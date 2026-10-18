@@ -411,6 +411,46 @@ def test_startup_timeout_and_launcher_errors_never_celebrate(setup, monkeypatch)
     assert "Startup not confirmed" in result["workers"][0]["message"]
 
 
+C = "c" * 40
+
+
+def test_install_replaced_by_another_version_finishes_without_error_or_celebration(setup, monkeypatch):
+    # The restart into B failed; the owner then ran an installer that put C on.
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    asyncio.run(fleet.dispatch("install"))
+    assert fleet.progress.load()["workers"][0]["from_version"] == A
+    saved = fleet.progress.load()
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    updates.desktop_exchange({"phase": "idle", "running_version": C})
+    result = asyncio.run(fleet.snapshot())["operation"]
+    assert result["phase"] == "complete"
+    assert result["workers"][0]["status"] == "replaced"
+    assert "completed_at" not in result  # nothing this install made to celebrate
+    assert fleet.progress.load()["phase"] == "complete"
+
+
+def test_failed_start_on_the_old_version_is_not_mistaken_for_a_replacement(setup, monkeypatch):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    asyncio.run(fleet.dispatch("install"))
+    saved = fleet.progress.load()
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    updates.desktop_exchange({"phase": "idle", "running_version": A})
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
+
+
+def test_a_new_check_clears_a_failed_install_saved_without_its_starting_version(setup, monkeypatch):
+    # Records written before from_version existed: a check is the way out.
+    fleet.progress.begin("old", [{"device_id": "self", "device_name": "Local"}])
+    fleet.progress.record("old", "self", target_version=B[:12], result={"accepted": True})
+    saved = fleet.progress.load()
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    updates.desktop_exchange({"phase": "idle", "running_version": C})
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
+    asyncio.run(fleet.dispatch("check"))
+    assert fleet.progress.load() is None
+    assert asyncio.run(fleet.snapshot())["operation"] is None
+
+
 @pytest.mark.parametrize("running,target", [(None, B), (B, None), ("", ""), (A, B), ("b", B), ("latest", "latest")])
 def test_version_verification_requires_a_matching_commit(running, target):
     assert not fleet.progress.same_version(running, target)
