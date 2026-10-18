@@ -172,7 +172,7 @@ def test_launcher_version_must_go_up_not_merely_change():
     for version in (None, "not json", json.dumps({"version": 0, "minimum": 0}),
                     json.dumps({"version": True, "minimum": 0}), raised_launcher(0), raised_launcher(-1)):
         groups = groups_for({"desktop/src/main/postgres.ts": "changed", reach.LAUNCHER_JSON: version})
-        assert groups["launcher-version"] == ["desktop/src/main/postgres.ts"], version
+        assert "desktop/src/main/postgres.ts" in groups["launcher-version"], version
     # A base from before launcher.json existed: any valid version is a raise.
     head = tree({"desktop/src/main/postgres.ts": b"changed", reach.LAUNCHER_JSON: raised_launcher().encode()})
     groups = reach.classify(["desktop/src/main/postgres.ts"], tree({reach.LAUNCHER_JSON: None}), head)
@@ -198,7 +198,7 @@ def test_a_further_change_to_an_unreleased_launcher_needs_no_second_bump():
     groups = reach.classify(["desktop/src/main/postgres.ts"], tree(),
                             tree({"desktop/src/main/postgres.ts": b"changed", reach.LAUNCHER_JSON: b"not json"}),
                             released=0)
-    assert groups["launcher-version"] == ["desktop/src/main/postgres.ts"]
+    assert groups["launcher-version"] == [reach.LAUNCHER_JSON, "desktop/src/main/postgres.ts"]
 
 
 def test_released_launcher_is_the_highest_version_of_any_release_tag(monkeypatch):
@@ -206,7 +206,7 @@ def test_released_launcher_is_the_highest_version_of_any_release_tag(monkeypatch
             "v6-phase1": {"version": 9}, "desktop-sources": {"version": 9}, "v0.1.0": None}
     monkeypatch.setattr(reach, "git", lambda *args: "\n".join(tags))
     monkeypatch.setattr(reach, "reader", lambda tag: lambda path: (
-        None if tags[tag] is None else json.dumps(tags[tag]).encode()))
+        None if tags[tag] is None else json.dumps({"minimum": 0, **tags[tag]}).encode()))
     # A prerelease installer is released too; non-version tags are not installers.
     assert reach.released_launcher() == 5
     del tags["v1.1.0-rc.1"]
@@ -264,6 +264,73 @@ def test_dynamic_side_effect_and_re_exported_modules_are_part_of_the_launcher():
     })
     assert reach.launcher_files(read) == {"desktop/src/main/managed-entry.ts", "desktop/src/main/side.ts",
                                           "desktop/src/main/again.ts", "desktop/src/main/later.ts"}
+
+
+def test_runtime_launcher_inputs_require_a_version_bump():
+    for path in ("desktop/src/pages/status.html", "desktop/src/pages/nested/recovery.html",
+                 "desktop/build/icon.png", reach.TRUST_KEY, "desktop/scripts/source-profile.cjs"):
+        # No imports at either revision: these are packed/read as data.
+        base = tree({reach.LAUNCHER_ENTRY: b""})
+        head = tree({reach.LAUNCHER_ENTRY: b"", path: b"changed"})
+        groups = reach.classify([path], base, head)
+        assert groups["windows-launcher"] == [path]
+        assert groups["launcher-version"] == [path]
+        raised = tree({reach.LAUNCHER_ENTRY: b"", path: b"changed",
+                       reach.LAUNCHER_JSON: raised_launcher().encode()})
+        assert reach.classify([path, reach.LAUNCHER_JSON], base, raised)["launcher-version"] == []
+
+
+def test_production_lock_changes_but_not_dev_only_changes_are_launcher_changes():
+    # Mutate the real locked yauzl and its transitive dependency, not a consumer-only fixture.
+    original = json.loads((ROOT / reach.LAUNCHER_LOCK).read_text())
+    for package in ("node_modules/yauzl", "node_modules/pend"):
+        assert not original["packages"][package].get("dev")
+        for field in ("version", "integrity", "name"):
+            lock = json.loads(json.dumps(original))
+            lock["packages"][package][field] = "changed"
+            groups = groups_for({reach.LAUNCHER_LOCK: json.dumps(lock)})
+            assert groups["windows-launcher"] == [reach.LAUNCHER_LOCK]
+            assert groups["launcher-version"] == [reach.LAUNCHER_LOCK]
+    for package in ("node_modules/electron", "node_modules/@types/node"):
+        lock = json.loads(json.dumps(original))
+        assert lock["packages"][package]["dev"]
+        lock["packages"][package]["version"] = "changed"
+        lock["packages"][package]["integrity"] = "changed"
+        assert groups_for({reach.LAUNCHER_LOCK: json.dumps(lock)})["windows-launcher"] == []
+    lock = json.loads(json.dumps(original))
+    lock["packages"]["node_modules/only-dev-optional"] = {"version": "1", "devOptional": True}
+    lock["packages"][""]["version"] = "99.0.0"
+    assert groups_for({reach.LAUNCHER_LOCK: json.dumps(lock)})["windows-launcher"] == []
+    for change in ("add", "remove", "dev-to-production"):
+        lock = json.loads(json.dumps(original))
+        if change == "add":
+            lock["packages"]["node_modules/new-package"] = {"version": "1", "integrity": "hash"}
+        elif change == "remove":
+            del lock["packages"]["node_modules/yauzl"]
+        else:
+            del lock["packages"]["node_modules/electron"]["dev"]
+        assert groups_for({reach.LAUNCHER_LOCK: json.dumps(lock)})["launcher-version"] == [reach.LAUNCHER_LOCK]
+    # The existing unreleased-version exception applies to dependencies too.
+    head = tree({reach.LAUNCHER_LOCK: json.dumps(lock).encode()})
+    current = reach.launcher_version(tree())
+    assert reach.classify([reach.LAUNCHER_LOCK], tree(), head, released=current - 1)["launcher-version"] == []
+
+
+def test_launcher_contract_policy_changes_and_validation_at_both_ends():
+    current = reach.launcher_version(tree())
+    for policy in ({"minimum": current - 1}, {"start": current}):
+        value = {"version": current, "minimum": current, **policy}
+        groups = groups_for({reach.LAUNCHER_JSON: json.dumps(value)})
+        assert groups["windows-launcher"] == [reach.LAUNCHER_JSON]
+        assert groups["launcher-version"] == [reach.LAUNCHER_JSON]
+    for invalid in ({"minimum": current + 1}, {"minimum": True}, {"minimum": -1},
+                    {"start": current + 1}, {"start": True}, {"start": -1}):
+        value = {"version": current, "minimum": current, **invalid}
+        bad = tree({reach.LAUNCHER_JSON: json.dumps(value).encode()})
+        assert reach.launcher_version(bad) is None
+        for base, head in ((tree(), bad), (bad, tree())):
+            assert reach.classify([reach.LAUNCHER_JSON], base, head)["launcher-version"] == [reach.LAUNCHER_JSON]
+    assert reach.classify([reach.LAUNCHER_JSON], tree(), tree({reach.LAUNCHER_JSON: None}))["launcher-version"] == [reach.LAUNCHER_JSON]
 
 
 def test_trust_key_change_fails_for_every_platform():

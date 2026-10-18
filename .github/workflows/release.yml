@@ -378,6 +378,25 @@ jobs:
           version="${RELEASE_TAG#v}"
           python3 scripts/release/promote_image.py --digest "$IMAGE_DIGEST" --tags "latest,${version%%.*},${version%.*}"
 
+  platform-installers:
+    name: Register Linux and Android downloads
+    needs: promote-image
+    # promote-image already requires the newest stable tag and every release gate.
+    # Reuse this run's verified artifacts; never dispatch another build.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, android]
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    uses: ./.github/workflows/platform-installer.yml
+    with:
+      platform: ${{ matrix.platform }}
+      build_run_id: ${{ format('{0}', github.run_id) }}
+    secrets: inherit
+
   android:
     name: Android Play internal release
     needs: [create-release, docker]

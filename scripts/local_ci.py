@@ -640,6 +640,7 @@ SUITES = [
                         "tests/scripts/test_security_gate.py"], workflows, "Workflow and publication policy tests"),
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
                            "desktop/scripts/*", "desktop/build/*", "desktop/electron-builder.yml",
+                           "desktop/src/pages/*", "desktop/package-lock.json", "desktop/launcher.json",
                            "scripts/source_archive.py", "scripts/ci/update_reach.py"],
           update_reach_checks, "Update-reach regression tests and installed-app update verdict"),
 ]
