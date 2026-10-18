@@ -73,6 +73,7 @@ function makeInit(
 			loadPersistedSession,
 			getPersistedProfile: () => 'profile-1',
 			getPersistedProject: () => 'proj-1',
+			getPersistedWorktreeIntent: () => 'local',
 			refreshSessionMetadata: vi.fn(async () => {}),
 			destroy: vi.fn(),
 		},
@@ -251,6 +252,14 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 
 		expect(getState().sessionId).toBe('explicit-target');
 		expect(getState().title).toBe('Chosen');
+	});
+
+	it.each([null, 'existing'])('keeps an existing worktree binding but does not restore a new composer’s unscoped intent (session=%s)', async sessionId => {
+		const {init,getState}=makeInit({sessionId, title:'Chat', profile:'p', project:'',
+		 worktreeIntent:'worktree', worktreeId:'wt', worktreeBranch:'session/branch'} as PersistedSession);
+		await init();
+		expect(getState().worktreeIntent).toBe(sessionId ? 'worktree' : 'local');
+		if (sessionId) expect(getState().worktreeId).toBe('wt');
 	});
 
 	it('does not mark the window when the persisted selection has no sessionId', async () => {

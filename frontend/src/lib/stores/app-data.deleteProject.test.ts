@@ -24,6 +24,7 @@ vi.mock('./active-session', () => ({
 		get current() { return mocks.activeState; },
 		newChat: mocks.newChat,
 		validateSelectedProfile: vi.fn(),
+		linkDiscoveredProjects: vi.fn(),
 	},
 }));
 

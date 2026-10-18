@@ -14,6 +14,7 @@ import type { SessionEphemeral } from '../session-cache';
 import type { ChatMessage } from '../types';
 import { appMode } from '../sessionMode.svelte';
 import { composerPreferences } from '../composer-preferences';
+import { git } from '../git.svelte';
 import { api } from '$lib/api/client';
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
@@ -1306,7 +1307,8 @@ describe('session mode lanes', () => {
 	});
 
 	it('still restores the remembered project and worktree intent in code mode', () => {
-		localStorage.setItem('aihub_executionMode', 'worktree');
+		vi.spyOn(git, 'current', 'get').mockReturnValue({projectId:'proj-A', hydrated:true, stale:false, status:{is_git_repo:true}} as typeof git.current);
+		composerPreferences.rememberWorktreeIntent({projectId:'proj-A',projectV2Id:null}, 'worktree');
 		localStorage.setItem('aihub_selectedProject', 'proj-A');
 		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A' }));
 

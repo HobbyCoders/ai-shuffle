@@ -137,8 +137,8 @@ it('publishes a complete snapshot once before a staged branch can guard later ch
  const seen:unknown[]=[];
  p.onRemote(()=>seen.push(structuredClone(p.current)));
  const checkout={kind:'branch',projectId:'host-a',projectV2Id:'repo',branch:'topic/new',baseBranch:'main',createNew:true};
- // The registered order applies checkout before model and effort.
- mocks.adapters.get('composer.checkout')!.apply(checkout);
+ mocks.adapters.get('composer.project')!.apply({projectId:'host-a',projectV2Id:'repo'});
+ mocks.prefixes.get('composer.projectWorktree.')('composer.projectWorktree.shared%3Arepo').apply({intent:'worktree',checkout});
  mocks.adapters.get('composer.model')!.apply('sonnet');
  mocks.adapters.get('composer.effort')!.apply('max');
  mocks.adapters.get('composer.permissionMode')!.apply('acceptEdits');
@@ -170,13 +170,14 @@ it('clears only the successfully consumed choice in storage and account sync, no
  p.set('project',project); p.set('checkout',choice); p.set('model','model-to-keep');
  const consume=p.claimBranchChoice(project,choice.branch,true).consume;
  // The same account snapshot arriving during POST is not a new selection.
- mocks.adapters.get('composer.checkout')!.apply({...choice});
+ mocks.adapters.get((await import('./composer-preferences')).projectWorktreeKey(project))!.apply({intent:'local',checkout:{...choice}});
  mocks.save.mockClear();
  consume();
  expect(p.current.checkout).toBeNull();
  expect(p.current.project).toEqual(project); expect(p.current.model).toBe('model-to-keep');
- expect(localStorage.getItem('ai-shuffle-composer:checkout')).toBe('null');
- expect(mocks.save).toHaveBeenCalledExactlyOnceWith('composer.checkout',null);
+ const key=(await import('./composer-preferences')).projectWorktreeKey(project);
+ expect(JSON.parse(localStorage.getItem('ai-shuffle-composer:projectWorktrees')!)[key].checkout).toBeNull();
+ expect(mocks.save).toHaveBeenCalledExactlyOnceWith(key,{intent:'local',checkout:null});
  vi.resetModules();
  const {composerPreferences:reloaded} = await import('./composer-preferences');
  expect(reloaded.current.checkout).toBeNull(); expect(reloaded.current.model).toBe('model-to-keep');
@@ -185,13 +186,14 @@ it('clears only the successfully consumed choice in storage and account sync, no
 it.each(['explicit-repick','remote-change-and-return','account-change'])('protects later intent across %s', async (change) => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const project={projectId:'local',projectV2Id:null};
+ p.set('project',project);
  const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
  p.set('checkout',choice);
  const consume=p.claimBranchChoice(project,choice.branch,true).consume;
  if(change==='explicit-repick') p.set('checkout',{...choice});
  if(change==='remote-change-and-return') {
-  mocks.adapters.get('composer.checkout')!.apply({...choice,branch:'topic/other'});
-  mocks.adapters.get('composer.checkout')!.apply({...choice});
+  mocks.adapters.get((await import('./composer-preferences')).projectWorktreeKey(project))!.apply({intent:'local',checkout:{...choice,branch:'topic/other'}});
+  mocks.adapters.get((await import('./composer-preferences')).projectWorktreeKey(project))!.apply({intent:'local',checkout:{...choice}});
  }
  if(change==='account-change') mocks.epoch++;
  mocks.save.mockClear();
@@ -203,6 +205,7 @@ it.each(['explicit-repick','remote-change-and-return','account-change'])('protec
 it('does not consume another project, branch, or existing-worktree preference', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const project={projectId:'local',projectV2Id:null};
+ p.set('project',project);
  const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:true};
  p.set('checkout',choice); mocks.save.mockClear();
  p.claimBranchChoice({...project,projectId:'different'},choice.branch,true).consume();
@@ -218,6 +221,7 @@ it('does not consume another project, branch, or existing-worktree preference', 
 it('consumes any remembered branch pick, including an existing branch, but not a legacy worktree pick (#1528)', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const project={projectId:'local',projectV2Id:null};
+ p.set('project',project);
  // New branch... creates the branch up front, so it is remembered like a listed branch.
  const listed={...project,kind:'branch' as const,branch:'live/1528-explicit',baseBranch:'main',createNew:false};
  p.set('checkout',listed);
@@ -235,13 +239,14 @@ it('consumes any remembered branch pick, including an existing branch, but not a
 it('marks the choice claimed while a create is in flight and keeps it after a failure', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  const project={projectId:'local',projectV2Id:null};
+ p.set('project',project);
  const choice={...project,kind:'branch' as const,branch:'topic/new',baseBranch:'main',createNew:false};
  p.set('checkout',choice);
  expect(p.checkoutClaimed).toBe(false);
  const claim=p.claimBranchChoice(project,choice.branch,false);
  expect(p.checkoutClaimed).toBe(true);
  // The same account snapshot echoed back is still the claimed choice.
- mocks.adapters.get('composer.checkout')!.apply({...choice});
+ mocks.adapters.get((await import('./composer-preferences')).projectWorktreeKey(project))!.apply({intent:'local',checkout:{...choice}});
  expect(p.checkoutClaimed).toBe(true);
  mocks.save.mockClear();
  claim.release();
@@ -305,6 +310,67 @@ it('round-trips the Standard context cap per canonical model through the account
  expect(mocks.save).toHaveBeenLastCalledWith('composer.modelContextCap.claude-opus-5', null);
  expect(revisions).toBeGreaterThan(1);
  stop();
+});
+
+it('keeps per-project settings across reload, explicit Off, and remote updates', async () => {
+ const {composerPreferences:p, projectWorktreeKey:key}=await import('./composer-preferences');
+ const a={projectId:'a',projectV2Id:'shared-a'}, b={projectId:'b',projectV2Id:null};
+ const checkout={...a,kind:'branch' as const,branch:'topic/a',baseBranch:'develop',createNew:true};
+ p.rememberWorktreeIntent(a,'worktree'); p.rememberCheckout(a,checkout);
+ expect(p.worktreeForProject(b)).toEqual({intent:'local',checkout:null});
+ expect(mocks.save).toHaveBeenLastCalledWith(key(a),{intent:'worktree',checkout});
+ p.rememberWorktreeIntent(b,'local');
+ expect(p.worktreeForProject(a)).toEqual({intent:'worktree',checkout});
+ vi.resetModules(); const {composerPreferences:reload}=await import('./composer-preferences');
+ expect(reload.worktreeForProject(a)).toEqual({intent:'worktree',checkout});
+ expect(reload.worktreeForProject(b)).toEqual({intent:'local',checkout:null});
+ mocks.save.mockClear(); mocks.adapters.get(key(a))!.apply({intent:'local',checkout});
+ expect(reload.worktreeForProject(a).intent).toBe('local');
+ expect(mocks.save).not.toHaveBeenCalled();
+ for (const adapter of mocks.adapters.values()) adapter.apply(undefined);
+ expect(reload.worktreeForProject(a)).toEqual({intent:'local',checkout:null});
+});
+it('seeds legacy On only for the last selected project and moves checkout under its own tagged project', async () => {
+ localStorage.setItem('aihub_executionMode','worktree');
+ localStorage.setItem('ai-shuffle-composer:worktreeIntent',JSON.stringify('worktree'));
+ localStorage.setItem('ai-shuffle-composer:checkout',JSON.stringify({kind:'branch',projectId:'b',projectV2Id:null,branch:'old',baseBranch:'main',createNew:true}));
+ localStorage.setItem('ai-shuffle-composer:project',JSON.stringify({projectId:'a',projectV2Id:null}));
+ const {composerPreferences:p}=await import('./composer-preferences');
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:null})).toEqual({intent:'worktree',checkout:null});
+ expect(p.worktreeForProject({projectId:'b',projectV2Id:null})).toEqual({intent:'local',checkout:expect.objectContaining({branch:'old'})});
+ for (const projectId of ['c','']) expect(p.worktreeForProject({projectId,projectV2Id:null})).toEqual({intent:'local',checkout:null});
+ expect(localStorage.getItem('aihub_executionMode')).toBeNull();
+ expect(localStorage.getItem('ai-shuffle-composer:worktreeIntent')).toBeNull();
+ expect(localStorage.getItem('ai-shuffle-composer:checkout')).toBeNull();
+ expect(mocks.adapters.has('composer.worktreeIntent')).toBe(false);
+ expect(mocks.adapters.has('composer.checkout')).toBe(false);
+ expect(mocks.save).not.toHaveBeenCalled();
+});
+it('does not spread legacy On with no recorded project or overwrite new scoped choices', async () => {
+ localStorage.setItem('aihub_executionMode','worktree');
+ const {composerPreferences:p,projectWorktreeKey:key}=await import('./composer-preferences');
+ expect(p.worktreeForProject({projectId:'a',projectV2Id:null}).intent).toBe('local');
+ p.set('project',{projectId:'a',projectV2Id:null}); p.rememberWorktreeIntent(p.current.project,'local');
+ localStorage.setItem('aihub_executionMode','worktree');
+ localStorage.setItem('ai-shuffle-composer:checkout',JSON.stringify({kind:'branch',projectId:'a',projectV2Id:null,branch:'old',baseBranch:'main',createNew:true}));
+ vi.resetModules();
+ const {composerPreferences:reload}=await import('./composer-preferences');
+ expect(reload.worktreeForProject({projectId:'a',projectV2Id:null})).toEqual({intent:'local',checkout:null});
+ expect(mocks.adapters.has(key({projectId:'a',projectV2Id:null}))).toBe(true);
+});
+it('consumes only A after switching to B while creation is in flight', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const a={projectId:'a',projectV2Id:null}, b={projectId:'b',projectV2Id:null};
+ p.set('project',a);
+ p.rememberCheckout(a,{...a,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true});
+ const claim=p.claimBranchChoice(a,'topic/a',true);
+ expect(p.checkoutClaimed).toBe(true);
+ p.set('project',b);
+ expect(p.checkoutClaimed).toBe(false);
+ p.rememberCheckout(b,{...b,kind:'branch',branch:'topic/b',baseBranch:'develop',createNew:false});
+ claim.consume();
+ expect(p.worktreeForProject(a).checkout).toBeNull();
+ expect(p.current.checkout?.branch).toBe('topic/b');
 });
 
 it('migrates the legacy fast flag only for the last selected model', async () => {

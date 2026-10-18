@@ -26,14 +26,14 @@ interface Picks {
 const legacy: Partial<Record<keyof Picks, string>> = {
  profile:'aihub_selectedProfile', model:'aihub_lastModel', effort:'aihub_lastEffort',
  permissionMode:'aihub_lastPermissionMode', contextWindowChoice:'aihub_lastContextWindowChoice',
- fastMode:'aihub_lastFastMode', worktreeIntent:'aihub_executionMode'
+ fastMode:'aihub_lastFastMode'
 };
 const defaults: Picks = {profile:'', project:{projectId:'',projectV2Id:null}, checkout:null,
  model:null, effort:null, modelEfforts:{}, permissionMode:null, contextWindowChoice:null, fastMode:null, worktreeIntent:'local'};
 const values = {...defaults};
-let checkoutRevision = 0;
+const checkoutRevisions = new Map<string, number>();
 export interface BranchClaim { consume(): void; release(): void }
-const claims = new Set<{revision: number; ownerEpoch: number}>();
+const claims = new Set<{key: string; revision: number; ownerEpoch: number}>();
 function sameCheckout(a: CheckoutPick | null, b: CheckoutPick | null) {
  if (a === b) return true;
  if (!a || !b || a.kind !== b.kind || a.projectId !== b.projectId
@@ -86,7 +86,6 @@ function normalize<K extends keyof Picks>(key: K, value: unknown): Picks[K] {
 function store<K extends keyof Picks>(key: K, value: unknown) {
  const normalized = normalize(key, value);
  // Identical account refreshes are not new choices. Actual remote changes are.
- if (key === 'checkout' && !sameCheckout(values.checkout, normalized as CheckoutPick | null)) checkoutRevision++;
  values[key] = normalized;
  try {
   localStorage.setItem(`ai-shuffle-composer:${key}`, JSON.stringify(values[key]));
@@ -124,6 +123,9 @@ function registerEffort(model: string) {
   preferenceSync.register(effortPreferenceKey(model), effortAdapter(model));
 }
 for (const key of Object.keys(defaults) as (keyof Picks)[]) {
+ // Migrate browser legacy worktree picks to their recorded projects below.
+ // Do not register old unscoped account keys: they must not revive globally.
+ if (key === 'worktreeIntent' || key === 'checkout') continue;
  try {
   const cached = localStorage.getItem(`ai-shuffle-composer:${key}`);
   const old = legacy[key] ? localStorage.getItem(legacy[key]!) : key === 'project'
@@ -159,6 +161,103 @@ preferenceSync.registerPrefix(MODEL_EFFORT_PREFIX, key => {
  } catch { return null; }
 });
 for (const model of Object.keys(values.modelEfforts)) registerEffort(model);
+
+// One conflict unit per project, shared across devices by the cluster UUID when
+// available. Local-only projects use their project ID, never a folder or name.
+export const PROJECT_WORKTREE_PREFIX = 'composer.projectWorktree.';
+export const projectWorktreeKey = (project: ProjectPick) => PROJECT_WORKTREE_PREFIX
+ + encodeURIComponent(project.projectV2Id ? `shared:${project.projectV2Id}` : `local:${project.projectId}`);
+type WorktreePick = {intent: Picks['worktreeIntent']; checkout: CheckoutPick | null};
+const WORKTREE_CACHE_KEY = 'ai-shuffle-composer:projectWorktrees';
+let projectWorktrees: Record<string, WorktreePick> = {};
+const registeredWorktrees = new Set<string>();
+const hasProject = (project: ProjectPick) => !!(project.projectId || project.projectV2Id);
+const emptyWorktree = (): WorktreePick => ({intent:'local', checkout:null});
+function worktreeFor(project: ProjectPick): WorktreePick {
+ return hasProject(project) ? projectWorktrees[projectWorktreeKey(project)] ?? emptyWorktree() : emptyWorktree();
+}
+function applyWorktree(key: string, value: unknown) {
+ const raw = value && typeof value === 'object' ? value as Partial<WorktreePick> : {};
+ const checkout = normalize('checkout', raw.checkout);
+ const next = {intent:normalize('worktreeIntent', raw.intent),
+  checkout:checkout && projectWorktreeKey(checkout) === key ? checkout : null};
+ if (!sameCheckout(projectWorktrees[key]?.checkout ?? null, next.checkout))
+  checkoutRevisions.set(key, (checkoutRevisions.get(key) ?? 0) + 1);
+ if (value === undefined) delete projectWorktrees[key]; else projectWorktrees[key] = next;
+ try { localStorage.setItem(WORKTREE_CACHE_KEY, JSON.stringify(projectWorktrees)); } catch { /* memory still works */ }
+}
+function worktreeAdapter(key: string) {
+ registeredWorktrees.add(key);
+ return {read: () => projectWorktrees[key] ?? null,
+  apply(value: unknown) { applyWorktree(key, value); notifyRemote(); }};
+}
+function validWorktreeKey(key: string) {
+ try {
+  const id = decodeURIComponent(key.slice(PROJECT_WORKTREE_PREFIX.length));
+  return /^(shared|local):.+/.test(id) && PROJECT_WORKTREE_PREFIX + encodeURIComponent(id) === key;
+ } catch { return false; }
+}
+function saveWorktree(project: ProjectPick, value: WorktreePick) {
+ if (!hasProject(project)) return;
+ const key = projectWorktreeKey(project);
+ if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
+ applyWorktree(key, value);
+ preferenceSync.save(key, projectWorktrees[key]);
+}
+const pendingWorktreeLinks = new Map<string, {project:ProjectPick; revision:number}>();
+// Git discovery can link a local project after its first compose pick. Promote
+// only that proven pair; bootstrap uses only_if_missing so a saved shared choice
+// on another device wins. Never move a branch while its create is in flight.
+function linkWorktreeProject(project: ProjectPick) {
+ if (!project.projectId || !project.projectV2Id) return;
+ const localKey = projectWorktreeKey({...project, projectV2Id:null});
+ const key = projectWorktreeKey(project);
+ const local = projectWorktrees[localKey];
+ if (!local || (local.intent === 'local' && !local.checkout && !pendingWorktreeLinks.has(localKey))) return;
+ const claimed = [...claims].some(claim => claim.key === localKey && claim.ownerEpoch === sessionOwnerEpoch());
+ const promote = !projectWorktrees[key];
+ if (promote) {
+  // Intent must follow discovery immediately, even while a create owns the branch.
+  applyWorktree(key, {...local, checkout:!claimed && local.checkout ? {...local.checkout, ...project} : null});
+  if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
+  if (claimed) pendingWorktreeLinks.set(localKey, {project, revision:checkoutRevisions.get(key) ?? 0});
+ }
+ if (claimed) {
+  if (promote) void preferenceSync.reconnect();
+  return;
+ }
+ const pending = pendingWorktreeLinks.get(localKey);
+ pendingWorktreeLinks.delete(localKey);
+ if (pending && local.checkout && !projectWorktrees[key]?.checkout
+  && pending.revision === (checkoutRevisions.get(key) ?? 0)) {
+  saveWorktree(project, {...worktreeFor(project), checkout:{...local.checkout, ...project}});
+ }
+ applyWorktree(localKey, null);
+ preferenceSync.save(localKey, null);
+ if (promote) void preferenceSync.reconnect();
+}
+try {
+ const cached = JSON.parse(localStorage.getItem(WORKTREE_CACHE_KEY) || '{}');
+ if (cached && typeof cached === 'object' && !Array.isArray(cached))
+  for (const [key, value] of Object.entries(cached)) if (validWorktreeKey(key)) applyWorktree(key, value);
+ // Seed only the recorded last project; checkout picks already identify their
+ // own project. Never copy an unscoped On into every project, or replace a new pick.
+ const alreadyScoped = new Set(Object.keys(projectWorktrees));
+ const legacyJson = (key:string, fallback:unknown = null) => {
+  try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; }
+ };
+ const intent = legacyJson('ai-shuffle-composer:worktreeIntent', localStorage.getItem('aihub_executionMode'));
+ if (intent === 'worktree' && hasProject(values.project) && !projectWorktrees[projectWorktreeKey(values.project)])
+  applyWorktree(projectWorktreeKey(values.project), {intent:'worktree', checkout:null});
+ const checkout = normalize('checkout', legacyJson('ai-shuffle-composer:checkout'));
+ if (checkout && hasProject(checkout)) {
+  const key = projectWorktreeKey(checkout);
+  if (!alreadyScoped.has(key)) applyWorktree(key, {...worktreeFor(checkout), checkout});
+ }
+ for (const key of ['aihub_executionMode', 'ai-shuffle-composer:worktreeIntent', 'ai-shuffle-composer:checkout']) localStorage.removeItem(key);
+} catch { /* SSR or unavailable storage */ }
+preferenceSync.registerPrefix(PROJECT_WORKTREE_PREFIX, key => validWorktreeKey(key) ? worktreeAdapter(key) : null);
+for (const key of Object.keys(projectWorktrees)) preferenceSync.register(key, worktreeAdapter(key));
 
 // Fast mode per model, one account-synced record each. Unlike effort there is
 // no older whole-map preference: the map below is only this browser's cache.
@@ -266,7 +365,17 @@ export const composerPreferences = {
   applyFast(key, on);
   preferenceSync.save(fastPreferenceKey(key), on);
  },
- get current(): Readonly<Picks> { return values; },
+ get current(): Readonly<Picks> { return {...values, worktreeIntent:worktreeFor(values.project).intent, checkout:worktreeFor(values.project).checkout}; },
+ worktreeForProject: worktreeFor,
+ linkWorktreeProject,
+ rememberWorktreeIntent(project: ProjectPick, intent: Picks['worktreeIntent']) {
+  saveWorktree(project, {...worktreeFor(project), intent});
+ },
+ rememberCheckout(project: ProjectPick, checkout: CheckoutPick | null) {
+  const key = projectWorktreeKey(project);
+  checkoutRevisions.set(key, (checkoutRevisions.get(key) ?? 0) + 1);
+  saveWorktree(project, {...worktreeFor(project), checkout});
+ },
  effortForModel(model: string | null): string | null {
   const key = effortModelKey(model), family = legacyEffortFamily(model || getDefaultModel());
   const hasExact = Object.prototype.hasOwnProperty.call(values.modelEfforts, key);
@@ -296,8 +405,14 @@ export const composerPreferences = {
     composerPreferences.rememberEffort(model, next[model] ?? null);
    return;
   }
-  // A deliberate re-pick is a new intent even when its fields are identical.
-  if (key === 'checkout') checkoutRevision++;
+  if (key === 'worktreeIntent') {
+   composerPreferences.rememberWorktreeIntent(values.project, value as Picks['worktreeIntent']); return;
+  }
+  if (key === 'checkout') {
+   const checkout = normalize('checkout', value);
+   composerPreferences.rememberCheckout(checkout ?? values.project, checkout); return;
+  }
+  if (key === 'project') linkWorktreeProject(value as ProjectPick);
   store(key, value); preferenceSync.save(`composer.${key}`, values[key]);
  },
  /**
@@ -308,28 +423,35 @@ export const composerPreferences = {
   * the claim and keeps the choice for a retry.
   */
  claimBranchChoice(project: ProjectPick, branch: string, createNew: boolean): BranchClaim {
-  const pick = values.checkout;
+  const pick = worktreeFor(project).checkout;
+  const key = projectWorktreeKey(project);
   const matchesProject = pick && (pick.projectV2Id
    ? pick.projectV2Id === project.projectV2Id : pick.projectId === project.projectId);
   if (pick?.kind !== 'branch' || pick.createNew !== createNew || pick.branch !== branch || !matchesProject) {
    return {consume() {}, release() {}};
   }
-  const claim = {revision: checkoutRevision, ownerEpoch: sessionOwnerEpoch()};
+  const claim = {key, revision: checkoutRevisions.get(key) ?? 0, ownerEpoch: sessionOwnerEpoch()};
   claims.add(claim);
   return {
    consume() {
     if (!claims.delete(claim)) return;
-    if (checkoutRevision === claim.revision && sessionOwnerEpoch() === claim.ownerEpoch) {
-     composerPreferences.set('checkout', null);
+    if ((checkoutRevisions.get(key) ?? 0) === claim.revision && sessionOwnerEpoch() === claim.ownerEpoch) {
+     composerPreferences.rememberCheckout(project, null);
     }
+    const linked = pendingWorktreeLinks.get(key);
+    if (linked) linkWorktreeProject(linked.project);
    },
-   release() { claims.delete(claim); },
+   release() {
+    claims.delete(claim);
+    const linked = pendingWorktreeLinks.get(key);
+    if (linked) linkWorktreeProject(linked.project);
+   },
   };
  },
  /** True while the current checkout choice is spoken for by an in-flight create. */
  get checkoutClaimed() {
   for (const claim of claims) {
-   if (claim.revision === checkoutRevision && claim.ownerEpoch === sessionOwnerEpoch()) return true;
+   if (claim.key === projectWorktreeKey(values.project) && claim.revision === (checkoutRevisions.get(claim.key) ?? 0) && claim.ownerEpoch === sessionOwnerEpoch()) return true;
   }
   return false;
  },
