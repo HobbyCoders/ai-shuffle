@@ -1,3 +1,3 @@
-# Tests that fail on Windows only (https://github.com/HobbyCoders/ai-shuffle/issues/2215).
+# Tests that fail on Windows only. Keep this list empty: fix a Windows failure instead of listing it.
 # scripts/local_ci.py skips these on Windows; Linux workers still run them.
 # One test per line (path::name, no parameters) or a whole file. Remove lines as tests are fixed.

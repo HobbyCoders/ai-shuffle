@@ -345,7 +345,7 @@ def pytest_args(python: str, timeout: int = 120, parallel: bool = True) -> list[
     if has_module(python, "pytest_timeout"):
         args += [f"--timeout={timeout}"]
     if os.name == "nt":
-        # Skips the tests in scripts/ci/windows_known_failures.txt (issue #2215).
+        # Skips the tests in scripts/ci/windows_known_failures.txt (kept empty).
         args += ["-p", "windows_known_failures"]
     return args
 

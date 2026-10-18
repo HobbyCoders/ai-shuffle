@@ -4,7 +4,7 @@ scripts/local_ci.py loads this plugin (-p windows_known_failures) on Windows
 only; it lives outside both `tests` packages so fluid and the backend can
 both load it. Each line of
 scripts/ci/windows_known_failures.txt names a test (`path::name`, without
-parameters) or a whole file. A listed test is skipped with the tracking issue
+parameters) or a whole file. A listed test is skipped, naming the list
 as the reason; anything not listed still fails. Linux workers run every test.
 Remove lines as the tests are fixed.
 """
@@ -16,7 +16,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 LIST = ROOT / "scripts/ci/windows_known_failures.txt"
-ISSUE = "https://github.com/HobbyCoders/ai-shuffle/issues/2215"
+# The list stays empty: a Windows failure is fixed, not skipped.
+SOURCE = "scripts/ci/windows_known_failures.txt"
 
 
 def load(path: Path = LIST) -> tuple[set[str], set[str]]:
@@ -44,7 +45,7 @@ def pytest_ignore_collect(collection_path, config):
 
 
 def pytest_collection_modifyitems(config, items):
-    marker = pytest.mark.skip(reason=f"known Windows failure, {ISSUE}")
+    marker = pytest.mark.skip(reason=f"known Windows failure, listed in {SOURCE}")
     for item in items:
         if repo_id(item) in TESTS:
             item.add_marker(marker)
@@ -68,4 +69,4 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if TESTS or FILES:
         terminalreporter.write_line(
             f"Not covered on Windows: {len(TESTS)} tests and {len(FILES)} files listed in "
-            f"scripts/ci/windows_known_failures.txt ({ISSUE}).")
+            f"{SOURCE}.")
