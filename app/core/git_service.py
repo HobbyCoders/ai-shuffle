@@ -18,6 +18,7 @@ Implementation is split across mixin modules for maintainability:
 import logging
 import os
 import re
+import stat
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,6 +38,7 @@ from app.core.git_cache import (
     _git_cache,
     _native_reader,
 )
+from app.core.fs_utils import force_rmtree
 from app.core.git_commit_ops import GitCommitMixin
 from app.core.git_diff_ops import GitDiffMixin
 from app.core.git_worktree_ops import GitWorktreeMixin
@@ -243,6 +245,21 @@ class GitService(
         except Exception as e:
             logger.error(f"Error initializing git repository: {e}")
             return False
+
+    def rollback_init(self, working_dir: str, metadata_identity: Tuple[int, int]) -> None:
+        """Remove only the metadata directory claimed by this initialization."""
+        git_dir = os.path.join(working_dir, ".git")
+        try:
+            current = os.lstat(git_dir)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != metadata_identity:
+            logger.warning("Not rolling back replaced Git metadata at %s", git_dir)
+            return
+        if _native_reader is not None:
+            _native_reader.invalidate_repo(working_dir)
+        force_rmtree(git_dir)
+        self.invalidate_status_cache(working_dir)
 
     def clone_repo(self, working_dir: str, clone_url: str, timeout: int = 120) -> Tuple[bool, Optional[str]]:
         """Clone a remote repository into the working directory.
