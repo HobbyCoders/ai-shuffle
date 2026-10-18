@@ -54,6 +54,12 @@ MAP_PATH = Path(os.environ.get("LOCAL_CI_TEST_MAP")
                 or Path.home() / ".cache" / "ai-shuffle" / "backend-test-map.json.gz")
 # The shared worker hosts run other sessions: never more than two test workers.
 WORKERS = os.environ.get("LOCAL_CI_WORKERS", "2")
+# Hosted Windows parts only (scripts/ci/windows_parts.py): a failed pytest
+# command reruns just its failed tests once. Off everywhere else.
+RETRY_FAILED_ENV = "LOCAL_CI_RETRY_FAILED"
+MAX_RETRIED = 20
+# Tests that failed and then passed on that rerun, in this process.
+FLAKY: list[str] = []
 
 # The CI Backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
 FAST_SUBSET = [
@@ -200,7 +206,7 @@ def kill_tree(process: subprocess.Popen) -> None:
 
 
 def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
-        timeout: float | None = None) -> None:
+        timeout: float | None = None, *, retry: bool = True) -> None:
     exe = shutil.which(argv[0]) or argv[0]
     shown = " ".join(argv)
     rel = cwd.relative_to(ROOT).as_posix() if cwd != ROOT else "."
@@ -213,6 +219,11 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
             timeout, stop_at_deadline = left, True
     print(f"\n$ ({rel}) {shown}", flush=True)
     merged = child_env(env)
+    failed_file = None
+    if retry and os.environ.get(RETRY_FAILED_ENV) == "1" and argv[1:3] == ["-m", "pytest"]:
+        failed_file = Path(tempfile.mkdtemp(prefix="local-ci-failed-")) / "failed.txt"
+        merged["LOCAL_CI_FAILED_FILE"] = str(failed_file)
+        argv = [*argv, "-p", "scripts.ci.record_failures"]
     process = subprocess.Popen([exe, *argv[1:]], cwd=cwd, env=merged, **low_priority_kwargs())
     try:
         returncode = process.wait(timeout=timeout)
@@ -225,6 +236,23 @@ def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         # Ctrl-C, or SIGTERM turned into SystemExit by full --step: leave no orphans.
         kill_tree(process)
         raise
+    if returncode and failed_file is not None:
+        failed = (list(dict.fromkeys(failed_file.read_text(encoding="utf-8").splitlines()))
+                  if failed_file.exists() else [])
+        shutil.rmtree(failed_file.parent, ignore_errors=True)
+        # Nothing recorded (a collection error, a crash) or many failures: a real break.
+        if failed and len(failed) <= MAX_RETRIED:
+            print(f"\n{len(failed)} failed test(s); running them once more.", flush=True)
+            rerun = [argv[0], "-m", "pytest", *failed, *pytest_args(argv[0], parallel=False)]
+            try:
+                run(rerun, cwd=cwd, env=env, timeout=timeout, retry=False)
+            except Failure:
+                raise Failure(f"{shown} (in {rel}) exited {returncode}; "
+                              f"its {len(failed)} failed test(s) failed again") from None
+            FLAKY.extend(failed)
+            return
+    elif failed_file is not None:
+        shutil.rmtree(failed_file.parent, ignore_errors=True)
     if returncode:
         raise Failure(f"{shown} (in {rel}) exited {returncode}")
 

@@ -9,6 +9,14 @@ name: Windows full suite
 # It posts nothing. scripts/ci/ship_release_status.py counts a successful run
 # the owner dispatched on main at the candidate as local/windows-suite.
 #
+# The suite runs as parallel parts (scripts/ci/windows_parts.py), each on its
+# own runner, so it takes the time of the slowest part. A part that fails does
+# not stop the others; rerun just the failed parts with
+#   gh run rerun <run id> --failed
+# and the run's newest attempt counts. A test that fails once and passes on an
+# immediate rerun passes its part and is listed under "Flaky tests" in the job
+# summary, to be fixed.
+#
 # To check a fix on a branch first, run only some tests (refused on main, so
 # every successful main run is the full suite):
 #   gh workflow run windows-suite.yml --ref <branch> -f tests="tests/core/test_x.py"
@@ -39,9 +47,16 @@ env:
 
 jobs:
   suite:
-    name: local_ci full on Windows
+    name: Windows ${{ matrix.part }}
+    if: inputs.tests == ''
     runs-on: windows-latest
-    timeout-minutes: 300
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # scripts/ci/windows_parts.py --list; tests/scripts/test_windows_parts.py keeps them equal.
+      matrix:
+        part: [backend-1, backend-2, backend-3, backend-4, backend-5, backend-6, backend-7, backend-8,
+               frontend, desktop, rest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,10 +70,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Refuse a partial run on main
-        if: inputs.tests != '' && github.ref == 'refs/heads/main'
-        shell: bash
-        run: echo "::error::The tests input is for branches; main always runs the full suite." && exit 1
       - name: Test environment
         shell: bash
         run: |
@@ -72,10 +83,10 @@ jobs:
           # name (RUNNER~1) that resolved paths never compare equal to.
           echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - name: Full suite
-        if: inputs.tests == ''
+      - name: Suite part
         shell: bash
         env:
+          PART: ${{ matrix.part }}
           # The runner ships an Android SDK; an owner's Windows PC does not, so
           # local_ci skips android-app there. Do the same: the Android app is
           # built and tested by android-play.yml, which first generates the
@@ -84,9 +95,48 @@ jobs:
           ANDROID_SDK_ROOT: ''
         run: |
           set -o pipefail
-          "$LOCAL_CI_PYTHON" scripts/local_ci.py full 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+          "$LOCAL_CI_PYTHON" scripts/ci/windows_parts.py "$PART" 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-suite-log-${{ matrix.part }}
+          path: ${{ runner.temp }}/local-ci.log
+          retention-days: 7
+
+  selected:
+    name: Selected tests on Windows
+    if: inputs.tests != ''
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a partial run on main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: echo "::error::The tests input is for branches; main always runs the full suite." && exit 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --upgrade pip
+          "$py" -m pip install -r requirements.txt -r requirements-native.txt -r requirements-dev.txt
+          "$py" -m pip install -e ./fluid
+          echo "LOCAL_CI_PYTHON=$py" >> "$GITHUB_ENV"
+          # The long form of the temp folder: the default is an 8.3 short
+          # name (RUNNER~1) that resolved paths never compare equal to.
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Selected tests
-        if: inputs.tests != ''
         shell: bash
         env:
           TESTS: ${{ inputs.tests }}
