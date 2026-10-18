@@ -1,10 +1,11 @@
+import re
 import runpy
 import tempfile
 import unittest
 from pathlib import Path
 
 module = runpy.run_path(str(Path(__file__).with_name("prepare-android-ui.py")))
-readiness, prepare = module["readiness"], module["prepare"]
+readiness, prepare, configure_webview = module["readiness"], module["prepare"], module["configure_webview"]
 
 HOME = "mCurrentFocus=Window{18f6feb u0 com.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher}\n"
 LAUNCHER_ANR = "mCurrentFocus=Window{563c1f5 u0 Application Not Responding: com.android.launcher3}\n"
@@ -116,6 +117,42 @@ class EmulatorReadinessTest(unittest.TestCase):
     def test_lost_focus_restarts_stability_count_and_eventually_times_out(self):
         with self.assertRaisesRegex(RuntimeError, "never reached"):
             self.run_preparation([HOME, HOME, "mCurrentFocus=null", HOME, HOME, "mCurrentFocus=null"])
+
+    def run_webview(self, build_type="userdebug", readback=None):
+        commands, flags = [], {}
+
+        def adb(*args):
+            commands.append(args)
+            if args == ("shell", "getprop", "ro.build.type"):
+                return build_type + "\n"
+            if args[:2] == ("shell", "cat"):
+                return (readback if readback is not None else flags.get(args[2], "")) + "\n"
+            if args == ("shell", "dumpsys", "webviewupdate"):
+                return "Current WebView package (name, version): (com.android.webview, 133.0.6943.137)\n"
+            written = re.fullmatch(r"echo '([^']*)' > (\S+) && chmod 644 \2", args[1]) if len(args) == 2 else None
+            if written:
+                flags[written.group(2)] = written.group(1)
+            return ""
+
+        with tempfile.TemporaryDirectory() as folder:
+            configure_webview(adb, Path(folder))
+            evidence = (Path(folder) / "webview.txt").read_text()
+        return commands, flags, evidence
+
+    def test_webview_turns_off_only_the_unretained_dangling_ptr_crash(self):
+        commands, flags, evidence = self.run_webview()
+        self.assertEqual({"/data/local/tmp/webview-command-line": "_ --disable-features=PartitionAllocUnretainedDanglingPtr"}, flags)
+        self.assertIn("133.0.6943.137", evidence)
+        # Only that one feature: no blanket crash, field-trial or sandbox switches.
+        written = flags["/data/local/tmp/webview-command-line"].split()
+        self.assertEqual(["_", "--disable-features=PartitionAllocUnretainedDanglingPtr"], written)
+        self.assertFalse(any("force-stop" in command or "kill" in " ".join(command) for command in commands))
+
+    def test_webview_flags_fail_closed_when_android_would_ignore_them(self):
+        with self.assertRaisesRegex(RuntimeError, "ignores"):
+            self.run_webview(build_type="user")
+        with self.assertRaisesRegex(RuntimeError, "reads back"):
+            self.run_webview(readback="")
 
 
 if __name__ == "__main__":

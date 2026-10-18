@@ -180,10 +180,13 @@ jobs:
             cores: 2
             memory: 2048
             advisory: false
-          # Report only: on hosted runners the API 36 guest failed three
-          # release runs in a row in emulator start-up, not in AI Shuffle, and
-          # blocked every release. It still runs and uploads its report; API 34
-          # stays the blocking device check. Internal tracking: #2375.
+          # Report only: the API 36 guest failed three release attempts in a row
+          # and blocked the release. Two were the image's frozen WebView 133
+          # aborting on its own dangling-pointer check (now turned off by
+          # ci/prepare-android-ui.py). One was an Espresso dialog-focus race
+          # (dialogs now use onDialogView). It still runs and uploads its
+          # report; API 34 stays the blocking device check until API 36 is
+          # proven stable again. Internal tracking: #2375.
           - api: 36
             target: default
             cores: 4
