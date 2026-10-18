@@ -525,6 +525,12 @@ async def _send(action, mode=None, scope=None):
         previous = await snapshot()
         if previous.get("operation") and previous["operation"]["phase"] == "waiting":
             raise ValueError("Waiting on workers to finish the previous update")
+        if previous.get("operation") and previous["operation"]["phase"] == "error" and action != "install":
+            # A new check or download moves past a failed install. Live worker
+            # errors still show on their rows; the old error could otherwise
+            # stay on the button for good when its target can never run (the
+            # worker was reinstalled).
+            await run_sync(progress.discard, operation["id"])
     listing = await run_sync(runners.directory)
     all_workers = await _in_scope(scope)
     request_id = uuid.uuid4().hex
@@ -554,7 +560,8 @@ async def _send(action, mode=None, scope=None):
                 async with semaphore:
                     if action == "install":
                         state = await _remote(row, {"operation": "status"})
-                        await run_sync(progress.record, request_id, row["device_id"], target_version=state.get("version"))
+                        await run_sync(progress.record, request_id, row["device_id"], target_version=state.get("version"),
+                                       from_version=state.get("running_version"))
                     body = {"operation": "action", "action": action, "request_id": request_id, "expires_at": time.time() + 10}
                     if mode:
                         body["mode"] = mode
@@ -566,7 +573,8 @@ async def _send(action, mode=None, scope=None):
     # Queue the initiating worker LAST so its restart cannot strand the fanout.
     if action == "install":
         state = await run_sync(updates.status)
-        await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"))
+        await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"),
+                       from_version=state.get("running_version"))
     local = local_action(action, request_id, mode)
     if action == "install":
         await run_sync(progress.record, request_id, self_row["device_id"], result=_tracked(local))
