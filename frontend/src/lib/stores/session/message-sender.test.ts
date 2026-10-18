@@ -119,6 +119,37 @@ function makeDeps(initial: ActiveSessionState) {
 	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree };
 }
 
+describe('compact first send', () => {
+	it('posts the exact normal query payload and uses only a queued optimistic echo', async () => {
+		const settings = { sessionId: 'compact-chat', title: 'Old chat', modelOverride: 'sonnet',
+			effortLevelOverride: 'high', permissionModeOverride: 'default', fastMode: false };
+		const normal = makeDeps(baseState(settings));
+		await createMessageSender(normal.deps).sendMessage('read my file', { pendingUploadPaths: ['/uploads/a.png'] });
+		const expected = normal.wsConn.send.mock.calls[0][0];
+		const compact = makeDeps(baseState(settings));
+		apiMocks.post.mockResolvedValueOnce({ turn_id: 'c', queued_turn_id: 'q', session_id: 'compact-chat' });
+		expect(await createMessageSender(compact.deps).sendMessage('read my file', {
+			compactFirst: true, pendingUploadPaths: ['/uploads/a.png'],
+		})).toBe(true);
+		expect(compact.wsConn.send).not.toHaveBeenCalled();
+		const [path, body] = apiMocks.post.mock.calls.at(-1)!;
+		expect(path).toBe('/sessions/compact-chat/compact');
+		expect(body.then_send).toEqual({ ...expected, client_message_id: expect.stringMatching(/^client-/) });
+		expect(compact.getState().messages).toHaveLength(0);
+		expect(compact.getState().queuedMessages).toEqual([expect.objectContaining({ content: 'read my file' })]);
+	});
+
+	it('rejects and removes its echo on an HTTP refusal so the composer restores the draft', async () => {
+		const { deps, getState, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		apiMocks.post.mockRejectedValueOnce(new Error('No capable device online'));
+		await expect(createMessageSender(deps).sendMessage('keep this', { compactFirst: true }))
+			.rejects.toThrow('No capable device online');
+		expect(getState().queuedMessages).toEqual([]);
+		expect(getState().messages).toEqual([]);
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
+
 describe('remembered permission on first send', () => {
 	it.each([
 		{}, { deviceIntent: { id: 'runner-1', name: 'Runner' } },

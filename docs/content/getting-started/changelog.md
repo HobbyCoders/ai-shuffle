@@ -34,6 +34,7 @@ Fixes from the first day of public use, plus a built-in Android emulator, faster
 
 ### Sessions and agents
 
+- "Compact first" queues your message after compaction and clears the composer, so you do not need to send it again. If compaction fails, the message still runs with the original context and the failure stays visible. Compacting also reactivates a settled chat, just like sending a message.
 - Moving a session between workers is faster. Both workers now log how long each step of the move took.
 - Agents start with a smaller prompt. They load only their everyday tools up front and see the rest by name, so you may see an agent look up a tool (ToolSearch or `read_tool_docs`) the first time it uses it.
 - Answering an agent's question resets the peer-chat budget, so a long, supervised run of chats no longer stops partway.

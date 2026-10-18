@@ -2121,6 +2121,8 @@ class SessionRuntime:
         prompt text, so it is safe to log.
         """
         payload = row.get("payload") or {}
+        if payload.get("compact_before_turn_id"):
+            return "a compact-first follow-up runs as its own turn"
         if (row.get("prompt") or "").strip().split(None, 1)[:1] == ["/compact"]:
             # A compaction is a turn of its own. Steered into a live turn it
             # would arrive as text for the model, and on Claude Code it would

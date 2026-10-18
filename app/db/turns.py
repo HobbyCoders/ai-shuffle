@@ -489,6 +489,21 @@ def enqueue_turn(
         if (_task_stop(cursor, session_id, owner=source in CWD_OWNER_SOURCES)
                 or _cwd_blocked(cursor, session_id, owner=source in CWD_OWNER_SOURCES)):
             return {"id": None, "session_id": session_id, "source": source}
+        # Compact first is one admission: no claimant (or concurrent send) can
+        # observe a compact without its follow-up. Both rows survive failure of
+        # the compact; ordinary settlement drains the follow-up on any outcome.
+        payload = dict(payload or {})
+        if payload.pop("compact_first", False):
+            compact = enqueue_turn(
+                session_id, source, prompt="/compact", profile_id=profile_id,
+                project_id=project_id, worktree_id=worktree_id, overrides=overrides,
+                explicit_permission=explicit_permission,
+                payload={k: v for k, v in payload.items()
+                         if k in ("api_user_id", "user_id", "forwarded_by_device")},
+                instance_id=instance_id, _conn=conn,
+            )
+            payload["compact_before_turn_id"] = compact["id"]
+            payload["deferred_user_record"] = True
         # All producers reach this boundary, including scheduler retries/unpark
         # and atomic AskUser answers that bypass turn_manager. Snapshot the
         # acknowledged pin and the stored folders, not an older turn's copy.
