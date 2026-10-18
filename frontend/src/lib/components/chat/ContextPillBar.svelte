@@ -96,6 +96,7 @@
 	const isGitRepo = $derived(!($git.hydrated
 		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
 		&& $git.sessionId === $activeSession.sessionId
+		&& $git.worktreeId === $activeSession.worktreeId
 		&& $git.status?.is_git_repo === false));
 	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
 	// Auto naming starts before the session has a worktree ID or branch.

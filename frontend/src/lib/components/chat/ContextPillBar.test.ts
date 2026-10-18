@@ -34,7 +34,7 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main', is_git_repo: true }),
-	git: writable({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: true } })
+	git: writable({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: true } })
 }));
 vi.mock('./ProfileSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./WorkspaceFolderSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -58,7 +58,7 @@ afterEach(() => {
 	// Observed owner changes are module state shared by the chip, row and composer.
 	resetOwnerTransitions();
 	cleanup();
-	(git as any).set({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: true } });
+	(git as any).set({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: true } });
 	(gitStatus as any).set({ current_branch: 'main', is_git_repo: true });
 	vi.mocked(adoptSession).mockClear();
 	vi.mocked(moveSession).mockReset();
@@ -86,12 +86,12 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		session.store.set(base);
 		const { container } = render(ContextPillBar, { sheetMode });
 		expect(container.querySelector('.branch-wt-row')).not.toBeNull();
-		(git as any).set({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: false } });
+		(git as any).set({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: false } });
 		(gitStatus as any).set({ current_branch: null, is_git_repo: false });
 		await tick();
 		expect(container.querySelector('.branch-wt-row')).toBeNull();
 		expect(container.querySelector('[title="Runs on this device"]')).not.toBeNull();
-		(git as any).set({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: true } });
+		(git as any).set({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: true } });
 		(gitStatus as any).set({ current_branch: 'main', is_git_repo: true });
 		await tick();
 		expect(container.querySelector('.branch-name')?.textContent).toBe('main');

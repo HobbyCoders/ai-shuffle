@@ -884,7 +884,8 @@
 		const repository = git.current;
 		if (!$activeSession.sessionId && repository.hydrated
 			&& (repository.projectId === $activeSession.projectV2Id || repository.projectId === $activeSession.project)
-			&& repository.sessionId === null && repository.status?.is_git_repo === false) {
+			&& repository.sessionId === null && repository.worktreeId === $activeSession.worktreeId
+			&& repository.status?.is_git_repo === false) {
 			activeSession.setWorktreeIntent('local', { persist: false });
 		}
 		composerSuggestion.invalidate();

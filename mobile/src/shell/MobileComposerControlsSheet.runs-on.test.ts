@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import { git } from '$lib/stores/git.svelte';
+import { tick } from 'svelte';
 import { getQueuedMove, queueMove, cancelQueuedMove, moveSession } from '$lib/api/sessions';
 
 const { session, appSessions, listInstallsMock } = vi.hoisted(() => ({
@@ -31,7 +33,10 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 	};
 });
 vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
-vi.mock('$lib/stores/git.svelte', () => ({ gitStatus: writable({ current_branch: 'main' }), git: {} }));
+vi.mock('$lib/stores/git.svelte', () => ({
+	gitStatus: writable({ current_branch: 'main' }),
+	git: writable({ projectId: 'project', sessionId: 'chat-1', worktreeId: null, hydrated: true, status: { is_git_repo: true } })
+}));
 vi.mock('$lib/components/chat/ProfileSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/chat/WorkspaceFolderSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/chat/BranchSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -50,6 +55,7 @@ vi.mock('$lib/api/sessions', () => ({
 
 afterEach(() => {
 	cleanup();
+	(git as any).set({ projectId: 'project', sessionId: 'chat-1', worktreeId: null, hydrated: true, status: { is_git_repo: true } });
 	vi.mocked(getQueuedMove).mockReset();
 	vi.mocked(queueMove).mockReset();
 	vi.mocked(cancelQueuedMove).mockReset();
@@ -91,6 +97,13 @@ async function openRunsOn(busy: { running: boolean; tasks: string[] }) {
 }
 
 describe('Runs on in Chat controls', () => {
+	it('hides branch and worktree indicators for a plain folder without hiding its runner', async () => {
+		const panel = await openRunsOn({ running: false, tasks: [] });
+		(git as any).set({ projectId: 'project', sessionId: 'chat-1', worktreeId: null, hydrated: true, status: { is_git_repo: false } });
+		await tick();
+		expect(panel.querySelector('.branch-wt-row')).toBeNull();
+		expect(within(panel).getByRole('button', { name: /^Runner:/ })).toBeTruthy();
+	});
 	it('queues the move while the turn runs, then shows it and lets it be cancelled', async () => {
 		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'ServerWorker' });
 		vi.mocked(cancelQueuedMove).mockResolvedValue(undefined);
