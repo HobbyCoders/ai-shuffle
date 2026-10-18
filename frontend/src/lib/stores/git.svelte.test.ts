@@ -99,6 +99,31 @@ beforeEach(() => {
 	mocks.fetchRemote.mockRejectedValue(new Error('no remote'));
 });
 
+describe('git store — repository capability changes', () => {
+	it('hydrates a plain folder without calling repository-only endpoints, then reloads after git init', async () => {
+		mocks.getGitStatus.mockResolvedValue(transformGitStatus({ is_git_repo: false }));
+		git.setWorkerTarget({ workerId: 'local', branch: null });
+		await git.loadRepository('plain-folder');
+		expect(git.current).toMatchObject({ hydrated: true, error: null, status: { is_git_repo: false }, branches: [] });
+		expect(mocks.getBranches).not.toHaveBeenCalled();
+		expect(mocks.getWorktrees).not.toHaveBeenCalled();
+		expect(mocks.getPrState).not.toHaveBeenCalled();
+		mocks.getGitStatus.mockResolvedValue(status());
+		await git.refreshStatus();
+		expect(git.current).toMatchObject({ hydrated: true, error: null, status: { is_git_repo: true } });
+		expect(git.current.branches).toHaveLength(1);
+		expect(mocks.getPrState).toHaveBeenCalled();
+	});
+
+	it('clears all repository state when an existing checkout becomes a plain folder', async () => {
+		await git.loadRepository('repo');
+		mocks.getGitStatus.mockResolvedValue(transformGitStatus({ is_git_repo: false }));
+		await git.refreshStatus();
+		expect(git.current).toMatchObject({ hydrated: true, error: null, status: { is_git_repo: false },
+			branches: [], worktrees: [], commits: [], diffStats: null, prState: null, changedFiles: null });
+	});
+});
+
 describe('git store — selected worker without a session', () => {
 	it('loads canonical worktrees for the local worker scope', async () => {
 		const target = { workerId: 'local', branch: 'feature/native' };

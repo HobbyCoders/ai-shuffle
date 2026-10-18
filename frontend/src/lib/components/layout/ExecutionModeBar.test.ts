@@ -198,6 +198,17 @@ describe('automatic non-git fallback', () => {
 		expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
 	});
 
+	it('restores the worktree control after the same folder becomes a repository', async () => {
+		mocks.git.set(nonGit);
+		render(ExecutionModeBar);
+		await tick();
+		expect(screen.queryByRole('checkbox')).toBeNull();
+		expect(screen.queryByRole('button', { name: /worktree branch:/i })).toBeNull();
+		mocks.git.set({ ...nonGit, status: { is_git_repo: true } });
+		await tick();
+		expect(screen.getByRole('checkbox')).toBeTruthy();
+	});
+
 	it('does not change an existing session binding', async () => {
 		Object.assign(activeSession.current, { sessionId: 'existing' });
 		mocks.git.set({ ...nonGit, sessionId: 'existing' });

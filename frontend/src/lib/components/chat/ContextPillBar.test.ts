@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
+import { git, gitStatus } from '$lib/stores/git.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
 import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
@@ -32,7 +33,8 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 });
 vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false) }));
 vi.mock('$lib/stores/git.svelte', () => ({
-	gitStatus: writable({ current_branch: 'main' }), git: {}
+	gitStatus: writable({ current_branch: 'main', is_git_repo: true }),
+	git: writable({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: true } })
 }));
 vi.mock('./ProfileSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./WorkspaceFolderSelector.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -56,6 +58,8 @@ afterEach(() => {
 	// Observed owner changes are module state shared by the chip, row and composer.
 	resetOwnerTransitions();
 	cleanup();
+	(git as any).set({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: true } });
+	(gitStatus as any).set({ current_branch: 'main', is_git_repo: true });
 	vi.mocked(adoptSession).mockClear();
 	vi.mocked(moveSession).mockReset();
 	vi.mocked(getQueuedMove).mockReset();
@@ -78,6 +82,21 @@ const base = {
 };
 
 describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) => {
+	it('hides active-chat branch and worktree context for a plain folder, and restores it after git init', async () => {
+		session.store.set(base);
+		const { container } = render(ContextPillBar, { sheetMode });
+		expect(container.querySelector('.branch-wt-row')).not.toBeNull();
+		(git as any).set({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: false } });
+		(gitStatus as any).set({ current_branch: null, is_git_repo: false });
+		await tick();
+		expect(container.querySelector('.branch-wt-row')).toBeNull();
+		expect(container.querySelector('[title="Runs on this device"]')).not.toBeNull();
+		(git as any).set({ projectId: 'project', sessionId: 'saved-session', hydrated: true, status: { is_git_repo: true } });
+		(gitStatus as any).set({ current_branch: 'main', is_git_repo: true });
+		await tick();
+		expect(container.querySelector('.branch-name')?.textContent).toBe('main');
+		expect(container.querySelector('.wt-indicator')).not.toBeNull();
+	});
 	it.each(['project', 'canonical'])('offers worker and branch selection without GitHub auth for %s', kind => {
 		execution.mockClear();
 		session.store.set({ ...base, sessionId: null, messages: [], project: kind === 'project' ? 'project' : null, projectV2Id: kind === 'canonical' ? 'pv2-project' : null });

@@ -1029,6 +1029,14 @@ export const git = {
 			_clearServerBackoff();
 			// Discard a response that a newer one has already superseded.
 			if (!_acceptSeq('status', seq)) return;
+			// git init / clone (or removal) changes the capability, not just the
+			// branch name. Reload coherently so branches, diffs and PR state return
+			// together, or are all cleared for a plain folder. Reuse the existing
+			// focus/idle/post-turn refresh; no additional poll is needed.
+			if (status.is_git_repo !== _state.status?.is_git_repo) {
+				await git.retryLoad();
+				return;
+			}
 			_learnIdentity(scope, projectId, status.current_branch);
 			if (!status.is_git_repo) {
 				const empty = { ..._cacheableSlice(EMPTY_STATE), status };
@@ -1043,8 +1051,8 @@ export const git = {
 			// Skip the write when nothing changed — with the canonical flat status
 			// this genuinely suppresses the poll, instead of comparing fresh array
 			// references that never match.
-			if (gitApi.gitStatusEqual(status, _state.status)) return;
-			_update((s) => ({ ...s, status }));
+			if (gitApi.gitStatusEqual(status, _state.status) && !_state.error) return;
+			_update((s) => ({ ...s, status, error: null }));
 			_syncToCache({ status });
 		} catch (e) {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
@@ -1709,9 +1717,11 @@ export const git = {
 		_diffStatsInFlight = false;
 		_branchesInFlight = false;
 		git.refreshStatus();
-		git.refreshDiffStats();
-		git.loadBranches();
-		git.refreshPrState(true).catch(() => {});
+		if (_state.status?.is_git_repo) {
+			git.refreshDiffStats();
+			git.loadBranches();
+			git.refreshPrState(true).catch(() => {});
+		}
 	}
 };
 

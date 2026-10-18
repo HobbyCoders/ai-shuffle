@@ -531,7 +531,7 @@
 
 		const now = Date.now();
 		git.refreshStatus();
-		if (shouldPollDiffStats(now, _gitLastActivity, _lastIdleDiffStatsPoll)) {
+		if ($gitStatus?.is_git_repo && shouldPollDiffStats(now, _gitLastActivity, _lastIdleDiffStatsPoll)) {
 			git.refreshDiffStats();
 			_lastIdleDiffStatsPoll = now;
 		}
@@ -1117,7 +1117,7 @@
 			</div>
 		{/if}
 		</div>
-		{#if activeSidePanel.active}
+		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && $git.hydrated && $gitStatus?.is_git_repo === false)}
 			<SessionSidePanel active={activeSidePanel.active} expanded={activeSidePanel.expanded}
 				width={browserPanel.current.width} mobile={panelOverlay}
 				onClose={closeSidePanel}

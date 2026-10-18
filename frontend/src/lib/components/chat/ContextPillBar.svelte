@@ -91,6 +91,12 @@
 		isEmptyState ? 0 : Math.max(1, $activeSession.messages.length)
 	);
 
+	// Only use a confirmed status for this composer; cache-miss placeholders
+	// can still describe the project the user just left.
+	const isGitRepo = $derived(!($git.hydrated
+		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
+		&& $git.sessionId === $activeSession.sessionId
+		&& $git.status?.is_git_repo === false));
 	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
 	// Auto naming starts before the session has a worktree ID or branch.
 	const isWorktreeSelected = $derived(isWorktreeSession || $activeSession.isCreatingWorktree);
@@ -123,7 +129,7 @@
 			githubAuthenticated: $githubAuthenticated,
 			worktreeIntent: $activeSession.worktreeIntent,
 			// Reuse the git store's repo signal — a non-git project has no branches.
-			isGitRepo: $gitStatus?.is_git_repo !== false
+			isGitRepo
 		})
 	);
 
@@ -649,6 +655,7 @@
 
 		{@render repoChip()}
 
+		{#if isGitRepo}
 		<div class="branch-wt-row">
 		{#if showBranch}
 			<BranchSelector
@@ -675,11 +682,12 @@
 			</span>
 		{/if}
 		</div>
+		{/if}
 	{/if}
 	{/if}
 </div>
 
-{#if $activeSession.mode !== 'chat' && $activeSession.project}
+{#if isGitRepo && $activeSession.mode !== 'chat' && $activeSession.project}
 	<CreateBranchModal
 		open={showCreateBranchModal}
 		onClose={() => (showCreateBranchModal = false)}
