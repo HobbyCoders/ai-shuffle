@@ -861,7 +861,8 @@ def _busy_words(state: Dict[str, Any]) -> str:
 
 def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
                           turn_id: Optional[str] = None, *, handoff_context: str = "",
-                          handoff_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                          handoff_id: Optional[str] = None,
+                          target_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Cancel callbacks and save replacement cards in ONE transaction.
 
     No question can disappear if the process stops between detaching the turn
@@ -895,7 +896,8 @@ def _detach_question_rows(session_id: str, rows: List[Dict[str, Any]],
             payload = {"request_id": request_id, "tool_use_id": request_id,
                        "questions": row["payload"]["questions"], "nonblocking": True,
                        "handoff_detached": True, "handoff_context": handoff_context,
-                       "handoff_id": handoff_id, "handoff_turn_id": turn_id}
+                       "handoff_id": handoff_id, "handoff_turn_id": turn_id,
+                       "handoff_target_id": target_id}
             iid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"))
             cur.execute("INSERT INTO pending_interactions (id,session_id,kind,payload,state) "
                         "VALUES (%s,%s,'question',%s,'pending') ON CONFLICT (id) DO NOTHING",
@@ -1015,7 +1017,7 @@ async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pendin
     replacements = await asyncio.to_thread(_detach_question_rows, session_id, blocking,
                                           live["id"] if live else None,
                                           handoff_context=_handoff_context(pending, pending.label),
-                                          handoff_id=pending.handoff_id)
+                                          handoff_id=pending.handoff_id, target_id=pending.target_id)
     if not replacements:
         return True
     # Interrupt the live provider BEFORE explicitly waking the cancelled

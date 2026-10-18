@@ -175,8 +175,14 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
             "history": handoff._history(database.get_session("s1")),
         }
         handoff.install_history("s1", snapshot, ".")
+        handoff._accept_owner("s1", pending.target_id)
         [received] = interactions.get_pending_interactions("s1")
+        assert received["payload"]["handoff_target_id"] == pending.target_id
         with (
+            patch(
+                "app.network.engine.context",
+                return_value=SimpleNamespace(device_id=pending.target_id),
+            ),
             patch(
                 "app.core.user_question_handler.UserQuestionHandler._retire_native_question",
                 AsyncMock(),
@@ -194,6 +200,80 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
     finally:
         callback.cancel()
         await asyncio.gather(callback, return_exceptions=True)
+
+
+@pytest.mark.parametrize("worker", ["source", "dev-gaming"])
+@pytest.mark.parametrize("owner", ["source", "dev-gaming"])
+def test_question_context_requires_designated_target_and_local_ownership(worker, owner):
+    from app.core.user_question_handler import _confirmed_handoff_context
+
+    _chat()
+    handoff._accept_owner("s1", owner)
+    payload = {
+        "handoff_detached": True,
+        "handoff_id": "this-move",
+        "handoff_target_id": "dev-gaming",
+        "handoff_context": "[hand-off] Moved with this note",
+    }
+    with patch(
+        "app.network.engine.context", return_value=SimpleNamespace(device_id=worker)
+    ):
+        result = _confirmed_handoff_context("s1", payload)
+    assert result == (
+        payload["handoff_context"] if worker == owner == "dev-gaming" else None
+    )
+
+
+async def test_new_handoff_does_not_retry_interrupt_for_old_detached_card():
+    _chat()
+    callback = await _post(blocking=True)
+    try:
+        assert await _settle(lambda: interactions.get_pending_interactions("s1"))
+        turn = turns.enqueue_turn("s1", "user", prompt="ask me")
+        turns.start_turn(turn["id"], None, "runner")
+        session_events.append_events(
+            "s1",
+            [
+                {
+                    "type": "tool.use",
+                    "turn_id": turn["id"],
+                    "payload": {
+                        "tool_use_id": "ask-tool",
+                        "name": "AskUser",
+                        "input": {"questions": QUESTIONS},
+                    },
+                }
+            ],
+        )
+        runtime = SimpleNamespace(
+            interrupt=AsyncMock(side_effect=RuntimeError("interrupt not finished"))
+        )
+        old = sh.PendingHandoff("dev-gaming", "DesktopWorker", "old note", time.time())
+        new = sh.PendingHandoff("dev-gaming", "DesktopWorker", "new note", time.time())
+        state = {"running": True, "tasks": [], "queued": 0, "wake": False}
+        with (
+            patch("app.network.runners.find", return_value=TARGET),
+            patch("app.core.session_runtime.get_live_runtime", return_value=runtime),
+        ):
+            assert not await asyncio.wait_for(
+                sh._prepare_questions("s1", state, old), timeout=3
+            )
+            assert turns.get_turn(turn["id"])["state"] == "interrupting"
+            [card] = interactions.get_pending_interactions("s1")
+            assert card["payload"]["handoff_id"] == old.handoff_id != new.handoff_id
+            assert card["payload"]["handoff_turn_id"] == turn["id"]
+            runtime.interrupt.assert_awaited_once()
+            runtime.interrupt.reset_mock()
+            # Same captured live turn and target, but a DIFFERENT hand-off.
+            assert await asyncio.wait_for(
+                sh._prepare_questions("s1", state, new), timeout=3
+            )
+            runtime.interrupt.assert_not_awaited()
+    finally:
+        callback.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(callback, return_exceptions=True), timeout=3
+        )
 
 
 @pytest.mark.parametrize("outcome", ["failure", "timeout"])

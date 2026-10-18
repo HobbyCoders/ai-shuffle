@@ -486,6 +486,70 @@ def _owner_calls(a, b, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tell_failed", [False, True])
+async def test_detached_answer_on_target_keeps_note_before_or_without_tell(pair, monkeypatch, tell_failed):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock
+    from app.core import session_handoff as sh
+    from app.core.user_question_handler import _confirmed_handoff_context, user_question_handler
+    from app.db import interactions, session_events, turns
+    from app.network import runners
+    from tests.core.test_session_handoff import _settle
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    questions = [{"question": "Which option?", "options": [{"label": "Keep", "description": "Keep it"}],
+                  "multiSelect": False, "header": "Choice"}]
+    real_find = runners.find
+    monkeypatch.setattr(runners, "find", lambda target: {
+        **(real_find(target) or {}), "capabilities": {"move_questions": 1}})
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    pending = sh.PendingHandoff(b.device_id, "Target worker", "Keep the owner's selected branch", time.time())
+    callback = None
+    try:
+        with a.active():
+            callback = asyncio.create_task(user_question_handler.request_answers(
+                "detached-move-question", "ask", sid, questions, AsyncMock()))
+            assert await asyncio.wait_for(_settle(lambda: interactions.get_pending_interactions(sid)), timeout=3)
+            assert await asyncio.wait_for(sh._prepare_questions(
+                sid, {"running": False, "tasks": [], "queued": 0, "wake": False}, pending), timeout=3)
+            assert await asyncio.wait_for(callback, timeout=3) == {"error": "No answers received"}
+            [source_card] = interactions.get_pending_interactions(sid)
+            assert source_card["payload"]["handoff_target_id"] == b.device_id
+            assert await handoff.move(database.get_session(sid), b.device_id) is True
+            # Match the source's real order: committed move, resume decision,
+            # then the later best-effort _tell (not yet run in the first case).
+            assert sh.resume_plan(sid, pending, b.device_id) == "question"
+            if tell_failed:
+                with patch.object(control, "call", AsyncMock(side_effect=ConnectionError("lost note reply"))):
+                    assert not await sh._tell(sid, b.device_id, "Moved", {
+                        "handoff_id": pending.handoff_id, "status": "moved", "worker": "Target worker"})
+                assert session_events.get_latest_system_note(sid, "handoff")["data"]["status"] == "moved"
+            # A mirrored owner row (or fallback moved note) on the source is
+            # not evidence that the answer is running on the designated target.
+            assert _confirmed_handoff_context(sid, source_card["payload"]) is None
+        with b.active():
+            assert database.get_session(sid)["owner_device_id"] == b.device_id
+            assert session_events.get_latest_system_note(sid, "handoff") is None
+            [card] = interactions.get_pending_interactions(sid)
+            assert card["payload"]["handoff_id"] == pending.handoff_id
+            with patch("app.core.user_question_handler.UserQuestionHandler._retire_native_question", AsyncMock()), \
+                    patch("app.core.session_runtime.try_steer_pending", AsyncMock()), \
+                    patch("app.core.session_runtime._broadcast_queue_after_start", AsyncMock()):
+                assert await user_question_handler._answer_nonblocking(
+                    card, {"Which option?": "Keep"}, None, human_input=True)
+            [answer] = turns.get_queued_turns(sid)
+            assert answer["prompt"].startswith("[hand-off] Moved from ")
+            assert "Your hand-off note: Keep the owner's selected branch" in answer["prompt"]
+            assert "Answer to your question:\nWhich option?\nKeep" in answer["prompt"]
+    finally:
+        if callback is not None:
+            callback.cancel()
+            await asyncio.wait_for(asyncio.gather(callback, return_exceptions=True), timeout=3)
+
+
+@pytest.mark.asyncio
 async def test_question_card_moves_with_history_and_is_visible_on_receiver(pair, monkeypatch):
     from unittest.mock import AsyncMock
     from app.core.user_question_handler import user_question_handler
