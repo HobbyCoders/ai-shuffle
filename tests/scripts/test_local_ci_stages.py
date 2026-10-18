@@ -90,7 +90,7 @@ def test_changed_identity_starts_new_receipts(gate, monkeypatch, changed):
     elif changed == "tree":
         monkeypatch.setattr(ci, "tree_of", lambda *a: "new-tree")
     elif changed == "workers":
-        monkeypatch.setattr(ci, "WORKERS", "1")
+        monkeypatch.setattr(ci, "WORKERS", "2" if ci.WORKERS == "1" else "1")
     elif changed == "audit":
         args.strict_audit = True
     elif changed == "python":
