@@ -46,6 +46,9 @@ class Resume(Op):
     resume."""
 
     source: str = "user"  # copied onto TurnStarted, as on UserTurn
+    # Optional fresh tail context when the resumed model no longer holds it.
+    # None preserves the exact saved request; never rewrite an existing node.
+    context_note: str | None = None
 
 
 @dataclass(kw_only=True)

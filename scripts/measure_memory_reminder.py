@@ -117,6 +117,8 @@ def _cache_stats(requests: list[list[str]], texts: list[list[str]] | None = None
         total = sum(len(e) for e in elements)
         cached = sum(len(e) for e in elements[:shared])
         out.append({
+            "chars": total, "cached_chars": cached,
+            "memory_chars": sum(_memory_chars(e) for e in plain),
             "tokens": _tokens(total), "cached_tokens": _tokens(cached),
             "memory_tokens": _tokens(sum(_memory_chars(e) for e in plain)),
         })
@@ -129,6 +131,8 @@ def _summary(per_request: list[dict]) -> dict:
     cached = sum(r["cached_tokens"] for r in per_request)
     return {
         "requests": len(per_request),
+        "chars_total": sum(r["chars"] for r in per_request),
+        "memory_chars_total": sum(r["memory_chars"] for r in per_request),
         "tokens_total": total,
         "tokens_per_request_mean": round(total / max(len(per_request), 1)),
         "tokens_last_request": per_request[-1]["tokens"] if per_request else 0,
@@ -141,6 +145,7 @@ def _summary(per_request: list[dict]) -> dict:
 def _patches(stack, store, legacy: bool):
     from app.core.provider import harness_adapter as ha
 
+    stack.enter_context(patch("app.core.claude_auth_mode.current_mode", return_value="subscription"))
     stack.enter_context(patch("app.core.fluid_memory.session_memory",
                               return_value=(store, None)))
     stack.enter_context(patch.object(ha.HarnessAdapter, "_resolve_app_session_id",
@@ -359,7 +364,7 @@ def main():
           f"native compacts automatically, delegated CLI compacts in turn {COMPACT_BEFORE}; "
           f"tokens are chars/4; fixed prefix "
           f"{prefixes[0]:,} chars native, {prefixes[1]:,} delegated")
-    keys = ("tokens_total", "tokens_per_request_mean", "tokens_last_request",
+    keys = ("chars_total", "memory_chars_total", "tokens_total", "tokens_per_request_mean", "tokens_last_request",
             "memory_tokens_total", "uncached_tokens_total", "cache_hit_rate")
     for leg in ("native", "delegated"):
         print(f"\n{leg}")

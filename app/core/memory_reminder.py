@@ -11,8 +11,12 @@ The rule now:
   the copy the model saw can no longer be trusted to be in its context: after a
   Claude Code compaction (unless its SessionStart put-back already carried the
   current one), after a rewind or fork that left it off the active path, after
-  a delegated slash command other than ``/compact``, and on a fresh adapter
-  that cannot prove what the history holds. A native compaction does not need
+  a delegated slash command other than ``/compact``, after a model/provider
+  switch, and on a fresh adapter that cannot prove what the history holds.
+  A CLI restarted without history (including a rejected --resume handle)
+  gets the snapshot before its first frame. Retry-from-here restores missing
+  or changed memory at the tail without rewriting the saved request.
+  A native compaction does not need
   it: fluid's compactor carries the snapshot and its change lists onto
   whatever digest, epoch or summary folds them
   (``CompactionConfig.pinned_reminder``), in the same request, mid-turn too.

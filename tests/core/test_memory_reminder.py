@@ -410,7 +410,7 @@ async def test_folded_lookup_uses_the_filtered_database_query(monkeypatch):
     from app.core.provider.fluid_pg_store import PgFluidStore
 
     rows = [
-        {"seq": 1, "event": {"_cls": "TurnStarted", "node_id": "n1"}},
+        {"seq": 1, "event": {"_cls": "TurnStarted", "node_id": "n1", "model": "fake", "provider": "fake"}},
         {"seq": 2, "event": {"_cls": "ContextCompaction", "tier": 2, "reason": "trigger"}},
     ]
     asked = []
@@ -422,6 +422,8 @@ async def test_folded_lookup_uses_the_filtered_database_query(monkeypatch):
     monkeypatch.setattr(fluid_transcript, "_event_rows_of_class", event_rows)
     store = object.__new__(PgFluidStore)
     adapter = HarnessAdapter()
+    from types import SimpleNamespace
+    adapter._engine = SimpleNamespace(model="fake", provider="fake")
     assert await adapter._memory_folded_since(store, "ses_x", "n1") is False
     assert asked == [("ses_x", ("TurnStarted", "ContextCompaction"))]
     rows.append({"seq": 3, "event": {"_cls": "ContextCompaction", "tier": 3, "reason": "cli_auto_compact"}})

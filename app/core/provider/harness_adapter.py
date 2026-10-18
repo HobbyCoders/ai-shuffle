@@ -353,6 +353,7 @@ class HarnessAdapter(ProviderAdapter):
         # Whether that node was looked up in the stored log yet (once per
         # adapter: a park/wake builds a fresh adapter over the same history).
         self._memory_rehydrated: bool = False
+        self._memory_identity: Optional[Tuple[str, str]] = None
         # What the model holds for the turn being built, and what the turn's
         # note decided to send (set by send_query around the note render).
         self._memory_held_for_turn: Optional[Any] = None
@@ -732,6 +733,7 @@ class HarnessAdapter(ProviderAdapter):
                 # back after a CLI compaction: mid-turn, the CLI folds the
                 # user message that carried it into its summary.
                 compact_context=self._compact_context_note,
+                fresh_context=self._fresh_memory_note,
                 # Bridged tools outside DELEGATED_LOADED_TOOLS reach the CLI
                 # deferred behind its ToolSearch; AI_SHUFFLE_PERF_BRIDGE_DEFER=0
                 # defers none.
@@ -1940,6 +1942,31 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_plan = plan
         return plan.note
 
+    async def _fresh_memory_note(self, content: List[Any]) -> Optional[str]:
+        """A new CLI conversation has no transcript, even if fluid does.
+        Called before its first frame, including a failed --resume retry.
+        The snapshot stays at the user-message tail. Slash commands must stay
+        verbatim; invalidating trust makes their next normal turn carry it.
+        """
+        from app.core.memory_reminder import memory_blocks, wrap
+
+        text = "\n".join(getattr(block, "text", "") for block in content)
+        if any(kind == "full" for kind, _ in memory_blocks(text)):
+            return None
+        self._memory_rehydrated = True
+        self._memory_trusted_node = None
+        self._memory_put_back = None
+        if _is_cli_command(text):
+            return None
+        section = await asyncio.to_thread(self._memory_section)
+        self._memory_full_pending = section is not None
+        return wrap(section) if section is not None else None
+
+    def _memory_engine_identity(self) -> Tuple[str, str]:
+        engine = self._engine
+        provider = getattr(engine, "provider", "")
+        return (getattr(engine, "model", ""), getattr(provider, "name", provider))
+
     async def _memory_held(self) -> Optional[Any]:
         """What the model holds of the # Memory snapshot, read back from the
         active path (:func:`app.core.memory_reminder.held_from_path`), or None
@@ -1961,6 +1988,11 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.memory_reminder import held_from_path, newest_full_node
 
             nodes = await store.load_path(sid)
+            identity = self._memory_engine_identity()
+            if self._memory_identity is not None and identity != self._memory_identity:
+                self._memory_trusted_node = None
+                self._memory_put_back = None
+            self._memory_identity = identity
             if not self._memory_rehydrated:
                 self._memory_rehydrated = True
                 node_id = newest_full_node(nodes)
@@ -2002,11 +2034,18 @@ class HarnessAdapter(ProviderAdapter):
                     rows.append({
                         "_cls": name, "node_id": getattr(event, "node_id", None),
                         "reason": getattr(event, "reason", None),
+                        "model": getattr(event, "model", None),
+                        "provider": getattr(event, "provider", None),
                     })
         started = False
         for row in rows:
             if row.get("_cls") == "TurnStarted" and row.get("node_id") == node_id:
                 started = True
+                # A new adapter may use a different model/provider (including
+                # switching between native and CLI). Its own history, not the
+                # old leg's stored path, is what matters. Unknown = re-send.
+                if (row.get("model"), row.get("provider")) != self._memory_engine_identity():
+                    return True
             elif started and row.get("_cls") == "ContextCompaction":
                 if compaction_may_fold_snapshot(row.get("reason")):
                     return True
@@ -2196,14 +2235,27 @@ class HarnessAdapter(ProviderAdapter):
         # user node. After Away ends that would replay the old Away instruction
         # too. Append the cancellation only in this case, leaving the unfinished
         # request in history and ordinary retries byte-identical as before.
+        # Missing/changed memory is likewise tail context on the Resume op;
+        # the native loop appends it only after validating the resume head.
         from app.core.away_mode import OWNER_BACK_NOTE
 
         note = await asyncio.to_thread(self._away_note)
         if note and OWNER_BACK_NOTE in note:
             await self.send_query("Resume the unfinished request above, using the current Away mode.")
             return
+        self._memory_held_for_turn = await self._memory_held()
+        try:
+            memory_note = await asyncio.to_thread(self._memory_turn_note)
+        finally:
+            self._memory_held_for_turn = None
         self._mark_turn_floor()
-        await self._engine.submit(Resume(source=self._take_turn_source()))
+        await self._engine.submit(Resume(
+            source=self._take_turn_source(), context_note=memory_note,
+        ))
+        plan, self._memory_plan = self._memory_plan, None
+        if plan is not None and plan.kind == "full":
+            self._memory_trusted_node = None
+            self._memory_full_pending = True
 
     def _mark_turn_floor(self) -> None:
         """Record the event head as it stands just before a turn is submitted.
@@ -2322,7 +2374,8 @@ class HarnessAdapter(ProviderAdapter):
 
             if type(event).__name__ == "TurnStarted":
                 self._pending_away_turn = event.turn_id
-            self._observe_memory_event(event)
+            if self._is_live(event):
+                self._observe_memory_event(event)
             if (
                 self._pending_away_note
                 and self._pending_away_turn == getattr(event, "turn_id", None)
@@ -3281,6 +3334,9 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.model = model
         # The id as the caller sent it (before canonicalization), since that
         # is what its next turn compares against.
+        self._memory_trusted_node = None
+        self._memory_put_back = None
+        self._memory_rehydrated = True
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:

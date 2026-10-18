@@ -688,6 +688,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         claude_mod: bool | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
+        fresh_context: Callable[[list[Any]], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
@@ -739,6 +740,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # callable returning the text, or None. The CLI folds the user
         # message that carried it into its summary when it compacts mid-turn.
         self.compact_context = compact_context
+        # Tail context for a fresh CLI conversation, including a rejected
+        # --resume retry. The host decides what is missing from this turn.
+        self.fresh_context = fresh_context
         # Registry names of bridge tools the CLI keeps behind its ToolSearch
         # (listed with ``_meta`` ``anthropic/alwaysLoad`` false): announced by
         # name, schema loaded on demand, every one still callable. None loads
@@ -1817,6 +1821,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         return
             op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+            content = await self._fresh_turn_content(content)
             user_node = SessionNode(
                 node_id=new_id("node"),
                 parent_id=op.parent_node_id or meta.head_node_id,
@@ -1861,6 +1866,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # resume handle above.
             await self._flush_events(sid)
 
+    async def _fresh_turn_content(self, content: list[Any]) -> list[Any]:
+        """A fresh CLI does not see the host's stored transcript. Restore
+        missing context at the tail, never by changing its cached system prompt.
+        A valid --resume (or a later turn on this process) needs no put-back.
+        """
+        if self._spawn_resume is not None or self._proc_results or self.fresh_context is None:
+            return content
+        note = await self.fresh_context(content)
+        return [*content, Text(note)] if note else content
+
     async def _drive_turn(
         self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any],
     ) -> StreamJsonMapper | None:
@@ -1886,6 +1901,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                     ))
                     return mapper
+                restored = await self._fresh_turn_content(content)
+                if restored is not content:
+                    # The rejected frame never reached a model. Keep the old
+                    # stored node immutable; record the replacement actually
+                    # sent to the new CLI, under the same turn id.
+                    content = restored
+                    user_node = SessionNode(
+                        node_id=new_id("node"), parent_id=user_node.node_id,
+                        message=Message(role="user", content=content),
+                    )
+                    await self.store.append(sid, user_node)
+                    await self._emit(TurnStarted(
+                        session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
+                        model=self.model, provider=self.provider,
+                    ))
             if self._interrupted.is_set():
                 # Stopped while the CLI was still starting (or being drained):
                 # never hand it the turn, or it would run the whole thing,

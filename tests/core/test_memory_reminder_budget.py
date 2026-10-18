@@ -20,6 +20,9 @@ from scripts import measure_memory_reminder as m
 # 20-request sum stays near 20 copies; before, request n carried n copies.
 MAX_MEMORY_SHARE_OF_LEGACY = 0.5
 MAX_COPIES_IN_A_REQUEST = 1.2
+# Measured 20-turn fixture; a 1% allowance permits minor wording changes, not
+# another snapshot. Regenerate with scripts/measure_memory_reminder.py.
+MEASURED_MEMORY_TOKENS = {"native": 43_539, "delegated": 42_537}
 
 
 @pytest.fixture(scope="module")
@@ -33,6 +36,7 @@ def test_snapshot_does_not_pile_up_in_history(runs, leg):
     legacy, current = (run[leg] for run in runs)
     before, after = legacy["summary"], current["summary"]
     assert after["memory_tokens_total"] <= MAX_MEMORY_SHARE_OF_LEGACY * before["memory_tokens_total"]
+    assert after["memory_tokens_total"] <= MEASURED_MEMORY_TOKENS[leg] * 101 // 100
     one_copy = current["per_request"][0]["memory_tokens"]
     assert one_copy > 1_000  # the snapshot is sent at all
     assert max(r["memory_tokens"] for r in current["per_request"]) <= MAX_COPIES_IN_A_REQUEST * one_copy
