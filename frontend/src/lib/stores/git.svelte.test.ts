@@ -142,6 +142,81 @@ describe('git store — selected worker without a session', () => {
 	});
 });
 
+describe('git store — project isolation and positive non-repo cache', () => {
+	it.each([false, true])('never shows project A branches while B loads (restore=%s)', async (restore) => {
+		await git.loadRepository('git-A');
+		const pending = deferred<GitStatus>();
+		mocks.getGitStatus.mockReturnValueOnce(pending.promise);
+		if (restore) git.restoreCacheImmediate('plain-B');
+		const load = git.loadRepository('plain-B');
+		expect(git.current.status).toBeNull();
+		expect(git.current.branches).toEqual([]);
+		expect(git.current.diffStats).toBeNull();
+		expect(git.current.prState).toBeNull();
+		expect(git.current.loading).toBe(true);
+		expect(git.current.hydrated).toBe(false);
+		pending.resolve(status({ is_git_repo: false, current_branch: null }));
+		await load;
+		expect(git.current.status?.is_git_repo).toBe(false);
+		expect(git.current.branches).toEqual([]);
+	});
+
+	it('restores worker-scoped non-repo state immediately, then observes git init', async () => {
+		git.setWorkerTarget({ workerId: 'local' });
+		mocks.getGitStatus.mockResolvedValueOnce(status({ is_git_repo: false, current_branch: null }));
+		await git.loadRepository('plain-B');
+		expect(mocks.getBranches).not.toHaveBeenCalled();
+		await git.loadRepository('git-A');
+		git.restoreCacheImmediate('plain-B');
+		expect(git.current.status?.is_git_repo).toBe(false);
+		expect(git.current.branches).toEqual([]);
+		expect(git.current.hydrated).toBe(true);
+		const pending = deferred<GitStatus>();
+		mocks.getGitStatus.mockReturnValueOnce(pending.promise);
+		const load = git.loadRepository('plain-B');
+		expect(git.current.status?.is_git_repo).toBe(false);
+		pending.resolve(status());
+		await load;
+		expect(git.current.status?.is_git_repo).toBe(true);
+		expect(git.current.branches).toHaveLength(1);
+	});
+
+	it('uses project non-repo memory for an unseen base worker scope', async () => {
+		git.setWorkerTarget({ workerId: 'local' });
+		mocks.getGitStatus.mockResolvedValueOnce(status({ is_git_repo: false, current_branch: null }));
+		await git.loadRepository('plain-B');
+		await git.loadRepository('git-A');
+		git.setWorkerTarget(null);
+		git.restoreCacheImmediate('plain-B');
+		expect(git.current.status?.is_git_repo).toBe(false);
+		expect(git.current.branches).toEqual([]);
+	});
+
+	it('switches between two git projects without a cross-project placeholder', async () => {
+		await git.loadRepository('git-A');
+		git.restoreCacheImmediate('git-C');
+		expect(git.current.status).toBeNull();
+		expect(git.current.branches).toEqual([]);
+		await git.loadRepository('git-C');
+		git.restoreCacheImmediate('git-A');
+		expect(git.current.status?.is_git_repo).toBe(true);
+		expect(git.current.branches).toHaveLength(1);
+	});
+
+	it('clears all git collections on a positive non-repo poll and remembers it', async () => {
+		await git.loadRepository('plain-B');
+		mocks.getGitStatus.mockResolvedValueOnce(status({ is_git_repo: false, current_branch: null }));
+		await git.refreshStatus();
+		expect(git.current.branches).toEqual([]);
+		expect(git.current.prState).toBeNull();
+		expect(git.current.diffStats).toBeNull();
+		await git.loadRepository('git-A');
+		git.restoreCacheImmediate('plain-B');
+		expect(git.current.status?.is_git_repo).toBe(false);
+		expect(git.current.branches).toEqual([]);
+	});
+});
+
 describe('git store — cleaned-up / reused worktree', () => {
 	it('reports a definitive no-repo status when the worktree folder is gone (404)', async () => {
 		mocks.getGitStatus.mockRejectedValue({ status: 404, detail: 'Worktree not found' });
