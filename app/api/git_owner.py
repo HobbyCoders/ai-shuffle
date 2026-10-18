@@ -6,6 +6,8 @@ The regular endpoint remains the implementation for local and remote actions.
 """
 import inspect
 import os
+import stat
+import subprocess
 from functools import wraps
 from typing import get_type_hints
 
@@ -246,6 +248,30 @@ async def _route_project_git(endpoint, values, worker_id, branch):
     return result["result"]
 
 
+def _is_plain_project_folder(path):
+    """Only a real non-repository is an empty Git status, never a failed probe.
+
+    Do not use is_git_repo here: its boolean fallback also covers permission,
+    missing Git and timeout failures. Missing paths retain the checkout 409.
+    This is deliberately uncached so an external git init is seen next poll.
+    """
+    from app.core.git_service import git_service
+
+    try:
+        if not stat.S_ISDIR(os.stat(path).st_mode):
+            return False
+    except FileNotFoundError:
+        return False
+    result = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=5,
+                                  env={**os.environ, "LC_ALL": "C"})
+    if result.returncode == 0:
+        return False  # An enclosing repository is not a plain project folder.
+    if "fatal: not a git repository (or any of the parent directories): .git" in result.stderr:
+        return True
+    raise subprocess.CalledProcessError(result.returncode, result.args,
+                                        output=result.stdout, stderr=result.stderr)
+
+
 async def handle_project_git(body, from_device):
     from app.api import git  # noqa: F401
     from app.api.git_helpers import _worker_checkout_scope
@@ -280,17 +306,22 @@ async def handle_project_git(body, from_device):
     found: dict = {}
     for row in sorted(candidates, key=lambda r: (not r.get("branch"), _resolve_checkout_path(r["path"]) != r["path"])):
         path = _resolve_checkout_path(row["path"])
+        plain_folder = False
         if not await run_sync(_dir_is_worktree, path):
-            continue
-        actual = await run_sync(git_service.get_current_branch, path)
+            if name != "get_git_status" or branch is not None or row.get("branch"):
+                continue
+            plain_folder = await run_sync(_is_plain_project_folder, path)
+            if not plain_folder:
+                continue
+        actual = None if plain_folder else await run_sync(git_service.get_current_branch, path)
         if branch is None and row.get("branch"):
             continue
         if branch is not None and actual != branch:
             continue
-        found.setdefault(os.path.normcase(os.path.realpath(path)), (path, row))
+        found.setdefault(os.path.normcase(os.path.realpath(path)), (path, row, plain_folder))
     if len(found) != 1:
         return {"status": 409, "detail": "Selected checkout is missing or ambiguous on this worker"}
-    path, checkout = next(iter(found.values()))
+    path, checkout, plain_folder = next(iter(found.values()))
     if name == "checkout_branch" and checkout.get("branch"):
         return {"status": 400, "detail": "Cannot checkout branches in a worktree. Worktrees are bound to their branch."}
     if name == "create_commit" and checkout.get("branch") and isinstance(params.get("body"), dict) \
@@ -316,7 +347,11 @@ async def handle_project_git(body, from_device):
         scope = _worker_checkout_scope.set((project_id, path))
         try:
             await _guard_mutation(body["action"], values, endpoint)
-            result = await endpoint(**values)
+            if plain_folder:
+                from app.api.schemas.git import GitStatusResponse
+                result = GitStatusResponse(is_git_repo=False)
+            else:
+                result = await endpoint(**values)
         finally:
             _worker_checkout_scope.reset(scope)
         return {"status": 200, "result": jsonable_encoder(result)}
