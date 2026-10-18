@@ -1037,7 +1037,7 @@ export const activeSession = {
 	},
 
 	setProject(projectId: string, projectV2Id?: string | null) {
-		if (_state.sessionId || (_state.worktreeIntent === 'local' && _state.messages.length > 0)) {
+		if (_state.worktreeIntent === 'local' && _state.messages.length > 0) {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
@@ -1052,7 +1052,8 @@ export const activeSession = {
 			...s,
 			workspaceProjectIds: (s.workspaceProjectIds ?? []).filter(id => id !== projectId),
 			// Re-read this project's defaults without clearing the project we left.
-			...composerCheckoutDefaults(s.mode !== 'chat', {projectId, projectV2Id:nextV2}, {project:projectId, projectV2Id:nextV2}),
+			...(s.sessionId ? {project:projectId, projectV2Id:nextV2}
+				: composerCheckoutDefaults(s.mode !== 'chat', {projectId, projectV2Id:nextV2}, {project:projectId, projectV2Id:nextV2})),
 			isCreatingWorktree: false,
 			worktreeError: null,
 		}));

@@ -77,5 +77,5 @@ it('does not change an existing session when Git or account defaults change', as
  const {composerPreferences:p}=await import('./composer-preferences');
  p.rememberWorktreeIntent({projectId:'a',projectV2Id:null},'local');
  active.applyComposerDefaults(); status('a',false); active.setProject('b');
- expect(active.current).toMatchObject({sessionId:'existing',project:'a',worktreeIntent:'worktree',worktreeId:'wt',worktreeBranch:'session/branch'});
+ expect(active.current).toMatchObject({sessionId:'existing',project:'b',worktreeIntent:'worktree',worktreeId:'wt',worktreeBranch:'session/branch'});
 });
