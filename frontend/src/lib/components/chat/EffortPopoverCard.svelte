@@ -62,7 +62,7 @@
 	}
 </script>
 
-<div class="effort-pop-card">
+<div class="effort-pop-card" class:fast-active={fastSupported && fastEnabled}>
 	<div class="pop-head">
 		<span class="pop-title">Effort</span>
 		<span class="pop-value-slot">
@@ -131,6 +131,41 @@
 	.effort-pop-card {
 		padding: 12px 14px;
 		min-width: 0;
+		position: relative;
+		isolation: isolate;
+		border-radius: inherit;
+	}
+
+	/* Decorative energy stays behind the controls and never catches a click.
+	   Three short passes celebrate activation, then settle to a quiet glow. */
+	.effort-pop-card::before,
+	.effort-pop-card::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		border-radius: inherit;
+		pointer-events: none;
+		opacity: 0;
+	}
+
+	.fast-active::before {
+		background: radial-gradient(ellipse at top right, color-mix(in oklch, var(--primary) 13%, transparent), transparent 75%);
+		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 28%, transparent);
+		opacity: 1;
+	}
+
+	.fast-active::after {
+		background: linear-gradient(110deg, transparent 35%, color-mix(in oklch, var(--primary) 12%, transparent) 49%, color-mix(in oklch, var(--primary) 24%, transparent) 50%, transparent 65%);
+		background-size: 300% 100%;
+		animation: fast-energy-sweep 1.6s ease-out 3;
+	}
+
+	@keyframes fast-energy-sweep {
+		0% { background-position: 100% 0; opacity: 0; }
+		15% { opacity: 1; }
+		70% { background-position: 0% 0; opacity: 0; }
+		100% { background-position: 0% 0; opacity: 0; }
 	}
 
 	.pop-head {
@@ -192,12 +227,20 @@
 	}
 
 	.fast-toggle.on {
-		background: color-mix(in oklch, var(--primary) 16%, transparent);
+		background: color-mix(in oklch, var(--primary) 18%, var(--card));
 		color: var(--primary);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	.fast-toggle.on :global(svg) {
 		fill: currentColor;
+		animation: fast-bolt-charge 480ms ease-out;
+	}
+
+	@keyframes fast-bolt-charge {
+		0% { transform: scale(0.75) rotate(12deg); }
+		55% { transform: scale(1.18) rotate(-8deg); }
+		100% { transform: scale(1) rotate(0); }
 	}
 
 	.fast-toggle:focus-visible {
@@ -346,8 +389,15 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.pop-value {
+		.pop-value,
+		.fast-active::after,
+		.fast-toggle.on :global(svg) {
 			animation: none;
+		}
+
+		.fast-toggle,
+		.fill {
+			transition: none;
 		}
 	}
 </style>
