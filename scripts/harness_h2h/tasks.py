@@ -68,9 +68,10 @@ def _run(cmd: list[str] | str, *, cwd: Path | None = None, env: dict | None = No
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: Written into every workspace the bench fills. A non-empty directory without
-#: it is never emptied: it is somebody's real folder, not a bench workspace.
-WORKSPACE_MARKER = ".harness-h2h-workspace"
+#: Name of the ownership record the callers keep OUTSIDE the workspace (in the
+#: results or scratch dir). It lists every workspace the bench has emptied, so
+#: an agent's ``git clean -fdx`` cannot erase the proof and agents never see it.
+OWNER_RECORD = "workspace_owner.json"
 
 
 class UnsafeWorkspace(RuntimeError):
@@ -100,32 +101,42 @@ def check_workspace(path: Path, protected: Any = ()) -> Path:
     return p
 
 
-def clear_dir(path: Path, protected: Any = ()) -> None:
+def _owned(record: Path) -> list[str]:
+    try:
+        return list(json.loads(record.read_text(encoding="utf-8")).get("workspaces") or [])
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def clear_dir(path: Path, protected: Any = (), *, owner_record: Path) -> None:
     """Empty a bench workspace in place (the app project keeps pointing at it).
 
-    Only a new or empty directory, or one carrying :data:`WORKSPACE_MARKER`,
-    is emptied; the marker is (re)written afterwards.
+    Only a new or empty directory, or one ``owner_record`` lists, is emptied;
+    the path is then (re)recorded. The record must live outside the workspace.
     """
-    path = check_workspace(path, protected)
+    owner_record = Path(owner_record).expanduser().resolve()
+    path = check_workspace(path, (*protected, owner_record))
     path.mkdir(parents=True, exist_ok=True)
     entries = list(path.iterdir())
-    if entries and not (path / WORKSPACE_MARKER).is_file():
+    owned = _owned(owner_record)
+    if entries and str(path) not in owned:
         raise UnsafeWorkspace(
-            f"{path} is not empty and was not created by the bench (no {WORKSPACE_MARKER}); "
+            f"{path} is not empty and {owner_record} does not list it as a bench workspace; "
             "refusing to empty it")
     for child in entries:
-        if child.name == WORKSPACE_MARKER:
-            continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
         else:
             child.unlink()
-    (path / WORKSPACE_MARKER).write_text("scripts/harness_h2h workspace; emptied before every run\n")
+    if str(path) not in owned:
+        owner_record.parent.mkdir(parents=True, exist_ok=True)
+        owner_record.write_text(json.dumps({"workspaces": [*owned, str(path)]}, indent=2) + "\n",
+                                encoding="utf-8")
 
 
-def snapshot(repo: str, sha: str, dest: Path, protected: Any = ()) -> None:
+def snapshot(repo: str, sha: str, dest: Path, protected: Any = (), *, owner_record: Path) -> None:
     """``dest`` holds ``sha``'s tree as a one-commit repository, nothing else."""
-    clear_dir(dest, (repo, *protected))
+    clear_dir(dest, (repo, *protected), owner_record=owner_record)
     archive = _run(["git", "-C", repo, "archive", "--format=tar", sha])
     if archive.returncode != 0:
         raise RuntimeError(f"git archive {sha} failed: {archive.stdout[-500:]!r}")
@@ -138,12 +149,6 @@ def snapshot(repo: str, sha: str, dest: Path, protected: Any = ()) -> None:
         r = _run(cmd, cwd=dest, env=env)
         if r.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd)} failed: {r.stdout[-500:]!r}")
-        if cmd[1] == "init":
-            # Keep the marker out of the snapshot commit and the agent's diff.
-            info = dest / ".git" / "info"
-            info.mkdir(parents=True, exist_ok=True)
-            with (info / "exclude").open("a", encoding="utf-8") as fh:
-                fh.write(f"/{WORKSPACE_MARKER}\n")
 
 
 def install_hidden_tests(task: Task, dest: Path) -> list[str]:
@@ -222,10 +227,11 @@ def validate(task: Task, scratch: Path) -> dict[str, Any]:
     if task.kind == "question":
         return {"task": task.id, "ok": True, "note": "question task: graded by answer checks"}
     ws = scratch / f"validate-{task.id}"
-    snapshot(task.repo, task.base, ws)
+    record = scratch / OWNER_RECORD
+    snapshot(task.repo, task.base, ws, owner_record=record)
     install_hidden_tests(task, ws)
     before = run_tests(task, ws)
-    snapshot(task.repo, task.fix, ws)
+    snapshot(task.repo, task.fix, ws, owner_record=record)
     after = run_tests(task, ws)
     shutil.rmtree(ws, ignore_errors=True)
     ok = (not before["passed"]) and after["passed"]

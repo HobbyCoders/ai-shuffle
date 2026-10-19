@@ -29,8 +29,9 @@ its calls are rebuilt from the session's event log.
   project's path), refilled before each run. Runs are strictly sequential.
   The bench refuses a workspace that is, contains or sits inside this
   checkout, a task's source repo, the results dir or the home directory, and
-  only empties a non-empty directory that carries its `.harness-h2h-workspace`
-  marker.
+  only empties a non-empty directory listed in `<out>/workspace_owner.json`.
+  That record lives outside the workspace, so an agent's `git clean -fdx`
+  cannot erase it and agents never see it.
 - `cc` and `fluid` run with an empty `HOME`, no GitHub credentials and no user
   config, skills or memory. The `app` arm cannot be isolated that way, so every
   run's tool calls are scanned for routes to the real fix (`gh`, github.com,
