@@ -87,7 +87,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -101,7 +101,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./call-popout': { CallPopout: class { register() {} } },
 		'./managed-context': { managedContext: () => managed, setManagedContext: context => { managed = context; } },
 		'./installed-entry': { installedContext: () => installed },
-		'./installed-host': { installedLaunchArgs: () => [] },
+		'./installed-host': { installedLaunchArgs: () => [], launcherVersion: localRequire('./installed-host').launcherVersion, LAUNCHER_VERSION_ENV: 'SHUFFLE_LAUNCHER_VERSION' },
 		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
 		'./menu': { installMenu: (actions) => { menu = actions; } },
 		'./navigation': { installPermissionPolicy() {}, forgetServiceWorkers: async () => { serviceWorkerClears.push(pages.length); } },
@@ -166,7 +166,7 @@ function loadUpdater(electron) {
 	vm.runInNewContext(readFileSync(path.join(desktopDir, 'dist/main/updater.js'), 'utf8'), {
 		// Its own imports (./channel-return) resolve beside it, as in the packaged app.
 		module, exports: module.exports, require: (id) => (id === 'electron' ? electron : createRequire(path.join(desktopDir, 'dist/main/updater.js'))(id)),
-		process: { env: {} }, setTimeout: inert, clearTimeout: inert, setInterval: inert, clearInterval: inert, Date, Error
+		process: { env: {} }, setTimeout: inert, clearTimeout: inert, setInterval: inert, clearInterval: inert, Date, Error, console
 	});
 	return module.exports.Updater;
 }
@@ -516,4 +516,88 @@ test('quitting a first boot before its database started lets the next launch ret
 	assert.equal(started.deferred, 0);
 	assert.equal(started.starting, 1, 'the launcher is told before the database starts');
 	assert.equal(waiting.starting, undefined);
+});
+
+test('an update\'s first start gives its worker 10 minutes to become ready; other starts keep the usual limit', async () => {
+	const { promises: fs } = await import('node:fs');
+	const os = await import('node:os');
+	const R = 'b'.repeat(40);
+	for (const [booting, expected] of [[R, 10 * 60_000], [undefined, undefined]]) {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-first-start-'));
+		try {
+			await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: 'a'.repeat(40), ...(booting ? { pending: R, booting, waiting: R } : {}) }, null, 2) + '\n');
+			const updates = { options: { root }, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {}, async load() {} };
+			const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
+			const main = await launch({ managed: { root, application, updates, host: null } });
+			assert.equal(main.worker.options.readyTimeoutMs, expected, booting ? 'first start' : 'ordinary start');
+			// The previous version's updater can offer a put-back first start again.
+			assert.equal(typeof main.updater.failedStart?.release, 'function');
+			assert.equal(typeof main.updater.restarting, 'function');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	}
+});
+
+test('restarting into an update copies the database for its restore point with the window saying so, only for launchers that then just check it', async () => {
+	const R = 'b'.repeat(40);
+	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
+	const host = { executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe', userData: 'C:/Users/owner/AppData/Roaming/AI Shuffle', name: 'AI Shuffle' };
+	const updates = (events) => ({ options: { root: '/isolated/no-root' }, async requireRestorePoint() {}, async databaseStarting() {}, healthy: () => new Promise(() => {}), async finishRollback() {}, async failed() {}, async load() {},
+		async prepareRollback(factory) { const copy = await factory('a'.repeat(40)); events.push(['copy', copy.constructor.name]); },
+		async rollbackVersion() { return events.ready ? '1.0.1' : null; }, async rollbackNotice() { return events.notice ?? null; },
+		async cancelPreparedRollback() { events.push(['discard']); } });
+	const events = []; events.ready = true;
+	const main = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(events), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	assert.deepEqual(main.errors, []);
+	const before = main.window.sent.length;
+	await main.updater.prepared.prepare();
+	assert.deepEqual([...events], [['copy', 'SinglePassClusterCopy']]);
+	assert.equal(main.window.currentPage, 'status');
+	const steps = main.window.sent.slice(before).filter(([channel]) => channel === 'desktop:worker-state').map(([, state]) => state.startupStep);
+	assert.deepEqual(steps, ['restore-point', undefined], 'the status page says the restore point is being prepared, then stops saying so');
+	await main.updater.prepared.discard();
+	assert.deepEqual(events.at(-1), ['discard']);
+	// A copy that failed ends the install with the reason the launcher would have shown.
+	const failing = []; failing.notice = 'Update 1.0.2 was not started because its database restore point failed: disk full';
+	const failed = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(failing), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	await assert.rejects(failed.updater.prepared.prepare(), /disk full/);
+	// Launchers before restore points, isolated profiles and other platforms keep the launcher's own behaviour.
+	for (const options of [{ env: { SHUFFLE_LAUNCHER_VERSION: '3' }, platform: 'win32', host }, { env: {}, platform: 'win32', host }, { env: { SHUFFLE_LAUNCHER_VERSION: '4' }, platform: 'linux', host }, { env: { SHUFFLE_LAUNCHER_VERSION: '4' }, platform: 'win32', host: null }]) {
+		const other = await launch({ managed: { root: '/isolated/no-root', application, updates: updates([]), host: options.host }, platform: options.platform, env: options.env });
+		assert.equal(other.updater.prepared, undefined, JSON.stringify(options));
+	}
+});
+test('while a restore point is ready for an update that has not started, nothing in this version reopens the database', async () => {
+	const { promises: fs } = await import('node:fs');
+	const os = await import('node:os');
+	const A = 'a'.repeat(40), R = 'b'.repeat(40);
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-held-point-'));
+	try {
+		const starts = [];
+		const updates = { options: { root }, version: A, async requireRestorePoint() {}, async databaseStarting() { starts.push('floor'); }, healthy: () => new Promise(() => {}), async finishRollback() {}, async failed() {}, async load() {} };
+		const main = await launch({ installed: { executable: path.resolve('Programs/AI Shuffle.exe'), updates, root }, postgresStart: async () => starts.push('postgres') });
+		assert.deepEqual(starts, ['floor', 'postgres']);
+		// The copy for R was made, then the restart failed (or the quit was cancelled).
+		await fs.writeFile(path.join(root, 'restore-point.json'), JSON.stringify({ schemaVersion: 1, phase: 'ready', revision: R, previous: A }));
+		await main.postgres.stop();
+		// Route 1: the failed install starts the stack again.
+		await main.updater.installFailed(new Error('cannot relaunch'));
+		// Route 2: Restart Worker.
+		await main.ipc.worker.restart();
+		assert.deepEqual(starts, ['floor', 'postgres'], 'the database stayed closed');
+		const state = main.window.sent.filter(([channel]) => channel === 'desktop:worker-state').at(-1)[1];
+		assert.equal(state.phase, 'failed'); assert.match(state.error, /Quit AI Shuffle and open it again to finish installing the update/);
+		// A point for this version itself (its own first start), a committed one, or none at all does not hold it.
+		for (const journal of [{ phase: 'ready', revision: A }, { phase: 'committed', revision: R }, null]) {
+			if (journal) await fs.writeFile(path.join(root, 'restore-point.json'), JSON.stringify({ schemaVersion: 1, previous: 'c'.repeat(40), ...journal }));
+			else await fs.rm(path.join(root, 'restore-point.json'), { force: true });
+			const before = starts.length;
+			await main.ipc.worker.restart();
+			assert.equal(starts.length, before + 2, JSON.stringify(journal));
+		}
+		// Route 3: a launch (or reopening the window) while the point is held.
+		await fs.writeFile(path.join(root, 'restore-point.json'), '{ not json');
+		const held = [];
+		await launch({ installed: { executable: path.resolve('Programs/AI Shuffle.exe'), updates: { ...updates, async databaseStarting() { held.push('floor'); } }, root }, postgresStart: async () => held.push('postgres') });
+		assert.deepEqual(held, [], 'an unreadable journal holds the database closed too');
+	} finally { await fs.rm(root, { recursive: true, force: true }); }
 });

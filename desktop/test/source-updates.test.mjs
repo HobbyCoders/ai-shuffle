@@ -524,6 +524,56 @@ test('restore journal: bundled-baseline first-start failure returns to the bundl
  assert.equal(restart.version,A); assert.equal(restart.hasSourceState,false); assert.equal(restart.hasMigrationRisk,false);
  const launcher=await installedLauncher(f); await launcher.start(); assert.ok(launcher.events.includes('bundled')); assert.ok(!launcher.events.includes(B));
 });
+test('a first start that never reached attach is put back by the launcher, then offered again and installs',async t=>{
+ const {retryableStarts,releaseStarts}=require('../dist/main/failed-start.js');
+ const {f,u,calls,factory}=await rollbackFixture(t);
+ // The owner installs B: the launcher makes the restore point and selects B (booting, floor uncertain).
+ await u.prepareRollback(factory); await u.select();
+ // B's process is still loading (a freshly built Electron being scanned) when the app is opened again.
+ // That launch sees booting without waiting, marks B failed and puts the database back.
+ const next=f.create(); await next.load(); assert.equal(await next.recoverRollback(factory),true);
+ assert.deepEqual(calls,['snapshot','restore','discard']);
+ const left=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.deepEqual([left.active,left.failed,left.supersededFailed,left.blocked,left.mayHaveMigrated],[A,[B],[B],undefined,undefined]);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'),'utf8')).revision,A,'B never opened the database');
+ // Before this fix the feed's B was refused for good, with only an installer to offer.
+ await assert.rejects(next.check(),/This revision failed to start/);
+ // The previous version (the app now running) offers it again.
+ assert.deepEqual(await releaseStarts(f.root,await retryableStarts(f.root)),[B]); await next.load();
+ assert.equal((await next.check()).kind,'available');
+ // The retry is an ordinary install: a new restore point, then B starts and becomes healthy.
+ next.stageDownloads(); await next.download(); await next.prepareInstall();
+ await next.prepareRollback(factory); assert.equal((await next.select()).revision,B);
+ const app=f.create(); await app.attach(B); await app.databaseStarting(); await app.healthy();
+ assert.equal(app.version,B); assert.equal(app.hasMigrationRisk,false);
+ assert.deepEqual(calls,['snapshot','restore','discard','snapshot']);
+});
+test('a restore point the app made before restarting is only checked by the launcher; one from a failed install is never reused',async t=>{
+ const {f,u,calls,factory}=await rollbackFixture(t);
+ const validated=[];const checking=async previous=>({...await factory(previous),validate:async()=>validated.push(previous),snapshot:async()=>assert.fail('the launcher must not copy again')});
+ // The running app copies the database with its window open, then restarts into the launcher.
+ await u.prepareRollback(factory);assert.deepEqual(calls,['snapshot']);assert.equal(await u.rollbackVersion(),'0.9.1');
+ const launcher=f.create();await launcher.load();
+ assert.equal(await launcher.recoverRollback(checking),false);await launcher.prepareRollback(checking);
+ assert.deepEqual(validated,[A]);assert.equal((await launcher.select()).revision,B);
+ // Another install whose restart fails: the app discards its point before the update stops being pending.
+ const g=await rollbackFixture(t);
+ g.u.stageDownloads();await g.u.prepareRollback(g.factory);
+ await g.u.cancelPreparedRollback(g.factory);await g.u.cancelInstall();
+ assert.deepEqual(g.calls,['snapshot','discard']);assert.equal(await g.u.rollbackVersion(),null);
+ // The running version used the database again; the next install copies it afresh.
+ await g.u.databaseStarting();await g.u.prepareInstall();await g.u.prepareRollback(g.factory);
+ assert.deepEqual(g.calls,['snapshot','discard','snapshot']);
+});
+test('a failed first start that may have migrated the database and was not put back is never offered again',async t=>{
+ const {retryableStarts}=require('../dist/main/failed-start.js');
+ const f=await fixture(t);const u=f.create();await u.load();
+ await f.release(A);await u.download();await u.select();await u.databaseStarting();await u.healthy();
+ // A launcher without restore points: no journal, so the failure stays fenced.
+ await f.release(B);await u.download();await u.select();
+ const next=f.create();await next.load();
+ assert.equal(next.blocked,true);assert.deepEqual(await retryableStarts(f.root),[]);
+});
 test('Linux startup drops only incomplete unselected downloads, validates healthy code and permits a real re-download',async t=>{
  for(const active of [false,true])for(const missing of ['build.json','release.json']){
   const f=await fixture(t);const seed=f.create();await seed.load();
@@ -1268,4 +1318,32 @@ test('the update lock: a live holder refuses, a dead holder is reclaimed, fresh 
  await assert.rejects(fs.stat(lock),/ENOENT/);
  f.signed=release.signed;assert.equal((await u.download()).kind,'ready');
  await assert.rejects(fs.stat(lock),/ENOENT/);
+});
+test('an app-made restore point that cannot be discarded holds the database closed, so the launcher never restores a stale copy over newer data', async t => {
+ const { SinglePassClusterCopy, pointHeldFor } = require('../dist/main/update-restore-point.js');
+ const { ColdClusterCopy } = require('../dist/main/database-restore.js');
+ const { f, u } = await rollbackFixture(t);
+ u.stageDownloads(); await u.download();
+ const rows = path.join(f.root, 'postgres', 'data', 'base', '16384', '2619');
+ for (const [name, body] of Object.entries({ 'PG_VERSION': '17\n', 'global/pg_control': 'control', 'base/16384/2619': 'rows-v1' })) {
+  await fs.mkdir(path.dirname(path.join(f.root, 'postgres', 'data', name)), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'postgres', 'data', name), body);
+ }
+ // Updater.install: the restart is prepared, then the app copies the database for the update's restore point.
+ await u.prepareInstall(); await u.prepareRollback(async () => new SinglePassClusterCopy(path.join(f.root, 'postgres'), async () => {}));
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'restore-point.json'), 'utf8')).phase, 'ready');
+ // The relaunch fails and so does the discard (a locked journal, a full disk): the journal stays ready.
+ // The old app used to move the update back to staged and reopen the database here; the
+ // launcher's next start then restored this copy over everything written since.
+ // Now nothing in this version opens the database while the point is held...
+ assert.equal(await pointHeldFor(f.root, A), true);
+ assert.equal(u.pendingVersion, B, 'the update stays pending');
+ // ...and the next launcher start keeps the copy as the update's restore point and starts the update.
+ const launcher = f.create(); await launcher.load();
+ assert.equal(await launcher.recoverRollback(async () => new ColdClusterCopy(path.join(f.root, 'postgres'), async () => {})), false);
+ await launcher.prepareRollback(async () => new ColdClusterCopy(path.join(f.root, 'postgres'), async () => {}));
+ assert.equal((await launcher.select()).revision, B);
+ assert.equal(await fs.readFile(rows, 'utf8'), 'rows-v1');
+ // Once the update started (or the point is committed), the running version is the point's own.
+ assert.equal(await pointHeldFor(f.root, B), false);
 });

@@ -11,7 +11,7 @@ function fixture(env = {}, modules = {}) {
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
   exports: module.exports, module, require: id => id === 'electron' ? { app } : modules[id] ?? path,
   process: { env }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
-  setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date
+  setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date, console
  });
  return { updater: new module.exports.Updater(), calls, timers, app };
 }
@@ -439,4 +439,92 @@ test('a bridge that fails or a session count that cannot be read never installs 
  await updater.exchange(); await new Promise(setImmediate);
  assert.equal(installs, 0);
  updater.stop();
+});
+
+const FAILED_START = 'Error: This revision failed to start. Check again after a newer update. Previous files and data have been retained.';
+test('a check refused for a failed first start the launcher put back offers that update again and says why', async () => {
+ const {updater}=fixture();const B='b'.repeat(40);let failed=true;const released=[];
+ updater.useApplications(source({check:async()=>{if(failed)throw Error(FAILED_START.slice(7));return {...available,version:B.slice(0,12),release:'1.0.2'};}}));
+ updater.onFailedStart({release:async()=>{released.push(B);failed=false;return [B];},installerNewer:async()=>assert.fail('a retry needs no installer')});
+ await updater.check();
+ assert.deepEqual(released,[B]);
+ assert.equal(updater.current.phase,'available');assert.equal(updater.current.version,B.slice(0,12));assert.equal(updater.current.release,'1.0.2');
+ assert.match(updater.current.message,/did not finish.*try again.*can take a few minutes/i);assert.equal(updater.current.error,null);
+ // Downloading it is the retry; the hint goes once the update is no longer the one that failed.
+ await updater.download();assert.equal(updater.current.phase,'ready');assert.equal(updater.current.message,null);
+});
+test('a failed first start that cannot be retried reports whether the installer is newer, and nothing else does', async () => {
+ for (const newer of [false,true,null]) {
+  const {updater}=fixture();
+  updater.useApplications(source({check:async()=>{throw Error(FAILED_START.slice(7));}}));
+  updater.onFailedStart({release:async()=>[],installerNewer:async()=>newer});
+  await updater.check();
+  assert.equal(updater.current.phase,'error');assert.equal(updater.current.error,FAILED_START);assert.equal(updater.current.installer_newer,newer);
+ }
+ const {updater}=fixture();let asked=0;
+ updater.useApplications(source({check:async()=>{throw Error('Source update request failed (503)');}}));
+ updater.onFailedStart({release:async()=>{asked++;return [];},installerNewer:async()=>{asked++;return true;}});
+ await updater.check();assert.equal(asked,0);assert.equal(updater.current.installer_newer,null);
+ // A release that fails leaves the original refusal.
+ const broken=fixture().updater;
+ broken.useApplications(source({check:async()=>{throw Error(FAILED_START.slice(7));}}));
+ broken.onFailedStart({release:async()=>{throw Error('locked');},installerNewer:async()=>false});
+ await broken.check();assert.equal(broken.current.error,FAILED_START);assert.equal(broken.current.installer_newer,false);
+});
+test('restarting into an update says the new version is starting before the window goes', async () => {
+ const {updater,calls}=fixture();const seen=[];
+ updater.useApplications(source({check:async()=>ready,prepareInstall:async()=>calls.push('prepare')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onRestarting(()=>calls.push('announce'));updater.subscribe(state=>seen.push(state.message));
+ await updater.check();await updater.install();
+ assert.deepEqual(calls.slice(0,2),['prepare','announce']);assert.equal(calls.at(-1),'quit');
+ assert.match(seen.at(-1),/Starting the new version\. This can take a few minutes/);
+ // A notification that cannot be shown never stops the restart.
+ const second=fixture();second.updater.useApplications(source({check:async()=>ready}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ second.updater.onRestarting(()=>{throw Error('no notifications');});
+ const error=console.error;console.error=()=>{};
+ try{await second.updater.check();await second.updater.install();}finally{console.error=error;}
+ assert.equal(second.calls.at(-1),'quit');
+});
+test('the restore point is made after the update is pending and before the restart, and discarded if the install then fails', async () => {
+ const {updater,calls,app}=fixture();
+ updater.useApplications(source({check:async()=>ready,prepareInstall:async()=>calls.push('pending'),cancelInstall:async()=>calls.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onBeforeInstall(async()=>calls.push('stop'));
+ updater.onInstallPrepared(async()=>calls.push('point'),async()=>calls.push('discard'));
+ await updater.check();await updater.install();
+ assert.deepEqual(calls.slice(0,3),['stop','pending','point']);assert.equal(calls.at(-1),'quit');assert(!calls.includes('discard'));
+ // The restart itself fails: the point goes before the update stops being pending.
+ const second=fixture();const order=second.calls;
+ second.app.relaunch=()=>{throw Error('cannot relaunch');};
+ second.updater.useApplications(source({check:async()=>ready,cancelInstall:async()=>order.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ second.updater.onInstallPrepared(async()=>order.push('point'),async()=>order.push('discard'));
+ await second.updater.check();await second.updater.install();
+ assert.deepEqual(order,['point','discard','cancel']);assert.match(second.updater.current.error,/cannot relaunch/);
+ // A copy that fails is the install's error; nothing is restarted.
+ const third=fixture();
+ third.updater.useApplications(source({check:async()=>ready}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ third.updater.onInstallPrepared(async()=>{throw Error('Update B was not started because its database restore point failed: disk full');},async()=>{});
+ await third.updater.check();await third.updater.install();
+ assert.match(third.updater.current.error,/disk full/);assert(!third.calls.includes('quit'));
+});
+test('a restore point that cannot be discarded keeps the update pending and never reopens the database', async () => {
+ const {updater,calls,app}=fixture();const order=[];
+ app.relaunch=()=>{throw Error('cannot relaunch');};
+ updater.useApplications(source({check:async()=>ready,cancelInstall:async()=>order.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onInstallPrepared(async()=>order.push('point'),async()=>{order.push('discard');throw Error('EBUSY: restore-point.json is locked');});
+ updater.onInstallFailed(async()=>order.push('start stack'));
+ const error=console.error;console.error=()=>{};
+ try{await updater.check();await updater.install();}finally{console.error=error;}
+ // Neither cancelInstall (the update stays pending) nor a restart of the stack.
+ assert.deepEqual(order,['point','discard']);assert(!calls.includes('quit'));
+ assert.equal(updater.current.phase,'ready');
+ assert.match(updater.current.error,/cannot relaunch[\s\S]*Quit AI Shuffle and open it again to finish installing/);
+});
+test('an install whose database copy failed ends with nothing staged and says so plainly', async () => {
+ const {updater}=fixture();const manager=source({check:async()=>ready,pendingVersion:'b'.repeat(40)});
+ updater.useApplications(manager,'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onInstallPrepared(async()=>{manager.pendingVersion=null;throw Error('The update was not installed: AI Shuffle could not save a copy of your database first (disk full).');},async()=>{});
+ let restarted=0;updater.onInstallFailed(async()=>{restarted++;});
+ await updater.check();await updater.install();
+ assert.equal(updater.current.phase,'error');assert.match(updater.current.error,/could not save a copy of your database first \(disk full\)/);
+ assert.doesNotMatch(updater.current.error,/did not finish|went back/);assert.equal(restarted,1,'the running version starts its stack again');
 });

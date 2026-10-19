@@ -6,10 +6,10 @@
  * to one already running on this computer), and opens its web UI. A first
  * run needs no setup: the embedded cluster is created on the spot.
  */
-import { app, dialog, safeStorage, session, shell } from 'electron';
+import { app, dialog, Notification, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, promises as fsPromises, readFileSync } from 'node:fs';
 import { managedContext } from './managed-context';
 import { installedContext } from './installed-entry';
 import { installedLaunchArgs, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
@@ -27,10 +27,19 @@ import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
+import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
+import { HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { CallPopout } from './call-popout';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
+
+/**
+ * How long an update's first start may take before its worker counts as failed
+ * (which marks the update failed). A freshly built Python runtime on a disk an
+ * antivirus is scanning can take several minutes; the status page says so.
+ */
+const FIRST_START_READY_MS = 10 * 60_000;
 
 // Packaged previews use metadata; source tests require an explicit isolated profile.
 const isolation = managedContext()?.profile;
@@ -76,6 +85,25 @@ async function main(): Promise<void> {
 	const updateRoot = managed?.root ?? installation?.root;
 	const updatePolicyFile = updateRoot ? path.join(updateRoot, 'allow-updates.json') : undefined;
 	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')).filter(arg => arg.startsWith('--')));
+	// An update's first start: a freshly built runtime may be scanned by antivirus software as it loads.
+	const firstStart = !!managed?.root && !!managed.application?.revision && await isFirstStart(managed.root, managed.application.revision);
+	if (applications && updateRoot) {
+		// The launcher marks an update failed when its process never reported back, even one that
+		// was only slow to load. When the launcher put everything back, offer it again (failed-start.ts).
+		updater.onFailedStart({
+			release: async () => {
+				const released = await releaseStarts(updateRoot, await retryableStarts(updateRoot));
+				if (released.length) await applications.load();
+				return released;
+			},
+			installerNewer: () => installerNewer(app.getVersion())
+		});
+	}
+	// The window closes now and the new version's can take minutes to appear: say it is starting.
+	updater.onRestarting(() => {
+		if (typeof Notification !== 'function' || !Notification.isSupported()) return;
+		new Notification({ title: 'Starting the new version of AI Shuffle', body: 'This can take a few minutes. AI Shuffle opens again by itself; there is no need to open it again.' }).show();
+	});
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {
@@ -122,6 +150,8 @@ async function main(): Promise<void> {
 	let preparingRestorePoint = false;
 	/** Why that copy failed; Try again repeats it in this process. */
 	let restorePointFailure: string | null = null;
+	/** Set while an update's restore point is ready for another revision: this version must not open the database. */
+	let heldPoint = false;
 	async function initializeRuntime(): Promise<void> {
 		const repoDir = path.resolve(__dirname, '..', '..', '..');
 		const selected = managed?.application;
@@ -148,6 +178,8 @@ async function main(): Promise<void> {
 						protectedPort: identity.protectedPort,
 						isolated: !!isolation,
 						allowAttach: applications ? false : identity.allowAttach,
+						// An update's first start may also migrate the database: give it longer than the usual 3 minutes.
+						...(firstStart ? { readyTimeoutMs: FIRST_START_READY_MS } : {}),
 						postgres: () => postgres?.connection() ?? null
 					});
 		observeWorker();
@@ -189,7 +221,7 @@ async function main(): Promise<void> {
 	};
 
 	const desktopState = (): DesktopState => ({
-		...(restorePointFailure ? { ...failedState(restorePointFailure), startupStep: 'restore-point' as const }
+		...(heldPoint ? failedState(HELD_POINT_MESSAGE) : restorePointFailure ? { ...failedState(restorePointFailure), startupStep: 'restore-point' as const }
 			: supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
 		...(preparingRestorePoint ? { startupStep: 'restore-point' as const } : {}),
 		postgres: postgresStatus()
@@ -207,6 +239,14 @@ async function main(): Promise<void> {
 		}
 		if (quitting || !supervisor) return;
 		if (!postgres) {
+			window.send('desktop:worker-state', desktopState());
+			return;
+		}
+		// A copy of the database is ready for an update that has not started yet (its restart
+		// failed, or a quit was cancelled). Opening the database now would let the launcher
+		// later restore that copy over whatever this version wrote: every start goes through here.
+		heldPoint = !!applications && !!updateRoot && await pointHeldFor(updateRoot, applications.version);
+		if (heldPoint) {
 			window.send('desktop:worker-state', desktopState());
 			return;
 		}
@@ -404,6 +444,40 @@ async function main(): Promise<void> {
 	installMenu(actions);
 	if (!isolation) installTray(actions, identity.name);
 
+	// The restart's restore point: made here, with the window saying so, rather than by the launcher
+	// with no window open (update-restore-point.ts). Only launchers that make restore points (4 and
+	// later) check a ready one instead of making their own; the installer's own app is such a launcher.
+	const launcherKeepsPoint = !!applications && !!postgres && !isolation && process.platform === 'win32' &&
+		(managed ? !!managed.host && !managed.profile && launcherVersion(process.env[LAUNCHER_VERSION_ENV]) >= 4 : !!installation);
+	if (launcherKeepsPoint) {
+		const restorePoint = async () => new SinglePassClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
+			await quiesceRecordedWorker(path.join(userData, 'worker'));
+			await postgres!.quiesce(snapshot);
+		});
+		updater.onInstallPrepared(async () => {
+			const revision = applications!.pendingVersion;
+			preparingRestorePoint = true;
+			try {
+				await window.showPage('status');
+				window.send('desktop:worker-state', desktopState());
+				await applications!.prepareRollback(restorePoint);
+			} finally {
+				preparingRestorePoint = false;
+				window.send('desktop:worker-state', desktopState());
+			}
+			// A ready point: the launcher only checks it. Still pending without one (a fenced
+			// recovery, or cleanup still pending): the launcher does as before.
+			if (await applications!.rollbackVersion() || applications!.pendingVersion) return;
+			// The copy failed. prepareRollback ended the install as the launcher would have and
+			// marked the update failed, but it never started: offer it again without using up a
+			// retry, and say here what happened instead of in a launcher notice at the next start.
+			const notice = await applications!.rollbackNotice();
+			await fsPromises.rm(path.join(updateRoot!, 'rollback-notice.json'), { force: true });
+			if (revision) { await releaseStarts(updateRoot!, [revision], false); await applications!.load(); }
+			const reason = notice?.replace(/^.*?database restore point failed:\s*/, '').replace(/\.\s*$/, '');
+			throw new RestorePointCopyError(`The update was not installed: AI Shuffle could not save a copy of your database first${reason ? ` (${reason})` : ''}. Your data is unchanged and this version keeps running. Free some disk space, or close programs that may be using the AI Shuffle data folder, then check for updates and try again.`);
+		}, async () => { await applications!.cancelPreparedRollback(restorePoint); });
+	}
 	updater.onBeforeInstall(async () => {
 		await initialization;
 		if (supervisor && !supervisor.state.external) {

@@ -175,6 +175,63 @@ takes the install through a bundled previous build, a failed copy with Try
 again, a kill during the copy and a kill after PostgreSQL started, then the
 launcher swap.
 
+## A first start that did not finish
+
+At step 4 a launcher that finds `booting` without `waiting` marks that build
+failed (`failed()`), and, when a restore point exists, puts the database back
+(`recoverRollback`). It cannot tell a build that crashed from one whose process
+was only slow to load: a freshly built Electron that an antivirus scans can
+take minutes to reach `attach`, and opening the app again in that time starts
+the launcher. The launcher's behaviour here is frozen.
+
+The updated app reads what the launcher left (`src/main/failed-start.ts`, not
+in the launcher closure). A revision in both `failed` and `supersededFailed`,
+with nothing in flight (`booting`, `pending`, `waiting`), no fence or block, no
+restore-point journal, and a readable, certain database floor that is not that
+revision, was fully put back: retrying it is as safe as the first attempt, with
+a new restore point. When the feed offers it and the source updater refuses it
+("This revision failed to start"), the app takes it out of `failed` (a write in
+the updater's own serialization), reloads, and offers it again with a note that
+the last attempt did not finish. Each revision is offered again at most three
+times (`start-retries.json`). Otherwise the refusal stands, and the app reports
+whether the hub's installer is a newer release (`installer_newer`) so the worker
+only suggests an installer that can help.
+
+An update's first start also gives its worker 10 minutes to become ready
+instead of 3: a worker that times out marks the update failed.
+
+**The restore point before the restart.** A launcher (4 and later) makes the
+restore point in `prepareRollback`, before `select` writes `booting`, with no
+window open. `ColdClusterCopy.snapshot` reads the cluster four times (hash,
+copy, hash the copy, hash the source again), so on a large database the
+launcher seems to hang for a minute or more; closing it then leaves a
+`preparing` journal, and `recoverRollback` marks the revision failed. Since
+this change the running app makes the point itself, once the update is
+pending and its worker and PostgreSQL are stopped, while the status page says
+"Preparing the update's database restore point…"
+(`src/main/update-restore-point.ts`). It writes the same folders and manifest
+in one copying pass plus one check of the copy, and checks the source for
+changes by size and modification time. The launcher's `prepareRollback` then
+finds a `ready` point for the pending revision and only validates it (one
+read). If the restart fails, the app discards the point
+(`cancelPreparedRollback`) before the update stops being pending, so a copy of
+a database the running version opens again is never kept. If that discard
+fails too, the update stays pending with its `ready` point and the app asks
+the owner to quit and open it again; the next launcher start then starts the
+update from that exact copy. Until then nothing in the running version opens
+the database: every start (a failed install, a cancelled quit, Restart
+Worker) refuses while `restore-point.json` names another revision than the
+running one or cannot be read (`pointHeldFor`), because the launcher would
+later restore that copy over anything written since. If the copy itself fails,
+`prepareRollback` has already ended the install and marked the revision
+failed, as the launcher would have; the app takes it out of `failed` again
+without counting a retry (it never started), removes the launcher's notice and
+says that the copy failed. The app does this
+only under a launcher that makes restore points (Windows, launcher version 4
+or later, or the installer's own app); otherwise the launcher acts as before.
+Making the launcher's own copy faster would change the launcher closure and
+need a new launcher version.
+
 ## Replacing an older launcher
 
 All of these files are in the installed `resources` folder unless shown

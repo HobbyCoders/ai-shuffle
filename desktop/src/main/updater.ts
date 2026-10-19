@@ -20,6 +20,29 @@ export interface UpdateState {
   release?: string | null; notes?: string | null;
   /** macOS and Linux: the verified installer just saved, for the web UI to announce. */
   installer?: string | null;
+  /**
+   * After a failed first start that cannot be retried: whether the hub's
+   * installer is a newer release than the one running (null: unknown). The
+   * worker offers the installer for that failure only when it is.
+   */
+  installer_newer?: boolean | null;
+  /** The offered update is one whose last first start did not finish and was put back (RETRY_MESSAGE says so). */
+  retry_start?: boolean;
+}
+/** The source updater's refusal of a revision whose first start failed (source-updates.ts update()). */
+export const FAILED_START = /this revision failed to start/i;
+/** Said beside an update offered again after its first start did not finish and was put back. */
+export const RETRY_MESSAGE = 'The last attempt to start this update did not finish, and AI Shuffle went back to the previous version with your data as it was. Download it to try again. The first start after an update can take a few minutes.';
+/** Said when an install failed after the database copy for it was made and that copy could not be removed. */
+export const KEPT_POINT_MESSAGE = 'The update stays ready to start, with the copy of your database made for it. Quit AI Shuffle and open it again to finish installing it; until then this version does not reopen the database.';
+/** Said while the app restarts into an update; the new version's window can take minutes to appear. */
+export const RESTARTING_MESSAGE = 'Starting the new version. This can take a few minutes; AI Shuffle opens again by itself.';
+/** Recovery for an update whose first start did not finish (failed-start.ts). */
+export interface FailedStartRecovery {
+  /** Make every fully put-back failed revision offerable again and reload the source updater; the revisions released. */
+  release(): Promise<string[]>;
+  /** Whether the hub's installer is newer than the running release; null when unknown. */
+  installerNewer(): Promise<boolean | null>;
 }
 /**
  * How often the shell trades update state with its worker (the web UI's
@@ -53,6 +76,9 @@ export class Updater {
   private beforeInstall: () => Promise<void> = async () => {};
   private installFailed: (error: unknown) => Promise<void> = async () => {};
   private installGuard: () => Promise<string | null> = async () => null;
+  private restarting: () => void = () => {};
+  private prepared: { prepare: () => Promise<void>; discard: () => Promise<void> } | null = null;
+  private failedStarts: FailedStartRecovery | null = null;
   private policy: () => Promise<boolean> = async () => true;
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
   private safeToRestart: () => Promise<boolean> = async () => false;
@@ -142,6 +168,32 @@ export class Updater {
    * asks natively: the in-app update button is the one place to retry.
    */
   onInstallGuard(guard: () => Promise<string | null>): void { this.installGuard = guard; }
+  /**
+   * Runs just before the app quits to start the update. The window closes and
+   * the new version's can take minutes to appear on a first start, so the
+   * owner is told here that it is starting (a system notification).
+   */
+  onRestarting(action: () => void): void { this.restarting = action; }
+  /**
+   * Runs once the update is pending and the stack is stopped, before the app
+   * quits: the app makes the update's database restore point here, with its
+   * window open, so the launcher only checks it (update-restore-point.ts).
+   * `discard` runs when the install then fails, before the update stops being
+   * pending: the running version will use the database again, so a point made
+   * from it must never be kept for a later start.
+   */
+  onInstallPrepared(prepare: () => Promise<void>, discard: () => Promise<void>): void { this.prepared = { prepare, discard }; }
+  /** A check refused because an update's first start failed: retry it when the launcher put everything back. */
+  onFailedStart(recovery: FailedStartRecovery): void { this.failedStarts = recovery; }
+  /** The check again after releasing failed starts, or null when none could be released. */
+  private async retryFailedStart(error: unknown, interactive: boolean): Promise<{ result: Awaited<ReturnType<SourceUpdates['check']>>; released: string[] } | null> {
+    if (!this.failedStarts || !this.applications || !FAILED_START.test(String(error))) return null;
+    let released: string[];
+    try { released = await this.failedStarts.release(); }
+    catch (failure) { console.error('Could not offer the failed update again', failure); return null; }
+    if (!released.length) return null;
+    return { result: await this.applications.check(undefined, interactive), released };
+  }
   useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
@@ -205,9 +257,21 @@ export class Updater {
           : { phase: 'idle', version: null, percent: null, message: null, checkedAt: new Date().toISOString(), release: null, notes: null });
         return;
       }
-      const result = await this.applications.check(undefined, interactive);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null });
-    } catch (error) { this.set({ phase: 'error', error: String(error), message: null }); }
+      let result: Awaited<ReturnType<SourceUpdates['check']>>;
+      let released: string[] = [];
+      try { result = await this.applications.check(undefined, interactive); }
+      catch (error) {
+        const retry = await this.retryFailedStart(error, interactive);
+        if (!retry) throw error;
+        ({ result, released } = retry);
+      }
+      const retried = !!result.version && released.some(revision => revision.startsWith(result.version!));
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: retried ? RETRY_MESSAGE : null, retry_start: retried, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null, installer_newer: null });
+    } catch (error) {
+      // Nothing to retry: point at the installer only when it is a newer release than this one.
+      const installerNewer = this.failedStarts && FAILED_START.test(String(error)) ? await this.failedStarts.installerNewer().catch(() => null) : null;
+      this.set({ phase: 'error', error: String(error), message: null, installer_newer: installerNewer });
+    }
     finally { this.checking = false; }
   }
   async download(): Promise<void> {
@@ -222,9 +286,14 @@ export class Updater {
         return;
       }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null, retry_start: false });
     } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
     finally { this.downloading = false; }
+  }
+  /** Never lets a notification failure stop the restart. */
+  private announceRestart(): void {
+    this.set({ message: RESTARTING_MESSAGE });
+    try { this.restarting(); } catch (error) { console.error('Could not announce the restart', error); }
   }
   async install(): Promise<void> {
     if (!this.applications || this.state.phase !== 'ready' || this.checking || this.downloading || this.installing) return;
@@ -239,6 +308,7 @@ export class Updater {
       stopping = true;
       await this.beforeInstall();
       await this.applications.prepareInstall?.();
+      await this.prepared?.prepare();
       if (this.installedExecutable) {
         // Electron's relaunch inherits this process's environment. An older
         // installed launcher treats these variables as an instruction to attach
@@ -247,6 +317,7 @@ export class Updater {
         const saved = launchKeys.map(key => process.env[key]);
         for (const key of launchKeys) delete process.env[key];
         try {
+          this.announceRestart();
           app.relaunch({ execPath: this.installedExecutable, args: this.restartArgs });
           app.quit();
         } catch (error) {
@@ -259,11 +330,25 @@ export class Updater {
       if (!current) throw new Error('No running source-managed application');
       // Relaunch through Node, not the currently running Electron executable.
       // The bootstrap selects the staged source AND its matching native runtimes.
+      this.announceRestart();
       app.relaunch({ execPath: current.node, args: [path.join(current.desktopDir, 'scripts/bootstrap.mjs'), '--root', this.applications.options.root] });
       app.quit();
     } catch (error) {
+      if (stopping && this.prepared) {
+        try { await this.prepared.discard(); }
+        catch (failure) {
+          // The copy for the update is still ready, so the update stays pending and
+          // the launcher starts it next. Reopening the database here would let the
+          // launcher later restore that copy over whatever this version wrote.
+          console.error('Could not discard the update restore point', failure);
+          this.set({ phase: 'ready', error: `${String(error)}\n${KEPT_POINT_MESSAGE}`, message: null });
+          this.installing = false;
+          return;
+        }
+      }
       try { await this.applications.cancelInstall?.(); } catch (failure) { error = failure; }
-      this.set({ phase: this.applications.cleanupError ? 'error' : 'ready', error: String(error), message: null });
+      // From what is left: a failed copy already ended the install, so nothing is staged.
+      this.set({ phase: this.applications.cleanupError || this.applications.pendingVersion === null ? 'error' : 'ready', error: String(error), message: null });
       if (stopping) {
         try { await this.installFailed(error); }
         catch (failure) { this.set({ error: `${String(error)}\nRestart failed: ${String(failure)}` }); }

@@ -215,7 +215,7 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
                   "request_pending", "checked_at", "channel", "release", "notes", "kind",
-                  "revision", "app_version", "busy", "deferred", "notice")
+                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
@@ -335,7 +335,9 @@ def classify(row, all_workers, offers=(), refusals=None):
         error = row.get("error")
         return {"role": "staged", "label": f"Staged, awaiting restart. {error}" if error else "Staged, awaiting restart"}
     if phase == "available":
-        return ({"role": "available", "label": "Update available; not downloaded"} if row.get("version")
+        # A desktop says why it offers an update again: its last first start did not finish.
+        label = (row.get("retry_start") is True and row.get("message")) or "Update available; not downloaded"
+        return ({"role": "available", "label": label} if row.get("version")
                 else {"role": "excluded", "label": "No update offered"})
     if phase == "error":
         return ({"role": "available", "label": row.get("error") or "Download failed; retry"} if row.get("version")
@@ -352,7 +354,12 @@ def classify(row, all_workers, offers=(), refusals=None):
 # reports them as free text, so they are read here, on the worker that builds
 # the snapshot: peers on older builds get the same answer.
 _INSTALLER = re.compile(r"install the latest (?:ai shuffle installer|desktop launcher)"
-                        r"|install a verified newer (?:build|release)|this revision failed to start", re.I)
+                        r"|install a verified newer (?:build|release)", re.I)
+# A revision whose first start failed is refused until a newer update. The
+# installer helps only when it is a newer release than the one running, which
+# the desktop reports as ``installer_newer``; otherwise its link is a dead end
+# (it would reinstall the same version), so the owner checks again instead.
+_FAILED_START = re.compile(r"this revision failed to start", re.I)
 # Said only when the launcher kept the previous files and database: "Previous
 # files and data have been retained", "Your files and data have been kept", or
 # a missing restore point, which requireRestorePoint refuses before the update's
@@ -372,7 +379,8 @@ def remedy(row):
     if row.get("kind") != "desktop" or not row.get("online", True):
         return {"remedy": None, "data_kept": False}
     text = " ".join(str(row.get(key) or "") for key in ("error", "message"))
-    needed = row.get("phase") == "unsupported" or bool(_INSTALLER.search(text))
+    needed = (row.get("phase") == "unsupported" or bool(_INSTALLER.search(text))
+              or (bool(_FAILED_START.search(text)) and row.get("installer_newer") is True))
     return {"remedy": "installer" if needed else None, "data_kept": needed and bool(_KEPT.search(text))}
 
 

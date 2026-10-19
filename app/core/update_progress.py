@@ -116,6 +116,15 @@ def moved_on(current, target, age):
             and _commit(target.get("target_version")) and not same_version(running, target["target_version"]))
 
 
+def put_back(current, target):
+    """A desktop back on its previous version, offering this install's target
+    again because its first start did not finish (``retry_start``). The
+    install is over; waiting longer would only hold the next request back."""
+    return (bool(current.get("online") and current.get("retry_start") is True)
+            and same_version(current.get("version"), target.get("target_version"))
+            and not same_version(current.get("running_version"), target.get("target_version")))
+
+
 def observe(operation, rows):
     if not operation:
         return None
@@ -136,6 +145,9 @@ def observe(operation, rows):
             worker.update(status="verified", message="Updated and verified")
         elif replaced(current, target) or moved_on(current, target, age):
             worker.update(status="replaced", message=f"Now runs {current['running_version'][:12]}; nothing left to install")
+        elif put_back(current, target):
+            worker.update(status="error", message="The update did not finish starting, so this worker went back to "
+                                                  "its previous version with its data as it was. Download it to try again.")
         elif target["accepted"] is False:
             worker.update(status="skipped", message=target.get("reason") or "Not queued")
         elif (current.get("error") or age >= STARTUP_TIMEOUT) and superseded(current, target):
