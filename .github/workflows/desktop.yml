@@ -30,6 +30,11 @@ on:
         type: boolean
         required: false
         default: false
+      verify_stable_installer:
+        description: 'Instead of the shell and preview packages: build the stable installer (stub worker, never published) and check its update-channel choice in silent installs'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -60,6 +65,7 @@ jobs:
   package:
     name: Package Windows shell
     timeout-minutes: 15
+    if: inputs.verify_stable_installer != true
     needs: check
     runs-on: windows-latest
     defaults:
@@ -124,6 +130,7 @@ jobs:
 
   windows-preview:
     name: Windows preview installer and fresh database
+    if: inputs.verify_stable_installer != true
     needs: check
     runs-on: windows-latest
     timeout-minutes: 35
@@ -202,3 +209,78 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The stable installer's Stable/Nightly page (desktop/build/installer-channel.nsh,
+  # issue #218). Builds the real stable config with a stub worker, publishes
+  # nothing and never starts the app: it only runs silent installs and reads
+  # %APPDATA%\ai-shuffle-desktop\updates\update-channel.json after each.
+  stable-installer-channel:
+    name: Stable installer channel choice (silent installs)
+    if: inputs.verify_stable_installer == true
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - name: Write a stub worker manifest
+        run: npm run build:worker:stub
+      - name: Build the stable NSIS installer (never publish)
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx electron-builder --win nsis --x64 --publish never
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Silent installs write the channel file only when asked, and never overwrite it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem release -Filter '*-win-x64.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one stable installer, found $($installers.Count)" }
+          $installer = $installers[0].FullName
+          $updates = Join-Path $env:APPDATA 'ai-shuffle-desktop\updates'
+          $file = Join-Path $updates 'update-channel.json'
+          $machineFile = Join-Path $env:ProgramData 'ai-shuffle-desktop\updates\update-channel.json'
+          $nightly = '{"channel":"nightly"}'
+          $stable = '{"channel":"stable"}'
+          $results = [System.Collections.Generic.List[string]]::new()
+          function Show($text) { if ($null -eq $text) { 'no file' } else { $text } }
+          function Install([string]$label, [string[]]$arguments) {
+            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "${label}: the installer exited with $($process.ExitCode)" }
+            $running = @(Get-Process -Name 'AI Shuffle' -ErrorAction SilentlyContinue)
+            if ($running.Count -gt 0) { $running | Stop-Process -Force; throw "${label}: the installer started the app" }
+          }
+          function Check([string]$label, [string[]]$arguments, $expected) {
+            Install $label $arguments
+            # Exact bytes: a BOM or a newline would not match.
+            $actual = if (Test-Path -LiteralPath $file) { [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($file)) } else { $null }
+            if ($actual -cne $expected) { throw "${label}: expected $(Show $expected), found $(Show $actual)" }
+            if (Test-Path -LiteralPath "$file.tmp") { throw "${label}: $file.tmp was left behind" }
+            $results.Add("${label} ($($arguments -join ' ')): $(Show $actual)")
+          }
+
+          if (Test-Path -LiteralPath (Split-Path $updates)) { throw 'The runner already has an AI Shuffle profile' }
+          Check '1. default install' @('/S', '/currentuser') $null
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\*\AI Shuffle.exe")) { throw '1. default install: AI Shuffle.exe was not installed for the current user' }
+          if (Test-Path -LiteralPath $updates) { throw '1. default install: Stable created the updates folder' }
+          Check '2. nightly install' @('/S', '/currentuser', '/CHANNEL=nightly') $nightly
+          [IO.File]::WriteAllText($file, $stable)
+          Check '3. existing choice kept' @('/S', '/CHANNEL=nightly') $stable
+          Check '4. installer update' @('/S', '--updated') $stable
+          Remove-Item -LiteralPath $file
+          Check '5. all-users nightly install' @('/S', '/allusers', '/CHANNEL=nightly') $nightly
+          if (-not (Test-Path "$env:ProgramFiles\*\AI Shuffle.exe")) { throw '5. all-users nightly install: AI Shuffle.exe was not installed for all users' }
+          if (Test-Path -LiteralPath $machineFile) { throw "5. all-users nightly install: wrote $machineFile instead of the user's profile" }
+
+          $results | ForEach-Object { Write-Host $_ }
+          "### Stable installer channel choice`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $results | ForEach-Object { "- $_" } | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY

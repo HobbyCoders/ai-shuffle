@@ -17,6 +17,15 @@ const macro = name => {
   assert.ok(match, `installer-channel.nsh defines ${name}`);
   return match[1];
 };
+// Index of the ${endif} that closes the ${if}/${ifNot} at lines[start], counting nesting.
+const matchingEndif = (lines, start) => {
+  let depth = 0;
+  for (let i = start; i < lines.length; i++) {
+    if (/^\$\{if(not)?\}/i.test(lines[i])) depth++;
+    else if (/^\$\{endif\}/i.test(lines[i]) && --depth === 0) return i;
+  }
+  assert.fail(`no \${endif} closes ${lines[start]}`);
+};
 
 test('real builder config loading keeps diagnostics off the runner event pipe', () => {
   // A plain process exposes ONLY the dependency's output, never TAP or test
@@ -93,12 +102,13 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   const install = macro('customInstall');
   const lines = install.split('\n').map(line => line.trim()).filter(Boolean);
   assert.equal(lines[0], '${if} $shuffleChannel == "nightly"');
-  assert.equal(lines.at(-1), '${endif}');
+  assert.equal(matchingEndif(lines, 0), lines.length - 1, 'the whole write is inside the nightly branch');
   const guard = lines.indexOf('${ifNot} ${FileExists} "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard > 0, 'the write is guarded by the file being absent');
   const open = lines.indexOf('FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w');
   const rename = lines.indexOf('Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard < open && open < rename, 'guard, then temporary file, then rename');
+  assert.ok(matchingEndif(lines, guard) > rename, 'the rename is inside the file-absent guard, not after it');
   assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*$/gm)].map(m => m[0].trim()), [
     'FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w',
     'Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"',

@@ -428,7 +428,8 @@ Every workflow other than the release and edge publication is
 `workflow_dispatch` (or called by a release). They exist for the cases above
 and for platform checks a local machine cannot run, for example
 `android.yml` for emulator verification, `desktop.yml` for the packaged
-Windows preview, `ci-browser-workspace.yml` and `container-postgres.yml`.
+Windows preview (or, with `verify_stable_installer`, the stable installer's
+Stable/Nightly choice in silent installs), `ci-browser-workspace.yml` and `container-postgres.yml`.
 Dispatch one only when a local run cannot answer the question, never to find
 out whether tests pass.
 
