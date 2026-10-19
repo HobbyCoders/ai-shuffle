@@ -29,6 +29,11 @@ The rule now:
   corrected or removed, for example by a Remember in the same session. A full
   snapshot replaces the change lists once their combined size passes half the
   snapshot, so the model never has to fold many small lists together.
+* **Bounded task additions** supplement the stable base without displacing it.
+  They require two distinct matched words, add at most 1k fact-line characters
+  per owner turn and hold at most 2k total. Task-only additions do not trigger
+  full base re-sends; a topic switch does not withdraw earlier additions.
+  Changed, expired, unsafe or out-of-scope sources still update/remove them.
 
 What the model holds is recovered from host-marked ranges in the transcript
 (:func:`held_from_path`): the newest full snapshot on the active path plus the
@@ -289,18 +294,84 @@ class MemoryPlan:
 
     kind: str
     note: Optional[str]
+    # Exact bounded section computed for this turn, also used if a CLI starts
+    # fresh inside submit. Never rebuild it with a previous turn's query.
+    section: Optional[str] = None
+
+
+TASK_TURN_CHARS = 1000
+TASK_TOTAL_CHARS = 2000
+_TASK_MARK = "; task-match] "
+
+
+def _is_task_item(item: str) -> bool:
+    header, separator, _ = item.partition("] ")
+    return bool(separator and _fact_id(item) and header.endswith("; task-match"))
+
+
+def task_memory_section(
+    section: str, held: Optional[HeldMemory], eligible: Sequence[str], query: str,
+) -> str:
+    """Add bounded live matches without displacing or re-ranking the base.
+
+    Eligible lines come from the same scope/checkout/injection/conflict screen
+    as the base snapshot. Previously delivered task facts persist across topic
+    switches, but are updated or removed when their real source changes. The
+    task slice cannot grow beyond 2k, even over arbitrarily many turns.
+    """
+    from fluid.codemode.relevance import query_terms, relevance
+
+    base_ids = {fid for fid in map(_fact_id, section_items(section)) if fid}
+    live = {fid: line for line in eligible if (fid := _fact_id(line)) and fid not in base_ids}
+    selected: dict[str, str] = {}
+    remaining = TASK_TOTAL_CHARS
+
+    def add(fid: str) -> bool:
+        nonlocal remaining
+        line = live[fid].replace("] ", _TASK_MARK, 1)
+        cost = len(line) + 1
+        if cost > remaining:
+            return False
+        selected[fid] = line
+        remaining -= cost
+        return True
+
+    # Retain only positively identified task facts, never arbitrary omissions
+    # from an older base snapshot. Real source revisions replace stale text.
+    for item in sorted(held.items if held else ()):
+        fid = _fact_id(item)
+        if _is_task_item(item) and fid in live and fid not in selected:
+            add(fid)
+    terms = query_terms(query)
+    scores = {fid: relevance(line.partition("] ")[2], terms) for fid, line in live.items()}
+    turn_remaining = TASK_TURN_CHARS
+    for fid in sorted(live, key=lambda fid: (-scores[fid], fid)):
+        if fid in selected or scores[fid] < 2:
+            continue
+        cost = len(live[fid].replace("] ", _TASK_MARK, 1)) + 1
+        if cost <= turn_remaining and add(fid):
+            turn_remaining -= cost
+    if not selected:
+        return section
+    return section + "\n\n" + "\n".join(selected.values())
 
 
 def plan_memory_note(section: str, held: Optional[HeldMemory]) -> MemoryPlan:
     """Decide what the turn's memory slot carries (see the module rule)."""
     full = wrap(section)
     if held is None:
-        return MemoryPlan("full", full)
+        return MemoryPlan("full", full, section)
     current = section_items(section)
     body = render_changes(sorted(held.items), current)
     if body is None:
-        return MemoryPlan("none", None)
+        return MemoryPlan("none", None, section)
     note = wrap(body)
-    if held.changes_chars + len(note) > CHANGES_BUDGET_SHARE * len(full):
-        return MemoryPlan("full", full)
-    return MemoryPlan("changes", note)
+    added = set(current) - held.items
+    task_additions_only = (
+        not (held.items - set(current)) and added and all(map(_is_task_item, added))
+    )
+    # Task additions have their own strict held-context cap. They cannot trigger
+    # re-sending the unchanged base. Actual edits/removals use the normal gate.
+    if not task_additions_only and held.changes_chars + len(note) > CHANGES_BUDGET_SHARE * len(full):
+        return MemoryPlan("full", full, section)
+    return MemoryPlan("changes", note, section)

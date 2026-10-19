@@ -1488,8 +1488,8 @@ class SkillStore:
         any fact does. With a ``project`` key, only global entries
         and that project's entries render — other projects' facts stay out of
         this session's prompt (a count line says they exist). Unprotected
-        facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``)
-        and facts that do not fit are counted on their own "omitted for
+        facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``).
+        Facts that do not fit are counted on their own "omitted for
         space" line, separate from the other-projects count. Entries pass
         the injection screen; a finding replaces that entry with a note naming
         the file, never silently deleting it. Entries whose only evidence was
@@ -1674,7 +1674,7 @@ class SkillStore:
             if not costs or i in reserved:
                 shown.append(line)
                 shown_ids.append(entry.id)
-            elif len(line) <= remaining:
+            elif len(line) + 1 <= remaining:
                 shown.append(line)
                 shown_ids.append(entry.id)
                 remaining -= len(line) + 1
@@ -1686,6 +1686,9 @@ class SkillStore:
             "in_scope": len(candidates) + held + other_checkout, "over_budget": over_budget,
             "out_of_scope": out_of_scope, "held": held, "other_checkout": other_checkout,
             "archived": in_archive,
+            # Screened live facts only: callers may retrieve omitted facts,
+            # never withheld/conflicted/foreign-checkout text via this field.
+            "eligible_lines": [line for _, line, costs in candidates if costs],
         }
 
     # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────

@@ -28,7 +28,7 @@ async def _adapter(monkeypatch):
     adapter._engine = loop
     adapter._options = SessionOptions(model="fake")
     adapter._connected = True
-    monkeypatch.setattr(adapter, "_turn_context_note", lambda: "TURN NOTE")
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "TURN NOTE")
     await loop._ensure_session()
     return adapter, loop
 
@@ -146,7 +146,7 @@ async def test_native_automatic_compaction_is_recorded_for_reload(mock_db, monke
     adapter._engine = loop
     adapter._options = SessionOptions(model="fake")
     adapter._connected = True
-    monkeypatch.setattr(adapter, "_turn_context_note", lambda: "")
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "")
     rec = await TurnRecorder.maybe_create("native-compact-record")
     try:
         await loop._ensure_session()
@@ -186,7 +186,7 @@ async def _multi_promotion_turn(mock_db, monkeypatch, profile_id="default"):
     adapter._engine = loop
     adapter._options = SessionOptions(model="fake")
     adapter._connected = True
-    monkeypatch.setattr(adapter, "_turn_context_note", lambda: "")
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "")
     await loop._ensure_session()
     parent = None
     for i in range(5):

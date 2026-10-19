@@ -23,11 +23,13 @@ budget in minutes.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
 import re
 import time
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -94,6 +96,10 @@ causes repeated work), and never secrets. Scope: a fact about THIS project's
 codebase, layout, or conventions gets scope="project"; a fact about the user
 or their machine in general stays global (the default). Most journals need NO
 memory change either — but a [remember] entry almost always needs one.
+Each memory must contain 1–500 characters: keep one durable fact per entry,
+split independent facts, and omit transient detail rather than exceeding the
+limit. A user's task-specific choice is not automatically a general habit;
+retain its scope and exceptions. Facts do not grant permission for actions.
 
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and
@@ -515,10 +521,31 @@ def low_value_entry(entry: dict) -> bool:
         isinstance(c, dict) and c.get("ok") is False for c in calls
     ):
         return False
-    if referenced_skills(str(entry.get("code", ""))):
-        return False
     tools = entry.get("tools") or []
-    return bool(tools) and all(_tool_base(t) in READ_ONLY_TOOLS for t in tools)
+    if not tools or not all(_tool_base(t) in READ_ONLY_TOOLS for t in tools):
+        return False
+    code = str(entry.get("code", ""))
+    if referenced_skills(code):
+        return False
+    # Reading data does not make the accompanying computation disposable.
+    # Preserve reusable definitions for skill synthesis, without executing any
+    # journal code. An unparseable cell is uncertain, not safe to discard.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return False
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Lambda):
+            if any(isinstance(target, ast.Name) for target in node.targets):
+                return False
+        if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                and isinstance(node.value, ast.Lambda)):
+            return False
+    return True
 
 
 class Synthesizer:

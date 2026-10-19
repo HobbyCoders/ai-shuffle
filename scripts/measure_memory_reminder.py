@@ -154,7 +154,7 @@ def _patches(stack, store, legacy: bool):
     stack.enter_context(patch.object(ha.HarnessAdapter, "_scratch_note", lambda self: ""))
     if legacy:
         # The behavior before this change: the full snapshot on every message.
-        def legacy_note(adapter):
+        def legacy_note(adapter, query=""):
             from app.core.memory_reminder import MemoryPlan
 
             note = adapter._memory_snapshot()
