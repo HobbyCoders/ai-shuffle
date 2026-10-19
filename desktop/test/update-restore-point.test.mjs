@@ -11,7 +11,7 @@ const { ColdClusterCopy } = require('../dist/main/database-restore.js');
 /** A stopped cluster's layout, with nested and empty folders and numeric names like PostgreSQL's. */
 async function cluster(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-restore-point-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const files = { 'PG_VERSION': '17\n', 'global/pg_control': 'control', 'base/1/1259': 'x'.repeat(200_000), 'base/16384/2619': 'rows', 'pg_wal/000000010000000000000001': 'wal', 'postgresql.conf': 'port = 5432\n' };
   for (const [name, body] of Object.entries(files)) {
     await fs.mkdir(path.dirname(path.join(root, 'data', name)), { recursive: true });
