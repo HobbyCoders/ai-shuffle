@@ -36,6 +36,7 @@ from app.core.config import settings
 from app.core.session_title import derive_session_title
 from app.db import runs as runs_db
 from app.db import session_events as session_events_db
+from app.db.async_database import run_lease
 
 logger = logging.getLogger(__name__)
 
@@ -1497,31 +1498,42 @@ class TurnRecorder:
         return self._superseded_dropped
 
     async def _renew_loop(self) -> None:
-        """Heartbeat the run lease every RUN_LEASE_RENEW_SECONDS."""
-        try:
-            while True:
-                await asyncio.sleep(RUN_LEASE_RENEW_SECONDS)
-                try:
-                    ok = await asyncio.to_thread(
+        """Renew independently of ordinary work; fail closed within one TTL."""
+        loop = asyncio.get_running_loop()
+        renewed_at = loop.time()
+        delay = RUN_LEASE_RENEW_SECONDS
+        while True:
+            await asyncio.sleep(delay)
+            attempt_at = loop.time()
+            try:
+                remaining = RUN_LEASE_TTL_SECONDS - (attempt_at - renewed_at)
+                if remaining <= 0:
+                    self._mark_superseded(0)
+                    return
+                ok = await asyncio.wait_for(
+                    run_lease(
                         runs_db.renew_run,
                         self.run_id, self.runner_id, self.fence_token,
                         RUN_LEASE_TTL_SECONDS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[TurnRecorder] renew_run raised for %s run %s",
-                        self.session_id, self.run_id, exc_info=True,
-                    )
+                    ),
+                    timeout=remaining,
+                )
+            except Exception:
+                remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)
+                logger.warning(
+                    "[TurnRecorder] renew_run raised for %s run %s",
+                    self.session_id, self.run_id, exc_info=True,
+                )
+                if remaining > 0:
+                    delay = min(1.0, RUN_LEASE_RENEW_SECONDS, remaining)
                     continue
-                if not ok:
-                    logger.warning(
-                        "[TurnRecorder] lease renewal lost for %s run %s — "
-                        "stopping heartbeat (appends will be fence-rejected)",
-                        self.session_id, self.run_id,
-                    )
-                    return
-        except asyncio.CancelledError:
-            raise
+                ok = False
+            if ok:
+                renewed_at = attempt_at
+                delay = RUN_LEASE_RENEW_SECONDS
+                continue
+            self._mark_superseded(0)
+            return
 
     @staticmethod
     def _cancel_task(task: Optional[asyncio.Task]) -> None:

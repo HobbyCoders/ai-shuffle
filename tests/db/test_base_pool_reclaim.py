@@ -205,6 +205,12 @@ class _FakeCursor:
     def __init__(self, conn):
         self._conn = conn
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
     def execute(self, sql, params=None):
         self._conn.executed.append(sql)
         if self._conn.ping_error is not None:

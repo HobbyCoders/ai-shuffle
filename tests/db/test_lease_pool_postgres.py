@@ -67,7 +67,24 @@ def test_real_holders_leave_renewal_and_reaper_available(lease_pool, monkeypatch
     assert not lease_pool._used
 
 
-@pytest.mark.parametrize("contender", ["claim", "reap"])
+def _settle(sid):
+    from app.core import session_settlement
+    from app.core.chat_access import broker
+
+    snapshot = session_settlement._capture_and_dismiss(sid, broker, None)
+    assert snapshot is not None
+    return snapshot["aborted"]
+
+
+def _waiting_session(sid, run):
+    from app.db import interactions, profiles, sessions
+
+    profiles.create_profile("lease-test", "Lease test", None, {}, if_absent=True)
+    sessions.create_session(sid, "lease-test", derive_provider_from_profile=False)
+    interactions.create_interaction(sid, "question", {"questions": []}, None, run_id=run["id"])
+
+
+@pytest.mark.parametrize("contender", ["claim", "reap", "stop", "settle"])
 def test_late_renewal_serializes_with_takeover(lease_pool, contender):
     # Repeat with fresh rows: both operations really compete for the PG row lock.
     for _ in range(10):
@@ -75,6 +92,8 @@ def test_late_renewal_serializes_with_takeover(lease_pool, contender):
         run = runs.claim_run(sid, "old", -1)
         turn = turns.enqueue_turn(sid, "user", prompt="race")
         assert turns.start_turn(turn["id"], run_id=run["id"])
+        if contender == "settle":
+            _waiting_session(sid, run)
         ready = threading.Barrier(2)
 
         def renew():
@@ -85,6 +104,10 @@ def test_late_renewal_serializes_with_takeover(lease_pool, contender):
             ready.wait(timeout=5)
             if contender == "claim":
                 return runs.claim_run(sid, "new", 60)
+            if contender == "stop":
+                return turns.stop_orphaned_turns(sid, turn["id"])
+            if contender == "settle":
+                return _settle(sid)
             return any(t["id"] == turn["id"] for t in turns.reap_expired())
 
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -99,3 +122,79 @@ def test_late_renewal_serializes_with_takeover(lease_pool, contender):
         with base.get_db() as conn:
             conn.cursor().execute("DELETE FROM turns WHERE id=%s", (turn["id"],))
             conn.cursor().execute("DELETE FROM runs WHERE session_id=%s", (sid,))
+
+@pytest.mark.parametrize("operation", ["stop", "settle"])
+def test_aborted_late_owner_cannot_renew_or_append(lease_pool, operation):
+    from app.db import session_events
+
+    sid = uuid4().hex
+    run = runs.claim_run(sid, "old", -1)
+    turn = turns.enqueue_turn(sid, "user", prompt="late heartbeat")
+    assert turns.start_turn(turn["id"], run_id=run["id"])
+    if operation == "settle":
+        _waiting_session(sid, run)
+        assert _settle(sid)
+    else:
+        assert turns.stop_orphaned_turns(sid, turn["id"])
+    assert turns.get_turn(turn["id"])["state"] == "aborted"
+    assert not runs.renew_run(run["id"], "old", run["fence_token"], 60)
+    with pytest.raises(session_events.FenceViolation):
+        session_events.append_events(
+            sid, [{"type": "system.note", "payload": {"content": "stale"}}],
+            run_id=run["id"], fence_token=run["fence_token"],
+        )
+    successor = runs.claim_run(sid, "new", 60)
+    assert successor["fence_token"] > run["fence_token"]
+    assert runs.claim_run(sid, "third", 60) is None
+    assert turns.stop_orphaned_turns(sid, turn["id"]) == []
+    assert runs.renew_run(successor["id"], "new", successor["fence_token"], 60)
+
+
+@pytest.mark.parametrize("outcome", ["aborted", "completed", "parked", "reassigned"])
+def test_late_renewal_rejects_terminal_or_reassigned_turn(lease_pool, outcome):
+    sid = uuid4().hex
+    run = runs.claim_run(sid, "old", -1)
+    turn = turns.enqueue_turn(sid, "user", prompt="race")
+    assert turns.start_turn(turn["id"], run_id=run["id"])
+    if outcome == "parked":
+        assert turns.park_turn(turn["id"], ["background"])
+    elif outcome == "reassigned":
+        assert any(t["id"] == turn["id"] for t in turns.reap_expired())
+        successor = runs.claim_run(sid, "new", 60)
+        assert successor
+        assert turns.start_turn(turn["id"], run_id=successor["id"])
+        assert turns.get_turn(turn["id"])["run_id"] == successor["id"]
+    else:
+        assert turns.settle_turn(turn["id"], outcome)
+    assert not runs.renew_run(run["id"], "old", run["fence_token"], 60)
+
+
+def test_lease_sql_timeouts_release_workers_and_do_not_leak(lease_pool):
+    sid = uuid4().hex
+    run = runs.claim_run(sid, "owner", 60)
+    with base.get_db() as blocker:
+        blocker.cursor().execute("SELECT id FROM runs WHERE id=%s FOR UPDATE", (run["id"],))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            renewal = executor.submit(runs.renew_run, run["id"], "owner", run["fence_token"], 60)
+            with pytest.raises(psycopg2.errors.LockNotAvailable):
+                renewal.result(timeout=3)
+    with base.get_lease_db() as conn:
+        with pytest.raises(psycopg2.errors.QueryCanceled):
+            conn.cursor().execute("SELECT pg_sleep(5)")
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SHOW lock_timeout")
+        assert cursor.fetchone()["lock_timeout"] == "0"
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()["statement_timeout"] == "0"
+    assert runs.renew_run(run["id"], "owner", run["fence_token"], 60)
+
+
+def test_reaper_fences_even_skipped_local_turns(lease_pool):
+    sid = uuid4().hex
+    run = runs.claim_run(sid, "old", -1)
+    turn = turns.enqueue_turn(sid, "user", prompt="local")
+    assert turns.start_turn(turn["id"], run_id=run["id"])
+    assert not any(t["id"] == turn["id"] for t in turns.reap_expired([turn["id"]]))
+    assert turns.get_turn(turn["id"])["state"] == "running"
+    assert not runs.renew_run(run["id"], "old", run["fence_token"], 60)

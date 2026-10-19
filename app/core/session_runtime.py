@@ -3404,9 +3404,16 @@ class SessionRuntime:
             await asyncio.sleep(delay)
             attempt_at = loop.time()
             try:
-                ok = await run_lease(
-                    runs_db.renew_run, run_id, runner_id, fence_token,
-                    RUN_LEASE_TTL_SECONDS,
+                remaining = RUN_LEASE_TTL_SECONDS - (attempt_at - renewed_at)
+                if remaining <= 0:
+                    self._on_lease_lost()
+                    return
+                ok = await asyncio.wait_for(
+                    run_lease(
+                        runs_db.renew_run, run_id, runner_id, fence_token,
+                        RUN_LEASE_TTL_SECONDS,
+                    ),
+                    timeout=remaining,
                 )
             except Exception:
                 remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)

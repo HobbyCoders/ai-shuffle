@@ -454,6 +454,12 @@ def _get_pg_connection() -> "_PgDictConnection":
                 )
             try:
                 conn.autocommit = False
+                if _lease_checkout.get():
+                    # Transaction-local limits also bound workers left finishing
+                    # after an async TTL timeout. Never leak these to borrowers.
+                    with conn.cursor() as cursor:
+                        cursor.execute("SET LOCAL lock_timeout = '500ms'")
+                        cursor.execute("SET LOCAL statement_timeout = '1500ms'")
             except BaseException:
                 _close_connection(conn)
                 raise

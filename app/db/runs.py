@@ -78,14 +78,21 @@ def renew_run(
 
     Claim and reaping fence expired runs with a guarded UPDATE first. Whichever
     UPDATE wins the row lock owns the outcome; a reaped/replaced owner cannot
-    revive itself. Expiry alone is eligibility for takeover, not a takeover.
+    revive itself. Stop/settle fence lapsed runs in the abort transaction too.
+    Terminal or reassigned turns also refuse renewal. Expiry alone is
+    eligibility for takeover, not a takeover.
     """
     with get_lease_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE runs SET lease_expires_at=NOW() + (%s * INTERVAL '1 second'), "
             "heartbeat_at=NOW(), updated_at=NOW() "
-            "WHERE id=%s AND runner_id=%s AND fence_token=%s AND state='active'",
+            "WHERE id=%s AND runner_id=%s AND fence_token=%s AND state='active' "
+            "AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id=runs.session_id "
+            "AND t.run_id=runs.id AND t.state IN ('completed','aborted','parked')) "
+            "AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id=runs.session_id "
+            "AND t.state IN ('running','interrupting','draining') "
+            "AND t.run_id <> runs.id)",
             (ttl_seconds, run_id, runner_id, fence_token),
         )
         return cursor.rowcount > 0
