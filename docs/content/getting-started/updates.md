@@ -16,6 +16,8 @@ AI Shuffle never changes under you. Your install runs the version you chose unti
 
 For Docker, set `UPDATE_CHANNEL=nightly` (or `stable`). An explicit environment value overrides the saved local choice and makes it read-only in the channel API. Without that override, the owner API saves `application-updates/update-channel.json` in the data volume; restart the container to apply a change. Desktop stores `{"channel":"nightly"}` in `updates/update-channel.json` under its user-data directory. The choice applies to this install, not every worker on the account.
 
+The Windows installer asks which channel a new install follows: **Stable** (the default) or **Nightly**. Choosing Nightly writes that file. An install that already has a choice keeps it: the installer skips the question and never overwrites the file, and choosing Stable writes nothing. For a silent install, add `/CHANNEL=nightly` (for example `/S /CHANNEL=nightly`); without it a silent install follows stable unless the install already chose nightly.
+
 For one release, existing `edge` settings are accepted as an alias of `nightly` and log a deprecation line. Publishing a nightly does not switch channels, install it or restart a worker. Read the release notes next to the update button before updating.
 
 ## In-app updates
