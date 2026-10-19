@@ -28,7 +28,7 @@ PARENT = "dev-gaming"
 TARGET = "dev-unraid"
 TARGET_RUNNER = "unraid-runner"
 UNRAID = {"device_id": TARGET, "device_name": "ServerWorker", "online": True, "is_self": False,
-          "capabilities": {"os": "linux", "remote_task": 1}}
+          "capabilities": {"os": "linux", "remote_task": remote_task.CHORE_BRANCH_VERSION}}
 SELF = {"device_id": PARENT, "device_name": "DesktopWorker", "online": True, "is_self": True,
         "capabilities": {"os": "windows", "remote_task": 1}}
 
@@ -274,7 +274,7 @@ def test_the_request_carries_identifiers_only(world, monkeypatch):
     [(_, _, body)] = calls
     assert set(body) == {"version", "worker_session_id", "agent", "agent_name", "prompt", "label", "name",
                          "provider_id", "model", "effort", "permission_mode", "tool_allowlist", "mode",
-                         "origin", "depth", "checkout", "parent"}
+                         "origin", "depth", "checkout", "parent", "effort_explicit"}
     assert set(body["parent"]) == {"device_id", "session_id", "owner_session_id", "task_id", "tool_use_id"}
     assert set(body["checkout"]) == {"mode", "project_v2_id", "branch", "base_commit", "parent_branch",
                                      "remote", "pushed", "reason"}
@@ -833,3 +833,35 @@ def test_a_remote_child_is_the_root_here_and_keeps_its_depth(world):
     assert remote_task.remote_child_in_chain("grandchild")
     assert not remote_task.remote_child_in_chain("parent")
     assert remote_task.report_owed("parent") is None
+
+
+# --- worker branch names across releases -----------------------------------
+
+def test_a_target_before_version_5_is_sent_the_legacy_task_branch(world, monkeypatch):
+    """A target of an earlier release checks for ``task/<id>``; this release
+    still sends that name to it, and as a target accepts it from such a parent."""
+    monkeypatch.setitem(UNRAID["capabilities"], "remote_task", remote_task.CHORE_BRANCH_VERSION - 1)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({"mode": "background"})
+    assert result["ok"] is True, result
+    child_id = result["worker_session_id"]
+    [(_, _, body)] = calls
+    assert body["checkout"]["branch"] == f"task/{child_id}"
+    assert remote_tip(world.parent, f"task/{child_id}") == world.tip
+    assert remote_tip(world.parent, f"chore/task-{child_id}") is None
+    row = database.get_session(child_id)
+    assert row["branch"] == f"task/{child_id}"
+    assert git(Path(row["worktree_path"]), "branch", "--show-current") == f"task/{child_id}"
+
+
+def test_an_old_target_refusing_the_new_branch_name_reads_as_a_version_mismatch(world, monkeypatch):
+    async def old_target(device_id, action, body, timeout=None, **kwargs):
+        # What a target of an earlier release answers for ``chore/task-<id>``.
+        raise control.ControlRefused(
+            "The worker checkout description does not match this worker; nothing was started.")
+
+    monkeypatch.setattr(control, "call", old_target)
+    result = dispatch({"mode": "background"})
+    assert result["ok"] is False
+    assert "version mismatch" in result["error"] and remote_task.NOT_DISPATCHED in result["error"]

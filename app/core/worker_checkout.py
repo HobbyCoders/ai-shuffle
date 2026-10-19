@@ -45,7 +45,13 @@ def worker_branch(worker_session_id: str) -> str:
 def is_worker_branch(branch: str, worker_session_id: str) -> bool:
     """Whether ``branch`` is this worker's own dedicated branch (either name)."""
     return bool(branch) and branch in (worker_branch(worker_session_id),
-                                       f"{LEGACY_WORKER_BRANCH_PREFIX}{worker_session_id}")
+                                       legacy_worker_branch(worker_session_id))
+
+
+def legacy_worker_branch(worker_session_id: str) -> str:
+    """The ``task/<id>`` name a worker of an earlier release gets: sent to a
+    remote target that predates ``chore/task-`` (remote_task version 5)."""
+    return f"{LEGACY_WORKER_BRANCH_PREFIX}{worker_session_id}"
 
 
 def chat_branch(session_id: str) -> str:
@@ -479,7 +485,8 @@ def _state(state) -> RemoteWorkerBranch:
     return state if isinstance(state, RemoteWorkerBranch) else RemoteWorkerBranch.from_wire(state)
 
 
-def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowlist=None) -> RemoteWorkerBranch:
+def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowlist=None, *,
+                          legacy_branch=False) -> RemoteWorkerBranch:
     """Parent side: push ``chore/task-<worker id>`` at the caller's committed HEAD.
 
     Same decisions as :func:`prepare_worker_checkout`: research-only surfaces
@@ -487,7 +494,8 @@ def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowl
     and a mismatched or missing bound checkout raises. Uncommitted parent
     changes are not copied, as locally. The push is never forced; a failed push
     returns ``pushed=False`` with a plain ``reason`` and the caller refuses.
-    No local branch is created on the parent.
+    No local branch is created on the parent. ``legacy_branch`` publishes the
+    ``task/<id>`` name a target of an earlier release expects.
     """
     from app.core import checkout_transfer, project_resolver
     from app.core.git_service import git_service
@@ -515,7 +523,7 @@ def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowl
         return RemoteWorkerBranch(REMOTE_NONE)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id):
         raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
-    branch = worker_branch(worker_session_id)
+    branch = (legacy_worker_branch if legacy_branch else worker_branch)(worker_session_id)
     target = expected or _current_branch(parent_path)
     tip = git_service._run_git(parent_path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
     sha = tip.stdout.strip()
@@ -573,10 +581,13 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id or ""):
         raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
-    branch = worker_branch(worker_session_id)
+    # Either name: a calling worker of an earlier release sends ``task/<id>``.
+    branch = sent.branch or ""
     sha = sent.base_commit or ""
-    if sent.branch != branch or not _SHA.fullmatch(sha):
-        raise WorkerCheckoutError("The worker checkout description does not match this worker; nothing was started.")
+    if not is_worker_branch(branch, worker_session_id) or not _SHA.fullmatch(sha):
+        raise WorkerCheckoutError("The worker checkout description does not match this worker (the "
+                                  "calling worker may run a different app version: a version "
+                                  "mismatch); nothing was started.")
     if not sent.pushed or sent.remote is None:
         raise WorkerCheckoutError(f"The calling worker did not publish {branch} to origin; nothing was started.")
     with _project_lock(project["id"]):
@@ -667,8 +678,10 @@ def bound_git_block(raw: Any, worker_session_id: str) -> Optional[Dict[str, Any]
     def count(value: Any) -> int:
         return min(value, 1_000_000) if type(value) is int and value > 0 else 0
 
-    expected = worker_branch(worker_session_id)
-    branch = expected if raw.get("mode") == REMOTE_BRANCH and raw.get("branch") == expected else None
+    sent = raw.get("branch")
+    # Either name: a worker of an earlier release reports ``task/<id>``.
+    branch = (sent if raw.get("mode") == REMOTE_BRANCH and isinstance(sent, str)
+              and is_worker_branch(sent, worker_session_id) else None)
     head = sha(raw.get("head")) if branch else None
     reason = raw.get("reason")
     if isinstance(reason, str) and reason.strip():
@@ -755,10 +768,12 @@ def push_worker_commits(worker_session_id: str, *, mode: Optional[str],
         return empty_git_block(REMOTE_SHARED)
     if mode != REMOTE_BRANCH:
         return empty_git_block(REMOTE_NONE)
-    branch = worker_branch(worker_session_id)
+    row: Dict[str, Any] = dict(database.get_session(worker_session_id) or {})
+    # The worker's own branch: a checkout made before an update keeps ``task/<id>``.
+    recorded = str(row.get("branch") or "")
+    branch = recorded if is_worker_branch(recorded, worker_session_id) else worker_branch(worker_session_id)
     block = empty_git_block(REMOTE_BRANCH)
     block["branch"] = branch
-    row: Dict[str, Any] = dict(database.get_session(worker_session_id) or {})
     project_id = row.get("project_v2_id")
     repo = _base_checkout_path(project_id) if project_id else None
     if not repo:
@@ -794,8 +809,9 @@ def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str,
     from app.core import checkout_transfer, project_resolver
 
     outcome: Dict[str, Any] = {"fetched": False, "released": False, "reason": None}
-    branch = worker_branch(worker_session_id)
-    if block.get("mode") != REMOTE_BRANCH or block.get("branch") != branch:
+    branch = block.get("branch")
+    if (block.get("mode") != REMOTE_BRANCH or not isinstance(branch, str)
+            or not is_worker_branch(branch, worker_session_id)):
         return outcome
     row = dict(parent_row or {})
     project = project_resolver.resolve_project_v2(row) if (row.get("project_v2_id") or row.get("project_id")) else None

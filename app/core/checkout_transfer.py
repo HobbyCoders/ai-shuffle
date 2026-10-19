@@ -447,11 +447,16 @@ def import_checkout(base, destination, state):
 # Same value as ``worker_checkout.WORKER_BRANCH_PREFIX`` (a ``chore/`` name an
 # origin restricted to fix/, feat/ and chore/ branches accepts).
 TASK_BRANCH_PREFIX = "chore/task-"
+# The name earlier releases use; still published to, fetched from and released
+# for workers of those releases.
+LEGACY_TASK_BRANCH_PREFIX = "task/"
 
 
 def _task_branch(cwd, branch):
-    if not branch.startswith(TASK_BRANCH_PREFIX) or _run(cwd, "check-ref-format", "refs/heads/" + branch).returncode:
-        raise ValueError("Only chore/task-<worker id> branches move between workers this way.")
+    if (not branch.startswith((TASK_BRANCH_PREFIX, LEGACY_TASK_BRANCH_PREFIX))
+            or _run(cwd, "check-ref-format", "refs/heads/" + branch).returncode):
+        raise ValueError("Only chore/task-<worker id> (or task/<worker id>) branches move between "
+                         "workers this way.")
 
 
 def _require_sha(sha):

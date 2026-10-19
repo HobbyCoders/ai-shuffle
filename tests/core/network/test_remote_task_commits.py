@@ -430,3 +430,48 @@ def test_an_older_target_without_a_git_block_adds_no_git_note(world):
     with world.b.active():
         row = database.get_session("caller")
         assert asyncio.run(remote_task.bring_commits_here(row, child, "ServerWorker", None)) == ""
+
+
+# --- a Task in flight across an update ------------------------------------------
+
+@pytest.mark.parametrize("commits", [2, 0])
+def test_a_child_started_on_a_task_branch_before_an_update_still_comes_back(world, commits):
+    """A child dispatched by an earlier release runs on ``task/<id>``. After
+    both workers update, its commits are pushed and fetched on that branch,
+    and an untouched branch is still released from origin."""
+    from tests.core.network.test_remote_task_control import dispatch
+
+    # Dispatched to a target that predated chore/task- names, as the earlier
+    # release named every worker branch; both workers have updated since.
+    with world.b.active():
+        result = dispatch(world.a, world.b, worker={
+            "device_id": world.a.device_id, "device_name": "ServerWorker",
+            "capabilities": {"remote_task": remote_task.CHORE_BRANCH_VERSION - 1}})
+    assert result["ok"] is True, result
+    child = result["worker_session_id"]
+    branch = f"task/{child}"
+    path = world.child_path(child)
+    assert git(path, "branch", "--show-current") == branch
+    base = git(path, "rev-parse", "HEAD")
+    head = base
+    for index in range(commits):
+        head = commit(path, f"fix{index}.txt", "the fix\n")
+    world.deliver(child, text="Done.")
+    block = world.sent_block(child)
+    assert block["branch"] == branch and block["commits"] == commits
+    if commits:
+        assert block["pushed"] is True and remote_tip(world.parent, branch) == head
+        assert local_tip(world.parent, branch) == head
+        assert f"Git: 2 commits on {branch}" in world.wake()
+    else:
+        assert remote_tip(world.parent, branch) is None
+        assert f"Git: it made no commits on {branch}." in world.wake()
+    assert remote_tip(world.parent, f"chore/task-{child}") is None
+
+
+def test_the_git_block_accepts_either_branch_name_and_nothing_else():
+    raw = {"mode": "branch", "base": "a" * 40, "head": "b" * 40, "commits": 1, "pushed": True}
+    for branch in ("chore/task-abc", "task/abc"):
+        assert worker_checkout.bound_git_block({**raw, "branch": branch}, "abc")["branch"] == branch
+    for branch in ("chore/task-xyz", "task/xyz", "fix/abc", "main"):
+        assert worker_checkout.bound_git_block({**raw, "branch": branch}, "abc")["branch"] is None

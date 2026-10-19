@@ -183,6 +183,7 @@ def test_archived_sessions_and_the_base_checkout_are_not_locked(project):
     "git branch -m renamed",
     "gh pr checkout 12",
     "git checkout main 2>&1 | tail -3",
+    "bash <<'EOF'\necho start\ngit switch main\nEOF",
     "git checkout -",
     "bash -lc 'git switch -c sneaky'",
 ])

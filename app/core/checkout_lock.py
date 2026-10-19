@@ -79,22 +79,29 @@ def _short_name(tool_name: str) -> str:
 
 
 _HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# The text before ``<<`` when a shell reads the here-document as its script.
+_SHELL_FEED = re.compile(r"(?:^|[;&|(]\s*)(?:\S*/)?(?:sudo\s+)?(?:bash|sh|zsh|dash|ksh)(?:\s+-\S+)*\s*$")
 
 
 def _strip_heredocs(command: str) -> str:
-    """Drop here-document bodies: their lines are data, not commands."""
+    """Drop here-document bodies: their lines are data, not commands. A body a
+    shell reads as its script (``bash <<EOF``) is kept: those lines run."""
     if "<<" not in command:
         return command
     kept: List[str] = []
     ending: List[tuple] = []
     for line in command.split("\n"):
         if ending:
-            dash, word = ending[0]
+            dash, word, script = ending[0]
             if (line.lstrip("\t") if dash else line) == word:
                 ending.pop(0)
+            elif script:
+                kept.append(line)
             continue
         kept.append(line)
-        ending = [(bool(m.group(1)), m.group(3)) for m in _HEREDOC.finditer(line.replace("<<<", "   "))]
+        masked = line.replace("<<<", "   ")
+        ending = [(bool(m.group(1)), m.group(3), bool(_SHELL_FEED.search(masked[:m.start()])))
+                  for m in _HEREDOC.finditer(masked)]
     return "\n".join(kept)
 
 
@@ -332,7 +339,8 @@ def _checkout_row(toplevel: str) -> Optional[Dict[str, Any]]:
 def _has_work(session_id: str) -> bool:
     from app.db import turns as turns_db
 
-    return turns_db.get_live_turn(session_id) is not None or bool(turns_db.get_queued_turns(session_id))
+    # One read: two would miss a turn flipping from queued to running between them.
+    return turns_db.session_has_unsettled_turns(session_id)
 
 
 def _created(row: Dict[str, Any]) -> tuple:
