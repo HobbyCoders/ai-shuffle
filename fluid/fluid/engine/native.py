@@ -2645,7 +2645,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         key = self._affinity_key()
         extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}
         try:
-            # Bound provider stalls too; ordinary turns never await this task.
+            # Bound provider stalls, including the rare target-miss fallback.
             async with asyncio.timeout(180):
                 text = await build_checkpoint(
                     self.provider, model=model, text=region[2],
@@ -2704,6 +2704,60 @@ class NativeLoop(BackgroundLifecycleMixin):
             decision_reason="summary_cold" if cold else "summary_batch",
         )
 
+    async def _checkpoint_for_compaction(
+        self, sid: str, turn_id: str, nodes: list[SessionNode], *,
+        overhead: int, scale: float, manual: bool,
+    ) -> Promotion | None:
+        """Finish an authorized rewrite, waiting for a checkpoint only if needed.
+
+        Automatic batches normally consume a background checkpoint. A batch
+        whose compacted residue still misses the target must not send that
+        shallow result simply because the background call was not ready yet.
+        Failure/cancellation leaves the mechanical ladder's honest outcome.
+        """
+        if not self._compactor.config.summary_enabled or self._interrupted.is_set():
+            return None
+        target = self._compactor._deep_target(self.context_window, scale)
+        if not manual and (target is None or self._compactor.estimate_view_tokens(nodes, overhead) <= target):
+            return None
+        if not manual:
+            await self._emit(ContextCompacting(
+                session_id=sid, turn_id=turn_id, active=True, trigger="auto",
+            ))
+        try:
+            if self._summary_task is not None and not self._summary_task.done():
+                await asyncio.wait([self._summary_task])
+            region = self._compactor.summary_region(
+                nodes, context_window=self.context_window, scale=scale,
+                for_target=target is not None and self._compactor.estimate_view_tokens(nodes, overhead) > target,
+            )
+            if region is None or self._interrupted.is_set():
+                return None
+            pending = self._pending_summary
+            if pending is None or pending[:2] != region[:2]:
+                self._manual_summary_task = asyncio.create_task(self._build_checkpoint(sid, turn_id, region))
+                try:
+                    pending = await self._manual_summary_task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if manual or (current is not None and current.cancelling()):
+                        raise
+                    return None  # Stop cancelled the side call, not the ladder.
+                finally:
+                    self._manual_summary_task = None
+            self._pending_summary = None
+            if pending is None:
+                return None
+            return self._compactor.apply_summary(
+                nodes, pending, overhead_tokens=overhead,
+                decision_reason="manual" if manual else "summary_batch",
+            )
+        finally:
+            if not manual:
+                await self._emit(ContextCompacting(
+                    session_id=sid, turn_id=turn_id, active=False, trigger="auto",
+                ))
+
     def _compaction_stats(self, nodes: list[SessionNode], measured: int | None) -> dict[str, int]:
         stats = self._compactor.stats(nodes)
         stats["projectedAfterCompactTokens"] = self._compactor.projected_after_compact(
@@ -2759,32 +2813,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
                     scale=scale,
                 )
-                if self._compactor.config.summary_enabled and not self._interrupted.is_set():
-                    # Only the owner's manual request may wait for this call.
-                    if self._summary_task is not None and not self._summary_task.done():
-                        # Wait without inheriting its fate: a host teardown may
-                        # cancel the background build, which is not this turn.
-                        await asyncio.wait([self._summary_task])
-                    region = self._compactor.summary_region(
-                        nodes, context_window=self.context_window, scale=scale,
-                    )
-                    if region is not None and not self._interrupted.is_set():
-                        pending = self._pending_summary
-                        if pending is None or pending[:2] != region[:2]:
-                            self._manual_summary_task = asyncio.create_task(
-                                self._build_checkpoint(sid, turn_id, region)
-                            )
-                            try:
-                                pending = await self._manual_summary_task
-                            finally:
-                                self._manual_summary_task = None
-                        self._pending_summary = None
-                        if pending is not None:
-                            promo = self._compactor.apply_summary(
-                                nodes, pending, overhead_tokens=overhead, decision_reason="manual",
-                            )
-                            if promo is not None:
-                                promotions.append(promo)
+                promo = await self._checkpoint_for_compaction(
+                    sid, turn_id, nodes, overhead=overhead, scale=scale, manual=True,
+                )
+                if promo is not None:
+                    promotions.append(promo)
             except asyncio.CancelledError:
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():
@@ -3247,6 +3280,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 render_version=e.render_version,
                 summary_text=e.summary,
                 path_end=e.node_id,
+                intent_pin_tokens=e.intent_pin_tokens,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -3370,6 +3404,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             trimmed=[list(p) for p in promo.trimmed],
             spans=[list(s) for s in promo.spans],
             summary=promo.summary_text,
+            intent_pin_tokens=promo.intent_pin_tokens,
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,
@@ -3561,6 +3596,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 sid, overhead_tokens=overhead_tokens,
                 turn_start=user_node.node_id if num_calls == 0 else None,
             )
+            compaction_scale = self._summary_scale(nodes, measured_prompt)
             rendered, promotions = self._compactor.apply(
                 nodes,
                 overhead_tokens=overhead_tokens,
@@ -3584,6 +3620,25 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             if summary is not None:
                 promotions.append(summary)
+            # Image-cap and sweep-only promotions are not permission to block
+            # a below-pressure turn. Only a committed deep size batch may wait.
+            decision = self._compactor.last_decision
+            size_batch = (
+                bool(promotions)
+                and decision.get("target_tokens") is not None
+                and decision.get("reason") in {
+                    "meaningful_reclaim", "hard_ceiling", "window_protection",
+                    "cold_commit", "cold_opportunistic", "break_even",
+                }
+            )
+            if size_batch:
+                summary = await self._checkpoint_for_compaction(
+                    sid, turn_id, nodes, overhead=overhead_tokens,
+                    scale=compaction_scale, manual=False,
+                )
+                if summary is not None:
+                    promotions.append(summary)
+            if promotions:
                 rendered = self._compactor.view(nodes)
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
@@ -3604,6 +3659,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                     batch_final=index == len(promotions) - 1,
                     batch_before_tokens=promotions[0].before_tokens,
                 )
+            if self._interrupted.is_set():
+                # Stop may land while a target-miss checkpoint is awaited.
+                # Persist the ladder above, but never start a main-model call.
+                partial, partial_cost = self._partial_usage(total_usage)
+                await self._emit_terminal_with_park(Interrupted(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    usage=partial, cost_usd=partial_cost, num_model_calls=num_calls,
+                ))
+                return
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
             call_was_sticky = not self._sticky_poisoned and (

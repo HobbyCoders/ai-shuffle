@@ -1187,8 +1187,9 @@ def test_measured_calibration_sizes_the_optional_trigger_and_the_stop_target() -
 
     # Trimming off, so only the digest rung reclaims, one turn at a time: its
     # stop target decides how much history goes.
+    # Isolate calibration of the trigger-relative target, not the new deep target.
     cfg = _cfg(trigger_tokens=1_000, trigger_window_ratio=0.6, target_ratio=0.7,
-               headroom_tokens=1_000,
+               deep_target_window_ratio=0.0, headroom_tokens=1_000,
                trim=TrimConfig(trigger_tokens=1_000, keep_recent_tool_results=2,
                                min_result_chars=10**6))
     nodes = _history(20, result_chars=2_000)
@@ -1820,7 +1821,8 @@ def test_mega_turn_fires_at_most_two_batches_where_legacy_fires_five() -> None:
     # Item 5 alone: the item 2 recency tail keeps 40k tokens verbatim, which
     # changes what the first batch can take, so it stays off on both sides.
     c, nodes, new, decisions, peak = _drive_mega_turn(
-        CompactionConfig(**_ITEM2_OFF), 60, overhead=130_000)
+        # This historical watermark comparison intrinsically uses the 35% target.
+        CompactionConfig(deep_target_window_ratio=0.35, **_ITEM2_OFF), 60, overhead=130_000)
     assert len(new) <= 2
     # The first batch is the same. The shortfall watermark then holds the
     # next one until a batch can reclaim the shortfall, so it is deeper than
@@ -1856,7 +1858,7 @@ def _old_turns(turns: int) -> list[SessionNode]:
 
 
 def test_batch_reaches_the_deep_target_on_a_known_window() -> None:
-    # Window 100k: trigger 60k, legacy target 0.7 * 60k = 42k, T = 35k.
+    # Window 100k: trigger 60k, legacy target 0.7 * 60k = 42k, T = 15k.
     nodes = _old_turns(60)
     config = dict(trigger_tokens=1_000, keep_recent_turns=2,
                   trim=TrimConfig(min_result_chars=500, keep_recent_tool_results=2))
@@ -1869,9 +1871,9 @@ def test_batch_reaches_the_deep_target_on_a_known_window() -> None:
     legacy, old = run(**_ITEM5_OFF)
     deep, new = run()
     assert legacy.last_decision["target_tokens"] == 42_000
-    assert deep.last_decision["target_tokens"] == 35_000
-    assert 35_000 < old[0].after_tokens <= 42_000
-    assert new[0].after_tokens <= 35_000
+    assert deep.last_decision["target_tokens"] == 15_000
+    assert 15_000 < old[0].after_tokens <= 42_000
+    assert new[0].after_tokens <= 15_000
     # Unknown window: the legacy target, whatever the flag says.
     unknown = Compactor(config=CompactionConfig(**config))
     unknown.apply(nodes)
@@ -2106,11 +2108,15 @@ def test_turn_already_over_the_limit_is_reclaimed_below_it() -> None:
     # over L. Only the in-flight rung reaches the tail itself.
     overhead, ratio = 210_000, 0.92
     nodes = _steer_turn(46, arg=1_000)
+    # The smaller default tail already gets below L; retain the original tail
+    # here to exercise the last-resort turn-budget rung independently.
+
 
     def run(**flags) -> tuple[Compactor, list[Message], list]:
         from fluid.context.trim import estimate_tokens_of_messages
 
-        c = Compactor(config=CompactionConfig(**flags))
+        c = Compactor(config=CompactionConfig(recency_tail_tokens=40_000,
+                                             recency_tail_window_ratio=0.15, **flags))
         estimate = overhead + estimate_tokens_of_messages(c.view(nodes))
         rendered, promotions = c.apply(
             nodes, overhead_tokens=overhead, context_window=_W,

@@ -216,7 +216,7 @@ Knobs for tool-result trimming and the compaction ladder
 | `trigger_window_ratio` | `0.6` | Fraction of a **known** context window (`context_window`) the prompt may reach before the ladder arms. The effective trigger is `min(max(trigger_tokens, window × trigger_window_ratio), window − headroom_tokens − output reserve)`, so a 200k model keeps the historical 120k trigger while a 1M model gets ~600k instead of compacting at 12% usage. Set `0` to pin the fixed trigger. |
 | `headroom_tokens` | `16000` | Reserve kept free below the trigger. |
 | `target_ratio` | `0.7` | Compaction aims to bring the prompt down to this fraction of the trigger. |
-| `keep_recent_turns` | `3` | Turns never folded into a digest. |
+| `keep_recent_turns` | `3` | Legacy turn-count protection (unknown window or token recency disabled). With a known window the token budget replaces this count; the in-flight turn is never folded whole by guarded compaction. |
 | `image_trigger_ratio` | `1.0` | Fraction of the arming threshold at which delivered images are consumed (swapped for a placeholder, sibling text kept). `1.0` is the same trigger as the other rungs; lower reclaims image bytes earlier; `0` holds them until overflow recovery. Image consumption only ever happens on the first model call of a turn — a rewrite between two calls of one turn breaks a prefix the provider cached seconds earlier. |
 | `max_resident_span_digests` | `20` | Span digests kept in the prompt before they fold into an epoch stub. |
 | `epoch_fold_spans` | `10` | How many span digests fold into one epoch stub. |
@@ -228,13 +228,13 @@ Knobs for tool-result trimming and the compaction ladder
 | `user_turn_text_cap` | `2000` | Characters of a real user's turn-start request a digest keeps (render version 2 and later). Wake and harness notices keep the shorter built-in cap. |
 | `below_threshold_skips_retry` | `true` | A decision below the trigger, or a batch that reclaimed nothing, does not arm the retry watermark, so the first call that really crosses the trigger compacts at once. `false` restores the old arming. |
 | `image_rung_in_batch` | `true` | Image consumption runs inside the size batch, so a due batch is not split into two rebuilds when images alone pull the prompt under the trigger. `false` restores the old early return. |
-| `deep_target_window_ratio` | `0.35` | With a known window, a full-ladder batch reclaims down to this fraction of the window, or to the `target_ratio` target when that is lower. `0` keeps the `target_ratio` target. |
+| `deep_target_window_ratio` | `0.15` | Automatic full-ladder batches and manual Compact now aim for this fraction of the **user-selected session limit**, not the model maximum (400k → ≤60k; 256k → ≤38.4k), or the `target_ratio` target when lower. `0` keeps the trigger-relative target. Irreducible overhead may prevent reaching it; reported sizes are actual calibrated estimates, never the target substituted as an outcome. |
 | `hard_window_ratio` | `0.75` | With `hard_margin_tokens`, sets the hard ceiling: the lower of this fraction of the window and the window-protection limit minus the margin. Above it a batch must land at or under the trigger. `0` turns the hard zone off. |
 | `hard_margin_tokens` | `32000` | Distance kept between the hard ceiling and the window-protection limit, sized for the largest single-call jump seen in production. |
 | `shortfall_watermark` | `true` | A batch that still leaves the prompt above its target makes later mid-turn calls wait until that much more is reclaimable, so one shallow batch is not followed by another a few calls later. The hard zone and window protection ignore it. |
-| `recency_tail_tokens` | `40000` | With a known window, the newest history up to this many tokens (or `recency_tail_window_ratio` of the window, whichever is smaller) stays verbatim. `0` restores the turn and result counts. |
-| `recency_tail_window_ratio` | `0.15` | Window fraction that caps the verbatim recency tail. |
-| `recency_tail_calls` | `2` | The newest model calls that always stay verbatim, whatever their size. |
+| `recency_tail_tokens` | `8000` | With a known window, the newest history up to this many tokens (or `recency_tail_window_ratio` of the window, whichever is smaller) stays verbatim. `0` restores the turn and result counts. |
+| `recency_tail_window_ratio` | `0.02` | Window fraction that caps the verbatim recency tail. |
+| `recency_tail_calls` | `2` | The newest model calls protected by the normal recency tail. If completed-turn recency prevents the deep target, older completed turns can be folded too; newest in-flight work stays intact. |
 | `turn_budget_window_ratio` | `0.2` | When the turn in flight holds more than this fraction of the window and the prompt is past `turn_budget_floor_ratio`, the guarded rung trims that turn's results older than the recency tail. `0` turns the rung off. |
 | `turn_budget_floor_ratio` | `0.45` | Window fraction the prompt must reach before the turn-budget rung may run. |
 | `window_floor_waiver_ratio` | `0.9` | At or above this fraction of the window, a batch commits whenever it frees `window_floor_waiver_tokens` or more, instead of needing the usual 5% reclaim. `0` keeps the 5% floor everywhere. |
@@ -248,25 +248,36 @@ Knobs for tool-result trimming and the compaction ladder
 | `summary_input_cap_tokens` | `120000` | Maximum chars/4 input estimate. Beyond it, retain the previous checkpoint and newest rendered material. |
 | `summary_model` | none | Override the session model for the no-tools side call, using the same provider. |
 | `sweep_mode` | `"shadow"` | The turn-boundary sweep of old tool results and already-seen images. `"off"` plans nothing, `"shadow"` logs what it would reclaim without changing the prompt, `"on"` commits it. |
-| `sweep_keep_tokens` | `20000` | The newest results of earlier turns, up to this many tokens, that the sweep leaves alone. |
-| `sweep_pin_tokens` | `16000` | Results the model fetched with `HistoryExpand` in the turn that just ended stay pinned for the next turn, newest first, up to this many tokens. |
+| `sweep_keep_tokens` | `20000` | Cap for the newest earlier-turn results left by a sweep; with a known limit the allowance is the smaller of this cap and **1%** of the limit. |
+| `sweep_pin_tokens` | `16000` | Cap for next-turn `HistoryExpand` result pins, newest first; with a known limit the allowance is the smaller of this cap and **0.5%** of the limit. |
 | `sweep_min_reclaim_tokens` | `2000` | Smallest reclaim for which a sweep commits on its own on a cold cache. |
 | `render_version` | current (`2`) | Renderer version new compaction decisions use. Stored decisions keep the version they were made under, so changing this never re-renders an old session. `1` is the original renderer. |
 | `steer_receipt_chars` | `1000` | From render version 2, a harness notice at least this long renders, once compacted, as a short receipt with a `HistoryExpand` ref. User and peer messages stay verbatim. |
 | `steer_receipt_preview_chars` | `300` | Characters of the notice that the receipt quotes. |
-| `intent_pin_tokens` | `4000` | From render version 2, epoch stubs keep the folded turns' user requests verbatim up to this many tokens. |
+| `intent_pin_tokens` | `4000` | Cap for epoch stubs' verbatim user-request pins; new folds use the smaller of this cap and **0.5%** of the known limit. Each fold persists its budget so a later limit change cannot rewrite a cached checkpoint. |
 
 Checkpoints use a guided layout for requests, constraints, decisions, exact
 identifiers, completed/pending work, errors and open questions. The engine builds
-one in the background without blocking the next turn and applies it only at a
-cold turn boundary or a due compaction batch. Manual Compact now can wait for a
-build after running the guarded mechanical ladder. Failed, empty or truncated
+one in the background and applies it only at a cold turn boundary or a due
+compaction batch. Manual Compact now can wait for a build after the guarded
+mechanical ladder. An automatic batch also waits if compacted residue still
+exceeds the 15% target and no suitable checkpoint is ready. Failed, empty or truncated
 builds are dropped; the ladder still works. Summary text is persisted with the
 tier-4 event, re-rendered without another model call, and ignored off its original
 path. Original nodes stay available for recall. Side-call usage/cost is recorded
 separately with `auxiliary_source="checkpoint_summary"` and no context snapshot.
 The projected post-compact size is a calibrated estimate, not a promise about a
 future model's output or billing.
+
+The target includes system instructions, tools and retained in-flight work.
+These can exceed 15% by themselves, especially on small windows: a 12k static
+prefix already exceeds a 32k window's 4.8k target. Compaction then folds all
+eligible completed work and uses a checkpoint if it saves more; it does not
+truncate safety instructions, memory pins or newest in-flight work to claim a
+win. The Context Compacted row reports the resulting size even above target.
+Trigger thresholds and cache pricing are unchanged; successful 15% batches sit
+well below the 45% opportunistic floor and 60% normal trigger. Existing retry
+watermarks still hold shallow/unreachable batches until more is reclaimable.
 
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
