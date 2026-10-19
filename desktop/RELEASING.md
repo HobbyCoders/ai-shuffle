@@ -39,12 +39,29 @@ wired into that job.
 | `desktop-linux-artifact.yml` | manual | x64 AppImage and deb, `SHA256SUMS`, provenance, as a one-day Actions artifact | no, by design |
 | `desktop-source.yml` | owner dispatch from `main` | the Ed25519-signed source manifest that installed Windows apps update from | always, with `DESKTOP_APPLICATION_SIGNING_KEY` |
 
-Releases promoted to latest stable automatically publish Windows, Linux and Android installers to
-GitHub and register all three on the hub. Sealed-candidate promotion reuses the
-retained packages without rebuilding. The final public download-list read-back
-fails if any of these platforms is missing or on another version/revision.
-Older-line patches and prereleases leave these stable pointers unchanged and
-skip Windows. macOS remains a separate manual publication.
+Newest final stable releases publish Linux and Android for the new tag. Windows
+builds only when needed (owner decision, 2026-10-19, option c, superseding #242):
+installer-relevant **inputs** must differ between the hub's current Windows build
+revision and the new tag. Version numbers and tags are never the need test.
+The read-only policy reuses `scripts/ci/update_reach.py`'s classification.
+See [the release-channel policy](../docs/ci/release-channels.md#ship-release-notes-all-platform-completion)
+for the complete installer input set and provenance checks.
+A release version-only bump skips paid Windows CI. Missing, unreadable or
+unverifiable hub downloads/history (including a checksum mismatch) require a build.
+
+Force a build with `build_desktop=true` on the existing owner-gated dispatch:
+`gh workflow run release.yml --ref <tag> -f version=<tag> -f build_desktop=true`.
+This also applies to `stage_only=true`; it does not override newest-final gates.
+Existing installs update in-app; a fresh install from the retained older installer
+updates itself on first start. Sealed-candidate promotion reuses retained packages
+without rebuilding, and may omit Windows only with a fresh not-needed decision.
+
+The final download-list check requires Linux/Android and built Windows to match
+the new tag/revision. Skipped Windows must equal the previous installer exactly,
+pass a fresh byte/checksum verification and still have unchanged installer inputs.
+Older-line patches and prereleases leave stable pointers unchanged and skip
+Windows even when forced. macOS remains a separate manual publication. See the
+ship-release notes in `docs/ci/release-channels.md` for completion and recovery.
 
 ## Windows: Authenticode
 

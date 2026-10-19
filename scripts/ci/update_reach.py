@@ -426,6 +426,47 @@ def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optio
     return groups
 
 
+def windows_installer_changes(changed: Iterable[str], base: Reader, head: Reader) -> list[str]:
+    """Installer inputs, independent of app/release versions and reach acceptances."""
+    groups = classify(changed, base, head)
+    relevant = set(groups["windows-launcher"]) | set(groups["windows-packaging"])
+    if base(LAUNCHER_JSON) != head(LAUNCHER_JSON):
+        relevant.add(LAUNCHER_JSON)
+
+    # Source-managed app code can update in-app, but the bootstrap runtimes,
+    # their assembly/signing hooks and the compiler/packager affect the installer.
+    installer_inputs = (
+        "desktop/scripts/build-worker.*", "desktop/scripts/postgres-binaries.*",
+        "desktop/scripts/gh-binaries.*", "desktop/scripts/bundled-symlinks.*",
+        "desktop/scripts/runtime-contract.*", "desktop/scripts/stamp-desktop-build.*",
+        "desktop/scripts/launcher-contract.*", "desktop/scripts/signing.*",
+        "desktop/scripts/signing-preflight.*", "desktop/scripts/verify-packaged-runtime.cjs",
+        "desktop/runtime-contract.json", "desktop/tsconfig.json",
+        ".github/workflows/desktop-installer.yml", "desktop/vendor/*",
+        "requirements.lock", "requirements-native.lock", "fluid/pyproject.toml",
+        "app/core/cloudflared.py",
+    )
+    relevant.update(p for p in changed if matches(p, installer_inputs))
+
+    def build_tools(read):
+        package = json.loads(read("desktop/package.json") or b"{}")
+        lock = json.loads(read(LAUNCHER_LOCK) or b"{}")
+        root = lock.get("packages", {}).get("", {})
+        # npm scripts (including lifecycle hooks) and all locked build-tool
+        # dependencies can affect the output, not just the top-level Electron,
+        # electron-builder and TypeScript versions. Ignore only app versions
+        # and descriptive lock metadata, never versions of actual dependencies.
+        package.pop("version", None)
+        root.pop("version", None)
+        packages = {path: {key: data.get(key) for key in ("version", "resolved", "integrity")}
+                    for path, data in lock.get("packages", {}).items() if path}
+        return package, root, packages, lock.get("dependencies")
+
+    if build_tools(base) != build_tools(head):
+        relevant.update(p for p in changed if p in {"desktop/package.json", LAUNCHER_LOCK})
+    return sorted(relevant)
+
+
 def in_archive(path: str, runtime_paths: Iterable[str], excluded: Iterable[str]) -> bool:
     """Whether the update archive carries this path (source_archive.pathspec, read as paths and globs)."""
     if not any(path == r or path.startswith(r + "/") for r in runtime_paths):

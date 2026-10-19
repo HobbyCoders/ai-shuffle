@@ -41,8 +41,12 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "older Play version cannot" in body
     assert "**internal testing**, not public production" in body
     assert "separate owner-approved Play Console step" in body
-    assert "Every release promoted to latest stable publishes Windows, Linux and Android downloads." in body
-    assert "Older-line patches and prereleases leave stable downloads unchanged and skip Windows." in body
+    assert "Newest stable releases publish Linux and Android downloads for this tag." in body
+    assert "Windows is rebuilt only when installer inputs changed, the hub installer cannot be verified," in body
+    assert "or the owner forces a build; otherwise the verified previous installer stays available" in body
+    assert "updates itself on first start" in body
+    assert "Older-line patches and prereleases leave stable downloads unchanged." in body
+    assert "fails checksum, identity or unchanged-input verification" in body
     assert "Desktop installers are opt-in" not in body
     assert "https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server" in body
     assert "docs/install" in body
@@ -123,9 +127,9 @@ def test_release_version_outputs_feed_play_and_docker(tmp_path):
 def test_release_orchestration_defaults_to_docker_play_and_signed_apk():
     workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     desktop = workflow["jobs"]["desktop"]
-    assert "build_desktop" not in workflow["on"]["workflow_dispatch"]["inputs"]
-    assert desktop["if"] == "needs.create-release.outputs.promote_latest == 'true'"
-    assert desktop["needs"] == "create-release"
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["build_desktop"]["default"] == "false"
+    assert desktop["if"] == "needs.create-release.outputs.promote_latest == 'true' && needs.windows-policy.outputs.build == 'true'"
+    assert desktop["needs"] == ["create-release", "windows-policy"]
     assert desktop["uses"] == "./.github/workflows/desktop-installer.yml"
     assert workflow["jobs"]["docker"]["uses"] == "./.github/workflows/docker-publish.yml"
     assert workflow["permissions"]["packages"] == "write"

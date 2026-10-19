@@ -32,7 +32,7 @@ def test_release_notes_and_publisher_use_the_documented_public_image():
     "apk_disabled", "apk_tag", "windows_tag", "linux_version", "linux_tag", "linux_attach", "linux_checkout",
     "callee_input", "callee_output", "job_output", "reuse_if", "reuse_digest", "reuse_source", "reuse_command",
     "build_if", "build_push", "build_load", "push_if", "push_command", "verify_if", "output_digest", "source_tag",
-    "step_order"])
+    "step_order", "windows_policy_missing", "windows_policy_bypass", "windows_policy_ungated", "windows_skip_unchecked"])
 def test_workflow_preflight_rejects_broken_release_delivery(tmp_path, monkeypatch, mutation):
     release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     docker = yaml.load((ROOT / ".github/workflows/docker-publish.yml").read_text(), Loader=yaml.BaseLoader)
@@ -46,6 +46,10 @@ def test_workflow_preflight_rejects_broken_release_delivery(tmp_path, monkeypatc
     elif mutation == "apk_disabled": jobs["android-apk"]["with"]["publish_download"] = "false"
     elif mutation == "apk_tag": jobs["android-apk"]["with"]["release_tag"] = "main"
     elif mutation == "windows_tag": jobs["desktop"]["with"]["release_tag"] = "main"
+    elif mutation == "windows_policy_missing": del jobs["windows-policy"]
+    elif mutation == "windows_policy_bypass": jobs["desktop"]["if"] = "needs.create-release.outputs.promote_latest == 'true'"
+    elif mutation == "windows_policy_ungated": jobs["windows-policy"]["needs"] = "create-release"
+    elif mutation == "windows_skip_unchecked": jobs["promote-image"]["if"] = jobs["promote-image"]["if"].replace("needs.windows-policy.outputs.build == 'false' && ", "")
     elif mutation == "linux_version": jobs["linux-build"]["with"]["version"] = "1.0.0"
     elif mutation == "linux_tag": jobs["linux-release"]["steps"][-1]["env"]["RELEASE_TAG"] = "main"
     elif mutation == "linux_attach": jobs["linux-release"]["steps"][-1]["run"] = "echo attach_linux.py"

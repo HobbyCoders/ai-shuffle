@@ -73,16 +73,43 @@ staging is not a claim that these other surfaces are staged.
 
 ## Ship-release notes: all-platform completion
 
-The ship-release checklist must not recommend skipping Windows when native
-launcher code is unchanged. Every release promoted to latest stable needs its
-own installer for new installs and recovery; existing users can still update
-inside the app. Do not pass the removed `build_desktop` input. A latest-stable
-dispatch and a staged candidate both include Windows, Linux and Android.
+Owner decision (2026-10-19, option c; supersedes #242's mandatory Windows build):
+build Windows only when needed, avoiding paid Windows CI for ordinary releases.
+**Needed is decided by installer-relevant INPUTS between the hub's current Windows
+build revision and the new tag, never by version numbers or tags**, which always
+differ between releases. The read-only **windows-policy** job reads
+`/v1/desktop/installers`, verifies the Windows download's bytes against its size
+and SHA-256 and its revision against its release tag. The same size and digest
+must match that tag's GitHub Windows asset and `SHA256SUMS`, and the release's
+`desktop-build.json` must name the same revision. Missing or mismatched release
+assets require a build, even if the unsigned hub row matches its own download.
+The policy then reuses `scripts/ci/update_reach.py`'s launcher/installer
+classification. It compares `desktop/launcher.json`, the launcher
+import/runtime/dependency closure, `desktop/build/**`, `desktop/electron-builder.yml`,
+the worker/runtime assembly and signing scripts, the packaged-runtime verifier,
+`desktop/runtime-contract.json`, `desktop/tsconfig.json`, and the Windows installer
+workflow. Bundled Python dependency locks, native vendor wheels, Fluid's package
+metadata and the cloudflared bundler also count. Package build scripts and locked
+build-tool dependencies (including Electron, electron-builder, TypeScript and
+their transitive dependencies) count; app version-only bumps do not.
+
+A changed input, missing Windows download, unreadable hub, checksum mismatch or
+unverifiable history requires a build. To force one, dispatch `release.yml` from
+the new final tag with `build_desktop=true` (also supported with `stage_only=true`):
+`gh workflow run release.yml --ref <tag> -f version=<tag> -f build_desktop=true`.
+This never overrides the newest-final-stable or owner/actor gates. Otherwise the
+Windows job is skipped: existing installs update in-app, and a fresh install from
+the older installer updates itself on first start. Linux and Android still build
+and register the new tag. The same rule applies when staging a candidate.
+Promotion of a sealed candidate without Windows requires both an explicit
+not-needed decision and a previous-installer snapshot before activation begins.
 Older-line patches and prereleases do not publish Windows or move the hub's
 stable download pointers. macOS remains separate.
 
 Before declaring a release complete, require **verify-downloads** to pass and
-read back the download list for the exact tag/revision. Do not substitute a
+read back the download list: Linux/Android and any newly built Windows installer
+must match the exact tag/revision; skipped Windows must remain exactly the
+previous verified installer and pass the input comparison again. Do not substitute a
 successful Docker promotion or Play upload for this check. If release gates
 failed or were skipped, fix those jobs and retry the release first: do not
 manually register downloads to bypass them. Only after successful activation,
@@ -91,9 +118,10 @@ Linux/Android use `platform-installer.yml` from the tag with `release_assets=tru
 and no build run ID. This reuses retained release assets even after the one-day
 Actions artifacts expire, without rebuilding packages with different bytes.
 For a sealed candidate, retry promotion to reuse the retained assets rather
-than rebuilding them. Legacy seals made without Windows cannot satisfy the
-all-platform completion gate unless the matching Windows installer is published;
-the error names the Windows recovery workflow. Never report such a run complete.
+than rebuilding them. A seal without Windows is promotable only while the current
+verified Windows installer still passes the not-needed check. If it no longer
+does (or the owner forces Windows), stage a candidate with Windows first; promotion
+never builds missing assets. Never report a failed completion gate as complete.
 
 ## The path of a release
 
@@ -120,9 +148,9 @@ the error names the Windows recovery workflow. Never report such a run complete.
    rebuild. The lifecycle and clean buyer-install checks still run. Only the
    final **promote-image** job, after buyer-install, source signing, Linux release
    attachment and Android APK publication, moves `X.Y`, `X` and `latest` by that
-   exact digest and reads them back. Windows must also succeed on every release;
-   there is no `build_desktop` opt-out. Failed, skipped or cancelled artifact
-   jobs never permit alias promotion.
+   exact digest and reads them back. Windows must succeed when the input policy
+   requires it; only an explicit not-needed decision permits its skipped job.
+   Failed or cancelled jobs, or any other skipped artifact job, block promotion.
 3. **buyer-install** pulls that image on a fresh GitHub-hosted runner and
    installs it with `docs/install/compose` exactly as a buyer would
    (`scripts/ci/verify_buyer_compose.py`), then checks the first session
@@ -140,7 +168,8 @@ the error names the Windows recovery workflow. Never report such a run complete.
 5. **android** builds and publishes to Play internal testing only when its
    existing signing/worker-readiness gates pass. This is not a public Play
    production release. **desktop** builds and publishes the Windows installer
-   whenever `promote_latest=true`, through `desktop-installer.yml` and its existing
+   when `promote_latest=true` and **windows-policy** requires it (or
+   `build_desktop=true` forces it), through `desktop-installer.yml` and its existing
    signing/verification. Older final releases and prereleases skip Windows so
    they cannot overwrite the latest stable installer or fail its stable-tag gate.
 6. **linux-build** calls the existing Linux workflow on the exact tag; **linux-release**
@@ -156,17 +185,21 @@ the error names the Windows recovery workflow. Never report such a run complete.
    R2 copy as a manual publish. No separate Linux or Android dispatch is needed.
    `platform-installer.yml` remains available from the tag for manual re-publishes
    (and macOS publication).
-8. Staging (`stage_only=true`) also requires Windows before sealing, but moves no
-   download pointers. Sealed-candidate promotion (`promote=vX.Y.Z`) activates the
-   sealed Windows installer, then **promotion-platform-installers** calls the same
+8. Staging (`stage_only=true`) uses the same Windows input decision before sealing,
+   but moves no download pointers. Sealed-candidate promotion (`promote=vX.Y.Z`)
+   activates a sealed Windows installer if present, or requires a fresh not-needed
+   decision before activation. Then **promotion-platform-installers** calls the same
    platform publisher with `release_assets=true`. It downloads Linux and Android
    from the durable release assets already checked by promotion, not expired
    Actions artifacts. It never rebuilds or re-signs the packages; only the hub
    installer entries are signed using the existing publisher.
 9. **verify-downloads** runs after either publication path, even when a registration
    job failed or was skipped. It reads the public `/v1/desktop/installers` response
-   and requires `win`, `linux` and `android` to match both the tag version and exact
-   revision. A missing/stale platform fails the run and names the platform and
+   and requires `linux` and `android` to match both the tag version and exact
+   revision. Built Windows must match too. Skipped Windows must equal the saved
+   pre-build hub entry, have its actual bytes/checksum verified again, and have
+   unchanged installer inputs against the new tag. A missing/stale/unverifiable
+   platform fails the run and names the platform and
    recovery workflow only after successful activation. If **promote-image** (or
    **promotion** on the sealed path) failed or was skipped, the check instead
    tells the owner to fix the release gates and not manually register installers.
