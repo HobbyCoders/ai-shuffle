@@ -92,15 +92,18 @@ export async function retryableStarts(root: string): Promise<string[]> {
  * other update; the owner still chooses to download and install. Returns the
  * revisions released. The caller must reload its SourceUpdates (load())
  * afterwards. The count is written first: a crash in between can only use up
- * a retry, never grant an extra one.
+ * a retry, never grant an extra one. `count` is false only when the update
+ * never started at all (the app's own copy of the database failed).
  */
-export async function releaseStarts(root: string, revisions: string[]): Promise<string[]> {
+export async function releaseStarts(root: string, revisions: string[], count = true): Promise<string[]> {
   const found = await retryable(root);
   const released = found ? found.revisions.filter(revision => revisions.includes(revision)) : [];
   if (!found || !released.length) return [];
-  const retries = { ...found.retries };
-  for (const revision of released) retries[revision] = (retries[revision] ?? 0) + 1;
-  await durableJson(path.join(root, RETRIES_FILE), retries);
+  if (count) {
+    const retries = { ...found.retries };
+    for (const revision of released) retries[revision] = (retries[revision] ?? 0) + 1;
+    await durableJson(path.join(root, RETRIES_FILE), retries);
+  }
   const failed = (found.state.failed ?? []).filter(revision => !released.includes(revision));
   if (failed.length) found.state.failed = failed; else delete found.state.failed;
   await durableJson(path.join(root, 'state.json'), found.state);

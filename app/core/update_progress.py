@@ -8,11 +8,7 @@ from app.core.config import settings
 from app.core.application_updates import atomic_json
 
 _lock = threading.RLock()
-# From the install request until every worker runs its target. A desktop's
-# first start can take minutes before its window appears (a freshly built
-# runtime scanned by antivirus software), and its worker may then take up to
-# 10 minutes (FIRST_START_READY_MS in desktop/src/main/index.ts).
-STARTUP_TIMEOUT = 20 * 60
+STARTUP_TIMEOUT = 10 * 60
 # Records saved before ``from_version`` existed cannot tell a failed start from
 # a worker that moved on. After this long, a worker running another version
 # than the target has moved on as far as this install is concerned.
@@ -120,6 +116,15 @@ def moved_on(current, target, age):
             and _commit(target.get("target_version")) and not same_version(running, target["target_version"]))
 
 
+def put_back(current, target):
+    """A desktop back on its previous version, offering this install's target
+    again because its first start did not finish (``retry_start``). The
+    install is over; waiting longer would only hold the next request back."""
+    return (bool(current.get("online") and current.get("retry_start") is True)
+            and same_version(current.get("version"), target.get("target_version"))
+            and not same_version(current.get("running_version"), target.get("target_version")))
+
+
 def observe(operation, rows):
     if not operation:
         return None
@@ -140,6 +145,9 @@ def observe(operation, rows):
             worker.update(status="verified", message="Updated and verified")
         elif replaced(current, target) or moved_on(current, target, age):
             worker.update(status="replaced", message=f"Now runs {current['running_version'][:12]}; nothing left to install")
+        elif put_back(current, target):
+            worker.update(status="error", message="The update did not finish starting, so this worker went back to "
+                                                  "its previous version with its data as it was. Download it to try again.")
         elif target["accepted"] is False:
             worker.update(status="skipped", message=target.get("reason") or "Not queued")
         elif (current.get("error") or age >= STARTUP_TIMEOUT) and superseded(current, target):

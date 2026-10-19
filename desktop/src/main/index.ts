@@ -9,7 +9,7 @@
 import { app, dialog, Notification, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, promises as fsPromises, readFileSync } from 'node:fs';
 import { managedContext } from './managed-context';
 import { installedContext } from './installed-entry';
 import { installedLaunchArgs, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
@@ -28,7 +28,7 @@ import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
-import { SinglePassClusterCopy } from './update-restore-point';
+import { HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { CallPopout } from './call-popout';
@@ -150,6 +150,8 @@ async function main(): Promise<void> {
 	let preparingRestorePoint = false;
 	/** Why that copy failed; Try again repeats it in this process. */
 	let restorePointFailure: string | null = null;
+	/** Set while an update's restore point is ready for another revision: this version must not open the database. */
+	let heldPoint = false;
 	async function initializeRuntime(): Promise<void> {
 		const repoDir = path.resolve(__dirname, '..', '..', '..');
 		const selected = managed?.application;
@@ -219,7 +221,7 @@ async function main(): Promise<void> {
 	};
 
 	const desktopState = (): DesktopState => ({
-		...(restorePointFailure ? { ...failedState(restorePointFailure), startupStep: 'restore-point' as const }
+		...(heldPoint ? failedState(HELD_POINT_MESSAGE) : restorePointFailure ? { ...failedState(restorePointFailure), startupStep: 'restore-point' as const }
 			: supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
 		...(preparingRestorePoint ? { startupStep: 'restore-point' as const } : {}),
 		postgres: postgresStatus()
@@ -237,6 +239,14 @@ async function main(): Promise<void> {
 		}
 		if (quitting || !supervisor) return;
 		if (!postgres) {
+			window.send('desktop:worker-state', desktopState());
+			return;
+		}
+		// A copy of the database is ready for an update that has not started yet (its restart
+		// failed, or a quit was cancelled). Opening the database now would let the launcher
+		// later restore that copy over whatever this version wrote: every start goes through here.
+		heldPoint = !!applications && !!updateRoot && await pointHeldFor(updateRoot, applications.version);
+		if (heldPoint) {
 			window.send('desktop:worker-state', desktopState());
 			return;
 		}
@@ -445,6 +455,7 @@ async function main(): Promise<void> {
 			await postgres!.quiesce(snapshot);
 		});
 		updater.onInstallPrepared(async () => {
+			const revision = applications!.pendingVersion;
 			preparingRestorePoint = true;
 			try {
 				await window.showPage('status');
@@ -454,12 +465,17 @@ async function main(): Promise<void> {
 				preparingRestorePoint = false;
 				window.send('desktop:worker-state', desktopState());
 			}
-			// A ready point: the launcher only checks it. None (a fenced recovery, or cleanup still
-			// pending) leaves the launcher to do as before. A failed copy already ended the
-			// install as the launcher would have: say why here.
-			if (await applications!.rollbackVersion()) return;
+			// A ready point: the launcher only checks it. Still pending without one (a fenced
+			// recovery, or cleanup still pending): the launcher does as before.
+			if (await applications!.rollbackVersion() || applications!.pendingVersion) return;
+			// The copy failed. prepareRollback ended the install as the launcher would have and
+			// marked the update failed, but it never started: offer it again without using up a
+			// retry, and say here what happened instead of in a launcher notice at the next start.
 			const notice = await applications!.rollbackNotice();
-			if (notice) throw new Error(notice);
+			await fsPromises.rm(path.join(updateRoot!, 'rollback-notice.json'), { force: true });
+			if (revision) { await releaseStarts(updateRoot!, [revision], false); await applications!.load(); }
+			const reason = notice?.replace(/^.*?database restore point failed:\s*/, '').replace(/\.\s*$/, '');
+			throw new RestorePointCopyError(`The update was not installed: AI Shuffle could not save a copy of your database first${reason ? ` (${reason})` : ''}. Your data is unchanged and this version keeps running. Free some disk space, or close programs that may be using the AI Shuffle data folder, then check for updates and try again.`);
 		}, async () => { await applications!.cancelPreparedRollback(restorePoint); });
 	}
 	updater.onBeforeInstall(async () => {

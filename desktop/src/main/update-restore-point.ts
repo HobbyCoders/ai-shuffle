@@ -79,3 +79,26 @@ async function shape(root: string): Promise<Record<string, string>> {
   await walk('');
   return result;
 }
+
+/**
+ * True while a restore point made for another revision than `running` may
+ * still be restored: the update is about to start (or is being put back).
+ * This process must not open the database then; anything it wrote would be
+ * lost when the launcher restores that copy. A journal that cannot be read is
+ * treated the same way: the launcher refuses to start anything over it.
+ */
+export async function pointHeldFor(root: string, running: string | null): Promise<boolean> {
+  let text: string;
+  try { text = await fs.readFile(path.join(root, 'restore-point.json'), 'utf8'); }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+  try {
+    const journal = JSON.parse(text);
+    if (journal?.phase === 'committed' || journal?.phase === 'preparing') return false;
+    return journal?.revision !== running;
+  } catch { return true; }
+}
+
+/** What the status page says while such a point is held. */
+export const HELD_POINT_MESSAGE = 'An update is ready to start and a copy of your database was made for it. Quit AI Shuffle and open it again to finish installing the update. This version does not reopen the database until then, so that copy stays exact.';
+/** Why an install stopped before the restart because the app could not copy the database. */
+export class RestorePointCopyError extends Error {}

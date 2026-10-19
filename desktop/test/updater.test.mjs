@@ -506,3 +506,25 @@ test('the restore point is made after the update is pending and before the resta
  await third.updater.check();await third.updater.install();
  assert.match(third.updater.current.error,/disk full/);assert(!third.calls.includes('quit'));
 });
+test('a restore point that cannot be discarded keeps the update pending and never reopens the database', async () => {
+ const {updater,calls,app}=fixture();const order=[];
+ app.relaunch=()=>{throw Error('cannot relaunch');};
+ updater.useApplications(source({check:async()=>ready,cancelInstall:async()=>order.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onInstallPrepared(async()=>order.push('point'),async()=>{order.push('discard');throw Error('EBUSY: restore-point.json is locked');});
+ updater.onInstallFailed(async()=>order.push('start stack'));
+ const error=console.error;console.error=()=>{};
+ try{await updater.check();await updater.install();}finally{console.error=error;}
+ // Neither cancelInstall (the update stays pending) nor a restart of the stack.
+ assert.deepEqual(order,['point','discard']);assert(!calls.includes('quit'));
+ assert.equal(updater.current.phase,'ready');
+ assert.match(updater.current.error,/cannot relaunch[\s\S]*Quit AI Shuffle and open it again to finish installing/);
+});
+test('an install whose database copy failed ends with nothing staged and says so plainly', async () => {
+ const {updater}=fixture();const manager=source({check:async()=>ready,pendingVersion:'b'.repeat(40)});
+ updater.useApplications(manager,'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onInstallPrepared(async()=>{manager.pendingVersion=null;throw Error('The update was not installed: AI Shuffle could not save a copy of your database first (disk full).');},async()=>{});
+ let restarted=0;updater.onInstallFailed(async()=>{restarted++;});
+ await updater.check();await updater.install();
+ assert.equal(updater.current.phase,'error');assert.match(updater.current.error,/could not save a copy of your database first \(disk full\)/);
+ assert.doesNotMatch(updater.current.error,/did not finish|went back/);assert.equal(restarted,1,'the running version starts its stack again');
+});

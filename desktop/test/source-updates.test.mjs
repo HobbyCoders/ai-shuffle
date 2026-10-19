@@ -1319,3 +1319,31 @@ test('the update lock: a live holder refuses, a dead holder is reclaimed, fresh 
  f.signed=release.signed;assert.equal((await u.download()).kind,'ready');
  await assert.rejects(fs.stat(lock),/ENOENT/);
 });
+test('an app-made restore point that cannot be discarded holds the database closed, so the launcher never restores a stale copy over newer data', async t => {
+ const { SinglePassClusterCopy, pointHeldFor } = require('../dist/main/update-restore-point.js');
+ const { ColdClusterCopy } = require('../dist/main/database-restore.js');
+ const { f, u } = await rollbackFixture(t);
+ u.stageDownloads(); await u.download();
+ const rows = path.join(f.root, 'postgres', 'data', 'base', '16384', '2619');
+ for (const [name, body] of Object.entries({ 'PG_VERSION': '17\n', 'global/pg_control': 'control', 'base/16384/2619': 'rows-v1' })) {
+  await fs.mkdir(path.dirname(path.join(f.root, 'postgres', 'data', name)), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'postgres', 'data', name), body);
+ }
+ // Updater.install: the restart is prepared, then the app copies the database for the update's restore point.
+ await u.prepareInstall(); await u.prepareRollback(async () => new SinglePassClusterCopy(path.join(f.root, 'postgres'), async () => {}));
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'restore-point.json'), 'utf8')).phase, 'ready');
+ // The relaunch fails and so does the discard (a locked journal, a full disk): the journal stays ready.
+ // The old app used to move the update back to staged and reopen the database here; the
+ // launcher's next start then restored this copy over everything written since.
+ // Now nothing in this version opens the database while the point is held...
+ assert.equal(await pointHeldFor(f.root, A), true);
+ assert.equal(u.pendingVersion, B, 'the update stays pending');
+ // ...and the next launcher start keeps the copy as the update's restore point and starts the update.
+ const launcher = f.create(); await launcher.load();
+ assert.equal(await launcher.recoverRollback(async () => new ColdClusterCopy(path.join(f.root, 'postgres'), async () => {})), false);
+ await launcher.prepareRollback(async () => new ColdClusterCopy(path.join(f.root, 'postgres'), async () => {}));
+ assert.equal((await launcher.select()).revision, B);
+ assert.equal(await fs.readFile(rows, 'utf8'), 'rows-v1');
+ // Once the update started (or the point is committed), the running version is the point's own.
+ assert.equal(await pointHeldFor(f.root, B), false);
+});

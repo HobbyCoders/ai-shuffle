@@ -215,7 +215,7 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
                   "request_pending", "checked_at", "channel", "release", "notes", "kind",
-                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer")
+                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
@@ -336,7 +336,7 @@ def classify(row, all_workers, offers=(), refusals=None):
         return {"role": "staged", "label": f"Staged, awaiting restart. {error}" if error else "Staged, awaiting restart"}
     if phase == "available":
         # A desktop says why it offers an update again: its last first start did not finish.
-        label = (row.get("kind") == "desktop" and row.get("message")) or "Update available; not downloaded"
+        label = (row.get("retry_start") is True and row.get("message")) or "Update available; not downloaded"
         return ({"role": "available", "label": label} if row.get("version")
                 else {"role": "excluded", "label": "No update offered"})
     if phase == "error":

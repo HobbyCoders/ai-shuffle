@@ -26,11 +26,15 @@ export interface UpdateState {
    * worker offers the installer for that failure only when it is.
    */
   installer_newer?: boolean | null;
+  /** The offered update is one whose last first start did not finish and was put back (RETRY_MESSAGE says so). */
+  retry_start?: boolean;
 }
 /** The source updater's refusal of a revision whose first start failed (source-updates.ts update()). */
 export const FAILED_START = /this revision failed to start/i;
 /** Said beside an update offered again after its first start did not finish and was put back. */
 export const RETRY_MESSAGE = 'The last attempt to start this update did not finish, and AI Shuffle went back to the previous version with your data as it was. Download it to try again. The first start after an update can take a few minutes.';
+/** Said when an install failed after the database copy for it was made and that copy could not be removed. */
+export const KEPT_POINT_MESSAGE = 'The update stays ready to start, with the copy of your database made for it. Quit AI Shuffle and open it again to finish installing it; until then this version does not reopen the database.';
 /** Said while the app restarts into an update; the new version's window can take minutes to appear. */
 export const RESTARTING_MESSAGE = 'Starting the new version. This can take a few minutes; AI Shuffle opens again by itself.';
 /** Recovery for an update whose first start did not finish (failed-start.ts). */
@@ -262,7 +266,7 @@ export class Updater {
         ({ result, released } = retry);
       }
       const retried = !!result.version && released.some(revision => revision.startsWith(result.version!));
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: retried ? RETRY_MESSAGE : null, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null, installer_newer: null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: retried ? RETRY_MESSAGE : null, retry_start: retried, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null, installer_newer: null });
     } catch (error) {
       // Nothing to retry: point at the installer only when it is a newer release than this one.
       const installerNewer = this.failedStarts && FAILED_START.test(String(error)) ? await this.failedStarts.installerNewer().catch(() => null) : null;
@@ -282,7 +286,7 @@ export class Updater {
         return;
       }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null, retry_start: false });
     } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
     finally { this.downloading = false; }
   }
@@ -330,9 +334,21 @@ export class Updater {
       app.relaunch({ execPath: current.node, args: [path.join(current.desktopDir, 'scripts/bootstrap.mjs'), '--root', this.applications.options.root] });
       app.quit();
     } catch (error) {
-      if (stopping && this.prepared) try { await this.prepared.discard(); } catch (failure) { error = failure; }
+      if (stopping && this.prepared) {
+        try { await this.prepared.discard(); }
+        catch (failure) {
+          // The copy for the update is still ready, so the update stays pending and
+          // the launcher starts it next. Reopening the database here would let the
+          // launcher later restore that copy over whatever this version wrote.
+          console.error('Could not discard the update restore point', failure);
+          this.set({ phase: 'ready', error: `${String(error)}\n${KEPT_POINT_MESSAGE}`, message: null });
+          this.installing = false;
+          return;
+        }
+      }
       try { await this.applications.cancelInstall?.(); } catch (failure) { error = failure; }
-      this.set({ phase: this.applications.cleanupError ? 'error' : 'ready', error: String(error), message: null });
+      // From what is left: a failed copy already ended the install, so nothing is staged.
+      this.set({ phase: this.applications.cleanupError || this.applications.pendingVersion === null ? 'error' : 'ready', error: String(error), message: null });
       if (stopping) {
         try { await this.installFailed(error); }
         catch (failure) { this.set({ error: `${String(error)}\nRestart failed: ${String(failure)}` }); }

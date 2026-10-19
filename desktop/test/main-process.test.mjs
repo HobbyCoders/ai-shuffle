@@ -87,7 +87,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -565,4 +565,39 @@ test('restarting into an update copies the database for its restore point with t
 		const other = await launch({ managed: { root: '/isolated/no-root', application, updates: updates([]), host: options.host }, platform: options.platform, env: options.env });
 		assert.equal(other.updater.prepared, undefined, JSON.stringify(options));
 	}
+});
+test('while a restore point is ready for an update that has not started, nothing in this version reopens the database', async () => {
+	const { promises: fs } = await import('node:fs');
+	const os = await import('node:os');
+	const A = 'a'.repeat(40), R = 'b'.repeat(40);
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-held-point-'));
+	try {
+		const starts = [];
+		const updates = { options: { root }, version: A, async requireRestorePoint() {}, async databaseStarting() { starts.push('floor'); }, healthy: () => new Promise(() => {}), async finishRollback() {}, async failed() {}, async load() {} };
+		const main = await launch({ installed: { executable: path.resolve('Programs/AI Shuffle.exe'), updates, root }, postgresStart: async () => starts.push('postgres') });
+		assert.deepEqual(starts, ['floor', 'postgres']);
+		// The copy for R was made, then the restart failed (or the quit was cancelled).
+		await fs.writeFile(path.join(root, 'restore-point.json'), JSON.stringify({ schemaVersion: 1, phase: 'ready', revision: R, previous: A }));
+		await main.postgres.stop();
+		// Route 1: the failed install starts the stack again.
+		await main.updater.installFailed(new Error('cannot relaunch'));
+		// Route 2: Restart Worker.
+		await main.ipc.worker.restart();
+		assert.deepEqual(starts, ['floor', 'postgres'], 'the database stayed closed');
+		const state = main.window.sent.filter(([channel]) => channel === 'desktop:worker-state').at(-1)[1];
+		assert.equal(state.phase, 'failed'); assert.match(state.error, /Quit AI Shuffle and open it again to finish installing the update/);
+		// A point for this version itself (its own first start), a committed one, or none at all does not hold it.
+		for (const journal of [{ phase: 'ready', revision: A }, { phase: 'committed', revision: R }, null]) {
+			if (journal) await fs.writeFile(path.join(root, 'restore-point.json'), JSON.stringify({ schemaVersion: 1, previous: 'c'.repeat(40), ...journal }));
+			else await fs.rm(path.join(root, 'restore-point.json'), { force: true });
+			const before = starts.length;
+			await main.ipc.worker.restart();
+			assert.equal(starts.length, before + 2, JSON.stringify(journal));
+		}
+		// Route 3: a launch (or reopening the window) while the point is held.
+		await fs.writeFile(path.join(root, 'restore-point.json'), '{ not json');
+		const held = [];
+		await launch({ installed: { executable: path.resolve('Programs/AI Shuffle.exe'), updates: { ...updates, async databaseStarting() { held.push('floor'); } }, root }, postgresStart: async () => held.push('postgres') });
+		assert.deepEqual(held, [], 'an unreadable journal holds the database closed too');
+	} finally { await fs.rm(root, { recursive: true, force: true }); }
 });

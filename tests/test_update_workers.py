@@ -949,10 +949,32 @@ def test_a_failed_first_start_offers_the_installer_only_when_it_is_newer(install
 
 def test_a_desktop_offering_a_failed_start_again_says_why():
     row = {"kind": "desktop", "online": True, "supported": True, "allow_updates": True, "phase": "available",
-           "version": "b" * 12, "running_version": "a" * 40, "message": "The last attempt to start this update did not finish."}
+           "version": "b" * 12, "running_version": "a" * 40, "retry_start": True,
+           "message": "The last attempt to start this update did not finish."}
     assert fleet.classify(row, False, {}) == {"role": "available", "label": row["message"]}
-    # A container's available status keeps the plain label.
-    assert fleet.classify({**row, "kind": None}, False, {})["label"] == "Update available; not downloaded"
+    # Any other message beside an offer (a macOS installer offer, updates turned off) keeps the plain label.
+    for other in ({**row, "retry_start": False}, {**row, "retry_start": None},
+                  {**row, "retry_start": None, "message": "AI Shuffle 1.0.3 is available. Download the installer to update."}):
+        assert fleet.classify(other, False, {})["label"] == "Update available; not downloaded"
+
+
+def test_an_install_put_back_ends_its_wait_at_once_and_a_retry_is_accepted(setup, monkeypatch):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    asyncio.run(fleet.dispatch("install"))
+    # Back on A, offering B again because its first start did not finish: no need to wait out the window.
+    updates.desktop_exchange({"phase": "available", "version": B[:12], "running_version": A, "retry_start": True,
+                              "message": "The last attempt to start this update did not finish."})
+    snapshot = asyncio.run(fleet.snapshot())
+    assert snapshot["operation"]["phase"] == "error"
+    assert "did not finish starting" in snapshot["operation"]["workers"][0]["message"]
+    assert snapshot["workers"][0]["label"] == "The last attempt to start this update did not finish."
+    result = asyncio.run(fleet.dispatch("download"))
+    assert result["results"][0]["accepted"] is True
+    # The same offer without the flag (a desktop still on its way out) keeps waiting.
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    asyncio.run(fleet.dispatch("install"))
+    updates.desktop_exchange({"phase": "available", "version": B[:12], "running_version": A})
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "waiting"
 
 
 @pytest.mark.parametrize("row", [
