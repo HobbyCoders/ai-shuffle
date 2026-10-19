@@ -1726,7 +1726,34 @@ async def delete_session(
     the HTTP response on slow worktree/subprocess lock release.
     """
     existing = await require_session(request, session_id)
+    await _delete_session(existing, background_tasks)
+
+
+async def _delete_session(existing: dict, background_tasks: BackgroundTasks, *,
+                          unreachable: Optional[dict[str, str]] = None) -> None:
+    """Delete on the execution owner before removing a read-only catalog copy."""
+    from app.network import control, engine, membership
+
+    session_id = existing["id"]
     await refuse_assistant_home_mutation(session_id, "deleted")
+    owner = control.owner_of(existing)
+    ctx = engine.context()
+    member = ctx.member(owner) if ctx is not None and owner else None
+    # A removed/unknown owner can no longer authorize control. Preserve the
+    # ability to discard its orphaned local copy without contacting it.
+    if owner is not None and member is not None and member.status == membership.STATUS_ACTIVE:
+        if unreachable is not None and owner in unreachable:
+            raise HTTPException(503, unreachable[owner])
+        try:
+            response = await control.call(owner, "session-delete", {"session_id": session_id})
+        except control.RunnerUnreachable as exc:
+            if unreachable is not None:
+                unreachable[owner] = str(exc)
+            raise HTTPException(503, str(exc)) from exc
+        except control.ControlRefused as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if response.get("deleted") is not True:
+            raise HTTPException(409, "The owning worker did not confirm deletion")
 
     # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
@@ -1747,13 +1774,35 @@ async def delete_session(
     except Exception:  # noqa: BLE001 — sync fan-out is best-effort
         logger.debug("session delete broadcast failed", exc_info=True)
 
-    # Defer slow cleanup (subprocess termination, JSONL file I/O) to background.
-    background_tasks.add_task(
-        _cleanup_session_artifacts,
-        session_id,
-        existing.get("sdk_session_id"),
-        existing.get("project_id"),
-    )
+    # Only the execution owner tears down runtime/transcript artifacts. The
+    # mirror drops its read view after confirmation; the owner's scanner emits
+    # the authoritative tombstone (also to other peers and reconnecting ones).
+    if owner is None:
+        background_tasks.add_task(
+            _cleanup_session_artifacts,
+            session_id,
+            existing.get("sdk_session_id"),
+            existing.get("project_id"),
+        )
+
+
+async def handle_delete(body: dict, from_device: str) -> Response:
+    """Authenticated peer control, with the same protection and cleanup as UI deletion."""
+    from fastapi.responses import JSONResponse
+    from app.network import control
+
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    existing = await run_sync(database.get_session, session_id)
+    background_tasks = BackgroundTasks()
+    if existing is not None:
+        if control.owner_of(existing) is not None:
+            raise PermissionError("This worker does not own the session")
+        await _delete_session(existing, background_tasks)
+    # A repeated request after a lost reply is harmless. Keep slow teardown
+    # after the HTTP response, just as for the local DELETE endpoint.
+    return JSONResponse({"deleted": True}, background=background_tasks)
 
 
 @router.post("/{session_id}/clear", status_code=status.HTTP_200_OK)
@@ -2071,34 +2120,16 @@ async def batch_delete_sessions(
     """
     deleted_count = 0
     errors = []
+    unreachable: dict[str, str] = {}
 
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
-            await refuse_assistant_home_mutation(session_id, "deleted")
-            await run_sync(database.delete_session, session_id)
-            from app.core import browser_runtime
-            await browser_runtime.close_session(session_id)
-            # Same fan-out as the single delete: other devices drop the row
-            # and leave the session if they have it open. Best-effort.
-            try:
-                from app.core.sync_engine import sync_engine
-                await sync_engine.broadcast_user_session_deleted(
-                    user_id=existing.get("api_user_id") or "admin",
-                    session_id=session_id,
-                    source_device_id=None,
-                )
-            except Exception:  # noqa: BLE001 — sync fan-out is best-effort
-                logger.debug("session delete broadcast failed", exc_info=True)
-            background_tasks.add_task(
-                _cleanup_session_artifacts,
-                session_id,
-                existing.get("sdk_session_id"),
-                existing.get("project_id"),
-            )
+            await _delete_session(existing, background_tasks, unreachable=unreachable)
             deleted_count += 1
         except HTTPException as e:
-            errors.append(f"Access denied for session {session_id}: {e.detail}")
+            label = "Access denied" if e.status_code in (401, 403) else "Deletion failed"
+            errors.append(f"{label} for session {session_id}: {e.detail}")
         except Exception as e:
             errors.append(f"Error deleting session {session_id}: {str(e)}")
 

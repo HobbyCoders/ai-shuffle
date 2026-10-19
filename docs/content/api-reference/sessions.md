@@ -12,6 +12,12 @@ AI Shuffle no longer ships a default built-in agent. For ordinary session creati
 
 An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
 
+## Lifecycle synchronization
+
+Active/Settled membership is shared across paired workers; archive and delete run on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. A child operation whose cascading parent has a known deletion record is recorded as a conflict rather than retried forever, allowing subsequent lifecycle updates to drain. This applies only to parents with generated, non-reusable IDs (sessions, tags, notes and API users). Its signed operation remains available for forwarding. A missing parent without a deletion record still waits for replication; permission rules always wait for their agent, whose ID can be reused.
+
+`GET /api/v1/network/status` includes each peer's `sync_warning` and `stalled_streams` (origin, incarnation, next required `head_seq`, reason, pass count and Unix `first_seen_at`). A successful HTTP exchange does not erase a blocked-stream warning. Diagnostic counters are in-memory and restart with the worker. A stalled prefix does not automatically restart transcript backfill or bootstrap; missing retained operations continue using the existing verified state-copy protocol.
+
 ## User-message revision
 
 Session list (including paginated/cursor lists) and detail responses include
@@ -415,6 +421,8 @@ curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Tit
 
 Delete a session and all its messages.
 
+For a session owned by another paired worker, deletion runs on that worker before the local catalog copy is removed. The owner publishes a deletion record so other workers remove their copies when synchronization catches up. If the owner is unreachable, the request returns `503`; if it refuses the request or does not support remote deletion, it returns `409`. Neither failure removes the local copy. An orphaned copy whose owner is unknown or removed can still be deleted locally. The same routing applies to batch deletion, where failures are listed in `errors` and other items continue; after one unreachable-owner failure, that owner's remaining items fail immediately rather than repeating the connection timeout.
+
 The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be deleted"}`. Its conversation and home binding are preserved.
 
 ```bash
@@ -536,7 +544,7 @@ curl -X POST http://localhost:8000/api/v1/sessions/batch-delete \
   -d '{"session_ids": ["sess_abc123", "sess_def456"]}'
 ```
 
-Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`. The assistant’s built-in home chat is also skipped, with `Access denied for session {id}: Your personal assistant is a persistent conversation and cannot be deleted` in `errors`. Other sessions in the batch are still deleted; the response remains `200` and the home binding is preserved.
+Returns `{"deleted_count": 1, "total_requested": 2, "errors": [...]}` (`errors` is `null` when every session was deleted). A session that does not exist or that the caller may not delete is skipped and listed in `errors`. The assistant’s built-in home chat is also skipped, with `Deletion failed for session {id}: Your personal assistant is a persistent conversation and cannot be deleted` in `errors`. Other sessions in the batch are still deleted; the response remains `200` and the home binding is preserved.
 
 ### POST /api/v1/sessions/{session_id}/archive
 
