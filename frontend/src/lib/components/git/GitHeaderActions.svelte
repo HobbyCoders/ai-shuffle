@@ -526,6 +526,13 @@
 				<TriangleAlert size={13} /> Git unavailable · Retry
 			</button>
 		{/if}
+	{:else if snapshot.status?.enclosing_repository_root}
+		<details class="enclosing-repository">
+			<summary class="git-btn"><GitBranch size={14} /> Inside repository</summary>
+			<p>Inside repository <code>{snapshot.status.enclosing_repository_root}</code>.
+				Chat uses this project folder. Open the repository root as a project to use Git controls;
+				changes outside this folder are not shown or modified here.</p>
+		</details>
 	{:else if panelTriggerShown}
 	<button
 		class="git-btn trigger tone-{summary.tone}"
@@ -844,6 +851,19 @@
 {/if}
 
 <style>
+	.enclosing-repository p {
+		position: absolute;
+		right: 0;
+		z-index: 40;
+		width: min(340px, calc(100vw - 32px));
+		padding: 12px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--background);
+		color: var(--foreground);
+		font-size: 12px;
+		overflow-wrap: anywhere;
+	}
 	.git-actions {
 		position: relative;
 		display: flex;

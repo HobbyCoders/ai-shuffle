@@ -111,6 +111,20 @@ afterEach(() => {
 });
 
 describe('git store — status refresh', () => {
+	it('hydrates an enclosing-repository notice without requesting parent-wide data, and recovers after nested init', async () => {
+		mocks.getGitStatus.mockResolvedValue(transformGitStatus({ is_git_repo: true,
+			enclosing_repository_root: '/monorepo', mutations_blocked: true }));
+		await git.loadRepository('enclosed', false, 'nested-session');
+		expect(git.current.hydrated).toBe(true);
+		expect(git.current.error).toBeNull();
+		expect(git.current.status?.enclosing_repository_root).toBe('/monorepo');
+		expect(mocks.getBranches).not.toHaveBeenCalled();
+		expect(mocks.getChangedFiles).not.toHaveBeenCalled();
+		mocks.getGitStatus.mockResolvedValue(status());
+		await git.refreshStatus();
+		expect(git.current.status?.enclosing_repository_root).toBeNull();
+		expect(mocks.getBranches).toHaveBeenCalled();
+	});
 	it('coalesces overlapping polls into one request', async () => {
 		await git.loadRepository('p', false, 's1');
 		const calls = mocks.getGitStatus.mock.calls.length;

@@ -145,6 +145,11 @@ async def get_git_status(
         raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
     if plain_folder:
         return GitStatusResponse(is_git_repo=False)
+    from app.api.git_owner import _enclosing_repository
+    enclosing = await run_git(_enclosing_repository, working_dir)
+    if enclosing:
+        return GitStatusResponse(is_git_repo=True, enclosing_repository_root=enclosing,
+                                 mutations_blocked=True)
 
     # Coalesced: concurrent polls for the same dir share one in-flight call
     status_data = await _coalescer.get_or_run(

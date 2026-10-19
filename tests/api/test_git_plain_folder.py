@@ -70,13 +70,11 @@ def test_plain_status_then_external_git_init(plain_project, monkeypatch, worker)
         assert call.await_count == 2
 
 
-@pytest.mark.parametrize("state", ["missing", "two-plain", "plain-and-repo", "nested"])
+@pytest.mark.parametrize("state", ["missing", "two-plain", "plain-and-repo"])
 def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
     project, folder, client = plain_project
     if state == "missing":
         folder.rmdir()
-    elif state == "nested":
-        git_at(folder.parent, "init", "-b", "main")
     else:
         other = folder.parent / "other"
         other.mkdir()
@@ -167,6 +165,39 @@ def test_worker_mutations_keep_refusing_plain_folder(plain_project, action, body
     response = client.post(f"/api/v1/projects/{project['id']}/git/{action}?worker_id=local", json=body)
     assert response.status_code in (400, 409), response.text
     assert list(folder.iterdir()) == []
+
+
+@pytest.mark.parametrize("scope", ["session", "worker"])
+@pytest.mark.parametrize("own_repository", [False, True])
+def test_nested_project_reports_scope_without_parent_files(plain_project, scope, own_repository):
+    from app.db import database
+    from app.core.project_resolver import resolve_existing_cwd
+    project, folder, client = plain_project
+    git_at(folder.parent, "init", "-b", "main")
+    (folder.parent / "outside.txt").write_text("parent-only content")
+    if own_repository:
+        git_at(folder, "init", "-b", "nested")
+        git_at(folder, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+               "commit", "--allow-empty", "-m", "Initial nested repository")
+    session_id = f"nested-chat-{scope}-{own_repository}"
+    database.create_session(session_id, "default", project_v2_id=project["id"])
+    assert resolve_existing_cwd(database.get_session(session_id)) == str(folder)
+    query = f"?session_id={session_id}" if scope == "session" else "?worker_id=local"
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status{query}")
+    assert response.status_code == 200, response.text
+    status = response.json()
+    assert status["is_git_repo"] is True
+    assert status["enclosing_repository_root"] == (None if own_repository else str(folder.parent.resolve()))
+    assert status["untracked"] == []
+    if own_repository:
+        assert status["current_branch"] == "nested"
+    else:
+        assert status["mutations_blocked"] is True
+        assert not (folder / ".git").exists()
+        for action, body in [("stage", {"files": ["../outside.txt"]}), ("init", {})]:
+            refused = client.post(f"/api/v1/projects/{project['id']}/git/{action}{query}", json=body)
+            assert refused.status_code == 409, refused.text
+        assert git_at(folder.parent, "diff", "--cached", "--name-only").stdout == ""
 
 
 def test_real_discovery_ceiling_ignores_repository_above_it(plain_project, monkeypatch):
