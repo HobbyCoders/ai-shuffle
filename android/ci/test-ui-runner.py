@@ -10,29 +10,32 @@ import tempfile
 import unittest
 
 CI = Path(__file__).resolve().parent
+# Match test-publish-apk.py: PATH's bash.exe can be the unconfigured WSL launcher.
+BASH = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == "nt" else "bash"
 
 
 class UiRunnerTest(unittest.TestCase):
     def run_runner(self, mode="pass", phase="suite"):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix="ui runner ") as directory:
             root = Path(directory)
-            (root / "bin").mkdir()
             (root / "ci").mkdir()
             (root / "ci/prepare-android-ui.py").write_text("pass\n")
             # Even failing evidence collection must not mask the test's status.
             (root / "ci/emulator-diagnostics.sh").write_text("exit 7\n")
             shutil.copy(CI / "check-instrumentation.py", root / "ci")
-            fake = "#!" + sys.executable + "\n" + r'''
-import json, os, sys
-from pathlib import Path
-args = sys.argv[1:]
+            fake = r'''
+import json, os, subprocess, sys
+name, *args = sys.argv[1:]
+assert name in ("adb", "timeout"), name
 with open(os.environ["CALLS"], "a") as log:
-    log.write(json.dumps([Path(sys.argv[0]).name, *args]) + "\n")
-if Path(sys.argv[0]).name == "timeout":
+    log.write(json.dumps([name, *args]) + "\n")
+if name == "timeout":
     while args[0].startswith("--"):
         args.pop(0)
     args.pop(0)  # Recorded host deadline; do not sleep in this self-test.
-    os.execvp(args[0], args)
+    # Run the requested fake command with this interpreter, not Windows execvp
+    # (which cannot execute an extensionless POSIX shebang script).
+    sys.exit(subprocess.call([sys.executable, __file__, *args]))
 if "instrument" in args:
     suite = "notClass" in args
     mode = os.environ["MODE"] if suite == (os.environ["PHASE"] == "suite") else "pass"
@@ -53,15 +56,25 @@ if "instrument" in args:
         print(f"INSTRUMENTATION_STATUS_CODE: {status}")
     print("OK (1 test)\nINSTRUMENTATION_CODE: -1")
 '''
-            for name in ("adb", "timeout"):
-                executable = root / "bin" / name
-                executable.write_text(fake)
-                executable.chmod(0o755)
-            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+            (root / "fake.py").write_text(fake, encoding="utf-8")
+            # BASH_ENV installs test-only functions before the real runner.
+            # Git Bash can prefer a host timeout.exe over an extensionless PATH
+            # shim; functions make both commands deterministic on every host.
+            # Explicitly launch Python instead of using a native Windows path
+            # as a POSIX shebang, and keep spaces in paths quoted.
+            shell_env = root / "fake-tools.sh"
+            shell_env.write_text(
+                'adb() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" adb "$@"; }\n'
+                'timeout() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" timeout "$@"; }\n',
+                encoding="utf-8", newline="\n")
+            env = dict(os.environ, BASH_ENV=shell_env.as_posix(),
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
-                       GITHUB_STEP_SUMMARY=str(root / "summary"))
-            result = subprocess.run(["bash", str(CI / "run-android-ui-tests.sh")], cwd=root,
+                       GITHUB_STEP_SUMMARY=str(root / "summary"),
+                       UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
+                       UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
+            result = subprocess.run([BASH, str(CI / "run-android-ui-tests.sh")], cwd=root,
                                     env=env, text=True, capture_output=True, timeout=10)
+            self.assertTrue((root / "calls").exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
             self.summary = (root / "summary").read_text()
             return result, calls

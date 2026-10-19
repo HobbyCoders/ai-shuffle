@@ -41,6 +41,8 @@ describe('Notes create, rename and delete', () => {
 	it('creates a note with a normalised tag after the autosave delay, then renames it in place', async () => {
 		render(NotesCard);
 		await screen.findByRole('button', { name: /Note B content B/ });
+		// Only fake the debounce timers; leave Svelte's microtasks running normally.
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 		await fireEvent.click(newNote());
 		expect((screen.getByTitle('Delete note') as HTMLButtonElement).disabled).toBe(true);
 		const tag = screen.getByPlaceholderText('add tag…');
@@ -50,16 +52,21 @@ describe('Notes create, rename and delete', () => {
 		await fireEvent.input(body(), { target: { value: 'ship it' } });
 		expect(screen.getByText('Unsaved')).toBeTruthy();
 		expect(createNote).not.toHaveBeenCalled();
-		await waitFor(() => expect(createNote).toHaveBeenCalledOnce(), { timeout: 2500 });
+		await vi.advanceTimersByTimeAsync(999);
+		expect(createNote).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(createNote).toHaveBeenCalledOnce();
 		expect(createNote).toHaveBeenCalledWith({ title: 'Launch plan', content: 'ship it', tags: ['bug-fix'], is_pinned: false });
-		await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+		expect(screen.getByText('Saved')).toBeTruthy();
 		expect(screen.getByRole('button', { name: /Launch plan ship it/ })).toBeTruthy();
 
 		await fireEvent.input(title(), { target: { value: 'Launch plan v2' } });
-		await waitFor(() => expect(updateNote).toHaveBeenCalledWith('new', expect.objectContaining({ title: 'Launch plan v2', tags: ['bug-fix'] })), { timeout: 2500 });
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(updateNote).toHaveBeenCalledWith('new', expect.objectContaining({ title: 'Launch plan v2', tags: ['bug-fix'] }));
 		expect(createNote).toHaveBeenCalledOnce();
 		await fireEvent.click(screen.getByRole('button', { name: 'Remove tag' }));
-		await waitFor(() => expect(updateNote).toHaveBeenLastCalledWith('new', expect.objectContaining({ tags: [] })), { timeout: 2500 });
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(updateNote).toHaveBeenLastCalledWith('new', expect.objectContaining({ tags: [] }));
 	});
 
 	it('deletes the open note only after confirmation and returns to the empty editor', async () => {
