@@ -362,8 +362,12 @@ def test_main_passes_skip_smoke_rows_through(monkeypatch, capsys):
 TIP = "fedcba9876543210fedcba9876543210fedcba98"
 
 
-def _fake_pinned(monkeypatch, statuses_by_sha, history):
+def _fake_pinned(monkeypatch, statuses_by_sha, history, seen=None):
+    seen = {} if seen is None else seen
+
     def fake_try(*args):
+        if args[:2] in (("git", "log"), ("git", "diff")):
+            seen.setdefault(args[1], []).append(args[-1])
         if args[:3] == ("git", "rev-parse", "--verify"):
             ref = args[-1].removesuffix("^{commit}")
             return {CANDIDATE[:9]: CANDIDATE, CANDIDATE: CANDIDATE, "abc": "abc"}.get(ref)
@@ -375,6 +379,8 @@ def _fake_pinned(monkeypatch, statuses_by_sha, history):
             return "abc\trefs/tags/v0.1.0"
         if args[:2] == ("git", "log"):
             return "abc change"
+        if args[:2] == ("git", "diff"):
+            return "desktop/src/main.rs" if args[-1].endswith(TIP) else "frontend/src/app.ts"
         return ""
 
     def fake_gh(*args):
@@ -388,18 +394,55 @@ def _fake_pinned(monkeypatch, statuses_by_sha, history):
 
 
 def test_a_pinned_candidate_reads_its_own_gates_after_main_moved(tmp_path, monkeypatch):
-    # The suites passed on CANDIDATE; another session then merged TIP. Pinning keeps the pass.
+    # The suites and smoke passed on CANDIDATE; another session then merged TIP. Pinning keeps them.
     passed = [_status(c) for c in srs.REQUIRED_LOCAL]
-    _fake_pinned(monkeypatch, {CANDIDATE: passed}, [TIP, CANDIDATE, "abc"])
+    seen = {}
+    _fake_pinned(monkeypatch, {CANDIDATE: passed}, [TIP, CANDIDATE, "abc"], seen)
+    smoked = []
+    real_gate = srs.smoke_gate
+    monkeypatch.setattr(srs, "smoke_gate", lambda revision, *a, **k: smoked.append(revision) or real_gate(
+        revision, *a, **k))
     unpinned = srs.collect(["ServerWorker"], "away", str(tmp_path))
     assert unpinned["main_head"] == TIP and not unpinned["ready"]
+    seen.clear()
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE[:9])
     assert report["main_head"] == CANDIDATE and report["main_tip"] == TIP and report["pinned"]
     assert report["ready"], report["blockers"]
-    assert f"{CANDIDATE[:9]} pinned; main is at {TIP[:9]}" in srs.render(report)
+    # Commits, changed platforms and smoke are all read for the pinned revision, not the tip.
+    assert seen == {"log": [f"abc..{CANDIDATE}"], "diff": [f"abc..{CANDIDATE}"]}
+    assert smoked[-1] == CANDIDATE
+    assert not report["platform_builds"]["desktop_installer"]["needed"]
+    text = srs.render(report)
+    assert f"{CANDIDATE[:9]} pinned; main is at {TIP[:9]}" in text
+    assert "does not block a pinned release" in text
+
+
+def test_a_hosted_windows_run_on_the_pinned_candidate_counts(tmp_path, monkeypatch):
+    _fake_pinned(monkeypatch, {CANDIDATE: [_status("local/full-suite")]}, [TIP, CANDIDATE, "abc"])
+    asked = []
+    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: asked.append(head) or (
+        [_hosted()] if head == CANDIDATE else []))
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE)
+    assert asked == [CANDIDATE]
+    assert report["ready"], report["blockers"]
+    assert report["windows_suite"]["source"] == "hosted"
+
+
+def test_a_pinned_candidate_missing_a_suite_says_it_cannot_be_made_now(tmp_path, monkeypatch):
+    _fake_pinned(monkeypatch, {CANDIDATE: [_status("local/full-suite")]}, [TIP, CANDIDATE, "abc"])
+    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: [])
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE)
+    assert report["blockers"] == [
+        f"local/windows-suite on pinned {CANDIDATE[:9]} is missing, and main has moved to {TIP[:9]}: "
+        f"a suite run now would test {TIP[:9]}, not the pinned revision. Pin a revision that already "
+        'passed, or drop --candidate and test main\'s tip or --skip-windows "<reason>".']
+    skipped = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="x", candidate=CANDIDATE)
+    assert skipped["ready"]
 
 
 def test_a_pinned_candidate_off_main_history_blocks(tmp_path, monkeypatch):
+    # CANDIDATE stands for a PR-branch commit: reachable through a merge's second parent,
+    # but not on main's first-parent history.
     _fake_pinned(monkeypatch, {CANDIDATE: [_status(c) for c in srs.REQUIRED_LOCAL]}, [TIP, "abc"])
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE)
     assert not report["ready"]

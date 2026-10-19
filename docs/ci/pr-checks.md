@@ -399,11 +399,20 @@ also independently supports safe ancestors and rechecks its own pointer.
   summary and should still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
   the release notes. Edge never waits for Windows.
-- Main stays open during a release. Once the suites and live smoke have passed
-  on one merged revision, `ship_release_status.py --candidate <sha>` checks
-  every gate on that revision instead of main's tip. The revision must be on
-  public main's first-parent history. Tag that SHA. Later merges ship in the
-  next release and never reset the gates, so no session has to hold its merges.
+- Main stays open during a release. A suite run starts on main's tip and can
+  keep going after main moves on:
+  - the one-shot `full --attest` posts its status on the revision it tested;
+  - a staged `full --step --attest` that has already started finishes its
+    later chunks on that revision, as long as it is still on public main's
+    first-parent history.
+
+  Once the suites and live smoke have passed on one merged revision,
+  `ship_release_status.py --candidate <sha>` checks every gate on that
+  revision instead of main's tip. Tag that SHA. Later merges ship in the next
+  release and never reset the gates, so no session has to hold its merges.
+  One limit: a gate that is still missing on a pinned revision behind main
+  can't be produced afterwards, because new runs start on the tip. Pin a
+  revision that already passed, or test the tip.
 - Mac-only checks, when the release changes them: `ios.yml` and
   `ci-folder-confinement.yml`.
 - The real-PostgreSQL and container contracts that only run in the hosted

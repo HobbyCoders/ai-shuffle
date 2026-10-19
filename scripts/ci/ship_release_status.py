@@ -314,6 +314,14 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         if context == WINDOWS_CONTEXT and skip_windows:
             notes.append(f"Windows full suite not run on this release (--skip-windows): {skip_windows}")
             continue
+        if head and tip and head != tip:
+            # Suites start only on main's tip, so a missing pass cannot be made for this revision now.
+            skip = " or --skip-windows \"<reason>\"" if context == WINDOWS_CONTEXT else ""
+            blockers.append(
+                f"{context} on pinned {head[:9]} is {local[context]}, and main has moved to {tip[:9]}: "
+                f"a suite run now would test {tip[:9]}, not the pinned revision. Pin a revision that "
+                f"already passed, or drop --candidate and test main's tip{skip}.")
+            continue
         if context == WINDOWS_CONTEXT:
             hosted = f" (the hosted run on it is {hosted_state})" if hosted_state not in (None, "missing") else ""
             blockers.append(
@@ -368,6 +376,9 @@ def render(report: dict) -> str:
         lines += [f"  owner to-do: {t}" for t in smoke.get("owner_todo", [])]
         lines += [f"  skipped blocker: {b}" for b in smoke.get("would_block", [])]
     lines += [f"  release notes must say: {line}" for line in report.get("release_notes_lines", [])]
+    if pinned:
+        lines.append("  (edge publication usually skips a superseded revision; 'edge published: no' "
+                     "does not block a pinned release)")
     for name, info in report["platform_builds"].items():
         lines.append(f"{name}: {'changed' if info['needed'] else 'no changes'}"
                      + (f" (e.g. {', '.join(info['example_paths'][:3])})" if info["needed"] else ""))
