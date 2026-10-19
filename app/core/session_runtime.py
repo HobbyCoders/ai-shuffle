@@ -749,6 +749,7 @@ class SessionRuntime:
         # owning it mid-turn (lease lost or fence superseded, ``_stop_unowned``).
         self._run_id: Optional[str] = None
         self._unowned = False
+        self._lease_finalizing = False
         self._recorder_closing = False
         # Queued turn ids already handed to the engine as steers THIS turn.
         # ``try_steer_pending`` fires once per send, so without this a message
@@ -2723,6 +2724,9 @@ class SessionRuntime:
                     (self.turn.get("payload") or {}).get("parked_usage", {}),
                     (self._pending_done or {}).get("metadata") or {},
                 )
+                # The pump is finished. A parked/terminal row intentionally
+                # rejects renewals, including one already in flight.
+                self._lease_finalizing = True
                 parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids, usage=usage)
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
@@ -2767,6 +2771,11 @@ class SessionRuntime:
         # A runner that lost its lease settles the row only while it is still
         # bound to that run. Once another install's sweep requeued it (or a
         # new owner started it), the row is theirs and this settle is a no-op.
+        # Stop interpreting heartbeat rejection before the first terminal write
+        # (recorder.settle may write it too). DB ownership/fence guards remain
+        # authoritative for these writes; this only suppresses teardown of a
+        # finished pump and its unrelated background work during slow cleanup.
+        self._lease_finalizing = True
         if recorder is not None and self._terminal == "done" and not self._unowned:
             # Resolve older, incompatible parked turns before this completion,
             # so terminal readers still see the current turn last.
@@ -3402,6 +3411,8 @@ class SessionRuntime:
         delay = RUN_LEASE_RENEW_SECONDS
         while True:
             await asyncio.sleep(delay)
+            if self._lease_finalizing:
+                return
             attempt_at = loop.time()
             try:
                 remaining = RUN_LEASE_TTL_SECONDS - (attempt_at - renewed_at)
@@ -3416,6 +3427,8 @@ class SessionRuntime:
                     timeout=remaining,
                 )
             except Exception:
+                if self._lease_finalizing:
+                    return
                 remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)
                 if remaining > 0:
                     # Retry promptly instead of burning another full heartbeat
@@ -3430,6 +3443,8 @@ class SessionRuntime:
                     "%ss lease TTL", run_id, RUN_LEASE_TTL_SECONDS, exc_info=True,
                 )
                 ok = False
+            if self._lease_finalizing:
+                return
             if ok:
                 renewed_at = attempt_at
                 delay = RUN_LEASE_RENEW_SECONDS

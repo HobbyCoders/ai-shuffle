@@ -225,6 +225,74 @@ async def test_a_renewal_error_inside_the_ttl_is_retried_not_fatal(mock_db, monk
     assert turns_db.get_turn(turn["id"])["stop_reason"] != "lease_lost"
 
 
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "parked"])
+@pytest.mark.parametrize("renewal", ["sleeping", "rejected", "error"])
+async def test_final_write_stops_heartbeat_without_lease_loss(
+    mock_db, monkeypatch, outcome, renewal,
+):
+    """Hold cleanup open after the real DB transition, including a renewal
+    already in flight when the turn becomes terminal/parked."""
+    turn = turns_db.enqueue_turn("final-heartbeat", "user", prompt="finish")
+    runtime = session_runtime.SessionRuntime(turn)
+    written = asyncio.Event()
+    started = asyncio.Event()
+    renewing = asyncio.Event()
+    heartbeat_done = asyncio.Event()
+    rejected = []
+    real_loop = runtime._renew_loop
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.001)
+
+    async def heartbeat(*args):
+        started.set()
+        try:
+            if renewal == "sleeping":
+                await written.wait()
+            await real_loop(*args)
+        finally:
+            heartbeat_done.set()
+
+    async def renew(fn, *args):
+        renewing.set()
+        await written.wait()
+        if renewal == "error":
+            raise RuntimeError("delayed SQL failure")
+        ok = await asyncio.to_thread(fn, *args)
+        rejected.append(ok)
+        return ok
+
+    async def pump(**kwargs):
+        await asyncio.wait_for(started.wait(), 3)
+        if renewal != "sleeping":
+            await asyncio.wait_for(renewing.wait(), 3)
+        yield {"type": "interrupted" if outcome == "aborted" else "done", "metadata": {}}
+
+    async def slow_cleanup(*args, **kwargs):
+        assert turns_db.get_turn(turn["id"])["state"] == outcome
+        written.set()
+        # The heartbeat must finish on its own, not via execute's final cancel.
+        await asyncio.wait_for(heartbeat_done.wait(), 3)
+
+    with _runtime_env(
+        pump=pump, bg_work=[{"id": "background"}] if outcome == "parked" else [],
+    ) as env, patch.object(runtime, "_renew_loop", new=heartbeat), patch.object(
+        session_runtime, "run_lease", new=renew,
+    ), patch.object(runtime, "_snapshot_working_set", new=slow_cleanup), patch.object(
+        runtime, "_on_lease_lost", wraps=runtime._on_lease_lost,
+    ) as lost, patch.object(
+        runtime, "_stop_unowned", wraps=runtime._stop_unowned,
+    ) as stop, patch("app.core.query_session_lifecycle.interrupt_session") as interrupt:
+        env["record_parked"].side_effect = slow_cleanup
+        assert await asyncio.wait_for(runtime.execute(), 5) == outcome
+
+    assert written.is_set()
+    assert rejected == ([False] if renewal == "rejected" else [])
+    lost.assert_not_called()
+    stop.assert_not_called()
+    interrupt.assert_not_called()
+    assert runtime._abort_reason is None
+    assert not runtime._unowned
+
+
 # ---------------------------------------------------------------------------
 # WS tool-input cap (docs: "replaced by a truncation marker when over 4 KB")
 # ---------------------------------------------------------------------------

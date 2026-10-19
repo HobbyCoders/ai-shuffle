@@ -1573,7 +1573,9 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
     Returns the list of turn rows as they were BEFORE resolution (so a caller
     can see what was reaped and how each was routed via its ``source``).
     """
-    with get_lease_db() as conn:
+    # Recovery may wait on ordinary row holders and sweep many runs. Keep the
+    # reserved admission, but do not inherit the short heartbeat SQL deadline.
+    with get_lease_db(lock_timeout_ms=5000, statement_timeout_ms=15000) as conn:
         cursor = conn.cursor()
         # Serialize with late heartbeats and claims before resolving any turn.
         # A heartbeat that wins keeps its turn; a reaper that wins fences the

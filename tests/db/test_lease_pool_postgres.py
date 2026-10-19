@@ -190,6 +190,41 @@ def test_lease_sql_timeouts_release_workers_and_do_not_leak(lease_pool):
     assert runs.renew_run(run["id"], "owner", run["fence_token"], 60)
 
 
+def test_reaper_has_longer_local_timeouts_without_leaking(lease_pool, monkeypatch):
+    from contextlib import contextmanager
+
+    real_lease_db = base.get_lease_db
+    observed = []
+
+    @contextmanager
+    def inspect_lease_db(**kwargs):
+        with real_lease_db(**kwargs) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SHOW lock_timeout")
+            lock_timeout = cursor.fetchone()["lock_timeout"]
+            cursor.execute("SHOW statement_timeout")
+            observed.append((lock_timeout, cursor.fetchone()["statement_timeout"]))
+            assert base._lease_checkout.get() is True
+            yield conn
+
+    monkeypatch.setattr(turns, "get_lease_db", inspect_lease_db)
+    turns.reap_expired()
+    assert observed == [("5s", "15s")]
+    # Both ordinary SQL and the next heartbeat keep their own limits.
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SHOW lock_timeout")
+        assert cursor.fetchone()["lock_timeout"] == "0"
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()["statement_timeout"] == "0"
+    with real_lease_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SHOW lock_timeout")
+        assert cursor.fetchone()["lock_timeout"] == "500ms"
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()["statement_timeout"] == "1500ms"
+
+
 def test_reaper_fences_even_skipped_local_turns(lease_pool):
     sid = uuid4().hex
     run = runs.claim_run(sid, "old", -1)

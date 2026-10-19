@@ -83,11 +83,32 @@ def test_concurrent_holders_cannot_starve_renewal(retaining_pool, monkeypatch, r
     assert base._lease_checkout.get() is False
 
 
+def test_reaper_uses_longer_timeouts_and_restores_heartbeat_limits(retaining_pool, monkeypatch):
+    from app.db import turns
+
+    pool, physical = retaining_pool
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(_PhysicalConn, "commit", lambda self: None, raising=False)
+    monkeypatch.setattr(_FakeCursor, "fetchall", lambda self: [], raising=False)
+    assert turns.reap_expired() == []
+    statements = [sql for conn in physical for sql in conn.executed]
+    assert "SET LOCAL lock_timeout = '5000ms'" in statements
+    assert "SET LOCAL statement_timeout = '15000ms'" in statements
+    assert base._lease_timeouts.get() == (500, 1500)
+    with base.get_lease_db():
+        pass
+    statements = [sql for conn in physical for sql in conn.executed]
+    assert "SET LOCAL lock_timeout = '500ms'" in statements
+    assert "SET LOCAL statement_timeout = '1500ms'" in statements
+    assert not pool._used
+
+
 def test_lease_checkout_resets_priority_after_failure(retaining_pool, monkeypatch):
     monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
     with pytest.raises(ValueError):
-        with base.get_lease_db():
+        with base.get_lease_db(lock_timeout_ms=5000, statement_timeout_ms=15000):
             raise ValueError("body failed")
+    assert base._lease_timeouts.get() == (500, 1500)
     assert not base._lease_checkout.get()
     assert not retaining_pool[0]._used
 
