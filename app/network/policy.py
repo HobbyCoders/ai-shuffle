@@ -212,7 +212,8 @@ _register(Collection(
                   "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id",
                   "balance_key", "balance_instance_id", "balance_snapshot"),
     resource="settings", priority=30,
-    notes="API keys travel encrypted under the network key. Refresh leases and billing bindings stay local."))
+    notes="API keys travel encrypted under the network key. Subscription bundles merge by codex_last_refresh; "
+          "other fields use row LWW. Refresh leases and billing bindings stay local."))
 
 _register(Collection(
     name="api_users", table="api_users", keys=("id",),

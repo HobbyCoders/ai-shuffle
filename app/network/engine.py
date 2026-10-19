@@ -70,6 +70,12 @@ BOOTSTRAP_READY = "ready"
 BOOTSTRAP_SYNCING = "syncing"
 _REVISION_TABLES = {"user_preferences", "system_settings", "model_providers"}
 _HISTORY_COLLECTIONS = {"session_events", "artifacts", "note_attachments"}
+# One atomic subscription credential generation. Ordinary provider edits still
+# use row LWW, but must not roll a rotated refresh token back (#207).
+_PROVIDER_CREDENTIAL_FIELDS = (
+    "auth_mode", "codex_access_token", "codex_refresh_token", "codex_account_id",
+    "codex_id_token_expires_at", "codex_last_refresh", "needs_reauth",
+)
 
 
 class NotEnrolled(RuntimeError):
@@ -604,7 +610,18 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     if coll.table in _REVISION_TABLES:
         columns.append("revision")
         values.append(str(uuid4()))
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in columns if c not in coll.keys)
+    updates = ", ".join(
+        f"{c} = " + (
+            f"CASE WHEN {coll.table}.codex_last_refresh IS NOT NULL AND "
+            f"(EXCLUDED.codex_last_refresh IS NULL OR "
+            f"{coll.table}.codex_last_refresh > EXCLUDED.codex_last_refresh) "
+            f"THEN {coll.table}.{c} ELSE EXCLUDED.{c} END"
+            if coll.name == "model_providers" and c in _PROVIDER_CREDENTIAL_FIELDS
+            else f"EXCLUDED.{c}"
+        ) for c in columns if c not in coll.keys
+    )
+    # Compare inside the write, not against a previously read row: a refresh
+    # committing concurrently with this UPSERT must also be protected.
     # Local NOT NULL columns get a placeholder on first insert only; an
     # existing row keeps whatever this worker put there.
     insert_columns, insert_values = list(columns), list(values)
@@ -1244,6 +1261,32 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
     return outcome
 
 
+def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_id: str,
+                                       incoming: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
+    """A row-LWW loser can still carry the newest subscription generation.
+
+    Keep the ordinary fields and their winning clock/origin. Leave the winning
+    hash unchanged so scan publishes the combined row, including to old peers.
+    Never revive a tombstone, and never advance with an unversioned bundle.
+    """
+    if (coll.name != "model_providers" or existing["deleted"]
+            or not incoming.get("codex_last_refresh")):
+        return False
+    # Writers (including older versions) send the whole bundle. A partial
+    # record must not advance its timestamp while leaving old token columns.
+    if not all(name in incoming for name in _PROVIDER_CREDENTIAL_FIELDS):
+        return False
+    encrypted = list(incoming.get("_enc") or [])
+    values = [_column_value(coll, name, incoming[name], encrypted)
+              for name in _PROVIDER_CREDENTIAL_FIELDS]
+    updates = ", ".join(f"{name} = %s" for name in _PROVIDER_CREDENTIAL_FIELDS)
+    cursor.execute(
+        f"UPDATE model_providers SET {updates}, revision = %s WHERE id = %s "
+        "AND (codex_last_refresh IS NULL OR codex_last_refresh < %s)",
+        (*values, str(uuid4()), record_id, incoming["codex_last_refresh"]))
+    return bool(cursor.rowcount)
+
+
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     if env.collection in policy.RETIRED_COLLECTIONS:
         # A peer on an older build still publishes a collection this build
@@ -1307,18 +1350,22 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         wins = existing is None or envelope_mod.compare(
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
+        merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
+            cursor, coll, env.record_id, plaintext, existing)
+        if merged:
+            result.touched.append((env.collection, env.record_id, env.op))
         # The network already moved past this write; keep it as a conflict
         # record, unless it says the same thing as what we already hold.
         incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
         if incoming_hash == (existing["content_hash"] or "") and bool(existing["deleted"]) == (env.op == OP_DELETE):
             store.insert_op(cursor, env.to_dict(), _lane(coll))
-            return "lost"
+            return "applied" if merged else "lost"
         losing_record = redact_secrets(plaintext) if env.op == OP_UPSERT else {"_deleted": True}
         store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
                            losing_device_id=env.origin_device_id, losing_record=losing_record,
                            winning_clock=int(existing["clock"]), winning_device_id=existing["origin_device_id"])
         store.insert_op(cursor, env.to_dict(), _lane(coll))
-        return "lost"
+        return "applied" if merged else "lost"
 
     if env.op == OP_DELETE and _grant_deletion_widens_key(cursor, coll, env.record_id):
         # Fail closed (see _grant_deletion_widens_key): keep the assignment and
@@ -1363,8 +1410,10 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         _after_mirror(cursor, coll, plaintext)
         if coll.name == "presence":
             _learn_presence_alias(cursor, ctx, plaintext, env.origin_device_id)
-        local_hash = env.content_hash
-        if row is not None:
+        local_hash = content_hash(coll, plaintext) if coll.name == "model_providers" else env.content_hash
+        # A merged provider must be republished by scan. In particular, the
+        # preserved local rotation may not have reached the outbox yet.
+        if row is not None and coll.name != "model_providers":
             try:
                 reserialized = serialize_row(coll, row)
                 if reserialized is not None:
@@ -2092,6 +2141,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                    winning_device_id=winner["origin_device_id"])
         if existing is not None and envelope_mod.compare(
                 int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
+            if not item["deleted"] and _merge_losing_provider_credentials(
+                    cursor, coll, item["record_id"], item["record"], existing):
+                touched.append((coll.name, item["record_id"], OP_UPSERT))
+                applied += 1
             continue
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
@@ -2120,7 +2173,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             # Snapshot items have no per-item signature. In particular,
             # their claimed origin is not evidence for an instance alias.
             local_hash = content_hash(coll, item["record"])
-            if row is not None:
+            if row is not None and coll.name != "model_providers":
                 try:
                     reserialized = serialize_row(coll, row)
                     if reserialized is not None:
