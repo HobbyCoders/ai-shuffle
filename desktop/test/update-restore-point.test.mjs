@@ -59,7 +59,7 @@ for (const change of ['missing', 'extra', 'type', 'link', 'manifest']) test(`str
   if (change === 'missing') await fs.rm(control);
   if (change === 'extra') await fs.writeFile(path.join(data, 'extra'), 'unexpected');
   if (change === 'type') { await fs.rm(control); await fs.mkdir(control); }
-  if (change === 'link') { await fs.rm(path.join(data, 'pg_tblspc'), { recursive: true }); await fs.symlink(path.join(root, 'data'), path.join(data, 'pg_tblspc'), 'junction'); }
+  if (change === 'link') { await fs.rm(path.join(data, 'pg_tblspc'), { recursive: true, maxRetries: 10, retryDelay: 100 }); await fs.symlink(path.join(root, 'data'), path.join(data, 'pg_tblspc'), 'junction'); }
   if (change === 'manifest') await fs.writeFile(path.join(root, 'update-snapshot', 'manifest.json'), '[]');
   await assert.rejects(checkRestorePointStructure(root));
 });
