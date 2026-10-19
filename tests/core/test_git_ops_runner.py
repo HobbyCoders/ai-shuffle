@@ -347,9 +347,12 @@ def test_refresh_status_caps_at_20s_wall_clock(project, tmp_path):
             return 1000.1  # first checkout still inside the window
         return 1021.0  # remaining rows are past the wall clock
 
-    with patch.object(git_ops_runner.time, "monotonic", fake_monotonic), patch.object(
+    # Patch only the runner's clock, not the process-wide time module: DB
+    # hold metrics also use monotonic and must not consume this deadline script.
+    with patch.object(git_ops_runner, "time") as clock, patch.object(
         git_ops_runner, "_record_checkout_state"
     ) as rec:
+        clock.monotonic.side_effect = fake_monotonic
         result = git_ops_runner.execute_refresh_status(
             {"project_v2_id": project["id"], "params": {}}
         )
