@@ -3,7 +3,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -22,11 +21,13 @@ DEVICE = '22222222-2222-2222-2222-222222222222'
 def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
     monkeypatch.setattr(encryption, '_key_salt', None)
-    settings = SimpleNamespace(effective_instance_id='this-install', effective_data_dir=tmp_path,
-                               port=8000, admin_password=None)
-    monkeypatch.setattr(managed_credentials, 'settings', settings)
-    monkeypatch.setattr(managed_connection, 'settings', settings)
-    monkeypatch.setattr(config, 'settings', settings)
+    # Hub activation lazily imports license (and other settings consumers).
+    # Keep the singleton identity so those imports cannot retain a fixture fake
+    # after monkeypatch restores the patched fields at teardown.
+    monkeypatch.setattr(config.settings, 'instance_id', 'this-install')
+    monkeypatch.setattr(config.settings, 'data_dir', tmp_path)
+    monkeypatch.setattr(config.settings, 'port', 8000)
+    monkeypatch.setattr(config.settings, 'admin_password', None)
     monkeypatch.setattr(managed_connection, '_protected_listener_ready', lambda: True)
     monkeypatch.delenv('ADMIN_PASSWORD', raising=False)
 
@@ -114,7 +115,7 @@ def test_copy_cannot_authorize_another_binding_or_installation(monkeypatch):
             managed_credentials.secret_for(changed)
     with pytest.raises(RuntimeError):
         managed_credentials.secret_for({**binding, 'linked_by': 'paired-controller'})
-    monkeypatch.setattr(managed_credentials.settings, 'effective_instance_id', 'another-install')
+    monkeypatch.setattr(managed_credentials.settings, 'instance_id', 'another-install')
     with pytest.raises(RuntimeError):
         managed_credentials.secret_for(binding)
 
@@ -254,6 +255,22 @@ def test_atomic_publication_never_overwrites_a_concurrent_key(monkeypatch):
     assert not list(path.parent.glob('.pending-*'))
 
 
+def test_managed_reconnect_does_not_poison_later_app_startup():
+    # A fresh worker must first import license through the real hub activation
+    # path, then start the app after the managed-credential fixture has torn down.
+    # Running in this process could hide the leak behind an earlier license import.
+    result = subprocess.run(
+        [sys.executable, '-m', 'pytest',
+         'tests/core/test_managed_credentials.py::test_cleared_process_keys_reconnect_and_check_phone_authorization_without_admin_password',
+         'tests/core/test_memory_health_wiring.py::test_memory_health_api_is_owner_only',
+         'tests/core/test_memory_health_wiring.py::test_memory_health_api_returns_the_owner_view',
+         '-q', '-p', 'no:randomly', '-o', 'addopts='],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_fresh_interpreter_reconnects_from_persistent_credential():
     binding = bind()
     managed_credentials.secret_for(binding)
@@ -262,12 +279,13 @@ def test_fresh_interpreter_reconnects_from_persistent_credential():
     script = r'''
 import json, os, sys
 from pathlib import Path
-from types import SimpleNamespace
 from app.core import account_hub, config, encryption, managed_connection, managed_credentials
 from app.db import database, mobile_hub
 state = json.loads(sys.stdin.read())
-settings = SimpleNamespace(effective_instance_id='this-install', effective_data_dir=Path(state['directory']), port=8000, admin_password=None)
-config.settings = managed_connection.settings = managed_credentials.settings = settings
+config.settings.instance_id = 'this-install'
+config.settings.data_dir = Path(state['directory'])
+config.settings.port = 8000
+config.settings.admin_password = None
 assert encryption._encryption_key is None and encryption._key_salt is None
 assert 'ADMIN_PASSWORD' not in os.environ
 database.get_system_setting = lambda key: state['stored'] if key == managed_credentials._setting_key() else None
