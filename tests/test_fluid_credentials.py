@@ -476,9 +476,10 @@ async def test_failed_401_names_the_worker_that_renews(monkeypatch, service):
 
     monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", no_fresh_token)
     monkeypatch.setattr(xai_token_refresh, "refresh_on_401_once", no_fresh_token)
+    fake_provider_rows(monkeypatch, CODEX_ROW, codex=dict(CODEX_TOKENS))
     monkeypatch.setattr(
         refresh_authority, "renewal_pending_message",
-        lambda svc: f"Your {svc} login is renewed by the worker 'Founder'.")
+        lambda svc, needs_reauth=False: f"Your {svc} login is renewed by the worker 'Founder'.")
     auth = (CodexSubscriptionAuth(PID, "acct_42") if service == "ChatGPT"
             else fluid_credentials.GrokSubscriptionAuth(PID))
 
@@ -495,6 +496,35 @@ async def test_failed_401_on_the_renewing_worker_keeps_the_upstream_error(monkey
         return False
 
     monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", no_fresh_token)
-    monkeypatch.setattr(refresh_authority, "renewal_pending_message", lambda svc: None)
+    fake_provider_rows(monkeypatch, CODEX_ROW, codex=dict(CODEX_TOKENS))
+    monkeypatch.setattr(refresh_authority, "renewal_pending_message",
+                        lambda svc, needs_reauth=False: None)
 
     await CodexSubscriptionAuth(PID, "acct_42").on_401()  # does not raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flagged", [True, False])
+async def test_failed_401_passes_the_stored_reauth_flag(monkeypatch, flagged):
+    # When the renewing worker already marked the login dead and that synced
+    # here, the waiting worker must ask for a sign-in, not blame the renewer.
+    from app.core import codex_token_refresh
+    from app.network import refresh_authority
+
+    async def no_fresh_token(provider_id, *, stale_access_token=None, client=None):
+        return False
+
+    seen = {}
+
+    def message(svc, needs_reauth=False):
+        seen["needs_reauth"] = needs_reauth
+        return "pending"
+
+    monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", no_fresh_token)
+    fake_provider_rows(monkeypatch, CODEX_ROW,
+                       codex={**CODEX_TOKENS, "needs_reauth": flagged})
+    monkeypatch.setattr(refresh_authority, "renewal_pending_message", message)
+
+    with pytest.raises(ProviderCredentialError):
+        await CodexSubscriptionAuth(PID, "acct_42").on_401()
+    assert seen == {"needs_reauth": flagged}

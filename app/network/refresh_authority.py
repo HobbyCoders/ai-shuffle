@@ -41,11 +41,14 @@ def authority_device_id(ctx: engine.NetworkContext) -> Optional[str]:
     return active[0] if active else None
 
 
-def renewal_pending_message(service: str) -> Optional[str]:
+def renewal_pending_message(service: str, *, needs_reauth: bool = False) -> Optional[str]:
     """User-facing reason a 401 could not be fixed here, or None if this worker renews.
 
     ``service`` names the login ("ChatGPT", "Grok"). Called after a worker
     that does not renew synced logins waited for a renewal that never came.
+    ``needs_reauth`` is the stored login's flag: when the renewing worker has
+    already found the login dead, waiting for it will not help, so the user is
+    asked to sign in again instead.
     """
     try:
         ctx = engine.load_context(publish=False)
@@ -60,6 +63,11 @@ def renewal_pending_message(service: str) -> Optional[str]:
     authority = authority_device_id(ctx)
     if authority == ctx.device_id:
         return None
+    if needs_reauth:
+        return (
+            f"Your {service} login has expired and could not be renewed. "
+            "Sign in again from Settings > Providers."
+        )
     member = ctx.member(authority) if authority else None
     if member is None:
         return (
@@ -67,7 +75,7 @@ def renewal_pending_message(service: str) -> Optional[str]:
             "this network can renew it. Sign in again from Settings > Providers."
         )
     return (
-        f"Your {service} login is renewed by the worker '{member.name}', and its "
+        f"Your {service} login is renewed by the worker '{member.name or member.device_id}', and its "
         "renewed token has not reached this worker. Make sure that worker is running "
         "and connected to this one, then try again."
     )
