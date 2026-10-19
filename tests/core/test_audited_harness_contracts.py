@@ -217,7 +217,7 @@ def test_adapter_snapshot_uses_real_store_and_current_checkout(tmp_path, monkeyp
         routed.append((sid, cwd))
         return store, None
     monkeypatch.setattr(fluid_memory, "session_memory", route)
-    adapter = object.__new__(ha.HarnessAdapter)
+    adapter = ha.HarnessAdapter()
     adapter._options = SessionOptions(model="fake", cwd=str(tmp_path / "fix-current"))
     adapter._resolve_app_session_id = lambda: "owner-scoped-session"
     snapshot = adapter._memory_snapshot()
