@@ -3396,6 +3396,31 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     NOTIFICATIONS_PER_USER_CAP = 500
 
+    # High-volume retention gets its own short transactions, returning the pool
+    # connection between batches rather than sharing the maintenance transaction.
+    from app.db.retention import BATCH_SIZE, delete_batches
+
+    try:
+        results["cleaned_usage_log"] = delete_batches(
+            "DELETE FROM usage_log WHERE id IN ("
+            "SELECT id FROM usage_log WHERE created_at < %s LIMIT %s)",
+            (cutoff_usage, BATCH_SIZE),
+        )
+    except Exception as e:
+        results["cleaned_usage_log"] = f"error: {e}"
+
+    # Only reconstructible deltas from idle sessions, never accounting evidence.
+    try:
+        from app.core.config import settings as _settings
+        from app.db.fluid_events import prune_fluid_delta_events
+
+        retention_days = int(getattr(_settings, "fluid_event_retention_days", 7) or 0)
+        results["cleaned_fluid_delta_events"] = (
+            prune_fluid_delta_events(retention_days) if retention_days > 0 else "disabled"
+        )
+    except Exception as e:
+        results["cleaned_fluid_delta_events"] = f"error: {e}"
+
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -3426,18 +3451,6 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
 
-        # Usage ledger retention: bounded, but well past the longest Stats
-        # range, so a year-over-year look still has data.
-        try:
-            with _savepoint(cursor, "sp_maint_usage_log"):
-                cursor.execute(
-                    "DELETE FROM usage_log WHERE created_at < %s", (cutoff_usage,)
-                )
-                cleaned = cursor.rowcount
-            results["cleaned_usage_log"] = cleaned
-        except Exception as e:
-            results["cleaned_usage_log"] = f"error: {e}"
-
         # 2a. Cross-install carrier tables (D5/D8). Both are transport, not
         # history: a terminal git_op has already been executed and its result
         # read, and an upload blob is materialized (data NULLed) at spawn. The
@@ -3461,29 +3474,6 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
             results["cleaned_upload_blobs"] = cleaned
         except Exception as e:
             results["cleaned_upload_blobs"] = f"error: {e}"
-
-        # 2c. fluid event-log retention. Streaming deltas dominate that table by
-        # volume and are reconstructible from the completed ToolUse rows and the
-        # node tree; everything else in the log is evidence and stays, Usage
-        # especially (the accounting backfill has no other source). Bounded to
-        # sessions idle past the window, so live replay is untouched.
-        try:
-            with _savepoint(cursor, "sp_maint_fluid_deltas"):
-                from app.core.config import settings as _settings
-                from app.db.fluid_events import prune_fluid_delta_events
-
-                _retention_days = int(
-                    getattr(_settings, "fluid_event_retention_days", 7) or 0
-                )
-                if _retention_days > 0:
-                    pruned = prune_fluid_delta_events(
-                        _retention_days, cursor=cursor
-                    )
-                else:
-                    pruned = "disabled"
-            results["cleaned_fluid_delta_events"] = pruned
-        except Exception as e:
-            results["cleaned_fluid_delta_events"] = f"error: {e}"
 
         # 2d. session_events delta compaction (finding B6). Streaming deltas are
         # the bulk of that table and are already coalesced by the replay reader;

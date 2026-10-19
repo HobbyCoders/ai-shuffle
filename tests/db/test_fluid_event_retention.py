@@ -99,6 +99,29 @@ def test_prunes_delta_rows_from_an_idle_session(mock_db):
     ]
 
 
+def test_retention_pages_across_sessions_and_sequence_numbers(mock_db, monkeypatch):
+    from app.db import fluid_events, retention
+
+    monkeypatch.setattr(retention, "BATCH_SIZE", 2)
+    monkeypatch.setattr(fluid_events, "BATCH_SIZE", 2)
+    for name in ("sdk-a", "sdk-b", "sdk-c"):
+        _mk_session("app-" + name, name, idle_days=30)
+        _seed_events(name, ["Usage", "TextDelta", "ToolUse", "TextDelta", "TextDelta"])
+    queries = []
+    mock_db.set_trace_callback(queries.append)
+    try:
+        assert prune_fluid_delta_events(7) == 9
+    finally:
+        mock_db.set_trace_callback(None)
+    deletes = [q for q in queries if q.startswith("DELETE FROM fluid_session_events")]
+    assert len(deletes) == 5
+    assert "(session_id, seq) > ('sdk-a', 3)" in deletes[1]
+    assert "(session_id, seq) > ('sdk-b', 1)" in deletes[2]
+    assert "(session_id, seq) > ('sdk-c', 3)" in deletes[-1]
+    for name in ("sdk-a", "sdk-b", "sdk-c"):
+        assert _remaining(name) == ["Usage", "ToolUse"]
+
+
 def test_keeps_the_accounting_and_transcript_evidence(mock_db):
     """Usage backs the backfill; ToolUse/ToolResult are code mode's only record."""
     _mk_session("s-keep", "sdk-keep", idle_days=90)
