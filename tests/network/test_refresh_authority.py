@@ -86,3 +86,19 @@ def test_pending_message_without_any_active_worker_asks_for_sign_in(monkeypatch)
     monkeypatch.setattr(refresh_authority.engine, "load_context",
                         lambda **_: _ctx("dev_peer", "dev_founder", *members))
     assert "Sign in again" in refresh_authority.renewal_pending_message("Grok")
+
+
+def test_a_login_the_renewing_worker_marked_dead_asks_for_sign_in(monkeypatch):
+    members = (_named("dev_founder", "home-server"), _named("dev_peer", "laptop"))
+    monkeypatch.setattr(refresh_authority.engine, "load_context",
+                        lambda **_: _ctx("dev_peer", "dev_founder", *members))
+    message = refresh_authority.renewal_pending_message("ChatGPT", needs_reauth=True)
+    assert "Sign in again" in message and "home-server" not in message
+
+
+def test_unnamed_renewing_worker_is_shown_by_device_id(monkeypatch):
+    members = (_named("dev_founder", None), _named("dev_peer", "laptop"))
+    monkeypatch.setattr(refresh_authority.engine, "load_context",
+                        lambda **_: _ctx("dev_peer", "dev_founder", *members))
+    message = refresh_authority.renewal_pending_message("ChatGPT")
+    assert "'dev_founder'" in message and "None" not in message
