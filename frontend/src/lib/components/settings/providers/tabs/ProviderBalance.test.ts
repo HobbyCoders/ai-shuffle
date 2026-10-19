@@ -44,6 +44,28 @@ it('xAI provides management-key controls, cycle spend and limit, not OpenAI sign
  await fireEvent.click(screen.getByRole('button', { name: 'Disconnect balance' }));
  await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith('x1'));
 });
+it.each([
+ { last_error_kind: 'network_error' },
+ { needs_reauth: true },
+ { fetched_at: Date.now() - 600_000 },
+ { status: 'stale' },
+])('suppresses non-current credit even when the response retains an amount: %j', async (patch) => {
+ mocks.get.mockResolvedValue({ ...status, ...patch });
+ render(ProviderBalance, { providerId: 'p1', openAI: true });
+ await screen.findByText(/Last fetched:/);
+ expect(screen.queryByText('$12.34')).toBeNull();
+});
+it('suppresses the previous amount when a status refresh fails', async () => {
+ mocks.get.mockResolvedValueOnce(status).mockRejectedValueOnce(new Error('Status unavailable')).mockResolvedValueOnce(status);
+ render(ProviderBalance, { providerId: 'p1', openAI: true });
+ await screen.findByText('$12.34');
+ await fireEvent.click(screen.getByRole('button', { name: 'Refresh balance status' }));
+ await screen.findByRole('alert');
+ expect(screen.queryByText('$12.34')).toBeNull();
+ await fireEvent.click(screen.getByRole('button', { name: 'Refresh balance status' }));
+ await screen.findByText('$12.34');
+ expect(screen.queryByRole('alert')).toBeNull();
+});
 it('starts owner sign-in with a one-shot ticket, never a URL credential', async () => {
  mocks.get.mockResolvedValue({ ...status, configured: false });
  mocks.start.mockResolvedValue({ ticket: 'one-shot-ticket' });
@@ -63,6 +85,13 @@ it('starts owner sign-in with a one-shot ticket, never a URL credential', async 
  expect(sockets[0].url).not.toContain('one-shot-ticket');
  sockets[0].onopen?.();
  expect(sockets[0].send).toHaveBeenCalledWith(JSON.stringify({ ticket: 'one-shot-ticket' }));
- await fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
+ sockets[0].onmessage?.({ data: JSON.stringify({ type: 'frame', data: 'fixture' }) });
+ const viewer = await screen.findByRole('textbox', { name: 'OpenAI Platform sign-in browser' });
+ await waitFor(() => expect(document.activeElement).toBe(viewer));
+ expect(await fireEvent.keyDown(viewer, { key: 'Tab', code: 'Tab' })).toBe(true);
+ expect(sockets[0].send).toHaveBeenCalledTimes(1);
+ await fireEvent.keyDown(viewer, { key: 'Escape', code: 'Escape' });
  expect(sockets[0].close).toHaveBeenCalled();
+ await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel sign-in' })).toBeNull());
+ expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Sign in to OpenAI Platform' }));
 });
