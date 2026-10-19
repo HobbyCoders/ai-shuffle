@@ -47,7 +47,7 @@ export const CHANNEL_READ_MS = 10_000;
 export const CHANNEL_LATE_POLL_MS = 30_000;
 
 export const NIGHTLY_RETURN_TEXT =
-	'Nightly may change how your data is stored. You can switch back to stable once a stable release is at least as new as the version this worker runs.';
+	'It may change how your data is stored, so you can switch back to stable only once a stable release is at least as new as the version this worker runs.';
 
 /** Older workers refuse every switch back to stable. */
 export const LEGACY_RETURN_TEXT = 'This worker’s version cannot switch back to stable. Install its next update, then try again.';
