@@ -13,7 +13,10 @@ Three seams are covered here:
 The turns table is real (pg_shim SQLite); the engine and the pump are stubbed.
 """
 
+import subprocess
+import sys
 import time
+from pathlib import Path
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -417,8 +420,29 @@ def _pump_env(pump):
         stack.enter_context(patch(
             "app.core.turn_finalize.persist_turn_end_state", new=AsyncMock(),
         ))
-        stack.enter_context(patch("app.core.sync_engine.sync_engine", new=sync))
+        # Runtime queue fan-out lazily imports chat_ws_handler. Keep the real
+        # singleton so that import cannot retain this helper's mock on teardown.
+        from app.core.sync_engine import sync_engine
+        for method in ("broadcast_message_added", "broadcast_queue_updated"):
+            stack.enter_context(patch.object(sync_engine, method, getattr(sync, method)))
         yield {"recorder": recorder, "broadcaster": broadcaster, "sync": sync}
+
+
+@pytest.mark.parametrize("producer", [
+    "tests/core/test_send_steering.py::test_receipt_records_the_message_and_absorbs_the_row",
+    "tests/core/test_steering_delivery_flows.py::test_the_steered_message_lands_between_its_tool_result_and_the_reply",
+])
+def test_pump_stub_does_not_leak_sync_engine(producer):
+    # Force each pump helper to be the first importer of the WebSocket handler.
+    # Whole-file runs can preload it and hide a captured singleton replacement.
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", producer,
+         "tests/core/test_session_orchestration.py::test_real_message_producer_bootstrap_and_single_delivery",
+         "-q", "-p", "no:randomly", "-p", "no:cacheprovider", "-o", "addopts="],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _seed_session(session_id):
