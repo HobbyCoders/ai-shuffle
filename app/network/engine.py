@@ -72,6 +72,8 @@ _REVISION_TABLES = {"user_preferences", "system_settings", "model_providers"}
 _HISTORY_COLLECTIONS = {"session_events", "artifacts", "note_attachments"}
 # One atomic subscription credential generation. Ordinary provider edits still
 # use row LWW, but must not roll a rotated refresh token back (#207).
+# A NULL codex_last_refresh cannot clear a stored bundle: any future sign-out
+# must publish a versioned clear rather than an unversioned empty bundle.
 _PROVIDER_CREDENTIAL_FIELDS = (
     "auth_mode", "codex_access_token", "codex_refresh_token", "codex_account_id",
     "codex_id_token_expires_at", "codex_last_refresh", "needs_reauth",
@@ -1315,6 +1317,25 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
     return outcome
 
 
+def _provider_credentials_kept(coll: policy.Collection, incoming: Mapping[str, Any],
+                               row: Mapping[str, Any]) -> bool:
+    """The guarded UPSERT kept a local generation, not just a timezone spelling.
+
+    Compare the returned timestamp as an instant. A naive incoming timestamp
+    was interpreted in the database session's zone; the returned offset gives
+    its interpretation when it represents the same local wall time.
+    """
+    if coll.name != "model_providers" or row.get("codex_last_refresh") is None:
+        return False
+    if incoming.get("codex_last_refresh") is None:
+        return True
+    stored = datetime.fromisoformat(str(row["codex_last_refresh"]))
+    received = datetime.fromisoformat(str(incoming["codex_last_refresh"]))
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=stored.tzinfo)
+    return stored != received
+
+
 def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_id: str,
                                        incoming: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
     """A row-LWW loser can still carry the newest subscription generation.
@@ -1464,16 +1485,19 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         _after_mirror(cursor, coll, plaintext)
         if coll.name == "presence":
             _learn_presence_alias(cursor, ctx, plaintext, env.origin_device_id)
-        local_hash = content_hash(coll, plaintext) if coll.name == "model_providers" else env.content_hash
-        # A merged provider must be republished by scan. In particular, the
-        # preserved local rotation may not have reached the outbox yet.
-        if row is not None and coll.name != "model_providers":
+        local_hash = env.content_hash
+        if row is not None:
             try:
                 reserialized = serialize_row(coll, row)
                 if reserialized is not None:
                     local_hash = content_hash(coll, reserialized)
             except ApplyError:
                 pass
+        if row is not None and _provider_credentials_kept(coll, plaintext, row):
+            # Only an actual merge needs a new signed op, including when the
+            # local rotation had not yet reached the outbox. Never compare a
+            # wire hash to a database row's timezone-dependent spelling.
+            local_hash = ""
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash=local_hash, deleted=False, order_seq=env.order_seq)
     # Stored for forwarding only once it applied: a failure above must not
@@ -2224,13 +2248,15 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             # Snapshot items have no per-item signature. In particular,
             # their claimed origin is not evidence for an instance alias.
             local_hash = content_hash(coll, item["record"])
-            if row is not None and coll.name != "model_providers":
+            if row is not None:
                 try:
                     reserialized = serialize_row(coll, row)
                     if reserialized is not None:
                         local_hash = content_hash(coll, reserialized)
                 except ApplyError:
                     pass
+            if row is not None and _provider_credentials_kept(coll, prepared, row):
+                local_hash = ""  # scan publishes only a genuinely merged bundle
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
                          deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))

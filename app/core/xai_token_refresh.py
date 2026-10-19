@@ -150,6 +150,7 @@ async def _mark_needs_reauth(provider_id: str) -> None:
         account_id=stored.get("codex_account_id"),
         id_token_expires_at=stored.get("codex_id_token_expires_at"),
         last_refresh=stored.get("codex_last_refresh"),
+        preserve_refresh_stamp=True,
         needs_reauth=True,
         auth_mode="grok",
     )

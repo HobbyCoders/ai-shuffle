@@ -47,7 +47,7 @@ Automations and connectors run on one worker each. Your other workers show them 
 
 If two workers change the same setting while they cannot reach each other, the later change wins. The other version is kept for 30 days, so nothing is lost without a trace.
 
-ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer refresh timestamp wins, independently of edits to the provider's name, models or enabled switch. Update every worker to get this protection everywhere. An older worker still replaces the whole provider row and can restore a spent token on itself; upgrade the renewing worker first. This cannot repair a login whose refresh token has already been invalidated.
+ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer refresh timestamp wins, independently of edits to the provider's name, models or enabled switch. Update every worker to get this protection everywhere. An older worker still replaces the whole provider row and can restore a spent token on itself; upgrade the renewing worker first. The network founder renews these logins; if the founder is no longer an active worker, the active worker with the lowest device id takes over. If a renewal has not reached this worker, the login-expired message names the renewing worker. This cannot repair a login whose refresh token has already been invalidated.
 
 ## Remove a device
 

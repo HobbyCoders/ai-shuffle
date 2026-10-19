@@ -1,13 +1,18 @@
 """Subscription generations merge independently of provider row LWW (#207)."""
-from unittest.mock import patch
+from datetime import datetime
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 import pytest
 
-from app.core import encryption
+from app.api import model_providers as provider_api
+from app.core import codex_oauth, codex_token_refresh, encryption, xai_oauth, xai_token_refresh
 from app.db import database, model_providers
 from app.db import network as store
 from app.network import engine, refresh_authority
 from tests.core.network.harness import converge, exchange, join
+from tests.fakes.http import mock_transport_client
 
 PROVIDER = "subscription"
 OLD = "2026-10-18T12:00:00+00:00"
@@ -38,6 +43,11 @@ def setup_pair(workers, mode="chatgpt", stamp=OLD):
         engine.create_network("Credential merge")
         database.create_model_provider(PROVIDER, "Original", "openai", "https://example.com")
         rotate(stamp, "old", mode, needs_reauth=True)
+        if stamp is None:
+            # Only legacy writers produced unversioned bundles. New writes
+            # always have a generation, even if the caller omitted its clock.
+            with database.get_db() as conn:
+                conn.cursor().execute("UPDATE model_providers SET codex_last_refresh = NULL WHERE id = %s", (PROVIDER,))
         scan()
     join(renewer, editor)
     converge([renewer, editor])
@@ -177,14 +187,25 @@ def test_rolling_upgrade_old_receiver_still_needs_upgrade(workers):
     assert_bundle(old)
 
 
-def test_equal_generation_reauth_status_still_uses_row_lww(workers):
-    renewer, editor = setup_pair(workers)
+@pytest.mark.parametrize("mode", ["chatgpt", "grok"])
+async def test_equal_generation_reauth_status_still_uses_row_lww(workers, mode):
+    renewer, editor = setup_pair(workers, mode)
+    refresh = codex_token_refresh if mode == "chatgpt" else xai_token_refresh
+    clear = provider_api.codex_clear_reauth if mode == "chatgpt" else provider_api.xai_clear_reauth
     with renewer.active():
-        rotate(OLD, "old", needs_reauth=False)
+        await clear(PROVIDER, token="test")
+        assert str(model_providers.get_codex_tokens(PROVIDER)["codex_last_refresh"]) == OLD
         scan()
     exchange(renewer, editor)
     with editor.active():
         assert not model_providers.get_codex_tokens(PROVIDER)["needs_reauth"]
+    with renewer.active():
+        await refresh._mark_needs_reauth(PROVIDER)
+        assert str(model_providers.get_codex_tokens(PROVIDER)["codex_last_refresh"]) == OLD
+        scan()
+    exchange(renewer, editor)
+    with editor.active():
+        assert model_providers.get_codex_tokens(PROVIDER)["needs_reauth"]
 
 
 def test_losing_rotation_does_not_revive_deleted_provider(workers):
@@ -200,3 +221,76 @@ def test_losing_rotation_does_not_revive_deleted_provider(workers):
     exchange(renewer, editor)
     with editor.active():
         assert database.get_model_provider(PROVIDER) is None
+
+@pytest.mark.parametrize("mode", ["chatgpt", "grok"])
+async def test_reconnect_with_clock_behind_wins_on_every_worker(workers, monkeypatch, mode):
+    # The old renewer's clock was far ahead of the signing-in worker's clock.
+    prior = "2099-10-19T12:00:00+00:00"
+    expected = "2099-10-19T12:00:00.000001+00:00"
+    renewer, editor = setup_pair(workers, mode, stamp=prior)
+    oauth = codex_oauth if mode == "chatgpt" else xai_oauth
+    monkeypatch.setattr(oauth, "poll_device_code", AsyncMock(return_value=oauth.TokenBundle(
+        access_token="access-new", refresh_token="refresh-new", account_id="account-new")))
+    if mode == "chatgpt":
+        pending, poll = provider_api._pending_enrollments, provider_api.codex_device_poll
+        monkeypatch.setitem(pending, PROVIDER, ("device", "verifier", "code", 0))
+    else:
+        pending, poll = provider_api._pending_xai_enrollments, provider_api.xai_device_poll
+        monkeypatch.setitem(pending, PROVIDER, ("device", 0))
+    with editor.active():
+        assert (await poll(PROVIDER, token="test")).status == "complete"
+        assert scan() == 1
+    with renewer.active():
+        # A disconnected, unrelated edit wins whole-row LWW while still
+        # carrying the dead bundle. Exercise both guarded merge directions.
+        with database.get_db() as conn:
+            store.observe_clock(conn.cursor(), 10000)
+        database.update_model_provider(PROVIDER, name="Edited")
+        assert scan() == 1
+    exchange(renewer, editor)
+    exchange(editor, renewer)
+    for worker in (renewer, editor):
+        with worker.active():
+            assert scan() == 1  # publish the combined row once
+    converge([renewer, editor])
+    for worker in (renewer, editor):
+        with worker.active():
+            bundle = model_providers.get_codex_tokens(PROVIDER)
+            assert encryption.decrypt_value(bundle["codex_refresh_token"]) == "refresh-new"
+            assert str(bundle["codex_last_refresh"]) == expected
+            assert not bundle["needs_reauth"]
+            assert scan() == 0
+
+
+@pytest.mark.parametrize("mode", ["chatgpt", "grok"])
+async def test_new_renewer_with_clock_behind_rotates_everywhere(workers, monkeypatch, mode):
+    founder, peer = setup_pair(workers, mode, stamp=NEW)
+    clear = provider_api.codex_clear_reauth if mode == "chatgpt" else provider_api.xai_clear_reauth
+    refresh = codex_token_refresh if mode == "chatgpt" else xai_token_refresh
+    with founder.active():
+        await clear(PROVIDER, token="test")
+        scan()
+    converge([founder, peer])
+    observer = workers("observer")
+    join(peer, observer)
+    with peer.active():
+        engine.revoke_device(founder.device_id)
+    converge([peer, observer])
+    renewer, observer = sorted([peer, observer], key=lambda worker: worker.device_id)
+    monkeypatch.setattr(refresh, "_now", lambda: datetime.fromisoformat(OLD))
+    with renewer.active():
+        assert refresh_authority.authority_device_id(engine.context()) == renewer.device_id
+        async with mock_transport_client(lambda _: httpx.Response(200, json={
+            "access_token": "access-new", "refresh_token": "refresh-new",
+        })) as client:
+            assert await refresh.refresh_provider(PROVIDER, client=client, force=True)
+        assert scan() == 1
+    exchange(renewer, observer)
+    converge([renewer, observer])
+    for worker in (renewer, observer):
+        with worker.active():
+            bundle = model_providers.get_codex_tokens(PROVIDER)
+            assert encryption.decrypt_value(bundle["codex_refresh_token"]) == "refresh-new"
+            assert str(bundle["codex_last_refresh"]) == "2026-10-19T12:00:00.000001+00:00"
+            assert not bundle["needs_reauth"]
+            assert scan() == 0

@@ -1,11 +1,12 @@
 """Credential merge SQL against a disposable PostgreSQL, never the app DB."""
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import UTC, datetime
 
 import pytest
 
+from app.db import network as store
 from app.db.schema_postgres import create_postgres_schema
 from app.network import engine, policy
 from tests.db.schema_lifecycle_helpers import pg16_bindir, pg_connect, private_postgres
@@ -70,3 +71,37 @@ def test_timestamp_comparison_and_atomic_write(cluster, losing_row):
     assert row["codex_account_id"] == "account-new"
     assert row["codex_last_refresh"] == datetime(2026, 10, 19, 12, tzinfo=UTC)
     assert row["name"] == ("Original" if losing_row else "Edited")
+
+@pytest.mark.parametrize("delivery", ["envelope", "snapshot"])
+@pytest.mark.parametrize("session_zone", ["UTC", "America/New_York"])
+def test_applied_bundle_does_not_echo_across_timezones(cluster, workers, monkeypatch, delivery, session_zone):
+    coll = policy.collection("model_providers")
+    provider = f"pg-echo-{delivery}-{session_zone}"
+    sender = workers("sender")
+    with sender.active():
+        ctx = engine.create_network("Timezone regression")
+        with closing(pg_connect(cluster)) as source, source:
+            source.cursor().execute("SET TIME ZONE 'UTC'")
+            row = engine.materialize(source.cursor(), coll, provider,
+                                     bundle(provider, "2026-10-19T12:00:00.123456+00:00", "new"))
+            record = engine.serialize_row(coll, row)
+        with engine.get_db() as conn:
+            env = engine.record(conn.cursor(), coll.name, provider, row, ctx=ctx)
+        assert env is not None
+        env = engine.Envelope.from_dict(env)
+        with closing(pg_connect(cluster)) as conn, conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT set_config('TimeZone', %s, false)", (session_zone,))
+            store.create_state(network_id=ctx.network_id, name=ctx.name,
+                               founder_device_id=ctx.founder_device_id, keyring={}, _conn=conn)
+            monkeypatch.setattr(engine, "get_db", lambda: nullcontext(conn))
+            if delivery == "envelope":
+                result = engine.ApplyResult()
+                assert engine._apply_in_order(cursor, ctx, env, ctx.member(ctx.device_id), result) == "applied"
+            else:
+                applied, _ = engine.apply_snapshot_items(cursor, coll, [{
+                    "record_id": provider, "record": record, "clock": env.clock,
+                    "origin_device_id": env.origin_device_id, "deleted": False,
+                }], ctx=ctx)
+                assert applied == 1
+            assert engine.scan_collection(coll.name, ctx=ctx, record_ids=[provider]) == 0
