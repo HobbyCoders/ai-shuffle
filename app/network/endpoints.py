@@ -50,6 +50,8 @@ address the peer withdrew stops being dialed: a session at it is dropped.
 from __future__ import annotations
 
 import ipaddress
+import re
+import socket
 from typing import Iterable, List, Mapping, Optional
 from urllib.parse import urlsplit
 
@@ -59,6 +61,11 @@ MAX_ENDPOINT_LENGTH = 512
 # Tailscale hands every node an address from the carrier-grade NAT block,
 # which ``ipaddress`` classifies as neither private nor global.
 _TAILSCALE_IPV4 = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+# One label of a legacy IPv4 form: decimal/octal digits or hex. A host made
+# only of such labels is an address to ``inet_aton``/``getaddrinfo``.
+_NUMERIC_LABEL = re.compile(r"\d+|0x[0-9a-f]*", re.IGNORECASE)
 
 
 def is_valid_endpoint(url: object) -> bool:
@@ -72,10 +79,23 @@ def is_valid_endpoint(url: object) -> bool:
         return False
     if parts.scheme not in ("http", "https"):
         return False
+    # Binding needs literal ASCII authorities. With the rollout gate off,
+    # preserve existing international hostnames, but classify the destination
+    # HTTPX actually dials so Unicode dots cannot hide link-local addresses.
+    ascii_host = None
+    if not parts.netloc.isascii():
+        from app.core.config import settings
+        if settings.network_token_binding_enabled:
+            return False
+        import httpx
+        try:
+            ascii_host = httpx.URL(url).raw_host.decode("ascii")
+        except (httpx.InvalidURL, UnicodeError):
+            return False
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
         return False
     try:
-        host = parts.hostname
+        host = ascii_host or parts.hostname
         parts.port  # raises on a malformed port
     except ValueError:
         return False
@@ -84,7 +104,18 @@ def is_valid_endpoint(url: object) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return True  # a name; resolution happens at dial time
+        # getaddrinfo accepts legacy IPv4 forms that ipaddress does not:
+        # integer, hex/octal and shortened dotted addresses. Classify these
+        # locally, without DNS, before applying the link-local restriction.
+        numeric_host = host.rstrip(".")
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(numeric_host))
+        except OSError:
+            if all(_NUMERIC_LABEL.fullmatch(label) for label in numeric_host.split(".")):
+                return False  # an out-of-range numeric address, not a DNS name
+            # Any non-numeric label makes it a name (``0xnas``, ``box.0xfeed``,
+            # ``nas.10``); resolution happens at dial time.
+            return True
     return not embedded_ipv4(address).is_link_local
 
 
@@ -108,6 +139,8 @@ def embedded_ipv4(address: ipaddress.IPv4Address | ipaddress.IPv6Address):
     """
     if address.version != 6:
         return address
+    if address.sixtofour is not None:
+        return address.sixtofour  # 2002::/16 carries IPv4 in bits 16–48
     embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     if any(address in net for net in _IPV4_CARRYING_PREFIXES):
         return embedded

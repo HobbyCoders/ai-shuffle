@@ -7,6 +7,8 @@ tunnel, and a tunnel that does not answer surfaces as the peer being
 unreachable instead of quietly falling back to the LAN address. Plain-http
 invites are accepted only on a path the owner controls.
 """
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -68,6 +70,78 @@ def test_dial_endpoints_uses_the_tunnel_alone_when_one_is_advertised():
     assert endpoints.peer_endpoints({"endpoints": [LAN]}, None) == [LAN]
     assert endpoints.peer_endpoints(None, {"endpoints": "not-a-list"}) == []
     assert endpoints.peer_endpoints(None, None) == []
+
+
+@pytest.mark.parametrize("dot", ["。", "．", "｡"], ids=["ideographic", "fullwidth", "halfwidth"])
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot, enabled, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", enabled)
+    url = f"http://169{dot}254{dot}169{dot}254:80"
+    assert endpoints.peer_endpoints({"endpoints": [url]}, None) == []
+    assert endpoints.peer_endpoints(None, {"endpoints": [url]}) == []
+    assert endpoints.dial_endpoints([url]) == []
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(403)
+    # Also exercise the raw-list constructor: no challenge may be sent before
+    # the stricter token transcript canonicalizer gets a chance to reject it.
+    link = transport.PeerLink("peer", [url])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(transport.PeerError):
+            await link.authenticate(client, SimpleNamespace(device_id="local"))
+    assert requests == []
+
+
+@pytest.mark.parametrize("url", ["https://faß.example", "https://K.example", "http://example.com:８０"])
+def test_peer_authorities_require_ascii_before_normalizing(url, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+    assert not endpoints.is_valid_endpoint(url)
+    assert endpoints.dial_endpoints([url]) == []
+
+
+@pytest.mark.parametrize("url, valid", [
+    ("http://[2002:a9fe:a9fe::1]:8000", False),
+    ("http://[2002:c0a8:114::1]:8000", True),
+    ("https://[2002:808:808::1]", True),
+])
+def test_6to4_addresses_apply_the_embedded_ipv4_link_local_rule(url, valid):
+    assert endpoints.is_valid_endpoint(url) is valid
+    assert endpoints.dial_endpoints([url]) == ([url] if valid else [])
+
+
+# Hosts the previous release's validator (main before endpoint binding)
+# accepted. With binding off they must stay accepted: a non-numeric label makes
+# the host a DNS name, even when another label is a number or starts with 0x.
+_STILL_VALID = ["http://0xnas:8000", "http://box.0xfeed", "http://nas.10:8000", "http://10.nas:8000",
+                "http://0x.example", "http://10.1:8000", "http://2130706433", "http://0x7f000001",
+                "https://bücher.example", "https://faß.example", "http://xn--bcher-kva.example",
+                "http://worker-1:8000", "http://192.168.1.5:8001/proxy/", "http://host.example.:8000"]
+# Main accepted these too. They are refused now because they name (or would be
+# parsed by getaddrinfo as) link-local or out-of-range numeric IPv4 addresses.
+_NOW_REFUSED = ["http://169.254.1", "http://169.254.43518", "http://0xa9fea9fe", "http://2851995648",
+                "http://0251.0376.0251.0376", "http://[2002:a9fe:101::]:8000", "http://256.1.1.1",
+                "http://1.2.3.4.5", "http://08.1.1.1", "http://0x.0x"]
+
+
+@pytest.mark.parametrize("url", _STILL_VALID)
+def test_names_main_accepted_stay_valid_with_binding_off(url, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+    assert endpoints.is_valid_endpoint(url)
+    assert len(endpoints.validate_endpoints([url])) == 1
+
+
+@pytest.mark.parametrize("url", _NOW_REFUSED)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_all_numeric_link_local_and_out_of_range_hosts_are_refused(url, enabled, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", enabled)
+    assert not endpoints.is_valid_endpoint(url)
+    assert endpoints.validate_endpoints([url]) == []
 
 
 @pytest.mark.parametrize("url, local", [
