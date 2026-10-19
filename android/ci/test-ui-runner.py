@@ -16,9 +16,8 @@ BASH = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == 
 
 class UiRunnerTest(unittest.TestCase):
     def run_runner(self, mode="pass", phase="suite"):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix="ui runner ") as directory:
             root = Path(directory)
-            (root / "bin").mkdir()
             (root / "ci").mkdir()
             (root / "ci/prepare-android-ui.py").write_text("pass\n")
             # Even failing evidence collection must not mask the test's status.
@@ -27,15 +26,16 @@ class UiRunnerTest(unittest.TestCase):
             fake = r'''
 import json, os, subprocess, sys
 name, *args = sys.argv[1:]
+assert name in ("adb", "timeout"), name
 with open(os.environ["CALLS"], "a") as log:
     log.write(json.dumps([name, *args]) + "\n")
 if name == "timeout":
     while args[0].startswith("--"):
         args.pop(0)
     args.pop(0)  # Recorded host deadline; do not sleep in this self-test.
-    # Native Windows exec cannot launch an extensionless Bash shim. Resolve it
-    # through Bash just like the real runner, preserving the child's exit code.
-    sys.exit(subprocess.call([os.environ["UI_RUNNER_TEST_BASH"], "-c", 'exec "$@"', "timeout-shim", *args]))
+    # Run the requested fake command with this interpreter, not Windows execvp
+    # (which cannot execute an extensionless POSIX shebang script).
+    sys.exit(subprocess.call([sys.executable, __file__, *args]))
 if "instrument" in args:
     suite = "notClass" in args
     mode = os.environ["MODE"] if suite == (os.environ["PHASE"] == "suite") else "pass"
@@ -57,20 +57,19 @@ if "instrument" in args:
     print("OK (1 test)\nINSTRUMENTATION_CODE: -1")
 '''
             (root / "fake.py").write_text(fake, encoding="utf-8")
-            # A native Windows Python path is not a valid POSIX shebang. Bash
-            # launches these shims and the quoted, slash-normalized interpreter
-            # explicitly, which also handles spaces in an interpreter path.
-            for name in ("adb", "timeout"):
-                executable = root / "bin" / name
-                executable.write_text(
-                    '#!/bin/bash\n'
-                    f'exec "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" {name} "$@"\n',
-                    encoding="utf-8", newline="\n")
-                executable.chmod(0o755)
-            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+            # BASH_ENV installs test-only functions before the real runner.
+            # Git Bash can prefer a host timeout.exe over an extensionless PATH
+            # shim; functions make both commands deterministic on every host.
+            # Explicitly launch Python instead of using a native Windows path
+            # as a POSIX shebang, and keep spaces in paths quoted.
+            shell_env = root / "fake-tools.sh"
+            shell_env.write_text(
+                'adb() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" adb "$@"; }\n'
+                'timeout() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" timeout "$@"; }\n',
+                encoding="utf-8", newline="\n")
+            env = dict(os.environ, BASH_ENV=shell_env.as_posix(),
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
                        GITHUB_STEP_SUMMARY=str(root / "summary"),
-                       UI_RUNNER_TEST_BASH=BASH,
                        UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
                        UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
             result = subprocess.run([BASH, str(CI / "run-android-ui-tests.sh")], cwd=root,
