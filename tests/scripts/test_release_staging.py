@@ -345,7 +345,7 @@ def test_default_release_graph_contract():
     opt_in = next(s for s in steps if s.get("name") == "Validate opt-in two-phase request")
     assert opt_in["if"] == "inputs.stage_only || inputs.promote != ''"
     steps.remove(opt_in)
-    assert p.sha256(p.canonical(wf)) == "673c66ea8c2850f3aa455b6d7689cc59977af39b8f89f0f51ca83c77bd2c0585"
+    assert p.sha256(p.canonical(wf)) == "d8d992973ca0451170af2ebda63f089eb673a146313aa64f0679ef498207a77f"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):

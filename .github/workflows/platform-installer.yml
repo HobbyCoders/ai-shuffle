@@ -47,6 +47,10 @@ on:
         description: Run ID of the build of this tag (desktop-macos-artifact.yml, desktop-linux-artifact.yml, or android.yml with this release_tag). Leave empty for android to build it in this run.
         required: false
         type: string
+      release_assets:
+        description: Reuse retained Linux/Android release assets (only after release gates succeed); no rebuild or build run ID needed
+        type: boolean
+        default: false
 
 permissions:
   contents: write

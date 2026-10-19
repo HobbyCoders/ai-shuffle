@@ -74,16 +74,22 @@ staging is not a claim that these other surfaces are staged.
 ## Ship-release notes: all-platform completion
 
 The ship-release checklist must not recommend skipping Windows when native
-launcher code is unchanged. Every stable version needs its own installer for
-new installs and recovery; existing users can still update inside the app.
-Do not pass the removed `build_desktop` input. A normal dispatch and a staged
-candidate both include Windows, Linux and Android. macOS remains separate.
+launcher code is unchanged. Every release promoted to latest stable needs its
+own installer for new installs and recovery; existing users can still update
+inside the app. Do not pass the removed `build_desktop` input. A latest-stable
+dispatch and a staged candidate both include Windows, Linux and Android.
+Older-line patches and prereleases do not publish Windows or move the hub's
+stable download pointers. macOS remains separate.
 
 Before declaring a release complete, require **verify-downloads** to pass and
 read back the download list for the exact tag/revision. Do not substitute a
-successful Docker promotion or Play upload for this check. If registration
-fails, inspect the named platform job and retry its registration: Windows uses
-`desktop-installer.yml`; Linux/Android use `platform-installer.yml` from the tag.
+successful Docker promotion or Play upload for this check. If release gates
+failed or were skipped, fix those jobs and retry the release first: do not
+manually register downloads to bypass them. Only after successful activation,
+inspect any failed platform registration: Windows uses `desktop-installer.yml`;
+Linux/Android use `platform-installer.yml` from the tag with `release_assets=true`
+and no build run ID. This reuses retained release assets even after the one-day
+Actions artifacts expire, without rebuilding packages with different bytes.
 For a sealed candidate, retry promotion to reuse the retained assets rather
 than rebuilding them. Legacy seals made without Windows cannot satisfy the
 all-platform completion gate unless the matching Windows installer is published;
@@ -133,8 +139,10 @@ the error names the Windows recovery workflow. Never report such a run complete.
    publisher independently refuses prereleases and skips an older final tag.
 5. **android** builds and publishes to Play internal testing only when its
    existing signing/worker-readiness gates pass. This is not a public Play
-   production release. **desktop** always builds and publishes the Windows installer
-   through `desktop-installer.yml`, including its existing signing and verification.
+   production release. **desktop** builds and publishes the Windows installer
+   whenever `promote_latest=true`, through `desktop-installer.yml` and its existing
+   signing/verification. Older final releases and prereleases skip Windows so
+   they cannot overwrite the latest stable installer or fail its stable-tag gate.
 6. **linux-build** calls the existing Linux workflow on the exact tag; **linux-release**
    verifies its source revision/version, AppImage and deb hashes, and checksum
    file, then attaches both packages, `SHA256SUMS-linux` and provenance to the
@@ -159,8 +167,12 @@ the error names the Windows recovery workflow. Never report such a run complete.
    job failed or was skipped. It reads the public `/v1/desktop/installers` response
    and requires `win`, `linux` and `android` to match both the tag version and exact
    revision. A missing/stale platform fails the run and names the platform and
-   recovery workflow. A hub read failure also fails closed. This is a completion
-   gate, not a transaction: earlier successful publications are not rolled back.
+   recovery workflow only after successful activation. If **promote-image** (or
+   **promotion** on the sealed path) failed or was skipped, the check instead
+   tells the owner to fix the release gates and not manually register installers.
+   A hub read failure also fails closed. This is a completion gate, not a
+   transaction: Windows can publish after its own checks before Docker/buyer
+   gates finish; earlier successful publications are not rolled back.
 
 Complete release workflows are serialized without cancelling an active
 publish. A failed gate stops its dependent jobs; a partial release must not

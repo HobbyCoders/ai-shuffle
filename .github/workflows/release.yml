@@ -175,7 +175,8 @@ jobs:
             After that, use Download update and Update and restart inside AI Shuffle.
             The app fetches the newest stable release and prepares updates in the
             background. No command prompt or new installer is needed.
-            Every stable release publishes Windows, Linux and Android downloads.
+            Every release promoted to latest stable publishes Windows, Linux and Android downloads.
+            Older-line patches and prereleases leave stable downloads unchanged and skip Windows.
             The release fails if any download does not match its version and revision.
             Existing desktop users can still update inside the app.
             Other workers are managed inside the app under Devices.
@@ -413,7 +414,7 @@ jobs:
 
   verify-downloads:
     name: Require current win, linux and android downloads
-    needs: [preflight, create-release, desktop, platform-installers, promotion, promotion-platform-installers]
+    needs: [preflight, create-release, desktop, promote-image, platform-installers, promotion, promotion-platform-installers]
     # Diagnose missing downloads even if a publishing job failed or was skipped.
     if: >-
       always() && !cancelled() && needs.preflight.result == 'success' && !inputs.stage_only &&
@@ -427,9 +428,10 @@ jobs:
       - name: Read back the public download list
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          ACTIVATION_RESULT: ${{ inputs.promote != '' && needs.promotion.result || needs.promote-image.result }}
         run: |
           revision=$(git rev-parse HEAD)
-          python3 scripts/ci/verify_release_downloads.py --tag "$RELEASE_TAG" --revision "$revision"
+          python3 scripts/ci/verify_release_downloads.py --tag "$RELEASE_TAG" --revision "$revision" --activation-result "$ACTIVATION_RESULT"
 
   android:
     name: Android Play internal release
@@ -490,6 +492,7 @@ jobs:
 
   desktop:
     name: Windows installer
+    if: needs.create-release.outputs.promote_latest == 'true'
     needs: create-release
     permissions:
       contents: write

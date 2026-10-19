@@ -39,6 +39,8 @@ def test_each_missing_or_stale_download_names_its_recovery(platform, fault):
     assert str(error.value).startswith(platform + ":")
     assert check.WORKFLOWS[platform] in str(error.value)
     assert "v1.2.3" in str(error.value)
+    if platform != "win":
+        assert "release_assets=true (no build run ID)" in str(error.value)
     assert len(str(error.value).splitlines()) == 1
 
 
@@ -53,7 +55,7 @@ def test_malformed_or_empty_list_reports_every_missing_platform(payload):
 
 @pytest.mark.parametrize("failure", [None, "stale", "http", "invalid-json"])
 def test_cli_readback_exits_nonzero_on_stale_or_unavailable_hub(monkeypatch, capsys, failure):
-    monkeypatch.setattr("sys.argv", ["check", "--tag", "v1.2.3", "--revision", REVISION])
+    monkeypatch.setattr("sys.argv", ["check", "--tag", "v1.2.3", "--revision", REVISION, "--activation-result", "success"])
     def fetch(request, timeout):
         assert request.full_url == check.URL
         assert timeout == 30
@@ -76,7 +78,7 @@ def test_stable_and_staged_windows_cannot_be_skipped():
     wf = workflow("release.yml")
     jobs = wf["jobs"]
     assert "build_desktop" not in wf["on"]["workflow_dispatch"]["inputs"]
-    assert "if" not in jobs["desktop"]
+    assert jobs["desktop"]["if"] == "needs.create-release.outputs.promote_latest == 'true'"
     assert jobs["desktop"]["needs"] == "create-release"
     assert jobs["stage-desktop"]["if"] == "inputs.stage_only"
     for job in ("desktop", "stage-desktop"):
@@ -98,7 +100,11 @@ def test_both_publication_paths_register_platforms_with_the_existing_publisher()
     assert jobs["platform-installers"]["with"]["build_run_id"] == "${{ format('{0}', github.run_id) }}"
     assert jobs["promotion-platform-installers"]["with"]["release_assets"] == "true"
     assert jobs["promotion-platform-installers"]["with"]["build_run_id"] == ""
-    publisher = workflow("platform-installer.yml")["jobs"]
+    wf = workflow("platform-installer.yml")
+    for trigger in ("workflow_dispatch", "workflow_call"):
+        assert wf["on"][trigger]["inputs"]["release_assets"]["type"] == "boolean"
+        assert wf["on"][trigger]["inputs"]["release_assets"]["default"] == "false"
+    publisher = wf["jobs"]
     assert "!inputs.release_assets" in publisher["android-build"]["if"]
     steps = publisher["publish"]["steps"]
     download = next(s for s in steps if s.get("name") == "Download the sealed release assets without rebuilding")
@@ -124,7 +130,7 @@ def test_both_publication_paths_register_platforms_with_the_existing_publisher()
 ])
 def test_final_readback_runs_for_both_paths_even_after_publication_failure(stage, promote, latest, preflight, cancelled, expected):
     job = workflow("release.yml")["jobs"]["verify-downloads"]
-    assert set(job["needs"]) == {"preflight", "create-release", "desktop", "platform-installers", "promotion", "promotion-platform-installers"}
+    assert set(job["needs"]) == {"preflight", "create-release", "desktop", "promote-image", "platform-installers", "promotion", "promotion-platform-installers"}
     expression = job["if"]
     for name, value in {"inputs.stage_only": stage, "inputs.promote": promote,
                         "needs.create-release.outputs.promote_latest": latest,
@@ -136,3 +142,51 @@ def test_final_readback_runs_for_both_paths_even_after_publication_failure(stage
     expression = re.sub(r"!(?!=)", " not ", expression)
     assert bool(eval(expression, {"__builtins__": {}}, {})) is expected
     assert "verify_release_downloads.py" in job["steps"][-1]["run"]
+
+@pytest.mark.parametrize("tag,newest,expected", [
+    ("v1.1.0", "v1.1.0", True),
+    ("v1.0.3", "v1.1.0", False),
+    ("v1.2.0-rc.1", "v1.1.0", False),
+])
+def test_windows_only_publishes_for_the_newest_final_release(tag, newest, expected):
+    # Exercise the producer's inline version decision and the consumer predicate.
+    import os
+    import subprocess
+    import shutil
+    from fluid.tools.shell import resolve_shell
+    jobs = workflow("release.yml")["jobs"]
+    step = next(s for s in jobs["create-release"]["steps"] if s.get("id") == "promote")
+    # This shell function replaces only git tag enumeration, not the decision.
+    script = 'git() { printf "%s\n" "$NEWEST"; }; export -f git\n' + step["run"]
+    script = script.replace('>> "$GITHUB_OUTPUT"', '')
+    env = {key: os.environ[key] for key in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP") if key in os.environ}
+    shell = resolve_shell().path if os.name == "nt" else shutil.which("bash")
+    assert shell is not None
+    result = subprocess.run([shell, "-c", script], env={**env, "VERSION": tag, "NEWEST": newest},
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    latest = next(line.split("=", 1)[1] for line in result.stdout.splitlines() if line.startswith("promote_latest="))
+    expression = jobs["desktop"]["if"].replace("needs.create-release.outputs.promote_latest", repr(latest))
+    assert eval(expression, {"__builtins__": {}}, {}) is expected
+
+
+@pytest.mark.parametrize("result", ["failure", "skipped", "cancelled"])
+@pytest.mark.parametrize("payload", [downloads(), {}])
+def test_failed_release_gates_never_recommend_manual_registration(monkeypatch, capsys, result, payload):
+    monkeypatch.setattr("sys.argv", ["check", "--tag", "v1.2.3", "--revision", REVISION, "--activation-result", result])
+    monkeypatch.setattr(check, "urlopen", lambda *args, **kwargs: io.StringIO(json.dumps(payload)))
+    assert check.main() == 1
+    message = capsys.readouterr().err
+    assert "Release gates failed or were skipped" in message
+    assert "do not manually register installers" in message
+    assert "platform-installer.yml" not in message
+    assert "desktop-installer.yml" not in message
+    if not payload:
+        for platform in check.WORKFLOWS:
+            assert platform + ": missing or stale" in message
+
+
+def test_final_readback_receives_the_correct_activation_result():
+    step = workflow("release.yml")["jobs"]["verify-downloads"]["steps"][-1]
+    assert step["env"]["ACTIVATION_RESULT"] == "${{ inputs.promote != '' && needs.promotion.result || needs.promote-image.result }}"
+    assert '--activation-result "$ACTIVATION_RESULT"' in step["run"]

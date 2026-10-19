@@ -34,16 +34,17 @@ wired into that job.
 | Workflow | Trigger | Output | Signed |
 | --- | --- | --- | --- |
 | `desktop.yml` | pull requests, manual | typecheck, tests, a Windows preview installer kept for one day | never; pull requests never see signing secrets |
-| `desktop-installer.yml` | every `release.yml` run, or manual with a `vX.Y.Z` tag | the stable Windows x64 NSIS installer, attached to the GitHub release and served by the hub at `/desktop` | Authenticode when the Windows secrets are set |
+| `desktop-installer.yml` | latest-stable `release.yml` run, or manual with a `vX.Y.Z` tag | the stable Windows x64 NSIS installer, attached to the GitHub release and served by the hub at `/desktop` | Authenticode when the Windows secrets are set |
 | `desktop-macos-artifact.yml` | manual, `build_macos` ticked | Apple Silicon DMG and ZIP, `SHA256SUMS`, provenance, as a one-day Actions artifact | Developer ID and notarized when the macOS secrets are set |
 | `desktop-linux-artifact.yml` | manual | x64 AppImage and deb, `SHA256SUMS`, provenance, as a one-day Actions artifact | no, by design |
 | `desktop-source.yml` | owner dispatch from `main` | the Ed25519-signed source manifest that installed Windows apps update from | always, with `DESKTOP_APPLICATION_SIGNING_KEY` |
 
-Stable releases automatically publish Windows, Linux and Android installers to
+Releases promoted to latest stable automatically publish Windows, Linux and Android installers to
 GitHub and register all three on the hub. Sealed-candidate promotion reuses the
 retained packages without rebuilding. The final public download-list read-back
 fails if any of these platforms is missing or on another version/revision.
-macOS remains a separate manual publication.
+Older-line patches and prereleases leave these stable pointers unchanged and
+skip Windows. macOS remains a separate manual publication.
 
 ## Windows: Authenticode
 
@@ -212,8 +213,9 @@ upgrade over a profile that has a signed-in hub session and never revert it.
 
 ## Release steps
 
-1. Tag `vX.Y.Z` and run `release.yml` from that tag. Windows is required, not
-   opt-in (`desktop-installer.yml` remains available for recovery). Check the "Choose code
+1. Tag `vX.Y.Z` and run `release.yml` from that tag. Windows is required for the
+   newest final release, not opt-in (`desktop-installer.yml` remains available
+   for recovery after release gates pass). Check the "Choose code
    signing" step says `azure-trusted-signing` or `windows-pfx`.
 2. Run `desktop-macos-artifact.yml` with the same version. Check the step says
    `developer-id+notary-api-key` or `developer-id+notary-apple-id` and that the

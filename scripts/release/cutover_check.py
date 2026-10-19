@@ -80,7 +80,8 @@ def checks(root, args):
         if "linux-build" not in linux.get("needs", []) or not any("attach_linux.py" in s.get("run", "") for s in linux.get("steps", [])):
             raise ValueError("Linux artifacts/checksums need durable release attachment and read-back")
         desktop = jobs.get("desktop", {})
-        if "build_desktop" in inputs or "if" in desktop or desktop.get("uses") != "./.github/workflows/desktop-installer.yml":
+        if ("build_desktop" in inputs or desktop.get("if") != "needs.create-release.outputs.promote_latest == 'true'"
+                or desktop.get("uses") != "./.github/workflows/desktop-installer.yml"):
             raise ValueError("Windows installer release wiring is missing")
         if jobs.get("android-apk", {}).get("uses") != "./.github/workflows/android.yml":
             raise ValueError("Merge the Play-preparation android-apk release caller before cutover")
