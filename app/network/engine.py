@@ -1006,11 +1006,21 @@ class ApplyResult:
     lost: int = 0
     own_ahead: int = 0  # highest seq of our own current stream seen that we do not hold
     reasons: List[str] = field(default_factory=list)
+    blocked: List[dict] = field(default_factory=list)
     touched: List[Tuple[str, str, str]] = field(default_factory=list)
+
+    def retry_operation(self, data: Mapping[str, Any], reason: str) -> None:
+        self.retry += 1
+        self.reasons.append(reason)
+        if len(self.blocked) < 20:
+            self.blocked.append({"origin_device_id": data.get("origin_device_id"),
+                                 "incarnation": data.get("origin_incarnation"),
+                                 "seq": data.get("origin_seq"), "reason": reason[:200]})
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "duplicate": self.duplicate, "pending": self.pending,
-                "rejected": self.rejected, "retry": self.retry, "lost": self.lost, "reasons": self.reasons[:20]}
+                "rejected": self.rejected, "retry": self.retry, "lost": self.lost,
+                "reasons": self.reasons[:20], "blocked": self.blocked[:20]}
 
 
 def _origin_allowed(cursor, ctx: NetworkContext, env: Envelope) -> Optional[Member]:
@@ -1159,8 +1169,7 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
                 # is still on its way). Keep it buffered; the stream resumes
                 # here once it can be opened.
                 store.stash_pending(cursor, buffered)
-                result.retry += 1
-                result.reasons.append(str(exc))
+                result.retry_operation(buffered, str(exc))
                 break
             except ApplyError as exc:
                 result.rejected += 1
@@ -1213,6 +1222,41 @@ def redact_stored_conflicts() -> int:
     return rewritten
 
 
+def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]:
+    """An enforced child dependency that was deleted, not merely slow to arrive.
+
+    Only CASCADE children are terminal on parent deletion. Optional references
+    and RESTRICT relationships retain their existing materialization/retry rules.
+    Never infer deletion from absence alone, or while a local parent is present.
+    The allowlisted parents have generated IDs with no undelete API:
+    tags: app/api/tags.py:31; notes: app/api/notes.py:153;
+    api_users: app/api/api_users.py:76; sessions:
+    app/core/session_orchestration.py:1243, app/core/session_sync.py:150.
+    Their tombstones are terminal even when concurrent child clocks are higher.
+    Agent IDs are routinely reused: permission rules always wait for their agent.
+    Do not add reusable-ID parents here without a causal/recreation check.
+    """
+    dependencies = {
+        "session_tags": (("session_id", "sessions"), ("tag_id", "tags")),
+        "note_attachments": (("note_id", "notes"),),
+        "api_user_credentials": (("api_user_id", "api_users"),),
+        "api_user_profiles": (("api_user_id", "api_users"),),
+        "user_credential_policies": (("api_user_id", "api_users"),),
+    }.get(env.collection, ())
+    if env.op != OP_UPSERT or not dependencies:
+        return None
+    from app.network.keyring import open_envelope
+    row, _key = open_envelope(ctx, env)
+    for field, parent in dependencies:
+        rid = row.get(field)
+        if not isinstance(rid, str) or not rid:
+            continue
+        version = store.get_record(cursor, parent, rid)
+        if version and version["deleted"] and _read_row(cursor, policy.collection(parent), rid) is None:
+            return f"parent deleted: {parent}/{rid}"
+    return None
+
+
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     """Apply the next op of a stream; classify what cannot be applied.
 
@@ -1236,14 +1280,20 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
         import sqlite3
         from psycopg2.errors import ForeignKeyViolation
 
+        reason = "storage refused the record: " + type(exc).__name__
         if (isinstance(exc, ForeignKeyViolation) or getattr(exc, "pgcode", None) == "23503"
                 or getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY):
-            # Ordering is per origin, not global. Consuming this op now would
-            # permanently lose a valid child whose parent is still in flight.
-            raise TransientApplyError("Referenced record has not arrived yet") from exc
-        reason = "storage refused the record: " + type(exc).__name__
+            deleted = _deleted_parent(cursor, ctx, env)
+            if deleted is None:
+                # Ordering is per origin, not global. A genuinely missing
+                # parent can still arrive; retain the child and its position.
+                raise TransientApplyError("Referenced record has not arrived yet") from exc
+            # CASCADE deletion wins over an in-flight child. Keep the refusal
+            # as a conflict, then allow its retraction and later lifecycle ops
+            # to drain instead of retrying an impossible dependency forever.
+            reason = deleted
         logger.warning("Operation %s/%s from %s could not be stored (%s); kept as a conflict",
-                       env.collection, env.record_id, env.origin_device_id, type(exc).__name__)
+                       env.collection, env.record_id, env.origin_device_id, reason)
         try:
             from app.network.keyring import open_envelope
             plaintext, _key = open_envelope(ctx, env)
@@ -1256,6 +1306,10 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
                            winning_clock=int(existing["clock"]) if existing else env.clock,
                            winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
         result.reasons.append(reason)
+        # A local materialization refusal is not a hole in the signed log.
+        # Preserve it for relays just like a losing LWW operation; downstream
+        # peers evaluate their own dependencies without a forced bootstrap.
+        store.insert_op(cursor, env.to_dict(), _lane(policy.collection(env.collection)))
         return "rejected"
     _savepoint(cursor, "RELEASE SAVEPOINT apply_op")
     return outcome
@@ -1636,6 +1690,7 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into.lost += part.lost
     into.own_ahead = max(into.own_ahead, part.own_ahead)
     into.reasons.extend(part.reasons)
+    into.blocked.extend(part.blocked[:max(0, 20 - len(into.blocked))])
     into.touched.extend(part.touched)
 
 
@@ -1649,8 +1704,7 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
         with get_db() as conn:
             outcome = apply_envelope(conn.cursor(), data, ctx=ctx, result=result)
     except TransientApplyError as exc:
-        result.retry += 1
-        result.reasons.append(str(exc))
+        result.retry_operation(data, str(exc))
         return
     except ApplyError as exc:
         result.rejected += 1
@@ -1658,8 +1712,7 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
         return
     except Exception as exc:  # noqa: BLE001 - keep the loop alive; log once per op
         logger.warning("Applying an operation failed: %s", exc, exc_info=True)
-        result.retry += 1
-        result.reasons.append("apply failed")
+        result.retry_operation(data, "apply failed")
         return
     _count_outcome(result, outcome)
 
@@ -1773,15 +1826,13 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                     cursor.execute("ROLLBACK TO SAVEPOINT apply_envelope")
                     cursor.execute("RELEASE SAVEPOINT apply_envelope")
                     if isinstance(exc, TransientApplyError):
-                        part.retry += 1
-                        part.reasons.append(str(exc))
+                        part.retry_operation(data, str(exc))
                     elif isinstance(exc, ApplyError):
                         part.rejected += 1
                         part.reasons.append(str(exc))
                     else:
                         logger.warning("Applying an operation failed: %s", exc, exc_info=True)
-                        part.retry += 1
-                        part.reasons.append("apply failed")
+                        part.retry_operation(data, "apply failed")
                     continue
                 if savepoints:
                     # A "rejected" outcome may have moved the watermark: keep it.
