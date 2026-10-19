@@ -32,7 +32,7 @@ class AppClient(HttpWorkerClient):
                 "id": project_id, "name": "Harness H2H bench",
                 "description": "Workspace for scripts/harness_h2h runs. Safe to delete."})
         got = project.get("path") or ""
-        if Path(got).name != Path(path).name:
+        if not got or Path(got).expanduser().resolve() != Path(path).expanduser().resolve():
             raise ClientError(f"project {project_id} points at {got!r}, expected {path!r}")
         return project
 

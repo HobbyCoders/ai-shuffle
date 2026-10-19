@@ -24,12 +24,15 @@ from scripts.harness_h2h.metered import read_jsonl
 _PREVIEW = 400
 
 
-def _preview(value: Any) -> str:
+def _full(value: Any) -> str:
     try:
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):
-        text = str(value)
-    return text[:_PREVIEW]
+        return str(value)
+
+
+def _preview(value: Any) -> str:
+    return _full(value)[:_PREVIEW]
 
 
 def _metered_calls(path: Path) -> list[dict[str, Any]]:
@@ -56,6 +59,7 @@ def from_claude_stream(stream_path: Path, calls_path: Path) -> dict[str, Any]:
     final_text = ""
     result: dict[str, Any] = {}
     texts: list[str] = []
+    full_inputs: list[dict[str, Any]] = []
     parse_errors = 0
     for row in read_jsonl(stream_path):
         t, line = row.get("t"), row.get("line", "")
@@ -73,6 +77,7 @@ def from_claude_stream(stream_path: Path, calls_path: Path) -> dict[str, Any]:
                                           "t_start": t, "t_end": None, "is_error": False,
                                           "input": _preview(block.get("input")),
                                           "subagent": bool(ev.get("parent_tool_use_id"))}
+                    full_inputs.append({"name": block.get("name"), "input": _full(block.get("input"))})
                     order.append(block["id"])
                 elif block.get("type") == "text" and not ev.get("parent_tool_use_id"):
                     texts.append(block.get("text", ""))
@@ -89,6 +94,7 @@ def from_claude_stream(stream_path: Path, calls_path: Path) -> dict[str, Any]:
                                               "num_turns", "total_cost_usd", "usage")}
             final_text = ev.get("result") or ""
     return {"calls": _metered_calls(calls_path), "tools": [tools[i] for i in order],
+            "contamination": contamination(full_inputs),
             "final_text": final_text or (texts[-1] if texts else ""),
             "self_reported": result, "parse_errors": parse_errors}
 
@@ -180,6 +186,7 @@ def from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     errors: list[str] = []
     compactions = 0
     retries = 0
+    full_inputs: list[dict[str, Any]] = []
     for raw in events:
         kind = _event_kind(raw)
         p = _payload(raw)
@@ -201,6 +208,7 @@ def from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             tid = str(p.get("tool_use_id") or len(order))
             tools[tid] = {"id": tid, "name": p.get("name"), "t_start": t, "t_end": None,
                           "is_error": False, "input": _preview(p.get("input"))}
+            full_inputs.append({"name": p.get("name"), "input": _full(p.get("input"))})
             order.append(tid)
         elif kind == "ToolResult":
             tid = str(p.get("tool_use_id") or "")
@@ -230,6 +238,7 @@ def from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         elif kind == "ProviderRetry":
             retries += 1
     return {"calls": derived, "tools": [tools[i] for i in order],
+            "contamination": contamination(full_inputs),
             "final_text": "".join(last_turn_text),
             "turn_starts": turn_starts, "turn_ends": turn_ends,
             "errors": errors, "compactions": compactions, "provider_retries": retries}
@@ -288,6 +297,8 @@ def contamination(tools: list[dict[str, Any]]) -> list[str]:
     hits = []
     for tool in tools or ():
         text = str(tool.get("input") or "")
-        if _CONTAMINATION.search(text):
-            hits.append(f"{tool.get('name')}: {text[:200]}")
+        m = _CONTAMINATION.search(text)
+        if m:
+            lo = max(0, m.start() - 80)
+            hits.append(f"{tool.get('name')}: {'…' if lo else ''}{text[lo:m.end() + 120]}")
     return hits

@@ -67,19 +67,65 @@ def _run(cmd: list[str] | str, *, cwd: Path | None = None, env: dict | None = No
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-def clear_dir(path: Path) -> None:
-    """Empty ``path`` in place (the app project keeps pointing at it)."""
+REPO_ROOT = Path(__file__).resolve().parents[2]
+#: Written into every workspace the bench fills. A non-empty directory without
+#: it is never emptied: it is somebody's real folder, not a bench workspace.
+WORKSPACE_MARKER = ".harness-h2h-workspace"
+
+
+class UnsafeWorkspace(RuntimeError):
+    """The workspace would overlap a real checkout, the output dir or home."""
+
+
+def check_workspace(path: Path, protected: Any = ()) -> Path:
+    """Refuse a workspace that is, contains or sits inside a protected path.
+
+    The bench empties its workspace before every run, so ``--workspace .`` or
+    ``--workspace /path/to/checkout`` must fail here, not wipe ``.git``.
+    Protected: this checkout, every task's source repo, the results dir and
+    anything passed in, plus the filesystem root and the home directory.
+    """
+    p = Path(path).expanduser().resolve()
+    if p == Path(p.anchor):
+        raise UnsafeWorkspace(f"workspace {p} is the filesystem root")
+    home = Path.home().resolve()
+    if home == p or home.is_relative_to(p):
+        raise UnsafeWorkspace(f"workspace {p} is or contains the home directory")
+    for q in (REPO_ROOT, *protected):
+        if not q:
+            continue
+        q = Path(q).expanduser().resolve()
+        if p == q or q.is_relative_to(p) or p.is_relative_to(q):
+            raise UnsafeWorkspace(f"workspace {p} overlaps {q}; pick an empty directory of its own")
+    return p
+
+
+def clear_dir(path: Path, protected: Any = ()) -> None:
+    """Empty a bench workspace in place (the app project keeps pointing at it).
+
+    Only a new or empty directory, or one carrying :data:`WORKSPACE_MARKER`,
+    is emptied; the marker is (re)written afterwards.
+    """
+    path = check_workspace(path, protected)
     path.mkdir(parents=True, exist_ok=True)
-    for child in path.iterdir():
+    entries = list(path.iterdir())
+    if entries and not (path / WORKSPACE_MARKER).is_file():
+        raise UnsafeWorkspace(
+            f"{path} is not empty and was not created by the bench (no {WORKSPACE_MARKER}); "
+            "refusing to empty it")
+    for child in entries:
+        if child.name == WORKSPACE_MARKER:
+            continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
         else:
             child.unlink()
+    (path / WORKSPACE_MARKER).write_text("scripts/harness_h2h workspace; emptied before every run\n")
 
 
-def snapshot(repo: str, sha: str, dest: Path) -> None:
+def snapshot(repo: str, sha: str, dest: Path, protected: Any = ()) -> None:
     """``dest`` holds ``sha``'s tree as a one-commit repository, nothing else."""
-    clear_dir(dest)
+    clear_dir(dest, (repo, *protected))
     archive = _run(["git", "-C", repo, "archive", "--format=tar", sha])
     if archive.returncode != 0:
         raise RuntimeError(f"git archive {sha} failed: {archive.stdout[-500:]!r}")
@@ -92,6 +138,12 @@ def snapshot(repo: str, sha: str, dest: Path) -> None:
         r = _run(cmd, cwd=dest, env=env)
         if r.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd)} failed: {r.stdout[-500:]!r}")
+        if cmd[1] == "init":
+            # Keep the marker out of the snapshot commit and the agent's diff.
+            info = dest / ".git" / "info"
+            info.mkdir(parents=True, exist_ok=True)
+            with (info / "exclude").open("a", encoding="utf-8") as fh:
+                fh.write(f"/{WORKSPACE_MARKER}\n")
 
 
 def install_hidden_tests(task: Task, dest: Path) -> list[str]:

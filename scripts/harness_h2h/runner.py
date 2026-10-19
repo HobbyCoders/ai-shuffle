@@ -224,7 +224,7 @@ def run_one(task: T.Task, arm: str, trial: int, *, out: Path, workspace: Path, m
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
     (run_dir / "prompt.txt").write_text(task.prompt, encoding="utf-8")
-    T.snapshot(task.repo, task.base, workspace)
+    T.snapshot(task.repo, task.base, workspace, protected=(out,))
     result: dict[str, Any] = {"task": task.id, "arm": arm, "trial": trial, "model": model,
                               "effort": effort, "started_at": time.time(), "run_id": uuid.uuid4().hex}
     try:
@@ -248,7 +248,10 @@ def run_one(task: T.Task, arm: str, trial: int, *, out: Path, workspace: Path, m
     patch = (grade.get("diff") or {}).pop("patch", "")
     (run_dir / "agent.patch").write_text(patch, encoding="utf-8")
     result["grade"] = grade
-    result["contamination"] = TR.contamination((result.get("trace") or {}).get("tools", []))
+    trace = result.get("trace") or {}
+    # The parsers scan every tool's FULL input; the stored inputs are previews.
+    result["contamination"] = (trace["contamination"] if "contamination" in trace
+                               else TR.contamination(trace.get("tools", [])))
     (run_dir / "result.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     return result
 
@@ -275,6 +278,8 @@ def _app_ready(app_url: str, model: str) -> bool:
 def run_matrix(*, tasks: list[T.Task], arms: list[str], trials: int, out: Path, workspace: Path,
                model: str, effort: str, token: Path | None, app_url: str, skip_done: bool = True) -> int:
     token = token or default_token_path()
+    # Fail before the first run, not after it, when --workspace is a real folder.
+    T.check_workspace(workspace, (out, *{t.repo for t in tasks}))
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps({
         "arms": arms, "trials": trials, "model": model, "effort": effort,
@@ -302,5 +307,5 @@ def run_matrix(*, tasks: list[T.Task], arms: list[str], trials: int, out: Path, 
                 print(f"    passed={g.get('passed')} wall={r.get('wall_s')}s "
                       f"calls={len(tr.get('calls', []))} tools={len(tr.get('tools', []))} "
                       f"err={r.get('harness_error') or ''}", flush=True)
-    T.clear_dir(workspace)
+    T.clear_dir(workspace, (out, *{t.repo for t in tasks}))
     return 0

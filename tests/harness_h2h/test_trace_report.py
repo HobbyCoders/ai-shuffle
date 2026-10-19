@@ -91,6 +91,42 @@ def test_matrix_redoes_harness_failures(tmp_path):
     assert runner._needs_redo(tmp_path / "missing.json")
 
 
+def test_contamination_scans_past_the_stored_preview(tmp_path):
+    long_cmd = "echo " + "x" * 600 + " && gh pr view 2343"
+    stream = _jsonl(tmp_path / "stream.jsonl", [
+        {"t": 1.0, "line": json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": long_cmd}}]}})},
+    ])
+    tr = TR.from_claude_stream(stream, tmp_path / "none.jsonl")
+    assert len(tr["tools"][0]["input"]) == 400 and "gh pr" not in tr["tools"][0]["input"]
+    assert len(tr["contamination"]) == 1 and "gh pr view 2343" in tr["contamination"][0]
+    app = TR.from_app_events([{"event_type": "tool.use", "data": {
+        "tool_use_id": "t", "name": "Bash", "input": {"command": long_cmd}}}], {})
+    assert len(app["contamination"]) == 1
+
+
+def test_workspace_guard_refuses_real_folders(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    out = tmp_path / "out"
+    for bad in (T.REPO_ROOT, T.REPO_ROOT / "scripts", Path("/"), Path.home(), repo, tmp_path, out / "ws"):
+        with pytest.raises(T.UnsafeWorkspace):
+            T.check_workspace(bad, (repo, out))
+    T.check_workspace(tmp_path / "ws", (repo, out))
+    # A non-empty folder the bench did not create is never emptied.
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+    (stranger / "keep.txt").write_text("mine")
+    with pytest.raises(T.UnsafeWorkspace):
+        T.clear_dir(stranger)
+    assert (stranger / "keep.txt").exists()
+    ws = tmp_path / "ws"
+    T.clear_dir(ws)
+    (ws / "junk").write_text("x")
+    T.clear_dir(ws)
+    assert [p.name for p in ws.iterdir()] == [T.WORKSPACE_MARKER]
+
+
 def test_contamination_flags_routes_to_the_real_fix():
     tools = [{"name": "Bash", "input": "gh pr view 2343"},
              {"name": "Bash", "input": "cat /workspace/ai-shuffle/app/serve.py"},

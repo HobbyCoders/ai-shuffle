@@ -27,6 +27,10 @@ its calls are rebuilt from the session's event log.
   are copied in only after the agent finishes, overwriting whatever it left.
 - Same directory for every arm (`/workspace/harness-h2h-ws`, also the app
   project's path), refilled before each run. Runs are strictly sequential.
+  The bench refuses a workspace that is, contains or sits inside this
+  checkout, a task's source repo, the results dir or the home directory, and
+  only empties a non-empty directory that carries its `.harness-h2h-workspace`
+  marker.
 - `cc` and `fluid` run with an empty `HOME`, no GitHub credentials and no user
   config, skills or memory. The `app` arm cannot be isolated that way, so every
   run's tool calls are scanned for routes to the real fix (`gh`, github.com,
@@ -56,8 +60,8 @@ commits from public history.
 
 ## Running
 
-From the repo root, with the Python that has pytest (`/usr/local/bin/python3`
-on the Unraid worker) and `PYTHONPATH=fluid:.`:
+From the repo root, with the Python that has pytest (the one `local_ci.py`
+records in git config `local-ci.python`) and `PYTHONPATH=fluid:.`:
 
 ```sh
 python -m scripts.harness_h2h.login device          # once: the bench's own ChatGPT login
