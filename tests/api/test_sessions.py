@@ -1873,6 +1873,33 @@ class TestGetSessionSyncStatus:
         assert response.json() == status
         freshness.assert_called_once_with("test-session-id", "peer-owner")
 
+    def test_passes_viewer_checkpoint(self, client, mock_database, sample_session):
+        sample_session["owner_device_id"] = "peer-owner"
+        mock_database.get_session.return_value = sample_session
+        with patch("app.network.transport.session_sync_status", return_value={"state": "syncing"}) as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status", params={
+                "initial_seq": 4, "initial_epoch": "epoch", "initial_tail_id": "tail",
+            })
+        assert response.status_code == 200
+        freshness.assert_called_once_with("test-session-id", "peer-owner", initial_target={
+            "seq": 4, "epoch": "epoch", "tail_id": "tail",
+        })
+
+    @pytest.mark.parametrize("params", [
+        {"initial_seq": 1},
+        {"initial_epoch": "epoch", "initial_tail_id": "tail"},
+        {"initial_seq": -1, "initial_epoch": "epoch", "initial_tail_id": "tail"},
+        {"initial_seq": 2**63, "initial_epoch": "epoch", "initial_tail_id": "tail"},
+        {"initial_seq": 1, "initial_epoch": "", "initial_tail_id": "tail"},
+        {"initial_seq": 1, "initial_epoch": "epoch", "initial_tail_id": "t" * 129},
+    ])
+    def test_rejects_invalid_checkpoint(self, client, mock_database, sample_session, params):
+        mock_database.get_session.return_value = sample_session
+        with patch("app.network.transport.session_sync_status") as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status", params=params)
+        assert response.status_code == 422
+        freshness.assert_not_called()
+
     def test_initial_transcript_download_stays_syncing(self, client, mock_database, sample_session):
         mock_database.get_session.return_value = sample_session
         with patch("app.network.transcripts.prioritise", return_value=True), patch(

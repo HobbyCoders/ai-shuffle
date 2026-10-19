@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(() => Promise.resolve({})), delete: vi.fn(() => Promise.resolve({})) } }));
 vi.mock('./auth.svelte', () => ({ auth: { current: { status: { authenticated: true } } } }));
 import { api } from '$lib/api/client';
@@ -7,6 +7,44 @@ beforeEach(() => {
  for (const n of notifications.current.live) notify.dismissLive(n.id);
  notify.clearAll();
  vi.clearAllMocks();
+});
+afterEach(() => {
+ notify.resetLocal();
+ vi.useRealTimers();
+});
+describe('banner flood protection', () => {
+ it('keeps only the newest three banners, including sticky and server banners', () => {
+  for (let i = 0; i < 20; i++) {
+   if (i % 2) notify.banner(`Archived ${i}`);
+   else notify.ingest({id: `server-${i}`, surface: 'banner', severity: 'info', message: `Archived ${i}`});
+   expect(notifications.current.live.length).toBeLessThanOrEqual(3);
+  }
+  expect(notifications.current.live.map(n => n.message)).toEqual(['Archived 17', 'Archived 18', 'Archived 19']);
+  for (const n of notifications.current.live) notify.dismissLive(n.id);
+  expect(notifications.current.live).toEqual([]); // no hidden backlog resurfaces
+ });
+ it('clears evicted timers without changing the remaining banners expiry', () => {
+  vi.useFakeTimers();
+  notify.banner('Old', {duration_ms: 6000});
+  vi.advanceTimersByTime(1000);
+  for (let i = 0; i < 3; i++) notify.banner(`New ${i}`, {duration_ms: 6000});
+  expect(vi.getTimerCount()).toBe(3);
+  vi.advanceTimersByTime(5000);
+  expect(notifications.current.live).toHaveLength(3);
+  vi.advanceTimersByTime(1000);
+  expect(notifications.current.live).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+ });
+ it('keeps persisted history and unread state when a banner is evicted', () => {
+  const id = notify.banner('Keep in history', {persist: true});
+  notify.info('Bell only');
+  for (let i = 0; i < 3; i++) notify.banner(`Archived ${i}`);
+  expect(notifications.current.live.some(n => n.id === id)).toBe(false);
+  expect(notificationHistory.current).toHaveLength(2);
+  expect(notificationHistory.current.find(n => n.id === id)).toMatchObject({read: false, dismissed: false});
+  expect(unreadCount.current).toBe(2);
+  expect(api.post).not.toHaveBeenCalledWith(`/notifications/${id}/dismiss`);
+ });
 });
 describe('two notification surfaces', () => {
  it.each(['error', 'warning', 'info', 'success'] as const)('%s goes only to the bell and persists', (severity) => {

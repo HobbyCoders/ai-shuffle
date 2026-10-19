@@ -81,6 +81,8 @@ export interface HistoryActions {
 }
 
 const HISTORY_CAP = 200;
+/** Keep only the newest banners; overflow is dismissed, never queued. */
+const LIVE_BANNER_CAP = 3;
 let _historyActions: HistoryActions | null = null;
 
 const _store = createStore<NotificationState>({ live: [], history: [] });
@@ -175,7 +177,12 @@ function _emit(
 	};
 
 	_store.update((s) => {
-		const live = surface === 'banner' ? [...s.live.filter((b) => b.id !== id), n] : s.live;
+		let live = s.live;
+		if (surface === 'banner') {
+			live = [...s.live.filter((b) => b.id !== id), n];
+			for (const evicted of live.slice(0, -LIVE_BANNER_CAP)) _clearTimer(evicted.id);
+			live = live.slice(-LIVE_BANNER_CAP);
+		}
 		let history = s.history;
 		if (surface === 'notification' || persist) {
 			// Dedupe by id (e.g. an ingested server event we already hold).

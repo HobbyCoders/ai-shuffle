@@ -126,6 +126,39 @@ describe('EffortPopoverCard', () => {
 		expect(screen.queryByRole('button', { name: 'Fast mode' })).toBeNull();
 	});
 
+	it('energizes only a supported, enabled fast tier and leaves effort unchanged', async () => {
+		const onSelect = vi.fn();
+		const onToggleFast = vi.fn();
+		const props = { options, value: 'high', onSelect, fastSupported: true, fastEnabled: false, onToggleFast };
+		const view = render(EffortPopoverCard, { props });
+		const card = view.container.querySelector('.effort-pop-card')!;
+		const toggle = screen.getByRole('button', { name: 'Fast mode' });
+		expect(card.classList.contains('fast-active')).toBe(false);
+		await fireEvent.click(toggle);
+		expect(onToggleFast).toHaveBeenCalledOnce();
+		// The parent owns the setting; a click alone must not fake an enabled tier.
+		expect(card.classList.contains('fast-active')).toBe(false);
+		await view.rerender({ ...props, fastEnabled: true });
+		expect(card.classList.contains('fast-active')).toBe(true);
+		expect(toggle.getAttribute('aria-pressed')).toBe('true');
+		expect(slider().getAttribute('aria-valuetext')).toBe('High');
+		expect(onSelect).not.toHaveBeenCalled();
+		await view.rerender(props);
+		expect(card.classList.contains('fast-active')).toBe(false);
+		expect(toggle.getAttribute('aria-pressed')).toBe('false');
+		await view.rerender({ ...props, fastEnabled: true, fastSupported: false });
+		expect(card.classList.contains('fast-active')).toBe(false);
+		expect(screen.queryByRole('button', { name: 'Fast mode' })).toBeNull();
+	});
+
+	it.each([{ levels: [] }, { levels: [options[2]] }])('energizes fast mode without requiring a slider ($levels)', ({ levels }) => {
+		const view = render(EffortPopoverCard, { props: {
+			options: levels, value: null, onSelect: vi.fn(), fastSupported: true, fastEnabled: true
+		} });
+		expect(view.container.querySelector('.fast-active')).toBeTruthy();
+		expect(screen.queryByRole('slider')).toBeNull();
+	});
+
 	it('updates the header level when the pinned value changes', async () => {
 		const onSelect = vi.fn();
 		const view = render(EffortPopoverCard, { props: { options, value: 'high', onSelect } });
