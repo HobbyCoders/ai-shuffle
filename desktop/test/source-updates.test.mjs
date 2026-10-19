@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { afterRename } from './helpers/crash-rename.mjs';
 const require = createRequire(import.meta.url);
-const { SourceUpdates, RestorePointError, verifySourceManifest, treeDigest, requiredLauncher } = require('../dist/main/source-updates.js');
+const { SourceUpdates, RestorePointError, InstallerRequiredError, verifySourceManifest, treeDigest, requiredLauncher, startLauncher } = require('../dist/main/source-updates.js');
 const { buildEnvironment, removeSourceDirectory } = require('../dist/main/source-build.js');
 const extractor = fileURLToPath(new URL('./helpers/source-archive.py', import.meta.url));
 const repoScripts = fileURLToPath(new URL('../../scripts', import.meta.url));
@@ -1018,7 +1018,7 @@ test('bootstrap first launch still downloads and selects an application; older s
  const legacy={load:async()=>{},select:async()=>{if(!legacyCalls)throw Error('No application');return {revision:A};},check:async(_progress,interactive)=>{assert.equal(interactive,true);legacyCalls++;}};
  assert.equal((await run(legacy)).revision,A);assert.equal(legacyCalls,1);
 });
-test('checks verify metadata only; explicit download stages the signed release and pending survives checks',async t=>{
+test('checks verify metadata only; explicit download stages the signed release and a newer release replaces it',async t=>{
  const f=await fixture(t);await f.release(A);const u=f.create();await u.load();
  await u.download();await u.select();await u.healthy();const old=await f.release(B);
  f.requests.length=0;const builds=f.builds;const progress=[];
@@ -1028,10 +1028,16 @@ test('checks verify metadata only; explicit download stages the signed release a
  assert.deepEqual(await u.download(),{kind:'ready',version:B.slice(0,12),release:old.manifest.version,notes:old.manifest.notes});
  assert.equal(f.requests.filter(url=>url===old.url).length,1);assert.equal(f.builds,builds+1);
  assert.equal(await fs.readFile(path.join(f.root,'versions',B,'release.json'),'utf8'),old.signed);
- await f.release(C);f.requests.length=0;
- assert.equal((await u.check()).version,B.slice(0,12));assert.equal((await u.download()).version,B.slice(0,12));
- const restarted=f.create();await restarted.load();assert.equal((await restarted.check()).kind,'ready');
- assert.deepEqual(f.requests,[]);assert.equal(f.builds,builds+1);
+ // #98: a pending download that never ran (no stageDownloads) no longer hides a newer release.
+ const newer=await f.release(C);f.requests.length=0;
+ assert.deepEqual(await u.check(),{kind:'available',version:C.slice(0,12),release:newer.manifest.version,notes:newer.manifest.notes});
+ assert.equal(u.pendingVersion,B,'a check downloads nothing');assert.equal(f.builds,builds+1);
+ assert.equal((await u.download()).version,C.slice(0,12));assert.equal(u.pendingVersion,C);
+ const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(state.pending,C);assert.equal(state.staged,undefined);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ const restarted=f.create();await restarted.load();f.requests.length=0;
+ assert.equal((await restarted.check()).kind,'ready');assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest']);
+ assert.equal(f.builds,builds+2);assert.equal((await restarted.select()).revision,C);
 });
 test('invalid check metadata fails before any archive request and can be retried',async t=>{
  const f=await fixture(t);const release=await f.release(A);const u=f.create();await u.load();
@@ -1377,6 +1383,63 @@ test('the update lock: a live holder refuses, a dead holder is reclaimed, fresh 
  f.signed=release.signed;assert.equal((await u.download()).kind,'ready');
  await assert.rejects(fs.stat(lock),/ENOENT/);
 });
+test('ready-journal launcher preparation reads every snapshot byte once without recopying', async t => {
+ const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
+ const { ColdClusterCopy } = require('../dist/main/database-restore.js');
+ const { f, u } = await rollbackFixture(t);
+ const postgres = path.join(f.root, 'postgres');
+ const mib = Number(process.env.SHUFFLE_ROLLBACK_BENCH_MIB || 8);
+ assert(Number.isSafeInteger(mib) && mib > 0 && mib <= 1024);
+ const block = Buffer.alloc(1024 * 1024, 0x5a);
+ for (const [name, body] of Object.entries({ 'PG_VERSION': '17\n', 'global/pg_control': 'control' })) {
+  await fs.mkdir(path.dirname(path.join(postgres, 'data', name)), { recursive: true });
+  await fs.writeFile(path.join(postgres, 'data', name), body);
+ }
+ const rows = path.join('base', '16384', '2619');
+ await fs.mkdir(path.dirname(path.join(postgres, 'data', rows)), { recursive: true });
+ const file = await fs.open(path.join(postgres, 'data', rows), 'w');
+ try { for (let i = 0; i < mib; i++) await file.write(block); } finally { await file.close(); }
+ // Produce the ready journal through the app's real snapshot path, not seeded metadata.
+ await u.prepareRollback(async () => new SinglePassClusterCopy(postgres, async () => {}));
+ const snapshot = path.join(postgres, 'update-snapshot', 'data');
+ const nativeFs = require('node:fs');
+ const readStream = nativeFs.createReadStream;
+ let bytes = 0, reads = 0, copies = 0, validations = 0;
+ t.mock.method(nativeFs, 'createReadStream', (name, ...args) => {
+  const stream = readStream(name, ...args);
+  if (String(name).startsWith(snapshot + path.sep)) {
+   reads++;
+   stream.on('data', chunk => { bytes += chunk.length; });
+  }
+  return stream;
+ });
+ const copyFile = fs.copyFile;
+ t.mock.method(fs, 'copyFile', (...args) => { copies++; return copyFile(...args); });
+ const database = new ColdClusterCopy(postgres, async () => assert.fail('ready point must not quiesce or copy again'));
+ const validate = database.validate.bind(database);
+ t.mock.method(database, 'validate', async () => { validations++; await validate(); });
+ const times = [];
+ for (let i = 0; i < 3; i++) {
+  const launcher = f.create(); await launcher.load();
+  bytes = 0; reads = 0; validations = 0;
+  const start = performance.now();
+  assert.equal(await launcher.recoverRollback(async () => database), false);
+  await launcher.prepareRollback(async () => database);
+  times.push(Number((performance.now() - start).toFixed(2)));
+  assert.equal(validations, 1);
+  assert.equal(reads, 3);
+  assert.equal(bytes, mib * block.length + Buffer.byteLength('17\ncontrol'));
+  assert.equal(copies, 0);
+ }
+ t.diagnostic(JSON.stringify({ fixtureMiB: mib, readyPreparationMs: times, snapshotReads: reads, snapshotBytes: bytes, copies }));
+ // Same-size corruption near the end must be caught, not trusted from structure/manifest.
+ const damaged = await fs.open(path.join(snapshot, rows), 'r+');
+ try { await damaged.write(Buffer.from('!'), 0, 1, mib * block.length - 1); } finally { await damaged.close(); }
+ const launcher = f.create(); await launcher.load();
+ await assert.rejects(launcher.prepareRollback(async () => database), /failed validation/);
+ assert.equal(launcher.pendingVersion, B, 'validation failure leaves the update unselected');
+});
+
 test('an app-made restore point that cannot be discarded holds the database closed, so the launcher never restores a stale copy over newer data', async t => {
  const { SinglePassClusterCopy, pointHeldFor } = require('../dist/main/update-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
@@ -1396,6 +1459,11 @@ test('an app-made restore point that cannot be discarded holds the database clos
  // Now nothing in this version opens the database while the point is held...
  assert.equal(await pointHeldFor(f.root, A), true);
  assert.equal(u.pendingVersion, B, 'the update stays pending');
+ // #98 must not supersede #225's selected update or its app-made restore point.
+ await f.release(C); f.requests.length = 0;
+ assert.equal((await u.check()).version, B.slice(0, 12));
+ assert.equal((await u.download()).version, B.slice(0, 12));
+ assert.deepEqual(f.requests, [], 'a selected update with its restore point never checks for a replacement');
  // ...and the next launcher start keeps the copy as the update's restore point and starts the update.
  const launcher = f.create(); await launcher.load();
  assert.equal(await launcher.recoverRollback(async () => new ColdClusterCopy(path.join(f.root, 'postgres'), async () => {})), false);
@@ -1404,4 +1472,170 @@ test('an app-made restore point that cannot be discarded holds the database clos
  assert.equal(await fs.readFile(rows, 'utf8'), 'rows-v1');
  // Once the update started (or the point is committed), the running version is the point's own.
  assert.equal(await pointHeldFor(f.root, B), false);
+});
+
+test('#97: a release the running launcher cannot start is refused before it is offered or downloaded',async t=>{
+ const f=await fixture(t);f.options.launcher=3;
+ const u=f.create();await u.load();
+ // desktop.launcher alone (the swap after a healthy start) never refuses: PR #89's 3 -> 4 path.
+ await f.release(A,undefined,{desktop:{launcher:4,start:3}});
+ assert.equal((await u.check()).kind,'available');
+ await f.release(B,undefined,{version:'1.1.0',desktop:{launcher:5,start:4}});f.requests.length=0;
+ for(const run of [()=>u.check(),()=>u.download()]){
+  await assert.rejects(run(),error=>error instanceof InstallerRequiredError&&error.code==='installer_required'&&
+   /AI Shuffle 1\.1\.0 needs a newer desktop launcher.*launcher 3; it needs 4.*Install the latest AI Shuffle installer.*Your files and data have been kept.*No update was downloaded/.test(error.message));
+ }
+ assert.deepEqual(f.requests,['https://hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest'],'no archive was requested');
+ assert.equal(f.builds,0);assert.equal(u.pendingVersion,null);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ // The launcher is never compared without one (profile and development builds), or for releases without desktop.start.
+ delete f.options.launcher;assert.equal((await f.create().check()).kind,'available');
+ f.options.launcher=0;await f.release(C,undefined,{desktop:{launcher:4}});assert.equal((await f.create().check()).kind,'available');
+});
+test('#97: desktop.start is validated like desktop.launcher and is absent from older manifests',async()=>{
+ const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
+ const signed=fields=>{const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,...fields}));return JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});};
+ assert.equal(startLauncher(verifySourceManifest(signed({}),publicKey)),0);
+ assert.equal(startLauncher(verifySourceManifest(signed({desktop:{launcher:4}}),publicKey)),0);
+ assert.equal(startLauncher(verifySourceManifest(signed({desktop:{launcher:4,start:3}}),publicKey)),3);
+ for(const start of [-1,1.5,'3',null])assert.throws(()=>verifySourceManifest(signed({desktop:{launcher:4,start}}),publicKey),/release fields/,String(start));
+});
+test('#99: installed Linux refuses a different signed Electron before offering or downloading',async t=>{
+ const f=await fixture(t),u=f.create();await u.load();u.useInstalledElectron('44.2.0');
+ await f.release(A,undefined,{desktop:{electron:'44.2.0'}});
+ assert.equal((await u.check()).kind,'available');
+ await f.release(B,undefined,{version:'1.2.0',desktop:{electron:'44.2.1'}});f.requests.length=0;
+ for(const run of [()=>u.check(),()=>u.download()])await assert.rejects(run(),/AI Shuffle 1.2.0 needs Electron 44.2.1; this Linux install has 44.2.0.*Install the latest AI Shuffle installer.*Your files and data have been kept.*No update was downloaded/);
+ assert.deepEqual(f.requests,Array(2).fill('https://hobbycoders.com/v1/desktop/manifest'));
+ assert.equal(f.builds,0);assert.equal(u.pendingVersion,null);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ // Windows/profile managers never opt in; old manifests remain compatible.
+ assert.equal((await f.create().check()).kind,'available');
+ await f.release(C);assert.equal((await u.check()).kind,'available');
+});
+test('#99: an incompatible newer Electron keeps the staged build ready with a notice',async t=>{
+ const {f,u}=await stagedOver(t);u.useInstalledElectron('44.2.0');
+ await f.release(C,undefined,{desktop:{electron:'45.0.0'}});f.requests.length=0;
+ for(const run of [()=>u.check(),()=>u.download()]){
+  const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
+  assert.equal(result.release,'1.0.0');assert.equal(result.notes,'Notes for bbbb');
+  assert.match(result.notice,/needs Electron 45.0.0.*Install the latest AI Shuffle installer.*newer release was not downloaded; the earlier downloaded update remains ready to install/);
+  assert.doesNotMatch(result.notice,/No update was downloaded\./);
+ }
+ assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,2);
+ assert((await fs.stat(path.join(f.root,'versions',B,'release.json'))).isFile());
+ await u.prepareInstall();assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).pending,B);
+});
+test('#97: a newer start-floor refusal leaves the staged build ready with a notice',async t=>{
+ const {f,u}=await stagedOver(t);f.options.launcher=4;
+ await f.release(C,undefined,{version:'1.2.0',desktop:{start:5}});f.requests.length=0;
+ for(const run of [()=>u.check(),()=>u.download()]){
+  const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
+  assert.match(result.notice,/AI Shuffle 1.2.0 needs a newer desktop launcher.*launcher 4; it needs 5.*newer release was not downloaded; the earlier downloaded update remains ready/);
+  assert.doesNotMatch(result.notice,/No update was downloaded\./);
+ }
+ assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,2);
+});
+test('#98: unreadable staged metadata stays visible but cannot block a newer verified download',async t=>{
+ const {f,u}=await stagedOver(t);
+ await fs.writeFile(path.join(f.root,'versions',B,'release.json'),'not json');
+ // Neither the running revision nor a different older feed can hide the bad download.
+ for(const revision of [A,E]){
+  await f.release(revision,undefined,{sequence:1});f.requests.length=0;
+  for(const run of [()=>u.check(),()=>u.download()]){
+   const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,B.slice(0,12));
+   assert.match(result.notice,/release information could not be verified.*still staged.*download a newer update/);
+  }
+  assert.equal(u.pendingVersion,B);assert.equal(f.requests.length,2);
+ }
+ await assert.rejects(u.prepareInstall(),error=>!(error instanceof SyntaxError)&&/downloaded update could not be verified.*download a newer update/.test(error.message));
+ assert.equal(u.pendingVersion,B);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).pending,undefined);
+ // A check remains metadata-only, but a successful newer download repairs the dead end.
+ await f.release(C,undefined,{sequence:999});f.requests.length=0;
+ assert.equal((await u.check()).kind,'available');assert.equal(u.pendingVersion,B);
+ assert.equal(f.requests.length,1);
+ const result=await u.download();assert.equal(result.kind,'ready');assert.equal(result.version,C.slice(0,12));
+ assert.equal(u.pendingVersion,C);await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ await u.prepareInstall();assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).pending,C);
+});
+test('#99: optional desktop.electron must be an exact locked version',async()=>{
+ const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
+ for(const electron of ['44.2.0',null,44,'^44.2.0','44.2',{},'44.2.0-beta.1']){
+  const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,desktop:{electron}}));
+  const signed=JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});
+  if(electron==='44.2.0')assert.equal(verifySourceManifest(signed,publicKey).desktop.electron,electron);
+  else assert.throws(()=>verifySourceManifest(signed,publicKey),/release fields/);
+ }
+});
+async function stagedOver(t){
+ const f=await fixture(t);await f.release(A);const u=f.create();await u.load();await u.download();await u.select();await u.databaseStarting();await u.healthy();
+ u.stageDownloads();const b=await f.release(B,undefined,{version:'1.0.0'});assert.equal((await u.download()).kind,'ready');
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).staged,B);
+ return {f,u,b};
+}
+test('#98: a waiting build takes precedence over a failed-start retry offer', async t => {
+ const {f,u,factory}=await rollbackFixture(t);
+ // Produce the failed-start record through the real restore path, not a seeded flag.
+ await u.prepareRollback(factory);await u.select();await u.databaseStarting();await u.failed();
+ await u.recoverRollback(factory);
+ assert.equal(u.hasMigrationRisk,false);
+ u.stageDownloads();await f.release(C);await u.download();
+ // A fresh feed advertises the failed revision after the waiting build was signed.
+ await f.release(B);f.requests.length=0;const builds=f.builds;
+ for(const run of [()=>u.check(),()=>u.download()]){
+  const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,C.slice(0,12));
+ }
+ assert.equal(u.pendingVersion,C);assert.equal(f.builds,builds);
+ assert.deepEqual(f.requests,Array(2).fill('https://hobbycoders.com/v1/desktop/manifest'));
+ // No refusal means Updater does not invoke failed-start recovery while C waits.
+ // Once the waiting build is gone, the normal retry-triggering refusal returns.
+ assert.equal(await u.discardStaged(C),true);
+ await assert.rejects(u.check(),/This revision failed to start/);
+});
+test('#98: a staged build does not hide a newer release; a download replaces it and removes its files',async t=>{
+ const {f,u}=await stagedOver(t);
+ await f.release(C,undefined,{version:'1.0.1'});f.requests.length=0;const builds=f.builds;
+ assert.deepEqual(await u.check(),{kind:'available',version:C.slice(0,12),release:'1.0.1',notes:'Notes for cccc'});
+ assert.equal(u.pendingVersion,B,'a check downloads nothing; B stays installable');assert.equal(f.builds,builds);
+ assert.deepEqual(await u.download(),{kind:'ready',version:C.slice(0,12),release:'1.0.1',notes:'Notes for cccc'});
+ const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.equal(state.staged,C);assert.equal(state.pending,undefined);assert.equal(u.pendingVersion,C);
+ await assert.rejects(fs.stat(path.join(f.root,'versions',B)),{code:'ENOENT'});
+ assert((await fs.stat(path.join(f.root,'versions',A))).isDirectory(),'the running build stays');
+ await u.prepareInstall();const restarted=f.create();await restarted.load();assert.equal((await restarted.select()).revision,C);
+});
+test('#98: when the newer download fails, the staged build stays ready; an unreachable feed keeps it too',async t=>{
+ const {f,u}=await stagedOver(t);
+ await f.release(C);f.fail=true;
+ await assert.rejects(u.download(),/Local build failed/);
+ // The same holds without stageDownloads (a pending download): it stays pending.
+ {const g=await fixture(t);await g.release(A);const p=g.create();await p.load();await p.download();await p.select();await p.databaseStarting();await p.healthy();
+  await g.release(B);await p.download();await g.release(C);g.fail=true;await assert.rejects(p.download(),/Local build failed/);
+  assert.equal(JSON.parse(await fs.readFile(path.join(g.root,'state.json'),'utf8')).pending,B);
+  assert((await fs.stat(path.join(g.root,'versions',B,'release.json'))).isFile());}
+ assert.equal(u.pendingVersion,B);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).staged,B);
+ assert((await fs.stat(path.join(f.root,'versions',B,'release.json'))).isFile());
+ await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});
+ f.signed='{}';assert.deepEqual(await u.check(),{kind:'ready',version:B.slice(0,12),release:'1.0.0',notes:'Notes for bbbb'});
+ // Nothing newer, or nothing this launcher can start: B stays the offer.
+ f.fail=false;await f.release(E,undefined,{desktop:{launcher:9,start:9}});f.options.launcher=3;
+ assert.equal((await u.check()).version,B.slice(0,12));
+});
+test('#98: a build selected to install or fenced is never replaced and the feed is not read',async t=>{
+ for(const step of ['selected','fenced']){
+  const {f,u,b}=await stagedOver(t);let manager=u;
+  if(step==='selected')await u.prepareInstall();
+  else{
+   // A staged retry of a build that may already have migrated the database (its fence survives).
+   const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+   await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({...state,mayHaveMigrated:{[B]:b.manifest.sequence},blocked:true}));
+   manager=f.create();await manager.load();manager.stageDownloads();assert.equal(manager.pendingVersion,B);
+  }
+  await f.release(C);f.requests.length=0;
+  assert.equal((await manager.check()).kind,'ready',step);
+  assert.equal((await manager.download()).version,B.slice(0,12),step);
+  assert.deepEqual(f.requests,[],step);
+  await assert.rejects(fs.stat(path.join(f.root,'versions',C)),{code:'ENOENT'});
+  assert((await fs.stat(path.join(f.root,'versions',B))).isDirectory(),step);
+ }
 });

@@ -45,6 +45,41 @@ def contract_with(**names):
     return text
 
 
+def test_electron_lock_change_needs_owner_acceptance_not_a_launcher_raise():
+    lock = json.loads((ROOT / "desktop/package-lock.json").read_text())
+    lock["packages"]["node_modules/electron"]["version"] = "99.0.1"
+    groups = groups_for({"desktop/package-lock.json": json.dumps(lock)})
+    assert groups["linux-electron"] == ["desktop/package-lock.json"]
+    assert groups["windows-launcher"] == [] and groups["launcher-version"] == []
+    assert reach.verdict(groups) == ["linux-electron"]
+    assert reach.verdict(groups, ["windows-launcher"]) == ["linux-electron"]
+    assert reach.verdict(groups, ["linux-electron"]) == []
+
+
+def test_other_lock_changes_do_not_need_a_linux_installer():
+    lock = json.loads((ROOT / "desktop/package-lock.json").read_text())
+    lock["packages"]["node_modules/typescript"]["version"] = "99.0.1"
+    assert groups_for({"desktop/package-lock.json": json.dumps(lock)})["linux-electron"] == []
+
+
+def test_launcher_dependencies_fail_closed_for_unparseable_or_malformed_lock():
+    for content in (b"not json", b"null", b"[]", b"{}", b'{"packages": []}',
+                    b'{"packages": {"node_modules/a": null}}'):
+        invalid = tree({reach.LAUNCHER_LOCK: content})
+        assert reach.launcher_dependencies(invalid) is None
+        groups = reach.classify([reach.LAUNCHER_LOCK], tree(), invalid)
+        assert groups["windows-launcher"] == [reach.LAUNCHER_LOCK]
+        assert "windows-launcher" in reach.verdict(groups)
+        # Even two unreadable endpoints cannot prove that the launcher is unchanged.
+        assert reach.classify([reach.LAUNCHER_LOCK], invalid, invalid)["windows-launcher"] == [reach.LAUNCHER_LOCK]
+    assert reach.launcher_dependencies(tree({reach.LAUNCHER_LOCK: None})) == {}
+
+
+def test_missing_or_invalid_electron_lock_cannot_hide_a_runtime_change():
+    for content in (None, "not json", "{}", json.dumps({"packages": {"node_modules/electron": {"version": None}}})):
+        assert groups_for({"desktop/package-lock.json": content})["linux-electron"] == ["desktop/package-lock.json"]
+
+
 def test_published_runtime_matches_the_image_contract():
     # Images compare this string with the one they carry; the check must
     # compute what publish-source.mjs signs (update_contract --manifest).

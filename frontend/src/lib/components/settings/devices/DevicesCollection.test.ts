@@ -133,6 +133,7 @@ function reads(path: string): unknown {
 				}
 			]
 		};
+	if (path === '/network/advertised-addresses') return { addresses: [], advertised: ['https://desk.example.com'] };
 	if (path === '/network/lan') return { enabled: true, addresses: [], advertised: ['https://desk.example.com', 'http://10.0.0.5:8000'] };
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
@@ -166,6 +167,30 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+	function peerFailure(last_error: string, last_error_code: string | null) {
+		status.sync = { records: {}, ops: 0, holes: [], conflicts: 0, peers: [{ device_id: 'laptop', base_url: null,
+			endpoints: ['https://alias.example'], last_error, last_error_code, seconds_since_contact: null, online: false }] };
+	}
+
+	it('shows the actionable peer refusal in the worker detail', async () => {
+		const error = 'Worker laptop refused https://alias.example because it does not advertise that address. Add Advertised addresses or set CLUSTER_ADVERTISE_URL.';
+		peerFailure(error, 'endpoint_not_advertised');
+		await model.loadStatus();
+		show('member:laptop');
+		expect(screen.getByText(error).closest('.st-banner')).not.toBeNull();
+	});
+
+	it.each([
+		['an offline worker', 'PeerConnectFailed: ConnectError: [Errno 113] No route to host'],
+		['a stalled sync', 'Sync with this worker is stalled: 3 changes are not arriving.']
+	])('shows no banner for %s', async (_case, error) => {
+		peerFailure(error, null);
+		await model.loadStatus();
+		const { container } = show('member:laptop');
+		expect(screen.queryByText(error)).toBeNull();
+		expect(container.querySelector('.st-banner')).toBeNull();
+	});
+
 	it('shows a desktop revision beside its bare version in the list and detail', async () => {
 		status.members![1] = member('laptop', { platform: 'windows', version: '0.9.1', revision: '04d9a0cfb' });
 		await model.loadStatus();
@@ -342,6 +367,18 @@ describe('Devices list', () => {
 		await model.loadStatus();
 		show('member:laptop');
 		expect(screen.getByText('Connection').closest('.st-row, [class*=row]')?.textContent).toContain('Direct (LAN)');
+	});
+
+	it('saves additional public URLs without depending on LAN-direct', async () => {
+		api.put.mockImplementation(async (_path: string, body: { addresses: string[] }) => ({ ...body, advertised: body.addresses }));
+		show('self', 'Network');
+		const field = await screen.findByRole('textbox', { name: 'Advertised addresses' });
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: 'https://proxy.example, https://other.example' } });
+		await fireEvent.blur(field);
+		await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith('/network/advertised-addresses', {
+			addresses: ['https://proxy.example', 'https://other.example']
+		}));
 	});
 
 	it('turns LAN-direct sync off and saves an extra address', async () => {

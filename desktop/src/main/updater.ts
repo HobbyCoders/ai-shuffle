@@ -200,6 +200,7 @@ export class Updater {
   useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
+    if (process.platform === 'linux' && installedExecutable) applications.useInstalledElectron?.(process.versions.electron);
     applications.stageDownloads?.();
     this.installedExecutable = installedExecutable;
     this.restartArgs = restartArgs;
@@ -211,7 +212,9 @@ export class Updater {
     this.set({ phase: cleanupError ? 'error' : pending && !needsCheck ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: cleanupError, message: null, percent: null, release: null, notes: null });
     if (needsCheck && !cleanupError) void this.check();
     // Older source managers have no releaseInfo; the prompt then shows no notes.
-    if (pending) void applications.releaseInfo?.(pending).then(info => {
+    // The modern check returns the staged notes and any compatibility notice.
+    // A parallel metadata read must not overwrite that notice after the check.
+    if (pending && !needsCheck) void applications.releaseInfo?.(pending).then(info => {
       if (this.state.phase === 'ready' && this.state.version === pending.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
     }).catch(() => {});
   }
@@ -269,7 +272,7 @@ export class Updater {
         ({ result, released } = retry);
       }
       const retried = !!result.version && released.some(revision => revision.startsWith(result.version!));
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: retried ? RETRY_MESSAGE : null, retry_start: retried, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: result.notes ?? null, installer_newer: null });
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: retried ? RETRY_MESSAGE : null, retry_start: retried, checkedAt: new Date().toISOString(), release: result.release ?? null, notes: [result.notice, result.notes].filter(Boolean).join('\n\n') || null, installer_newer: null });
     } catch (error) {
       // Nothing to retry: point at the installer only when it is a newer release than this one.
       const installerNewer = this.failedStarts && FAILED_START.test(String(error)) ? await this.failedStarts.installerNewer().catch(() => null) : null;
@@ -289,8 +292,17 @@ export class Updater {
         return;
       }
       const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
-      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: result.notes ?? null, retry_start: false });
-    } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, release: result.release ?? null, notes: [result.notice, result.notes].filter(Boolean).join('\n\n') || null, retry_start: false });
+    } catch (error) {
+      // A newer release failed to download over a staged one: that one stays ready to install (#98).
+      const staged = this.applications?.pendingVersion;
+      if (staged && staged !== this.applications!.version && !this.applications!.cleanupError) {
+        this.set({ phase: 'ready', version: staged.slice(0, 12), error: String(error), percent: null, message: null, release: null, notes: null });
+        void this.applications!.releaseInfo?.(staged).then(info => {
+          if (this.state.phase === 'ready' && this.state.version === staged.slice(0, 12)) this.set({ release: info.release ?? null, notes: info.notes ?? null });
+        }).catch(() => {});
+      } else this.set({ phase: 'error', error: String(error), percent: null, message: null });
+    }
     finally { this.downloading = false; }
   }
   /** Never lets a notification failure stop the restart. */

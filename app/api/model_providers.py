@@ -1676,6 +1676,7 @@ async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admi
         account_id=stored.get("codex_account_id"),
         id_token_expires_at=stored.get("codex_id_token_expires_at"),
         last_refresh=stored.get("codex_last_refresh"),
+        preserve_refresh_stamp=True,
         needs_reauth=False,
         auth_mode="chatgpt",
     )
@@ -1845,6 +1846,7 @@ async def xai_clear_reauth(provider_id: str, token: str = Depends(require_admin)
         account_id=stored.get("codex_account_id"),
         id_token_expires_at=stored.get("codex_id_token_expires_at"),
         last_refresh=stored.get("codex_last_refresh"),
+        preserve_refresh_stamp=True,
         needs_reauth=False,
         auth_mode="grok",
     )

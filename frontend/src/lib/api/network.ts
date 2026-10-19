@@ -100,6 +100,8 @@ export interface SyncPeer {
 	/** Why the LAN path is not in use, while the peer has LAN addresses. */
 	lan_error?: string | null;
 	last_error: string | null;
+	/** Set only for errors the UI acts on: `endpoint_not_advertised` (a token-binding refusal). */
+	last_error_code?: string | null;
 	seconds_since_contact: number | null;
 	online: boolean;
 	syncing?: boolean;
@@ -481,6 +483,19 @@ export interface NetworkPolicy {
 
 export async function getNetworkPolicy(): Promise<NetworkPolicy> {
 	return api.get<NetworkPolicy>('/network/policy');
+}
+
+export interface AdvertisedAddresses {
+	addresses: string[];
+	advertised: string[];
+}
+
+export async function getAdvertisedAddresses(): Promise<AdvertisedAddresses> {
+	return api.get<AdvertisedAddresses>('/network/advertised-addresses', { cache: 'no-store' });
+}
+
+export async function updateAdvertisedAddresses(addresses: string[]): Promise<AdvertisedAddresses> {
+	return api.put<AdvertisedAddresses>('/network/advertised-addresses', { addresses });
 }
 
 // ─── LAN-direct sync ─────────────────────────────────────────────────────────

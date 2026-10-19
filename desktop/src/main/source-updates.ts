@@ -54,11 +54,28 @@ export interface SourceManifest {
   format: 2; revision: string; sequence: number; sha256: string; size: number;
   /** Added after format 2 shipped; older signed manifests (and installed release.json files) lack them. */
   channel?: UpdateChannel | 'edge'; version?: string; notes?: string; tree?: string;
-  /** launcher: the oldest Windows launcher (installed app.asar) this release runs under (#1821 D5). Absent means any. */
-  desktop?: { launcher?: number };
+  /**
+   * launcher: launchers below it are replaced after the release's first healthy start (#1821 D5).
+   * start: the oldest installed launcher (app.asar) that can start the release at all, before any
+   * replacement (desktop/LAUNCHER.md). Absent means any.
+   */
+  desktop?: { launcher?: number; start?: number; electron?: string };
 }
 /** The launcher version a release needs; 0 for manifests signed before desktop.launcher existed. */
 export function requiredLauncher(manifest: SourceManifest): number { return manifest.desktop?.launcher ?? 0; }
+/** The oldest launcher that can start a release; 0 for manifests signed before desktop.start existed. */
+export function startLauncher(manifest: SourceManifest): number { return manifest.desktop?.start ?? 0; }
+/**
+ * The running installed launcher cannot start this release (desktop.start). Nothing was
+ * downloaded; only a newer installer can take this install to it.
+ */
+export class InstallerRequiredError extends Error {
+  readonly code = 'installer_required';
+  constructor(readonly release: string, readonly running: number, readonly needed: number) {
+    super(`AI Shuffle ${release} needs a newer desktop launcher than this install has (launcher ${running}; it needs ${needed}). ` +
+      'Install the latest AI Shuffle installer from hobbycoders.com to update. Your files and data have been kept. No update was downloaded.');
+  }
+}
 export interface SourceOptions {
   root: string;
   /** Overrides the update-channel.json setting; tests and owner builds only. */
@@ -67,6 +84,12 @@ export interface SourceOptions {
   bootstrapNode: string;
   /** Trusted revision included in the installer, before its first source update. */
   baseline?: { revision: string; sequence: number };
+  /**
+   * The installed launcher this app runs under (desktop/LAUNCHER.md), compared with each
+   * release's desktop.start before it is offered. Omitted (profile and development builds,
+   * which have no installed launcher): not compared.
+   */
+  launcher?: number;
   fetch?: typeof fetch;
   build?: (source: string, stage: string, revision: string, progress: (message: string) => void) => Promise<InstalledBuild>;
 }
@@ -101,7 +124,7 @@ export function parseSourceState(text: string): SourceState {
 export type SourceProgress = (percent: number | null, message: string) => void;
 /** The signed release name and notes shown beside the update button. */
 export interface ReleaseInfo { release?: string; notes?: string }
-export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string } & ReleaseInfo;
+export type SourceCheck = { kind: 'current' | 'available' | 'ready'; version?: string; notice?: string } & ReleaseInfo;
 function releaseOf(manifest: SourceManifest): ReleaseInfo {
   return { ...(manifest.version ? { release: manifest.version } : {}), ...(manifest.notes ? { notes: manifest.notes } : {}) };
 }
@@ -119,7 +142,9 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
     || ('version' in m && !(typeof m.version === 'string' && VERSION.test(m.version)))
     || ('notes' in m && !(typeof m.notes === 'string' && m.notes.length <= MAX_NOTES))
     || ('desktop' in m && !(m.desktop && typeof m.desktop === 'object' && !Array.isArray(m.desktop)
-      && (!('launcher' in m.desktop) || (Number.isSafeInteger(m.desktop.launcher) && m.desktop.launcher! >= 0))))) throw new Error('Invalid source manifest release fields');
+      && (!('launcher' in m.desktop) || (Number.isSafeInteger(m.desktop.launcher) && m.desktop.launcher! >= 0))
+      && (!('start' in m.desktop) || (Number.isSafeInteger(m.desktop.start) && m.desktop.start! >= 0))
+      && (!('electron' in m.desktop) || (typeof m.desktop.electron === 'string' && /^\d+\.\d+\.\d+$/.test(m.desktop.electron)))))) throw new Error('Invalid source manifest release fields');
   return m;
 }
 
@@ -199,6 +224,18 @@ export class SourceUpdates {
   }
   private checking = false;
   private explicitActivation = false;
+  // Opted into by the running UI updater, not the installed launcher. Windows
+  // source updates carry their own Electron; Linux keeps the installed sandbox.
+  private installedElectron: string | undefined;
+  useInstalledElectron(version: string): void { this.installedElectron = version; }
+  private requireElectron(manifest: SourceManifest): void {
+    const needed = manifest.desktop?.electron;
+    if (this.installedElectron !== undefined && needed !== undefined && needed !== this.installedElectron) {
+      throw new Error(`AI Shuffle ${manifest.version ?? manifest.revision.slice(0, 12)} needs Electron ${needed}; this Linux install has ${this.installedElectron}. ` +
+        'Install the latest AI Shuffle installer from hobbycoders.com to preserve the Linux Electron sandbox. ' +
+        'Your files and data have been kept. No update was downloaded.');
+    }
+  }
   private rollbackDatabase: RestoreDatabaseFactory | null = null;
   private cleanupFailure: string | null = null;
   get cleanupError(): string | null { return this.cleanupFailure; }
@@ -216,7 +253,12 @@ export class SourceUpdates {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     await this.retryCleanup();
     if (!this.state.staged) return;
-    await this.assertCanRun(this.state.staged);
+    let manifest: SourceManifest;
+    try { manifest = await this.release(this.state.staged); }
+    catch {
+      throw new Error('The downloaded update could not be verified. Check for and download a newer update before installing. Your files and data have been kept.');
+    }
+    await this.assertCanRun(this.state.staged, manifest.sequence);
     this.state.pending = this.state.staged;
     delete this.state.staged;
     await this.save();
@@ -645,32 +687,103 @@ export class SourceUpdates {
   async download(progress: SourceProgress = () => {}, interactive = true): Promise<SourceCheck> {
     return this.update(true, progress, interactive);
   }
+  private async ready(revision: string, notice?: string): Promise<SourceCheck> {
+    return { kind: 'ready', version: revision.slice(0, 12), ...await this.releaseInfo(revision), ...(notice ? { notice } : {}) };
+  }
+  /**
+   * A download nobody chose to install yet that never ran: the only build a newer
+   * release may replace (#98). That is a staged download, or the pending one of a
+   * manager that activates downloads on exit (no stageDownloads). Never one that
+   * Update and restart selected, starting, failed, fenced, blocked or named by an
+   * unfinished restore point.
+   */
+  private async replaceable(revision: string): Promise<boolean> {
+    const s = this.state;
+    const unchosen = s.staged === revision ? !s.pending : s.pending === revision && !s.staged && !this.explicitActivation;
+    if (!unchosen || s.booting || s.waiting || s.blocked || this.hasMigrationRisk ||
+        [s.active, s.previous].includes(revision) || s.failed?.includes(revision) || s.mayHaveMigrated?.[revision] !== undefined ||
+        this.migrationFloor === null || this.migrationFloor?.revision === revision) return false;
+    try { const j = await this.journal(); return !j || j.phase === 'committed'; }
+    catch { return false; }
+  }
+  /** Remove a staged build that a newer download replaced; anything still referenced stays. */
+  private async dropReplaced(revision: string): Promise<void> {
+    const s = this.state;
+    if ([s.active, s.previous, s.pending, s.staged, s.booting, s.waiting].includes(revision) || s.failed?.includes(revision) ||
+        s.mayHaveMigrated?.[revision] !== undefined) return;
+    try { await removeSourceDirectory(this.directory(revision)); }
+    catch (error) { console.warn(`Could not remove the replaced update ${revision.slice(0, 12)}; it is removed after the next update`, error); }
+  }
+  /** Before offering a release: the running launcher must be able to start it (desktop.start). */
+  private requireLauncher(manifest: SourceManifest): void {
+    const running = this.options.launcher;
+    const needed = startLauncher(manifest);
+    if (running !== undefined && running < needed) throw new InstallerRequiredError(manifest.version ?? manifest.revision.slice(0, 12), running, needed);
+  }
   private async update(download: boolean, progress: SourceProgress, interactive: boolean): Promise<SourceCheck> {
     if (!await this.updatesAllowed()) throw new Error('Application updates are disabled in Account settings');
     if (this.checking) throw new Error('An application update is already running');
     if (this.state.booting) return { kind: 'current' };
     await this.retryCleanup();
-    if (this.pendingVersion) return { kind: 'ready', version: this.pendingVersion.slice(0, 12), ...await this.releaseInfo(this.pendingVersion) };
+    // A staged download must not hide a newer release (#98): read the feed, and
+    // replace it only with a newer one. Anything selected, started or fenced stays.
+    const staged = this.pendingVersion;
+    if (staged && !await this.replaceable(staged)) return this.ready(staged);
     this.checking = true;
     let unlock: (() => Promise<void>) | undefined;
     try {
       unlock = await this.lock();
-      const { signed, manifest } = await this.manifest();
+      let feed: { signed: string; manifest: SourceManifest };
+      try { feed = await this.manifest(); }
+      catch (error) {
+        if (!staged) throw error;
+        // Not reading the feed leaves the staged build ready, as before #98.
+        console.warn('Could not check for a newer update; the staged one stays ready', error);
+        return this.ready(staged);
+      }
+      const { signed, manifest } = feed;
+      let stagedNotice: string | undefined;
+      if (staged) {
+        let stagedSequence = 0;
+        try { stagedSequence = (await this.release(staged)).sequence; }
+        catch {
+          // An unselected, unfenced download with bad metadata must not block
+          // recovery by a verified newer release. Retain it only if no new offer follows.
+          stagedNotice = "The downloaded update's release information could not be verified. It is still staged; download a newer update before installing.";
+        }
+        // Prefer the waiting build over a failed newer release: returning ready intentionally
+        // defers the failed-start retry offer until there is no staged build to install.
+        if (manifest.revision === staged || manifest.sequence <= stagedSequence || this.state.failed?.includes(manifest.revision)) return this.ready(staged, stagedNotice);
+        try { this.requireLauncher(manifest); this.requireElectron(manifest); }
+        catch (error) {
+          // This refusal is about the newer release, not the compatible download
+          // already waiting. Keep it installable and show a notice, not a remedy.
+          const reason = (error as Error).message.replace(/ No update was downloaded\.$/, '');
+          const retained = stagedNotice ? `The newer release was not downloaded. ${stagedNotice}`
+            : 'The newer release was not downloaded; the earlier downloaded update remains ready to install.';
+          return this.ready(staged, `${reason} ${retained}`);
+        }
+      }
       const installed = this.state.pending ?? this.version;
-      if (manifest.revision === installed) return { kind: this.state.pending ? 'ready' : 'current', version: this.state.pending?.slice(0, 12) };
+      if (manifest.revision === installed) return staged ? this.ready(staged, stagedNotice) : { kind: this.state.pending ? 'ready' : 'current', version: this.state.pending?.slice(0, 12) };
       if (installed) {
         const old = installed === this.options.baseline?.revision && !this.state.active
           ? this.options.baseline
           : verifySourceManifest(await fs.readFile(path.join(this.directory(installed), 'release.json'), 'utf8'), this.options.publicKey);
-        if (manifest.sequence <= old.sequence) return { kind: 'current' };
+        if (manifest.sequence <= old.sequence) return staged ? this.ready(staged, stagedNotice) : { kind: 'current' };
       }
       if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer update. Previous files and data have been retained.');
+      // Before anything is offered or downloaded: a release this launcher cannot start would fail at restart (#97).
+      this.requireLauncher(manifest);
+      this.requireElectron(manifest);
       if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
-      await this.stage(manifest, signed, progress);
+      await this.stage(manifest, signed, progress, staged ?? undefined);
+      if (staged) await this.dropReplaced(staged);
       return { kind: 'ready', version: manifest.revision.slice(0, 12), ...releaseOf(manifest) };
     } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }
   }
-  private async stage(manifest: SourceManifest, signed: string, progress: SourceProgress): Promise<void> {
+  /** `replaces`: the staged download this one takes the place of; it stays staged until this one is. */
+  private async stage(manifest: SourceManifest, signed: string, progress: SourceProgress, replaces?: string): Promise<void> {
     await this.assertCanRun(manifest.revision, manifest.sequence);
     const stage = path.join(this.options.root, 'staging');
     await removeSourceDirectory(stage);
@@ -712,8 +825,14 @@ export class SourceUpdates {
       await removeSourceDirectory(target); await fs.rename(stage, target);
       if (!await this.updatesAllowed()) throw new Error('Updates were disabled while preparing; no update was activated');
       const field = this.explicitActivation ? 'staged' : 'pending';
+      const before = { staged: this.state.staged, pending: this.state.pending };
+      if (replaces && before.staged === replaces) delete this.state.staged;
       this.state[field] = manifest.revision;
-      try { await this.save(); } catch (error) { delete this.state[field]; throw error; }
+      try { await this.save(); }
+      catch (error) {
+        for (const key of ['staged', 'pending'] as const) { if (before[key] === undefined) delete this.state[key]; else this.state[key] = before[key]; }
+        throw error;
+      }
     } finally { await removeSourceDirectory(stage); }
   }
   /** The signed manifest an installed revision was built from, verified again. */

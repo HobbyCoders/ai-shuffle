@@ -40,6 +40,9 @@ reads when it runs this check before a push):
                     what the launcher does (a move, a comment, dead code), so no
                     install needs the new launcher. That label also accepts
                     windows-launcher.
+  linux-electron    The locked desktop Electron version changed. Packaged Linux
+                    keeps its installed sandbox/Electron; the release needs a
+                    matching installer. Only the owner accepts that.
   update-trust-key  The application update public key. Images and installed
                     apps verify updates with the key they shipped; a new key
                     makes them refuse every later update.
@@ -117,7 +120,7 @@ CLOUD_LEGACY_PATHS = ("android/hub/*", "android/site/*", "android/license/*",
 IMAGE_SUPERVISOR = ("docker/*",)
 LABEL = "update-reach:"
 
-FAILING = ("docker-image", "image-pin", "docker-image-copy", "windows-launcher", "launcher-version", "update-trust-key")
+FAILING = ("docker-image", "image-pin", "docker-image-copy", "windows-launcher", "launcher-version", "linux-electron", "update-trust-key")
 GROUPS = FAILING + ("image-inputs", "image-supervisor", "image-tooling", "image-dev-tooling", "windows-packaging",
                     "android-native", "macos-desktop")
 # What each owner acceptance (label update-reach:NAME, or --allow NAME) accepts.
@@ -280,7 +283,7 @@ LAUNCHER_RUNTIME = ("desktop/src/pages/*", "desktop/build/icon.png",
                     TRUST_KEY, "desktop/scripts/source-profile.cjs")
 
 
-def launcher_dependencies(read: Reader) -> dict:
+def launcher_dependencies(read: Reader) -> Optional[dict]:
     """Production packages packed by launcherMembers/electron-builder, including nested deps.
 
     Ignore root metadata and dev/devOptional packages: changing build tooling does
@@ -289,10 +292,17 @@ def launcher_dependencies(read: Reader) -> dict:
     data = read(LAUNCHER_LOCK)
     if data is None:
         return {}
-    packages = json.loads(data).get("packages", {})
-    return {path: {key: package.get(key) for key in ("name", "version", "integrity")}
-            for path, package in packages.items()
-            if path.startswith("node_modules/") and not package.get("dev") and not package.get("devOptional")}
+    try:
+        packages = json.loads(data)["packages"]
+        if not isinstance(packages, dict) or any(not isinstance(package, dict) for package in packages.values()):
+            return None
+        return {path: {key: package.get(key) for key in ("name", "version", "integrity")}
+                for path, package in packages.items()
+                if path.startswith("node_modules/") and not package.get("dev") and not package.get("devOptional")}
+    except (ValueError, KeyError, TypeError):
+        # Unknown dependency contents are not an unchanged launcher. classify
+        # reports the lockfile through the normal verdict, never a traceback.
+        return None
 
 
 def launcher_version(read: Reader) -> Optional[int]:
@@ -337,6 +347,16 @@ def released_launcher(run: Optional[Callable[..., str]] = None,
     return max(known) if known else None
 
 
+def locked_electron(read: Reader) -> Optional[str]:
+    """The exact runtime Linux's installed sandbox must keep using (#99)."""
+    try:
+        lock = json.loads(read("desktop/package-lock.json") or b"null")
+        version = lock["packages"]["node_modules/electron"]["version"]
+        return version if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optional[int] = None) -> dict:
     """Group the changed paths of base..head by how far the in-app update reaches them.
 
@@ -371,10 +391,15 @@ def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optio
                 groups[group].append(path)
                 break
 
+    if "desktop/package-lock.json" in changed and locked_electron(base) != locked_electron(head):
+        groups["linux-electron"] = ["desktop/package-lock.json"]
+
     launcher = launcher_files(base) | launcher_files(head)
     groups["windows-launcher"] = [p for p in changed if p in launcher or matches(p, LAUNCHER_RUNTIME)]
-    if LAUNCHER_LOCK in changed and launcher_dependencies(base) != launcher_dependencies(head):
-        groups["windows-launcher"].append(LAUNCHER_LOCK)
+    if LAUNCHER_LOCK in changed:
+        before, after = launcher_dependencies(base), launcher_dependencies(head)
+        if before is None or after is None or before != after:
+            groups["windows-launcher"].append(LAUNCHER_LOCK)
     # A version-only bump is not a code change. Other contract fields affect
     # launch policy and must not silently reuse an already released version.
     if LAUNCHER_JSON in changed and launcher_version(base) is not None and launcher_version(head) is not None:
@@ -468,6 +493,8 @@ EXPLAIN = {
                         "raise desktop/launcher.json \"version\" for changed inputs (desktop/LAUNCHER.md). "
                         "Only if the change leaves what the launcher does unchanged may the owner accept it with "
                         "update-reach:no-launcher-change instead; update-reach:windows-launcher does not accept it.",
+    "linux-electron": "The locked Electron version changed. Packaged Linux updates keep the installed Electron sandbox "
+                      "and require a matching installer. Have the owner accept that installer requirement.",
     "update-trust-key": "Images and installed apps verify updates with the key they shipped; they will refuse every later update.",
     "image-inputs": "Only new Docker images get this (pinned: older images keep taking updates without it).",
     "image-supervisor": "Images that hand over to the updated supervisor get this with the update; older images keep "

@@ -915,6 +915,13 @@ MAY_HAVE_MIGRATED = ("The database may have been migrated, but the update state 
 MIGRATED_NEWER_BUILD = ("The database may have been migrated. Install a verified newer build to recover; "
                         "cancelling cannot run older code.")
 LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely."
+LINUX_ELECTRON = ("AI Shuffle 1.2.0 needs Electron 44.2.1; this Linux install has 44.2.0. "
+                  "Install the latest AI Shuffle installer from hobbycoders.com to preserve the Linux Electron sandbox. "
+                  "Your files and data have been kept. No update was downloaded.")
+# InstallerRequiredError (source-updates.ts, #97): refused before any download.
+LAUNCHER_START = ("AI Shuffle 1.1.0 needs a newer desktop launcher than this install has (launcher 3; it needs 4). "
+                  "Install the latest AI Shuffle installer from hobbycoders.com to update. "
+                  "Your files and data have been kept. No update was downloaded.")
 
 
 @pytest.mark.parametrize("phase,error,kept", [
@@ -924,6 +931,8 @@ LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely
     ("error", MAY_HAVE_MIGRATED, False),
     ("error", MIGRATED_NEWER_BUILD, False),
     ("error", LINUX_ENTRY, False),
+    ("error", LINUX_ELECTRON, True),
+    ("error", LAUNCHER_START, True),
     # A desktop that cannot update itself; nothing was attempted, so nothing is claimed.
     ("unsupported", None, False),
 ])
@@ -982,6 +991,10 @@ def test_an_install_put_back_ends_its_wait_at_once_and_a_retry_is_accepted(setup
     {"kind": "desktop", "phase": "error", "error": "Source archive checksum or size mismatch"},
     {"kind": "desktop", "phase": "ready", "error": "Busy with active sessions; retry when finished."},
     {"kind": "desktop", "phase": "available", "version": "abc"},
+    # A newer release's installer notice accompanies an installable staged build,
+    # in its notes, not message/error: the worker itself needs no installer.
+    {"kind": "desktop", "phase": "ready", "notes": LINUX_ELECTRON},
+    {"kind": "desktop", "phase": "ready", "notes": LAUNCHER_START},
     # Containers get a newer image, not an installer (imageHint in the web UI).
     {"phase": "error", "error": "An application update failed first boot. Install a newer image; "
                                 "older code cannot safely run over this database. Files retained."},
