@@ -1210,10 +1210,14 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
 
     Only CASCADE children are terminal on parent deletion. Optional references
     and RESTRICT relationships retain their existing materialization/retry rules.
-    Never infer deletion from absence alone, or from a tombstone while a
-    re-created local parent is present. Newer children may depend on a parent's
-    re-creation still in flight, so only a strictly later tombstone can win.
+    Never infer deletion from absence alone, or while a local parent is present.
+    The allowlisted parents have generated IDs with no undelete API:
+    tags: app/api/tags.py:31; notes: app/api/notes.py:153;
+    api_users: app/api/api_users.py:76; sessions:
+    app/core/session_orchestration.py:1243, app/core/session_sync.py:150.
+    Their tombstones are terminal even when concurrent child clocks are higher.
     Agent IDs are routinely reused: permission rules always wait for their agent.
+    Do not add reusable-ID parents here without a causal/recreation check.
     """
     dependencies = {
         "session_tags": (("session_id", "sessions"), ("tag_id", "tags")),
@@ -1231,8 +1235,7 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
         if not isinstance(rid, str) or not rid:
             continue
         version = store.get_record(cursor, parent, rid)
-        if (version and version["deleted"] and env.clock < int(version["clock"])
-                and _read_row(cursor, policy.collection(parent), rid) is None):
+        if version and version["deleted"] and _read_row(cursor, policy.collection(parent), rid) is None:
             return f"parent deleted: {parent}/{rid}"
     return None
 

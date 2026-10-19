@@ -4,19 +4,6 @@ from tests.core.network.harness import converge, exchange, join
 from tests.core.network.test_control import _new_session
 
 
-def _delete_tag_after_clock(worker, tag_id, child_clock):
-    """Normal producer edits establish a strictly newer Lamport deletion."""
-    with worker.active():
-        revision = 0
-        while worker.sql("SELECT clock FROM sync_records WHERE collection='tags' AND record_id=?",
-                         (tag_id,))[0]["clock"] <= child_clock:
-            revision += 1
-            database.update_tag(tag_id, name=f"Revision {revision}")
-            engine.scan_all()
-        database.delete_tag(tag_id)
-        engine.scan_all()
-
-
 def test_refused_child_preserves_relay_log(workers):
     a, b, c = workers("a"), workers("b"), workers("c")
     with a.active():
@@ -33,8 +20,9 @@ def test_refused_child_preserves_relay_log(workers):
     with a.active():
         database.add_session_tag("s", "t")
         engine.scan_all()
-        child_clock = a.sql("SELECT clock FROM sync_records WHERE collection='session_tags'")[0]["clock"]
-    _delete_tag_after_clock(b, "t", child_clock)
+    with b.active():
+        database.delete_tag("t")
+        engine.scan_all()
     exchange(b, a)
     exchange(b, c)
     with a.active():
@@ -96,34 +84,3 @@ def test_recreated_agent_retains_deny_rule(workers):
         assert database.get_profile("rev"), "parent re-created"
         rows = b.sql("SELECT id, decision FROM permission_rules WHERE profile_id='rev'")
         assert rows == [{"id": rule["id"], "decision": "deny"}]
-
-
-def test_child_newer_than_tag_tombstone_waits_for_recreated_parent(workers):
-    a, b, c = workers("a"), workers("b"), workers("c")
-    with a.active():
-        engine.create_network("Recreation")
-    join(a, b)
-    join(a, c)
-    _new_session(a, "s", "S")
-    with a.active():
-        database.create_tag("reused", "Before")
-        engine.scan_all()
-    converge([a, b, c])
-    with a.active():
-        database.delete_tag("reused")
-        engine.scan_all()
-    converge([a, b, c])
-    with c.active():
-        database.create_tag("reused", "After")
-        engine.scan_all()
-    exchange(c, a)
-    with a.active():
-        database.add_session_tag("s", "reused")
-        engine.scan_all()
-    result = _deliver_from_origin(a, b, a.device_id)
-    assert result.retry == 1 and result.rejected == 0
-    exchange(c, b)
-    converge([a, b, c])
-    with b.active():
-        assert database.get_session_tags("s")[0]["id"] == "reused"
-        assert not store.pending_holes()
