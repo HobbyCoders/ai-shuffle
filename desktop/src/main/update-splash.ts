@@ -12,10 +12,12 @@ export function splashPhase(state: SourceState | null, revision: string): Splash
   return 'stopped';
 }
 export const SPLASH_TEXT = {
-  checking: 'Checking the copy of your database. This can take a few minutes. AI Shuffle opens by itself when it is ready.',
-  starting: 'Opening the new version. Its first start can take a few minutes. Please keep AI Shuffle open.',
+  checking: 'Checking the copy of your database. This can take a few minutes. If another AI Shuffle dialog is open, follow its instructions.',
+  starting: 'Opening the new version. Its first start can take a few minutes. If no app window appears after three minutes, open AI Shuffle again to retry or recover.',
 };
 export const SPLASH_LIMIT_MS = 30 * 60_000;
+/** The launcher has selected the build, but it never attached. Close only this notice. */
+export const STARTING_LIMIT_MS = 3 * 60_000;
 export const LAUNCHER_GRACE_MS = 20_000;
 export const LAUNCHER_GONE_MS = 10_000;
 /** Checking leaves state.json unchanged, even when the launcher exits with an error. */
@@ -53,7 +55,7 @@ export function splashArgs(options: SplashOptions): string[] {
 export function launchUpdateSplash(options: SplashOptions, run: typeof spawn = spawn): (() => void) | null {
   try {
     const env = { ...process.env };
-    for (const key of ['ELECTRON_RUN_AS_NODE', 'SHUFFLE_SOURCE_ROOT', 'SHUFFLE_SOURCE_REVISION', 'SHUFFLE_SOURCE_NODE']) delete env[key];
+    for (const key of ['ELECTRON_RUN_AS_NODE', 'SHUFFLE_SOURCE_ROOT', 'SHUFFLE_SOURCE_REVISION', 'SHUFFLE_SOURCE_NODE', 'SHUFFLE_LAUNCHER_VERSION']) delete env[key];
     const child = run(options.electron, splashArgs(options), { detached: true, stdio: 'ignore', env, windowsHide: false });
     child.on('error', error => console.error('Could not show the update window', error));
     child.unref();

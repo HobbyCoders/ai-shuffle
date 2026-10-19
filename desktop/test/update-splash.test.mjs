@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { test } from 'node:test';
 const require = createRequire(import.meta.url);
 const helpers = require('../dist/main/update-splash.js');
-const { splashPhase, launchUpdateSplash, imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS } = helpers;
+const { splashPhase, launchUpdateSplash, imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS, STARTING_LIMIT_MS } = helpers;
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 
 test('the window follows checking, starting, attachment and launcher failure', () => {
@@ -34,7 +34,7 @@ test('the detached process has a separate profile and can be closed when relaunc
   assert.ok(call.args.includes('--launcher=AI Shuffle.exe'));
   assert.equal(call.spawnOptions.detached, true);
   assert.equal(call.spawnOptions.stdio, 'ignore');
-  for (const key of ['ELECTRON_RUN_AS_NODE', 'SHUFFLE_SOURCE_ROOT', 'SHUFFLE_SOURCE_REVISION', 'SHUFFLE_SOURCE_NODE']) assert.equal(call.spawnOptions.env[key], undefined);
+  for (const key of ['ELECTRON_RUN_AS_NODE', 'SHUFFLE_SOURCE_ROOT', 'SHUFFLE_SOURCE_REVISION', 'SHUFFLE_SOURCE_NODE', 'SHUFFLE_LAUNCHER_VERSION']) assert.equal(call.spawnOptions.env[key], undefined);
   assert.equal(runs.at(-1), 'unref');
   close(); assert.equal(runs.at(-1), 'kill');
   assert.equal(launchUpdateSplash(options, () => { throw Error('spawn failed'); }), null);
@@ -69,7 +69,7 @@ async function entry(phases, { running = true, stalled = false } = {}) {
   const file = new URL('../dist/main/update-splash-main.js', import.meta.url);
   vm.runInNewContext(readFileSync(file, 'utf8'), {
     exports: {}, process: { argv: ['electron', 'entry', `--root=${path.resolve('fixture')}`, `--profile=${path.resolve('splash-profile')}`, `--revision=${B}`, '--release=1.0.2', '--launcher=AI Shuffle.exe'] },
-    Date: { now: () => now },
+    Date: { now: () => now }, clearTimeout() {},
     setTimeout: (fn, ms) => { if (ms === SPLASH_LIMIT_MS) timers.push(fn); else { now += ms; Promise.resolve().then(fn); } return { unref() {} }; },
     require: id => id === 'electron' ? { app, BrowserWindow: Window } : id === 'node:fs' ? { promises: { readFile: async () => { reads++; if (stalled) return new Promise(() => {}); return '{}'; } } } : id === './source-updates' ? { parseSourceState: () => ({}) } : id === './update-splash' ? { ...helpers, splashPhase: () => phases[Math.min(reads - 1, phases.length - 1)], imageRunning: async () => running } : require(id),
   });
@@ -89,6 +89,11 @@ for (const terminal of ['attached', 'stopped']) test(`compiled window closes whe
 test('compiled window closes if the launcher exits during its check', async () => {
   const { now } = await entry(['checking'], { running: false });
   assert.ok(now > 20_000 && now < 25_000);
+});
+test('compiled window stops waiting for a selected build that never attaches', async () => {
+  const { now, events } = await entry(['checking', 'starting']);
+  assert.ok(now >= STARTING_LIMIT_MS && now < STARTING_LIMIT_MS + 1000);
+  assert.ok(events.some(event => typeof event === 'string' && event.includes('open AI Shuffle again to retry or recover')));
 });
 test('watchdog closes even if reading the state never completes', async () => {
   await entry(['checking'], { stalled: true });

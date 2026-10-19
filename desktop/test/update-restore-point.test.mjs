@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
 const require = createRequire(import.meta.url);
-const { SinglePassClusterCopy, checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHER } = require('../dist/main/update-restore-point.js');
+const { SinglePassClusterCopy, checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS } = require('../dist/main/update-restore-point.js');
 const { ColdClusterCopy } = require('../dist/main/database-restore.js');
 
 /** A stopped cluster's layout, with nested and empty folders and numeric names like PostgreSQL's. */
@@ -23,12 +23,17 @@ async function cluster(t) {
 const read = file => fs.readFile(file, 'utf8');
 
 test('only a known installed Windows launcher handoff skips the second hash', () => {
-  assert.equal(RESTORE_POINT_VALIDATING_LAUNCHER, 4);
-  for (const version of [4, 5]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
-  for (const version of [0, 1, 2, 3, NaN, Infinity, 4.5]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), false);
+  assert.deepEqual([...RESTORE_POINT_VALIDATING_LAUNCHERS], [4]);
+  assert.equal(launcherValidatedRestorePoint('win32', 4, true, false), true);
+  for (const version of [0, 1, 2, 3, 5, 6, 999, NaN, Infinity, 4.5]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), false);
   for (const platform of ['linux', 'darwin']) assert.equal(launcherValidatedRestorePoint(platform, 4, true, false), false);
   assert.equal(launcherValidatedRestorePoint('win32', 4, false, false), false);
   assert.equal(launcherValidatedRestorePoint('win32', 4, true, true), false);
+});
+
+test('a launcher version bump requires explicitly reviewing the hash allowlist', async () => {
+  const { version } = JSON.parse(await read(new URL('../launcher.json', import.meta.url)));
+  assert.equal(version, 4, 'Re-audit RESTORE_POINT_VALIDATING_LAUNCHERS and the installed factory; do not trust a new launcher without proof it hashes ready points');
 });
 
 test('the installed launcher awaits prepareRollback before every select', async () => {

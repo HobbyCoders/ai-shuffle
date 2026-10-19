@@ -512,10 +512,11 @@ test('a restore point that cannot be discarded keeps the update pending and neve
  updater.useApplications(source({check:async()=>ready,cancelInstall:async()=>order.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
  updater.onInstallPrepared(async()=>order.push('point'),async()=>{order.push('discard');throw Error('EBUSY: restore-point.json is locked');});
  updater.onInstallFailed(async()=>order.push('start stack'));
+ updater.onRestartCancelled(()=>order.push('close notice'));
  const error=console.error;console.error=()=>{};
  try{await updater.check();await updater.install();}finally{console.error=error;}
  // Neither cancelInstall (the update stays pending) nor a restart of the stack.
- assert.deepEqual(order,['point','discard']);assert(!calls.includes('quit'));
+ assert.deepEqual(order,['point','close notice','discard']);assert(!calls.includes('quit'));
  assert.equal(updater.current.phase,'ready');
  assert.match(updater.current.error,/cannot relaunch[\s\S]*Quit AI Shuffle and open it again to finish installing/);
 });

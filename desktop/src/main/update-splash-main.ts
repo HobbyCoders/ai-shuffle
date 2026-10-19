@@ -3,7 +3,7 @@ import { app, BrowserWindow } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { parseSourceState } from './source-updates';
-import { imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS, SPLASH_TEXT, splashPhase, type SplashPhase } from './update-splash';
+import { imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS, STARTING_LIMIT_MS, SPLASH_TEXT, splashPhase, type SplashPhase } from './update-splash';
 
 const arg = (name: string) => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? '';
 const root = arg('root'), revision = arg('revision'), profile = arg('profile');
@@ -43,18 +43,25 @@ async function main(): Promise<void> {
     await window.webContents.executeJavaScript(`for (const [id, text] of Object.entries(${JSON.stringify(values)})) document.getElementById(id).textContent = text;`);
   };
   let lastSeen: number | null = null, checkedAt = 0;
+  let startingAt: number | null = null;
   while (!window.isDestroyed()) {
     const phase = await readPhase();
-    if (phase === 'attached' || phase === 'stopped') break;
+    if (window.isDestroyed() || phase === 'attached' || phase === 'stopped') break;
+    if (phase === 'starting') {
+      startingAt ??= Date.now();
+      if (Date.now() - startingAt >= STARTING_LIMIT_MS) break;
+    } else startingAt = null;
     if (launcher && phase === 'checking' && Date.now() - checkedAt >= 2000) {
       checkedAt = Date.now();
       if (await imageRunning(launcher)) lastSeen = Date.now();
       if (launcherGaveUp(phase, started, lastSeen, Date.now())) break;
     }
+    if (window.isDestroyed()) break;
     await render(phase);
-    if (!window.isVisible()) window.show();
+    if (!window.isDestroyed() && !window.isVisible()) window.show();
     await new Promise(resolve => setTimeout(resolve, 500));
   }
+  clearTimeout(deadline);
   app.quit();
 }
 app.on('window-all-closed', () => app.quit());

@@ -89,7 +89,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}
 	class FakeUpdater {
 		get current() { return { release: '1.0.2' }; }
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onRestartCancelled(fn) { this.restartCancelled = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -162,6 +162,8 @@ test('Windows source restart shows the release window and a failed relaunch clos
   assert.equal(f.splashes[0].options.release, '1.0.2');
   assert.equal(f.splashes[0].options.revision, revision);
   assert.equal(f.splashes[0].options.launcher, 'AI Shuffle.exe');
+  assert.equal(f.app.notifications.length, 1, 'a spawned child is not proof the notice rendered');
+  f.updater.restartCancelled();
   await f.updater.installFailed(Error('relaunch failed'));
   assert.equal(f.splashes[0].closed, true);
 });
@@ -173,9 +175,39 @@ for (const launcher of [undefined, '3', 'unknown', '4']) test(`main process keep
   assert.equal(f.postgres.validations, 1);
 });
 
+test('direct source relaunch clears the previous launcher handoff proof', async () => {
+  const env = { SHUFFLE_LAUNCHER_VERSION: '4' };
+  const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
+    async requireRestorePoint() { throw Error('journal read failed'); }, async failed() {} };
+  const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
+    application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } };
+  const f = await launch({ platform: 'win32', managed, env });
+  let relaunched = false;
+  f.app.relaunch = () => { relaunched = true; assert.equal(env.SHUFFLE_LAUNCHER_VERSION, undefined); };
+  await f.ipc.worker.restart();
+  assert.equal(relaunched, true);
+  assert.equal(f.app.quits, 1);
+});
+
+for (const launcher of ['5', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
+  const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
+    async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
+  const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
+    application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } };
+  const f = await launch({ platform: 'win32', managed, env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.postgres.validations, 1);
+  assert.equal(f.updater.prepared, undefined);
+});
+
 function electronFake(app, errors, messageBox) {
 	return {
 		app,
+		Notification: class {
+			static isSupported() { return true; }
+			constructor(options) { this.options = options; }
+			show() { (app.notifications ??= []).push(this.options); }
+		},
 		dialog: { showErrorBox: (title, message) => errors.push([title, message]), showMessageBox: (...args) => messageBox(args.at(-1), args.length > 1 ? args[0] : null) },
 		safeStorage: { isEncryptionAvailable: () => false },
 		session: { fromPartition: () => ({ setUserAgent() {}, getUserAgent: () => 'test' }) },

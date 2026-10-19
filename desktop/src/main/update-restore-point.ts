@@ -66,12 +66,13 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
   }
 }
 
-/** Windows launchers from this version validate the point in prepareRollback before select. */
-export const RESTORE_POINT_VALIDATING_LAUNCHER = 4;
+/** Audited Windows launchers that hash a ready point in prepareRollback before select.
+ * A new version is NOT trusted automatically: review its factory and ready-journal path. */
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4]);
 
 /** Unknown handoffs and fenced recovery must keep full validation. */
 export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {
-  return platform === 'win32' && Number.isSafeInteger(launcher) && launcher >= RESTORE_POINT_VALIDATING_LAUNCHER && installedHandoff && !migrationRisk;
+  return platform === 'win32' && Number.isSafeInteger(launcher) && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcher) && installedHandoff && !migrationRisk;
 }
 
 /**
