@@ -43,9 +43,9 @@ Newest final stable releases publish Linux and Android for the new tag. Windows
 builds only when needed (owner decision, 2026-10-19, option c, superseding #242):
 installer-relevant **inputs** must differ between the hub's current Windows build
 revision and the new tag. Version numbers and tags are never the need test.
-The read-only policy reuses `scripts/ci/update_reach.py`'s classification of
-`desktop/launcher.json`, launcher closure/runtime dependencies, `desktop/build/**`,
-`desktop/electron-builder.yml` and Electron in `desktop/package.json`/its lockfile.
+The read-only policy reuses `scripts/ci/update_reach.py`'s classification.
+See [the release-channel policy](../docs/ci/release-channels.md#ship-release-notes-all-platform-completion)
+for the complete installer input set and provenance checks.
 A release version-only bump skips paid Windows CI. Missing, unreadable or
 unverifiable hub downloads/history (including a checksum mismatch) require a build.
 

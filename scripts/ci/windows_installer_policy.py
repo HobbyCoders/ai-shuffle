@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -26,7 +27,10 @@ RELEASE_DOWNLOAD = "https://github.com/HobbyCoders/ai-shuffle/releases/download/
 def verify_release(row):
     """Anchor the unsigned hub row to the independently published GitHub assets."""
     tag = "v" + row["version"]
-    request = Request(RELEASE_API + tag, headers={"User-Agent": "ai-shuffle-release-check"})
+    headers = {"User-Agent": "ai-shuffle-release-check"}
+    if token := os.environ.get("GH_TOKEN"):
+        headers["Authorization"] = "Bearer " + token
+    request = Request(RELEASE_API + tag, headers=headers)
     with urlopen(request, timeout=30) as response:
         release = json.load(response)
     if release.get("tag_name") != tag or release.get("draft") is not False:

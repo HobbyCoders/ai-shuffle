@@ -189,6 +189,30 @@ def test_lock_descriptive_metadata_does_not_need_windows(release):
     assert policy.decide("v1.0.1", revision)["build"] is False
 
 
+@pytest.mark.parametrize("token", [None, "", "test-release-token"])
+def test_github_api_authentication_is_not_sent_to_asset_downloads(release, monkeypatch, token):
+    _, _, row, _, _ = release
+    if token is None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GH_TOKEN", token)
+    requests = []
+    fetch = policy.urlopen
+
+    def capture(request, timeout):
+        requests.append(request)
+        return fetch(request, timeout)
+
+    monkeypatch.setattr(policy, "urlopen", capture)
+    policy.verify_installer(row)
+    api = [request for request in requests if request.full_url.startswith(policy.RELEASE_API)]
+    assert len(api) == 1
+    assert api[0].get_header("Authorization") == ("Bearer " + token if token else None)
+    downloads = [request for request in requests if not request.full_url.startswith(policy.RELEASE_API)]
+    assert len(downloads) == 3  # GitHub checksums/build metadata and the hub installer.
+    assert all(request.get_header("Authorization") is None for request in downloads)
+
+
 @pytest.mark.parametrize("api_digest", [True, False])
 def test_github_release_assets_match_hub(release, github, api_digest):
     _, commit, row, _, _ = release
