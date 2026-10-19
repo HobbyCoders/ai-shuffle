@@ -72,7 +72,7 @@ def _client(port, peer="172.17.0.2", cookies=None):
 
 
 def _cookie():
-    return {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    return {preview_access.cookie_name(): preview_access.mint(SESSION)}
 
 
 # ─── port choice ─────────────────────────────────────────────────────────────
@@ -172,13 +172,13 @@ def test_redirect_endpoint_is_reachable_without_a_cookie():
 
 @pytest.mark.parametrize("token", ["", "garbage", "v1.a.b.c"])
 def test_a_bad_cookie_is_refused(token):
-    client = _client(PREVIEW, cookies={preview_access.COOKIE_NAME: token})
+    client = _client(PREVIEW, cookies={preview_access.cookie_name(): token})
     assert client.get("/api/v1/whoami").status_code == 403
 
 
 def test_an_expired_grant_is_refused():
     stale = preview_access.mint(SESSION, ttl_seconds=60, now=1_000_000.0)
-    client = _client(PREVIEW, cookies={preview_access.COOKIE_NAME: stale})
+    client = _client(PREVIEW, cookies={preview_access.cookie_name(): stale})
     assert client.get("/api/v1/whoami").status_code == 403
 
 
@@ -204,7 +204,7 @@ def test_mutation_ceiling_still_applies_on_the_preview_port():
     # grant() itself refuses the protected prefixes, whatever the listener.
     scope = {"type": "http", "method": "POST", "path": "/api/v1/settings/x", "query_string": b"",
              "server": ("0.0.0.0", PREVIEW), "client": ("172.17.0.2", 5), "shuffle.ingress": "preview",
-             "headers": [(b"cookie", f"{preview_access.COOKIE_NAME}={preview_access.mint(SESSION)}".encode())]}
+             "headers": [(b"cookie", f"{preview_access.cookie_name()}={preview_access.mint(SESSION)}".encode())]}
     assert preview_access.grant(Request(scope)) is None
 
 

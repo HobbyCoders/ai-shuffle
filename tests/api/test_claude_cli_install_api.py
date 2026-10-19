@@ -101,7 +101,7 @@ def test_agent_preview_cannot_change_or_act(authenticated_client, guarded, monke
     from app.api import auth as auth_api
     authenticated_client.app.dependency_overrides.pop(auth_api.require_admin, None)
     monkeypatch.setattr(preview_access, "verify", lambda token: object())
-    authenticated_client.cookies.set(preview_access.COOKIE_NAME, "preview-token")
+    authenticated_client.cookies.set(preview_access.cookie_name(), "preview-token")
     response = _call(authenticated_client, method, suffix)
     assert response.status_code == 403
     assert response.json()["detail"].startswith("Agent previews cannot change")

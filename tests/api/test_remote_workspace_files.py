@@ -214,7 +214,7 @@ def test_preview_cookie_is_refused_even_alongside_local_owner_access(peer, monke
     app = FastAPI()
     app.include_router(remote.router)
     with TestClient(app) as client:
-        client.cookies.set(preview_access.COOKIE_NAME, "preview-token")
+        client.cookies.set(preview_access.cookie_name(), "preview-token")
         assert client.get(f"{BASE}/files").status_code == 403
         assert client.request("DELETE", f"{BASE}/files",
                               params={"path": "docs/readme.md"}).status_code == 403

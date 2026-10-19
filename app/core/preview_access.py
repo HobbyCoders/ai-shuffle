@@ -55,6 +55,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Optional
@@ -62,7 +63,9 @@ from urllib.parse import quote, urlsplit
 
 logger = logging.getLogger(__name__)
 
-COOKIE_NAME = "ais_preview"
+COOKIE_PREFIX = "ais_preview_"
+# Upgrade bridge: old grants still expire normally and must verify locally.
+LEGACY_COOKIE_NAME = "ais_preview"
 QUERY_PARAM = "token"
 REDIRECT_PATH = "/api/v1/auth/preview-access"
 KEY_FILE = "preview-access.key"
@@ -181,9 +184,9 @@ def _read_key(path: Path) -> bytes:
     return bytes.fromhex(raw)
 
 
-def _key() -> bytes:
+def _key(path: Optional[Path] = None) -> bytes:
     """Publish one complete key without replacing another process's key."""
-    path = _key_path()
+    path = path if path is not None else _key_path()
     try:
         return _read_key(path)
     except FileNotFoundError:
@@ -346,6 +349,38 @@ def mutation_allowed(path: str, method: str) -> bool:
     return not path.startswith(MUTATION_DENY_PREFIXES)
 
 
+@lru_cache(maxsize=32)
+def _cookie_name_for_path(path: Path) -> str:
+    # Cache only the public name, never the signing key or verification result.
+    # Keys are install-lifetime files; replacing one requires a worker restart.
+    fingerprint = sha256(b"ai-shuffle-preview-cookie\0" + _key(path)).hexdigest()[:24]
+    return COOKIE_PREFIX + fingerprint
+
+
+def cookie_name() -> str:
+    """A stable namespace per install, independent of listener/proxy ports.
+
+    Browsers share cookies across ports on a host. Isolated previews use
+    different signing keys, so their grants must have different names too.
+    Resolve lazily after startup config, then cache per key path so ordinary
+    lookups do not repeat disk reads (or Windows ACL protection writes).
+    """
+    return _cookie_name_for_path(_key_path())
+
+
+def cookie_token(cookies) -> Optional[str]:
+    """Read this install's name, with a legacy fallback for in-flight grants.
+
+    Normal owner cookies must not read or create a preview key. Lookup errors
+    for preview cookies deliberately propagate: callers applying restrictions
+    must not confuse an unreadable key with an absent grant.
+    """
+    legacy = cookies.get(LEGACY_COOKIE_NAME)
+    if not any(name.startswith(COOKIE_PREFIX) for name in cookies):
+        return legacy
+    return cookies.get(cookie_name()) or legacy
+
+
 def enforce_limits(request) -> None:
     """A valid preview cookie restricts *all* HTTP authentication paths.
 
@@ -356,8 +391,12 @@ def enforce_limits(request) -> None:
     """
     from fastapi import HTTPException
 
-    token = request.cookies.get(COOKIE_NAME)
-    found = verify(token) if token else None
+    try:
+        token = cookie_token(request.cookies)
+        found = verify(token) if token else None
+    except Exception as exc:  # noqa: BLE001 — never bypass limits on key failure
+        logger.debug("preview access: restriction check unavailable", exc_info=True)
+        raise HTTPException(503, "Preview access could not be checked. Try again later.") from exc
     request.state.preview_grant = found
     if found is not None and not mutation_allowed(request.url.path, request.method):
         raise HTTPException(403, "Agent previews cannot change ownership, credentials or settings.")
@@ -371,7 +410,7 @@ def grant(request) -> Optional[Grant]:
     """
     try:
         cookies = getattr(request, "cookies", None) or {}
-        token = cookies.get(COOKIE_NAME)
+        token = cookie_token(cookies)
         if not token:
             return None
         if not _private_peer(request):

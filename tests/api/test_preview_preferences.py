@@ -42,7 +42,7 @@ def clients(tmp_path, monkeypatch):
     app = IngressApplication(api, local_port=18090)
     owner = TestClient(app, base_url=ORIGIN, client=("10.0.0.20", 54321), headers={"Origin": ORIGIN})
     preview = TestClient(app, base_url=ORIGIN, client=("10.0.0.20", 54322), headers={"Origin": ORIGIN})
-    preview.cookies.set(preview_access.COOKIE_NAME, preview_access.mint("preview-session"))
+    preview.cookies.set(preview_access.cookie_name(), preview_access.mint("preview-session"))
     return owner, preview, writes, deletes
 
 

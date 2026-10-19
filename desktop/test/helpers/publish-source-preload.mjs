@@ -37,6 +37,7 @@ cp.execFileSync=(exe,args,options={})=>{
   if(args[0]==='rev-list')return '42\n';
   if(args[0]==='show'&&args.includes('--format=%ct'))return '1\n';
   if(args[0]==='show'&&args[1]===`${revision}:desktop/launcher.json`)return fs.readFileSync(new URL('../../launcher.json',import.meta.url),'utf8');
+  if(args[0]==='show'&&args[1]===`${revision}:desktop/package-lock.json`)return JSON.stringify({packages:{'node_modules/electron':{version:'99.2.1'}}});
   if(args[0]==='fetch'){events.push('fetch-main');return '';}
   if(args[0]==='merge-base'){events.push('on-main');if(scenario==='offmain')throw Error('not an ancestor');return '';}
   if(args[0]==='cat-file')return 'tag\n';

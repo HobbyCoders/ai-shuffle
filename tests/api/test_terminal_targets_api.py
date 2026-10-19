@@ -17,7 +17,7 @@ def test_remote_targets_refuse_agents_nonowners_and_preview(ctx, monkeypatch, ta
     # A valid preview cookie restricts even a real owner credential.
     tc = owner(ctx)
     monkeypatch.setattr(preview_access, "verify", lambda token: {"session_id": "preview"})
-    tc.cookies.set(preview_access.COOKIE_NAME, "fixture-preview")
+    tc.cookies.set(preview_access.cookie_name(), "fixture-preview")
     assert tc.post("/api/v1/terminals", json={"target": target}).status_code == 403
     create.assert_not_awaited()
 

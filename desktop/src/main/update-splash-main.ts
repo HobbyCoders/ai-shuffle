@@ -44,6 +44,7 @@ async function main(): Promise<void> {
   };
   let lastSeen: number | null = null, checkedAt = 0;
   let startingAt: number | null = null;
+  let shown = false;
   while (!window.isDestroyed()) {
     const phase = await readPhase();
     if (window.isDestroyed() || phase === 'attached' || phase === 'stopped') break;
@@ -58,7 +59,8 @@ async function main(): Promise<void> {
     }
     if (window.isDestroyed()) break;
     await render(phase);
-    if (!window.isDestroyed() && !window.isVisible()) window.show();
+    // Never restore a minimized notice or take focus from a launcher dialog.
+    if (!window.isDestroyed() && !shown) { window.showInactive(); shown = true; }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   clearTimeout(deadline);

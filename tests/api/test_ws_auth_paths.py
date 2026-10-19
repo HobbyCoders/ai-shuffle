@@ -72,21 +72,21 @@ async def test_local_listener_is_not_used_when_a_token_is_offered(monkeypatch, n
 
 async def test_preview_cookie_same_origin_is_admin(monkeypatch, no_local):
     monkeypatch.setattr(preview_access, "grant", lambda request: preview_access.Grant("s1", 9999999999))
-    socket = _socket(cookies={preview_access.COOKIE_NAME: "tok"})
+    socket = _socket(cookies={preview_access.cookie_name(): "tok"})
     assert await ws_auth.authenticate_websocket(socket, None) == (True, None)
     assert socket.state.mobile_tool_principal["kind"] == "admin"
 
 
 async def test_preview_cookie_cross_origin_is_refused(monkeypatch, no_local):
     monkeypatch.setattr(preview_access, "grant", lambda request: preview_access.Grant("s1", 9999999999))
-    socket = _socket(origin="http://evil.example", cookies={preview_access.COOKIE_NAME: "tok"})
+    socket = _socket(origin="http://evil.example", cookies={preview_access.cookie_name(): "tok"})
     assert await ws_auth.authenticate_websocket(socket, None) == (False, None)
     assert getattr(socket.state, "mobile_tool_principal", None) is None
 
 
 async def test_invalid_preview_cookie_grants_nothing(monkeypatch, no_local):
     monkeypatch.setattr(preview_access, "grant", lambda request: None)
-    socket = _socket(cookies={preview_access.COOKIE_NAME: "forged"})
+    socket = _socket(cookies={preview_access.cookie_name(): "forged"})
     assert await ws_auth.authenticate_websocket(socket, None) == (False, None)
     assert socket.state.mobile_tool_principal is None
 

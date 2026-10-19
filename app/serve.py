@@ -61,16 +61,6 @@ def configured_preview_port(env, local_port: int, remote_port: int):
     return port
 
 
-def _cookie(scope, name: str):
-    for key, value in scope.get("headers", []):
-        if key.lower() == b"cookie":
-            for part in value.decode("latin-1").split(";"):
-                found, _, content = part.strip().partition("=")
-                if found == name:
-                    return content
-    return None
-
-
 class IngressApplication:
     """Marks each request with the listener it arrived on.
 
@@ -98,12 +88,13 @@ class IngressApplication:
         if scope["type"] == "http" and scope.get("path") == preview_access.REDIRECT_PATH \
                 and scope.get("method") == "GET":
             return True
-        token = _cookie(scope, preview_access.COOKIE_NAME)
-        if not token:
-            return False
         try:
+            from starlette.requests import HTTPConnection
             from app.db.async_database import run_sync
 
+            token = await run_sync(preview_access.cookie_token, HTTPConnection(scope).cookies)
+            if not token:
+                return False
             return await run_sync(preview_access.verify, token) is not None
         except Exception:  # noqa: BLE001 - an unreadable grant is a denial
             return False

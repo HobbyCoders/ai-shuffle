@@ -106,17 +106,17 @@ def _client(
     if session:
         client.cookies.set("session", session)
     if preview == "valid":
-        client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
+        client.cookies.set(preview_access.cookie_name(), preview_access.mint(SESSION))
     elif preview == "expired":
         client.cookies.set(
-            preview_access.COOKIE_NAME,
+            preview_access.cookie_name(),
             preview_access.mint(SESSION, ttl_seconds=60, now=time.time() - 120),
         )
     elif preview == "forged":
         token = preview_access.mint(SESSION)
         # Change the signature's last hex digit (always to a different one).
         tampered = token[:-1] + ("1" if token[-1] == "0" else "0")
-        client.cookies.set(preview_access.COOKIE_NAME, tampered)
+        client.cookies.set(preview_access.cookie_name(), tampered)
     return client
 
 

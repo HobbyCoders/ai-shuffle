@@ -66,8 +66,11 @@ def _preview_cookie_present(conn) -> bool:
     credential sent with it, as ``preview_access.enforce_limits`` does)."""
     from app.core import preview_access
 
-    token = (getattr(conn, "cookies", None) or {}).get(preview_access.COOKIE_NAME)
-    return bool(token) and preview_access.verify(token) is not None
+    try:
+        token = preview_access.cookie_token(getattr(conn, "cookies", None) or {})
+        return bool(token) and preview_access.verify(token) is not None
+    except Exception:  # noqa: BLE001 — a key failure cannot lift shell restrictions
+        return True
 
 
 def _desktop_loopback(conn) -> bool:

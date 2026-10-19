@@ -174,7 +174,7 @@ def _as_preview(client, monkeypatch):
     monkeypatch.setattr(preview_access, "_private_peer", lambda request: True)
     monkeypatch.setattr(preview_access, "verify",
                         lambda token: preview_access.Grant(session_id="s1", expires_at=2**40))
-    client.cookies.set(preview_access.COOKIE_NAME, "preview-token")
+    client.cookies.set(preview_access.cookie_name(), "preview-token")
 
 
 def test_an_agent_preview_reads_only_non_secret_fields_and_cannot_change(authenticated_client, monkeypatch):

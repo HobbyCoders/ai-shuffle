@@ -194,6 +194,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
+    # Default-off rollout gate: existing aliases and old peers must keep working.
+    network_token_binding_enabled: bool = False
+    # With binding enabled, require it even for peers without a durable pin.
+    network_require_token_binding: bool = False
 
     # Release safety: recipient-side kill switch. Enabling this alone does not
     # enable peer terminals: independent recipient-verified owner grants are
