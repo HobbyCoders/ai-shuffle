@@ -10,13 +10,14 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 1.0.2
 
-Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fixes for hand-offs, git and the composer.
+Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fixes for hand-offs, git, sync and the composer.
 
 ### Usage and credit
 
 - xAI API keys show your remaining prepaid credit, this month's usage and your spending limit. Add an xAI management key (console.x.ai → Settings → Management Keys) on the provider's Usage tab.
 - OpenAI API keys can show your real remaining credit. Sign in to OpenAI Platform from the provider's Usage tab, in a private browser window only you control, or paste a session key. OpenAI has no official balance API, so this is unofficial and may stop working if OpenAI changes it. A typed-in balance is now only a fallback.
 - When access expires or is refused, the amount is hidden and you are asked to sign in again or replace the key, instead of seeing old numbers.
+- Usage panel numbers no longer flip like a clock when they change.
 
 ### Voice
 
@@ -33,7 +34,9 @@ Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fi
 - "Compact first" sends your draft after compaction and reactivates a settled chat. "Restore unsent draft" puts attachments back once, in place.
 - A question written in an agent's reply no longer marks a chat as waiting for you while it is still working.
 - Hand-offs keep a pending question answerable across the move, and a queued hand-off starts once the current work finishes.
-- The composer remembers its worktree settings per project.
+- The composer remembers its worktree settings per project. The effort panel animates when fast mode is on.
+- At most three live notification banners show at once, for example when you archive many chats.
+- Opening a busy chat mirrored from another worker loads from a fixed checkpoint instead of stalling.
 
 ### Git
 
