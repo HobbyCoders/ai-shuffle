@@ -98,6 +98,22 @@ def test_task_facts_revalidate_on_correction_retirement_and_scope_loss():
     assert not any("mushrooms" in x for x in cleared.items)
 
 
+def test_fact_already_in_base_is_not_repeated_as_task_match():
+    line = "- [m1 r1; user] vegetarian recipes without mushrooms"
+    base = "# Memory\n" + line
+    assert task_memory_section(base, None, [line], "vegetarian recipes") == base
+
+
+def test_displaced_base_fact_is_not_retained_as_a_task_fact():
+    line = "- [m1 r1; user] vegetarian recipes without mushrooms"
+    old_base = "# Memory\n" + line
+    held = hold(None, plan_memory_note(old_base, None))
+    new_base = "# Memory\n- [m2 r1; user] higher priority explicit preference"
+    section = task_memory_section(new_base, held, [line], "unrelated topic")
+    assert section == new_base
+    assert "m1" not in section
+
+
 def test_actual_base_mutations_still_use_full_resend_budget():
     base = "# Memory\n- [m1 r1; user] original"
     held = HeldMemory(frozenset(section_items(base)), 10000, "node")
