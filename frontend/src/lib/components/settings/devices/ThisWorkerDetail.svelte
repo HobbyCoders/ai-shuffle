@@ -10,6 +10,9 @@
 		abandonHandoffTransfer,
 		getLanSettings,
 		updateLanSettings,
+		getAdvertisedAddresses,
+		updateAdvertisedAddresses,
+		type AdvertisedAddresses,
 		type HandoffTransferRecovery,
 		type LanSettings
 	} from '$lib/api/network';
@@ -70,6 +73,30 @@
 	async function rename(name: string) {
 		if (await model.rename('self', name)) flashSaved();
 		else rev += 1;
+	}
+
+	let aliases = $state<AdvertisedAddresses | null>(null);
+	let aliasesError = $state('');
+	let aliasesRev = $state(0);
+	$effect(() => {
+		if (model.enrolled) void loadAliases();
+	});
+	async function loadAliases() {
+		try {
+			aliases = await getAdvertisedAddresses();
+		} catch (e) {
+			aliasesError = getErrorMessage(e, 'Could not load advertised addresses');
+		}
+	}
+	async function saveAliases(text: string) {
+		aliasesError = '';
+		try {
+			aliases = await updateAdvertisedAddresses(text.split(/[\s,]+/).filter(Boolean));
+			flashSaved();
+		} catch (e) {
+			aliasesError = getErrorMessage(e, 'Could not save advertised addresses');
+		}
+		aliasesRev += 1;
 	}
 
 	const LAN_HELP =
@@ -211,6 +238,19 @@
 				/>
 			</SettingRow>
 		</RowGroup>
+		{#if aliases}
+			<RowGroup title="Advertised addresses">
+				{#key aliasesRev}
+					<SettingRow label="Additional URLs" hint="At most two; HTTP or HTTPS"
+						help="URLs peers use to reach this worker, including reverse proxies and mapped ports. These are shared with your network and accepted for endpoint binding, even with a managed tunnel. Use ASCII (punycode) hostnames, no passwords or query strings. HTTPS is recommended.">
+						<TextField value={aliases.addresses.join(', ')} mono width={220}
+							label="Advertised addresses" placeholder="https://worker.example.com"
+							onchange={saveAliases} />
+					</SettingRow>
+				{/key}
+			</RowGroup>
+		{/if}
+		{#if aliasesError}<InlineBanner tone="warn"><span role="alert">{aliasesError}</span></InlineBanner>{/if}
 		{#if lan}
 			<RowGroup title="Local network">
 				<SettingRow label="Sync directly on the LAN" hint="Tunnel is the fallback" help={LAN_HELP}>

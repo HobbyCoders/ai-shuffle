@@ -2336,7 +2336,9 @@ def _own_endpoints() -> List[str]:
     have no account link. Docker's guessed LAN address can also be private to
     its bridge; peers authenticate the device identity at either address.
 
-    Beside a tunnel only private LAN addresses follow (``lan.advertised_addresses``):
+    Automatically detected addresses beside a tunnel are private LAN addresses
+    (``lan.advertised_addresses``); explicit owner-configured dial aliases are
+    appended independently, including public HTTPS aliases. For LAN addresses:
     peers on the same network dial them first through a sealed session
     (``app.network.lan``) and never dial anything else there in the clear.
     """
@@ -2364,6 +2366,10 @@ def _own_endpoints() -> List[str]:
         enabled, extra = False, []
     for address in lan.advertised_addresses(tunnel=bool(endpoints), advertise=url, source=source,
                                             docker=not settings.is_local_mode(), enabled=enabled, extra=extra):
+        if address not in endpoints:
+            endpoints.append(address)
+    from app.network import advertisements
+    for address in advertisements.owner_urls():
         if address not in endpoints:
             endpoints.append(address)
     return endpoints
