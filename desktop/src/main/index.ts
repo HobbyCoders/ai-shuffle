@@ -105,7 +105,7 @@ async function main(): Promise<void> {
 	let closeUpdateSplash: (() => void) | null = null;
 	updater.onRestarting(() => {
 		const revision = applications?.pendingVersion;
-		if (process.platform === 'win32' && managed && !app.isPackaged && updateRoot && revision) {
+		if (process.platform === 'win32' && managed?.host && !isolation && !app.isPackaged && updateRoot && revision) {
 			closeUpdateSplash?.();
 			closeUpdateSplash = launchUpdateSplash({ electron: process.execPath, mainDir: __dirname, root: updateRoot,
 				revision, release: updater.current.release ?? revision.slice(0, 12), profile: path.join(userData, 'update-splash'), launcher: launcherImage(installedExecutable) });
@@ -342,7 +342,12 @@ async function main(): Promise<void> {
 	const callPopout = new CallPopout(userData, window);
 	callPopout.register();
 	registerIpc({ window, updater, worker, callPopout });
-	updater.subscribe((state) => window.send('desktop:update-state', state));
+	updater.subscribe((state) => {
+		// A retained restore point suppresses installFailed (the stack must stay
+		// stopped), but its restart notice must still close as soon as the error is reported.
+		if (state.error) { closeUpdateSplash?.(); closeUpdateSplash = null; }
+		window.send('desktop:update-state', state);
+	});
 
 	/** An older installed launcher than this release needs is replaced from this verified source (desktop/LAUNCHER.md). */
 	function replaceLauncher(): void {

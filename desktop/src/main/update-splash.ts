@@ -12,10 +12,12 @@ export function splashPhase(state: SourceState | null, revision: string): Splash
   return 'stopped';
 }
 export const SPLASH_TEXT = {
-  checking: 'Checking the copy of your database. This can take a few minutes. AI Shuffle opens by itself when it is ready.',
-  starting: 'Opening the new version. Its first start can take a few minutes. Please keep AI Shuffle open.',
+  checking: 'Checking the copy of your database. This can take a few minutes. If AI Shuffle shows a dialog, follow its instructions. You can close this notice without stopping the update.',
+  starting: 'Opening the new version. Its first start can take a few minutes. If AI Shuffle shows a dialog, follow its instructions. You can close this notice without stopping the update.',
 };
 export const SPLASH_LIMIT_MS = 30 * 60_000;
+/** Match index.ts FIRST_START_READY_MS; a build that never attaches must not leave a 30-minute notice. */
+export const STARTING_LIMIT_MS = 10 * 60_000;
 export const LAUNCHER_GRACE_MS = 20_000;
 export const LAUNCHER_GONE_MS = 10_000;
 /** Checking leaves state.json unchanged, even when the launcher exits with an error. */

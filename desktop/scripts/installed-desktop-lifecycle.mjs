@@ -36,9 +36,29 @@ export function parseTasklist(text) {
   .map(([image, pid]) => ({ image, pid: Number(pid) }));
 }
 const tasklist = image => execFileSync('tasklist.exe', ['/FI', `IMAGENAME eq ${image}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-/** Every running desktop Electron process (a fresh CI machine runs no other Electron app). */
-export function desktopProcesses(list = tasklist) {
- return DESKTOP_IMAGES.flatMap(image => parseTasklist(list(image)));
+const electronProcessDetails = () => {
+ const script = "Get-CimInstance Win32_Process -Filter \"Name = 'electron.exe'\" | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress";
+ const text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+ return text.trim() ? [].concat(JSON.parse(text)) : [];
+};
+/** A source update's notice and its Chromium children hold no app instance lock. */
+export function splashProcessIds(processes) {
+ const ids = new Set(processes.filter(p => /(?:^|[\\/\s"])update-splash-main\.js(?=["\s]|$)/i.test(p.CommandLine ?? '')).map(p => p.ProcessId));
+ let changed;
+ do {
+  changed = false;
+  for (const p of processes) if (ids.has(p.ParentProcessId) && !ids.has(p.ProcessId)) { ids.add(p.ProcessId); changed = true; }
+ } while (changed);
+ return ids;
+}
+/** Every lock-owning desktop Electron process; unknown command lines remain in the wait. */
+export function desktopProcesses(list = tasklist, details = electronProcessDetails) {
+ const processes = DESKTOP_IMAGES.flatMap(image => parseTasklist(list(image)));
+ if (!processes.some(p => p.image.toLowerCase() === 'electron.exe')) return processes;
+ try {
+  const splash = splashProcessIds(details());
+  return processes.filter(p => p.image.toLowerCase() !== 'electron.exe' || !splash.has(p.pid));
+ } catch { return processes; } // An unavailable process query is not proof the app exited.
 }
 /** Wait until no desktop Electron process is left; the ones still running on timeout are in the error. */
 export async function waitForDesktopExit(timeout = 120000, list = desktopProcesses, every = 250) {

@@ -3,7 +3,7 @@ import { app, BrowserWindow } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { parseSourceState } from './source-updates';
-import { imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS, SPLASH_TEXT, splashPhase, type SplashPhase } from './update-splash';
+import { imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS, STARTING_LIMIT_MS, SPLASH_TEXT, splashPhase, type SplashPhase } from './update-splash';
 
 const arg = (name: string) => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? '';
 const root = arg('root'), revision = arg('revision'), profile = arg('profile');
@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   deadline.unref();
   await app.whenReady();
   const started = Date.now();
-  const window = new BrowserWindow({ width: 520, height: 240, show: false, resizable: false, maximizable: false,
+  const window = new BrowserWindow({ width: 520, height: 300, show: false, resizable: false, maximizable: false,
     title: 'AI Shuffle update', autoHideMenuBar: true,
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } });
   window.setMenu(null);
@@ -43,16 +43,22 @@ async function main(): Promise<void> {
     await window.webContents.executeJavaScript(`for (const [id, text] of Object.entries(${JSON.stringify(values)})) document.getElementById(id).textContent = text;`);
   };
   let lastSeen: number | null = null, checkedAt = 0;
+  let shown = false, startingDeadline: NodeJS.Timeout | undefined;
   while (!window.isDestroyed()) {
     const phase = await readPhase();
     if (phase === 'attached' || phase === 'stopped') break;
+    if (phase === 'starting' && !startingDeadline) {
+      startingDeadline = setTimeout(() => app.exit(), STARTING_LIMIT_MS);
+      startingDeadline.unref();
+    }
     if (launcher && phase === 'checking' && Date.now() - checkedAt >= 2000) {
       checkedAt = Date.now();
       if (await imageRunning(launcher)) lastSeen = Date.now();
       if (launcherGaveUp(phase, started, lastSeen, Date.now())) break;
     }
     await render(phase);
-    if (!window.isVisible()) window.show();
+    // Never restore a minimized notice or take focus from a launcher dialog.
+    if (!shown) { window.showInactive(); shown = true; }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   app.quit();

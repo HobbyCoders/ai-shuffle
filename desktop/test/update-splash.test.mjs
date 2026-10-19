@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { test } from 'node:test';
 const require = createRequire(import.meta.url);
 const helpers = require('../dist/main/update-splash.js');
-const { splashPhase, launchUpdateSplash, imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS } = helpers;
+const { splashPhase, launchUpdateSplash, imageRunning, launcherGaveUp, launcherImage, SPLASH_LIMIT_MS, STARTING_LIMIT_MS } = helpers;
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 
 test('the window follows checking, starting, attachment and launcher failure', () => {
@@ -63,32 +63,54 @@ async function entry(phases, { running = true, stalled = false } = {}) {
   class Window {
     constructor(options) { events.push(options); this.webContents = { setWindowOpenHandler() {}, on() {}, executeJavaScript: async code => events.push(code) }; }
     setMenu() {} async loadURL(url) { events.push(url); }
-    isDestroyed() { return false; } isVisible() { return false; } show() { events.push('show'); }
+    isDestroyed() { return false; } isVisible() { return false; } // Simulate minimizing after the first show.
+    show() { assert.fail('the notice must not steal focus'); } showInactive() { events.push('showInactive'); }
   }
   let reads = 0;
   const file = new URL('../dist/main/update-splash-main.js', import.meta.url);
   vm.runInNewContext(readFileSync(file, 'utf8'), {
     exports: {}, process: { argv: ['electron', 'entry', `--root=${path.resolve('fixture')}`, `--profile=${path.resolve('splash-profile')}`, `--revision=${B}`, '--release=1.0.2', '--launcher=AI Shuffle.exe'] },
     Date: { now: () => now },
-    setTimeout: (fn, ms) => { if (ms === SPLASH_LIMIT_MS) timers.push(fn); else { now += ms; Promise.resolve().then(fn); } return { unref() {} }; },
+    setTimeout: (fn, ms) => {
+      if (ms >= STARTING_LIMIT_MS) timers.push({ fn, ms, at: now + ms, fired: false });
+      else {
+        now += ms;
+        const due = timers.find(timer => !timer.fired && now >= timer.at);
+        if (due) { due.fired = true; Promise.resolve().then(due.fn); }
+        else Promise.resolve().then(fn);
+      }
+      return { unref() {} };
+    },
     require: id => id === 'electron' ? { app, BrowserWindow: Window } : id === 'node:fs' ? { promises: { readFile: async () => { reads++; if (stalled) return new Promise(() => {}); return '{}'; } } } : id === './source-updates' ? { parseSourceState: () => ({}) } : id === './update-splash' ? { ...helpers, splashPhase: () => phases[Math.min(reads - 1, phases.length - 1)], imageRunning: async () => running } : require(id),
   });
-  if (stalled) { await new Promise(resolve => setImmediate(resolve)); timers[0](); }
+  if (stalled) { await new Promise(resolve => setImmediate(resolve)); timers[0].fn(); }
   await ended;
   return { events, now, timers };
 }
 for (const terminal of ['attached', 'stopped']) test(`compiled window closes when ${terminal}`, async () => {
   const { events, timers } = await entry(['checking', 'starting', terminal]);
-  assert.ok(events.includes('show'));
+  assert.equal(events.filter(event => event === 'showInactive').length, 1, 'a minimized notice stays minimized across polls');
   assert.ok(events.some(event => typeof event === 'string' && event.includes('Starting the update to AI Shuffle 1.0.2')));
   const options = events.find(event => event?.webPreferences);
   assert.equal(options.webPreferences.sandbox, true);
   assert.equal(options.webPreferences.nodeIntegration, false);
-  assert.equal(timers.length, 1);
+  assert.deepEqual(timers.map(timer => timer.ms), [SPLASH_LIMIT_MS, STARTING_LIMIT_MS]);
 });
 test('compiled window closes if the launcher exits during its check', async () => {
   const { now } = await entry(['checking'], { running: false });
   assert.ok(now > 20_000 && now < 25_000);
+});
+test('a build that dies before attaching is bounded by the first-start window', async () => {
+  const { now } = await entry(['starting']);
+  assert.equal(now, STARTING_LIMIT_MS);
+  const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /const FIRST_START_READY_MS = 10 \* 60_000/);
+  assert.equal(STARTING_LIMIT_MS, 10 * 60_000);
+  for (const text of Object.values(helpers.SPLASH_TEXT)) {
+    assert.match(text, /close this notice without stopping the update/);
+    assert.match(text, /dialog/);
+    assert.doesNotMatch(text, /opens by itself|Please keep AI Shuffle open/);
+  }
 });
 test('watchdog closes even if reading the state never completes', async () => {
   await entry(['checking'], { stalled: true });

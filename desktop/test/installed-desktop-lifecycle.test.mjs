@@ -74,7 +74,7 @@ test('the next start waits for the updated app (electron.exe), not only for the 
  // The fixed wait this replaces looked for AI Shuffle.exe only. The launcher
  // has exited by then; the updated app still holds the single-instance lock.
  const running = { 'AI Shuffle.exe': [], 'electron.exe': ['"electron.exe","6532","Console","1","120,404 K"'] };
- const list = () => desktopProcesses(image => running[image].join('\r\n') || 'INFO: No tasks are running which match the specified criteria.');
+ const list = () => desktopProcesses(image => running[image].join('\r\n') || 'INFO: No tasks are running which match the specified criteria.', () => []);
  let done = false;
  const waiting = waitForDesktopExit(5000, list, 1).then(() => { done = true; });
  await new Promise(resolve => setTimeout(resolve, 20));
@@ -82,6 +82,20 @@ test('the next start waits for the updated app (electron.exe), not only for the 
  running['electron.exe'] = [];
  await waiting;
  assert.equal(done, true);
+});
+
+test('the exit wait excludes only the splash entry and its Chromium descendants', async () => {
+ const list = image => image === 'electron.exe' ? [11, 12, 13, 14, 15].map(pid => `"electron.exe","${pid}"`).join('\n') : '';
+ const details = () => [
+  { ProcessId: 11, ParentProcessId: 1, CommandLine: 'electron.exe "C:\\source\\desktop\\dist\\main\\update-splash-main.js" --root=C:\\updates' },
+  { ProcessId: 12, ParentProcessId: 11, CommandLine: 'electron.exe --type=renderer' },
+  { ProcessId: 13, ParentProcessId: 12, CommandLine: 'electron.exe --type=utility' },
+  { ProcessId: 14, ParentProcessId: 1, CommandLine: 'electron.exe C:/source/desktop/dist/main/managed-entry.js' },
+  { ProcessId: 15, ParentProcessId: 1, CommandLine: null },
+ ];
+ assert.deepEqual(desktopProcesses(list, details).map(p => p.pid), [14, 15]);
+ assert.equal(desktopProcesses(list, () => { throw Error('access denied'); }).length, 5, 'query failure stays conservative');
+ await waitForDesktopExit(0, () => desktopProcesses(image => image === 'electron.exe' ? '"electron.exe","11"\n"electron.exe","12"' : '', details));
 });
 
 test('a desktop that never exits names what is still running', async () => {
