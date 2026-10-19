@@ -1,4 +1,5 @@
 """Plain project folders are positive non-repos, not unavailable checkouts."""
+import os
 import subprocess
 from unittest.mock import AsyncMock, Mock
 
@@ -28,6 +29,18 @@ def plain_project(tmp_path, monkeypatch):
 
 def git_at(folder, *args):
     return subprocess.run(["git", "-C", str(folder), *args], check=True, capture_output=True, text=True)
+
+
+def deny_read_access(monkeypatch, target):
+    access = os.access
+    target = os.path.normcase(os.path.realpath(target))
+
+    def readable(path, mode, **kwargs):
+        if os.path.normcase(os.path.realpath(path)) == target and mode & os.R_OK:
+            return False
+        return access(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "access", readable)
 
 
 @pytest.mark.parametrize("worker", ["local", "remote-worker"])
@@ -104,7 +117,7 @@ def test_non_english_environment_uses_c_locale_for_confirmation(plain_project, m
     assert response.json()["is_git_repo"] is False
 
 
-def test_linked_worktree_git_file_is_a_repository(plain_project):
+def test_linked_worktree_git_file_is_a_repository(plain_project, monkeypatch):
     project, folder, client = plain_project
     base = folder.parent / "base-repo"
     base.mkdir()
@@ -117,13 +130,11 @@ def test_linked_worktree_git_file_is_a_repository(plain_project):
     assert response.json()["is_git_repo"] is True
     assert response.json()["current_branch"] == "linked"
     target = folder / (folder / ".git").read_text().strip().removeprefix("gitdir: ")
-    previous = target.stat().st_mode
-    target.chmod(0)
-    try:
-        response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
-        assert response.status_code == 503, response.text
-    finally:
-        target.chmod(previous)
+    # Model an access denial (e.g. a Windows ACL), not POSIX chmod bits:
+    # Windows chmod(0) only changes the read-only attribute, not readability.
+    deny_read_access(monkeypatch, target)
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
+    assert response.status_code == 503, response.text
 
 
 def test_structural_git_marker_never_classifies_as_plain(plain_project, monkeypatch):
@@ -181,7 +192,7 @@ def test_exec_only_ancestor_does_not_make_readable_project_unavailable(plain_pro
 
 
 @pytest.mark.parametrize("state", ["plain", "missing", "unreadable-git"])
-def test_existing_session_status_only_confirms_readable_plain_folder(plain_project, state):
+def test_existing_session_status_only_confirms_readable_plain_folder(plain_project, monkeypatch, state):
     from app.db import database
     project, folder, client = plain_project
     session_id = f"plain-chat-{state}"
@@ -194,17 +205,13 @@ def test_existing_session_status_only_confirms_readable_plain_folder(plain_proje
         warm = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
         assert warm.status_code == 200, warm.text
         assert warm.json()["is_git_repo"] is True
-        (folder / ".git").chmod(0)
-    try:
-        response = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
-        assert response.status_code == (200 if state == "plain" else 503), response.text
-        if state == "plain":
-            assert response.json()["is_git_repo"] is False
-        else:
-            assert "unavailable" in response.json()["detail"].lower()
-    finally:
-        if state == "unreadable-git":
-            (folder / ".git").chmod(0o700)
+        deny_read_access(monkeypatch, folder / ".git")
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
+    assert response.status_code == (200 if state == "plain" else 503), response.text
+    if state == "plain":
+        assert response.json()["is_git_repo"] is False
+    else:
+        assert "unavailable" in response.json()["detail"].lower()
 
 
 @pytest.mark.parametrize("scope", ["project", "session", "worker"])

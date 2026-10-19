@@ -1,5 +1,7 @@
 """scripts/ci/windows_parts.py and the hosted Windows suite's parallel parts."""
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -34,6 +36,44 @@ def test_selected_tests_are_refused_on_main():
     refuse = next(step for step in selected["steps"] if step.get("name") == "Refuse a partial run on main")
     assert refuse["if"] == "github.ref == 'refs/heads/main'"
     assert "exit 1" in refuse["run"]
+
+
+@pytest.mark.parametrize("tests, expected, fail_match", [
+    ("tests/api/test_git_plain_folder.py android/ci/test-ui-runner.py", ["python"], ""),
+    ("frontend/src/lib/components/deck/cards/NotesCard.editing.test.ts", ["npm", "npx", "npx"], ""),
+    ("tests/api/test_git_plain_folder.py frontend/src/lib/components/deck/cards/NotesCard.editing.test.ts",
+     ["python", "npm", "npx", "npx"], ""),
+    ("tests/api/test_git_plain_folder.py", ["python"], "pytest"),
+    ("frontend/src/lib/components/deck/cards/NotesCard.editing.test.ts", ["npm", "npx", "npx"], "vitest"),
+])
+def test_selected_tests_route_to_their_runner_and_preserve_failures(tmp_path, tests, expected, fail_match):
+    command = next(step["run"] for step in workflow()["jobs"]["selected"]["steps"]
+                   if step.get("name") == "Selected tests")
+    (tmp_path / "frontend").mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("python", "npm", "npx"):
+        shim = bin_dir / name
+        shim.write_text(
+            '#!/usr/bin/env bash\n'
+            'printf "%s:%s\\n" "${0##*/}" "$*" >> "$CALLS"\n'
+            'if [[ -n "$FAIL_MATCH" && "$*" == *"$FAIL_MATCH"* ]]; then exit 9; fi\n',
+            encoding="utf-8", newline="\n")
+        shim.chmod(0o755)
+    calls = tmp_path / "calls"
+    result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], cwd=tmp_path,
+                            env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                                 "LOCAL_CI_PYTHON": (bin_dir / "python").as_posix(), "TESTS": tests,
+                                 "RUNNER_TEMP": tmp_path.as_posix(), "CALLS": calls.as_posix(),
+                                 "FAIL_MATCH": fail_match}, capture_output=True, text=True, timeout=15)
+    assert result.returncode == (9 if fail_match else 0), result.stdout + result.stderr
+    lines = calls.read_text().splitlines()
+    assert [line.split(":", 1)[0] for line in lines] == expected
+    if "python" in expected:
+        assert "-m pytest tests/api/test_git_plain_folder.py" in lines[0]
+        assert "frontend/" not in lines[0]
+    if "npx" in expected:
+        assert lines[-1] == "npx:vitest run src/lib/components/deck/cards/NotesCard.editing.test.ts"
 
 
 def test_the_backend_parts_cover_every_backend_file_exactly_once():

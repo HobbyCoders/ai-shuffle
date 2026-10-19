@@ -22,17 +22,18 @@ class UiRunnerTest(unittest.TestCase):
             # Even failing evidence collection must not mask the test's status.
             (root / "ci/emulator-diagnostics.sh").write_text("exit 7\n")
             shutil.copy(CI / "check-instrumentation.py", root / "ci")
-            fake = "#!" + sys.executable + "\n" + r'''
-import json, os, sys
-from pathlib import Path
-args = sys.argv[1:]
+            fake = r'''
+import json, os, subprocess, sys
+name, *args = sys.argv[1:]
 with open(os.environ["CALLS"], "a") as log:
-    log.write(json.dumps([Path(sys.argv[0]).name, *args]) + "\n")
-if Path(sys.argv[0]).name == "timeout":
+    log.write(json.dumps([name, *args]) + "\n")
+if name == "timeout":
     while args[0].startswith("--"):
         args.pop(0)
     args.pop(0)  # Recorded host deadline; do not sleep in this self-test.
-    os.execvp(args[0], args)
+    # Native Windows exec cannot launch an extensionless Bash shim. Resolve it
+    # through Bash just like the real runner, preserving the child's exit code.
+    sys.exit(subprocess.call(["bash", "-c", 'exec "$@"', "timeout-shim", *args]))
 if "instrument" in args:
     suite = "notClass" in args
     mode = os.environ["MODE"] if suite == (os.environ["PHASE"] == "suite") else "pass"
@@ -53,15 +54,25 @@ if "instrument" in args:
         print(f"INSTRUMENTATION_STATUS_CODE: {status}")
     print("OK (1 test)\nINSTRUMENTATION_CODE: -1")
 '''
+            (root / "fake.py").write_text(fake, encoding="utf-8")
+            # A native Windows Python path is not a valid POSIX shebang. Bash
+            # launches these shims and the quoted, slash-normalized interpreter
+            # explicitly, which also handles spaces in an interpreter path.
             for name in ("adb", "timeout"):
                 executable = root / "bin" / name
-                executable.write_text(fake)
+                executable.write_text(
+                    '#!/usr/bin/env bash\n'
+                    f'exec "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" {name} "$@"\n',
+                    encoding="utf-8", newline="\n")
                 executable.chmod(0o755)
             env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
-                       GITHUB_STEP_SUMMARY=str(root / "summary"))
+                       GITHUB_STEP_SUMMARY=str(root / "summary"),
+                       UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
+                       UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
             result = subprocess.run(["bash", str(CI / "run-android-ui-tests.sh")], cwd=root,
                                     env=env, text=True, capture_output=True, timeout=10)
+            self.assertTrue((root / "calls").exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
             self.summary = (root / "summary").read_text()
             return result, calls

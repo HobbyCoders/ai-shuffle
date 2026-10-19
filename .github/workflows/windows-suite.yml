@@ -20,6 +20,7 @@ name: Windows full suite
 # To check a fix on a branch first, run only some tests (refused on main, so
 # every successful main run is the full suite):
 #   gh workflow run windows-suite.yml --ref <branch> -f tests="tests/core/test_x.py"
+# Frontend test paths (frontend/**/*.test.ts) run with Vitest, not pytest.
 #
 # The runner is not set up like an owner's PC: it may create symlinks (so
 # symlink tests run instead of skipping), it has thousands of PowerShell
@@ -30,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       tests:
-        description: Branch only. Space-separated test paths to run instead of the full suite.
+        description: Branch only. Space-separated Python or frontend/*.test.ts paths instead of the full suite.
         required: false
         default: ''
 
@@ -142,8 +143,23 @@ jobs:
           TESTS: ${{ inputs.tests }}
         run: |
           set -o pipefail
-          # shellcheck disable=SC2086 # word splitting is the point
-          "$LOCAL_CI_PYTHON" -m pytest $TESTS -o addopts= -q -p no:cacheprovider --timeout=120 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+          python_tests=()
+          frontend_tests=()
+          for test in $TESTS; do
+            case "$test" in
+              frontend/*.test.ts) frontend_tests+=("${test#frontend/}") ;;
+              *) python_tests+=("$test") ;;
+            esac
+          done
+          if (( ${#python_tests[@]} )); then
+            "$LOCAL_CI_PYTHON" -m pytest "${python_tests[@]}" -o addopts= -q -p no:cacheprovider --timeout=120 2>&1 | tee "$RUNNER_TEMP/local-ci.log"
+          fi
+          if (( ${#frontend_tests[@]} )); then
+            cd frontend
+            npm ci --no-audit --no-fund
+            npx svelte-kit sync
+            npx vitest run "${frontend_tests[@]}" 2>&1 | tee -a "$RUNNER_TEMP/local-ci.log"
+          fi
       - name: Keep the log
         if: always()
         uses: actions/upload-artifact@v4
