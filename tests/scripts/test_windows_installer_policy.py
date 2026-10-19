@@ -208,6 +208,8 @@ def test_github_api_authentication_is_not_sent_to_asset_downloads(release, monke
     api = [request for request in requests if request.full_url.startswith(policy.RELEASE_API)]
     assert len(api) == 1
     assert api[0].get_header("Authorization") == ("Bearer " + token if token else None)
+    # Never a redirectable header: urllib copies ``headers`` to any redirect host.
+    assert "Authorization" not in api[0].headers
     downloads = [request for request in requests if not request.full_url.startswith(policy.RELEASE_API)]
     assert len(downloads) == 3  # GitHub checksums/build metadata and the hub installer.
     assert all(request.get_header("Authorization") is None for request in downloads)
@@ -328,3 +330,23 @@ def test_built_verification_requires_new_tag(release, result):
     payload["platforms"]["win"] = old
     with pytest.raises(ValueError, match="win:"):
         check.verify(payload, "v1.0.1", revision, windows_policy=decision, windows_result=result)
+
+
+def test_github_api_token_is_dropped_on_cross_host_redirect(monkeypatch):
+    from urllib.request import HTTPRedirectHandler
+
+    monkeypatch.setenv("GH_TOKEN", "test-release-token")
+    seen = []
+
+    def stop(request, timeout):
+        seen.append(request)
+        raise RuntimeError("stop after building the request")
+
+    monkeypatch.setattr(policy, "urlopen", stop)
+    with pytest.raises(RuntimeError):
+        policy.verify_release({"version": "1.0.2"})
+    redirected = HTTPRedirectHandler().redirect_request(
+        seen[0], None, 302, "Found", {}, "https://elsewhere.example/asset",
+    )
+    assert seen[0].get_header("Authorization") == "Bearer test-release-token"
+    assert redirected.get_header("Authorization") is None

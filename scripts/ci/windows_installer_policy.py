@@ -27,10 +27,10 @@ RELEASE_DOWNLOAD = "https://github.com/HobbyCoders/ai-shuffle/releases/download/
 def verify_release(row):
     """Anchor the unsigned hub row to the independently published GitHub assets."""
     tag = "v" + row["version"]
-    headers = {"User-Agent": "ai-shuffle-release-check"}
+    request = Request(RELEASE_API + tag, headers={"User-Agent": "ai-shuffle-release-check"})
     if token := os.environ.get("GH_TOKEN"):
-        headers["Authorization"] = "Bearer " + token
-    request = Request(RELEASE_API + tag, headers=headers)
+        # Unredirected: urllib copies ordinary headers to any redirect target.
+        request.add_unredirected_header("Authorization", "Bearer " + token)
     with urlopen(request, timeout=30) as response:
         release = json.load(response)
     if release.get("tag_name") != tag or release.get("draft") is not False:
