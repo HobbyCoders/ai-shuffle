@@ -1446,7 +1446,7 @@ def require_worktree_project(project_v2_row: dict[str, Any], runner_id: str | No
     )
     path = next((_resolve_checkout_path(row["path"]) for row in rows
                  if row.get("path") and os.path.isdir(_resolve_checkout_path(row["path"]))), None)
-    if not path or os.path.lexists(os.path.join(path, ".git")):
+    if not path:
         return
     result = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=5)
     if result.returncode == 0 and result.stdout.strip():

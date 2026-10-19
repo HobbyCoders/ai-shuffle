@@ -34,12 +34,18 @@ def git_at(folder, *args):
 @pytest.mark.parametrize("route", ["local", "remote"])
 @pytest.mark.parametrize("create_new", [False, True])
 @pytest.mark.parametrize("branch", ["main", "feature/new"])
-async def test_enclosed_project_refuses_worktrees_before_parent_lookup_or_config(plain_project, monkeypatch, route, create_new, branch):
+@pytest.mark.parametrize("marker_kind", ["absent", "empty", "missing-head"])
+async def test_enclosed_project_refuses_worktrees_before_parent_lookup_or_config(plain_project, monkeypatch, route, create_new, branch, marker_kind):
     from app.api import sessions_worktree
     from app.api.sessions_helpers import CreateWorktreeSessionRequest
     from app.core import checkout_manager, git_ops_runner
     project, folder, _ = plain_project
     git_at(folder.parent, "init", "-b", "main")
+    if marker_kind != "absent":
+        (folder / ".git").mkdir()
+        if marker_kind == "missing-head":
+            (folder / ".git" / "objects").mkdir()
+            (folder / ".git" / "refs").mkdir()
     before = (folder.parent / ".git" / "config").read_bytes()
     lookup = Mock(side_effect=AssertionError("must not look up parent branches"))
     record = Mock(side_effect=AssertionError("must not write parent config"))
@@ -63,7 +69,7 @@ async def test_enclosed_project_refuses_worktrees_before_parent_lookup_or_config
     record.assert_not_called()
     assert (folder.parent / ".git" / "config").read_bytes() == before
     assert not (folder / ".fluid").exists()
-    assert not (folder / ".git").exists()
+    assert (folder / ".git").exists() == (marker_kind != "absent")
 
 
 @pytest.mark.parametrize("marker_kind", ["directory", "file", "broken-link"])
@@ -71,7 +77,7 @@ def test_enclosing_probe_skips_own_markers_without_a_git_process(tmp_path, monke
     from app.api.git_owner import _enclosing_repository
     marker = tmp_path / ".git"
     if marker_kind == "directory":
-        marker.mkdir()
+        git_at(tmp_path, "init", "-b", "main")
     elif marker_kind == "file":
         marker.write_text("gitdir: /missing")
     else:
@@ -222,13 +228,20 @@ def test_worker_mutations_keep_refusing_plain_folder(plain_project, action, body
 
 
 @pytest.mark.parametrize("scope", ["session", "worker"])
-@pytest.mark.parametrize("own_repository", [False, True])
-def test_nested_project_reports_scope_without_parent_files(plain_project, scope, own_repository):
+@pytest.mark.parametrize("repository_kind", ["enclosed", "empty-marker", "missing-head", "own"])
+def test_nested_project_reports_scope_without_parent_files(plain_project, scope, repository_kind):
     from app.db import database
     from app.core.project_resolver import resolve_existing_cwd
     project, folder, client = plain_project
     git_at(folder.parent, "init", "-b", "main")
     (folder.parent / "outside.txt").write_text("parent-only content")
+    own_repository = repository_kind == "own"
+    invalid_marker = repository_kind in ("empty-marker", "missing-head")
+    if invalid_marker:
+        (folder / ".git").mkdir()
+        if repository_kind == "missing-head":
+            (folder / ".git" / "objects").mkdir()
+            (folder / ".git" / "refs").mkdir()
     if own_repository:
         git_at(folder, "init", "-b", "nested")
         git_at(folder, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
@@ -247,7 +260,7 @@ def test_nested_project_reports_scope_without_parent_files(plain_project, scope,
         assert status["current_branch"] == "nested"
     else:
         assert status["mutations_blocked"] is True
-        assert not (folder / ".git").exists()
+        assert (folder / ".git").exists() == invalid_marker
         for action in ("diff-stats", "changed-files"):
             refused = client.get(f"/api/v1/projects/{project['id']}/git/{action}{query}")
             assert refused.status_code == 409, refused.text

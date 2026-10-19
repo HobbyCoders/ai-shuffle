@@ -308,8 +308,11 @@ def _enclosing_repository(path):
     from app.core.git_service import git_service
 
     # The hot status/read path for ordinary roots must stay subprocess-free.
-    # lexists also covers broken markers: Git refuses those, never discovers a parent.
-    if os.path.lexists(os.path.join(path, ".git")):
+    # Invalid directories without HEAD can fall through to a parent repository.
+    # Files/symlinks (even broken ones) instead stop Git's upward discovery.
+    marker = os.path.join(path, ".git")
+    if (os.path.isfile(marker) or os.path.islink(marker)
+            or (os.path.isdir(marker) and os.path.exists(os.path.join(marker, "HEAD")))):
         return None
     if not os.path.isdir(path) or not _has_git_marker(path):
         return None

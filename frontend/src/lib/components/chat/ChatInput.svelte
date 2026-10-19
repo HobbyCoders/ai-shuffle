@@ -872,7 +872,7 @@
 		if (!$activeSession.sessionId && repository.hydrated
 			&& (repository.projectId === $activeSession.projectV2Id || repository.projectId === $activeSession.project)
 			&& repository.sessionId === null && repository.worktreeId === $activeSession.worktreeId
-			&& repository.status?.is_git_repo === false) {
+			&& (repository.status?.is_git_repo === false || !!repository.status?.enclosing_repository_root)) {
 			activeSession.setWorktreeIntent('local', { persist: false });
 		}
 		composerSuggestion.invalidate();
