@@ -52,7 +52,9 @@ async def test_upgrade_keeps_existing_identity_and_routes(upgrade_pair, monkeypa
         # newer caller already sends a signed support statement and bound proof.
         with monkeypatch.context() as receiver, server.active():
             receiver.setattr(settings, "network_token_binding_enabled", False)
-            response = server_client.post(request.url.path, json=body)
+            # A reverse proxy strips its configured base path before forwarding.
+            route = request.url.path.removeprefix(httpx.URL(endpoint).path.rstrip("/"))
+            response = server_client.post(route, json=body)
         return httpx.Response(response.status_code, json=response.json())
 
     monkeypatch.setattr(settings, "network_token_binding_enabled", client_enabled)
@@ -73,6 +75,14 @@ async def test_upgrade_keeps_existing_identity_and_routes(upgrade_pair, monkeypa
     for body in token_requests:
         assert ("bound_signature" in body) is client_enabled
         assert ("token_binding_proof" in body) is client_enabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["https://faß.example", "https://bücher.example", "https://example.com/café"])
+async def test_disabled_binding_preserves_international_routes(upgrade_pair, monkeypatch, endpoint):
+    from app.network.endpoints import dial_endpoints
+    assert dial_endpoints([endpoint]) == [endpoint]
+    await test_upgrade_keeps_existing_identity_and_routes(upgrade_pair, monkeypatch, endpoint, False)
 
 
 def test_existing_pin_is_ignored_when_disabled_and_retained_for_reenable(upgrade_pair, monkeypatch):

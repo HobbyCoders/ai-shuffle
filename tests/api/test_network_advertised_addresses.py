@@ -10,7 +10,8 @@ from app.core import managed_connection
 from app.core.config import settings
 from app.db import database
 from app.db import network as store
-from app.network import advertisements, engine, lan, policy, tokens, transport
+import app.network.advertisements as advertisements
+from app.network import engine, lan, policy, tokens, transport
 from tests.core.network.conftest import workers  # noqa: F401
 from tests.core.network.harness import exchange, join
 from tests.core.network.test_token_binding import post, request_body

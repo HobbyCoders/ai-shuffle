@@ -73,15 +73,23 @@ def is_valid_endpoint(url: object) -> bool:
         return False
     if parts.scheme not in ("http", "https"):
         return False
-    # Match the binding transcript's ASCII/A-label rule before any HTTP dial.
-    # HTTPX maps Unicode dot variants to ASCII dots; classifying the original
-    # spelling as a DNS name would otherwise bypass the link-local check.
+    # Binding needs literal ASCII authorities. With the rollout gate off,
+    # preserve existing international hostnames, but classify the destination
+    # HTTPX actually dials so Unicode dots cannot hide link-local addresses.
+    ascii_host = None
     if not parts.netloc.isascii():
-        return False
+        from app.core.config import settings
+        if settings.network_token_binding_enabled:
+            return False
+        import httpx
+        try:
+            ascii_host = httpx.URL(url).raw_host.decode("ascii")
+        except (httpx.InvalidURL, UnicodeError):
+            return False
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
         return False
     try:
-        host = parts.hostname
+        host = ascii_host or parts.hostname
         parts.port  # raises on a malformed port
     except ValueError:
         return False

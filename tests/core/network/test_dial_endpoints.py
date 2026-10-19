@@ -74,7 +74,10 @@ def test_dial_endpoints_uses_the_tunnel_alone_when_one_is_advertised():
 
 @pytest.mark.parametrize("dot", ["。", "．", "｡"], ids=["ideographic", "fullwidth", "halfwidth"])
 @pytest.mark.asyncio
-async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot):
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot, enabled, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", enabled)
     url = f"http://169{dot}254{dot}169{dot}254:80"
     assert endpoints.peer_endpoints({"endpoints": [url]}, None) == []
     assert endpoints.peer_endpoints(None, {"endpoints": [url]}) == []
@@ -93,7 +96,9 @@ async def test_unicode_dot_peer_addresses_are_filtered_before_any_request(dot):
 
 
 @pytest.mark.parametrize("url", ["https://faß.example", "https://K.example", "http://example.com:８０"])
-def test_peer_authorities_require_ascii_before_normalizing(url):
+def test_peer_authorities_require_ascii_before_normalizing(url, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", True)
     assert not endpoints.is_valid_endpoint(url)
     assert endpoints.dial_endpoints([url]) == []
 

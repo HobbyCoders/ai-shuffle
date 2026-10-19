@@ -116,8 +116,10 @@ addresses while LAN-direct is on; use **Advertised addresses** for public aliase
 
 Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
 IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames
-must be supplied as ASCII A-labels (punycode); Unicode hosts are rejected in both
-proofs and advertisements, never re-encoded with a different IDNA version. Path case and interior
+must be supplied as ASCII A-labels (punycode) for bound proofs and new owner
+aliases. With binding enabled, Unicode peer authorities are rejected before dialing.
+With binding disabled, existing international peer routes remain usable; their
+HTTPX-normalized destination is still checked against the link-local restriction. Path case and interior
 slashes remain significant; unreserved percent escapes are decoded and other
 escapes use uppercase hex. A DNS trailing dot remains significant. Credentials,
 queries, fragments, scoped IPv6, whitespace, backslashes, dot path segments and
