@@ -6,7 +6,7 @@ import { SourceUpdates } from './source-updates';
 import { setManagedContext } from './managed-context';
 import { readProfile, localFeed } from './source-profile';
 import { readInstalledHostSync, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
-import { confirmLauncher } from './launcher-swap';
+import { confirmLauncher, parseLauncher, LAUNCHER_FILE } from './launcher-swap';
 import { buildEnvironment } from './source-build';
 
 async function start(): Promise<void> {
@@ -36,7 +36,8 @@ export async function startManagedSource(root: string, revision: string, bootstr
     app.setPath('sessionData', host.userData);
   }
   const publicKey = profile?.publicKey ?? await fs.readFile(path.resolve(__dirname, '../../build/application-update-key.pem'), 'utf8');
-  const updates = new SourceUpdates({ root, publicKey, bootstrapNode, fetch: localFeed(profile) });
+  // Profile and development builds run under no installed launcher; their updates are not compared with one.
+  const updates = new SourceUpdates({ root, publicKey, bootstrapNode, fetch: localFeed(profile), launcher: host ? await runningLauncher() : undefined });
   await updates.attach(revision);
   // Settle a launcher swap (desktop/LAUNCHER.md): this start proves which launcher runs.
   if (host && process.platform === 'win32') {
@@ -49,6 +50,22 @@ export async function startManagedSource(root: string, revision: string, bootstr
   const subprocessEnv = process.platform === 'linux' ? buildEnvironment(application.node, application.python) : undefined;
   setManagedContext({ updates, application, root, profile, host, installersOnly, subprocessEnv });
   require('./index');
+}
+/**
+ * The installed launcher this source runs under (desktop/LAUNCHER.md). A Windows
+ * launcher passes its version; one that passes none predates the stamp (0). The
+ * installed Linux app runs this in its own process without the variable: its own
+ * launcher.json, then its desktop-build.json stamp, as installed-entry reads them.
+ */
+async function runningLauncher(): Promise<number> {
+  const passed = process.env[LAUNCHER_VERSION_ENV];
+  if (passed !== undefined || process.platform === 'win32') return launcherVersion(passed);
+  try { return parseLauncher(await fs.readFile(path.join(app.getAppPath(), LAUNCHER_FILE), 'utf8')).version; }
+  catch { /* Installers before #1821 D5 have no launcher.json. */ }
+  try {
+    const stamp = JSON.parse(await fs.readFile(path.join(process.resourcesPath, 'worker/desktop-build.json'), 'utf8')).launcher;
+    return Number.isSafeInteger(stamp) && stamp >= 0 ? stamp : 0;
+  } catch { return 0; }
 }
 function run(): void {
   void start().catch(async error => {

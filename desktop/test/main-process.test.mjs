@@ -168,7 +168,7 @@ test('Windows source restart shows the release window and a failed relaunch clos
   assert.equal(f.splashes[0].closed, true);
 });
 
-for (const launcher of [undefined, '3', 'unknown', '4']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
+for (const launcher of [undefined, '3', 'unknown', '4', '5']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false, async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const f = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', updates, application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } }, env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
   assert.deepEqual(f.errors, []);
@@ -189,7 +189,7 @@ test('direct source relaunch clears the previous launcher handoff proof', async 
   assert.equal(f.app.quits, 1);
 });
 
-for (const launcher of ['5', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
+for (const launcher of ['6', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
     async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
@@ -593,7 +593,7 @@ test('an update\'s first start gives its worker 10 minutes to become ready; othe
 	}
 });
 
-test('restarting into an update copies the database for its restore point with the window saying so, only for launchers that then just check it', async () => {
+for (const launcher of ['4', '5']) test(`restarting with launcher ${launcher} copies the database for its restore point with the window saying so`, async () => {
 	const R = 'b'.repeat(40);
 	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
 	const host = { executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe', userData: 'C:/Users/owner/AppData/Roaming/AI Shuffle', name: 'AI Shuffle' };
@@ -602,7 +602,7 @@ test('restarting into an update copies the database for its restore point with t
 		async rollbackVersion() { return events.ready ? '1.0.1' : null; }, async rollbackNotice() { return events.notice ?? null; },
 		async cancelPreparedRollback() { events.push(['discard']); } });
 	const events = []; events.ready = true;
-	const main = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(events), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	const main = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(events), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
 	assert.deepEqual(main.errors, []);
 	const before = main.window.sent.length;
 	await main.updater.prepared.prepare();
@@ -614,7 +614,7 @@ test('restarting into an update copies the database for its restore point with t
 	assert.deepEqual(events.at(-1), ['discard']);
 	// A copy that failed ends the install with the reason the launcher would have shown.
 	const failing = []; failing.notice = 'Update 1.0.2 was not started because its database restore point failed: disk full';
-	const failed = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(failing), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	const failed = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(failing), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
 	await assert.rejects(failed.updater.prepared.prepare(), /disk full/);
 	// Launchers before restore points, isolated profiles and other platforms keep the launcher's own behaviour.
 	for (const options of [{ env: { SHUFFLE_LAUNCHER_VERSION: '3' }, platform: 'win32', host }, { env: {}, platform: 'win32', host }, { env: { SHUFFLE_LAUNCHER_VERSION: '4' }, platform: 'linux', host }, { env: { SHUFFLE_LAUNCHER_VERSION: '4' }, platform: 'win32', host: null }]) {
