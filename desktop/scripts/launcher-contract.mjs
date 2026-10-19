@@ -21,9 +21,10 @@
 // it from its own verified source (desktop/LAUNCHER.md). Minimum 3 is the
 // owner-accepted signing-key bridge. Minimum 4 replaces launchers without
 // database restore points (0.9.6) and the 1.0.0 ones that report 3; every
-// bump needs a Windows acceptance run. The start-floor/staged replacement
-// changes are pending an owner launcher-version decision; version and minimum
-// remain 4 in this draft.
+// bump needs a Windows acceptance run. Version 5 includes the start-floor/staged
+// replacement changes and waits for a timed-out self-test to close before cleanup.
+// Minimum stays 4 and start stays 3. Launcher 5 still fully reads back and hashes
+// the ready database restore point before selecting the update.
 export function readLauncher(text) {
  const value = JSON.parse(text);
  const count = n => Number.isSafeInteger(n) && n >= 0;

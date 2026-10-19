@@ -1325,6 +1325,63 @@ test('the update lock: a live holder refuses, a dead holder is reclaimed, fresh 
  f.signed=release.signed;assert.equal((await u.download()).kind,'ready');
  await assert.rejects(fs.stat(lock),/ENOENT/);
 });
+test('ready-journal launcher preparation reads every snapshot byte once without recopying', async t => {
+ const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
+ const { ColdClusterCopy } = require('../dist/main/database-restore.js');
+ const { f, u } = await rollbackFixture(t);
+ const postgres = path.join(f.root, 'postgres');
+ const mib = Number(process.env.SHUFFLE_ROLLBACK_BENCH_MIB || 8);
+ assert(Number.isSafeInteger(mib) && mib > 0 && mib <= 1024);
+ const block = Buffer.alloc(1024 * 1024, 0x5a);
+ for (const [name, body] of Object.entries({ 'PG_VERSION': '17\n', 'global/pg_control': 'control' })) {
+  await fs.mkdir(path.dirname(path.join(postgres, 'data', name)), { recursive: true });
+  await fs.writeFile(path.join(postgres, 'data', name), body);
+ }
+ const rows = path.join('base', '16384', '2619');
+ await fs.mkdir(path.dirname(path.join(postgres, 'data', rows)), { recursive: true });
+ const file = await fs.open(path.join(postgres, 'data', rows), 'w');
+ try { for (let i = 0; i < mib; i++) await file.write(block); } finally { await file.close(); }
+ // Produce the ready journal through the app's real snapshot path, not seeded metadata.
+ await u.prepareRollback(async () => new SinglePassClusterCopy(postgres, async () => {}));
+ const snapshot = path.join(postgres, 'update-snapshot', 'data');
+ const nativeFs = require('node:fs');
+ const readStream = nativeFs.createReadStream;
+ let bytes = 0, reads = 0, copies = 0, validations = 0;
+ t.mock.method(nativeFs, 'createReadStream', (name, ...args) => {
+  const stream = readStream(name, ...args);
+  if (String(name).startsWith(snapshot + path.sep)) {
+   reads++;
+   stream.on('data', chunk => { bytes += chunk.length; });
+  }
+  return stream;
+ });
+ const copyFile = fs.copyFile;
+ t.mock.method(fs, 'copyFile', (...args) => { copies++; return copyFile(...args); });
+ const database = new ColdClusterCopy(postgres, async () => assert.fail('ready point must not quiesce or copy again'));
+ const validate = database.validate.bind(database);
+ t.mock.method(database, 'validate', async () => { validations++; await validate(); });
+ const times = [];
+ for (let i = 0; i < 3; i++) {
+  const launcher = f.create(); await launcher.load();
+  bytes = 0; reads = 0; validations = 0;
+  const start = performance.now();
+  assert.equal(await launcher.recoverRollback(async () => database), false);
+  await launcher.prepareRollback(async () => database);
+  times.push(Number((performance.now() - start).toFixed(2)));
+  assert.equal(validations, 1);
+  assert.equal(reads, 3);
+  assert.equal(bytes, mib * block.length + Buffer.byteLength('17\ncontrol'));
+  assert.equal(copies, 0);
+ }
+ t.diagnostic(JSON.stringify({ fixtureMiB: mib, readyPreparationMs: times, snapshotReads: reads, snapshotBytes: bytes, copies }));
+ // Same-size corruption near the end must be caught, not trusted from structure/manifest.
+ const damaged = await fs.open(path.join(snapshot, rows), 'r+');
+ try { await damaged.write(Buffer.from('!'), 0, 1, mib * block.length - 1); } finally { await damaged.close(); }
+ const launcher = f.create(); await launcher.load();
+ await assert.rejects(launcher.prepareRollback(async () => database), /failed validation/);
+ assert.equal(launcher.pendingVersion, B, 'validation failure leaves the update unselected');
+});
+
 test('an app-made restore point that cannot be discarded holds the database closed, so the launcher never restores a stale copy over newer data', async t => {
  const { SinglePassClusterCopy, pointHeldFor } = require('../dist/main/update-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');

@@ -59,7 +59,7 @@ workflow verifies the transitional installer on a clean Windows runner. This is
 not evidence of an existing-install migration: verify that swap before switching
 signers. Future minimum bumps should follow a Windows acceptance run.
 
-Version and minimum **4** are the launchers that make the database restore
+Version **4** introduced the launcher contract for making the database restore
 point before an update's first start (`prepareRollback`, and `recoverRollback`
 after a failed first start). The launcher closure gained them in 1.0.0 without
 a version bump, so the 0.9.6 launcher (no restore points) and the 1.0.x
@@ -67,6 +67,14 @@ launchers (restore points) both report 3. Minimum 4 makes every version-3
 launcher swap to this one after the update's first healthy start; from the
 next update on, the launcher makes the restore point again. Run the acceptance
 run below against a 0.9.6 installer and a 1.0.x installer before release.
+
+Current version is **5**, with **minimum 4** and **start 3** unchanged. It includes
+the start-floor/staged replacement changes and waits for a timed-out self-test
+to close after killing it (bounded to 10 seconds) before rejecting the candidate.
+Launcher 5 still runs the full `ColdClusterCopy.validate()` content read-back
+on a ready journal: every snapshot file is hashed against the manifest before
+selection. There is no redundant copy or second read in this path to remove;
+a structure-only or manifest-trust check would weaken the rollback guarantee.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.

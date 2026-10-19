@@ -3,6 +3,8 @@
 // The Windows acceptance run is desktop-installer.yml.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
+import vm from 'node:vm';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -182,6 +184,37 @@ function candidateWith(t, script) {
  write(candidate, { [swap.SELF_TEST]: script });
  return candidate;
 }
+test('self-test timeout waits for close, not kill or exit, with a bounded fallback', async t => {
+ for (const finish of ['close', 'kill-error', 'never-closes']) await t.test(finish, async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  let killed = false;
+  child.kill = () => { killed = true; if (finish === 'kill-error') child.emit('error', Error('kill failed')); return true; };
+  const timers = new Map();
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(realDesktop, 'dist/main/launcher-swap.js'), 'utf8'), {
+   module, exports: module.exports, Buffer, process, console,
+   require: id => id === 'node:child_process' ? { spawn: () => child } : createRequire(path.join(realDesktop, 'dist/main/launcher-swap.js'))(id),
+   setTimeout: (fn, ms) => { timers.set(ms, fn); return ms; }, clearTimeout: ms => timers.delete(ms),
+  });
+  let settled = false;
+  const result = module.exports.selfTest(process.execPath, path.join(os.tmpdir(), 'app.new.asar'), 5, os.tmpdir(), 123);
+  result.then(() => { settled = true; }, () => { settled = true; });
+  timers.get(123)();
+  assert.equal(killed, true);
+  child.emit('exit', 0);
+  await Promise.resolve();
+  assert.equal(settled, false, 'neither kill, kill error nor exit releases the archive handles');
+  assert.equal(typeof timers.get(10_000), 'function', 'the post-kill wait is bounded to ten seconds');
+  if (finish === 'never-closes') timers.get(10_000)();
+  else child.emit('close', 0);
+  await assert.rejects(result, /did not finish in time/, 'a timeout cannot become a successful verdict');
+  // A late close after the fallback is harmless and clears the wait timer too.
+  if (finish === 'never-closes') child.emit('close', null);
+  assert.equal(timers.size, 0);
+ });
+});
+
 const nonceOf = 'const nonce = process.argv.find(a => a.startsWith("--nonce=")).slice(8);';
 test('self-test verdicts: only a clean exit with this run\'s verdict for the expected version passes', async t => {
  const root = tmp(t);
@@ -200,14 +233,13 @@ test('self-test verdicts: only a clean exit with this run\'s verdict for the exp
   'a crash': [`throw new Error('boom')`, /boom/],
  };
  for (const [name, [script, error]] of Object.entries(cases)) await assert.rejects(swap.selfTest(process.execPath, candidateWith(t, script), 2, root), error, name);
- // A hung self-test is killed. selfTest rejects without waiting for the exit, and the
- // child's cwd is its temp folder, which Windows will not delete while the child lives.
- // Wait for the kill to land, so the test checks it and cleanup never races it.
+ // A hung self-test is killed and closed before rejection: cleanup must not
+ // race a dying child holding its cwd or app.new.asar open on Windows.
  const hung = candidateWith(t, `require('fs').writeFileSync(require('path').join(__dirname, 'pid'), String(process.pid)); setInterval(() => {}, 1000);`);
  await assert.rejects(swap.selfTest(process.execPath, hung, 2, root, 2000), /did not finish in time/);
  const pid = Number(fs.readFileSync(path.join(hung, path.dirname(swap.SELF_TEST), 'pid'), 'utf8'));
  assert(pid > 0, 'the hung self-test started');
- await until(() => !alive(pid));
+ assert.equal(alive(pid), false, 'the killed self-test has exited before rejection');
  await assert.rejects(swap.selfTest(path.join(root, 'missing.exe'), ok, 2, root), /ENOENT/);
 });
 
