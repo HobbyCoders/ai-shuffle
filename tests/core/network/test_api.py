@@ -343,8 +343,10 @@ def test_ipv4_carrying_ipv6_endpoints_are_classified_by_the_ipv4(url, ok):
     ("http://169.254.43518", False),
     ("http://2852039166./", False),
     ("http://4294967296", False),  # out-of-range integer, not a hostname
-    ("http://worker.123", False),
-    ("http://worker.0xinvalid", False),
+    ("http://1.2.3.4.5", False),  # every label numeric: an address form, not a name
+    # One non-numeric label makes a DNS name, as before endpoint binding.
+    ("http://worker.123", True),
+    ("http://worker.0xinvalid", True),
     ("http://0xc0a80114:8000", True),  # numeric private LAN stays valid
     ("http://0300.0250.1.024:8000", True),
     ("http://127.1:8000", True),

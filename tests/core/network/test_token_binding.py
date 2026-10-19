@@ -31,7 +31,7 @@ def pair(workers, monkeypatch):
 def request_body(client, server, peer, endpoint=None):
     challenge = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": peer.device_id})
     assert challenge.status_code == 200
-    assert challenge.json()["token_binding"] == 1
+    assert challenge.json().get("token_binding") == (1 if settings.network_token_binding_enabled else None)
     nonce = challenge.json()["challenge"]
     body = {"device_id": peer.device_id, "challenge": nonce,
             "signature": tokens.sign_challenge(peer.identity.signing_private, nonce, server.device_id)}
