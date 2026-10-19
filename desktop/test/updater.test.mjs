@@ -497,8 +497,10 @@ test('the restore point is made after the update is pending and before the resta
  second.app.relaunch=()=>{throw Error('cannot relaunch');};
  second.updater.useApplications(source({check:async()=>ready,cancelInstall:async()=>order.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
  second.updater.onInstallPrepared(async()=>order.push('point'),async()=>order.push('discard'));
+ second.updater.onRestartCancelled(()=>order.push('close notice'));
+ second.updater.onInstallFailed(async()=>order.push('start stack'));
  await second.updater.check();await second.updater.install();
- assert.deepEqual(order,['point','discard','cancel']);assert.match(second.updater.current.error,/cannot relaunch/);
+ assert.deepEqual(order,['point','close notice','discard','cancel','start stack']);assert.match(second.updater.current.error,/cannot relaunch/);
  // A copy that fails is the install's error; nothing is restarted.
  const third=fixture();
  third.updater.useApplications(source({check:async()=>ready}),'C:/Programs/AI Shuffle/AI Shuffle.exe');

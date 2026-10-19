@@ -463,10 +463,10 @@ async function main(): Promise<void> {
 	if (!isolation) installTray(actions, identity.name);
 
 	// The restart's restore point: made here, with the window saying so, rather than by the launcher
-	// with no window open (update-restore-point.ts). Only audited source handoffs
-	// pre-create the copy; unknown and packaged launchers keep their normal full-copy path.
+	// with no window open (update-restore-point.ts). Source handoffs need an audited
+	// launcher; the bundled app uses this build's own audited installed-entry factory.
 	const launcherKeepsPoint = !!applications && !!postgres && !isolation && process.platform === 'win32' &&
-		!!managed?.host && !managed.profile && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcherVersion(process.env[LAUNCHER_VERSION_ENV]));
+		(managed ? !!managed.host && !managed.profile && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcherVersion(process.env[LAUNCHER_VERSION_ENV])) : !!installation);
 	if (launcherKeepsPoint) {
 		const restorePoint = async () => new SinglePassClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
 			await quiesceRecordedWorker(path.join(userData, 'worker'));

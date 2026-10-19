@@ -20,7 +20,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	const splashes = [];
 	const app = {
 		// Linux delegation only ever runs inside the packaged app.
-		isPackaged: !!installers || !!delegatedApplication,
+		isPackaged: !!installed || !!installers || !!delegatedApplication,
 		getAppPath: () => desktopDir,
 		getPath: () => path.join(desktopDir, 'no-user-data'),
 		getVersion: () => '0.0.0-test',
@@ -622,6 +622,28 @@ test('restarting into an update copies the database for its restore point with t
 		assert.equal(other.updater.prepared, undefined, JSON.stringify(options));
 	}
 });
+test('a fresh Windows packaged install prepares its first update restore point in the app', async () => {
+  const events = [];
+  const root = '/isolated/no-root';
+  const updates = { options: { root }, async requireRestorePoint() {}, async databaseStarting() {},
+    healthy: () => new Promise(() => {}), async finishRollback() {}, async failed() {},
+    async prepareRollback(factory) { const copy = await factory('a'.repeat(40)); events.push(copy.constructor.name); },
+    async rollbackVersion() { return '1.0.1'; }, async cancelPreparedRollback() { events.push('discard'); } };
+  // No managed source context or inherited launcher version: this is the installer's bundled app.
+  const main = await launch({ platform: 'win32', installed: { root, updates, executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe' } });
+  assert.deepEqual(main.errors, []);
+  assert.equal(main.app.isPackaged, true);
+  assert.equal(typeof main.updater.prepared?.prepare, 'function', 'the installer keeps the in-app copy before quitting');
+  const before = main.window.sent.length;
+  await main.updater.prepared.prepare();
+  assert.deepEqual(events, ['SinglePassClusterCopy']);
+  assert.equal(main.window.currentPage, 'status');
+  const steps = main.window.sent.slice(before).filter(([channel]) => channel === 'desktop:worker-state').map(([, state]) => state.startupStep);
+  assert.deepEqual(steps, ['restore-point', undefined]);
+  await main.updater.prepared.discard();
+  assert.equal(events.at(-1), 'discard');
+});
+
 test('while a restore point is ready for an update that has not started, nothing in this version reopens the database', async () => {
 	const { promises: fs } = await import('node:fs');
 	const os = await import('node:os');
