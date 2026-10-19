@@ -206,6 +206,22 @@ async def _load_grok_access_token(provider_id: str) -> str:
     return access
 
 
+async def _raise_if_renewed_elsewhere(service: str) -> None:
+    """After a failed 401 refresh, explain a renewal owned by another worker.
+
+    In a worker network only one worker renews a synced subscription login
+    (``app.network.refresh_authority``). When the others' 401 wait ends without
+    a renewed token, a bare upstream 401 tells the user nothing; this names the
+    worker that renews the login instead. No-op on the renewing worker.
+    """
+    from app.db.async_database import run_sync
+    from app.network import refresh_authority
+
+    message = await run_sync(refresh_authority.renewal_pending_message, service)
+    if message:
+        raise ProviderCredentialError(message)
+
+
 class GrokSubscriptionAuth:
     """fluid ``ResponsesAuth`` implementation for a SuperGrok provider row.
 
@@ -236,6 +252,7 @@ class GrokSubscriptionAuth:
                 "grok auth: 401 refresh produced no fresh token for provider %s",
                 self.provider_id,
             )
+            await _raise_if_renewed_elsewhere("Grok")
 
 
 class CodexSubscriptionAuth:
@@ -273,6 +290,7 @@ class CodexSubscriptionAuth:
                 "codex auth: 401 refresh produced no fresh token for provider %s",
                 self.provider_id,
             )
+            await _raise_if_renewed_elsewhere("ChatGPT")
 
 
 async def resolve_provider_credentials(

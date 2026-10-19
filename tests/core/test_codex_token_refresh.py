@@ -585,6 +585,19 @@ class TestPeerWorkerNeverRenews:
         assert posted == []
         assert not db.get_codex_tokens(PROVIDER_ID)["needs_reauth"]
 
+    async def test_sweep_does_not_reach_refresh_provider(self, mock_db, peer_worker, monkeypatch):
+        unlock_encryption(mock_db)
+        _seed_provider(last_refresh=_due_iso())
+        called = []
+
+        async def record(provider_id, **kwargs):
+            called.append(provider_id)
+            return False
+
+        monkeypatch.setattr(codex_token_refresh, "refresh_provider", record)
+        assert await codex_token_refresh.refresh_due_providers() == 0
+        assert called == []
+
     async def test_401_picks_up_the_bundle_synced_from_the_renewing_worker(
             self, mock_db, peer_worker):
         unlock_encryption(mock_db)

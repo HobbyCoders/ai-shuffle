@@ -6,12 +6,16 @@ rotated bundle persist with ``auth_mode='grok'`` and permanent failure →
 ``needs_reauth``.
 """
 
+import asyncio
+import base64
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
 from app.core import encryption, xai_token_refresh
+from app.core.config import settings
 from app.db import database as db
 from tests.fakes.http import mock_transport_client
 from tests.helpers import unlock_encryption
@@ -186,6 +190,64 @@ class TestPeerWorkerNeverRenews:
         monkeypatch.setattr(xai_token_refresh, "SYNC_WAIT_ON_401_SECONDS", 0.2, raising=False)
         monkeypatch.setattr(xai_token_refresh, "SYNC_POLL_SECONDS", 0.05, raising=False)
 
+    async def test_direct_and_forced_refresh_do_not_post(self, mock_db):
+        unlock_encryption(mock_db)
+        _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
+        posted = []
+
+        def handler(request):
+            posted.append(1)
+            return httpx.Response(400, json={"error": "refresh_token_reused"})
+
+        async with mock_transport_client(handler) as c:
+            assert await xai_token_refresh.refresh_provider(PROVIDER_ID, client=c) is False
+            assert await xai_token_refresh.refresh_provider(
+                PROVIDER_ID, force=True, client=c) is False
+        assert posted == []
+
+    async def test_sweep_does_not_reach_refresh_provider(self, mock_db, monkeypatch):
+        unlock_encryption(mock_db)
+        _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
+        called = []
+
+        async def record(provider_id, **kwargs):
+            called.append(provider_id)
+            return False
+
+        monkeypatch.setattr(xai_token_refresh, "refresh_provider", record)
+        assert await xai_token_refresh.refresh_due_providers() == 0
+        assert called == []
+
+    async def test_401_picks_up_the_bundle_synced_from_the_renewing_worker(self, mock_db):
+        unlock_encryption(mock_db)
+        _seed_provider(access="access-old",
+                       last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
+        posted = []
+
+        def handler(request):
+            posted.append(1)
+            return httpx.Response(400, json={"error": "refresh_token_reused"})
+
+        async def renewed_bundle_arrives():
+            await asyncio.sleep(0.1)
+            db.set_codex_token_bundle(
+                PROVIDER_ID,
+                access_token=encryption.encrypt_value("access-from-founder"),
+                refresh_token=encryption.encrypt_value("refresh-from-founder"),
+                account_id="team-1",
+                last_refresh=_iso(datetime.now(timezone.utc)),
+                auth_mode="grok",
+            )
+
+        async with mock_transport_client(handler) as c:
+            ok, _ = await asyncio.gather(
+                xai_token_refresh.refresh_on_401_once(
+                    PROVIDER_ID, stale_access_token="access-old", client=c),
+                renewed_bundle_arrives(),
+            )
+        assert ok is True
+        assert posted == []
+
     async def test_due_login_is_not_renewed_here(self, mock_db):
         unlock_encryption(mock_db)
         _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
@@ -201,3 +263,21 @@ class TestPeerWorkerNeverRenews:
                 PROVIDER_ID, stale_access_token="access-old", client=c) is False
         assert posted == []
         assert not db.get_codex_tokens(PROVIDER_ID)["needs_reauth"]
+
+
+def _jwt_with_exp(dt) -> str:
+    def _seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+    return f"{_seg({'alg': 'none'})}.{_seg({'exp': int(dt.timestamp())})}.sig"
+
+
+class TestRefreshWindow:
+    def test_renews_with_time_left_for_sync(self):
+        recent = _iso(datetime.now(timezone.utc) - timedelta(minutes=50))
+        in_twelve = _jwt_with_exp(datetime.now(timezone.utc) + timedelta(minutes=12))
+        in_thirty = _jwt_with_exp(datetime.now(timezone.utc) + timedelta(minutes=30))
+        assert xai_token_refresh._needs_refresh({"codex_last_refresh": recent}, in_twelve)
+        assert not xai_token_refresh._needs_refresh({"codex_last_refresh": recent}, in_thirty)
+
+    def test_sweep_runs_inside_the_refresh_window(self):
+        assert 0 < settings.xai_token_refresh_interval_seconds < xai_token_refresh.EXP_SKEW_SECONDS

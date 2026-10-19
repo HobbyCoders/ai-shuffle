@@ -41,6 +41,38 @@ def authority_device_id(ctx: engine.NetworkContext) -> Optional[str]:
     return active[0] if active else None
 
 
+def renewal_pending_message(service: str) -> Optional[str]:
+    """User-facing reason a 401 could not be fixed here, or None if this worker renews.
+
+    ``service`` names the login ("ChatGPT", "Grok"). Called after a worker
+    that does not renew synced logins waited for a renewal that never came.
+    """
+    try:
+        ctx = engine.load_context(publish=False)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read network membership for a %s renewal", service, exc_info=True)
+        return (
+            f"Your {service} login has expired on this worker, and this worker could not "
+            "read its network membership to find the worker that renews it. Try again shortly."
+        )
+    if ctx is None:
+        return None
+    authority = authority_device_id(ctx)
+    if authority == ctx.device_id:
+        return None
+    member = ctx.member(authority) if authority else None
+    if member is None:
+        return (
+            f"Your {service} login has expired on this worker and no active worker in "
+            "this network can renew it. Sign in again from Settings > Providers."
+        )
+    return (
+        f"Your {service} login is renewed by the worker '{member.name}', and its "
+        "renewed token has not reached this worker. Make sure that worker is running "
+        "and connected to this one, then try again."
+    )
+
+
 def may_refresh_here() -> bool:
     """True when this install may send a refresh for a synced subscription login.
 

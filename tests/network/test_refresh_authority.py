@@ -55,3 +55,34 @@ def test_unreadable_membership_does_not_renew(monkeypatch):
 
     monkeypatch.setattr(refresh_authority.engine, "load_context", broken)
     assert refresh_authority.may_refresh_here() is False
+
+
+def _named(device_id, name, **kwargs):
+    member = _member(device_id, **kwargs)
+    member.name = name
+    return member
+
+
+def test_renewing_worker_has_no_pending_message(monkeypatch):
+    members = (_named("dev_founder", "Unraid"), _named("dev_peer", "GamingPC"))
+    monkeypatch.setattr(refresh_authority.engine, "load_context",
+                        lambda **_: _ctx("dev_founder", "dev_founder", *members))
+    assert refresh_authority.renewal_pending_message("ChatGPT") is None
+    monkeypatch.setattr(refresh_authority.engine, "load_context", lambda **_: None)
+    assert refresh_authority.renewal_pending_message("ChatGPT") is None
+
+
+def test_pending_message_names_the_renewing_worker(monkeypatch):
+    members = (_named("dev_founder", "Unraid"), _named("dev_peer", "GamingPC"))
+    monkeypatch.setattr(refresh_authority.engine, "load_context",
+                        lambda **_: _ctx("dev_peer", "dev_founder", *members))
+    message = refresh_authority.renewal_pending_message("ChatGPT")
+    assert "ChatGPT" in message and "'Unraid'" in message
+
+
+def test_pending_message_without_any_active_worker_asks_for_sign_in(monkeypatch):
+    members = (_named("dev_founder", "Unraid", status=STATUS_REVOKED),
+               _named("dev_peer", "GamingPC", status=STATUS_REVOKED))
+    monkeypatch.setattr(refresh_authority.engine, "load_context",
+                        lambda **_: _ctx("dev_peer", "dev_founder", *members))
+    assert "Sign in again" in refresh_authority.renewal_pending_message("Grok")
