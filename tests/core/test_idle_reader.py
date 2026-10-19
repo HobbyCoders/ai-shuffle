@@ -41,6 +41,8 @@ def _make_pool(*, alive=True):
 def _draining_turn(session_id):
     turn = turns_db.enqueue_turn(session_id, "user", prompt="hi")
     turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn(session_id, "stop", turn_id=turn["id"])
+    turns_db.escalate_to_draining(turn["id"])
     return turn
 
 
@@ -80,7 +82,23 @@ async def test_drain_holds_the_eviction_guard_flag_while_it_runs(mock_db):
     assert state.idle_reader_active is False
 
 
-async def test_no_drainable_client_leaves_the_turn_alone(mock_db):
+async def test_live_streaming_client_is_not_evicted_or_settled(mock_db):
+    turn = _draining_turn("s1")
+    pool, state = _make_pool()
+    state.is_streaming = True
+    scheduler = MagicMock()
+    session_runtime.register_scheduler(scheduler)
+
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        await idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"])
+
+    assert turns_db.get_turn(turn["id"])["state"] == "draining"
+    pool.remove_broken.assert_not_awaited()
+    pool.remove_dead.assert_not_awaited()
+    scheduler.assert_not_called()
+
+
+async def test_missing_client_still_settles_the_draining_turn(mock_db):
     turn = _draining_turn("s1")
     pool = MagicMock()
     pool.peek.return_value = None
@@ -88,4 +106,4 @@ async def test_no_drainable_client_leaves_the_turn_alone(mock_db):
     with patch("app.core.session_pool.get_session_pool", return_value=pool):
         await idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"])
 
-    assert turns_db.get_turn(turn["id"])["state"] != "aborted"
+    assert turns_db.get_turn(turn["id"])["state"] == "aborted"
