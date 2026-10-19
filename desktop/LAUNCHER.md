@@ -75,6 +75,12 @@ Launcher 5 still runs the full `ColdClusterCopy.validate()` content read-back
 on a ready journal: every snapshot file is hashed against the manifest before
 selection. There is no redundant copy or second read in this path to remove;
 a structure-only or manifest-trust check would weaken the rollback guarantee.
+The `RESTORE_POINT_VALIDATING_LAUNCHERS` allowlist was re-audited for launcher 5:
+its ready-point preparation still performs that full content read-back, as
+`ready-journal launcher preparation reads every snapshot byte once without recopying`
+in [`test/source-updates.test.mjs`](test/source-updates.test.mjs) proves, including
+rejection of same-size content corruption. Launchers 4 and 5 are explicitly trusted;
+future versions still require a fresh audit.
 
 The acceptance run is `desktop-installer.yml` with `launcher_acceptance`
 checked and `release_tag` set to a published installer with an older launcher.
