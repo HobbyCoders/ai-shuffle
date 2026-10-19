@@ -73,6 +73,7 @@ export class Updater {
   private installFailed: (error: unknown) => Promise<void> = async () => {};
   private installGuard: () => Promise<string | null> = async () => null;
   private restarting: () => void = () => {};
+  private prepared: { prepare: () => Promise<void>; discard: () => Promise<void> } | null = null;
   private failedStarts: FailedStartRecovery | null = null;
   private policy: () => Promise<boolean> = async () => true;
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
@@ -169,6 +170,15 @@ export class Updater {
    * owner is told here that it is starting (a system notification).
    */
   onRestarting(action: () => void): void { this.restarting = action; }
+  /**
+   * Runs once the update is pending and the stack is stopped, before the app
+   * quits: the app makes the update's database restore point here, with its
+   * window open, so the launcher only checks it (update-restore-point.ts).
+   * `discard` runs when the install then fails, before the update stops being
+   * pending: the running version will use the database again, so a point made
+   * from it must never be kept for a later start.
+   */
+  onInstallPrepared(prepare: () => Promise<void>, discard: () => Promise<void>): void { this.prepared = { prepare, discard }; }
   /** A check refused because an update's first start failed: retry it when the launcher put everything back. */
   onFailedStart(recovery: FailedStartRecovery): void { this.failedStarts = recovery; }
   /** The check again after releasing failed starts, or null when none could be released. */
@@ -294,6 +304,7 @@ export class Updater {
       stopping = true;
       await this.beforeInstall();
       await this.applications.prepareInstall?.();
+      await this.prepared?.prepare();
       if (this.installedExecutable) {
         // Electron's relaunch inherits this process's environment. An older
         // installed launcher treats these variables as an instruction to attach
@@ -319,6 +330,7 @@ export class Updater {
       app.relaunch({ execPath: current.node, args: [path.join(current.desktopDir, 'scripts/bootstrap.mjs'), '--root', this.applications.options.root] });
       app.quit();
     } catch (error) {
+      if (stopping && this.prepared) try { await this.prepared.discard(); } catch (failure) { error = failure; }
       try { await this.applications.cancelInstall?.(); } catch (failure) { error = failure; }
       this.set({ phase: this.applications.cleanupError ? 'error' : 'ready', error: String(error), message: null });
       if (stopping) {

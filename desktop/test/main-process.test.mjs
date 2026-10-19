@@ -87,7 +87,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -101,7 +101,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./call-popout': { CallPopout: class { register() {} } },
 		'./managed-context': { managedContext: () => managed, setManagedContext: context => { managed = context; } },
 		'./installed-entry': { installedContext: () => installed },
-		'./installed-host': { installedLaunchArgs: () => [] },
+		'./installed-host': { installedLaunchArgs: () => [], launcherVersion: localRequire('./installed-host').launcherVersion, LAUNCHER_VERSION_ENV: 'SHUFFLE_LAUNCHER_VERSION' },
 		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
 		'./menu': { installMenu: (actions) => { menu = actions; } },
 		'./navigation': { installPermissionPolicy() {}, forgetServiceWorkers: async () => { serviceWorkerClears.push(pages.length); } },
@@ -534,5 +534,35 @@ test('an update\'s first start gives its worker 10 minutes to become ready; othe
 			assert.equal(typeof main.updater.failedStart?.release, 'function');
 			assert.equal(typeof main.updater.restarting, 'function');
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	}
+});
+
+test('restarting into an update copies the database for its restore point with the window saying so, only for launchers that then just check it', async () => {
+	const R = 'b'.repeat(40);
+	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
+	const host = { executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe', userData: 'C:/Users/owner/AppData/Roaming/AI Shuffle', name: 'AI Shuffle' };
+	const updates = (events) => ({ options: { root: '/isolated/no-root' }, async requireRestorePoint() {}, async databaseStarting() {}, healthy: () => new Promise(() => {}), async finishRollback() {}, async failed() {}, async load() {},
+		async prepareRollback(factory) { const copy = await factory('a'.repeat(40)); events.push(['copy', copy.constructor.name]); },
+		async rollbackVersion() { return events.ready ? '1.0.1' : null; }, async rollbackNotice() { return events.notice ?? null; },
+		async cancelPreparedRollback() { events.push(['discard']); } });
+	const events = []; events.ready = true;
+	const main = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(events), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	assert.deepEqual(main.errors, []);
+	const before = main.window.sent.length;
+	await main.updater.prepared.prepare();
+	assert.deepEqual([...events], [['copy', 'SinglePassClusterCopy']]);
+	assert.equal(main.window.currentPage, 'status');
+	const steps = main.window.sent.slice(before).filter(([channel]) => channel === 'desktop:worker-state').map(([, state]) => state.startupStep);
+	assert.deepEqual(steps, ['restore-point', undefined], 'the status page says the restore point is being prepared, then stops saying so');
+	await main.updater.prepared.discard();
+	assert.deepEqual(events.at(-1), ['discard']);
+	// A copy that failed ends the install with the reason the launcher would have shown.
+	const failing = []; failing.notice = 'Update 1.0.2 was not started because its database restore point failed: disk full';
+	const failed = await launch({ managed: { root: '/isolated/no-root', application, updates: updates(failing), host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	await assert.rejects(failed.updater.prepared.prepare(), /disk full/);
+	// Launchers before restore points, isolated profiles and other platforms keep the launcher's own behaviour.
+	for (const options of [{ env: { SHUFFLE_LAUNCHER_VERSION: '3' }, platform: 'win32', host }, { env: {}, platform: 'win32', host }, { env: { SHUFFLE_LAUNCHER_VERSION: '4' }, platform: 'linux', host }, { env: { SHUFFLE_LAUNCHER_VERSION: '4' }, platform: 'win32', host: null }]) {
+		const other = await launch({ managed: { root: '/isolated/no-root', application, updates: updates([]), host: options.host }, platform: options.platform, env: options.env });
+		assert.equal(other.updater.prepared, undefined, JSON.stringify(options));
 	}
 });

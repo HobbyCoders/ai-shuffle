@@ -1,0 +1,81 @@
+/**
+ * The update's database restore point, made by the running app before it
+ * restarts into the update instead of by the launcher afterwards.
+ *
+ * A launcher (4 and later) makes the point in `prepareRollback` before it
+ * selects the update, with no window open. `ColdClusterCopy.snapshot` reads
+ * the cluster four times (hash, copy, hash the copy, hash the source again),
+ * so on a large database the app seems to hang for minutes, and closing it
+ * then marks the update failed. When the running app has already made a ready
+ * point for the pending revision, the launcher's unchanged `prepareRollback`
+ * only validates it (one read). This file is not in the launcher closure
+ * (scripts/ci/update_reach.py).
+ */
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import path from 'node:path';
+import { ColdClusterCopy, durableJson, syncDirectory } from './database-restore';
+import { privateDirectory } from './private-file';
+
+/**
+ * Makes exactly the point `ColdClusterCopy.snapshot` makes (same folders, same
+ * manifest, checked by the same `validate`), reading each file once while it is
+ * copied and once more to check the copy. The source is checked for changes by
+ * size and modification time, which a stopped cluster does not change.
+ */
+export class SinglePassClusterCopy extends ColdClusterCopy {
+  constructor(private readonly cluster: string, private readonly stop: (snapshot: boolean) => Promise<void>) { super(cluster, stop); }
+
+  override async snapshot(): Promise<void> {
+    await this.stop(true);
+    await privateDirectory(this.cluster);
+    const source = path.join(this.cluster, 'data');
+    const before = await shape(source);
+    if (!before.PG_VERSION || !before[path.join('global', 'pg_control')] || before['postmaster.pid']) throw new Error('Not a stopped managed PostgreSQL cluster');
+    // The journal owns these paths; a prior snapshot is never overwritten implicitly.
+    const snapshot = path.join(this.cluster, 'update-snapshot');
+    await fs.mkdir(snapshot, { mode: 0o700 });
+    const manifest: Record<string, string> = {};
+    // The same walk and key order as inventory() in database-restore.ts: validate() compares the JSON text.
+    const copy = async (relative: string): Promise<void> => {
+      const from = path.join(source, relative), to = path.join(snapshot, 'data', relative);
+      const stat = await fs.lstat(from);
+      if (stat.isSymbolicLink()) throw new Error('Database restore points do not support symbolic links or external tablespaces');
+      if (stat.isDirectory()) {
+        manifest[relative + '/'] = 'directory';
+        await fs.mkdir(to, { mode: 0o700 });
+        for (const name of (await fs.readdir(from)).sort()) await copy(path.join(relative, name));
+        await syncDirectory(to);
+      } else if (stat.isFile()) {
+        const hash = createHash('sha256');
+        const read = createReadStream(from);
+        read.on('data', chunk => hash.update(chunk));
+        await pipeline(read, createWriteStream(to, { flags: 'wx', mode: 0o600 }));
+        const fd = await fs.open(to, 'r+');
+        try { await fd.sync(); } finally { await fd.close(); }
+        manifest[relative] = hash.digest('hex');
+      } else throw new Error('Unsupported database file');
+    };
+    await copy('');
+    await durableJson(path.join(snapshot, 'manifest.json'), manifest);
+    await syncDirectory(this.cluster);
+    // The launcher validates the copy the same way before it starts the update.
+    await this.validate();
+    if (JSON.stringify(before) !== JSON.stringify(await shape(source))) throw new Error('Database changed while taking its restore point');
+  }
+}
+
+/** Every entry below `root`: "directory", or the file's size and modification time. */
+async function shape(root: string): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  const walk = async (relative: string): Promise<void> => {
+    const stat = await fs.lstat(path.join(root, relative));
+    if (stat.isDirectory()) {
+      result[relative + '/'] = 'directory';
+      for (const name of (await fs.readdir(path.join(root, relative))).sort()) await walk(path.join(relative, name));
+    } else result[relative] = `${stat.isFile() ? 'file' : 'other'}:${stat.size}:${stat.mtimeMs}`;
+  };
+  await walk('');
+  return result;
+}

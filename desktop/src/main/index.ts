@@ -28,6 +28,7 @@ import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
+import { SinglePassClusterCopy } from './update-restore-point';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { CallPopout } from './call-popout';
@@ -433,6 +434,34 @@ async function main(): Promise<void> {
 	installMenu(actions);
 	if (!isolation) installTray(actions, identity.name);
 
+	// The restart's restore point: made here, with the window saying so, rather than by the launcher
+	// with no window open (update-restore-point.ts). Only launchers that make restore points (4 and
+	// later) check a ready one instead of making their own; the installer's own app is such a launcher.
+	const launcherKeepsPoint = !!applications && !!postgres && !isolation && process.platform === 'win32' &&
+		(managed ? !!managed.host && !managed.profile && launcherVersion(process.env[LAUNCHER_VERSION_ENV]) >= 4 : !!installation);
+	if (launcherKeepsPoint) {
+		const restorePoint = async () => new SinglePassClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
+			await quiesceRecordedWorker(path.join(userData, 'worker'));
+			await postgres!.quiesce(snapshot);
+		});
+		updater.onInstallPrepared(async () => {
+			preparingRestorePoint = true;
+			try {
+				await window.showPage('status');
+				window.send('desktop:worker-state', desktopState());
+				await applications!.prepareRollback(restorePoint);
+			} finally {
+				preparingRestorePoint = false;
+				window.send('desktop:worker-state', desktopState());
+			}
+			// A ready point: the launcher only checks it. None (a fenced recovery, or cleanup still
+			// pending) leaves the launcher to do as before. A failed copy already ended the
+			// install as the launcher would have: say why here.
+			if (await applications!.rollbackVersion()) return;
+			const notice = await applications!.rollbackNotice();
+			if (notice) throw new Error(notice);
+		}, async () => { await applications!.cancelPreparedRollback(restorePoint); });
+	}
 	updater.onBeforeInstall(async () => {
 		await initialization;
 		if (supervisor && !supervisor.state.external) {

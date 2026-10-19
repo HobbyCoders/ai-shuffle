@@ -548,6 +548,23 @@ test('a first start that never reached attach is put back by the launcher, then 
  assert.equal(app.version,B); assert.equal(app.hasMigrationRisk,false);
  assert.deepEqual(calls,['snapshot','restore','discard','snapshot']);
 });
+test('a restore point the app made before restarting is only checked by the launcher; one from a failed install is never reused',async t=>{
+ const {f,u,calls,factory}=await rollbackFixture(t);
+ const validated=[];const checking=async previous=>({...await factory(previous),validate:async()=>validated.push(previous),snapshot:async()=>assert.fail('the launcher must not copy again')});
+ // The running app copies the database with its window open, then restarts into the launcher.
+ await u.prepareRollback(factory);assert.deepEqual(calls,['snapshot']);assert.equal(await u.rollbackVersion(),'0.9.1');
+ const launcher=f.create();await launcher.load();
+ assert.equal(await launcher.recoverRollback(checking),false);await launcher.prepareRollback(checking);
+ assert.deepEqual(validated,[A]);assert.equal((await launcher.select()).revision,B);
+ // Another install whose restart fails: the app discards its point before the update stops being pending.
+ const g=await rollbackFixture(t);
+ g.u.stageDownloads();await g.u.prepareRollback(g.factory);
+ await g.u.cancelPreparedRollback(g.factory);await g.u.cancelInstall();
+ assert.deepEqual(g.calls,['snapshot','discard']);assert.equal(await g.u.rollbackVersion(),null);
+ // The running version used the database again; the next install copies it afresh.
+ await g.u.databaseStarting();await g.u.prepareInstall();await g.u.prepareRollback(g.factory);
+ assert.deepEqual(g.calls,['snapshot','discard','snapshot']);
+});
 test('a failed first start that may have migrated the database and was not put back is never offered again',async t=>{
  const {retryableStarts}=require('../dist/main/failed-start.js');
  const f=await fixture(t);const u=f.create();await u.load();

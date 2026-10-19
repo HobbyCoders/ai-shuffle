@@ -200,6 +200,27 @@ only suggests an installer that can help.
 An update's first start also gives its worker 10 minutes to become ready
 instead of 3: a worker that times out marks the update failed.
 
+**The restore point before the restart.** A launcher (4 and later) makes the
+restore point in `prepareRollback`, before `select` writes `booting`, with no
+window open. `ColdClusterCopy.snapshot` reads the cluster four times (hash,
+copy, hash the copy, hash the source again), so on a large database the
+launcher seems to hang for a minute or more; closing it then leaves a
+`preparing` journal, and `recoverRollback` marks the revision failed. Since
+this change the running app makes the point itself, once the update is
+pending and its worker and PostgreSQL are stopped, while the status page says
+"Preparing the update's database restore point…"
+(`src/main/update-restore-point.ts`). It writes the same folders and manifest
+in one copying pass plus one check of the copy, and checks the source for
+changes by size and modification time. The launcher's `prepareRollback` then
+finds a `ready` point for the pending revision and only validates it (one
+read). If the restart fails, the app discards the point
+(`cancelPreparedRollback`) before the update stops being pending, so a copy of
+a database the running version opens again is never kept. The app does this
+only under a launcher that makes restore points (Windows, launcher version 4
+or later, or the installer's own app); otherwise the launcher acts as before.
+Making the launcher's own copy faster would change the launcher closure and
+need a new launcher version.
+
 ## Replacing an older launcher
 
 All of these files are in the installed `resources` folder unless shown

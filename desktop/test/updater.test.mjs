@@ -485,3 +485,24 @@ test('restarting into an update says the new version is starting before the wind
  try{await second.updater.check();await second.updater.install();}finally{console.error=error;}
  assert.equal(second.calls.at(-1),'quit');
 });
+test('the restore point is made after the update is pending and before the restart, and discarded if the install then fails', async () => {
+ const {updater,calls,app}=fixture();
+ updater.useApplications(source({check:async()=>ready,prepareInstall:async()=>calls.push('pending'),cancelInstall:async()=>calls.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onBeforeInstall(async()=>calls.push('stop'));
+ updater.onInstallPrepared(async()=>calls.push('point'),async()=>calls.push('discard'));
+ await updater.check();await updater.install();
+ assert.deepEqual(calls.slice(0,3),['stop','pending','point']);assert.equal(calls.at(-1),'quit');assert(!calls.includes('discard'));
+ // The restart itself fails: the point goes before the update stops being pending.
+ const second=fixture();const order=second.calls;
+ second.app.relaunch=()=>{throw Error('cannot relaunch');};
+ second.updater.useApplications(source({check:async()=>ready,cancelInstall:async()=>order.push('cancel')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ second.updater.onInstallPrepared(async()=>order.push('point'),async()=>order.push('discard'));
+ await second.updater.check();await second.updater.install();
+ assert.deepEqual(order,['point','discard','cancel']);assert.match(second.updater.current.error,/cannot relaunch/);
+ // A copy that fails is the install's error; nothing is restarted.
+ const third=fixture();
+ third.updater.useApplications(source({check:async()=>ready}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ third.updater.onInstallPrepared(async()=>{throw Error('Update B was not started because its database restore point failed: disk full');},async()=>{});
+ await third.updater.check();await third.updater.install();
+ assert.match(third.updater.current.error,/disk full/);assert(!third.calls.includes('quit'));
+});
