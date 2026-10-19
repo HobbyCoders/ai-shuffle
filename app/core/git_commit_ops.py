@@ -296,6 +296,9 @@ class GitCommitMixin:
         self,
         working_dir: str,
         message: str,
+        *,
+        allow_empty: bool = False,
+        fallback_identity: Optional[Tuple[str, str]] = None,
     ) -> Tuple[bool, Optional[str]]:
         """
         Create a commit.
@@ -303,6 +306,8 @@ class GitCommitMixin:
         Args:
             working_dir: Repository directory
             message: Commit message
+            allow_empty: Allow an initial commit without tracked files
+            fallback_identity: Commit-scoped name/email for missing config fields
 
         Returns:
             Tuple of (success: bool, sha_or_error: Optional[str]).
@@ -314,7 +319,15 @@ class GitCommitMixin:
             # only unambiguous generation artifacts; prose is untouched.
             from app.core.git_text import sanitize_commit_text
 
-            args = ["commit", "-m", sanitize_commit_text(message)]
+            args = []
+            if fallback_identity:
+                for field, fallback in zip(("user.name", "user.email"), fallback_identity):
+                    configured = self._run_git(working_dir, ["config", "--get", field], timeout=5)
+                    if not configured.stdout.strip():
+                        args.extend(["-c", f"{field}={fallback}"])
+            args.extend(["commit", "-m", sanitize_commit_text(message)])
+            if allow_empty:
+                args.append("--allow-empty")
             result = self._run_git(working_dir, args, timeout=30)
 
             if result.returncode == 0:
@@ -324,7 +337,7 @@ class GitCommitMixin:
                 self.invalidate_status_cache(working_dir)
                 return True, commit_sha
 
-            error_msg = result.stderr.strip() if result.stderr else "Unknown commit error"
+            error_msg = result.stderr.strip() or result.stdout.strip() or f"git commit exited with status {result.returncode}"
             logger.warning(f"Failed to commit: {error_msg}")
             return False, error_msg
         except Exception as e:

@@ -265,13 +265,15 @@ curl -X POST http://localhost:8000/api/v1/projects/proj_abc123/git/init \
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `create_initial_commit` | boolean | `true` | Commit every file as "Initial commit" |
+| `create_initial_commit` | boolean | `true` | Commit every file as "Initial commit"; also creates a commit for an empty folder |
 | `create_github_repo` | boolean | `false` | Create a GitHub repository (needs `github_repo_name` and a signed-in GitHub CLI) and push the initial commit to it |
 | `github_repo_name` | string | | Up to 100 characters |
 | `github_private` | boolean | `true` | Make the GitHub repository private |
 | `default_branch` | string | `main` | Name of the first branch. Letters, digits, `.`, `_`, `/` and `-`, starting with a letter, digit or `_` (`422` otherwise) |
 
-Returns `success`, `message`, `repository_id`, `github_repo_url` and `github_repo_name`. Returns `400` if the folder is already a repository or GitHub is not signed in.
+Returns `success`, `message`, `repository_id`, `github_repo_url` and `github_repo_name`. Returns `400` if the folder already contains Git metadata or GitHub is not signed in.
+
+Missing Git identity fields use commit-scoped defaults: the owner's saved profile name (or `AI Shuffle`) and `noreply@ai-shuffle.invalid`. Configured fields are kept; no local or global Git identity is written. If initialization fails before a GitHub repository is created, only this request's `.git` metadata is rolled back, leaving project files intact so the action can be retried. This is filesystem cleanup, not a database transaction; a registration record may remain and is reused on retry. Commit failures include Git's diagnostic text. GitHub authentication is checked before any local initialization. Once a GitHub repository is created, the local repository is kept too: a failed push names the created repository and tells the user to push again from the Git panel, with `origin` already configured. Neither repository is deleted. On cancellation, cleanup waits briefly for the running operation; if it has not finished, metadata is kept rather than deleted underneath Git.
 
 ### POST /api/v1/projects/{project_id}/git/clone
 
