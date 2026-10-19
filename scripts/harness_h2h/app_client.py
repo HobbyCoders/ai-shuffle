@@ -56,6 +56,14 @@ class AppClient(HttpWorkerClient):
                 return f"prov:{row['id']}:{model}"
         raise ClientError(f"no ChatGPT provider row on this worker serves {model}")
 
+    def provider_usable(self, model: str) -> bool:
+        """Whether the ChatGPT row is signed in (``usable``) right now."""
+        pid = self.resolve_model(model).split(":")[1]
+        rows = self._req("GET", "/models").get("providers") or []
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        return any(r.get("id") == pid and r.get("usable", True) for r in rows)
+
     def start(self, prompt: str, *, project: str, profile: str, model: str, effort: str) -> str:
         model = self.resolve_model(model)
         request_id = uuid.uuid4().hex

@@ -256,6 +256,14 @@ def from_fluid_store(store: Path, calls_path: Path, stream_path: Path) -> dict[s
 def from_app_events(events: list[dict[str, Any]], session: dict[str, Any] | None) -> dict[str, Any]:
     tr = from_events(events)
     session = session or {}
+    # A turn the app ended on an error (a dead provider sign-in, a harness
+    # exception) is not the agent's failure; the runner turns it into a
+    # harness_error so the run is redone.
+    tr["aborts"] = [str(_payload(e).get("message") or "")[:500] for e in events
+                    if e.get("event_type") == "turn.aborted"
+                    and _payload(e).get("reason") == "error"]
+    tr["subagents"] = [{k: _payload(e).get(k) for k in ("worker_session_id", "agent_name", "description")}
+                       for e in events if e.get("event_type") == "subagent.started"]
     tr["self_reported"] = {k: session.get(k) for k in (
         "total_tokens_in", "total_tokens_out", "total_cache_read_tokens",
         "total_cache_creation_tokens", "total_cost_usd", "model", "status")}

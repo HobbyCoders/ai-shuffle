@@ -67,6 +67,30 @@ def test_app_events_rebuild_calls_from_usage_boundaries():
     assert tr["final_text"] == "done"
 
 
+def test_app_abort_and_delegation_are_surfaced():
+    ev = [
+        {"event_type": "turn.started", "data": {"created_at": "2026-10-19T00:00:00+00:00"}},
+        {"event_type": "subagent.started", "data": {"worker_session_id": "w1", "agent_name": "A",
+                                                     "description": "d"}},
+        {"event_type": "turn.aborted", "data": {"created_at": "2026-10-19T00:00:03+00:00",
+                                                 "reason": "error", "message": "needs to be reconnected"}},
+        {"event_type": "turn.aborted", "data": {"reason": "user"}},
+    ]
+    tr = TR.from_app_events(ev, {})
+    assert tr["aborts"] == ["needs to be reconnected"]
+    assert tr["subagents"] == [{"worker_session_id": "w1", "agent_name": "A", "description": "d"}]
+
+
+def test_matrix_redoes_harness_failures(tmp_path):
+    from scripts.harness_h2h import runner
+    ok, bad = tmp_path / "ok.json", tmp_path / "bad.json"
+    ok.write_text(json.dumps({"grade": {"passed": False}}))
+    bad.write_text(json.dumps({"harness_error": "app turn aborted: x"}))
+    assert not runner._needs_redo(ok)
+    assert runner._needs_redo(bad)
+    assert runner._needs_redo(tmp_path / "missing.json")
+
+
 def test_contamination_flags_routes_to_the_real_fix():
     tools = [{"name": "Bash", "input": "gh pr view 2343"},
              {"name": "Bash", "input": "cat /workspace/ai-shuffle/app/serve.py"},

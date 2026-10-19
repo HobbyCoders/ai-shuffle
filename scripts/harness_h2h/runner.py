@@ -197,8 +197,16 @@ def run_app(task: T.Task, ws: Path, run_dir: Path, *, model: str, effort: str, a
     finally:
         client.close()
     tr = TR.from_app_events(events, session)
-    return {"t_start": t0, "t_end": done or t1, "exit": 0 if not timed_out else None,
-            "timed_out": timed_out, "trace": tr, "session_id": sid}
+    out = {"t_start": t0, "t_end": done or t1, "exit": 0 if not timed_out else None,
+           "timed_out": timed_out, "trace": tr, "session_id": sid}
+    if tr["aborts"]:
+        out["harness_error"] = "app turn aborted: " + tr["aborts"][0]
+    if tr["subagents"]:
+        # Subagents run on the owner's subagent default model, not the model
+        # under test; the bench profile blocks them, so this flags a leak.
+        out["harness_error"] = (out.get("harness_error") or "") + \
+            f" delegated to {len(tr['subagents'])} subagent(s)"
+    return out
 
 
 # ─── matrix ─────────────────────────────────────────────────────────────────
@@ -245,6 +253,25 @@ def run_one(task: T.Task, arm: str, trial: int, *, out: Path, workspace: Path, m
     return result
 
 
+def _needs_redo(result_path: Path) -> bool:
+    """A finished run whose result is a harness failure, not the agent's."""
+    try:
+        return bool(json.loads(result_path.read_text()).get("harness_error"))
+    except (OSError, ValueError):
+        return True
+
+
+def _app_ready(app_url: str, model: str) -> bool:
+    from scripts.harness_h2h.app_client import AppClient
+    client = AppClient(app_url)
+    try:
+        return client.provider_usable(model)
+    except Exception:  # noqa: BLE001 — an unreachable app is not ready either
+        return False
+    finally:
+        client.close()
+
+
 def run_matrix(*, tasks: list[T.Task], arms: list[str], trials: int, out: Path, workspace: Path,
                model: str, effort: str, token: Path | None, app_url: str, skip_done: bool = True) -> int:
     token = token or default_token_path()
@@ -261,7 +288,11 @@ def run_matrix(*, tasks: list[T.Task], arms: list[str], trials: int, out: Path, 
         for ti, task in enumerate(tasks):
             for arm in _order(arms, ti, trial):
                 done = out / "runs" / task.id / arm / f"t{trial}" / "result.json"
-                if skip_done and done.exists():
+                if skip_done and done.exists() and not _needs_redo(done):
+                    continue
+                if arm == "app" and not _app_ready(app_url, model):
+                    print(f"[{time.strftime('%H:%M:%S')}] {task.id} app t{trial} skipped: the app's "
+                          "ChatGPT provider is not usable (reconnect it, then re-run)", flush=True)
                     continue
                 print(f"[{time.strftime('%H:%M:%S')}] {task.id} {arm} t{trial} ...", flush=True)
                 r = run_one(task, arm, trial, out=out, workspace=workspace, model=model,
