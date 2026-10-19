@@ -107,8 +107,8 @@ def test_preview_cookie_can_read_but_cannot_put_advertised_addresses(setup, monk
     monkeypatch.setattr(preview_access, "_private_peer", lambda request: True)
     monkeypatch.setattr(preview_access, "verify", lambda token:
         preview_access.Grant(session_id="preview-session", expires_at=2**40) if token == "preview-token" else None)
-    client.cookies.set(preview_access.COOKIE_NAME, "preview-token")
     with server.active():
+        client.cookies.set(preview_access.cookie_name(), "preview-token")
         advertisements.set_owner_urls(["https://saved.example"])
         assert client.get("/api/v1/network/advertised-addresses").json()["addresses"] == ["https://saved.example"]
         response = client.put("/api/v1/network/advertised-addresses", json={"addresses": ["https://changed.example"]})
