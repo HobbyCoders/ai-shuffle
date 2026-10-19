@@ -8,7 +8,10 @@ The Codex columns are reused as generic OAuth blobs; Grok enrollment writes
 Responsibilities mirror ``codex_token_refresh``:
 
 * Decide WHEN a Grok provider's access token needs refreshing (8-day proactive
-  interval, or JWT ``exp`` within 5 minutes).
+  interval, or JWT ``exp`` within 15 minutes).
+* Renew a synced login from ONE worker only (``app.network.refresh_authority``);
+  other workers in the network wait for the renewed bundle to arrive through
+  sync, exactly like ``codex_token_refresh``.
 * Serialize refreshes per provider via an asyncio lock + the existing durable
   ``codex_refresh_lease_*`` columns.
 * Decrypt, refresh via ``xai_oauth.refresh_token``, re-encrypt, persist with
@@ -32,11 +35,13 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 PROACTIVE_REFRESH_AFTER_SECONDS = 8 * 24 * 3600  # 8 days
-EXP_SKEW_SECONDS = 5 * 60  # refresh when the access-token exp is within 5 min
+EXP_SKEW_SECONDS = 15 * 60  # leave time for the renewed bundle to sync to peers
 
 CLAIM_TTL_SECONDS = 120
 CLAIM_ATTEMPTS_ON_401 = 3
 CLAIM_RETRY_SLEEP_SECONDS = 2
+SYNC_WAIT_ON_401_SECONDS = 20
+SYNC_POLL_SECONDS = 2
 
 _locks: Dict[str, asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
@@ -86,7 +91,7 @@ def _access_token_exp(access_token: Optional[str]) -> Optional[datetime]:
 
 
 def _needs_refresh(bundle: dict, access_token_plaintext: Optional[str]) -> bool:
-    """True when the 8-day interval has elapsed or JWT exp is within 5 min."""
+    """True when the 8-day interval has elapsed or JWT exp is within 15 min."""
     now = _now()
     last_refresh = _parse_iso(bundle.get("codex_last_refresh"))
     if last_refresh is None:
@@ -199,6 +204,44 @@ async def _release_claim(provider_id: str, owner: str) -> None:
         )
 
 
+async def _may_refresh_here() -> bool:
+    """Whether this install renews synced logins (see refresh_authority)."""
+    from app.db.async_database import run_sync
+    from app.network import refresh_authority
+
+    return await run_sync(refresh_authority.may_refresh_here)
+
+
+async def _wait_for_synced_rotation(
+    provider_id: str, stale_access_token: Optional[str]
+) -> bool:
+    """Wait for the renewing worker's rotated bundle to arrive through sync.
+
+    Never POSTs: this worker's copy of the refresh token may already be spent.
+    """
+    from app.db.async_database import run_sync
+    from app.db import database as db
+
+    if stale_access_token is not None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SYNC_WAIT_ON_401_SECONDS
+        while True:
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not _usable_grok_bundle(stored):
+                return False
+            if _stored_access_differs(stored, stale_access_token):
+                return True
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(SYNC_POLL_SECONDS)
+    logger.warning(
+        "grok refresh: 401 for provider %s on a worker that does not renew "
+        "synced logins, and no renewed token arrived from the network",
+        provider_id,
+    )
+    return False
+
+
 def _usable_grok_bundle(stored: Optional[dict]) -> bool:
     """A stored bundle we may auto-refresh: has a refresh blob, is grok mode,
     and is not already flagged dead."""
@@ -273,10 +316,14 @@ async def refresh_provider(
 ) -> bool:
     """Refresh one provider's Grok token if needed (or ``force``).
 
-    Returns ``True`` if a refresh was performed, ``False`` if skipped.
+    Returns ``True`` if a refresh was performed, ``False`` if skipped
+    (including when another worker in the network renews this login).
     """
     from app.db.async_database import run_sync
     from app.db import database as db
+
+    if not await _may_refresh_here():
+        return False
 
     lock = await _get_lock(provider_id)
     async with lock:
@@ -336,10 +383,14 @@ async def refresh_on_401_once(
 
     A single forced refresh after an upstream 401, serialized per provider.
     Returns ``True`` when a fresh token is available (we rotated it, or a peer
-    did) so the caller retries the upstream once.
+    did) so the caller retries the upstream once. A worker that does not renew
+    synced logins waits for the renewed bundle to sync instead of POSTing.
     """
     from app.db.async_database import run_sync
     from app.db import database as db
+
+    if not await _may_refresh_here():
+        return await _wait_for_synced_rotation(provider_id, stale_access_token)
 
     lock = await _get_lock(provider_id)
     async with lock:
@@ -393,6 +444,9 @@ async def refresh_due_providers(*, client=None) -> int:
     from app.db.async_database import run_sync
     from app.db import database as db
 
+    if not await _may_refresh_here():
+        logger.debug("grok refresh: another worker renews synced logins; skipping sweep")
+        return 0
     providers = await run_sync(db.get_enabled_model_providers)
     refreshed = 0
     for row in providers or []:

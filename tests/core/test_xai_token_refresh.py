@@ -174,3 +174,30 @@ class TestRefreshOn401:
         stored = db.get_codex_tokens(PROVIDER_ID)
         assert encryption.decrypt_value(stored["codex_access_token"]) == "access-401"
         assert stored["auth_mode"] == "grok"
+
+
+class TestPeerWorkerNeverRenews:
+    """In a worker network only one worker renews the synced Grok login."""
+
+    @pytest.fixture(autouse=True)
+    def _peer_worker(self, monkeypatch):
+        from app.network import refresh_authority
+        monkeypatch.setattr(refresh_authority, "may_refresh_here", lambda: False)
+        monkeypatch.setattr(xai_token_refresh, "SYNC_WAIT_ON_401_SECONDS", 0.2, raising=False)
+        monkeypatch.setattr(xai_token_refresh, "SYNC_POLL_SECONDS", 0.05, raising=False)
+
+    async def test_due_login_is_not_renewed_here(self, mock_db):
+        unlock_encryption(mock_db)
+        _seed_provider(last_refresh=_iso(datetime.now(timezone.utc) - timedelta(days=9)))
+        posted = []
+
+        def handler(request):
+            posted.append(1)
+            return httpx.Response(400, json={"error": "refresh_token_reused"})
+
+        async with mock_transport_client(handler) as c:
+            assert await xai_token_refresh.refresh_due_providers(client=c) == 0
+            assert await xai_token_refresh.refresh_on_401_once(
+                PROVIDER_ID, stale_access_token="access-old", client=c) is False
+        assert posted == []
+        assert not db.get_codex_tokens(PROVIDER_ID)["needs_reauth"]
