@@ -105,12 +105,6 @@ def _as_owner_chat(owner):
     return owner
 
 
-def _mirror_owner(row):
-    """``_owner()`` of a chat another worker runs, from its synced label."""
-    from app.db.mobile_tool_identity import mirrored
-    return _as_owner_chat((row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin")))
-
-
 def _list_entry(row):
     entry = {key: row.get(key) for key in _LIST_FIELDS}
     stamp = entry.get("updated_at")
@@ -125,8 +119,10 @@ def _principal(session_id):
 
 
 def _owner(row):
-    principal = _principal(row["id"])
-    # Legacy install-local chats remain usable without acquiring mobile grants.
+    from app.db.mobile_tool_identity import mirrored
+    principal = _principal(row["id"]) or mirrored(row)
+    # A handed-off chat can retain only its owner label. Do not turn a foreign
+    # labelled chat into an install-owner chat just because no credential is here.
     return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")))
 
 
@@ -230,11 +226,11 @@ def _calling_worker(from_device, what):
 def _remote_peer(caller, session_id):
     """The worker that runs ``session_id`` when another worker does, else None.
 
-    Checked against this worker's mirror with the same rules as a local peer;
-    the owning worker checks its own row again before it queues anything.
+    The mirror supplies routing only; the owning worker checks its current
+    row before it queues anything.
     """
     from app.db import sessions
-    from app.network import control, engine, runners
+    from app.network import control, engine
     if engine.context() is None:
         return None
     row = sessions.get_session(session_id)
@@ -243,24 +239,23 @@ def _remote_peer(caller, session_id):
     device = control.owner_of(row)
     if device is None:
         return None
-    if row.get("status") == "archived" and _mirror_owner(row) == _owner(caller):
-        from app.core import archive_guard
-        label = f"Session {session_id}" + (f" ({row['title']})" if row.get("title") else "")
-        raise ValueError(archive_guard.refusal(label, "receive messages"))
-    if not _top_level(row) or _mirror_owner(row) != _owner(caller):
-        raise ValueError("Session is not an eligible peer; use ListSessions.")
+    # The mirror locates the owner; it is not current eligibility evidence.
+    # Only the destination knows whether the chat is open, stopped or claimed.
     if _owner(caller) != _OWNER_CHAT:
         # A tool identity is a credential of THIS install and cannot travel.
         raise PermissionError("Only the owner's chats can message chats on another worker.")
+    return _peer_worker(device, session_id)
+
+
+def _peer_worker(device, session_id):
+    from app.network import runners
     worker = next((w for w in runners.other_workers() if w["device_id"] == device), None)
     if worker is None:
         raise ValueError(f"Session {session_id} runs on {_device_name(device)}, which is no longer "
                          "an active worker of this account.")
-    name = worker["device_name"]
-    if not worker["online"]:
-        raise ValueError(f"Session {session_id} runs on {name}, which is offline; it cannot receive "
-                         f"messages until {name} is back online.")
-    return {"device_id": device, "device_name": name}
+    # A stale heartbeat is not a refusal. The bounded authenticated control
+    # request below is the liveness check and reports an unreachable worker.
+    return {"device_id": device, "device_name": worker["device_name"]}
 
 
 def _peer_workers(session_id):
@@ -294,7 +289,7 @@ async def _ask_for_peers(worker, session_id=None):
 def _mirrored_peers(session_id, data, answers):
     """Owner-vouched entries, even before their catalog rows arrive here.
 
-    An existing mirror still fences conflicting ownership and provenance.
+    An existing mirror still fences conflicting execution ownership.
     """
     from app.db import sessions
     from app.network import control
@@ -307,8 +302,7 @@ def _mirrored_peers(session_id, data, answers):
             if not isinstance(peer_id, str) or peer_id == session_id:
                 continue
             row = sessions.get_session(peer_id)
-            if row and (control.owner_of(row) != worker["device_id"] or not _top_level(row)
-                        or _mirror_owner(row) != _OWNER_CHAT):
+            if row and control.owner_of(row) != worker["device_id"]:
                 continue
             # The owner just checked eligibility. Catalog replication can lag
             # behind this response, including the very existence of the row.
@@ -327,9 +321,8 @@ async def _discover_remote_peer(session_id, target_id):
     if await asyncio.to_thread(sessions.get_session, target_id):
         return None
     workers = await asyncio.to_thread(_peer_workers, session_id)
-    online = [w for w in workers if w["online"]]
-    answers = await asyncio.gather(*(_ask_for_peers(w, target_id) for w in online))
-    matches = [w for w, (entries, _) in zip(online, answers)
+    answers = await asyncio.gather(*(_ask_for_peers(w, target_id) for w in workers))
+    matches = [w for w, (entries, _) in zip(workers, answers)
                if entries is not None and any(isinstance(e, dict) and e.get("id") == target_id
                                               for e in entries)]
     if len(matches) > 1:
@@ -347,11 +340,9 @@ async def list_everywhere(session_id, data):
     workers = await asyncio.to_thread(_peer_workers, session_id)
     if not workers:
         return result
-    online = [w for w in workers if w["online"]]
-    answers = await asyncio.gather(*(_ask_for_peers(w) for w in online))
-    missed = [f"{w['device_name']} (offline)" for w in workers if not w["online"]]
-    missed += [problem for _, problem in answers if problem]
-    vouched = [(w, entries) for w, (entries, _) in zip(online, answers) if entries is not None]
+    answers = await asyncio.gather(*(_ask_for_peers(w) for w in workers))
+    missed = [problem for _, problem in answers if problem]
+    vouched = [(w, entries) for w, (entries, _) in zip(workers, answers) if entries is not None]
     result["sessions"].extend(await asyncio.to_thread(_mirrored_peers, session_id, data, vouched))
     result["note"] += (" Chats with a worker field run on that worker; MessageSession relays to them.")
     if missed:
@@ -1278,7 +1269,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             # Revalidate the caller and membership after the network lookup.
             if _owner(sender) != _OWNER_CHAT:
                 raise PermissionError("Only the owner's chats can message chats on another worker.")
-            peer = _remote_worker(discovered_peer["device_id"])
+            peer = _peer_worker(discovered_peer["device_id"], data["session_id"])
         if peer is not None:
             return _reserve_remote_message(
                 sender, context, peer, session_id=_text(data, "session_id", 200), text=text,

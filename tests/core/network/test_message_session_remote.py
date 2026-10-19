@@ -178,11 +178,32 @@ async def test_remote_reply_credit_is_consumed_once_and_cannot_ping_pong(workers
 
 async def test_offline_worker_is_named_in_the_listing(workers, monkeypatch, kicks):
     _a, b, _ = _two_workers(workers, monkeypatch, online=False)
-    monkeypatch.setattr(control, "call", AsyncMock(side_effect=AssertionError("no remote call")))
+    call = AsyncMock(side_effect=control.RunnerUnreachable("offline"))
+    monkeypatch.setattr(control, "call", call)
     with b.active():
         result = json.loads((await _tool("ListSessions", {})).text)
     assert [entry["id"] for entry in result["sessions"]] == []
-    assert "Not listed: chats on ServerWorker (offline)." in result["note"]
+    assert "Not listed: chats on ServerWorker (could not be reached)." in result["note"]
+    call.assert_awaited_once()
+
+
+@pytest.mark.parametrize("stale_fields", [
+    {"is_active": False}, {"status": "archived"}, {"hidden": True},
+    {"is_worker": True}, {"provenance_owner": "account:old-owner"},
+])
+async def test_owner_eligibility_beats_stale_mirror_and_presence(workers, monkeypatch, kicks, stale_fields):
+    a, b, _ = _two_workers(workers, monkeypatch, online=False)
+    _update(b, "target", publish=False, **stale_fields)
+    with b.active():
+        listing = await _tool("ListSessions", {"scope": "all"})
+        assert not listing.is_error, listing.text
+        assert [e["id"] for e in json.loads(listing.text)["sessions"]] == ["target"]
+        transport._last_contact.pop(a.device_id, None)
+        sent = await _tool("MessageSession", MESSAGE)
+        assert not sent.is_error, sent.text
+    with a.active():
+        assert len(agent_turns("target")) == 1
+    assert kicks == ["target"]
 
 
 async def test_other_states_do_not_ask_other_workers(workers, monkeypatch, kicks):
@@ -253,13 +274,14 @@ async def test_relay_returns_the_queued_shape(workers, monkeypatch, kicks):
 
 async def test_offline_owner_is_named_in_the_refusal(workers, monkeypatch, kicks):
     _a, b, _ = _two_workers(workers, monkeypatch, online=False)
-    call = AsyncMock(side_effect=AssertionError("no remote call"))
+    call = AsyncMock(side_effect=control.RunnerUnreachable("offline"))
     monkeypatch.setattr(control, "call", call)
     with b.active():
         outcome = await _tool("MessageSession", MESSAGE)
-        assert outcome.is_error and "Session target runs on ServerWorker, which is offline" in outcome.text
-        assert "not an eligible peer" not in outcome.text and _receipts() == []
-    call.assert_not_called()
+        assert outcome.is_error and "ServerWorker could not be reached" in outcome.text
+        assert "not an eligible peer" not in outcome.text
+        assert len(_receipts()) == 1  # An uncertain delivery retains its retry identity.
+    call.assert_awaited_once()
 
 
 async def test_unreachable_owner_keeps_the_receipt_for_a_retry(workers, monkeypatch, kicks):
