@@ -277,6 +277,109 @@ async def test_mirror_freshness_tracks_real_backlog_until_committed(workers, mon
     assert owner_pref(b, "backlog-3") == 3
 
 
+async def test_opening_checkpoint_finishes_while_owner_keeps_writing(workers):
+    """Real appends -> catalog -> authenticated exchange -> materialized mirror.
+
+    Every poll sees a newer live head; reaching the first head must nevertheless
+    finish initial loading. Later status calls still report the real backlog.
+    """
+    from app.db import session_events
+    from app.network import catalog
+    from tests.core.network.harness import join
+
+    a, b = workers("busy-owner"), workers("busy-mirror")
+    with a.active():
+        engine.create_network("Home")
+        database.create_session("busy", "default", title="Busy")
+        session_events.append_events("busy", [{"type": "message.user", "payload": {"content": "start"}}])
+        catalog.publish_owned()
+    join(a, b)
+    with a.active():
+        session_events.append_events("busy", [{"type": "subagent.progress", "payload": {"text": "working"}}])
+    served = ServedBy(a, "https://busy-owner.example.com")
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            transport.session_sync_status("busy", a.device_id)
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context())
+            first = transport.session_sync_status("busy", a.device_id)
+            target = first["initial_target"]
+            assert first["state"] == "syncing"
+            assert first["initial_pending_updates"] == 1
+            assert not first["initial_caught_up"]
+            assert target["seq"] == 2
+        for _ in range(3):
+            with a.active():
+                catalog.publish_events(session_ids=["busy"])
+                session_events.append_events("busy", [
+                    {"type": "subagent.progress", "payload": {"text": "still working"}} for _ in range(3)
+                ])
+            with b.active():
+                await link.sync_once(client, engine.context())
+                status = transport.session_sync_status("busy", a.device_id, initial_target=target)
+                assert status["state"] == "syncing"
+                assert status["pending_updates"] == 3
+                assert status["initial_target"] == target
+                assert status["initial_caught_up"]
+                assert status["initial_pending_updates"] == 0
+                # A second viewer gets its own opening checkpoint, not a latch
+                # that some other viewer already completed.
+                other = transport.session_sync_status("busy", a.device_id)
+                assert not other["initial_caught_up"]
+                assert other["initial_target"]["seq"] > target["seq"]
+
+
+@pytest.mark.parametrize("change", ["clear", "truncate", "missing-witness"])
+def test_opening_checkpoint_requires_epoch_and_tail_identity(workers, change):
+    from app.db import session_events
+    from app.db.sessions import clear_session_conversation
+
+    worker = workers("checkpoint-mirror")
+    with worker.active():
+        engine.create_network("Home")
+        database.create_session("viewed", "default", title="Viewed")
+        session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "one"}}])
+        target = session_events.get_watermark("viewed")
+        session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "two"}}])
+        head = session_events.get_watermark("viewed")
+        transport.session_sync_status("viewed", "owner")
+        if change == "clear":
+            clear_session_conversation("viewed")
+            session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "new"}}])
+            head = session_events.get_watermark("viewed")
+            head = {**head, "seq": 2, "tail_id": "not-replicated"}
+        elif change == "truncate":
+            target = {**target, "seq": 100, "tail_id": "retracted"}
+            head = {**head, "tail_id": "replacement-not-replicated"}
+        else:
+            # Matching seq/epoch alone must not reveal a partial replacement.
+            target = {**target, "tail_id": "replacement-not-replicated"}
+            head = {**head, "seq": 3, "tail_id": "new-tail"}
+        transport.note_session_watermarks("owner", ["viewed"], {"viewed": head})
+        status = transport.session_sync_status("viewed", "owner", initial_target=target)
+        assert status["state"] == "syncing"
+        assert not status["initial_caught_up"]
+        assert status["initial_pending_updates"] > 0
+        assert status["initial_target"] == (target if change == "missing-witness" else head)
+
+
+def test_current_head_supersedes_retracted_opening_checkpoint(workers):
+    from app.db import session_events
+
+    worker = workers("retracted-checkpoint")
+    with worker.active():
+        engine.create_network("Home")
+        database.create_session("viewed", "default", title="Viewed")
+        session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "one"}}])
+        head = session_events.get_watermark("viewed")
+        transport.session_sync_status("viewed", "owner")
+        transport.note_session_watermarks("owner", ["viewed"], {"viewed": head})
+        status = transport.session_sync_status("viewed", "owner", initial_target={**head, "tail_id": "retracted"})
+        assert status["state"] == "current"
+        assert status["initial_caught_up"]
+        assert status["initial_pending_updates"] == 0
+
+
 async def test_session_freshness_ignores_other_chats_and_tracks_all_events(workers):
     from app.db import session_events
     from app.network import catalog

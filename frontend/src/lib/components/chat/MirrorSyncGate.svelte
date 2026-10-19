@@ -15,8 +15,8 @@
 		sessionId: string | null;
 		remote?: boolean;
 		deviceName?: string | null;
-		/** Fires ONCE per opened session: its first transition to `current`.
-		 *  Later drains of an owner-wide backlog must not reload the transcript —
+		/** Fires ONCE per opened session: its opening checkpoint is materialized.
+		 *  Later drains of a live backlog must not reload the transcript —
 		 *  the live SSE feed already delivers every replicated event, and an
 		 *  explicit log rewrite reaches the feed as its own `reset` (#2227). */
 		onCaughtUp: () => void;
@@ -44,6 +44,7 @@
 		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout>;
 		let caughtUpOnce = false;
+		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
 		const notice = createConnectionBannerGrace({
 			onShow: () => { syncNoticeVisible = true; },
 			onHide: () => { syncNoticeVisible = false; },
@@ -55,17 +56,28 @@
 		pending = 0;
 		async function poll() {
 			try {
-				const response = await fetch(`${apiBase()}/sessions/${encodeURIComponent(id!)}/sync-status`, withAuth({ signal: controller.signal }));
+				const query = new URLSearchParams();
+				if (initialTarget && !caughtUpOnce) {
+					query.set('initial_seq', String(initialTarget.seq));
+					query.set('initial_epoch', initialTarget.epoch);
+					query.set('initial_tail_id', initialTarget.tail_id);
+				}
+				const suffix = query.size ? `?${query}` : '';
+				const response = await fetch(`${apiBase()}/sessions/${encodeURIComponent(id!)}/sync-status${suffix}`, withAuth({ signal: controller.signal }));
 				if (!response.ok) throw new Error('Sync status unavailable');
 				const status = await response.json();
 				if (controller.signal.aborted) return;
 				if (!['checking', 'syncing', 'current', 'offline'].includes(status.state)) throw new Error('Invalid sync status');
-				// Only the first catch-up may rebuild the transcript.
-				const firstCatchUp = status.state === 'current' && !caughtUpOnce;
+				// Pin an opening checkpoint instead of chasing a continuously writing
+				// owner. The server replaces it on an epoch change or truncation.
+				if (!caughtUpOnce && status.initial_target) initialTarget = status.initial_target;
+				const firstCatchUp = !caughtUpOnce && (status.state === 'current' || status.initial_caught_up === true);
 				if (firstCatchUp) caughtUpOnce = true;
 				syncState = status.state;
-				pending = status.pending_updates ?? 0;
-				if (status.state === 'current' || status.state === 'offline') revealedSession = id;
+				pending = status.scope === 'owner' ? 0 : (!caughtUpOnce
+					? status.initial_pending_updates ?? status.pending_updates ?? 0
+					: status.pending_updates ?? 0);
+				if (firstCatchUp || status.state === 'current' || status.state === 'offline') revealedSession = id;
 				notice.setConnected(status.state !== 'syncing' && status.state !== 'checking');
 				if (firstCatchUp) untrack(onCaughtUp);
 			} catch {
