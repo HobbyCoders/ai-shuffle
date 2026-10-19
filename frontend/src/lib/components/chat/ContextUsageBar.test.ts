@@ -217,58 +217,44 @@ describe('ContextUsageBar — collapsed Claude row and passed resets', () => {
 	});
 });
 
-describe('ContextUsageBar — updates while closed', () => {
-	it.each([false, true])('animates snapshot balances and live quota on reopen (expanded=%s)', async (expanded) => {
-		let callbacks = new Map<number, FrameRequestCallback>();
-		let id = 0;
-		vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-			callbacks.set(++id, callback); return id;
+describe('ContextUsageBar — immediate usage numbers', () => {
+	it.each([false, true])('shows current values on reopen and live updates without flipping (expanded=%s)', async (expanded) => {
+		usageSections.set({ plan: expanded, 'provider:credits': expanded, 'provider:codex': expanded });
+		const snapshot = (balance: number, used = 40) => rateLimit.applySnapshot({
+			available: true, windows: [{ type: 'five_hour', utilization: 24, resets_at: future() }],
+			providers: [
+				{ provider_id: 'credits', provider_type: 'fal', provider_name: 'fal.ai',
+					credits: { balance_remaining: balance } },
+				{ provider_id: 'codex', provider_type: 'chatgpt', provider_name: 'ChatGPT',
+					windows: [{ type: 'five_hour', utilization: used, resets_at: future() }] },
+			],
 		});
-		vi.stubGlobal('cancelAnimationFrame', (key: number) => callbacks.delete(key));
-		vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
-		const advance = (time: number) => {
-			const pending = [...callbacks.values()]; callbacks.clear();
-			pending.forEach(callback => callback(time));
-		};
-		try {
-			usageSections.set({ plan: expanded, 'provider:credits': expanded });
-			const snapshot = (balance: number) => rateLimit.applySnapshot({
-				available: true, windows: [{ type: 'five_hour', utilization: 24, resets_at: future() }],
-				providers: [{ provider_id: 'credits', provider_type: 'fal', provider_name: 'fal.ai',
-					credits: { balance_remaining: balance } }]
-			});
-			snapshot(22.91);
-			const { container } = render(ContextUsageBar);
-			await openPopover(container);
-			expect(container.textContent).toContain('24% left');
-			expect(container.textContent).toContain('$22.91 left');
-			await openPopover(container);
-			snapshot(21.50);
-			snapshot(20.44);
-			rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.82, resets_at: future() });
-			await openPopover(container);
-			expect(container.textContent).toContain('24% left');
-			expect(container.textContent).toContain('$22.91 left');
-			advance(0); advance(450);
-			expect(container.textContent).toContain('$22.91 left');
-			expect(container.querySelectorAll('.usage-number-flipping')).toHaveLength(2);
-			expect(container.textContent).not.toContain('$20.44 left');
-			advance(1650);
-			expect(container.textContent).toContain('18% left');
-			expect(container.textContent).toContain('$20.44 left');
-			await openPopover(container); await openPopover(container);
-			expect(container.textContent).toContain('18% left');
-			expect(container.textContent).toContain('$20.44 left');
-			expect(callbacks.size).toBe(0);
-			// The refresh request started by opening can land after the labels mount.
-			snapshot(19.25);
-			await waitFor(() => expect(callbacks.size).toBeGreaterThan(0));
-			expect(container.textContent).toContain('$20.44 left');
-			advance(0); advance(1650);
-			expect(container.textContent).toContain('$19.25 left');
-		} finally {
-			cleanup(); vi.unstubAllGlobals();
-		}
+		snapshot(22.91);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('24% left');
+		expect(container.textContent).toContain('$22.91 left');
+		expect(container.textContent).toContain('60% left');
+		await openPopover(container);
+		snapshot(21.50);
+		snapshot(20.44, 50);
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.82, resets_at: future() });
+		await openPopover(container);
+		expect(container.textContent).toContain('18% left');
+		expect(container.textContent).toContain('$20.44 left');
+		expect(container.textContent).toContain('50% left');
+		expect(container.textContent).not.toContain('24% left');
+		expect(container.textContent).not.toContain('$22.91 left');
+		expect(container.querySelector('[class*="usage-flip"], .usage-number')).toBeNull();
+
+		// A refresh landing while open must also show the new reading immediately.
+		snapshot(19.25, 55);
+		await tick();
+		expect(container.textContent).toContain('$19.25 left');
+		expect(container.textContent).toContain('45% left');
+		expect(container.textContent).not.toContain('$20.44 left');
+		expect(container.querySelector('[class*="usage-flip"], .usage-number')).toBeNull();
+		expect(localStorage.getItem('aihub.usageLastShown.v1')).toBeNull();
 	});
 });
 
@@ -2196,9 +2182,9 @@ describe('ContextUsageBar — live per-call breakdown', () => {
 			...mocks.activeSession.current,
 			liveContextUsage: live(150_000),
 		});
-		await waitFor(() =>
-			expect(container.querySelector('.ctx-pct')?.textContent).toContain('75%')
-		);
+		await tick();
+		expect(container.querySelector('.ctx-pct')?.textContent).toBe('(75%)');
+		expect(container.querySelector('.ctx-pct')?.children).toHaveLength(0);
 	});
 
 	it('renders category rows from the pushed snapshot', async () => {
