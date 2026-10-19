@@ -1517,24 +1517,37 @@ def _owner_wake_pass(*, dirty: set, sessions: Optional[set], candidates: Optiona
 
 
 PRUNE_INTERVAL_SECONDS = 24 * 3600.0
-_last_prune = 0.0
+PRUNE_STARTUP_DELAY_SECONDS = 5 * 60.0
+
+
+async def prune_loop() -> None:
+    """Retention must never hold up presence or compete with startup catch-up."""
+    stop = threading.Event()
+    try:
+        await asyncio.sleep(PRUNE_STARTUP_DELAY_SECONDS)
+        while True:
+            try:
+                pruned = await asyncio.to_thread(store.prune_ops, stop=stop)
+                if pruned:
+                    logger.info("Pruned %d old sync operations", pruned)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.warning("Sync operation pruning failed", exc_info=True)
+            await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
+    finally:
+        # Cancelling to_thread alone does not stop its worker. Each SQL statement
+        # is timeout-bounded; do not let the thread start another batch on stop.
+        stop.set()
 
 
 async def presence_loop() -> None:
-    global _last_prune
     while True:
         try:
             capabilities = await asyncio.to_thread(_capabilities)
             await asyncio.to_thread(engine.publish_presence, capabilities=capabilities, version=settings.version)
             await asyncio.to_thread(store.expire_conflicts)
             await asyncio.to_thread(store.expire_joins)
-            if time.monotonic() - _last_prune >= PRUNE_INTERVAL_SECONDS:
-                # The op log is forwarded to peers that lack it; older ops that
-                # are not a record's latest are served by snapshots instead.
-                _last_prune = time.monotonic()
-                pruned = await asyncio.to_thread(store.prune_ops)
-                if pruned:
-                    logger.info("Pruned %d old sync operations", pruned)
             from app.network import peer_snapshot
             await asyncio.to_thread(peer_snapshot.cleanup)
         except asyncio.CancelledError:
@@ -1598,6 +1611,7 @@ def start() -> List[asyncio.Task]:
         asyncio.create_task(sync_loop(), name="network-sync"),
         asyncio.create_task(scan_loop(), name="network-scan"),
         asyncio.create_task(presence_loop(), name="network-presence"),
+        asyncio.create_task(prune_loop(), name="network-prune"),
         asyncio.create_task(liveness_loop(), name="network-liveness"),
         asyncio.create_task(transcripts.loop(), name="network-transcripts"),
     ]

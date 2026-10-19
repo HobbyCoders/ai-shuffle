@@ -637,6 +637,11 @@ async def _create_v2_branch_session(
     #    that still carried the previous task's branch). Refuse instead; the
     #    per-(project, branch) lock makes two concurrent mints of one name
     #    resolve to exactly one owner.
+    try:
+        await run_sync(checkout_manager.require_worktree_project, pv2)
+    except checkout_manager.WorktreeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
     if body.create_new_branch:
         async with _new_branch_intake_lock(pv2["id"], branch_name):
             if await run_sync(checkout_manager.local_branch_exists, pv2, branch_name):

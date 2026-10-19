@@ -520,7 +520,7 @@
 
 		const now = Date.now();
 		git.refreshStatus();
-		if ($gitStatus?.is_git_repo && shouldPollDiffStats(now, _gitLastActivity, _lastIdleDiffStatsPoll)) {
+		if ($gitStatus?.is_git_repo && !$gitStatus.enclosing_repository_root && shouldPollDiffStats(now, _gitLastActivity, _lastIdleDiffStatsPoll)) {
 			git.refreshDiffStats();
 			_lastIdleDiffStatsPoll = now;
 		}
@@ -1105,7 +1105,7 @@
 			</div>
 		{/if}
 		</div>
-		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && !activeWorktreeId && !activeWorktreeBranch && !$git.error && $git.hydrated && $gitStatus?.is_git_repo === false)}
+		{#if activeSidePanel.active && !(activeSidePanel.active === 'changes' && !activeWorktreeId && !activeWorktreeBranch && !$git.error && $git.hydrated && ($gitStatus?.is_git_repo === false || !!$gitStatus?.enclosing_repository_root))}
 			<SessionSidePanel active={activeSidePanel.active} expanded={activeSidePanel.expanded}
 				width={browserPanel.current.width} mobile={panelOverlay}
 				onClose={closeSidePanel}
