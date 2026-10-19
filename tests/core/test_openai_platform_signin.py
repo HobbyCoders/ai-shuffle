@@ -36,7 +36,13 @@ async def test_isolated_capture_never_forwards_secret_and_disposes_context(monke
             if msg["method"] == "Page.navigate":
                 async def event(method, params):
                     await self.queue.put({"sessionId": "private-session", "method": method, "params": params})
-                await event("Page.screencastFrame", {"data": "fake-jpeg", "sessionId": 1})
+                await event("Page.screencastFrame", {"data": "old-jpeg", "sessionId": 1})
+                for frame_id in range(2, 6):
+                    await event("Page.screencastFrame", {"data": "fake-jpeg", "sessionId": frame_id})
+                # A real navigation bursts hundreds of events before the ack.
+                for i in range(300):
+                    await event("Network.dataReceived", {"requestId": str(i)})
+                    await event("Network.requestWillBeSent", {"requestId": str(i), "request": {"url": "https://platform.openai.com/asset", "headers": {}}})
                 await event("Network.requestWillBeSent", {"requestId": "evil", "request": {
                     "url": "https://evil.test/dashboard/", "headers": {"Authorization": "Bearer sess-evil"}}})
                 await event("Network.requestWillBeSent", {"requestId": "login", "request": {
@@ -48,19 +54,20 @@ async def test_isolated_capture_never_forwards_secret_and_disposes_context(monke
                     await event("Network.loadingFinished", {"requestId": "login"})
     socket = Socket()
     monkeypatch.setattr(signin.websockets, "connect", lambda *a, **k: socket)
-    monkeypatch.setattr(signin.native_chrome, "ensure_started", AsyncMock())
-    monkeypatch.setattr(signin.native_chrome, "cdp_get", AsyncMock(return_value={
+    monkeypatch.setattr(signin.native_chrome, "sign_in_browser_version", AsyncMock(return_value={
         "webSocketDebuggerUrl": "ws://localhost:9221/devtools/browser/test"}))
     async def never_input():
         await asyncio.Future()
     viewer = type("Viewer", (), {"receive_json": staticmethod(never_input), "send_json": AsyncMock()})()
     authorize = AsyncMock()
-    key = await signin.capture(viewer, authorize=authorize)
+    async with asyncio.timeout(2):
+        key = await signin.capture(viewer, authorize=authorize)
     assert key == "sess-captured-test"
     assert "sess-" not in repr(viewer.send_json.call_args_list)
     assert viewer.send_json.call_args_list[0].args[0] == {"type": "frame", "data": "fake-jpeg"}
     create = next(c for c in socket.commands if c["method"] == "Target.createBrowserContext")
     assert create["params"]["disposeOnDetach"] is True
+    assert [c["params"]["sessionId"] for c in socket.commands if c["method"] == "Page.screencastFrameAck"] == list(range(1, 6))
     target = next(c for c in socket.commands if c["method"] == "Target.createTarget")
     assert target["params"]["browserContextId"] == "isolated"
     assert any(c["method"] == "Target.disposeBrowserContext" for c in socket.commands)

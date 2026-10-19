@@ -128,6 +128,7 @@ export interface UsageSourceInfo {
 	support_label: string;
 	dashboard_url: string;
 	min_interval_seconds?: number | null;
+	freshness_seconds?: number | null;
 	/** Figures this source cannot report (shown as unavailable). */
 	unavailable?: string[];
 }
@@ -150,6 +151,7 @@ export interface ProviderUsageBucket {
 	cooldownUntil?: number | null;
 	status?: ProviderUsageStatus;
 	lastErrorKind?: ProviderUsageErrorKind | null;
+	lastErrorScope?: string | null;
 	providerId: string;
 	providerName: string | null;
 	providerType: string | null;
@@ -256,6 +258,7 @@ export interface ProviderUsageEntry {
 	cooldown_until?: number | null;
 	status?: ProviderUsageStatus;
 	last_error_kind?: ProviderUsageErrorKind | null;
+	last_error_scope?: string | null;
 	provider_id: string;
 	provider_name?: string | null;
 	provider_type?: string | null;
@@ -642,15 +645,15 @@ export function bucketObservedAt(bucket: UsageBucket, nowMs?: number): number | 
 /**
  * A provider row's status as of `nowMs`. The backend dates `fresh` when it
  * answers, but rows also come from localStorage and outlive a failed refresh,
- * so a `fresh` reading older than its source's interval (the backend's own
- * threshold, 300 s by default) is shown as `stale`.
+ * so readings age against the server's freshness window, falling back to the
+ * polling interval for older sources. Balance windows cover interval + jitter.
  */
 export function providerStatusAt(
 	pb: Pick<ProviderUsageBucket, 'status' | 'fetchedAt' | 'sourceInfo'>,
 	nowMs: number
 ): ProviderUsageStatus | undefined {
 	if (pb.status !== 'fresh' || pb.fetchedAt == null) return pb.status;
-	const intervalMs = (pb.sourceInfo?.min_interval_seconds || 300) * 1000;
+	const intervalMs = (pb.sourceInfo?.freshness_seconds || pb.sourceInfo?.min_interval_seconds || 300) * 1000;
 	return nowMs - pb.fetchedAt > intervalMs ? 'stale' : 'fresh';
 }
 
@@ -958,6 +961,7 @@ export const rateLimit = {
 						cooldownUntil: p.cooldown_until ?? null,
 						status: p.status,
 						lastErrorKind: p.last_error_kind ?? null,
+						lastErrorScope: p.last_error_scope ?? null,
 						providerName: p.provider_name ?? null,
 						providerType: p.provider_type ?? null,
 						planType: p.plan_type ?? null,

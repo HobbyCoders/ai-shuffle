@@ -134,6 +134,7 @@ class UsageSource:
             "support_label": SUPPORT_LABELS[self.support],
             "endpoints": [e.url for e in self.endpoints],
             "min_interval_seconds": self.min_interval or None,
+            "freshness_seconds": self.min_interval * 2 if self.id in {"openai_platform_balance", "xai_management"} else self.min_interval or None,
             "failure_policy": self.failure_policy,
             "dashboard_url": self.dashboard_url,
             "unavailable": list(self.unavailable),

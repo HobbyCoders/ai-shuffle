@@ -167,6 +167,7 @@ class UsageSourceInfo(BaseModel):
     support_label: str
     dashboard_url: str
     min_interval_seconds: int | None = None
+    freshness_seconds: int | None = None
     unavailable: list[str] = []
 
 
@@ -193,6 +194,7 @@ class ProviderUsageEntry(BaseModel):
     fetched_at: Optional[int] = None
     status: Literal["fresh", "stale", "unavailable", "never_fetched"] = "never_fetched"
     last_error_kind: ErrorKind | None = None
+    last_error_scope: str | None = None
     # Short labels kept for older clients; ``source_info`` has the full entry.
     source: str | None = None
     scope: str | None = None
@@ -398,11 +400,20 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
             if not balance["configured"]:
                 continue  # Manual balance is a fallback only without a real-balance binding.
             source_def = usage_sources.SOURCES[balance["source_id"]]
+            # Admin access reports organization spend, not remaining credit.
+            # Preserve only its spend fields; never resurrect a manual balance.
+            admin_spend = {}
+            for entry in entries:
+                if entry.provider_id == provider["id"] and entry.source_info and entry.source_info.id == "openai_admin":
+                    admin_spend = {k: v for k, v in (entry.credits or {}).items()
+                                   if k in {"spend_month", "input_tokens", "output_tokens", "num_model_requests"}}
+            credits = {**admin_spend, **(balance["credits"] or {})} or None
             entries = [e for e in entries if e.provider_id != provider["id"]]
             entries.append(ProviderUsageEntry(
                 provider_id=provider["id"], provider_name=provider.get("name"),
                 provider_type=provider["provider_type"], status=balance["status"],
-                credits=balance["credits"], fetched_at=balance["fetched_at"],
+                credits=credits, fetched_at=balance["fetched_at"],
+                last_error_scope=balance["last_error_scope"],
                 source=source_def.label, scope=source_def.scope_label,
                 source_info=_source_info(source_def), last_error_kind=balance["last_error_kind"],
             ))

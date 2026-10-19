@@ -22,6 +22,8 @@ def test_xai_ledger_sign_and_cents_not_dollars():
     assert result["balance_remaining"] == 45
     assert result["spend_month"] == 1.2
     assert result["spending_limit"] == 200
+    assert parse_xai({}) == {"balance_remaining": 0, "currency": "USD"}
+    assert parse_xai({"total": {}}, {})["spend_month"] == 0
     assert usd_cents({"val": "1"}) == .01
     assert usd_cents({"val": "1.5"}) == .015
     with pytest.raises(ValueError):

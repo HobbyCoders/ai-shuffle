@@ -608,13 +608,18 @@
 		return pb.sourceInfo?.id === 'openai_platform_balance' || pb.sourceInfo?.id === 'xai_management';
 	}
 	function providerCredits(pb: ProviderUsageBucket) {
-		return reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)
-			? null : pb.credits;
+		if (reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)) {
+			// Admin spend has its own source; only the unconfirmed balance is hidden.
+			return pb.providerType === 'openai' && pb.credits?.spend_month != null
+				? { spend_month: pb.credits.spend_month } : null;
+		}
+		return pb.credits;
 	}
 
 	/** Something the user can act on for this provider row, or null. */
 	function providerGuidance(pb: ProviderUsageBucket): string | null {
 		if (reportedBalanceSource(pb) && pb.lastErrorKind === 'billing_access_denied') {
+			if (pb.providerType === 'xai' && pb.lastErrorScope === 'inference') return 'Replace or fix the xAI API key';
 			return pb.providerType === 'openai' ? 'Sign in again to OpenAI Platform' : 'Replace xAI management key';
 		}
 		// Legacy Admin-spend rows have no balance credential to repair here.

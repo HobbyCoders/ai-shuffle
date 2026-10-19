@@ -91,7 +91,7 @@
 			>
 		</SettingRow>
 	</RowGroup>
-{:else if !realBalanceConfigured}
+{:else if !realBalanceConfigured && !xai}
 	<RowGroup title={openAI ? 'Manual balance (fallback only)' : 'Billing'}>
 		<SettingRow
 			label="Balance"

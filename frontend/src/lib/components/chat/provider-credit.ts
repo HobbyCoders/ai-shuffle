@@ -16,7 +16,11 @@ export function creditText(credits: Record<string, unknown> | null, type: string
    detail: spend == null ? detail : `$${spend.toFixed(2)} organization spend this month (UTC); ${detail}`,
   };
  }
- if (balance != null) return { short: `$${balance.toFixed(2)} left`, detail: `$${balance.toFixed(2)} left` };
+ if (balance != null) {
+  const left = `$${balance.toFixed(2)} left`;
+  const spend = type === 'openai' ? creditNumber(credits, 'spend_month') : null;
+  return { short: left, detail: spend == null ? left : `${left}; $${spend.toFixed(2)} organization spend this month (UTC)` };
+ }
  if (type === 'chatgpt') {
   const extra = creditNumber(credits, 'balance');
   if (extra == null || extra <= 0) return null;

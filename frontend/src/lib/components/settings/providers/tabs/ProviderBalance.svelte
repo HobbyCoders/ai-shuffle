@@ -16,7 +16,7 @@
  let key = $state('');
  let busy = $state(false);
  let error = $state('');
- const reading = $derived(!error && !status?.last_error_kind && !status?.needs_reauth && status?.status === 'fresh' && status.fetched_at && now - status.fetched_at <= 300_000 ? status.credits : null);
+ const reading = $derived(!error && !status?.last_error_kind && !status?.needs_reauth && status?.status === 'fresh' && status.fetched_at && now <= (status.fresh_until ?? status.fetched_at) ? status.credits : null);
  let frame = $state('');
  let signingIn = $state(false);
  let signInButton = $state<HTMLButtonElement>();
@@ -24,6 +24,7 @@
  $effect(() => { if (signingIn && signInScreen) signInScreen.focus(); });
  let socket: WebSocket | null = null;
  let disposed = false;
+ let reread: ReturnType<typeof setTimeout> | undefined;
  async function refresh() {
   const value = await getProviderBalance(providerId);
   if (disposed) return;
@@ -31,11 +32,15 @@
   status = value;
   error = '';
   onconfigured(value.configured);
+  clearTimeout(reread);
+  if (value.refreshing) reread = setTimeout(() => {
+   refresh().catch((e) => { if (!disposed) error = getErrorMessage(e); });
+  }, 1000);
  }
  onMount(() => {
   refresh().catch((e) => { if (!disposed) error = getErrorMessage(e); });
   const clock = setInterval(() => { now = Date.now(); }, 10_000);
-  return () => { disposed = true; clearInterval(clock); socket?.close(); key = ''; };
+  return () => { disposed = true; clearInterval(clock); clearTimeout(reread); socket?.close(); key = ''; };
  });
  async function save(remove = false) {
   if (busy || access.readOnly) return;
@@ -45,6 +50,7 @@
   try {
    status = await (remove ? removeProviderBalance(providerId) : saveProviderBalance(providerId, value));
    onconfigured(status.configured);
+   await refresh();
   } catch (e) { error = getErrorMessage(e); }
   finally { busy = false; }
  }

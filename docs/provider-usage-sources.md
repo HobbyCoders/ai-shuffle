@@ -75,8 +75,12 @@ The `xai_management` source resolves the team using the inference key and reads
 prepaid balance and invoice preview using a separate management key (official).
 See [setup and endpoint details](content/api-reference/model-providers.md#provider-reported-api-balances).
 Both headline remaining credit, source and fetched time; expired/failed or stale
-readings expose no current amount. Admin usage remains separate organization
-spend. A configured real-balance source always outranks manual estimates,
+readings expose no current amount. The server's ten-minute freshness window
+covers the five-minute polling interval plus jitter. Opening balance status or
+pressing Refresh requests a poll (30-second forced-refresh cooldown; endpoint
+budgets still apply), and Settings re-reads while it runs. Optional xAI invoice
+failures do not hide prepaid credit. Admin usage remains separate organization
+spend and its fields stay in the popover alongside real remaining credit. A configured real-balance source always outranks manual estimates,
 including when re-authentication is needed.
 
 In **Settings > Providers > the key > Usage**, enter the current prepaid balance

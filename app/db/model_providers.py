@@ -566,8 +566,9 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        clear_balance = ", balance_key = NULL, balance_instance_id = NULL, balance_snapshot = NULL" if not enabled else ""
         cursor.execute(
-            "UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s WHERE id = %s",
+            f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
             (enabled, now, str(uuid4()), provider_id),
         )
         if cursor.rowcount == 0:

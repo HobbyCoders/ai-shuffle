@@ -156,6 +156,19 @@ it('OpenAI: saves, reloads and clears a two-decimal balance, including zero', as
 	expect(within(panel).queryByText(/Tracked by this worker/)).toBeNull();
 });
 
+it.each(['https://api.x.ai/v1', 'https://custom.example/v1', 'http://api.x.ai/v1', 'https://api.x.ai.evil.test/v1'])(
+ 'xAI management access is gated to the official host (%s)', async (base_url) => {
+  worker = fakeWorker({ rows: [row({ id: 'xai', provider_type: 'xai', base_url })] }, {
+   'GET /model-providers/:id/balance-access': () => ({ configured: false, credits: null })
+  });
+  vi.stubGlobal('fetch', worker.fetch);
+  const panel = await usageOf('mp:xai');
+  const official = base_url === 'https://api.x.ai/v1';
+  expect(!!within(panel).queryByLabelText('xAI management key')).toBe(official);
+  expect(worker.sent('GET', '/model-providers/xai/balance-access')).toHaveLength(official ? 1 : 0);
+  if (official) expect(panel.textContent).not.toContain('Not available for this key');
+ });
+
 it('a gateway has no Usage tab', async () => {
 	worker = fakeWorker({
 		rows: [

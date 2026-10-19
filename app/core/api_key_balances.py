@@ -12,13 +12,15 @@ import httpx
 from app.core import encryption
 from app.core.config import settings
 from app.core.usage_polling import UsageDeferred, usage_get
+from app.core.usage_sources import SOURCES
 from app.db import database as db, provider_balances
 from app.db.async_database import run_sync
 
 OPENAI_CREDIT_URL = "https://api.openai.com/v1/dashboard/billing/credit_grants"
 XAI_KEY_URL = "https://api.x.ai/v1/api-key"
 XAI_BILLING_BASE = "https://management-api.x.ai/v1/billing/teams/"
-INTERVAL = 300
+INTERVAL = SOURCES["openai_platform_balance"].min_interval
+FRESHNESS_SECONDS = SOURCES["openai_platform_balance"].public()["freshness_seconds"]
 
 
 def credential_fingerprint(row):
@@ -57,7 +59,7 @@ def usd_cents(value):
     if isinstance(value, dict):
         if value.get("currency", "USD").upper() != "USD" or value.get("unit", "cents") not in {"cents", "USD_CENTS"}:
             raise ValueError("Unsupported monetary unit")
-        value = value["val"]
+        value = value.get("val", 0)
     return float(number(value) / 100)
 
 
@@ -67,15 +69,18 @@ def parse_openai(body):
             "total_usage": float(number(body["total_used"])), "currency": "USD"}
 
 
-def parse_xai(balance, invoice):
-    core = invoice["coreInvoice"]
-    # Purchases/refunds are negative in the prepaid ledger; spend is positive.
-    remaining = -usd_cents(balance["total"])
-    postpaid = usd_cents(core["totalWithCorr"])
-    prepaid_used = usd_cents(core["prepaidCreditsUsed"])
-    return {"balance_remaining": remaining, "currency": "USD",
-            "spend_month": postpaid + prepaid_used,
-            "spending_limit": usd_cents(invoice["effectiveSpendingLimit"])}
+def parse_xai(balance, invoice=None):
+    # Proto JSON omits zero values. Purchases are negative; spend is positive.
+    result = {"balance_remaining": -usd_cents(balance.get("total", 0)), "currency": "USD"}
+    if invoice is not None:
+        core = invoice.get("coreInvoice") or {}
+        # The prepaid sign is undocumented (examples use negative credits).
+        # A live response still needs verifying before relying on cycle usage.
+        result["spend_month"] = (usd_cents(core.get("totalWithCorr", 0))
+                                 + abs(usd_cents(core.get("prepaidCreditsUsed", 0))))
+        if "effectiveSpendingLimit" in invoice:
+            result["spending_limit"] = usd_cents(invoice["effectiveSpendingLimit"])
+    return result
 
 
 def source_id(row):
@@ -83,7 +88,6 @@ def source_id(row):
 
 
 def status(row):
-    from app.core.usage_sources import SOURCES
     configured = bool(row.get("balance_key") and row.get("balance_instance_id") == settings.effective_instance_id)
     try:
         snap = json.loads(row.get("balance_snapshot") or "{}") if configured else {}
@@ -93,9 +97,13 @@ def status(row):
         configured, snap = False, {}
     fetched = snap.get("fetched_at")
     error = snap.get("last_error_kind")
-    fresh = bool(fetched and not error and time.time() * 1000 - fetched <= INTERVAL * 1000)
+    fresh = bool(fetched and not error and time.time() * 1000 - fetched <= FRESHNESS_SECONDS * 1000)
     return {"configured": configured, "source": SOURCES[source_id(row)].label,
             "source_id": source_id(row), "fetched_at": fetched,
+            "fresh_until": fetched + FRESHNESS_SECONDS * 1000 if fetched else None,
+            "last_error_scope": snap.get("last_error_scope"),
+            "invoice_error_kind": snap.get("invoice_error_kind"),
+            "spending_limit_error_kind": snap.get("spending_limit_error_kind"),
             "last_error_kind": error, "needs_reauth": error == "billing_access_denied",
             "status": "fresh" if fresh else "stale" if fetched else "unavailable",
             # A stale or failed reading is never advertised as current credit.
@@ -117,6 +125,8 @@ async def poll(row):
     if not row.get("balance_key") or row.get("balance_instance_id") != settings.effective_instance_id:
         return
     team, cached = None, {}
+    error_scope = "balance"
+    invoice_error = limit_error = None
     try:
         cached = json.loads(row.get("balance_snapshot") or "{}")
         if cached.get("credential") != credential_fingerprint(row):
@@ -128,18 +138,29 @@ async def poll(row):
         else:
             # Resolve with the inference key, never send a management key here.
             if not team:
+                error_scope = "inference"
                 info = await get(XAI_KEY_URL, encryption.decrypt_value(row["auth_token"]))
                 team = info["team_id"]
+                error_scope = "balance"
             if not isinstance(team, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,180}", team):
                 raise ValueError("Invalid team ID")
             base = XAI_BILLING_BASE + team
-            import asyncio
-            balance, invoice = await asyncio.gather(
-                get(base + "/prepaid/balance", key),
-                get(base + "/postpaid/invoice/preview", key),
-            )
-            credits = parse_xai(balance, invoice)
-        await run_sync(provider_balances.snapshot, row, {"credits": credits, "team_id": team, "fetched_at": int(time.time() * 1000)})
+            balance = await get(base + "/prepaid/balance", key)
+            credits = parse_xai(balance)
+            try:
+                invoice = await get(base + "/postpaid/invoice/preview", key)
+                credits.update(parse_xai(balance, {"coreInvoice": invoice.get("coreInvoice")}))
+                if "effectiveSpendingLimit" in invoice:
+                    try:
+                        credits["spending_limit"] = usd_cents(invoice["effectiveSpendingLimit"])
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        limit_error = "unavailable"
+            except Exception as error:
+                code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                invoice_error = "billing_access_denied" if code in (401, 403) else "unavailable"
+        await run_sync(provider_balances.snapshot, row, {"credits": credits, "team_id": team,
+            "invoice_error_kind": invoice_error, "spending_limit_error_kind": limit_error,
+            "fetched_at": int(time.time() * 1000)})
     except UsageDeferred:
         if team and not cached.get("team_id"):
             await run_sync(provider_balances.snapshot, row, {"team_id": team})
@@ -148,4 +169,4 @@ async def poll(row):
         code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
         # No exception strings or provider response bodies (they may echo keys).
         kind = "billing_access_denied" if code in (401, 403) else "unavailable"
-        await run_sync(provider_balances.snapshot, row, {"last_error_kind": kind, "team_id": team, "fetched_at": cached.get("fetched_at")})
+        await run_sync(provider_balances.snapshot, row, {"last_error_kind": kind, "last_error_scope": error_scope, "team_id": team, "fetched_at": cached.get("fetched_at")})

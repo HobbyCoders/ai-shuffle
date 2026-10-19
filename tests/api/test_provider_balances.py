@@ -122,7 +122,7 @@ def test_xai_resolves_team_with_model_key_and_polls_management(authenticated_cli
     assert status["source"] == "xAI Management API"
 
 
-@pytest.mark.parametrize("change", [{"auth_token": "other"}, {"enabled": False}, {"base_url": "https://example.com"}, {"provider_type": "custom"}])
+@pytest.mark.parametrize("change", [{"auth_token": "other"}, {"auth_mode": "codex"}, {"enabled": False}, {"base_url": "https://example.com"}, {"provider_type": "custom"}])
 def test_binding_invalidated_and_inflight_snapshot_rejected(authenticated_client, provider, change):
     configure(authenticated_client, provider)
     old = db.get_model_provider(provider, include_token=True)
@@ -138,3 +138,99 @@ def test_stale_balance_not_current(authenticated_client, provider):
     result = authenticated_client.get(f"{ROOT}/{provider}/balance-access").json()
     assert result["status"] == "stale"
     assert result["credits"] is None
+
+
+def test_status_detects_sync_replacing_inference_secret(authenticated_client, provider):
+    configure(authenticated_client, provider)
+    row = db.get_model_provider(provider, include_token=True)
+    provider_balances.snapshot(row, {"credits": {"balance_remaining": 99}, "fetched_at": int(time.time() * 1000)})
+    row = db.get_model_provider(provider, include_token=True)
+    assert balances.status(row)["credits"]["balance_remaining"] == 99
+    # Network sync can replace the credential without calling the update helper.
+    row["auth_token"] = encryption.encrypt_value("synced-other-account")
+    assert balances.status(row)["configured"] is False
+    assert balances.status(row)["credits"] is None
+
+
+def test_refresh_requests_poll_and_survives_interval_jitter(authenticated_client, provider):
+    from app.core.provider_usage import provider_usage_monitor, FORCED_REFRESH_COOLDOWN_SECONDS
+    configure(authenticated_client, provider)
+    row = db.get_model_provider(provider, include_token=True)
+    fetched = int((time.time() - balances.INTERVAL - 30) * 1000)
+    provider_balances.snapshot(row, {"credits": {"balance_remaining": 10}, "fetched_at": fetched})
+    provider_usage_monitor.request_refresh.reset_mock()
+    result = authenticated_client.get(f"{ROOT}/{provider}/balance-access").json()
+    provider_usage_monitor.request_refresh.assert_called_once_with(force=True, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
+    assert result["status"] == "fresh"
+    assert result["credits"]["balance_remaining"] == 10
+    assert result["fresh_until"] == fetched + balances.FRESHNESS_SECONDS * 1000
+
+
+def test_toggle_disable_clears_binding(authenticated_client, provider):
+    configure(authenticated_client, provider)
+    db.set_model_provider_enabled(provider, True)
+    assert db.get_model_provider(provider, include_token=True)["balance_key"]
+    old = db.get_model_provider(provider, include_token=True)
+    db.set_model_provider_enabled(provider, False)
+    row = db.get_model_provider(provider, include_token=True)
+    assert all(row[k] is None for k in ("balance_key", "balance_instance_id", "balance_snapshot"))
+    assert not provider_balances.snapshot(old, {"credits": {"balance_remaining": 999}})
+
+
+@pytest.mark.parametrize("invoice", [403, 404, {}, {"coreInvoice": {"prepaidCreditsUsed": {"val": "-4500"}}, "effectiveSpendingLimit": "NaN"}])
+def test_xai_optional_invoice_cannot_hide_prepaid(authenticated_client, provider, monkeypatch, invoice):
+    db.update_model_provider(provider, provider_type="xai", base_url="https://api.x.ai/v1")
+    configure(authenticated_client, provider, "management-test-only")
+    async def fake_get(url, **kwargs):
+        code, body = 200, {}
+        if url == balances.XAI_KEY_URL:
+            body = {"team_id": "team-test"}
+        elif url.endswith("/prepaid/balance"):
+            body = {"total": {"val": "-1234"}}
+        elif isinstance(invoice, int):
+            code = invoice
+        else:
+            body = invoice
+        return httpx.Response(code, json=body, request=httpx.Request("GET", url))
+    monkeypatch.setattr(balances, "usage_get", fake_get)
+    asyncio.run(balances.poll({"id": provider}))
+    result = authenticated_client.get(f"{ROOT}/{provider}/balance-access").json()
+    assert result["status"] == "fresh"
+    assert result["needs_reauth"] is False
+    assert result["credits"]["balance_remaining"] == 12.34
+    if isinstance(invoice, int):
+        assert result["invoice_error_kind"]
+        assert "spend_month" not in result["credits"]
+    else:
+        assert result["credits"]["spend_month"] == (45 if invoice else 0)
+        if invoice:
+            assert result["spending_limit_error_kind"] == "unavailable"
+            assert "spending_limit" not in result["credits"]
+
+
+def test_xai_inference_refusal_identifies_the_api_key(authenticated_client, provider, monkeypatch):
+    db.update_model_provider(provider, provider_type="xai", base_url="https://api.x.ai/v1")
+    configure(authenticated_client, provider, "management-test-only")
+    async def fake_get(url, **kwargs):
+        assert url == balances.XAI_KEY_URL
+        return httpx.Response(401, request=httpx.Request("GET", url))
+    monkeypatch.setattr(balances, "usage_get", fake_get)
+    asyncio.run(balances.poll({"id": provider}))
+    result = authenticated_client.get(f"{ROOT}/{provider}/balance-access").json()
+    assert result["last_error_kind"] == "billing_access_denied"
+    assert result["last_error_scope"] == "inference"
+    assert result["credits"] is None
+
+
+def test_failed_websocket_hello_releases_ticket(authenticated_client, provider, monkeypatch):
+    from starlette.websockets import WebSocketDisconnect
+    from app.api import provider_balances as api
+    # WebSocket auth is called directly, not through the TestClient's override.
+    monkeypatch.setattr(api, "require_admin", lambda request: "test-owner")
+    first = authenticated_client.post(f"{ROOT}/{provider}/balance-access/sign-in")
+    assert first.status_code == 200
+    with authenticated_client.websocket_connect(f"{ROOT}/{provider}/balance-access/browser") as socket:
+        socket.send_json({"ticket": "not-the-ticket"})
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_json()
+    assert authenticated_client.post(f"{ROOT}/{provider}/balance-access/sign-in").status_code == 200

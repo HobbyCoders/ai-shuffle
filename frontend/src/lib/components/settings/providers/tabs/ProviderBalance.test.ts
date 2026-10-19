@@ -8,7 +8,7 @@ vi.mock('$lib/api/provider-balances', () => ({
  getProviderBalance: mocks.get, saveProviderBalance: mocks.save,
  removeProviderBalance: mocks.remove, startPlatformSignIn: mocks.start
 }));
-const status = { configured: true, source: 'OpenAI Platform balance (unofficial)', fetched_at: Date.now(),
+const status = { configured: true, source: 'OpenAI Platform balance (unofficial)', fetched_at: Date.now(), fresh_until: Date.now() + 600_000,
  status: 'fresh', needs_reauth: false, credits: { balance_remaining: 12.34 } };
 afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
 
@@ -47,7 +47,7 @@ it('xAI provides management-key controls, cycle spend and limit, not OpenAI sign
 it.each([
  { last_error_kind: 'network_error' },
  { needs_reauth: true },
- { fetched_at: Date.now() - 600_000 },
+ { fresh_until: Date.now() - 1 },
  { status: 'stale' },
 ])('suppresses non-current credit even when the response retains an amount: %j', async (patch) => {
  mocks.get.mockResolvedValue({ ...status, ...patch });
@@ -65,6 +65,14 @@ it('suppresses the previous amount when a status refresh fails', async () => {
  await fireEvent.click(screen.getByRole('button', { name: 'Refresh balance status' }));
  await screen.findByText('$12.34');
  expect(screen.queryByRole('alert')).toBeNull();
+});
+it('re-reads while a requested balance poll runs and keeps readings through jitter', async () => {
+ mocks.get.mockResolvedValueOnce({ ...status, refreshing: true, fetched_at: Date.now() - 330_000 })
+  .mockResolvedValueOnce({ ...status, refreshing: false, credits: { balance_remaining: 23.45 } });
+ render(ProviderBalance, { providerId: 'p1', openAI: true });
+ await screen.findByText('$12.34');
+ await waitFor(() => expect(screen.getByText('$23.45')).toBeTruthy(), { timeout: 2500 });
+ expect(mocks.get).toHaveBeenCalledTimes(2);
 });
 it('starts owner sign-in with a one-shot ticket, never a URL credential', async () => {
  mocks.get.mockResolvedValue({ ...status, configured: false });

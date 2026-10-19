@@ -68,7 +68,10 @@ async def save(row, key):
 
 @router.get("/{provider_id}/balance-access")
 async def balance_status(provider_id: str, _: str = Depends(require_admin)):
-    return balances.status(await provider(provider_id))
+    row = await provider(provider_id)
+    from app.core.provider_usage import provider_usage_monitor, FORCED_REFRESH_COOLDOWN_SECONDS
+    provider_usage_monitor.request_refresh(force=True, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
+    return {**balances.status(row), "refreshing": provider_usage_monitor.refreshing}
 
 
 @router.put("/{provider_id}/balance-access")
@@ -115,6 +118,7 @@ async def sign_in_browser(websocket: WebSocket, provider_id: str):
         return
     await websocket.accept()
     acquired = False
+    pending = {token for token, (row, _) in _tickets.items() if row["id"] == provider_id}
     try:
         async with asyncio.timeout(10):
             hello = await websocket.receive_json()
@@ -136,13 +140,19 @@ async def sign_in_browser(websocket: WebSocket, provider_id: str):
                     raise HTTPException(409, "Provider changed during sign-in")
                 await save(current, key)
             await websocket.send_json({"type": "saved"})
-    except Exception:
-        # Never stringify browser/CDP exceptions: they can contain auth headers.
+    except Exception as error:
+        # Only fixed startup errors are safe; CDP exceptions may contain keys.
+        from app.core.native_chrome import BrowserSignInUnavailable
+        message = str(error) if isinstance(error, BrowserSignInUnavailable) else "Sign-in ended. Retry or paste a Platform session key."
         try:
-            await websocket.send_json({"type": "error", "message": "Sign-in ended. Retry or paste a Platform session key."})
+            await websocket.send_json({"type": "error", "message": message})
         except Exception:
             pass
     finally:
+        # An authenticated connection which fails before hello must release its
+        # original ticket too. Do not clear tickets created by a later retry.
+        for token in pending:
+            _tickets.pop(token, None)
         if acquired:
             _active.discard(provider_id)
         try:

@@ -314,9 +314,17 @@ worker, excluded from network sync, and included in secret re-encryption.
   and postpaid spending limit. The documented `val` fields are **USD cents**;
   purchases are negative ledger entries, so remaining is `-total.val / 100`.
   Unknown units/currencies or non-finite amounts are rejected, never guessed.
+  Invoice preview is optional: a refused/missing invoice does not hide prepaid
+  credit; `invoice_error_kind` reports that failure separately. A malformed
+  limit is omitted with `spending_limit_error_kind`, preserving cycle usage. Proto JSON's
+  omitted zero fields are treated as zero; an omitted spending limit is unknown.
+  Cycle usage adds the absolute prepaid usage because its sign is undocumented;
+  the sign and cycle totals still need comparison with a live account.
 - **OpenAI Platform (unofficial):** choose **Sign in to OpenAI Platform** and
   sign in yourself in the app-owned, isolated browser screen. The supervised
-  browser keeps its existing egress proxy; no agent tools or network transcript
+  browser must be enabled and owned by this worker's native or Docker supervisor;
+  startup waits for Chrome and refuses an external CDP listener. It keeps its
+  existing egress proxy; no agent tools or network transcript
   get this context. The app captures a dashboard `sess-` key server-side from
   the login response or dashboard Authorization header, then destroys the
   temporary cookies/context. If sign-in is refused (including CAPTCHA or popup
@@ -327,12 +335,20 @@ worker, excluded from network sync, and included in secret re-encryption.
   or ChatGPT/Codex OAuth token cannot replace a Platform session key.
 
 Polling is demand-driven, at most once per five minutes per credential/endpoint,
-under the existing shared usage budget. Status includes the source and last
+under the existing shared usage budget. Opening balance status or choosing
+**Refresh balance status** requests a poll (30-second forced-refresh cooldown;
+per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
+remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
+`fresh_until` is supplied by the server. Status includes the source and last
 successful fetched time. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference key, origin, auth type, or
-disabling the provider invalidate its binding and reject in-flight snapshots.
+disabling the provider (including the enable toggle) invalidate its binding and
+reject in-flight snapshots. Admin organization-spend fields remain alongside
+real remaining credit in the usage popover; balance freshness/error state stays
+owned by the balance source. A failed WebSocket hello releases its ticket so an
+immediate sign-in retry is possible.
 Balance snapshots are stored independently from Admin spend and passive headers
 so those readers cannot overwrite provider-reported credit.
 

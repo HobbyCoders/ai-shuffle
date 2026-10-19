@@ -14,6 +14,7 @@
 		type OpenRouterUsageStatus
 	} from '$lib/api/openrouter-billing';
 	import { supportsOpenAIBilling } from '$lib/api/openai-billing';
+	import { supportsXAIBalance } from '$lib/api/provider-balances';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
@@ -201,7 +202,7 @@
 		{#if tab === 'Models'}
 			{#key row.id}<ModelCuration {row} />{/key}
 		{:else if tab === 'Usage'}
-			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} xai={row.provider_type === 'xai'} />{/key}
+			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} xai={supportsXAIBalance(row)} />{/key}
 		{:else}
 			<RowGroup title="Connection" id="providers-connection">
 				<SettingRow label="Name">

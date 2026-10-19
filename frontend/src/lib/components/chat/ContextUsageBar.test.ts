@@ -739,23 +739,34 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const id = type === 'openai' ? 'openai_platform_balance' : 'xai_management';
 		const source_info = { id, label: source, scope: 'account', scope_label: 'API prepaid credit',
 			measure: 'monetary_credit' as const, measure_label: 'Provider-reported credit balance', collection: 'polled' as const,
-			support: 'documented' as const, support_label: 'API', dashboard_url: 'https://example.com', min_interval_seconds: 300 };
+			support: 'documented' as const, support_label: 'API', dashboard_url: 'https://example.com', min_interval_seconds: 300, freshness_seconds: 600 };
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'real-balance', provider_type: type, provider_name: 'Real balance', status: 'fresh',
-				credits: { balance_remaining: 12.34 }, fetched_at: Date.now(), source, source_info }
+				credits: { balance_remaining: 12.34, spend_month: 5 }, fetched_at: Date.now() - 330_000, source, source_info }
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34 left');
 		expect(container.textContent).toContain(source);
+		if (type === 'openai') expect(container.textContent).toContain('$5.00 organization spend this month');
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'real-balance', provider_type: type, provider_name: 'Real balance', status: 'stale',
-				credits: { balance_remaining: 12.34 }, fetched_at: 123, source, source_info, last_error_kind: 'billing_access_denied' }
+				credits: { balance_remaining: 12.34, spend_month: 5 }, fetched_at: 123, source, source_info, last_error_kind: 'billing_access_denied' }
 		] });
 		await tick();
 		expect(container.textContent).not.toContain('$12.34 left');
-		expect(container.textContent).toContain('Balance unavailable');
+		expect(container.textContent).toMatch(/balance unavailable/i);
+		if (type === 'openai') expect(container.textContent).toContain('$5.00 organization spend this month');
 		expect(container.textContent).toContain(type === 'openai' ? 'Sign in again to OpenAI Platform' : 'Replace xAI management key');
+			if (type === 'xai') {
+				rateLimit.applySnapshot({ windows: [], available: true, providers: [
+					{ provider_id: 'real-balance', provider_type: type, status: 'stale', source, source_info,
+						last_error_kind: 'billing_access_denied', last_error_scope: 'inference' }
+				] });
+				await tick();
+				expect(container.textContent).toContain('Replace or fix the xAI API key');
+				expect(container.textContent).not.toContain('Replace xAI management key');
+			}
 	});
 
 	it.each([12.34, 0])('preserves a successful OpenAI API balance of %s', async (balance) => {

@@ -43,7 +43,10 @@ class Cdp:
         self.socket = socket
         self.serial = 0
         self.pending = {}
-        self.events = asyncio.Queue(maxsize=128)
+        # Critical network events must never block command replies. Chrome only
+        # sends a few unacked screencast frames; retain at most one queued frame.
+        self.events = asyncio.Queue()
+        self.frame_queued = None
 
     async def call(self, method, params=None, session=None):
         self.serial += 1
@@ -70,8 +73,18 @@ class Cdp:
                         future.set_exception(RuntimeError("Browser command failed"))
                     else:
                         future.set_result(msg.get("result", {}))
-                elif "method" in msg:
-                    await self.events.put(msg)
+                elif msg.get("method") in {
+                    "Page.screencastFrame", "Network.requestWillBeSent",
+                    "Network.requestWillBeSentExtraInfo", "Network.loadingFinished",
+                }:
+                    if msg["method"] == "Page.screencastFrame":
+                        if self.frame_queued is not None:
+                            self.frame_queued["acks"].append(msg["params"]["sessionId"])
+                            self.frame_queued["params"] = msg["params"]
+                            continue
+                        msg["acks"] = [msg["params"]["sessionId"]]
+                        self.frame_queued = msg
+                    self.events.put_nowait(msg)
         finally:
             for future in self.pending.values():
                 if not future.done():
@@ -79,10 +92,7 @@ class Cdp:
 
 
 async def capture(viewer, *, authorize):
-    await native_chrome.ensure_started()
-    version = await native_chrome.cdp_get("/json/version")
-    if not version:
-        raise RuntimeError("Browser unavailable")
+    version = await native_chrome.sign_in_browser_version()
     # Do not trust a remote debugging address returned by an external listener.
     path = urlsplit(version["webSocketDebuggerUrl"]).path
     if not path.startswith("/devtools/browser/") or "?" in path:
@@ -132,9 +142,11 @@ async def capture(viewer, *, authorize):
                     continue
                 method, params = event["method"], event.get("params", {})
                 if method == "Page.screencastFrame":
+                    cdp.frame_queued = None
                     await authorize()
                     await viewer.send_json({"type": "frame", "data": params["data"]})
-                    await cdp.call("Page.screencastFrameAck", {"sessionId": params["sessionId"]}, session)
+                    for frame_id in event["acks"]:
+                        await cdp.call("Page.screencastFrameAck", {"sessionId": frame_id}, session)
                 elif method == "Network.requestWillBeSent":
                     request = params["request"]
                     if dashboard_url(request.get("url", "")):
