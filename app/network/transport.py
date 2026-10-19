@@ -367,6 +367,10 @@ class PeerLink:
         self.token: str | None = None
         self.token_expires = 0.0
         self.last_error: str | None = None
+        # Machine-readable reason for ``last_error`` when the UI should act on
+        # it. Only the endpoint-binding refusal has one; ordinary dial and sync
+        # failures (an offline worker, a stall warning) leave it None.
+        self.last_error_code: str | None = None
         self.sync_warning: str | None = None
         self._stalled_streams: dict[tuple[str, str], dict] = {}
         self.backoff_until = 0.0
@@ -582,6 +586,7 @@ class PeerLink:
                     and isinstance(detail, dict) and detail.get("code") == tokens.ENDPOINT_NOT_ADVERTISED):
                 error = PeerEndpointNotAdvertised(self.device_id, base)
                 self.last_error = str(error)
+                self.last_error_code = PeerEndpointNotAdvertised.code
                 now = time.monotonic()
                 last_warning = _binding_warning_at.get(self.device_id)
                 if last_warning is None or now - last_warning >= 300:
@@ -633,7 +638,11 @@ class PeerLink:
                 connect_only = connect_only and isinstance(exc, CONNECT_ERRORS)
                 continue
             self.base_url, self.token, self.token_expires = endpoint, token, expires
-            self.last_error = None
+            if self.last_error_code == PeerEndpointNotAdvertised.code:
+                # The binding refusal is resolved. Any other status (#245's
+                # stall warning, the last sync failure) belongs to the sync
+                # pass, which replaces it when it finishes.
+                self.last_error, self.last_error_code = self.sync_warning, None
             return
         if at is None:
             self.base_url = None
@@ -805,7 +814,7 @@ class PeerLink:
             summary["snapshot_required"] = True
         self.failures = 0
         self.contact_kick_used = False
-        self.last_error = self.sync_warning
+        self.last_error, self.last_error_code = self.sync_warning, None
         return summary
 
     def _note_stalled_pull(self, ctx, before, current, theirs, checked, summary) -> None:
@@ -1139,7 +1148,8 @@ def link_status() -> List[dict]:
         out.append({"device_id": link.device_id, "base_url": link.active_url, "endpoints": link.endpoints,
                     "lan_endpoints": link.lan_endpoints, "route": link.route,
                     "lan_error": link.lan_last_error if link.lan is None and link.lan_endpoints else None,
-                    "last_error": link.last_error, "sync_warning": link.sync_warning,
+                    "last_error": link.last_error, "last_error_code": link.last_error_code,
+                    "sync_warning": link.sync_warning,
                     "stalled_streams": list(link._stalled_streams.values()),
                     "seconds_since_contact": age,
                     "online": age is not None and age <= ONLINE_WINDOW_SECONDS, "syncing": link.syncing})
@@ -1247,7 +1257,10 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             await asyncio.to_thread(store.upsert_peer, link.device_id, base_url=link.active_url, contacted=True,
                                     error=link.last_error)
         except (httpx.HTTPError, PeerError) as exc:
-            link.last_error = str(exc) if isinstance(exc, PeerEndpointNotAdvertised) else f"{type(exc).__name__}: {exc}"[:200]
+            if isinstance(exc, PeerEndpointNotAdvertised):
+                link.last_error, link.last_error_code = str(exc), exc.code
+            else:
+                link.last_error, link.last_error_code = f"{type(exc).__name__}: {exc}"[:200], None
             link.note_failure()
             await asyncio.to_thread(store.upsert_peer, link.device_id, error=link.last_error)
             logger.debug("Peer %s unreachable: %s", link.device_id, link.last_error)

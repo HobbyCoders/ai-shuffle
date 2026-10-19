@@ -69,7 +69,11 @@ with this rollout gate enabled.
 The bound transcript is the canonical JSON array
 `["shuffle-device-token-bound-v1", challenge, server_device_id, canonical_base_endpoint]`.
 The server checks the endpoint against its current locally advertised tunnel and
-LAN addresses, never against HTTP Host or forwarded headers. Tunnel rotation
+LAN addresses. The token request's own Host and forwarded headers are never
+consulted. One advertised source does come from a Host header: on a Docker
+worker without `CLUSTER_ADVERTISE_URL`, the "observed" advertise URL is the
+address the owner used for a direct (unproxied) LAN sign-in. Only the owner can
+set it, and the owner can already add aliases. Tunnel rotation
 accepts the new advertisement immediately and rejects the removed address,
 including challenges issued before rotation; peers must refresh discovery.
 A valid proof for an unadvertised address receives HTTP 403 with

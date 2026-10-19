@@ -100,6 +100,8 @@ export interface SyncPeer {
 	/** Why the LAN path is not in use, while the peer has LAN addresses. */
 	lan_error?: string | null;
 	last_error: string | null;
+	/** Set only for errors the UI acts on: `endpoint_not_advertised` (a token-binding refusal). */
+	last_error_code?: string | null;
 	seconds_since_contact: number | null;
 	online: boolean;
 	syncing?: boolean;

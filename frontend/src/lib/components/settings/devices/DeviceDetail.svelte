@@ -38,9 +38,14 @@
 		key.startsWith('legacy:') ? model.legacyInstalls.find((i) => `legacy:${i.id}` === key) : undefined
 	);
 	const linked = $derived(model.linkedRegistration(key));
-	const peerError = $derived(member
-		? model.status?.sync?.peers.find((peer) => peer.device_id === member.device_id)?.last_error
-		: null);
+	// Only the endpoint-binding refusal gets a banner: it names the fix. A
+	// worker that is switched off or a stalled sync already shows in the list
+	// and status rows, and their raw error text is not actionable here.
+	const bindingRefusal = $derived.by(() => {
+		if (!member) return null;
+		const peer = model.status?.sync?.peers.find((p) => p.device_id === member.device_id);
+		return peer?.last_error_code === 'endpoint_not_advertised' ? peer.last_error : null;
+	});
 	const busy = $derived(model.saving !== null);
 
 	let rev = $state(0);
@@ -105,8 +110,8 @@
 			}
 		]}
 	>
-		{#if peerError}
-			<InlineBanner tone="warn"><span role="alert">{peerError}</span></InlineBanner>
+		{#if bindingRefusal}
+			<InlineBanner tone="warn"><span class="binding-refusal">{bindingRefusal}</span></InlineBanner>
 		{/if}
 		<RowGroup title="Device">
 			{@render nameRow(member.name, 100)}
@@ -263,3 +268,10 @@
 {:else}
 	<EmptyDetail icon={MonitorSmartphone} title="Not here any more" message="This device left the list." />
 {/if}
+
+<style>
+	/* The refusal names a full URL; let it wrap on a phone-width pane. */
+	.binding-refusal {
+		overflow-wrap: anywhere;
+	}
+</style>

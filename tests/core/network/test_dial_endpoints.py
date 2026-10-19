@@ -113,6 +113,37 @@ def test_6to4_addresses_apply_the_embedded_ipv4_link_local_rule(url, valid):
     assert endpoints.dial_endpoints([url]) == ([url] if valid else [])
 
 
+# Hosts the previous release's validator (main before endpoint binding)
+# accepted. With binding off they must stay accepted: a non-numeric label makes
+# the host a DNS name, even when another label is a number or starts with 0x.
+_STILL_VALID = ["http://0xnas:8000", "http://box.0xfeed", "http://nas.10:8000", "http://10.nas:8000",
+                "http://0x.example", "http://10.1:8000", "http://2130706433", "http://0x7f000001",
+                "https://bücher.example", "https://faß.example", "http://xn--bcher-kva.example",
+                "http://worker-1:8000", "http://192.168.1.5:8001/proxy/", "http://host.example.:8000"]
+# Main accepted these too. They are refused now because they name (or would be
+# parsed by getaddrinfo as) link-local or out-of-range numeric IPv4 addresses.
+_NOW_REFUSED = ["http://169.254.1", "http://169.254.43518", "http://0xa9fea9fe", "http://2851995648",
+                "http://0251.0376.0251.0376", "http://[2002:a9fe:101::]:8000", "http://256.1.1.1",
+                "http://1.2.3.4.5", "http://08.1.1.1", "http://0x.0x"]
+
+
+@pytest.mark.parametrize("url", _STILL_VALID)
+def test_names_main_accepted_stay_valid_with_binding_off(url, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+    assert endpoints.is_valid_endpoint(url)
+    assert len(endpoints.validate_endpoints([url])) == 1
+
+
+@pytest.mark.parametrize("url", _NOW_REFUSED)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_all_numeric_link_local_and_out_of_range_hosts_are_refused(url, enabled, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "network_token_binding_enabled", enabled)
+    assert not endpoints.is_valid_endpoint(url)
+    assert endpoints.validate_endpoints([url]) == []
+
+
 @pytest.mark.parametrize("url, local", [
     ("http://127.0.0.1:8000", True), ("http://localhost:8000", True), ("http://[::1]:8000", True),
     ("http://10.0.0.5:8000", True), ("http://192.168.1.20", True), ("http://172.16.4.4:8000", True),

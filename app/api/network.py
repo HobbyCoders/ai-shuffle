@@ -553,7 +553,9 @@ async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
         row = await run_sync(store.get_member, body.device_id)
         member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
     return {"challenge": tokens.new_challenge(body.device_id, requester, member_address=member_address),
-            "expires_in": tokens.CHALLENGE_TTL_SECONDS, "token_binding": 1}
+            "expires_in": tokens.CHALLENGE_TTL_SECONDS,
+            # Advertise binding support only while this worker enforces it.
+            **({"token_binding": 1} if settings.network_token_binding_enabled else {})}
 
 
 @router.post("/peer/auth/token")

@@ -50,6 +50,7 @@ address the peer withdrew stops being dialed: a session at it is dropped.
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from typing import Iterable, List, Mapping, Optional
 from urllib.parse import urlsplit
@@ -60,6 +61,11 @@ MAX_ENDPOINT_LENGTH = 512
 # Tailscale hands every node an address from the carrier-grade NAT block,
 # which ``ipaddress`` classifies as neither private nor global.
 _TAILSCALE_IPV4 = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+# One label of a legacy IPv4 form: decimal/octal digits or hex. A host made
+# only of such labels is an address to ``inet_aton``/``getaddrinfo``.
+_NUMERIC_LABEL = re.compile(r"\d+|0x[0-9a-f]*", re.IGNORECASE)
 
 
 def is_valid_endpoint(url: object) -> bool:
@@ -105,10 +111,11 @@ def is_valid_endpoint(url: object) -> bool:
         try:
             address = ipaddress.IPv4Address(socket.inet_aton(numeric_host))
         except OSError:
-            last_label = numeric_host.rsplit(".", 1)[-1].lower()
-            if last_label.isdigit() or last_label.startswith("0x"):
-                return False  # numeric-looking but invalid IPv4, not a DNS name
-            return True  # a name; resolution happens at dial time
+            if all(_NUMERIC_LABEL.fullmatch(label) for label in numeric_host.split(".")):
+                return False  # an out-of-range numeric address, not a DNS name
+            # Any non-numeric label makes it a name (``0xnas``, ``box.0xfeed``,
+            # ``nas.10``); resolution happens at dial time.
+            return True
     return not embedded_ipv4(address).is_link_local
 
 

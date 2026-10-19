@@ -167,13 +167,28 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+	function peerFailure(last_error: string, last_error_code: string | null) {
+		status.sync = { records: {}, ops: 0, holes: [], conflicts: 0, peers: [{ device_id: 'laptop', base_url: null,
+			endpoints: ['https://alias.example'], last_error, last_error_code, seconds_since_contact: null, online: false }] };
+	}
+
 	it('shows the actionable peer refusal in the worker detail', async () => {
 		const error = 'Worker laptop refused https://alias.example because it does not advertise that address. Add Advertised addresses or set CLUSTER_ADVERTISE_URL.';
-		status.sync = { records: {}, ops: 0, holes: [], conflicts: 0, peers: [{ device_id: 'laptop', base_url: null,
-			endpoints: ['https://alias.example'], last_error: error, seconds_since_contact: null, online: false }] };
+		peerFailure(error, 'endpoint_not_advertised');
 		await model.loadStatus();
 		show('member:laptop');
-		expect(screen.getByRole('alert').textContent).toBe(error);
+		expect(screen.getByText(error).closest('.st-banner')).not.toBeNull();
+	});
+
+	it.each([
+		['an offline worker', 'PeerConnectFailed: ConnectError: [Errno 113] No route to host'],
+		['a stalled sync', 'Sync with this worker is stalled: 3 changes are not arriving.']
+	])('shows no banner for %s', async (_case, error) => {
+		peerFailure(error, null);
+		await model.loadStatus();
+		const { container } = show('member:laptop');
+		expect(screen.queryByText(error)).toBeNull();
+		expect(container.querySelector('.st-banner')).toBeNull();
 	});
 
 	it('shows a desktop revision beside its bare version in the list and detail', async () => {

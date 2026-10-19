@@ -155,6 +155,7 @@ async def test_mismatch_reason_reaches_peer_status_and_rate_limited_logs(pair, c
                     await link.authenticate(client, engine.context())
                 assert exc.value.code == tokens.ENDPOINT_NOT_ADVERTISED
         status = transport.link_status()[0]
+        assert status["last_error_code"] == tokens.ENDPOINT_NOT_ADVERTISED
         assert alias in status["last_error"]
         assert "Advertised addresses" in status["last_error"]
         assert "CLUSTER_ADVERTISE_URL" in status["last_error"]
@@ -164,6 +165,58 @@ async def test_mismatch_reason_reaches_peer_status_and_rate_limited_logs(pair, c
     for reply in replies:
         if "challenge" in reply:
             assert reply["challenge"] not in warnings[0]
+
+
+def test_challenge_advertises_binding_only_while_enabled(pair, monkeypatch):
+    server, peer, _, client = pair
+    with server.active():
+        monkeypatch.setattr(settings, "network_token_binding_enabled", False)
+        reply = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": peer.device_id})
+        assert reply.status_code == 200
+        assert "token_binding" not in reply.json()
+        monkeypatch.setattr(settings, "network_token_binding_enabled", True)
+        reply = client.post("/api/v1/network/peer/auth/challenge", json={"device_id": peer.device_id})
+        assert reply.json()["token_binding"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", [False, True])
+async def test_a_new_token_keeps_the_stall_warning_and_clears_only_a_binding_refusal(binding, monkeypatch):
+    monkeypatch.setattr(settings, "network_token_binding_enabled", binding)
+    stall = "Sync with this worker is stalled: 3 changes are not arriving."
+    link = transport.PeerLink("peer-device", ["https://peer.example"])
+    link.sync_warning = link.last_error = stall
+    async def issue(client, ctx, endpoint):
+        return "token", 4102444800.0
+    monkeypatch.setattr(link, "_issue_token", issue)
+    # A control or browser call re-authenticates between sync passes: #245's
+    # warning (and any other sync failure) stays until the next pass ends.
+    await link.authenticate(None, None)
+    assert (link.last_error, link.last_error_code) == (stall, None)
+    link.last_error = "PeerConnectFailed: ConnectError: offline"
+    link.token = None
+    await link.authenticate(None, None)
+    assert link.last_error == "PeerConnectFailed: ConnectError: offline"
+    # Only the binding refusal is resolved by a token, back to the sync status.
+    link.last_error = str(transport.PeerEndpointNotAdvertised("peer-device", "https://peer.example"))
+    link.last_error_code, link.token = tokens.ENDPOINT_NOT_ADVERTISED, None
+    await link.authenticate(None, None)
+    assert (link.last_error, link.last_error_code) == (stall, None)
+
+
+@pytest.mark.asyncio
+async def test_an_offline_peer_reports_no_binding_error_code(pair):
+    server, peer, endpoints, _ = pair
+    def offline(request):
+        raise httpx.ConnectError("offline", request=request)
+    with peer.active():
+        store.touch_member(server.device_id, endpoints=endpoints)
+        transport.reset_for_tests()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(offline)) as client:
+            await transport.sync_pass(client)
+        status = next(p for p in transport.link_status() if p["device_id"] == server.device_id)
+        assert status["last_error"] and "does not advertise" not in status["last_error"]
+        assert status["last_error_code"] is None
 
 
 def test_owner_configured_alias_repairs_unadvertised_direct_endpoint(workers, monkeypatch):
