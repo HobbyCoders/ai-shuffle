@@ -2720,33 +2720,43 @@ class NativeLoop(BackgroundLifecycleMixin):
         target = self._compactor._deep_target(self.context_window, scale)
         if not manual and (target is None or self._compactor.estimate_view_tokens(nodes, overhead) <= target):
             return None
-        if self._summary_task is not None and not self._summary_task.done():
-            await asyncio.wait([self._summary_task])
-        region = self._compactor.summary_region(
-            nodes, context_window=self.context_window, scale=scale,
-            for_target=target is not None and self._compactor.estimate_view_tokens(nodes, overhead) > target,
-        )
-        if region is None or self._interrupted.is_set():
-            return None
-        pending = self._pending_summary
-        if pending is None or pending[:2] != region[:2]:
-            self._manual_summary_task = asyncio.create_task(self._build_checkpoint(sid, turn_id, region))
-            try:
-                pending = await self._manual_summary_task
-            except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if manual or (current is not None and current.cancelling()):
-                    raise
-                return None  # Stop cancelled the side call, not the ladder.
-            finally:
-                self._manual_summary_task = None
-        self._pending_summary = None
-        if pending is None:
-            return None
-        return self._compactor.apply_summary(
-            nodes, pending, overhead_tokens=overhead,
-            decision_reason="manual" if manual else "summary_batch",
-        )
+        if not manual:
+            await self._emit(ContextCompacting(
+                session_id=sid, turn_id=turn_id, active=True, trigger="auto",
+            ))
+        try:
+            if self._summary_task is not None and not self._summary_task.done():
+                await asyncio.wait([self._summary_task])
+            region = self._compactor.summary_region(
+                nodes, context_window=self.context_window, scale=scale,
+                for_target=target is not None and self._compactor.estimate_view_tokens(nodes, overhead) > target,
+            )
+            if region is None or self._interrupted.is_set():
+                return None
+            pending = self._pending_summary
+            if pending is None or pending[:2] != region[:2]:
+                self._manual_summary_task = asyncio.create_task(self._build_checkpoint(sid, turn_id, region))
+                try:
+                    pending = await self._manual_summary_task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if manual or (current is not None and current.cancelling()):
+                        raise
+                    return None  # Stop cancelled the side call, not the ladder.
+                finally:
+                    self._manual_summary_task = None
+            self._pending_summary = None
+            if pending is None:
+                return None
+            return self._compactor.apply_summary(
+                nodes, pending, overhead_tokens=overhead,
+                decision_reason="manual" if manual else "summary_batch",
+            )
+        finally:
+            if not manual:
+                await self._emit(ContextCompacting(
+                    session_id=sid, turn_id=turn_id, active=False, trigger="auto",
+                ))
 
     def _compaction_stats(self, nodes: list[SessionNode], measured: int | None) -> dict[str, int]:
         stats = self._compactor.stats(nodes)
@@ -3610,13 +3620,24 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             if summary is not None:
                 promotions.append(summary)
-            if promotions:
+            # Image-cap and sweep-only promotions are not permission to block
+            # a below-pressure turn. Only a committed deep size batch may wait.
+            decision = self._compactor.last_decision
+            size_batch = (
+                bool(promotions)
+                and decision.get("target_tokens") is not None
+                and decision.get("reason") in {
+                    "meaningful_reclaim", "hard_ceiling", "window_protection",
+                    "cold_commit", "cold_opportunistic", "break_even",
+                }
+            )
+            if size_batch:
                 summary = await self._checkpoint_for_compaction(
                     sid, turn_id, nodes, overhead=overhead_tokens,
                     scale=compaction_scale, manual=False,
                 )
-            if summary is not None:
-                promotions.append(summary)
+                if summary is not None:
+                    promotions.append(summary)
             if promotions:
                 rendered = self._compactor.view(nodes)
             history = repair_dangling_tool_calls(rendered)

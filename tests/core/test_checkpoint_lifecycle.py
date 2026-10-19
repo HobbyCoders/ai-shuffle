@@ -1,6 +1,5 @@
 """Checkpoint producers book once and stop through the host's idle teardown."""
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -111,11 +110,6 @@ async def persist(sid, result):
 @pytest.mark.parametrize("during_turn", [False, True])
 async def test_background_books_without_terminal_and_never_in_next_turn(mock_db, monkeypatch, during_turn):
     sid, adapter, loop, provider = await setup_loop(monkeypatch)
-    # Isolate background accounting from pressure: a due 15% batch may now
-    # await its checkpoint before opening the main call. Keep this fixture's
-    # background build due, but its conversation below the compaction trigger.
-    loop.context_window = 400_000
-    loop._compactor.config = replace(loop._compactor.config, summary_trigger_window_ratio=0.001)
     try:
         loop._schedule_checkpoint(loop.session_id, "origin")
         task = loop._summary_task
