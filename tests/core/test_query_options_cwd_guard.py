@@ -88,16 +88,13 @@ def test_session_spawn_cwd_from_resolver_base(tmp_path):
 
 
 def test_session_spawn_cwd_from_resolver_branch(tmp_path):
-    """A branch-bound session → resolver's branch checkout path wins and
-    base_branch is enriched from the legacy worktree row."""
+    """A branch-bound session → resolver's branch checkout path wins."""
     feat = tmp_path / "checkouts" / "proj" / "feat-x"
     feat.mkdir(parents=True)
     session = {"id": "ses-1", "project_v2_id": "pv2-1", "branch": "feat/x"}
 
     with patch.object(qo, "get_security_instructions", return_value=""), patch.object(
         qo.database, "get_session", return_value=session
-    ), patch.object(
-        qo.database, "get_worktree_by_session", return_value={"base_branch": "develop"}
     ), patch(
         "app.core.project_resolver.resolve_cwd", return_value=str(feat)
     ) as rc:

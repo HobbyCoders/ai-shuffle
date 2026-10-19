@@ -1569,6 +1569,9 @@ class TestExportProfileEndpoint:
                 # SDK-era fields are no longer part of the export wire shape
                 assert "system_prompt_type" not in body["agent"]
                 assert "thinking_mode" not in body["agent"]
+                # A stored row still carrying the retired environment switch
+                # exports without it, under either name.
+                assert "inject_env" not in result.body.decode()
                 # setting_sources IS exported again (fluid honors it); null
                 # when the profile never set one.
                 assert body["agent"]["setting_sources"] is None
@@ -1829,23 +1832,27 @@ class TestImportProfileEndpoint:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
 
-            request = AgentImportRequest(
-                version="1.0",
-                type="ai-shuffle-agent",
-                agent=AgentImportData(
-                    name="Custom Prompt Agent",
-                    system_prompt_type="custom",
-                    system_prompt_content="You are a custom agent",
-                    system_prompt_inject_env=True
-                )
-            )
+            # An older export file, parsed the way the route parses it. It
+            # still carries the retired environment switch.
+            request = AgentImportRequest.model_validate({
+                "version": "1.0",
+                "type": "ai-shuffle-agent",
+                "agent": {
+                    "name": "Custom Prompt Agent",
+                    "system_prompt_type": "custom",
+                    "system_prompt_content": "You are a custom agent",
+                    "system_prompt_inject_env": True,
+                },
+            })
+            assert "system_prompt_inject_env" not in AgentImportData.model_fields
 
             await import_profile(request, token="test-token")
 
             call_kwargs = mock_db.create_profile.call_args[1]
             config = call_kwargs["config"]
-            assert config["system_prompt"]["type"] == "custom"
-            assert config["system_prompt"]["content"] == "You are a custom agent"
+            assert config["system_prompt"] == {
+                "type": "custom", "content": "You are a custom agent",
+            }
 
     @pytest.mark.asyncio
     async def test_import_profile_with_preset_and_append(self):

@@ -27,7 +27,9 @@ class SystemPromptConfig(BaseModel):
     preset: Optional[str] = "claude_code"
     content: Optional[str] = None
     append: Optional[str] = None
-    inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
+    # The retired ``inject_env_details`` switch is not a field: a request that
+    # still sends it validates and the key is dropped (the fluid prompt
+    # compiler supplies the environment for every agent).
 
 
 class ComputerUseConfig(BaseModel):
@@ -1011,13 +1013,14 @@ class AgentImportData(AgentExportData):
     Older export files carry SDK-era fields the fluid harness ignores. They
     are accepted here so old files still import: a preset-shaped prompt's
     append text is mapped onto the custom prompt content; everything else is
-    silently dropped.
+    silently dropped. The retired ``system_prompt_inject_env`` is not listed:
+    an old file that carries it imports and the key is ignored like any other
+    unknown field.
     """
     thinking_mode: Optional[str] = None
     system_prompt_type: Optional[str] = None
     system_prompt_preset: Optional[str] = None
     system_prompt_append: Optional[str] = None
-    system_prompt_inject_env: Optional[bool] = False
     max_buffer_size: Optional[int] = None
     continue_conversation: Optional[bool] = False
     fork_session: Optional[bool] = False

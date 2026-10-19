@@ -1278,12 +1278,10 @@ async def test_out_of_order_session_intake_preserves_prompt_branch_and_spawn_con
                 if m["role"] == "user"] == [prompt]
         assert (response.session_id, "worktree", prompt) in submitted
         options, _ = query_options.build_options_from_profile(
-            query_profile({"system_prompt": {
-                "type": "custom", "content": "test", "inject_env_details": True
-            }}), session_id=response.session_id,
+            query_profile({"system_prompt": {"type": "custom", "content": "test"}}),
+            session_id=response.session_id,
         )
         assert str(options.cwd) == response.worktree_path
-        assert options.aih_turn_env["worktree_info"]["branch"] == response.branch_name
         assert checkout_manager.git_service.get_current_branch(str(options.cwd)) == response.branch_name
 
     # A changes its own HEAD mid-turn; a subsequent spawn is refused instead of

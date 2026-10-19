@@ -167,9 +167,10 @@ class TestCreateProfile:
         assert body["success"] is True
         # Verify create_profile was called with the correct config
         _, kwargs = mock_create.call_args
-        sp = kwargs["config"]["system_prompt"]
-        assert sp["type"] == "custom"
-        assert sp["content"] == "You are a code reviewer."
+        # The retired environment switch is never written.
+        assert kwargs["config"]["system_prompt"] == {
+            "type": "custom", "content": "You are a code reviewer.",
+        }
 
     @pytest.mark.asyncio
     async def test_create_profile_with_system_prompt_append_stores_preset(self, admin_tools):
@@ -347,7 +348,7 @@ class TestUpdateProfile:
             mock_update.return_value = _make_profile(
                 id="sp-content-switch",
                 name="SP Content Switch",
-                config={"system_prompt": {"type": "custom", "content": "x", "inject_env_details": True}},
+                config={"system_prompt": {"type": "custom", "content": "x"}},
             )
             result = await tool.handler({
                 "profile_id": "sp-content-switch",
@@ -356,9 +357,9 @@ class TestUpdateProfile:
         body = tool_result_json(result)
         assert body["success"] is True
         _, kwargs = mock_update.call_args
-        sp = kwargs["config"]["system_prompt"]
-        assert sp["type"] == "custom"
-        assert sp["content"] == "x"
+        # A content-only edit writes the content and nothing else: no
+        # retired environment switch rides along.
+        assert kwargs["config"]["system_prompt"] == {"type": "custom", "content": "x"}
 
     @pytest.mark.asyncio
     async def test_update_profile_system_prompt_append_sets_preset_append(self, admin_tools):

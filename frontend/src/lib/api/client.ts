@@ -499,7 +499,6 @@ export interface ProfileConfig {
 		preset?: string;  // LEGACY
 		content?: string;
 		append?: string;  // LEGACY: preset-shape append text
-		inject_env_details?: boolean;  // LEGACY: env is fluid-compiled now
 	} | null;
 }
 
@@ -638,7 +637,6 @@ export interface AgentExportData {
 	system_prompt_type?: string | null;
 	system_prompt_preset?: string | null;
 	system_prompt_append?: string | null;
-	system_prompt_inject_env?: boolean | null;
 	max_buffer_size?: number | null;
 	continue_conversation?: boolean | null;
 	fork_session?: boolean | null;
