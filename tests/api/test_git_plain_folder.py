@@ -194,6 +194,10 @@ def test_nested_project_reports_scope_without_parent_files(plain_project, scope,
     else:
         assert status["mutations_blocked"] is True
         assert not (folder / ".git").exists()
+        for action in ("diff-stats", "changed-files"):
+            refused = client.get(f"/api/v1/projects/{project['id']}/git/{action}{query}")
+            assert refused.status_code == 409, refused.text
+            assert "outside.txt" not in refused.text
         for action, body in [("stage", {"files": ["../outside.txt"]}), ("init", {})]:
             refused = client.post(f"/api/v1/projects/{project['id']}/git/{action}{query}", json=body)
             assert refused.status_code == 409, refused.text
