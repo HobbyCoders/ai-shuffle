@@ -164,7 +164,8 @@ function loadUpdater(electron) {
 	const module = { exports: {} };
 	const inert = () => 0;
 	vm.runInNewContext(readFileSync(path.join(desktopDir, 'dist/main/updater.js'), 'utf8'), {
-		module, exports: module.exports, require: (id) => (id === 'electron' ? electron : createRequire(import.meta.url)(id)),
+		// Its own imports (./channel-return) resolve beside it, as in the packaged app.
+		module, exports: module.exports, require: (id) => (id === 'electron' ? electron : createRequire(path.join(desktopDir, 'dist/main/updater.js'))(id)),
 		process: { env: {} }, setTimeout: inert, clearTimeout: inert, setInterval: inert, clearInterval: inert, Date, Error
 	});
 	return module.exports.Updater;
