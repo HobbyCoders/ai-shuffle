@@ -98,7 +98,10 @@ async def _drain(session_id: str, *, drain_turn_id: str) -> None:
     from app.core.session_pool import get_session_pool
 
     state = get_session_pool().peek(session_id)  # peek = no LRU promote
-    if state is None or not state.adapter.is_alive() or state.is_streaming:
+    # A client may die/disappear after escalation chose to keep it. That is
+    # already safe to evict: still settle the captured turn below, rather than
+    # strand it draining and keep a queued hand-off waiting for the reap sweep.
+    if state is not None and state.adapter.is_alive() and state.is_streaming:
         logger.info(
             "idle_reader: no drainable client (state=%s alive=%s streaming=%s) [session=%s]",
             state is not None,

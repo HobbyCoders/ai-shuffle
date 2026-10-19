@@ -11,7 +11,7 @@ const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40);
 const text = value => JSON.stringify(value, null, 2) + '\n';
 async function root(t, state, floor = { schemaVersion: 1, revision: A, sequence: 100 }) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-failed-start-'));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   if (state !== undefined) await fs.writeFile(path.join(dir, 'state.json'), typeof state === 'string' ? state : text(state));
   if (floor) await fs.writeFile(path.join(dir, 'database-floor.json'), text(floor));
   return dir;

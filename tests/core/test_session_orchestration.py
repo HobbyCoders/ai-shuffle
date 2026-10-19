@@ -86,6 +86,31 @@ async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkey
     await sync_engine.unregister_device("watcher", "peer", handler.websocket)
 
 
+def test_cross_messages_lock_sessions_in_global_order_before_chain(peers, monkeypatch):
+    from tests.pg_shim import ShimCursor
+    execute = ShimCursor.execute
+    locks = []
+
+    def trace(self, sql, params=None):
+        if sql == "SELECT id FROM sessions WHERE id=%s FOR UPDATE":
+            locks.append(("session", params[0]))
+        elif sql == "SELECT id FROM turns WHERE id=%s FOR UPDATE":
+            locks.append(("root", params[0]))
+        return execute(self, sql, params)
+
+    monkeypatch.setattr(ShimCursor, "execute", trace)
+    # The shim cannot emulate PostgreSQL row-lock waits. Assert the actual
+    # producer's acquisition order for both halves of concurrent X<->Y work;
+    # enqueue_turn's later recipient lock must already be held in either case.
+    for sender, target in (("caller", "peer"), ("peer", "caller")):
+        locks.clear()
+        result = orch._queue(sender, {"session_id": target, "message": "Coordinate",
+                                      "request_id": "cross"}, "message")
+        assert result["status"] == "queued"
+        assert locks[:2] == [("session", "caller"), ("session", "peer")]
+        assert locks[2][0] == "root"
+
+
 async def test_existing_message_receipt_after_stop_never_wakes(peers, monkeypatch):
     from unittest.mock import Mock
     from fluid.tools.registry import ToolCtx
@@ -689,6 +714,27 @@ def test_start_budget_survives_fresh_handler_and_retries(peers):
         orch._queue("caller", {**args, "request_id": "overflow"}, "start")
 
 
+@pytest.mark.parametrize("pending", [False, True])
+def test_direct_reply_does_not_spend_budget_or_mint_reply_credit(peers, monkeypatch, pending):
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 1)
+    request = orch._queue("caller", {"session_id": "peer", "message": "Please check", "request_id": "ask"}, "message")
+    if not pending:
+        turns.start_turn(request["turn_id"])
+    # Also answer an incoming request while the current context is an older
+    # human turn, as happens when a peer messages a busy recipient.
+    args = {"session_id": "caller", "message": "Checked", "request_id": "answer"}
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
+    reply = orch._queue("peer", args, "message")
+    assert turns.get_turn(reply["turn_id"])["payload"]["orchestration_reply_to"] == request["turn_id"]
+    assert orch._queue("peer", args, "message")["turn_id"] == reply["turn_id"]
+    with pytest.raises(ValueError, match="budget"):
+        orch._queue("peer", {**args, "request_id": "repeat"}, "message")
+    with pytest.raises(ValueError, match="budget"):
+        orch._queue("caller", {"session_id": "peer", "message": "Thanks", "request_id": "ack"}, "message")
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 2)
+    orch._queue("peer", {**args, "request_id": "new-work"}, "message")
+
+
 def test_message_budget_and_no_hop_limit(peers, monkeypatch):
     monkeypatch.setattr(orch, "MAX_ACTIONS", 2)
     args = {"session_id": "peer", "message": "go"}
@@ -722,12 +768,15 @@ async def test_question_answer_peer_budget_boundary(peers, monkeypatch, delivery
     chain_actions = 8
     monkeypatch.setattr(orch, "MAX_ACTIONS", chain_actions)
     sender, target = "caller", "peer"
-    for hop in range(chain_actions):
+    # Every request earns exactly one free reply; exhaust both the charged
+    # actions and their reply credits before testing human continuation.
+    chain_messages = 2 * chain_actions
+    for hop in range(chain_messages):
         receipt = orch._queue(sender, {"session_id": target, "message": "Coordinate",
                                       "request_id": f"hop-{hop}"}, "message")
         current = turns.start_turn(receipt["turn_id"])
         assert current
-        if hop < chain_actions - 1 or delivery == "queued":
+        if hop < chain_messages - 1 or delivery == "queued":
             turns.settle_turn(current["id"], "completed")
         elif delivery == "parked":
             turns.park_turn(current["id"], ["background-task"])

@@ -866,10 +866,14 @@ def security_check(python: str, strict: bool = False, *, audit: bool = True) -> 
         print("Dependency audit: not run on automatic push; run `python scripts/local_ci.py check` to refresh.")
 
 
-def scan_push(local_sha: str, remote_sha: str) -> None:
+def scan_push(local_sha: str, remote_sha: str, push_remote: str | None = None) -> None:
     # Always runs, even for a cached tree: a secret added then deleted in the
     # outgoing history must not slip through a clean final-tree pass.
-    run([choose_python(), "scripts/secret_scan.py", "--local", local_sha, "--remote", remote_sha], timeout=120)
+    # ``push_remote`` (the hook's $1) bounds a new branch's scan by what that
+    # remote's main already holds; see secret_scan.new_ref_boundary.
+    target = ["--push-remote", push_remote] if push_remote else []
+    run([choose_python(), "scripts/secret_scan.py", "--local", local_sha, "--remote", remote_sha, *target],
+        timeout=120)
 
 
 def attest_update_reach(revision: str) -> None:
@@ -995,10 +999,21 @@ def push_update_reach(revision: str, remote_ref: str) -> None:
 
 
 def cmd_pre_push(args) -> int:
-    """Called by the pre-push hook with git's ref lines on stdin."""
+    """Called by the pre-push hook with git's ref lines on stdin.
+
+    The hook passes the remote being pushed to in PUSH_REMOTE_ENV, not as an
+    argument: the installed hook is shared by every worktree of the clone,
+    and an older checkout's local_ci.py would reject an unknown argument.
+    """
     zero = "0" * 40
     records = load_records()
     head = git("rev-parse", "HEAD")
+    # Consume hook-only inputs so nested Git checks cannot inherit this push.
+    hook_version = os.environ.pop("LOCAL_CI_HOOK", None)
+    remote_argument = os.environ.pop(PUSH_REMOTE_ENV, "")
+    push_remote = (remote_argument or None) if hook_version == "4" else None
+    # The scanner validates this against configured remotes before using
+    # any tracking ref; a URL/path or unknown name scans all history.
     for line in sys.stdin.read().splitlines():
         parts = line.split()
         if len(parts) != 4:
@@ -1006,7 +1021,7 @@ def cmd_pre_push(args) -> int:
         _, local_sha, remote_ref, remote_sha = parts
         if local_sha == zero:
             continue  # ref deletions introduce no objects
-        scan_push(local_sha, remote_sha)
+        scan_push(local_sha, remote_sha, push_remote)
         if remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/"):
             revision_range = local_sha if remote_sha == zero else f"{remote_sha}..{local_sha}"
             # Check both sides of every change, including merge parents and
@@ -1062,6 +1077,8 @@ def cmd_pre_push(args) -> int:
 
 HOOK_SOURCE = ROOT / ".githooks" / "pre-push"
 HOOK_MARKER = "# LOCAL-CI-PRE-PUSH"
+# Set by the hook to git's first pre-push argument: the remote being pushed to.
+PUSH_REMOTE_ENV = "LOCAL_CI_PUSH_REMOTE"
 
 
 def hooks_dir() -> Path:
@@ -1075,14 +1092,24 @@ def hooks_dir() -> Path:
     return path if path.is_absolute() else (ROOT / path).resolve()
 
 
-def install_hook(directory: Path) -> str:
+def install_hook(directory: Path, *, force: bool = False) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     target, kept = directory / "pre-push", directory / "pre-push.user"
-    if target.exists() and HOOK_MARKER not in target.read_text(encoding="utf-8", errors="replace"):
-        if kept.exists():
-            raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
-        target.replace(kept)
-    target.write_bytes(HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n"))
+    source = HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n")
+    if target.exists():
+        installed = target.read_text(encoding="utf-8", errors="replace")
+        version_pattern = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
+        current_version = re.search(version_pattern, installed)
+        source_version = re.search(version_pattern, source.decode("utf-8"))
+        if (current_version and source_version
+                and int(current_version[1]) > int(source_version[1]) and not force):
+            raise Failure(f"{target} has newer hook v{current_version[1]}; refusing to replace it "
+                          f"with v{source_version[1]}. Use install --force to downgrade explicitly.")
+        if HOOK_MARKER not in installed:
+            if kept.exists():
+                raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
+            target.replace(kept)
+    target.write_bytes(source)
     target.chmod(0o755)
     return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
 
@@ -1117,7 +1144,7 @@ def find_test_python(explicit: str | None = None) -> str:
 def cmd_install(args) -> int:
     python = find_test_python(args.python)
     git("config", PYTHON_CONFIG, python)
-    print(install_hook(hooks_dir()))
+    print(install_hook(hooks_dir(), force=getattr(args, "force", False)))
     print(f"Tests run with {python} (git config {PYTHON_CONFIG}).")
     return 0
 
@@ -1146,6 +1173,7 @@ def main(argv: list[str] | None = None) -> int:
                              "stop a stage at MINUTES and split test stages that do not fit "
                              "(default 40, inside a 45-minute Monitor budget; 0 runs one stage, unlimited)")
     parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
+    parser.add_argument("--force", action="store_true", help="with install: allow downgrading a newer shared hook")
     parser.add_argument("--strict-audit", action="store_true",
                         help="fail on Python advisories, npm high/critical findings, or unavailable audits")
     args = parser.parse_args(argv)

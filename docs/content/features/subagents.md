@@ -84,7 +84,7 @@ Besides subagents, agents can coordinate with your other open chats:
 - send a message to another chat;
 - start a new, separate chat with a short brief.
 
-A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 4 new chats and 32 actions until you send a new message.
+A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 4 new chats and 32 actions until you send a new message. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, archive and ownership checks always apply.
 
 ### Work the personal assistant starts
 

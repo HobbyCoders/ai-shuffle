@@ -476,7 +476,16 @@ async function main(): Promise<void> {
 			if (revision) { await releaseStarts(updateRoot!, [revision], false); await applications!.load(); }
 			const reason = notice?.replace(/^.*?database restore point failed:\s*/, '').replace(/\.\s*$/, '');
 			throw new RestorePointCopyError(`The update was not installed: AI Shuffle could not save a copy of your database first${reason ? ` (${reason})` : ''}. Your data is unchanged and this version keeps running. Free some disk space, or close programs that may be using the AI Shuffle data folder, then check for updates and try again.`);
-		}, async () => { await applications!.cancelPreparedRollback(restorePoint); });
+		}, async () => {
+			try { await applications!.cancelPreparedRollback(restorePoint); }
+			catch (error) {
+				// The update stays pending with its copy (updater.ts): the status page, still
+				// showing the stopped stack, says at once to quit and open the app again.
+				heldPoint = true;
+				window.send('desktop:worker-state', desktopState());
+				throw error;
+			}
+		});
 	}
 	updater.onBeforeInstall(async () => {
 		await initialization;
