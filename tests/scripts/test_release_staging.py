@@ -215,6 +215,27 @@ def test_upload_never_clobbers_existing_asset(candidate, tmp_path, monkeypatch):
     assert all("upload" not in call for call in calls)
 
 
+@pytest.mark.parametrize("sealed_windows,needed,allowed", [(True, True, True), (True, False, True),
+                                                         (False, False, True), (False, True, False)])
+def test_promotion_checks_windows_intent_before_any_activation(candidate, tmp_path, monkeypatch,
+                                                              sealed_windows, needed, allowed):
+    record = {**candidate.record, "windows": sealed_windows}
+    envelope = p.sign_record(record, candidate.private)
+    monkeypatch.setattr(gh, "Backend", lambda _: Fake(candidate))
+    monkeypatch.setattr(gh, "load", lambda *_: envelope)
+    monkeypatch.setenv("WINDOWS_POLICY", json.dumps({"build": needed}))
+    monkeypatch.setattr("sys.argv", ["stage", "promote", "--tag", "v1.2.3", "--source-root", str(tmp_path),
+                                   "--directory", str(tmp_path)])
+    writes = []
+    monkeypatch.setattr(p, "activate", lambda *args, **kwargs: writes.append("activated"))
+    if allowed:
+        gh.main()
+    else:
+        with pytest.raises(ValueError, match="win: sealed candidate lacks a required Windows installer"):
+            gh.main()
+    assert writes == (["activated"] if allowed else [])
+
+
 def test_missing_record_is_not_a_legacy_canary(candidate, tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "api", lambda _: {"id": 9})
     monkeypatch.setattr(gh, "inventory", lambda _: [])
@@ -326,8 +347,8 @@ def test_new_workflow_paths_hold_publication_and_never_rebuild_promotion():
     assert any(s.get("uses", "").startswith("actions/attest-build-provenance@") for s in jobs["stage-record"]["steps"])
 
 def test_default_release_graph_contract():
-    # Canonical YAML digest includes mandatory Windows and the all-platform
-    # read-back gate (#223/#166); explicit behavior tests cover both paths.
+    # Canonical YAML digest includes input-based Windows and the all-platform
+    # read-back gate (#242/#166); explicit behavior tests cover both paths.
     # Remove ONLY opt-in staging inputs/jobs and guards that are true at defaults.
     wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     del wf["on"]["workflow_dispatch"]["inputs"]["stage_only"]
@@ -345,7 +366,7 @@ def test_default_release_graph_contract():
     opt_in = next(s for s in steps if s.get("name") == "Validate opt-in two-phase request")
     assert opt_in["if"] == "inputs.stage_only || inputs.promote != ''"
     steps.remove(opt_in)
-    assert p.sha256(p.canonical(wf)) == "d8d992973ca0451170af2ebda63f089eb673a146313aa64f0679ef498207a77f"
+    assert p.sha256(p.canonical(wf)) == "4fd966b8f73631b023012a4c5b4b54ebe449612257c4f6586dbd51e5fb4793c5"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):

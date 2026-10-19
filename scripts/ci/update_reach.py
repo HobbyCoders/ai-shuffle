@@ -401,6 +401,29 @@ def classify(changed: Iterable[str], base: Reader, head: Reader, released: Optio
     return groups
 
 
+def windows_installer_changes(changed: Iterable[str], base: Reader, head: Reader) -> list[str]:
+    """Installer inputs, independent of app/release versions and reach acceptances."""
+    groups = classify(changed, base, head)
+    relevant = set(groups["windows-launcher"]) | set(groups["windows-packaging"])
+    if base(LAUNCHER_JSON) != head(LAUNCHER_JSON):
+        relevant.add(LAUNCHER_JSON)
+
+    def electron(read):
+        package = json.loads(read("desktop/package.json") or b"{}")
+        lock = json.loads(read(LAUNCHER_LOCK) or b"{}")
+        root = lock.get("packages", {}).get("", {})
+        return (package.get("devDependencies", {}).get("electron"),
+                package.get("dependencies", {}).get("electron"),
+                root.get("devDependencies", {}).get("electron"),
+                root.get("dependencies", {}).get("electron"),
+                lock.get("packages", {}).get("node_modules/electron", {}).get("version"),
+                lock.get("dependencies", {}).get("electron", {}).get("version"))
+
+    if electron(base) != electron(head):
+        relevant.update(p for p in changed if p in {"desktop/package.json", LAUNCHER_LOCK})
+    return sorted(relevant)
+
+
 def in_archive(path: str, runtime_paths: Iterable[str], excluded: Iterable[str]) -> bool:
     """Whether the update archive carries this path (source_archive.pathspec, read as paths and globs)."""
     if not any(path == r or path.startswith(r + "/") for r in runtime_paths):

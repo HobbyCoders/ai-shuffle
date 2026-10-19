@@ -426,6 +426,11 @@ def main():
         if args.action == "play":
             from scripts.ci.release_staging_play import Play
             backend.play = Play()
+        if args.action == "promote":
+            record = protocol.verify_signed(envelope, backend.public_key)
+            policy = json.loads(os.environ["WINDOWS_POLICY"])
+            if not record["windows"] and policy.get("build") is not False:
+                raise ValueError("win: sealed candidate lacks a required Windows installer; stage a candidate with Windows first")
         protocol.activate(envelope, backend, play_only=args.action == "play")
     print("PASS whole-release " + args.action + ": " + args.tag)
 

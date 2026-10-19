@@ -74,17 +74,18 @@ def test_cli_readback_exits_nonzero_on_stale_or_unavailable_hub(monkeypatch, cap
             assert platform in output.err
 
 
-def test_stable_and_staged_windows_cannot_be_skipped():
+def test_stable_and_staged_windows_follow_the_verified_input_policy():
     wf = workflow("release.yml")
     jobs = wf["jobs"]
-    assert "build_desktop" not in wf["on"]["workflow_dispatch"]["inputs"]
-    assert jobs["desktop"]["if"] == "needs.create-release.outputs.promote_latest == 'true'"
-    assert jobs["desktop"]["needs"] == "create-release"
-    assert jobs["stage-desktop"]["if"] == "inputs.stage_only"
+    assert wf["on"]["workflow_dispatch"]["inputs"]["build_desktop"]["default"] == "false"
+    assert jobs["desktop"]["if"] == "needs.create-release.outputs.promote_latest == 'true' && needs.windows-policy.outputs.build == 'true'"
+    assert jobs["desktop"]["needs"] == ["create-release", "windows-policy"]
+    assert jobs["stage-desktop"]["if"] == "inputs.stage_only && needs.windows-policy.outputs.build == 'true'"
     for job in ("desktop", "stage-desktop"):
         assert jobs[job]["uses"] == "./.github/workflows/desktop-installer.yml"
     assert "needs.stage-desktop.result == 'success'" in jobs["stage-record"]["if"]
-    assert "skipped" not in jobs["stage-record"]["if"]
+    assert "needs.windows-policy.outputs.build == 'false' && needs.stage-desktop.result == 'skipped'" in jobs["stage-record"]["if"]
+    assert "needs.windows-policy.outputs.build == 'false' && needs.desktop.result == 'skipped'" in jobs["promote-image"]["if"]
     stage = next(s for s in jobs["stage-record"]["steps"] if s.get("name", "").startswith("Retain immutable"))
     assert "--windows" in stage["run"]
 
@@ -130,7 +131,7 @@ def test_both_publication_paths_register_platforms_with_the_existing_publisher()
 ])
 def test_final_readback_runs_for_both_paths_even_after_publication_failure(stage, promote, latest, preflight, cancelled, expected):
     job = workflow("release.yml")["jobs"]["verify-downloads"]
-    assert set(job["needs"]) == {"preflight", "create-release", "desktop", "promote-image", "platform-installers", "promotion", "promotion-platform-installers"}
+    assert set(job["needs"]) == {"preflight", "create-release", "desktop", "windows-policy", "promote-image", "platform-installers", "promotion", "promotion-platform-installers"}
     expression = job["if"]
     for name, value in {"inputs.stage_only": stage, "inputs.promote": promote,
                         "needs.create-release.outputs.promote_latest": latest,
@@ -167,6 +168,7 @@ def test_windows_only_publishes_for_the_newest_final_release(tag, newest, expect
     assert result.returncode == 0, result.stderr
     latest = next(line.split("=", 1)[1] for line in result.stdout.splitlines() if line.startswith("promote_latest="))
     expression = jobs["desktop"]["if"].replace("needs.create-release.outputs.promote_latest", repr(latest))
+    expression = expression.replace("needs.windows-policy.outputs.build", repr("true")).replace("&&", "and")
     assert eval(expression, {"__builtins__": {}}, {}) is expected
 
 

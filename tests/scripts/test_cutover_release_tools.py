@@ -202,19 +202,21 @@ def test_prepare_produces_frozen_mapping_and_refuses_low_inventory(tmp_path,monk
 
 
 @pytest.mark.parametrize("desktop", ["success", "skipped", "failure", "cancelled"])
-@pytest.mark.parametrize("failed_job", [None, "docker", "buyer-install", "source-stable", "android-apk", "linux-release"])
-def test_promotion_requires_all_artifacts_including_windows(desktop,failed_job):
+@pytest.mark.parametrize("needed", [True, False])
+@pytest.mark.parametrize("failed_job", [None, "docker", "buyer-install", "source-stable", "android-apk", "linux-release", "windows-policy"])
+def test_promotion_requires_all_artifacts_or_verified_windows_skip(desktop,needed,failed_job):
     workflow=yaml.load((ROOT/".github/workflows/release.yml").read_text(),Loader=yaml.BaseLoader)
     expression=workflow["jobs"]["promote-image"]["if"]
     expression=expression.replace("needs.create-release.outputs.promote_latest", repr("true"))
-    for job in ("create-release", "docker", "buyer-install", "source-stable", "android-apk", "linux-release", "desktop"):
+    expression=expression.replace("needs.windows-policy.outputs.build", repr(str(needed).lower()))
+    for job in ("create-release", "docker", "buyer-install", "source-stable", "android-apk", "linux-release", "desktop", "windows-policy"):
         result=desktop if job=="desktop" else ("failure" if job==failed_job else "success")
         expression=expression.replace(f"needs.{job}.result",repr(result))
     expression=expression.replace("always()","True").replace("failure()","False").replace("cancelled()","False")
     expression=expression.replace("&&","and").replace("||","or").replace("!","not ")
     # Only quoted fixture values and boolean operators remain; no names/calls.
     result=eval(expression,{"__builtins__":{}},{})
-    assert result == (failed_job is None and desktop=="success")
+    assert result == (failed_job is None and (desktop=="success" or (desktop=="skipped" and not needed)))
 
 
 def test_linux_release_is_exact_tag_and_durable():

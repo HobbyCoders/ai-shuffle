@@ -7,6 +7,11 @@ on:
         description: 'Existing tag to release (select that same tag as the workflow ref, e.g. v0.8.19)'
         required: true
         type: string
+      build_desktop:
+        description: Force a Windows installer for the newest final stable release (otherwise compare installer inputs)
+        required: false
+        type: boolean
+        default: false
       stage_only:
         description: Build and seal a whole-release candidate; hold all moving pointers and Play
         required: false
@@ -95,6 +100,30 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: python scripts/ci/release_preflight.py --tag "$RELEASE_TAG" --github --remote-catalog
 
+  windows-policy:
+    name: Decide whether Windows installer inputs require a build
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.policy.outputs.build }}
+      policy: ${{ steps.policy.outputs.policy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify the current hub installer and compare inputs, never release versions
+        id: policy
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          FORCE_WINDOWS: ${{ inputs.build_desktop }}
+        run: |
+          args=()
+          if [[ "$FORCE_WINDOWS" == 'true' ]]; then args+=(--force); fi
+          python3 scripts/ci/windows_installer_policy.py --tag "$RELEASE_TAG" --revision "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT" "${args[@]}"
+
   create-release:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') && !inputs.stage_only && inputs.promote == ''
@@ -175,9 +204,12 @@ jobs:
             After that, use Download update and Update and restart inside AI Shuffle.
             The app fetches the newest stable release and prepares updates in the
             background. No command prompt or new installer is needed.
-            Every release promoted to latest stable publishes Windows, Linux and Android downloads.
-            Older-line patches and prereleases leave stable downloads unchanged and skip Windows.
-            The release fails if any download does not match its version and revision.
+            Newest stable releases publish Linux and Android downloads for this tag.
+            Windows is rebuilt only when installer inputs changed, the hub installer cannot be verified,
+            or the owner forces a build; otherwise the verified previous installer stays available
+            and updates itself on first start. Older-line patches and prereleases leave stable downloads unchanged.
+            The release fails if a new download does not match its tag/revision or a retained Windows installer
+            fails checksum, identity or unchanged-input verification.
             Existing desktop users can still update inside the app.
             Other workers are managed inside the app under Devices.
 
@@ -338,7 +370,7 @@ jobs:
 
   promote-image:
     name: Promote the verified immutable Docker image
-    needs: [create-release, docker, buyer-install, source-stable, android-apk, linux-release, desktop]
+    needs: [create-release, docker, buyer-install, source-stable, android-apk, linux-release, desktop, windows-policy]
     if: >-
       always() && !failure() && !cancelled() &&
       needs.create-release.outputs.promote_latest == 'true' &&
@@ -348,7 +380,9 @@ jobs:
       needs.source-stable.result == 'success' &&
       needs.android-apk.result == 'success' &&
       needs.linux-release.result == 'success' &&
-      needs.desktop.result == 'success'
+      needs.windows-policy.result == 'success' &&
+      (needs.desktop.result == 'success' ||
+       (needs.windows-policy.outputs.build == 'false' && needs.desktop.result == 'skipped'))
     runs-on: ubuntu-latest
     environment: release-signing
     permissions:
@@ -414,7 +448,7 @@ jobs:
 
   verify-downloads:
     name: Require current win, linux and android downloads
-    needs: [preflight, create-release, desktop, promote-image, platform-installers, promotion, promotion-platform-installers]
+    needs: [preflight, create-release, desktop, windows-policy, promote-image, platform-installers, promotion, promotion-platform-installers]
     # Diagnose missing downloads even if a publishing job failed or was skipped.
     if: >-
       always() && !cancelled() && needs.preflight.result == 'success' && !inputs.stage_only &&
@@ -425,13 +459,17 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Read back the public download list
         env:
+          WINDOWS_POLICY: ${{ needs.windows-policy.outputs.policy }}
+          WINDOWS_RESULT: ${{ inputs.promote != '' && 'promoted' || needs.desktop.result }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           ACTIVATION_RESULT: ${{ inputs.promote != '' && needs.promotion.result || needs.promote-image.result }}
         run: |
           revision=$(git rev-parse HEAD)
-          python3 scripts/ci/verify_release_downloads.py --tag "$RELEASE_TAG" --revision "$revision" --activation-result "$ACTIVATION_RESULT"
+          python3 scripts/ci/verify_release_downloads.py --tag "$RELEASE_TAG" --revision "$revision" --activation-result "$ACTIVATION_RESULT" --windows-policy "$WINDOWS_POLICY" --windows-result "$WINDOWS_RESULT"
 
   android:
     name: Android Play internal release
@@ -492,8 +530,8 @@ jobs:
 
   desktop:
     name: Windows installer
-    if: needs.create-release.outputs.promote_latest == 'true'
-    needs: create-release
+    if: needs.create-release.outputs.promote_latest == 'true' && needs.windows-policy.outputs.build == 'true'
+    needs: [create-release, windows-policy]
     permissions:
       contents: write
       actions: write
@@ -656,8 +694,8 @@ jobs:
       version: ${{ needs.preflight.outputs.release_version }}
 
   stage-desktop:
-    if: inputs.stage_only
-    needs: [preflight, stage-begin]
+    if: inputs.stage_only && needs.windows-policy.outputs.build == 'true'
+    needs: [preflight, stage-begin, windows-policy]
     permissions:
       contents: write
       actions: write
@@ -668,14 +706,16 @@ jobs:
     secrets: inherit
 
   stage-record:
-    needs: [preflight, stage-begin, stage-docker, stage-buyer, stage-source, stage-android, stage-apk, stage-linux, stage-desktop]
+    needs: [preflight, stage-begin, stage-docker, stage-buyer, stage-source, stage-android, stage-apk, stage-linux, stage-desktop, windows-policy]
     if: >-
       always() && !failure() && !cancelled() && inputs.stage_only &&
       needs.stage-begin.result == 'success' && needs.stage-docker.result == 'success' &&
       needs.stage-buyer.result == 'success' && needs.stage-source.result == 'success' &&
       needs.stage-android.result == 'success' && needs.stage-apk.result == 'success' &&
       needs.stage-linux.result == 'success' &&
-      needs.stage-desktop.result == 'success'
+      needs.windows-policy.result == 'success' &&
+      (needs.stage-desktop.result == 'success' ||
+       (needs.windows-policy.outputs.build == 'false' && needs.stage-desktop.result == 'skipped'))
     runs-on: ubuntu-latest
     environment: release-signing
     timeout-minutes: 30
@@ -747,6 +787,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
+          BUILD_WINDOWS: ${{ needs.windows-policy.outputs.build }}
           IMAGE_DIGEST: ${{ needs.stage-docker.outputs.digest }}
           PLAY_CODE: ${{ needs.stage-android.outputs.version_code }}
           STAGING_JOB_RESULTS: >-
@@ -755,7 +796,9 @@ jobs:
             "apk":"${{ needs.stage-apk.result }}","play":"${{ needs.stage-android.result }}",
             "windows":"${{ needs.stage-desktop.result }}"}
         run: |
-          python -I scripts/ci/release_staging_github.py stage --tag "$RELEASE_TAG" --source-root "$RELEASE_CANDIDATE_CHECKOUT" --directory "$RUNNER_TEMP/stage" --artifacts "$RUNNER_TEMP/stage-artifacts" --image-digest "$IMAGE_DIGEST" --play-code "$PLAY_CODE" --windows
+          args=()
+          if [[ "$BUILD_WINDOWS" == 'true' ]]; then args+=(--windows); fi
+          python -I scripts/ci/release_staging_github.py stage --tag "$RELEASE_TAG" --source-root "$RELEASE_CANDIDATE_CHECKOUT" --directory "$RUNNER_TEMP/stage" --artifacts "$RUNNER_TEMP/stage-artifacts" --image-digest "$IMAGE_DIGEST" --play-code "$PLAY_CODE" "${args[@]}"
       - name: Attest the signed record and all transitively bound artifact hashes
         uses: actions/attest-build-provenance@v2
         with:
@@ -769,7 +812,7 @@ jobs:
 
   promotion:
     if: inputs.promote != '' && !inputs.stage_only
-    needs: preflight
+    needs: [preflight, windows-policy]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release-signing
@@ -820,6 +863,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify sealed bytes and resume activation without signing or building
         env:
+          WINDOWS_POLICY: ${{ needs.windows-policy.outputs.policy }}
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
