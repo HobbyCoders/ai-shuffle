@@ -193,6 +193,18 @@ def _owns_cdp_port(port: int) -> bool:
     import psutil
 
     try:
+        if not _in_container():
+            if _proc is None or _proc.returncode is not None:
+                return False
+            # macOS denies system-wide connection inspection without root.
+            # Inspect only our supervised launcher and its own descendants.
+            process = psutil.Process(_proc.pid)
+            for child in [process, *process.children(recursive=True)]:
+                connections = getattr(child, "net_connections", None) or child.connections
+                if any(c.status == psutil.CONN_LISTEN and c.laddr.port == port
+                       for c in connections(kind="tcp")):
+                    return True
+            return False
         listeners = [c for c in psutil.net_connections(kind="tcp")
                      if c.status == psutil.CONN_LISTEN and c.laddr.port == port]
         if not listeners:
@@ -202,19 +214,15 @@ def _owns_cdp_port(port: int) -> bool:
                 return False
             process = psutil.Process(listener.pid)
             chain = [process, *process.parents()]
-            if not _in_container():
-                if _proc is None or _proc.returncode is not None or not any(p.pid == _proc.pid for p in chain):
-                    return False
-            else:
-                supervisor = egress = False
-                for ancestor in chain:
-                    names = {Path(arg).name for arg in ancestor.cmdline()}
-                    supervisor |= bool(names & {"chrome-supervisor", "chrome-supervisor.sh"})
-                    egress |= "egress-launch.js" in names
-                    if supervisor and egress:
-                        break  # Do not inspect protected ancestors above our supervisor.
-                if not (supervisor and egress):
-                    return False
+            supervisor = egress = False
+            for ancestor in chain:
+                names = {Path(arg).name for arg in ancestor.cmdline()}
+                supervisor |= bool(names & {"chrome-supervisor", "chrome-supervisor.sh"})
+                egress |= "egress-launch.js" in names
+                if supervisor and egress:
+                    break  # Do not inspect protected ancestors above our supervisor.
+            if not (supervisor and egress):
+                return False
         return True
     except (psutil.Error, OSError):
         return False

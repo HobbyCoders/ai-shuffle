@@ -234,3 +234,53 @@ def test_failed_websocket_hello_releases_ticket(authenticated_client, provider, 
         with pytest.raises(WebSocketDisconnect):
             socket.receive_json()
     assert authenticated_client.post(f"{ROOT}/{provider}/balance-access/sign-in").status_code == 200
+
+@pytest.mark.parametrize("invoice_code,bad_limit", [(200, False), (200, True), (403, False)])
+def test_xai_invoice_budget_deferral_keeps_optional_observations(authenticated_client, provider, monkeypatch, invoice_code, bad_limit):
+    from unittest.mock import AsyncMock
+    from app.core import usage_polling as polling
+    db.update_model_provider(provider, provider_type="xai", base_url="https://api.x.ai/v1")
+    configure(authenticated_client, provider, "management-budget-test")
+    invoice = {"coreInvoice": {"prepaidCreditsUsed": {"val": "-500"}},
+               "effectiveSpendingLimit": "NaN" if bad_limit else {"val": "20000"}}
+    upstream = AsyncMock(side_effect=lambda url, **kwargs: httpx.Response(
+        invoice_code, json=invoice, request=httpx.Request("GET", url)))
+    client = Mock(get=upstream)
+    context = Mock(__aenter__=AsyncMock(return_value=client), __aexit__=AsyncMock(return_value=False))
+    monkeypatch.setattr(polling.httpx, "AsyncClient", Mock(return_value=context))
+    prepaid = ["-1234", "-1434"]
+    deferred = []
+    async def endpoints(url, **kwargs):
+        if url == balances.XAI_KEY_URL:
+            body = {"team_id": "team-budget-test"}
+        elif url.endswith("/prepaid/balance"):
+            body = {"total": {"val": prepaid.pop(0)}}
+        else:
+            # The real durable budget pauses on a403 or defers on interval jitter.
+            try:
+                return await polling.usage_get(url, **kwargs)
+            except polling.UsageDeferred:
+                deferred.append(url)
+                raise
+        return httpx.Response(200, json=body, request=httpx.Request("GET", url))
+    monkeypatch.setattr(balances, "usage_get", endpoints)
+    asyncio.run(balances.poll({"id": provider}))
+    first = authenticated_client.get(f"{ROOT}/{provider}/balance-access").json()
+    if invoice_code == 403:
+        assert first["invoice_error_kind"] == "billing_access_denied"
+    else:
+        assert first["credits"]["spend_month"] == 5
+        if bad_limit:
+            assert first["spending_limit_error_kind"] == "unavailable"
+        else:
+            assert first["credits"]["spending_limit"] == 200
+    asyncio.run(balances.poll({"id": provider}))
+    second = authenticated_client.get(f"{ROOT}/{provider}/balance-access").json()
+    assert second["status"] == "fresh"
+    assert second["credits"]["balance_remaining"] == 14.34
+    assert {k: v for k, v in second["credits"].items() if k != "balance_remaining"} == {
+        k: v for k, v in first["credits"].items() if k != "balance_remaining"}
+    assert second["invoice_error_kind"] == first["invoice_error_kind"]
+    assert second["spending_limit_error_kind"] == first["spending_limit_error_kind"]
+    assert len(deferred) == 1 and deferred[0].endswith("/postpaid/invoice/preview")
+    assert upstream.await_count == 1

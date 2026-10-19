@@ -10,6 +10,7 @@ on page load, before any live ``usage_snapshot`` WS event arrives.
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, List, Literal, Optional
 
 from fastapi import APIRouter, Depends
@@ -272,6 +273,8 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
 
         entries: List[ProviderUsageEntry] = []
         now_ms = time.time() * 1000
+        month_start_ms = datetime.fromtimestamp(now_ms / 1000, timezone.utc).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
         for row in rows:
             try:
                 # Usage history can outlive a provider (including an in-flight poll
@@ -404,7 +407,12 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
             # Preserve only its spend fields; never resurrect a manual balance.
             admin_spend = {}
             for entry in entries:
-                if entry.provider_id == provider["id"] and entry.source_info and entry.source_info.id == "openai_admin":
+                if (entry.provider_id == provider["id"] and entry.source_info
+                        and entry.source_info.id == "openai_admin"
+                        and entry.status == "fresh" and not entry.last_error_kind
+                        and entry.fetched_at and month_start_ms <= entry.fetched_at <= now_ms):
+                    # Do not relabel an old/failed or prior-month Admin total
+                    # with the balance's newer timestamp and current-month label.
                     admin_spend = {k: v for k, v in (entry.credits or {}).items()
                                    if k in {"spend_month", "input_tokens", "output_tokens", "num_model_requests"}}
             credits = {**admin_spend, **(balance["credits"] or {})} or None

@@ -48,12 +48,11 @@ async def test_signin_startup_fails_closed(monkeypatch, case, message):
         chrome.cdp_get.assert_not_awaited()
 
 
-@pytest.mark.parametrize("docker, supervised, egress, allowed", [
-    (False, True, True, True), (False, False, True, False),
-    (True, True, True, True), (True, False, True, False), (True, True, False, False),
+@pytest.mark.parametrize("supervised, egress, allowed", [
+    (True, True, True), (False, True, False), (True, False, False),
 ])
-def test_port_ownership_requires_supervised_listener(monkeypatch, docker, supervised, egress, allowed):
-    monkeypatch.setattr(chrome, "_in_container", lambda: docker)
+def test_port_ownership_requires_supervised_listener(monkeypatch, supervised, egress, allowed):
+    monkeypatch.setattr(chrome, "_in_container", lambda: True)
     monkeypatch.setattr(chrome, "_proc", SimpleNamespace(pid=20, returncode=None))
     parent = Mock(pid=20 if supervised else 99)
     parent.cmdline.return_value = ["node", "/opt/browser-mcp/dist/egress-launch.js"] if egress else ["chrome"]
@@ -68,4 +67,28 @@ def test_port_ownership_requires_supervised_listener(monkeypatch, docker, superv
     assert chrome._owns_cdp_port(9221) is allowed
     # An unknown listener is never silently trusted.
     listener.pid = None
+    assert not chrome._owns_cdp_port(9221)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_native_ownership_uses_supervised_process_connections_without_root(monkeypatch, legacy):
+    monkeypatch.setattr(chrome, "_in_container", lambda: False)
+    monkeypatch.setattr(chrome, "_proc", SimpleNamespace(pid=20, returncode=None))
+    system = Mock(side_effect=psutil.AccessDenied())
+    monkeypatch.setattr(psutil, "net_connections", system)
+    launcher = SimpleNamespace(pid=20, net_connections=Mock(return_value=[]))
+    listener = SimpleNamespace(status=psutil.CONN_LISTEN, laddr=SimpleNamespace(port=9221))
+    own_connections = Mock(return_value=[listener])
+    child = SimpleNamespace(pid=30, **{"connections" if legacy else "net_connections": own_connections})
+    launcher.children = Mock(return_value=[child])
+    process = Mock(return_value=launcher)
+    monkeypatch.setattr(psutil, "Process", process)
+    assert chrome._owns_cdp_port(9221)
+    process.assert_called_once_with(20)
+    launcher.children.assert_called_once_with(recursive=True)
+    system.assert_not_called()
+    # An external listener is insufficient when no owned child has that port.
+    own_connections.return_value = []
+    assert not chrome._owns_cdp_port(9221)
+    own_connections.side_effect = psutil.AccessDenied()
     assert not chrome._owns_cdp_port(9221)

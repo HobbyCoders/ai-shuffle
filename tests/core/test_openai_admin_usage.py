@@ -1,6 +1,8 @@
 """Admin API producing path, storage isolation, pagination and durable budgets."""
 
 import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -116,7 +118,8 @@ def test_invalid_costs_are_not_zero_balances(amount):
 
 
 @pytest.mark.asyncio
-async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenticated_client, upstream):
+@pytest.mark.parametrize("admin_state", ["fresh", "stale", "error", "prior_month"])
+async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenticated_client, upstream, monkeypatch, admin_state):
     from app.core import encryption
     row = db.create_model_provider(provider_id="test-openai", name="OpenAI", provider_type="openai", base_url="https://api.openai.com", auth_token=encryption.encrypt_value("inference-key"))
     pid = row["id"]
@@ -141,6 +144,16 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
     from app.core import api_key_balances as balances
     from app.db import provider_balances
     from app.api.usage import _load_provider_usage
+    from app.api import usage as api_usage
+    # A month boundary must not relabel last month's otherwise-recent spend.
+    now = datetime(2026, 10, 1, 0, 0, 30, tzinfo=timezone.utc).timestamp()
+    fetched = int((now - {"fresh": 10, "stale": 3600, "error": 10, "prior_month": 60}[admin_state]) * 1000)
+    raw = {**snapshot["raw"], "billing_fetched_at": fetched}
+    if admin_state == "error":
+        raw["usage_error"] = "billing_access_denied"
+    assert db.upsert_provider_usage_snapshot(pid, "openai", None, [], snapshot["credits"], raw, fetched,
+        expected_binding=("org-test", settings.effective_instance_id), expected_admin_key=encrypted)
+    monkeypatch.setattr(api_usage, "time", SimpleNamespace(time=lambda: now))
     current = db.get_model_provider(pid, include_token=True)
     assert provider_balances.bind(current, settings.effective_instance_id, encryption.encrypt_value("sess-test-balance"))
     async def credit_get(url, **kwargs):
@@ -151,14 +164,21 @@ async def test_real_producing_path_uses_only_admin_key_and_stores_spend(authenti
     await balances.poll({"id": pid})
     entry = next(e for e in await _load_provider_usage() if e.provider_id == pid)
     assert entry.credits["balance_remaining"] == 8
-    assert entry.credits["spend_month"] == 12.5
-    assert entry.credits["input_tokens"] == 30
+    if admin_state == "fresh":
+        assert entry.credits["spend_month"] == 12.5
+        assert entry.credits["input_tokens"] == 30
+    else:
+        assert "spend_month" not in entry.credits
+        assert "input_tokens" not in entry.credits
     assert entry.source_info.id == "openai_platform_balance"
     current = db.get_model_provider(pid, include_token=True)
     assert provider_balances.snapshot(current, {"last_error_kind": "billing_access_denied"})
     entry = next(e for e in await _load_provider_usage() if e.provider_id == pid)
-    assert "balance_remaining" not in entry.credits
-    assert entry.credits["spend_month"] == 12.5
+    assert "balance_remaining" not in (entry.credits or {})
+    if admin_state == "fresh":
+        assert entry.credits["spend_month"] == 12.5
+    else:
+        assert entry.credits is None
     assert entry.last_error_kind == "billing_access_denied"
     assert entry.status == "unavailable"
     db.clear_openai_billing_binding(pid)

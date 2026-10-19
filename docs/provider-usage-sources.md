@@ -79,8 +79,11 @@ readings expose no current amount. The server's ten-minute freshness window
 covers the five-minute polling interval plus jitter. Opening balance status or
 pressing Refresh requests a poll (30-second forced-refresh cooldown; endpoint
 budgets still apply), and Settings re-reads while it runs. Optional xAI invoice
-failures do not hide prepaid credit. Admin usage remains separate organization
-spend and its fields stay in the popover alongside real remaining credit. A configured real-balance source always outranks manual estimates,
+failures do not hide prepaid credit; a deferred invoice retains its optional
+values and error states. Admin usage remains separate organization spend. Only
+fresh, error-free current-UTC-month Admin fields are merged alongside real
+remaining credit; stale/failed/prior-month totals are withheld when a balance
+is bound rather than inheriting its timestamp. A configured real-balance source always outranks manual estimates,
 including when re-authentication is needed.
 
 In **Settings > Providers > the key > Usage**, enter the current prepaid balance

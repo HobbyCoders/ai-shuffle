@@ -316,7 +316,9 @@ worker, excluded from network sync, and included in secret re-encryption.
   Unknown units/currencies or non-finite amounts are rejected, never guessed.
   Invoice preview is optional: a refused/missing invoice does not hide prepaid
   credit; `invoice_error_kind` reports that failure separately. A malformed
-  limit is omitted with `spending_limit_error_kind`, preserving cycle usage. Proto JSON's
+  limit is omitted with `spending_limit_error_kind`, preserving cycle usage.
+  A budget-deferred invoice keeps its previous cycle/limit values and optional
+  error states; it is not a new failure. Proto JSON's
   omitted zero fields are treated as zero; an omitted spending limit is unknown.
   Cycle usage adds the absolute prepaid usage because its sign is undocumented;
   the sign and cycle totals still need comparison with a live account.
@@ -345,9 +347,11 @@ current; 401/403 asks for renewed access and pauses requests until the credentia
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference key, origin, auth type, or
 disabling the provider (including the enable toggle) invalidate its binding and
-reject in-flight snapshots. Admin organization-spend fields remain alongside
-real remaining credit in the usage popover; balance freshness/error state stays
-owned by the balance source. A failed WebSocket hello releases its ticket so an
+reject in-flight snapshots. Fresh, error-free Admin organization-spend fields
+from the current UTC month remain alongside real remaining credit in the usage
+popover. Stale, failed or prior-month Admin totals are withheld when a balance
+is bound, rather than borrowing its newer timestamp. Balance freshness/error
+state stays owned by the balance source. A failed WebSocket hello releases its ticket so an
 immediate sign-in retry is possible.
 Balance snapshots are stored independently from Admin spend and passive headers
 so those readers cannot overwrite provider-reported credit.

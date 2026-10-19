@@ -155,6 +155,14 @@ async def poll(row):
                         credits["spending_limit"] = usd_cents(invoice["effectiveSpendingLimit"])
                     except (ValueError, TypeError, KeyError, AttributeError):
                         limit_error = "unavailable"
+            except UsageDeferred:
+                # Invoice and prepaid endpoints have independent budget jitter.
+                # No observation is not an error: retain the optional endpoint's
+                # last values and refusal state (including a paused 401/403).
+                credits.update({k: v for k, v in (cached.get("credits") or {}).items()
+                                if k in {"spend_month", "spending_limit"}})
+                invoice_error = cached.get("invoice_error_kind")
+                limit_error = cached.get("spending_limit_error_kind")
             except Exception as error:
                 code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
                 invoice_error = "billing_access_denied" if code in (401, 403) else "unavailable"
