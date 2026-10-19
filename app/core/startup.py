@@ -590,8 +590,9 @@ def start_background_tasks() -> List[asyncio.Task]:
 
             Scans every enabled Codex provider and refreshes any whose access
             token is proactively due (8-day interval) or nearing JWT ``exp``
-            (5-min skew). Refreshes are serialized per provider (rotating refresh
-            token — a double refresh is permanent death), and permanent failures
+            (15-min skew). In a worker network only one worker renews (see
+            app.network.refresh_authority). Refreshes are serialized per provider
+            (rotating refresh token — a double refresh is permanent death), and permanent failures
             flip ``needs_reauth`` + surface a reconnect prompt. See
             app.core.codex_token_refresh.
             """
