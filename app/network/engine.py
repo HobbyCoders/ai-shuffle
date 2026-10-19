@@ -1211,11 +1211,12 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
     Only CASCADE children are terminal on parent deletion. Optional references
     and RESTRICT relationships retain their existing materialization/retry rules.
     Never infer deletion from absence alone, or from a tombstone while a
-    re-created local parent is present.
+    re-created local parent is present. Newer children may depend on a parent's
+    re-creation still in flight, so only a strictly later tombstone can win.
+    Agent IDs are routinely reused: permission rules always wait for their agent.
     """
     dependencies = {
         "session_tags": (("session_id", "sessions"), ("tag_id", "tags")),
-        "permission_rules": (("profile_id", "agents"),),
         "note_attachments": (("note_id", "notes"),),
         "api_user_credentials": (("api_user_id", "api_users"),),
         "api_user_profiles": (("api_user_id", "api_users"),),
@@ -1230,7 +1231,8 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
         if not isinstance(rid, str) or not rid:
             continue
         version = store.get_record(cursor, parent, rid)
-        if version and version["deleted"] and _read_row(cursor, policy.collection(parent), rid) is None:
+        if (version and version["deleted"] and env.clock < int(version["clock"])
+                and _read_row(cursor, policy.collection(parent), rid) is None):
             return f"parent deleted: {parent}/{rid}"
     return None
 
@@ -1284,6 +1286,10 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
                            winning_clock=int(existing["clock"]) if existing else env.clock,
                            winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
         result.reasons.append(reason)
+        # A local materialization refusal is not a hole in the signed log.
+        # Preserve it for relays just like a losing LWW operation; downstream
+        # peers evaluate their own dependencies without a forced bootstrap.
+        store.insert_op(cursor, env.to_dict(), _lane(policy.collection(env.collection)))
         return "rejected"
     _savepoint(cursor, "RELEASE SAVEPOINT apply_op")
     return outcome

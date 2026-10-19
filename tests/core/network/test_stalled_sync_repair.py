@@ -11,7 +11,8 @@ from tests.core.network.test_control import _new_session
 from tests.core.network.test_transport import ServedBy
 
 
-async def test_deleted_parent_drains_without_snapshot_or_backfill(workers):
+@pytest.mark.parametrize("newer_tombstone", [False, True])
+async def test_deleted_parent_drains_only_with_newer_tombstone(workers, newer_tombstone):
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Repair")
@@ -25,10 +26,15 @@ async def test_deleted_parent_drains_without_snapshot_or_backfill(workers):
     with a.active():
         database.add_session_tag("blocked", "removed")
         engine.scan_all()
-    # The assignment is still in flight when B deletes its parent.
-    with b.active():
-        database.delete_tag("removed")
-        engine.scan_all()
+        child_clock = a.sql("SELECT clock FROM sync_records WHERE collection='session_tags'")[0]["clock"]
+    # Wall-clock order alone does not establish Lamport dominance.
+    if newer_tombstone:
+        from tests.core.network.test_session_dependency_regressions import _delete_tag_after_clock
+        _delete_tag_after_clock(b, "removed", child_clock)
+    else:
+        with b.active():
+            database.delete_tag("removed")
+            engine.scan_all()
     exchange(b, a)
     with a.active():
         database.set_session_active("blocked", False)
@@ -38,6 +44,13 @@ async def test_deleted_parent_drains_without_snapshot_or_backfill(workers):
         link = transport.PeerLink(a.device_id, [served.base_url])
         async with httpx.AsyncClient(transport=served.transport()) as client:
             result = await link.sync_once(client, engine.require_context())
+            if not newer_tombstone:
+                assert result["apply"]["retry"] == 1
+                assert result["apply"]["rejected"] == 0
+                assert store.pending_holes()
+                assert link.sync_warning
+                assert not any(path == "/api/v1/network/peer/state" for _, path in served.requests)
+                return  # ambiguous deletion must not discard a valid child
             assert result["apply"]["retry"] == 0
             assert result["apply"]["rejected"] == 1
             assert "parent deleted: tags/removed" in result["apply"]["reasons"]

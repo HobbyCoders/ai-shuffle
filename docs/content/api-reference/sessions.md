@@ -14,7 +14,7 @@ An API key sees and acts only on the sessions it started (see [Own Sessions](/do
 
 ## Lifecycle synchronization
 
-Active/Settled membership is shared across paired workers; archive and delete run on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. A child operation whose cascading parent has a known deletion record is recorded as a conflict rather than retried forever, allowing subsequent lifecycle updates to drain. A missing parent without a deletion record still waits for replication.
+Active/Settled membership is shared across paired workers; archive and delete run on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. An older child operation whose cascading parent has a newer deletion record is recorded as a conflict rather than retried forever, allowing subsequent lifecycle updates to drain. Its signed operation remains available for forwarding. A missing parent without a newer deletion record still waits for replication; permission rules always wait for their agent, whose ID can be reused.
 
 `GET /api/v1/network/status` includes each peer's `sync_warning` and `stalled_streams` (origin, incarnation, next required `head_seq`, reason, pass count and Unix `first_seen_at`). A successful HTTP exchange does not erase a blocked-stream warning. Diagnostic counters are in-memory and restart with the worker. A stalled prefix does not automatically restart transcript backfill or bootstrap; missing retained operations continue using the existing verified state-copy protocol.
 
