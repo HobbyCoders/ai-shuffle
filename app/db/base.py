@@ -12,6 +12,7 @@ from collections import deque
 import threading
 import time
 import logging
+import traceback
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
@@ -91,7 +92,9 @@ def parse_database_url(db_url: str) -> Dict[str, Any]:
 class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
     """Open the startup minimum, then retain healthy connections up to maxconn."""
 
-    def __init__(self, minconn, maxconn, *args, **kwargs):
+    def __init__(self, minconn, maxconn, *args, reserved=0, **kwargs):
+        self._reserved = min(reserved, maxconn - 1)
+        self._lease_waiters = deque()
         # Separate lock: snapshots and sleeping acquirers never block on libpq.
         self._available = threading.Condition()
         self._waiters = deque()
@@ -138,9 +141,11 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         start = time.monotonic()
         deadline = start + _POOL_ACQUIRE_MAX_WAIT_SECONDS
         ticket = object()
+        lease = _lease_checkout.get()
+        waiters = self._lease_waiters if lease else self._waiters
         waited = timed_out = False
         with self._available:
-            self._waiters.append(ticket)
+            waiters.append(ticket)
         try:
             while True:
                 with self._available:
@@ -150,7 +155,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     if remaining <= 0:
                         timed_out = True
                         raise psycopg2.pool.PoolError("connection pool exhausted")
-                    if self._waiters[0] is not ticket:
+                    if waiters[0] is not ticket:
                         if not waited:
                             waited = True
                             self._wait_started()
@@ -173,13 +178,18 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             yield conn
         finally:
             with self._available:
-                self._waiters.remove(ticket)
+                waiters.remove(ticket)
                 self._available.notify_all()
             self._acquisition_finished(time.monotonic() - start, waited, timed_out)
 
     def pressure_stats(self):
         with self._pressure_lock:
-            return dict(self._pressure)
+            stats = dict(self._pressure)
+            stats["oldest_hold_seconds"] = (
+                time.monotonic() - min(self._held_since.values())
+                if self._held_since else 0.0
+            )
+            return stats
 
     def _duration(self, prefix, elapsed):
         # Caller holds _pressure_lock.
@@ -214,6 +224,12 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         return conn
 
     def _getconn(self, key=None):
+        # Called under the driver lock: admission is atomic with returns.
+        # Existing keyed checkouts do not consume another slot.
+        if (self._reserved and not _lease_checkout.get()
+                and key not in self._used
+                and len(self._used) >= self.maxconn - self._reserved):
+            raise psycopg2.pool.PoolError("connection pool exhausted")
         conn = super()._getconn(key)
         with self._pressure_lock:
             self._held_since.setdefault(id(conn), time.monotonic())
@@ -285,6 +301,7 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
     _pg_pool = _RetainingThreadedConnectionPool(
         min_conn,
         max_conn,
+        reserved=2,
         **settings.get_database_connection(),
     )
     logger.info(
@@ -575,6 +592,18 @@ def _rollback_quietly(conn) -> None:
 
 
 _commit_callbacks = ContextVar("db_commit_callbacks", default=())
+_lease_checkout = ContextVar("db_lease_checkout", default=False)
+
+
+@contextmanager
+def get_lease_db():
+    """Short lease maintenance only; shares the pool budget, not its admission queue."""
+    token = _lease_checkout.set(True)
+    try:
+        with get_db() as conn:
+            yield conn
+    finally:
+        _lease_checkout.reset(token)
 
 
 def after_commit(conn, callback):
@@ -588,6 +617,16 @@ def after_commit(conn, callback):
     raise RuntimeError("after_commit requires an app-managed transaction")
 
 
+def _warn_slow_hold(started):
+    elapsed = time.monotonic() - started
+    if elapsed >= 10.0:
+        # Collect only on a slow return, not every hot-path checkout. Frame
+        # locations identify the holder without SQL, parameters or locals.
+        frames = traceback.extract_stack(limit=8)[:-1]
+        locations = " <- ".join(f"{f.filename}:{f.lineno}:{f.name}" for f in frames)
+        logger.warning("Database connection held %.1fs: %s", elapsed, locations)
+
+
 @contextmanager
 def get_db():
     """Context manager for database connections.
@@ -596,6 +635,7 @@ def get_db():
     and always returns the connection to the pool.
     """
     conn = get_connection()
+    started = time.monotonic()
     callbacks = []
     token = _commit_callbacks.set((*_commit_callbacks.get(), (conn, callbacks)))
     try:
@@ -607,6 +647,7 @@ def get_db():
     finally:
         _commit_callbacks.reset(token)
         _close_connection(conn)
+        _warn_slow_hold(started)
     for callback in callbacks:
         try:
             callback()
@@ -636,6 +677,7 @@ def transaction():
     their own ``get_db()`` connection when provided.
     """
     conn = get_connection()
+    started = time.monotonic()
     callbacks = []
     token = _commit_callbacks.set((*_commit_callbacks.get(), (conn, callbacks)))
     try:
@@ -647,6 +689,7 @@ def transaction():
     finally:
         _commit_callbacks.reset(token)
         _close_connection(conn)
+        _warn_slow_hold(started)
     for callback in callbacks:
         try:
             callback()

@@ -17,6 +17,81 @@ import pytest
 
 import app.db.base as base
 
+@pytest.mark.parametrize("scope", ["get_db", "transaction"])
+def test_slow_hold_logs_location_not_local_values(monkeypatch, caplog, scope):
+    clock = [10.0]
+    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    private_value = "never-log-connection-parameters"
+    with getattr(base, scope)():
+        clock[0] += 11
+    assert "Database connection held 11.0s" in caplog.text
+    assert "test_slow_hold_logs_location_not_local_values" in caplog.text
+    assert private_value not in caplog.text
+
+
+def test_pressure_reports_age_of_still_held_connections(retaining_pool, monkeypatch):
+    pool, _ = retaining_pool
+    clock = [10.0]
+    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    conn = pool.getconn()
+    clock[0] += 61
+    assert base.pressure_stats()["oldest_hold_seconds"] == 61
+    pool.putconn(conn)
+    assert base.pressure_stats()["oldest_hold_seconds"] == 0
+
+
+@pytest.mark.parametrize("reserved, succeeds", [(0, False), (2, True)])
+def test_concurrent_holders_cannot_starve_renewal(retaining_pool, monkeypatch, reserved, succeeds):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.db import runs, turns
+
+    pool, _ = retaining_pool
+    pool._reserved = reserved
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    monkeypatch.setattr(base, "_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(_PhysicalConn, "commit", lambda self: None, raising=False)
+    monkeypatch.setattr(_FakeCursor, "rowcount", 1, raising=False)
+    monkeypatch.setattr(_FakeCursor, "fetchall", lambda self: [], raising=False)
+    n = pool.maxconn - reserved
+    ready = threading.Barrier(n + 1)
+    release = threading.Event()
+
+    def holder():
+        with base.get_db():
+            ready.wait(timeout=3)
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=n + 1) as executor:
+        holders = [executor.submit(holder) for _ in range(n)]
+        try:
+            ready.wait(timeout=3)
+            # An ordinary waiter ahead of renewal must not block the lease FIFO.
+            ordinary = executor.submit(base._get_pg_connection)
+            if succeeds:
+                assert runs.renew_run("run", "owner", 1, 60)
+                assert turns.reap_expired() == []
+            else:
+                with pytest.raises(psycopg2.pool.PoolError, match="exhausted"):
+                    runs.renew_run("run", "owner", 1, 60)
+            with pytest.raises(psycopg2.pool.PoolError, match="exhausted"):
+                ordinary.result(timeout=2)
+        finally:
+            release.set()
+        for future in holders:
+            future.result(timeout=3)
+    assert not pool._used and not pool._waiters and not pool._lease_waiters
+    assert base._lease_checkout.get() is False
+
+
+def test_lease_checkout_resets_priority_after_failure(retaining_pool, monkeypatch):
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+    with pytest.raises(ValueError):
+        with base.get_lease_db():
+            raise ValueError("body failed")
+    assert not base._lease_checkout.get()
+    assert not retaining_pool[0]._used
+
+
 
 class _FakeConn:
     def __init__(self):

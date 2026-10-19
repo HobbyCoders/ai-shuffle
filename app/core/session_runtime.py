@@ -49,6 +49,7 @@ from app.core.turn_recorder import (
 )
 from app.db import runs as runs_db
 from app.db import turns as turns_db
+from app.db.async_database import run_lease
 
 logger = logging.getLogger(__name__)
 
@@ -3392,22 +3393,27 @@ class SessionRuntime:
         """Heartbeat the run lease every ``RUN_LEASE_RENEW_SECONDS`` until
         cancelled or the lease is lost.
 
-        The lease is lost when a renewal misses its guard (expired, or the run
+        The lease is lost when a renewal misses its ownership guard (the run
         was reaped or taken over) or when renewals kept failing for a whole
         TTL, which is when the DB lets the lease lapse. Either way the turn
         stops itself (``_on_lease_lost``) instead of running on unowned."""
         loop = asyncio.get_running_loop()
         renewed_at = loop.time()
+        delay = RUN_LEASE_RENEW_SECONDS
         while True:
-            await asyncio.sleep(RUN_LEASE_RENEW_SECONDS)
+            await asyncio.sleep(delay)
             attempt_at = loop.time()
             try:
-                ok = await asyncio.to_thread(
+                ok = await run_lease(
                     runs_db.renew_run, run_id, runner_id, fence_token,
                     RUN_LEASE_TTL_SECONDS,
                 )
             except Exception:
-                if loop.time() - renewed_at < RUN_LEASE_TTL_SECONDS:
+                remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)
+                if remaining > 0:
+                    # Retry promptly instead of burning another full heartbeat
+                    # interval after each two-second pool admission failure.
+                    delay = min(1.0, RUN_LEASE_RENEW_SECONDS, remaining)
                     logger.warning(
                         "SessionRuntime: renew_run raised for run %s", run_id, exc_info=True,
                     )
@@ -3419,6 +3425,7 @@ class SessionRuntime:
                 ok = False
             if ok:
                 renewed_at = attempt_at
+                delay = RUN_LEASE_RENEW_SECONDS
                 continue
             logger.warning(
                 "SessionRuntime: lease renewal lost for run %s — stopping heartbeat",

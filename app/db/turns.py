@@ -44,7 +44,7 @@ from typing import Any, Callable, Collection, Dict, List, Optional
 import psycopg2
 
 from app.core.config import settings
-from app.db.base import get_db, parse_jsonb as _parse_json
+from app.db.base import get_db, get_lease_db, parse_jsonb as _parse_json
 from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
@@ -1557,8 +1557,15 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
     Returns the list of turn rows as they were BEFORE resolution (so a caller
     can see what was reaped and how each was routed via its ``source``).
     """
-    with get_db() as conn:
+    with get_lease_db() as conn:
         cursor = conn.cursor()
+        # Serialize with late heartbeats and claims before resolving any turn.
+        # A heartbeat that wins keeps its turn; a reaper that wins fences the
+        # old owner permanently, so it cannot revive a requeued turn.
+        cursor.execute(
+            "UPDATE runs SET state='expired', updated_at=NOW() "
+            "WHERE state='active' AND lease_expires_at < NOW()",
+        )
         cursor.execute(
             "SELECT t.* FROM turns t "
             "LEFT JOIN runs r ON t.run_id = r.id "

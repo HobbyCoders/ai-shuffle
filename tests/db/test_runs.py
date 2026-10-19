@@ -3,6 +3,25 @@
 
 from app.db import runs
 
+def test_delayed_owner_can_renew_before_any_takeover(mock_db):
+    r = runs.claim_run("delayed-owner", "runnerA", -1)
+    assert runs.renew_run(r["id"], "runnerA", r["fence_token"], 60)
+    assert runs.claim_run("delayed-owner", "runnerB", 60) is None
+
+
+def test_reaper_fences_expired_owner_before_requeue(mock_db):
+    from app.db import turns
+
+    r = runs.claim_run("reaped-owner", "runnerA", -1)
+    t = turns.enqueue_turn("reaped-owner", "user", prompt="hello")
+    assert turns.start_turn(t["id"], run_id=r["id"])
+    assert [row["id"] for row in turns.reap_expired()] == [t["id"]]
+    assert not runs.renew_run(r["id"], "runnerA", r["fence_token"], 60)
+    assert turns.get_turn(t["id"])["state"] == "queued"
+    next_run = runs.claim_run("reaped-owner", "runnerB", 60)
+    assert next_run["fence_token"] == r["fence_token"] + 1
+
+
 
 def test_claim_then_second_claim_returns_none(mock_db):
     r1 = runs.claim_run("s1", "runnerA", 60)

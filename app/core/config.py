@@ -264,7 +264,7 @@ class Settings(BaseSettings):
 
     # Database endpoints come only from the private managed supervisor descriptor.
     db_pool_min: ClassVar[int] = 2  # Internal managed defaults, not environment knobs
-    db_pool_max: ClassVar[int] = 32  # Healthy burst connections stay open for reuse
+    db_pool_max: ClassVar[int] = 32  # Includes two slots reserved for lease maintenance
     # Several thread pools share this pool: the asyncio default executor,
     # AnyIO sync dependencies, and Git workers. Agents borrow connections for
     # short operations rather than holding one for their entire turn.
