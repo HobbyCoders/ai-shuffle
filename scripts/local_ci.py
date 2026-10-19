@@ -866,10 +866,14 @@ def security_check(python: str, strict: bool = False, *, audit: bool = True) -> 
         print("Dependency audit: not run on automatic push; run `python scripts/local_ci.py check` to refresh.")
 
 
-def scan_push(local_sha: str, remote_sha: str) -> None:
+def scan_push(local_sha: str, remote_sha: str, push_remote: str | None = None) -> None:
     # Always runs, even for a cached tree: a secret added then deleted in the
     # outgoing history must not slip through a clean final-tree pass.
-    run([choose_python(), "scripts/secret_scan.py", "--local", local_sha, "--remote", remote_sha], timeout=120)
+    # ``push_remote`` (the hook's $1) bounds a new branch's scan by what that
+    # remote's main already holds; see secret_scan.new_ref_boundary.
+    target = ["--push-remote", push_remote] if push_remote else []
+    run([choose_python(), "scripts/secret_scan.py", "--local", local_sha, "--remote", remote_sha, *target],
+        timeout=120)
 
 
 def attest_update_reach(revision: str) -> None:
@@ -995,10 +999,16 @@ def push_update_reach(revision: str, remote_ref: str) -> None:
 
 
 def cmd_pre_push(args) -> int:
-    """Called by the pre-push hook with git's ref lines on stdin."""
+    """Called by the pre-push hook with git's ref lines on stdin.
+
+    The hook passes the remote being pushed to in PUSH_REMOTE_ENV, not as an
+    argument: the installed hook is shared by every worktree of the clone,
+    and an older checkout's local_ci.py would reject an unknown argument.
+    """
     zero = "0" * 40
     records = load_records()
     head = git("rev-parse", "HEAD")
+    push_remote = os.environ.get(PUSH_REMOTE_ENV, "").strip() or None
     for line in sys.stdin.read().splitlines():
         parts = line.split()
         if len(parts) != 4:
@@ -1006,7 +1016,7 @@ def cmd_pre_push(args) -> int:
         _, local_sha, remote_ref, remote_sha = parts
         if local_sha == zero:
             continue  # ref deletions introduce no objects
-        scan_push(local_sha, remote_sha)
+        scan_push(local_sha, remote_sha, push_remote)
         if remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/"):
             revision_range = local_sha if remote_sha == zero else f"{remote_sha}..{local_sha}"
             # Check both sides of every change, including merge parents and
@@ -1062,6 +1072,8 @@ def cmd_pre_push(args) -> int:
 
 HOOK_SOURCE = ROOT / ".githooks" / "pre-push"
 HOOK_MARKER = "# LOCAL-CI-PRE-PUSH"
+# Set by the hook to git's first pre-push argument: the remote being pushed to.
+PUSH_REMOTE_ENV = "LOCAL_CI_PUSH_REMOTE"
 
 
 def hooks_dir() -> Path:

@@ -149,6 +149,63 @@ def test_actual_hook_blocks_scratch_history_even_with_cached_clean_tree(remote_e
             assert token not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("push_remote,blocked,scope", [
+    # The remote being pushed to already holds everything but the new commit.
+    ("public", False, "1 outgoing commit(s), not on refs/remotes/public/main"),
+    # origin is behind it: the same push to origin scans what origin lacks.
+    ("origin", True, "3 outgoing commit(s), not on refs/remotes/origin/main"),
+    # An older hook names no remote: the origin/main boundary, as before.
+    ("", True, "3 outgoing commit(s), not on origin/main"),
+    # A named remote without a main ref (never fetched, or a URL): everything.
+    ("fork", True, "4 outgoing commit(s), all reachable history"),
+])
+def test_actual_hook_bounds_a_new_ref_by_the_remote_pushed_to(push_remote, blocked, scope):
+    """#229: in a clone whose origin is another repository, a new branch pushed
+    to the second remote scanned that remote's whole history and timed out."""
+    with tempfile.TemporaryDirectory(prefix="secret-hook-remote-") as directory:
+        root = Path(directory)
+        init(root)
+        (root / "scripts").mkdir()
+        for name in ("local_ci.py", "secret_scan.py"):
+            shutil.copyfile(ROOT / "scripts" / name, root / "scripts" / name)
+        (root / "hook").write_bytes((ROOT / ".githooks/pre-push").read_bytes())
+        base = commit(root)
+        git(root, "update-ref", "refs/remotes/origin/main", base)
+        # History the pushed-to remote already has, including a secret that
+        # was added and removed there: re-scanning it cannot unpublish it.
+        token = "AKIA" + "Q7W8E9R0T1Y2U3I4"
+        (root / "planted.txt").write_text(token)
+        commit(root)
+        (root / "planted.txt").unlink()
+        published = commit(root)
+        git(root, "update-ref", "refs/remotes/public/main", published)
+        (root / "new.txt").write_text("the only outgoing change\n")
+        tip = commit(root)
+        # A tag ref gets the scan but not the test suites.
+        refs = f"refs/tags/topic {tip} refs/tags/topic {'0' * 40}\n"
+        result = subprocess.run(["sh", str(root / "hook"), push_remote, "https://example.invalid/repo.git"],
+                                cwd=root, input=refs, env={**os.environ, "LOCAL_CI_PYTHON": sys.executable},
+                                text=True, capture_output=True, check=False)
+        assert scope in result.stdout, result.stdout + result.stderr
+        assert (result.returncode != 0) is blocked, result.stdout + result.stderr
+        assert ("aws-access-key" in result.stdout) is blocked
+        assert token not in result.stdout + result.stderr
+
+
+def test_pre_push_hands_the_hook_remote_to_the_scan(monkeypatch):
+    monkeypatch.setattr(local_ci, "load_records", lambda: {})
+    monkeypatch.setattr(local_ci, "git", lambda *args: "head")
+    calls = []
+    monkeypatch.setattr(local_ci, "scan_push", lambda *args: calls.append(args))
+    for value, expected in (("public", "public"), ("", None)):
+        monkeypatch.setenv(local_ci.PUSH_REMOTE_ENV, value)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(f"refs/tags/t head refs/tags/t {'0' * 40}\n"))
+        assert local_ci.cmd_pre_push(argparse.Namespace()) == 0
+        assert calls.pop() == ("head", "0" * 40, expected)
+    hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")
+    assert f'{local_ci.PUSH_REMOTE_ENV}="$1" "$python" "$root/scripts/local_ci.py" pre-push' in hook
+
+
 def test_commit_scan_handles_binary_and_unusual_names(tmp_path):
     init(tmp_path)
     base = commit(tmp_path)

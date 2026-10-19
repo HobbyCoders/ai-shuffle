@@ -63,20 +63,37 @@ def tree_files(root: Path):
         yield path, file.read_bytes().decode("utf-8", errors="replace"), "tree"
 
 
-def commit_files(root: Path, local: str, remote: str):
-    # A new ref has no remote tip: scan everything not already on origin/main.
-    # If that ref isn't available, scan all reachable history (fail safe).
+def new_ref_boundary(root: Path, push_remote: str | None) -> str | None:
+    """The ref whose history a new branch's scan may skip, or None for all of it.
+
+    A new ref has no remote tip, so the scan skips what the push target's main
+    already holds. The hook names that target (git's first pre-push argument):
+    in a clone whose origin is another repository, origin/main says nothing
+    about what the target has, and excluding it left the target's whole
+    history to scan. Only main counts: a stale tracking ref of a rewritten or
+    deleted branch could hide commits the remote no longer has. A named target
+    without that ref (not fetched, or a URL) scans all reachable history (fail
+    safe). An older hook names no target and keeps the origin/main boundary.
+    """
+    ref = "origin/main" if not push_remote else f"refs/remotes/{push_remote}/main"
+    exists = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref + "^{commit}"],
+                            cwd=root, capture_output=True, check=False, timeout=15)
+    return ref if exists.returncode == 0 else None
+
+
+def commit_files(root: Path, local: str, remote: str, push_remote: str | None = None):
     git(root, "cat-file", "-e", local + "^{commit}")
     revisions = [local]
     if remote != "0" * 40:
         git(root, "cat-file", "-e", remote + "^{commit}")
         revisions += ["^" + remote]
     else:
-        exists = subprocess.run(["git", "rev-parse", "--verify", "origin/main"],
-                                cwd=root, capture_output=True, check=False, timeout=15)
-        if exists.returncode == 0:
-            revisions += ["^origin/main"]
+        boundary = new_ref_boundary(root, push_remote)
+        if boundary is not None:
+            revisions += ["^" + boundary]
     commits = git(root, "rev-list", *revisions, "--").decode().splitlines()
+    scope = f"not on {revisions[1][1:]}" if len(revisions) > 1 else "all reachable history"
+    print(f"Secret scan: {len(commits)} outgoing commit(s), {scope}", flush=True)
     for commit in commits:
         # Inspect changed blobs for every commit, including each merge parent.
         # Unlike a final-tree diff this catches add-then-delete leaks, and unlike
@@ -112,10 +129,10 @@ def safe_metadata(rules, value: str, text: str) -> str:
 
 
 def scan(root: Path = ROOT, local: str | None = None, remote: str | None = None,
-         revision: str | None = None) -> int:
+         revision: str | None = None, push_remote: str | None = None) -> int:
     rules = load_rules(root)
     sources = (revision_files(root, revision) if revision else
-               commit_files(root, local, remote or "0" * 40) if local else tree_files(root))
+               commit_files(root, local, remote or "0" * 40, push_remote) if local else tree_files(root))
     count = 0
     for path, text, source_revision in sources:
         for rule_id, line in findings(rules, path, text):
@@ -133,9 +150,11 @@ def main():
     mode.add_argument("--local")
     mode.add_argument("--revision", help="scan one committed tree, e.g. origin/main")
     parser.add_argument("--remote")
+    parser.add_argument("--push-remote", help="the remote being pushed to (pre-push hook $1)")
     args = parser.parse_args()
     try:
-        return scan(local=args.local, remote=args.remote, revision=args.revision)
+        return scan(local=args.local, remote=args.remote, revision=args.revision,
+                    push_remote=args.push_remote)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, re.error, subprocess.TimeoutExpired):
         print("Secret scan failed: cannot read inputs/config; push blocked (details withheld).")
         return 1

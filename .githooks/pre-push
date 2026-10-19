@@ -1,5 +1,5 @@
 #!/bin/sh
-# LOCAL-CI-PRE-PUSH v3
+# LOCAL-CI-PRE-PUSH v4
 # Every outgoing ref gets an offline secret scan, even with a cached test pass.
 # Local checks before anything leaves this machine (scripts/local_ci.py).
 # CI does not test pull requests; this hook is where tests run.
@@ -36,7 +36,10 @@ if [ -f "$root/scripts/local_ci.py" ]; then
     echo "  python scripts/local_ci.py install --python /path/to/python" >&2
     exit 1
   fi
-  printf '%s\n' "$refs" | "$python" "$root/scripts/local_ci.py" pre-push || exit 1
+  # $1 is the remote being pushed to. It bounds a new branch's secret scan by
+  # what that remote's main already holds. It goes in the environment because
+  # an older checkout's local_ci.py would reject an extra argument.
+  printf '%s\n' "$refs" | LOCAL_CI_PUSH_REMOTE="$1" "$python" "$root/scripts/local_ci.py" pre-push || exit 1
 fi
 user_hook="$(dirname "$0")/pre-push.user"
 if [ -x "$user_hook" ]; then
