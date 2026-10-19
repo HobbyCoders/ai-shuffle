@@ -389,6 +389,21 @@ def list_all_active_checkout_paths() -> List[str]:
     return [dict(r)["path"] for r in rows]
 
 
+def list_branch_checkouts(runner_id: str) -> List[Dict[str, Any]]:
+    """Every row on ``runner_id`` that materializes a branch (not a base
+    checkout), oldest first. Paths are returned as stored; callers resolve
+    them with ``checkout_manager._resolve_checkout_path``."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM checkouts WHERE runner_id = %s "
+            "AND branch IS NOT NULL AND branch <> '' ORDER BY created_at ASC, id ASC",
+            (runner_id,),
+        )
+        rows = cursor.fetchall()
+    return _rows(rows)
+
+
 def set_checkout_status(checkout_id: str, status: str) -> Optional[Dict[str, Any]]:
     """Set a checkout's ``status`` (e.g. ``'active'`` → ``'archived'``).
 

@@ -731,8 +731,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Deny-only policy for the CLI's own tool calls, applied at the
         # PreToolUse hook: (tool name, input) -> the denial text, or None to
         # let the CLI's permission flow decide; it may also return an
-        # awaitable of either. A policy that raises denies the call. None
-        # falls back to the permission engine's deny rules. Bridge-served
+        # awaitable of either. A policy with a ``cwd`` keyword also gets the
+        # CLI's working directory for the call. A policy that raises denies
+        # the call. None falls back to the permission engine's deny rules. Bridge-served
         # calls are gated at the bridge instead and never reach it.
         self.tool_policy = tool_policy
         # The host's per-turn note (memory, Away mode, date and branch), put
@@ -3398,8 +3399,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         call's hooks and gates it, so the CLI's hooks leave it alone."""
         return tool_name.startswith(_BUNDLED_PREFIX) and self._socket_server is not None
 
-    async def _policy_denial(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    async def _policy_denial(
+        self, tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+    ) -> str | None:
         """Why the deny policy refuses this call, or None.
+
+        ``cwd`` is the CLI's working directory for this call, from the hook
+        payload: its shell keeps a ``cd`` between calls, so it can differ from
+        the session's. It reaches a policy that takes a ``cwd`` keyword.
 
         Fails closed: a ``tool_policy`` that raises, or returns an awaitable
         that raises, denies the call. Letting it through instead would turn
@@ -3411,7 +3418,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # A sync policy may block on a DB read (the app's saved-rule
                 # lookup), so it runs off the loop; an async policy returns
                 # its coroutine from the thread and is awaited here.
-                verdict = await asyncio.to_thread(self.tool_policy, tool_name, tool_input)
+                extra = {"cwd": cwd} if _accepts_cwd(self.tool_policy) else {}
+                verdict = await asyncio.to_thread(self.tool_policy, tool_name, tool_input, **extra)
                 if inspect.isawaitable(verdict):
                     verdict = await verdict
             except asyncio.CancelledError:
@@ -3469,7 +3477,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     specific["permissionDecisionReason"] = decision.note
             if decision.additional_context:
                 specific["additionalContext"] = decision.additional_context
-        denial = await self._policy_denial(name, tool_input)
+        cli_cwd = data.get("cwd")
+        denial = await self._policy_denial(
+            name, tool_input, cli_cwd if isinstance(cli_cwd, str) and cli_cwd else None,
+        )
         if denial is not None:
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -4271,6 +4282,16 @@ def _frame_type(text: str) -> Any:
     except json.JSONDecodeError:
         return None
     return frame.get("type") if isinstance(frame, dict) else None
+
+
+def _accepts_cwd(policy: Any) -> bool:
+    """Whether a ``tool_policy`` takes the ``cwd`` keyword; older two-argument
+    policies keep being called with ``(tool name, input)``."""
+    try:
+        params = inspect.signature(policy).parameters
+    except (TypeError, ValueError):
+        return False
+    return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def _hook_text(value: Any) -> str:

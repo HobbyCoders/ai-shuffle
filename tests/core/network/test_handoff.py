@@ -1424,20 +1424,26 @@ async def test_dirty_default_branch_releases_holds_without_moving_owner(pair, mo
 @pytest.mark.asyncio
 async def test_push_failure_releases_reservation_without_moving_owner(pair, monkeypatch):
     a, b, source, target = pair
-    original_git = checkout_transfer.git
-    def fail_push(cwd, *args):
+    import subprocess
+    original_run = checkout_transfer._run
+    def fail_push(cwd, *args, **kwargs):
         if args[0] == "push":
-            raise ValueError("Git push failed during resume")
-        return original_git(cwd, *args)
-    monkeypatch.setattr(checkout_transfer, "git", fail_push)
+            # Origin's rules refuse the branch name (the stderr is classified,
+            # never echoed).
+            return subprocess.CompletedProcess(["git", *args], 1, b"", (
+                b"remote: error: GH013: Repository rule violations found for refs/heads/x. "
+                b"token=secret-canary"))
+        return original_run(cwd, *args, **kwargs)
+    monkeypatch.setattr(checkout_transfer, "_run", fail_push)
     async def call(device, action, body, **kwargs):
         with a.active():
             return await control.handle(action, body, from_device=b.device_id)
     monkeypatch.setattr(control, "call", call)
     (source / "new.txt").write_text("saved despite push failure")
     with b.active():
-        with pytest.raises(ValueError, match="push failed"):
+        with pytest.raises(ValueError, match="branch rules refuse the name") as refused:
             await handoff.receive(database.get_session("handoff-test"))
+        assert "secret-canary" not in str(refused.value)
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
     with a.active(), get_db() as conn:
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id

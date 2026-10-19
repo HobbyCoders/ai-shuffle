@@ -82,7 +82,9 @@ def network(workers, monkeypatch):
 
 def dispatch(a, b, **changes):
     fields = dict(
-        worker={"device_id": a.device_id, "device_name": "ServerWorker"},
+        # A target on this release (it names worker branches chore/task-<id>).
+        worker={"device_id": a.device_id, "device_name": "ServerWorker",
+                "capabilities": {"remote_task": remote_task.CHORE_BRANCH_VERSION}},
         caller_row=database.get_session("caller"), caller_session_id="caller", root_session_id="caller",
         depth=1, profile_id="default", agent_name="Default", result_agent="default", provider_id=None,
         model_id="sonnet", effort=None, prompt="Check the disk.", label="Task · Default",

@@ -27,7 +27,36 @@ logger = logging.getLogger(__name__)
 SHELL_TOOLS = frozenset({"bash", "monitor"})
 
 #: Worker branches live under this prefix; reclaim refuses anything else.
-WORKER_BRANCH_PREFIX = "task/"
+#: It is a ``chore/`` name so a remote worker's branch can be pushed to an
+#: origin whose rules accept only ``fix/``, ``feat/`` and ``chore/`` branches.
+WORKER_BRANCH_PREFIX = "chore/task-"
+#: Earlier releases named worker branches ``task/<id>``; those checkouts are
+#: still recognized locally (reclaim and restore).
+LEGACY_WORKER_BRANCH_PREFIX = "task/"
+#: Branches of chats started with StartSession: ``chore/chat-<first 8 of id>``.
+CHAT_BRANCH_PREFIX = "chore/chat-"
+
+
+def worker_branch(worker_session_id: str) -> str:
+    """The dedicated branch a worker with this session id gets."""
+    return f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+
+
+def is_worker_branch(branch: str, worker_session_id: str) -> bool:
+    """Whether ``branch`` is this worker's own dedicated branch (either name)."""
+    return bool(branch) and branch in (worker_branch(worker_session_id),
+                                       legacy_worker_branch(worker_session_id))
+
+
+def legacy_worker_branch(worker_session_id: str) -> str:
+    """The ``task/<id>`` name a worker of an earlier release gets: sent to a
+    remote target that predates ``chore/task-`` (remote_task version 5)."""
+    return f"{LEGACY_WORKER_BRANCH_PREFIX}{worker_session_id}"
+
+
+def chat_branch(session_id: str) -> str:
+    """The branch a chat started with StartSession gets."""
+    return f"{CHAT_BRANCH_PREFIX}{session_id[:8]}"
 
 _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
@@ -159,11 +188,15 @@ def _tool_surface(profile_id, tool_allowlist):
     return None
 
 
-def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None, *, base_commit=None):
+def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None, *,
+                            base_commit=None, share_read_only=True, branch=None):
     """Provision write-capable project workers; explicit research may share.
 
     Shares only explicitly declared surfaces of known, non-mutating builtins
     (no Write/Edit, no shell). Unknown/unrestricted surfaces are isolated.
+    ``share_read_only=False`` isolates every surface: a top-level chat started
+    with StartSession keeps its checkout after its owner changes its tools.
+    ``branch`` names the new branch (default: :func:`worker_branch`).
     A mismatched/unavailable bound Git checkout is a refusal, never a fallback.
     Non-project and non-Git tasks retain their normal working-directory behavior.
     """
@@ -172,7 +205,8 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
 
     if base_commit is not None and (not isinstance(base_commit, str) or not _SHA.fullmatch(base_commit)):
         raise WorkerCheckoutError("base_commit must be a full commit SHA already available locally.")
-    if base_commit is None and _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
+    if (share_read_only and base_commit is None
+            and _is_shared_surface(_tool_surface(profile_id, tool_allowlist))):
         return None
     if parent_row is None:
         raise WorkerCheckoutError("The calling session is unavailable; refusing worker checkout inheritance.")
@@ -198,7 +232,7 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
     target = expected or _current_branch(parent_path)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id):
         raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
-    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    branch = branch or worker_branch(worker_session_id)
 
     with _project_lock(project["id"]):
         ref = base_commit or "HEAD"
@@ -279,7 +313,7 @@ def reclaim_untouched_worker_checkout(
     """Reclaim a finished/unstarted worker's checkout if it holds no work.
 
     Uses ``checkout`` when the caller provisioned it, else the worker's own
-    session binding. Only a ``task/<worker id>`` branch is eligible; anything
+    session binding. Only a ``chore/task-<worker id>`` branch is eligible; anything
     with commits past its recorded base or uncommitted changes is retained for
     review. Returns True when it was removed.
     """
@@ -296,7 +330,7 @@ def reclaim_untouched_worker_checkout(
         branch = (row or {}).get("branch") or ""
         path = (row or {}).get("worktree_path")
         project_id = (row or {}).get("project_v2_id")
-    if branch != f"{WORKER_BRANCH_PREFIX}{worker_session_id}" or not path or not project_id:
+    if not is_worker_branch(branch, worker_session_id) or not path or not project_id:
         return False
     if not os.path.isdir(path):
         return False
@@ -340,7 +374,7 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
     """Re-materialize a reclaimed worker checkout before the worker resumes.
 
     A resumed turn reuses its saved cwd, so the directory must exist again.
-    Restores the ``task/<worker id>`` branch from the tip stamped at reclaim,
+    Restores the ``chore/task-<worker id>`` branch from the tip stamped at reclaim,
     at the same deterministic path, without shared runtime links. Returns True
     when nothing needed restoring or the checkout is back at its saved path.
     """
@@ -351,7 +385,7 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
         row = database.get_session(worker_session_id) or {}
         branch = row.get("branch") or ""
         path = row.get("worktree_path")
-        if branch != f"{WORKER_BRANCH_PREFIX}{worker_session_id}" or not path:
+        if not is_worker_branch(branch, worker_session_id) or not path:
             return True
         if os.path.isdir(path):
             return True
@@ -392,12 +426,12 @@ def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:
 # --- Workers that run on another worker -------------------------------------
 #
 # Git moves between workers only through origin (``checkout_transfer``). The
-# parent publishes ``task/<worker id>`` at its committed HEAD; the target
+# parent publishes ``chore/task-<worker id>`` at its committed HEAD; the target
 # fetches it and provisions the same isolated checkout a local worker gets.
 # Only identifiers travel: branch, base SHA, project id and an origin identity
 # hash. Paths, URLs and credentials never do.
 
-#: The worker runs in its own ``task/<id>`` checkout fetched from origin.
+#: The worker runs in its own ``chore/task-<id>`` checkout fetched from origin.
 REMOTE_BRANCH = "branch"
 #: A research-only surface: no push, the target's base checkout, read-only.
 REMOTE_SHARED = "shared"
@@ -437,7 +471,7 @@ class RemoteWorkerBranch:
 class ReceivedWorkerCheckout:
     """Where a remote worker runs on the target.
 
-    ``checkout`` is set only for an isolated ``task/<id>`` checkout. ``cwd`` is
+    ``checkout`` is set only for an isolated ``chore/task-<id>`` checkout. ``cwd`` is
     that checkout, the base checkout for a shared surface, or None when the
     worker should run in this worker's workspace directory.
     """
@@ -451,15 +485,17 @@ def _state(state) -> RemoteWorkerBranch:
     return state if isinstance(state, RemoteWorkerBranch) else RemoteWorkerBranch.from_wire(state)
 
 
-def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowlist=None) -> RemoteWorkerBranch:
-    """Parent side: push ``task/<worker id>`` at the caller's committed HEAD.
+def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowlist=None, *,
+                          legacy_branch=False) -> RemoteWorkerBranch:
+    """Parent side: push ``chore/task-<worker id>`` at the caller's committed HEAD.
 
     Same decisions as :func:`prepare_worker_checkout`: research-only surfaces
     share (no push), no project or no Git checkout means nothing to transfer,
     and a mismatched or missing bound checkout raises. Uncommitted parent
     changes are not copied, as locally. The push is never forced; a failed push
     returns ``pushed=False`` with a plain ``reason`` and the caller refuses.
-    No local branch is created on the parent.
+    No local branch is created on the parent. ``legacy_branch`` publishes the
+    ``task/<id>`` name a target of an earlier release expects.
     """
     from app.core import checkout_transfer, project_resolver
     from app.core.git_service import git_service
@@ -487,7 +523,7 @@ def publish_worker_branch(parent_row, worker_session_id, profile_id, tool_allowl
         return RemoteWorkerBranch(REMOTE_NONE)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id):
         raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
-    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    branch = (legacy_worker_branch if legacy_branch else worker_branch)(worker_session_id)
     target = expected or _current_branch(parent_path)
     tip = git_service._run_git(parent_path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
     sha = tip.stdout.strip()
@@ -516,7 +552,7 @@ def _base_checkout_path(project_id: str) -> Optional[str]:
 
 
 def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
-    """Target side: fetch the parent's ``task/<id>`` and provision its checkout.
+    """Target side: fetch the parent's ``chore/task-<id>`` and provision its checkout.
 
     Refuses by name when the project is not checked out here or this origin is
     a different repository. The new checkout must sit at exactly the SHA the
@@ -545,10 +581,13 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id or ""):
         raise WorkerCheckoutError("Invalid worker identity for a dedicated branch.")
-    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    # Either name: a calling worker of an earlier release sends ``task/<id>``.
+    branch = sent.branch or ""
     sha = sent.base_commit or ""
-    if sent.branch != branch or not _SHA.fullmatch(sha):
-        raise WorkerCheckoutError("The worker checkout description does not match this worker; nothing was started.")
+    if not is_worker_branch(branch, worker_session_id) or not _SHA.fullmatch(sha):
+        raise WorkerCheckoutError("The worker checkout description does not match this worker (the "
+                                  "calling worker may run a different app version: a version "
+                                  "mismatch); nothing was started.")
     if not sent.pushed or sent.remote is None:
         raise WorkerCheckoutError(f"The calling worker did not publish {branch} to origin; nothing was started.")
     with _project_lock(project["id"]):
@@ -579,7 +618,7 @@ def receive_worker_branch(state, worker_session_id) -> ReceivedWorkerCheckout:
 
 
 def release_worker_branch(state) -> Dict[str, Any]:
-    """Parent side: delete the published ``task/<id>`` on origin if untouched.
+    """Parent side: delete the published ``chore/task-<id>`` on origin if untouched.
 
     Compare-and-delete against the base SHA, so a branch carrying anyone's new
     commits stays. Returns ``deleted`` and a plain ``reason``; never raises for
@@ -603,7 +642,7 @@ def release_worker_branch(state) -> Dict[str, Any]:
 # --- Commits back -------------------------------------------------------------
 #
 # When a remote worker finishes, the worker that ran it pushes its
-# ``task/<id>`` to origin if it holds commits, and reports what it did as a
+# ``chore/task-<id>`` to origin if it holds commits, and reports what it did as a
 # git block of identifiers and fixed-text reasons. The calling worker fetches
 # the branch into a local ref of the same name. Uncommitted changes are
 # reported, never committed for the worker.
@@ -622,7 +661,7 @@ def bound_git_block(raw: Any, worker_session_id: str) -> Optional[Dict[str, Any]
     """A git block reduced to known, bounded fields, or None when there is none.
 
     Used on both sides: before the report is stored and when it arrives. The
-    branch must be this worker's own ``task/<id>``; SHAs, counts and the
+    branch must be this worker's own ``chore/task-<id>``; SHAs, counts and the
     origin hash must have their shapes; the reason is cut, stripped of URL
     credentials and of harness markers.
     """
@@ -639,8 +678,10 @@ def bound_git_block(raw: Any, worker_session_id: str) -> Optional[Dict[str, Any]
     def count(value: Any) -> int:
         return min(value, 1_000_000) if type(value) is int and value > 0 else 0
 
-    expected = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
-    branch = expected if raw.get("mode") == REMOTE_BRANCH and raw.get("branch") == expected else None
+    sent = raw.get("branch")
+    # Either name: a worker of an earlier release reports ``task/<id>``.
+    branch = (sent if raw.get("mode") == REMOTE_BRANCH and isinstance(sent, str)
+              and is_worker_branch(sent, worker_session_id) else None)
     head = sha(raw.get("head")) if branch else None
     reason = raw.get("reason")
     if isinstance(reason, str) and reason.strip():
@@ -713,7 +754,7 @@ def push_worker_commits(worker_session_id: str, *, mode: Optional[str],
                         base_commit: Optional[str] = None) -> Dict[str, Any]:
     """Target side: push a finished remote worker's commits; return its git block.
 
-    Only a ``task/<worker id>`` checkout (mode ``branch``) has anything to
+    Only a ``chore/task-<worker id>`` checkout (mode ``branch``) has anything to
     push, and only commits past ``base_commit`` (the parent's HEAD it started
     from) are pushed, without force, to that same branch name on origin.
     Uncommitted changes are counted, not committed. A checkout with no
@@ -727,10 +768,12 @@ def push_worker_commits(worker_session_id: str, *, mode: Optional[str],
         return empty_git_block(REMOTE_SHARED)
     if mode != REMOTE_BRANCH:
         return empty_git_block(REMOTE_NONE)
-    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    row: Dict[str, Any] = dict(database.get_session(worker_session_id) or {})
+    # The worker's own branch: a checkout made before an update keeps ``task/<id>``.
+    recorded = str(row.get("branch") or "")
+    branch = recorded if is_worker_branch(recorded, worker_session_id) else worker_branch(worker_session_id)
     block = empty_git_block(REMOTE_BRANCH)
     block["branch"] = branch
-    row: Dict[str, Any] = dict(database.get_session(worker_session_id) or {})
     project_id = row.get("project_v2_id")
     repo = _base_checkout_path(project_id) if project_id else None
     if not repo:
@@ -757,7 +800,7 @@ def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str,
     """Parent side: bring a remote worker's pushed branch into this project.
 
     ``block`` is the validated git block from its report. With commits on
-    origin, the branch is fetched into a local ``task/<id>`` so ``git log``
+    origin, the branch is fetched into a local ``chore/task-<id>`` so ``git log``
     works here; only refs change. With no commits, the branch the parent
     published at dispatch is removed from origin while it still points at its
     base. Returns ``fetched``, ``released`` and a plain ``reason`` when it was
@@ -766,8 +809,9 @@ def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str,
     from app.core import checkout_transfer, project_resolver
 
     outcome: Dict[str, Any] = {"fetched": False, "released": False, "reason": None}
-    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
-    if block.get("mode") != REMOTE_BRANCH or block.get("branch") != branch:
+    branch = block.get("branch")
+    if (block.get("mode") != REMOTE_BRANCH or not isinstance(branch, str)
+            or not is_worker_branch(branch, worker_session_id)):
         return outcome
     row = dict(parent_row or {})
     project = project_resolver.resolve_project_v2(row) if (row.get("project_v2_id") or row.get("project_id")) else None

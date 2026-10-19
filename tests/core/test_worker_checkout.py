@@ -28,7 +28,7 @@ def test_invalid_or_missing_review_commit_refuses_before_branch_creation(repo, v
     row, parent, *_ = repo
     with pytest.raises(worker_checkout.WorkerCheckoutError):
         worker_checkout.prepare_worker_checkout(row, "bad-ref", "coder", base_commit=value)
-    assert not git(parent, "branch", "--list", "task/bad-ref")
+    assert not git(parent, "branch", "--list", "chore/task-bad-ref")
 
 
 def test_python_and_frontend_receipt_uses_local_checkout_without_copying(repo):
@@ -333,7 +333,7 @@ def test_wrong_parent_branch_refuses_without_repair(repo):
     assert str(parent) in message
     assert "no longer exists" not in message and "unavailable" not in message
     assert git(parent, "branch", "--show-current") == "wrong-branch"
-    assert not git(parent, "branch", "--list", "task/writer")
+    assert not git(parent, "branch", "--list", "chore/task-writer")
 
 
 def test_provisioning_failure_never_falls_back_and_reclaims_its_empty_branch(repo, monkeypatch):
@@ -343,7 +343,7 @@ def test_provisioning_failure_never_falls_back_and_reclaims_its_empty_branch(rep
         worker_checkout.prepare_worker_checkout(row, "failed", "coder")
     # The branch never held a commit of its own, so nothing is lost by
     # removing it — and a retry is not left a stray ref to trip over.
-    assert not git(parent, "branch", "--list", "task/failed")
+    assert not git(parent, "branch", "--list", "chore/task-failed")
     assert git(parent, "branch", "--show-current") == "parent-branch"
 
 
@@ -361,8 +361,8 @@ def test_post_provision_refusal_reclaims_the_unused_checkout(repo, monkeypatch):
     monkeypatch.setattr(checkout_manager, "_require_branch_binding", flaky)
     with pytest.raises(checkout_manager.WorktreeError):
         worker_checkout.prepare_worker_checkout(row, "raced", "coder")
-    assert not git(parent, "branch", "--list", "task/raced")
-    assert "task/raced" not in git(parent, "worktree", "list")
+    assert not git(parent, "branch", "--list", "chore/task-raced")
+    assert "chore/task-raced" not in git(parent, "worktree", "list")
 
 
 def test_unbound_caller_reports_its_actual_branch_as_integration_target(repo):
@@ -600,13 +600,13 @@ def test_real_dispatch_binds_own_session_and_turn_cwd_before_launch(repo, worker
                        provider_id=provider, model_id="sonnet" if provider is None else "model")
     assert outcome.ok, outcome.error
     worker = database.get_session(outcome.session_id)
-    assert worker["branch"] == worker["worktree_branch"] == "task/spawn-a"
+    assert worker["branch"] == worker["worktree_branch"] == "chore/task-spawn-a"
     assert worker["worktree_id"] is None
     assert worker["project_v2_id"] == row["project_v2_id"]
     launch = worker_runtime[0]
     overrides = launch["overrides"]
     assert overrides["cwd"] == worker["worktree_path"] != str(parent)
-    assert launch["branch"] == "task/spawn-a" and launch["head"] == tip
+    assert launch["branch"] == "chore/task-spawn-a" and launch["head"] == tip
     assert "FILE ROLE" in overrides["system_prompt_append"]
     assert "Host-provisioned worker checkout" in overrides["system_prompt_append"]
     assert tip in overrides["system_prompt_append"]
@@ -615,9 +615,9 @@ def test_real_dispatch_binds_own_session_and_turn_cwd_before_launch(repo, worker
     # The worker finished without touching its checkout: reclaimed, with the
     # tip recorded so a resume can bring it back.
     assert not Path(worker["worktree_path"]).exists()
-    assert not git(parent, "branch", "--list", "task/spawn-a")
+    assert not git(parent, "branch", "--list", "chore/task-spawn-a")
     record = checkouts.get_checkout(row["project_v2_id"], settings.effective_instance_id,
-                                    branch="task/spawn-a")
+                                    branch="chore/task-spawn-a")
     assert record["status"] == "archived" and record["head_sha"] == tip
 
 
@@ -632,7 +632,7 @@ def test_worker_checkout_with_work_is_retained_for_review(repo, worker_runtime, 
     assert outcome.ok, outcome.error
     worker = database.get_session("keeper")
     assert Path(worker["worktree_path"]).is_dir()
-    assert git(parent, "branch", "--list", "task/keeper")
+    assert git(parent, "branch", "--list", "chore/task-keeper")
     assert project_resolver.resolve_existing_cwd(worker) == worker["worktree_path"]
 
 
@@ -648,7 +648,7 @@ def test_reclaimed_checkout_is_restored_for_a_resumed_worker(repo, worker_runtim
                         lambda *a, **kw: pytest.fail("restore must not fetch"))
     assert worker_checkout.restore_reclaimed_worker_checkout("resumable")
     assert Path(path).is_dir()
-    assert git(path, "branch", "--show-current") == "task/resumable"
+    assert git(path, "branch", "--show-current") == "chore/task-resumable"
     assert git(path, "rev-parse", "HEAD") == tip
     # Still reclaimable once the resumed turn leaves it untouched again.
     assert worker_checkout.reclaim_untouched_worker_checkout("resumable")
@@ -677,7 +677,7 @@ def test_nested_dispatch_forks_direct_callers_branch_not_routing_root(repo, work
     nested_cwd = launch["overrides"]["cwd"]
     assert nested_cwd != cwd
     assert launch["head"] == nested_tip
-    assert launch["branch"] == "task/nested"
+    assert launch["branch"] == "chore/task-nested"
 
 
 def test_checkout_failure_prevents_session_creation_and_provider_submit(repo, worker_runtime, monkeypatch):
@@ -717,8 +717,8 @@ def test_session_insert_failure_reclaims_the_provisioned_checkout(repo, worker_r
     outcome = dispatch(worker="never-inserted")
     assert not outcome.ok and "insert failed" in outcome.error
     assert not worker_runtime
-    assert not git(parent, "branch", "--list", "task/never-inserted")
-    assert "task/never-inserted" not in git(parent, "worktree", "list")
+    assert not git(parent, "branch", "--list", "chore/task-never-inserted")
+    assert "chore/task-never-inserted" not in git(parent, "worktree", "list")
 
 
 @pytest.mark.parametrize("use_swarm", [False, True])
@@ -765,7 +765,7 @@ def test_task_and_swarm_producing_paths_auto_provision_without_model_instruction
         paths.add(cwd)
         assert cwd == worker["worktree_path"] != str(parent)
         assert launch["head"] == tip
-        assert worker["branch"].startswith("task/") and launch["branch"] == worker["branch"]
+        assert worker["branch"].startswith("chore/task-") and launch["branch"] == worker["branch"]
     assert len(paths) == len(worker_runtime)
     assert git(parent, "branch", "--show-current") == "parent-branch"
 
@@ -800,9 +800,9 @@ def test_start_retry_reclaims_the_failed_attempts_checkout(repo, worker_runtime,
     ))
     assert outcome.ok, outcome.error
     assert attempts[0] == "first-try" and len(attempts) == 2
-    assert [launch["branch"] for launch in worker_runtime] == [f"task/{sid}" for sid in attempts]
+    assert [launch["branch"] for launch in worker_runtime] == [f"chore/task-{sid}" for sid in attempts]
     assert all(launch["head"] == tip for launch in worker_runtime)
-    assert not git(parent, "branch", "--list", "task/first-try")
+    assert not git(parent, "branch", "--list", "chore/task-first-try")
     assert not Path(worker_runtime[0]["overrides"]["cwd"]).exists()
 
 

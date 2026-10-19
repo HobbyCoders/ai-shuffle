@@ -182,3 +182,21 @@ async def test_connect_passes_the_sync_policy_to_an_older_fluid(monkeypatch, tmp
     policy = await _connect_policy(monkeypatch, tmp_path, supports=False)
     assert callable(policy) and not asyncio.iscoroutinefunction(policy)
     assert policy("Edit", {"file_path": "x"}) is None
+
+
+@pytest.mark.asyncio
+async def test_the_inner_policy_runs_off_the_event_loop_with_the_cli_cwd(monkeypatch, async_policies):
+    """The inner policy may run Git and read the database (the checkout
+    lock), so the async wrapper hands it to a thread, with the CLI's cwd."""
+    import threading
+
+    _lookup_must_not_run(monkeypatch)
+    seen = {}
+
+    def inner(name: str, tool_input: dict, cwd=None) -> str:
+        seen.update(thread=threading.current_thread(), cwd=cwd)
+        return "refused"
+
+    policy = _adapter("auto")._delegated_policy_with_saved_rules(inner)
+    assert await policy("Bash", {"command": "git switch main"}, cwd="/elsewhere") == "refused"
+    assert seen["thread"] is not threading.main_thread() and seen["cwd"] == "/elsewhere"

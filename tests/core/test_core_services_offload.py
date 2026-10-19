@@ -369,7 +369,7 @@ def worker_dispatch_env(monkeypatch):
     # The parent/project is intentionally fictitious. Stub the Git producer
     # here; real Git and durable binding are covered by test_worker_checkout.
     checkout_spy = _ThreadSpy(lambda row, sid, pid, tools: worker_checkout.WorkerCheckout(
-        path="/repo/isolated-worker", branch=f"task/{sid}", base_commit="a" * 40,
+        path="/repo/isolated-worker", branch=f"chore/task-{sid}", base_commit="a" * 40,
         project_v2_id="project-v2", parent_branch="feat/x",
     ))
     create_session_spy = _ThreadSpy(lambda **kw: {"id": kw.get("session_id")})

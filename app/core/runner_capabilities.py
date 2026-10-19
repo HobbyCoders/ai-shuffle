@@ -165,7 +165,10 @@ def _detect_claude_cli_signed_in() -> bool:
 # optional ``context_window`` start field, version 3 the optional ``fast``
 # field, version 4 explicit-effort provenance. A parent sends each only to
 # a target at that version or later (an older target refuses unknown fields).
-REMOTE_TASK_VERSION = 4
+# Version 5 names the worker's branch ``chore/task-<id>`` (pushable to an origin
+# that accepts only fix/, feat/ and chore/ branches); an older target gets
+# ``task/<id>``.
+REMOTE_TASK_VERSION = 5
 
 # A moved chat's pending wake-ups move with it (#1819): version 1 receivers
 # re-create the ``wakes`` a move sends. Older ones ignore them, so the owner

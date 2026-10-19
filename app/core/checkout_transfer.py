@@ -352,7 +352,11 @@ def export_checkout(cwd, branch, expected_remote=None):
                 "then try again. Ownership has not moved."
             )
         # Push this exact commit, not a moving HEAD, and never force-update a branch.
-        git(cwd, "push", "origin", head + ":refs/heads/" + branch)
+        pushed = _run(cwd, "push", "origin", head + ":refs/heads/" + branch)
+        if pushed.returncode:
+            # A plain reason (Git's stderr can carry credentials), e.g. a
+            # branch name origin's rules refuse.
+            raise ValueError(_push_refused(pushed.stderr, branch) + " Ownership has not moved.")
         upstream = head
     published = git(cwd, "ls-remote", "--exit-code", "origin", "refs/heads/" + branch).decode().split()
     if not published or published[0] != upstream or fingerprint(cwd) != head:
@@ -434,18 +438,25 @@ def import_checkout(base, destination, state):
 # --- Task worker branches between workers -----------------------------------
 #
 # A Task worker that runs on another worker gets its checkout through origin,
-# the same way a handoff does: the parent pushes ``task/<worker id>`` at its
+# the same way a handoff does: the parent pushes ``chore/task-<worker id>`` at its
 # committed HEAD (never forced), the target fetches it with its own
 # credentials, and the parent later removes the ref only while it still points
 # at that base. Reasons and errors are fixed text: Git's stderr and remote URLs
 # can carry tokens, so they are read for classification and never returned.
 
-TASK_BRANCH_PREFIX = "task/"
+# Same value as ``worker_checkout.WORKER_BRANCH_PREFIX`` (a ``chore/`` name an
+# origin restricted to fix/, feat/ and chore/ branches accepts).
+TASK_BRANCH_PREFIX = "chore/task-"
+# The name earlier releases use; still published to, fetched from and released
+# for workers of those releases.
+LEGACY_TASK_BRANCH_PREFIX = "task/"
 
 
 def _task_branch(cwd, branch):
-    if not branch.startswith(TASK_BRANCH_PREFIX) or _run(cwd, "check-ref-format", "refs/heads/" + branch).returncode:
-        raise ValueError("Only task/<worker id> branches move between workers this way.")
+    if (not branch.startswith((TASK_BRANCH_PREFIX, LEGACY_TASK_BRANCH_PREFIX))
+            or _run(cwd, "check-ref-format", "refs/heads/" + branch).returncode):
+        raise ValueError("Only chore/task-<worker id> (or task/<worker id>) branches move between "
+                         "workers this way.")
 
 
 def _require_sha(sha):
@@ -477,6 +488,10 @@ def _remote_tip(cwd, branch):
 def _push_refused(stderr, branch):
     """A plain reason for a failed push, classified without echoing stderr."""
     text = stderr.decode(errors="replace").lower()
+    if any(mark in text for mark in ("rule violation", "gh013", "creations being restricted",
+                                     "cannot create ref")):
+        return (f"Origin's branch rules refuse the name {branch}. Rename the branch to a name origin "
+                "accepts (for example fix/…, feat/… or chore/…) and retry.")
     if any(mark in text for mark in ("[rejected]", "non-fast-forward", "fetch first", "stale info")):
         return f"Origin's {branch} changed meanwhile; nothing was forced."
     if any(mark in text for mark in ("authentication", "permission", "could not read username", "403",
@@ -584,7 +599,7 @@ def delete_untouched_task_branch(cwd, branch, base) -> dict:
 
 # --- Commits back from a Task worker on another worker ----------------------
 #
-# When the worker finishes, the worker that ran it pushes ``task/<id>`` to
+# When the worker finishes, the worker that ran it pushes ``chore/task-<id>`` to
 # origin (only with commits past the base, never forced) and the calling
 # worker fetches it into a local branch of the same name. Neither side touches
 # a working tree, index or current branch, and reasons stay fixed text.

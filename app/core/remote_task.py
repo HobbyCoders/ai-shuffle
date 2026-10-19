@@ -4,7 +4,7 @@ Two halves joined by the worker session id, which the parent allocates and
 the target uses as its idempotency key:
 
 * **Parent** (:func:`dispatch_remote`, called by ``task_dispatch``): publish
-  ``task/<worker id>`` to origin, ask the target to start the child with the
+  ``chore/task-<worker id>`` to origin, ask the target to start the child with the
   ``task-start`` control action, and answer with a receipt. A refusal or an
   unreachable target refuses the Task call by name and releases the untouched
   branch.
@@ -116,6 +116,9 @@ CONTEXT_WINDOW_VERSION = 2
 #: mode) in the body; sent only to targets at this version or later.
 FAST_VERSION = 3
 EFFORT_VERSION = 4
+#: The ``remote_task`` capability that expects ``chore/task-<id>``; an older
+#: target is sent the ``task/<id>`` name it checks for.
+CHORE_BRANCH_VERSION = 5
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -407,7 +410,8 @@ async def dispatch_remote(
         context_window = None
     try:
         state = await asyncio.to_thread(
-            publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist)
+            publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist,
+            legacy_branch=_remote_task_version(worker) < CHORE_BRANCH_VERSION)
     except WorkerCheckoutError as exc:
         return {"ok": False, "error": f"{str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
     if state.mode == REMOTE_BRANCH and not state.pushed:
@@ -469,6 +473,9 @@ async def dispatch_remote(
         reason = str(exc).rstrip(".")
         if "Unknown control action" in reason:
             reason = "it runs an older release; ask the owner to update it"
+        elif "checkout description does not match this worker" in reason:
+            # Its release names worker branches differently from this one's.
+            reason += " (a version mismatch between the workers; update both to the same release)"
         return {"ok": False, "error": f"{name} refused the subagent: {reason}; {NOT_DISPATCHED}."}
     except control.RunnerUnreachable as exc:
         if MAY_HAVE_APPLIED in str(exc):

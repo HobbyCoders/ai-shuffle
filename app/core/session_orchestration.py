@@ -1090,6 +1090,64 @@ async def _wake_peer(session_id):
         log.exception("Peer message queued, but queue broadcast failed")
 
 
+def _start_checkout(sender, new_id):
+    """The new chat's own worktree and branch, or None when the caller has none.
+
+    A chat bound to a branch never hands that branch to the chat it starts:
+    another chat in the same folder could switch it mid-turn. The new chat gets
+    a ``chore/chat-<id>`` worktree forked from the caller's committed HEAD, as
+    a Task worker does, whatever its tool surface; the ``chore/`` name is one
+    an origin restricted to fix/, feat/ and chore/ branches accepts. A caller
+    in the project's main checkout (no branch) keeps sharing it, as before.
+    """
+    if not (sender.get("branch") or sender.get("worktree_branch")):
+        return None
+    from app.core.worker_checkout import WorkerCheckoutError, chat_branch, prepare_worker_checkout
+    try:
+        checkout = prepare_worker_checkout(sender, new_id, sender.get("profile_id"),
+                                           share_read_only=False, branch=chat_branch(new_id))
+    except WorkerCheckoutError as exc:
+        raise ValueError(f"Could not give the new chat its own checkout: {exc} "
+                         "Nothing was started.") from exc
+    if checkout is None:
+        raise ValueError("This chat's branch has no Git checkout on this worker, so the new chat "
+                         "cannot get its own branch. Nothing was started.")
+    return checkout
+
+
+class _UnusedCheckout:
+    """A checkout made for a start before the chain lock, removed again unless
+    the start that made it committed (an error, a refusal or a duplicate
+    request all leave it unused)."""
+
+    def __init__(self, checkout):
+        self.checkout = checkout
+        self.kept = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.checkout is not None and (exc_type is not None or not self.kept):
+            from app.core.worker_checkout import discard_unused_worker_checkout
+            try:
+                discard_unused_worker_checkout(self.checkout)
+            except Exception:  # noqa: BLE001 — keep the original outcome
+                log.warning("Could not reclaim the unused checkout %s", self.checkout.path, exc_info=True)
+        return False
+
+
+def _checkout_note(checkout):
+    """What the new chat is told about its checkout on its first turn."""
+    return ("# Your checkout\n"
+            f"This chat runs in its own checkout {checkout.path} on branch "
+            f"'{checkout.branch}', forked from commit {checkout.base_commit} of the chat that "
+            f"started it (branch '{checkout.parent_branch}'). Uncommitted changes there were not "
+            "copied. Work and commit here; you may rename or switch this checkout's own branch "
+            "(push only fix/, feat/ or chore/ names). Never check out, switch, rename or remove "
+            "a branch or worktree of another chat's checkout: the app refuses it.")
+
+
 def _queue(sender_id, data, action, placement=None, model_plan=None):
     """``placement`` is :func:`_project_placement`'s answer for a StartSession
     that named a project (the owner's assistant only). ``model_plan`` is
@@ -1180,7 +1238,12 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     overrides = target_context.get("overrides") or {}
     # Read before the chain lock below: it may look up the sender's agent.
     started_mode = _started_permission_mode(sender, overrides) if action == "start" else None
-    with transaction() as conn:
+    # The new chat's own checkout is made before the chain lock below: Git
+    # work and its nested connections must not run under that lock.
+    new_id = str(uuid4()) if action == "start" else None
+    checkout = (_start_checkout(sender, new_id)
+                if action == "start" and placement is None and remote is None else None)
+    with _UnusedCheckout(checkout) as unused, transaction() as conn:
         cursor = conn.cursor()
         # One database lock serializes all fanout in this autonomous chain.
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
@@ -1239,7 +1302,6 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             return {"remote": remote, "receipt_id": receipt["id"], "reserved": True, "body": body}
         if action == "start":
             title = _text(data, "title", 160)
-            new_id = str(uuid4())
             # A named project runs in that project's checkout here, never in
             # the caller's workspace.
             workspace = {} if placement is not None else {
@@ -1248,6 +1310,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 "worktree_path": sender.get("worktree_path")}
             if placement is not None:
                 workspace["project_v2_id"] = project_v2_id
+            if checkout is not None:
+                workspace.update(project_v2_id=checkout.project_v2_id, worktree_id=None,
+                                 worktree_branch=checkout.branch, worktree_path=checkout.path)
             from app.core.provider_agent import _caller_fast
             run = {"provider_id": sender.get("provider_id"),
                    "model": overrides.get("model") or sender.get("model"),
@@ -1269,9 +1334,16 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                                                 explicit=data.get("effort"), parent=parent_effort, caller=sender)
             run["fast"] = resolve_child_fast(run["model"], run["provider_id"], parent=run["fast"],
                                              caller=sender, profile_id=sender["profile_id"])
-            overrides = {**{k: v for k, v in overrides.items() if k != "fast"}, "effort": run["effort"]}
+            # The new chat runs where its own row binds it, never in a cwd
+            # copied from the caller's turn.
+            overrides = {**{k: v for k, v in overrides.items() if k not in ("fast", "cwd")},
+                         "effort": run["effort"]}
             if run["fast"] is not None:
                 overrides["fast"] = run["fast"]
+            if checkout is not None:
+                note = _checkout_note(checkout)
+                append = overrides.get("system_prompt_append")
+                overrides["system_prompt_append"] = f"{append}\n\n{note}" if append else note
             target = sessions.create_session(
                 session_id=new_id, title=title, profile_id=sender["profile_id"],
                 api_user_id=sender.get("api_user_id"), is_active=True,
@@ -1281,8 +1353,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 context_window=run["context_window"], fast=run["fast"],
                 mode=sender.get("mode"), _conn=conn, **workspace,
             )
-            if sender.get("branch") and placement is None:
-                cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (sender["branch"], new_id))
+            if checkout is not None:
+                cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, new_id))
+                unused.kept = True
             if "workspace_project_ids" in overrides:
                 # The first turn copies the caller's folder list, and a copied
                 # list runs as the chat's STORED one (#1852): store the
@@ -1305,7 +1378,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
         turn = turns.enqueue_turn(
             target["id"], "agent_message", prompt=prompt,
             profile_id=target["profile_id"], project_id=target.get("project_id"),
-            worktree_id=None if placement is not None else (
+            worktree_id=None if placement is not None or checkout is not None else (
                 target_context.get("worktree_id") or target.get("worktree_id")),
             overrides=overrides, payload=payload, command_id=command_id,
             parent_turn_id=root_id, _conn=conn,
@@ -1316,9 +1389,18 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
         link_job(home, target["id"])
     result = {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
               "delivery_status": "queued", "created": action == "start", "url": "/?session=" + target["id"],
-              "note": "Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped status. No automatic reply or completion notification; peers must use MessageSession. New sessions share the caller's workspace; coordinate edits or choose a separate branch."}
+              "note": "Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped status. No automatic reply or completion notification; peers must use MessageSession."}
     if action == "start":
         result.update(_model_receipt(target, plan))
+        if checkout is not None:
+            result["checkout"] = {"path": checkout.path, "branch": checkout.branch,
+                                  "base_commit": checkout.base_commit}
+            result["note"] += (" It runs in its own checkout on branch " + checkout.branch
+                               + ", forked from your committed HEAD; your uncommitted changes were "
+                               "not copied, and it cannot switch your branch.")
+        elif placement is None and sender.get("project_v2_id"):
+            result["note"] += (" It shares this project's main checkout with you; "
+                               "coordinate file ownership.")
     if assistant:
         project = placement["project"] if placement is not None else None
         result["note"] = (
