@@ -6,9 +6,17 @@ Responsibilities:
 
 * Decide WHEN a provider's Codex access token needs refreshing:
   - proactively when ``codex_last_refresh`` is older than **8 days** (F3);
-  - when the access-token JWT ``exp`` is within **5 minutes** (F3);
+  - when the access-token JWT ``exp`` is within **15 minutes**. ChatGPT access
+    tokens now last about an hour, and in a worker network the renewed bundle
+    has to sync to the other workers before their copy expires;
   - on demand, exactly once, after an upstream 401 (``refresh_on_401_once`` — the
     future gateway upstream client calls this).
+* Renew a synced login from ONE worker only. The provider row (refresh token
+  included) syncs to every worker in a network, so the founder alone renews it
+  (``app.network.refresh_authority``); other workers wait for the renewed
+  bundle to arrive through sync. Observed 2026-10-19: two workers renewed the
+  same login 108 s apart, the second got ``refresh_token_reused``, and the
+  ChatGPT login was dead on every worker.
 * Serialize refreshes **per provider**, at two levels. The Codex refresh token
   ROTATES, so two concurrent refreshes of the SAME provider race and one gets
   ``refresh_token_reused`` → permanent credential death (plan G9 / risk
@@ -48,7 +56,10 @@ logger = logging.getLogger(__name__)
 
 # Refresh policy thresholds (F3).
 PROACTIVE_REFRESH_AFTER_SECONDS = 8 * 24 * 3600  # 8 days
-EXP_SKEW_SECONDS = 5 * 60  # refresh when the access-token exp is within 5 min
+# Refresh when the access-token exp is within 15 min. Access tokens last about
+# an hour; the margin lets the renewed bundle sync to peers before theirs
+# expires. Pairs with the 5-minute sweep (codex_token_refresh_interval_seconds).
+EXP_SKEW_SECONDS = 15 * 60
 
 # TTL of the durable cross-install refresh lease. Generous on purpose: it
 # outlives any plausible refresh POST, so the only case where the TTL matters is
@@ -59,6 +70,10 @@ CLAIM_TTL_SECONDS = 120
 # lose the claim → wait → re-read → maybe the holder already rotated for us.
 CLAIM_ATTEMPTS_ON_401 = 3
 CLAIM_RETRY_SLEEP_SECONDS = 2
+# A worker that does not renew a synced login waits this long after a 401 for
+# the renewed bundle to arrive through sync before giving up.
+SYNC_WAIT_ON_401_SECONDS = 20
+SYNC_POLL_SECONDS = 2
 
 # Per-provider refresh locks. Keyed by provider_id so two concurrent refreshes of
 # the SAME provider serialize (rotating refresh token — a double POST is fatal),
@@ -120,7 +135,7 @@ def _needs_refresh(bundle: dict, access_token_plaintext: Optional[str]) -> bool:
     ``bundle`` is the public/non-secret fields from ``get_codex_tokens``;
     ``access_token_plaintext`` is the decrypted access token (for its ``exp``).
     Returns True when either the 8-day proactive interval has elapsed OR the
-    access-token ``exp`` is within the 5-minute skew.
+    access-token ``exp`` is within the 15-minute skew.
     """
     now = _now()
     # Proactive 8-day interval since last refresh.
@@ -250,6 +265,46 @@ async def _release_claim(provider_id: str, owner: str) -> None:
         )
 
 
+async def _may_refresh_here() -> bool:
+    """Whether this install renews synced logins (see refresh_authority)."""
+    from app.db.async_database import run_sync
+    from app.network import refresh_authority
+
+    return await run_sync(refresh_authority.may_refresh_here)
+
+
+async def _wait_for_synced_rotation(
+    provider_id: str, stale_access_token: Optional[str]
+) -> bool:
+    """Wait for the renewing worker's rotated bundle to arrive through sync.
+
+    Returns True once the stored access token differs from the one that got
+    the 401, False if nothing arrived in ``SYNC_WAIT_ON_401_SECONDS``. Never
+    POSTs: this worker's copy of the refresh token may already be spent.
+    """
+    from app.db.async_database import run_sync
+    from app.db import database as db
+
+    if stale_access_token is not None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SYNC_WAIT_ON_401_SECONDS
+        while True:
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not _usable_codex_bundle(stored):
+                return False
+            if _stored_access_differs(stored, stale_access_token):
+                return True
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(SYNC_POLL_SECONDS)
+    logger.warning(
+        "codex refresh: 401 for provider %s on a worker that does not renew "
+        "synced logins, and no renewed token arrived from the network",
+        provider_id,
+    )
+    return False
+
+
 def _usable_codex_bundle(stored: Optional[dict]) -> bool:
     """A stored bundle we may auto-refresh: has a refresh blob, is chatgpt mode,
     and is not already flagged dead."""
@@ -344,10 +399,14 @@ async def refresh_provider(
     stop.
 
     Returns ``True`` if a refresh was performed, ``False`` if skipped (not due,
-    no bundle, already flagged ``needs_reauth``, or the claim went to a peer).
+    no bundle, already flagged ``needs_reauth``, the claim went to a peer, or
+    another worker in the network renews this login).
     """
     from app.db.async_database import run_sync
     from app.db import database as db
+
+    if not await _may_refresh_here():
+        return False
 
     lock = await _get_lock(provider_id)
     async with lock:
@@ -424,9 +483,15 @@ async def refresh_on_401_once(
     The same reasoning extends across installs via the durable claim: a caller
     that loses the claim waits briefly and re-reads instead of POSTing, because
     the peer holding it is about to rotate the very token we would have sent.
+
+    A worker that does not renew synced logins never POSTs here; it waits for
+    the renewing worker's bundle to arrive through sync instead.
     """
     from app.db.async_database import run_sync
     from app.db import database as db
+
+    if not await _may_refresh_here():
+        return await _wait_for_synced_rotation(provider_id, stale_access_token)
 
     lock = await _get_lock(provider_id)
     async with lock:
@@ -491,6 +556,9 @@ async def refresh_due_providers(*, client=None) -> int:
     from app.db.async_database import run_sync
     from app.db import database as db
 
+    if not await _may_refresh_here():
+        logger.debug("codex refresh: another worker renews synced logins; skipping sweep")
+        return 0
     providers = await run_sync(db.get_enabled_model_providers)
     refreshed = 0
     for row in providers or []:

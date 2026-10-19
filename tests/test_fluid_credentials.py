@@ -459,3 +459,42 @@ async def test_sdk_options_without_provider_id_leaves_extra_empty():
     adapter.connect = fake_connect  # type: ignore[method-assign]
     await adapter.connect_with_sdk_options(FakeSdkOptions())
     assert captured["extra"] == {}
+
+
+# A worker that does not renew a synced subscription login (only one worker in a
+# network does) must not end its failed 401 refresh in a bare upstream 401: it
+# names the worker that renews the login.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service", ["ChatGPT", "Grok"])
+async def test_failed_401_names_the_worker_that_renews(monkeypatch, service):
+    from app.core import codex_token_refresh, xai_token_refresh
+    from app.network import refresh_authority
+
+    async def no_fresh_token(provider_id, *, stale_access_token=None, client=None):
+        return False
+
+    monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", no_fresh_token)
+    monkeypatch.setattr(xai_token_refresh, "refresh_on_401_once", no_fresh_token)
+    monkeypatch.setattr(
+        refresh_authority, "renewal_pending_message",
+        lambda svc: f"Your {svc} login is renewed by the worker 'Founder'.")
+    auth = (CodexSubscriptionAuth(PID, "acct_42") if service == "ChatGPT"
+            else fluid_credentials.GrokSubscriptionAuth(PID))
+
+    with pytest.raises(ProviderCredentialError, match=f"Your {service} login is renewed by the worker 'Founder'"):
+        await auth.on_401()
+
+
+@pytest.mark.asyncio
+async def test_failed_401_on_the_renewing_worker_keeps_the_upstream_error(monkeypatch):
+    from app.core import codex_token_refresh
+    from app.network import refresh_authority
+
+    async def no_fresh_token(provider_id, *, stale_access_token=None, client=None):
+        return False
+
+    monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", no_fresh_token)
+    monkeypatch.setattr(refresh_authority, "renewal_pending_message", lambda svc: None)
+
+    await CodexSubscriptionAuth(PID, "acct_42").on_401()  # does not raise

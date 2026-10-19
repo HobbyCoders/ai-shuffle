@@ -543,3 +543,109 @@ class TestRefreshOn401ClaimContention:
         assert len(posted) == 1
         assert _lease_owner(mock_db) is None
         assert settings.effective_instance_id != PEER_INSTALL
+
+
+# ---------------------------------------------------------------------------
+# WORKER NETWORK — one worker renews a synced login
+#
+# The provider row (refresh token included) syncs to every worker, and the
+# per-row lease above only covers installs sharing one database. Observed
+# 2026-10-19: two workers renewed the same ChatGPT login 108 s apart, the second
+# sent the already-spent refresh token, got refresh_token_reused, and the login
+# was dead on every worker. A worker that is not the network's renewing worker
+# must never POST; it waits for the renewed bundle to arrive through sync.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def peer_worker(monkeypatch):
+    """This install is in a network and another worker renews synced logins."""
+    from app.network import refresh_authority
+    monkeypatch.setattr(refresh_authority, "may_refresh_here", lambda: False)
+    monkeypatch.setattr(codex_token_refresh, "SYNC_WAIT_ON_401_SECONDS", 0.3, raising=False)
+    monkeypatch.setattr(codex_token_refresh, "SYNC_POLL_SECONDS", 0.05, raising=False)
+
+
+def _refuse_posts(posted):
+    def handler(request):
+        posted.append(1)
+        return httpx.Response(400, json={"error": "refresh_token_reused"})
+    return handler
+
+
+class TestPeerWorkerNeverRenews:
+    async def test_sweep_skips_a_due_login(self, mock_db, peer_worker):
+        unlock_encryption(mock_db)
+        _seed_provider(last_refresh=_due_iso())
+        posted = []
+        async with mock_transport_client(_refuse_posts(posted)) as c:
+            assert await codex_token_refresh.refresh_due_providers(client=c) == 0
+            assert await codex_token_refresh.refresh_provider(PROVIDER_ID, client=c) is False
+            assert await codex_token_refresh.refresh_provider(
+                PROVIDER_ID, force=True, client=c) is False
+        assert posted == []
+        assert not db.get_codex_tokens(PROVIDER_ID)["needs_reauth"]
+
+    async def test_sweep_does_not_reach_refresh_provider(self, mock_db, peer_worker, monkeypatch):
+        unlock_encryption(mock_db)
+        _seed_provider(last_refresh=_due_iso())
+        called = []
+
+        async def record(provider_id, **kwargs):
+            called.append(provider_id)
+            return False
+
+        monkeypatch.setattr(codex_token_refresh, "refresh_provider", record)
+        assert await codex_token_refresh.refresh_due_providers() == 0
+        assert called == []
+
+    async def test_401_picks_up_the_bundle_synced_from_the_renewing_worker(
+            self, mock_db, peer_worker):
+        unlock_encryption(mock_db)
+        _seed_provider(access="access-old", last_refresh=_due_iso())
+        posted = []
+
+        async def renewed_bundle_arrives():
+            await asyncio.sleep(0.1)
+            db.set_codex_token_bundle(
+                PROVIDER_ID,
+                access_token=encryption.encrypt_value("access-from-founder"),
+                refresh_token=encryption.encrypt_value("refresh-from-founder"),
+                account_id="acct-1",
+                last_refresh=_iso(datetime.now(timezone.utc)),
+            )
+
+        async with mock_transport_client(_refuse_posts(posted)) as c:
+            ok, _ = await asyncio.gather(
+                codex_token_refresh.refresh_on_401_once(
+                    PROVIDER_ID, stale_access_token="access-old", client=c),
+                renewed_bundle_arrives(),
+            )
+        assert ok is True
+        assert posted == []
+
+    async def test_401_without_a_synced_bundle_keeps_the_login(self, mock_db, peer_worker):
+        unlock_encryption(mock_db)
+        _seed_provider(access="access-old", last_refresh=_due_iso())
+        posted = []
+        async with mock_transport_client(_refuse_posts(posted)) as c:
+            ok = await codex_token_refresh.refresh_on_401_once(
+                PROVIDER_ID, stale_access_token="access-old", client=c)
+        assert ok is False
+        assert posted == []
+        stored = db.get_codex_tokens(PROVIDER_ID)
+        assert not stored["needs_reauth"]
+        assert encryption.decrypt_value(stored["codex_refresh_token"]) == "refresh-old"
+
+
+class TestRefreshWindow:
+    def test_renews_with_time_left_for_sync(self):
+        # Access tokens last about an hour; renewing at 5 minutes left gave peer
+        # workers no time to receive the new bundle before theirs expired.
+        recent = _iso(datetime.now(timezone.utc) - timedelta(minutes=50))
+        in_twelve = _jwt_with_exp(datetime.now(timezone.utc) + timedelta(minutes=12))
+        in_thirty = _jwt_with_exp(datetime.now(timezone.utc) + timedelta(minutes=30))
+        assert codex_token_refresh._needs_refresh({"codex_last_refresh": recent}, in_twelve)
+        assert not codex_token_refresh._needs_refresh({"codex_last_refresh": recent}, in_thirty)
+
+    def test_sweep_runs_inside_the_refresh_window(self):
+        assert 0 < settings.codex_token_refresh_interval_seconds < codex_token_refresh.EXP_SKEW_SECONDS

@@ -381,11 +381,14 @@ class Settings(BaseSettings):
 
     # Codex / ChatGPT-subscription OAuth token-refresh worker. Polls every
     # enabled Codex provider on this cadence and refreshes any whose access token
-    # is due (proactive 8-day interval, or JWT exp within 5 min — see
-    # app.core.codex_token_refresh). The Codex refresh token ROTATES, so refreshes
-    # are serialized per provider by a lock; this is just the wake-up cadence. 0
+    # is due (proactive 8-day interval, or JWT exp within 15 min — see
+    # app.core.codex_token_refresh). Access tokens last about an hour, so the
+    # sweep must run well inside the 15-minute window for a renewed token to
+    # sync to peer workers before theirs expires. A sweep is only DB reads
+    # unless a token is due. The Codex refresh token ROTATES, so refreshes are
+    # serialized per provider by a lock; this is just the wake-up cadence. 0
     # disables the periodic worker (the refresh-on-401 hook still works on demand).
-    codex_token_refresh_interval_seconds: int = 3600
+    codex_token_refresh_interval_seconds: int = 300
 
     # ─── Cross-install background sweep ─────────────────────────────────────
     # turn-claim, git-ops-claim and interaction-expiry are cross-INSTALL
@@ -416,7 +419,7 @@ class Settings(BaseSettings):
     # ``codex_token_refresh_interval_seconds`` (0 disables the periodic worker;
     # the refresh-on-401 hook still works on demand). Defaults to the Codex
     # interval so both sweeps wake together.
-    xai_token_refresh_interval_seconds: int = 3600
+    xai_token_refresh_interval_seconds: int = 300
 
     # fluid code-mode + continual harness (native legs only — the delegated
     # claude-CLI leg has code_mode capped off and is untouched). Code-mode moves
