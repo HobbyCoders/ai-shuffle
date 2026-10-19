@@ -914,46 +914,6 @@ def _build_env_with_ai_tools(
     return env
 
 
-#: Appended after the placement line when the session executes on a shared
-#: runner (or inside a container). One session spent nine minutes and a user
-#: interruption starting the app inside the runner and pointing the browser
-#: tool at its loopback address; nothing in the prompt said where it was.
-PLACEMENT_RUNNER_NOTE = (
-    "The app instance the user is looking at is a separate, already-running "
-    "process — not one you can start here, and localhost here is not the "
-    "browser tool's localhost. Do not treat an app you launch here as live "
-    "verification: verify through the browser tool against the user's "
-    "instance, a real-provider probe, or an end-to-end test that drives the "
-    "producing path."
-)
-
-
-def _placement_lines(placement_where: Optional[str]) -> list:
-    """The ``Runtime placement:`` line (plus the shared-runner note), or none.
-
-    ``placement_where`` is ``sessions.placement["where"]`` — ``runner:<id>``
-    for a pinned session, ``anywhere``/a capability token for an elected one,
-    empty/None for the local lane. The note rides along for a ``runner:`` pin
-    and for any session that finds itself inside a container, which are the
-    two shapes where "just run the app and look at it" quietly verifies the
-    wrong process.
-
-    Session-stable by construction: a re-placed session is rebuilt by the
-    runner that adopts it (new working directory, new prompt), so the line
-    regenerates with the rest of the block rather than drifting mid-prefix.
-    """
-    where = (placement_where or "").strip()
-    shared = where.startswith("runner:") or _in_container()
-    if not where and not shared:
-        return []
-    label = where or "local"
-    if shared:
-        return [
-            f"Runtime placement: {label} (shared runner). {PLACEMENT_RUNNER_NOTE}"
-        ]
-    return [f"Runtime placement: {label}"]
-
-
 def _in_container() -> bool:
     """Whether this process runs inside a container. Never raises."""
     try:
@@ -1084,9 +1044,8 @@ def _render_worker_lines(identity: Dict[str, Any]) -> list:
 def worker_identity_lines() -> list:
     """The ``Worker:`` line (plus the other-workers note), or none. Never raises.
 
-    Both prompt renderers carry these lines in their session-stable half: the
-    app's ``<env>`` block (:func:`generate_environment_details`) and fluid's
-    ``# Environment`` section (the harness adapter passes them in). A failed
+    Fluid's ``# Environment`` section carries these lines in its
+    session-stable half (the harness adapter passes them in). A failed
     lookup reuses this process's last good answer; with none, it renders
     nothing rather than failing the prompt.
     """
@@ -1104,79 +1063,6 @@ def worker_identity_text() -> Optional[str]:
     """:func:`worker_identity_lines` joined, or None when there are none."""
     lines = worker_identity_lines()
     return "\n".join(lines) if lines else None
-
-
-def generate_environment_details(
-    working_dir: str,
-    execution_mode: str = "local",
-    worktree_info: Optional[Dict[str, str]] = None,
-    include_volatile: bool = True,
-    placement_where: Optional[str] = None,
-) -> str:
-    """
-    Generate environment details block for custom system prompts.
-    Similar to Claude Code's dynamic environment injection.
-
-    Args:
-        working_dir: The working directory path
-        execution_mode: Either "local" or "worktree"
-        worktree_info: Dict with branch and base_branch info when in worktree mode
-        include_volatile: Whether to render the facts that change WITHIN a
-            session (today's date, the checked-out branch). False renders the
-            session-stable half only — see :func:`generate_turn_environment_note`
-            for where the other half goes and why.
-        placement_where: ``sessions.placement["where"]`` for this session, when
-            the caller has the row. Renders WHERE the session executes — see
-            :func:`_placement_lines`.
-
-    Every line here lands in the provider's cached prompt prefix, so a line
-    that changes mid-session re-bills the whole prefix (system + tools +
-    history) on the next turn. What stays:
-
-    * working directory — the model's whole frame of reference for every path
-      it reads or writes, and it only ever changes together with the session's
-      checkout (which invalidates the prefix on its own merits);
-    * is-git / platform / OS / shell — properties of the machine and checkout,
-      fixed for the life of the process;
-    * execution mode — local vs worktree, which moves in lockstep with the
-      working directory above;
-    * runtime placement — where this session executes. It changes only when
-      the session is re-placed onto another runner, and that already moves the
-      working directory and the whole prompt with it;
-    * worker — this machine's name as the owner sees it in the app (see
-      :func:`worker_identity_lines`). Same lifetime as the placement line: a
-      move to another worker rebuilds the prompt there.
-
-    What leaves: today's date and the branch pair. Both change under a session
-    that is otherwise untouched (UTC midnight; a checkout switch), and neither
-    is worth a full prefix miss.
-    """
-    is_git = _is_git_repo(working_dir)
-    os_version = _get_os_version()
-
-    lines = [
-        f"Working directory: {working_dir}",
-        f"Is directory a git repo: {'Yes' if is_git else 'No'}",
-        f"Platform: {sys.platform}",
-        f"OS Version: {os_version}",
-        "Shell: " + (
-            "cmd.exe (use Windows cmd syntax)" if os.name == "nt"
-            else "/bin/sh-compatible (use POSIX shell syntax)"
-        ),
-    ]
-    if include_volatile:
-        lines.append(f"Today's date: {_today()}")
-    lines.append(f"Execution mode: {execution_mode}")
-    lines.extend(_placement_lines(placement_where))
-    lines.extend(worker_identity_lines())
-    if include_volatile:
-        lines.extend(_worktree_lines(execution_mode, worktree_info))
-
-    body = "\n".join(lines)
-    return (
-        "Here is useful information about the environment you are running in:\n"
-        f"<env>\n{body}\n</env>"
-    )
 
 
 def _today() -> str:
@@ -1221,7 +1107,7 @@ def generate_turn_environment_note(
     *,
     branch: Optional[str] = None,
 ) -> str:
-    """The volatile half of the <env> block, rendered fresh for one turn.
+    """Today's date and the branch, rendered fresh for one turn.
 
     This rides the turn's user message instead of the system prompt: it sits
     after every cache breakpoint (system tail, tool-defs tail, last stable

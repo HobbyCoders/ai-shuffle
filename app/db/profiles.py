@@ -16,6 +16,40 @@ from app.db.base import get_db, row_to_dict, rows_to_list
 # "not passed" for ``avatar_color``, whose None means "clear it".
 _UNSET: Any = object()
 
+#: ``config.system_prompt`` keys that are retired. ``inject_env_details`` once
+#: added the app's own ``<env>`` block to a custom prompt; the fluid prompt
+#: compiler now supplies the environment for every agent, so the key controls
+#: nothing. Rows stored before the retirement (or replicated from an older
+#: worker) still carry it: it is dropped on every read and write here, and from
+#: stored rows by the column-migration pass (``_strip_retired_prompt_keys`` in
+#: app/db/database.py).
+RETIRED_SYSTEM_PROMPT_KEYS = ("inject_env_details",)
+
+
+def without_retired_prompt_keys(config: Any) -> Any:
+    """``config`` without the retired ``system_prompt`` keys.
+
+    Returns the same object when there is nothing to drop, otherwise a shallow
+    copy with a new ``system_prompt`` dict; every other key, the prompt text
+    included, is kept as it was.
+    """
+    if not isinstance(config, dict):
+        return config
+    prompt = config.get("system_prompt")
+    if not isinstance(prompt, dict) or not any(k in prompt for k in RETIRED_SYSTEM_PROMPT_KEYS):
+        return config
+    cleaned = {k: v for k, v in prompt.items() if k not in RETIRED_SYSTEM_PROMPT_KEYS}
+    return {**config, "system_prompt": cleaned}
+
+
+def _decode_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a stored agent row's JSON columns in place."""
+    config = row["config"]
+    config = json.loads(config) if isinstance(config, str) else (config if config is not None else {})
+    row["config"] = without_retired_prompt_keys(config)
+    row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
+    return row
+
 
 # ============================================================================
 # TypedDict definitions
@@ -41,8 +75,7 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
         cursor.execute("SELECT * FROM agents WHERE id = %s", (profile_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
-            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
-            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
+            _decode_row(row)
         return row
 
 
@@ -62,8 +95,7 @@ def get_all_profiles() -> List[ProfileRow]:
                        (ASSISTANT_AGENT_ID,))
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
-            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
-            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
+            _decode_row(row)
         return rows
 
 
@@ -100,7 +132,8 @@ def create_profile(
         cursor.execute(
             """INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, avatar_color, created_at, updated_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""" + on_conflict,
-            (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []),
+            (profile_id, name, description, json.dumps(without_retired_prompt_keys(config)),
+             is_builtin, json.dumps(mcp_tools or []),
              avatar_color, now, now)
         )
         if cursor.rowcount > 0:
@@ -146,7 +179,7 @@ def update_profile(
         values.append(description)
     if config is not None:
         updates.append("config = %s")
-        values.append(json.dumps(config))
+        values.append(json.dumps(without_retired_prompt_keys(config)))
 
     if mcp_tools is not None:
         updates.append("mcp_tools = %s")

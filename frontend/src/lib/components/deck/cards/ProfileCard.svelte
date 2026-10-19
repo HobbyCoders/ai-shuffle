@@ -548,7 +548,6 @@
 			preset?: string;
 			append?: string;
 			content?: string;
-			inject_env_details?: boolean;
 		};
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];

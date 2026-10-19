@@ -49,7 +49,6 @@ from app.core.environment import (  # noqa: F401
     _build_env_with_ai_tools,
     apply_context_window_override,
     apply_provider_env,
-    generate_environment_details,
 )
 
 logger = logging.getLogger(__name__)
@@ -795,15 +794,12 @@ def build_options_from_profile(
     config = profile["config"]
     overrides = overrides or {}
 
-    # Determine working directory and execution mode (needed for env details injection)
-    # Priority order:
+    # Determine the working directory. Priority order:
     # 1. Override cwd (explicit worktree path from agent engine)
     # 2. Session worktree (for resumed sessions)
     # 3. Project path
     # 4. Profile config cwd
     # 5. Default workspace
-    execution_mode = "local"
-    worktree_info = None
     working_dir_source = "workspace"
 
     # The session row, fetched ONCE below and reused by both the v2 resolver seam
@@ -826,10 +822,6 @@ def build_options_from_profile(
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
         working_dir_source = "override"
-        # Check if override includes worktree info
-        if overrides.get("worktree_info"):
-            execution_mode = "worktree"
-            worktree_info = overrides.get("worktree_info")
     elif session_id:
         # V2 projects: the origin-keyed resolver is the SINGLE cwd authority for
         # every session (resolver-FIRST, no project_v2_id gate). This is the SPAWN
@@ -853,21 +845,6 @@ def build_options_from_profile(
         if v2_cwd is not None:
             working_dir = v2_cwd
             working_dir_source = "project-v2"
-            branch = session_row.get("branch") if session_row else None
-            if branch:
-                # A branch-bound v2 checkout is a worktree; record minimal info so
-                # the environment-details prompt reflects the branch. base_branch
-                # comes from the legacy worktree row when the session has one, else
-                # the conventional default.
-                execution_mode = "worktree"
-                base_branch = "main"
-                try:
-                    wt_row = database.get_worktree_by_session(session_id)
-                    if wt_row and wt_row.get("base_branch"):
-                        base_branch = wt_row["base_branch"]
-                except Exception:  # noqa: BLE001 — best-effort base_branch enrichment
-                    pass
-                worktree_info = {"branch": branch, "base_branch": base_branch}
         else:
             # resolve_cwd returned None. Two cases, distinguished by whether the
             # session resolves to a project_v2 at all:
@@ -923,15 +900,6 @@ def build_options_from_profile(
                         )
                     working_dir = retry_cwd
                     working_dir_source = "project-v2"
-                    execution_mode = "worktree"
-                    base_branch = "main"
-                    try:
-                        wt_row = database.get_worktree_by_session(session_id)
-                        if wt_row and wt_row.get("base_branch"):
-                            base_branch = wt_row["base_branch"]
-                    except Exception:  # noqa: BLE001 — best-effort enrichment
-                        pass
-                    worktree_info = {"branch": branch, "base_branch": base_branch}
                 else:
                     raise ValueError(
                         f"This session's project is not checked out on this device "
@@ -954,9 +922,8 @@ def build_options_from_profile(
 
     # ── The session's sidepanel lane, resolved BEFORE the cwd is final ───────
     #
-    # The chat lane repoints the working directory below, and the cwd is already
-    # baked into the environment-details prompt block a few dozen lines down —
-    # so the lane has to be known here, not at the run-binding block further on.
+    # The chat lane repoints the working directory below, so the lane has to
+    # be known here, not at the run-binding block further on.
     # Read off the session row (the same snapshot the binding block reuses);
     # ``session_row`` is only populated inside the session_id branch above, so a
     # cwd-override or project-only spawn re-fetches or resolves to 'code'.
@@ -967,24 +934,6 @@ def build_options_from_profile(
         except Exception:  # noqa: BLE001 — a lookup failure falls back to config
             _binding_row = None
     session_mode = session_mode_of(_binding_row)
-
-    # ── Where this session EXECUTES, for the <env> block below ───────────────
-    #
-    # ``sessions.placement["where"]`` — ``runner:<id>`` for a pinned session.
-    # Without it, a session on a shared runner can start the app inside that
-    # runner and point the browser tool at its loopback address. Read
-    # off the same row snapshot as the lane above; only an EXPLICIT placement
-    # counts (the implicit ``instance_id`` pin is every session, including
-    # the local lane, so surfacing it would say "shared runner" everywhere).
-    placement_where: Optional[str] = None
-    try:
-        from app.core.placement import _normalize_placement
-
-        _placement = _normalize_placement((_binding_row or {}).get("placement"))
-        _where = str((_placement or {}).get("where") or "").strip()
-        placement_where = _where or None
-    except Exception:  # noqa: BLE001 — placement is a prompt nicety, never a gate
-        placement_where = None
 
     if session_mode == "chat":
         # A chat session RUNS INSIDE its own uploads folder. This is not
@@ -1033,11 +982,6 @@ def build_options_from_profile(
     # Build system prompt
     system_prompt = config.get("system_prompt")
     override_append = overrides.get("system_prompt_append", "")
-    # Set only by the one prompt shape that carries the app's <env> block: the
-    # inputs its volatile half needs, re-rendered per turn onto the user message
-    # (see generate_turn_environment_note). None on every other shape, so a
-    # profile that never had the app env block does not start getting one.
-    turn_env: Optional[Dict[str, Any]] = None
 
     # Get the active security instructions (custom or default). A worker turn's
     # reply is read by the agent that started it, not shown in the chat, so it
@@ -1060,31 +1004,13 @@ def build_options_from_profile(
             # Custom system prompt - use content directly with security instructions
             # Content can be empty/blank
             custom_content = system_prompt.get("content", "") or ""
-            inject_env = system_prompt.get("inject_env_details", False)
 
-            # Start building the prompt
+            # Start building the prompt. No environment block here, whatever
+            # the config says: the retired ``inject_env_details`` key is
+            # ignored (app/db/profiles.py drops it on read and write). The
+            # fluid prompt compiler adds the environment section and the
+            # per-turn date/git reminder for every profile.
             prompt_parts = [security_instructions]
-
-            # Add environment details if enabled (includes AI tools based on ai_tools_config)
-            #
-            # STABLE HALF ONLY. The date and the branch pair change under a
-            # session nobody touched, and everything in this prompt is the
-            # provider's cached prefix — one changed character there re-bills
-            # system + tools + the whole history on the next turn. They ride
-            # the turn's user message instead, rendered per turn by the
-            # harness adapter from ``aih_turn_env`` below.
-            if inject_env:
-                prompt_parts.append(generate_environment_details(
-                    working_dir,
-                    execution_mode=execution_mode,
-                    worktree_info=worktree_info,
-                    include_volatile=False,
-                    placement_where=placement_where,
-                ))
-                turn_env = {
-                    "execution_mode": execution_mode,
-                    "worktree_info": worktree_info,
-                }
 
             # Add custom content if provided
             if custom_content:
@@ -1995,14 +1921,6 @@ def build_options_from_profile(
     options.aih_assistant_home = assistant_home
     options.aih_assistant_scope = assistant_scope
     # Durable turn provenance must also survive SDK option rebuilding.
-
-    # The volatile half of the app's <env> block — execution mode and the
-    # branch pair — carried as INPUTS, not as rendered text. The adapter
-    # re-renders the note (with the date) on every send_query, so a pooled
-    # client that is reused for twenty turns still tells the model today's
-    # date and the branch it is actually on. None when the profile's prompt
-    # shape carries no app env block at all.
-    options.aih_turn_env = turn_env
 
     # No per-project memory dir is stamped here and the prompt has no
     # "# Project memory" section: nothing writes one (see

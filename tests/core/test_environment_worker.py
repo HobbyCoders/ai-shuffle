@@ -24,9 +24,9 @@ from fluid.tools.registry import ToolRegistry
 import app.core.environment as env_mod
 import app.core.provider.harness_adapter as ha
 from app.core.environment import (
-    generate_environment_details,
     generate_turn_environment_note,
     worker_identity_lines,
+    worker_identity_text,
 )
 from app.core.provider.types import SessionOptions
 
@@ -85,13 +85,13 @@ def _not_networked(monkeypatch, *, install_name=None, install_raises=False):
     monkeypatch.setattr(env_mod.database, "get_install", get_install)
 
 
-def _block(tmp_path, placement_where=None):
-    return generate_environment_details(
-        str(tmp_path),
-        execution_mode="worktree",
-        worktree_info={"branch": "claude/x", "base_branch": "main"},
-        include_volatile=False,
-        placement_where=placement_where,
+def _block(tmp_path):
+    """The session-stable environment section as the harness adapter builds
+    it: fluid's renderer, given this worker's identity text."""
+    from fluid.context.environment import environment_block
+
+    return environment_block(
+        str(tmp_path), include_volatile=False, worker=worker_identity_text()
     )
 
 
@@ -158,11 +158,10 @@ def test_failed_lookup_renders_the_prompt_without_the_line(monkeypatch, tmp_path
 
     monkeypatch.setattr(engine, "cached_context", lambda: None)
     monkeypatch.setattr(engine, "context", boom)
-    block = _block(tmp_path, "runner:ai-shuffle-4aac1979")
+    block = _block(tmp_path)
     assert "Worker:" not in block
-    # Everything else still renders, placement semantics untouched.
-    assert f"Working directory: {tmp_path}" in block
-    assert "Runtime placement: runner:ai-shuffle-4aac1979 (shared runner)." in block
+    # Everything else still renders.
+    assert f"Working directory: {tmp_path.resolve()}" in block
 
 
 def test_failed_lookup_keeps_the_last_good_line(monkeypatch):
@@ -183,13 +182,13 @@ def test_failed_lookup_keeps_the_last_good_line(monkeypatch):
 def test_worker_line_sits_in_the_stable_half_and_is_byte_identical(monkeypatch, tmp_path):
     _network(monkeypatch)
     monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-01")
-    one = _block(tmp_path, "runner:ai-shuffle-4aac1979")
+    one = _block(tmp_path)
     monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-02")
-    two = _block(tmp_path, "runner:ai-shuffle-4aac1979")
+    two = _block(tmp_path)
     assert "Worker: ServerWorker" in one
     assert hashlib.sha256(one.encode()).digest() == hashlib.sha256(two.encode()).digest()
-    # After the placement line, inside the <env> block.
-    assert one.index("Runtime placement:") < one.index("Worker:") < one.index("</env>")
+    # Right after the shell line, in the session-stable section.
+    assert one.index("Shell:") < one.index("Worker:") < one.index("Git repository:")
     # The per-turn note never carries it.
     assert "Worker" not in generate_turn_environment_note("worktree", {"branch": "b"})
 
@@ -198,11 +197,11 @@ def test_moved_session_renders_the_new_worker(monkeypatch, tmp_path):
     """A move rebuilds the prompt in the adopting worker's process, which
     renders its own identity — never the previous worker's."""
     _network(monkeypatch, self_name="ServerWorker", peers=(("DesktopWorker", PEER),))
-    before = _block(tmp_path, "runner:dev_aaaaaaaaaaaaaaaaaaaaaaaa")
+    before = _block(tmp_path)
     # The adopting worker: DesktopWorker is now "self", ServerWorker the peer.
     monkeypatch.setattr(env_mod, "_in_container", lambda: False)
     _network(monkeypatch, self_name="DesktopWorker", peers=(("ServerWorker", PEER),))
-    after = _block(tmp_path, "runner:dev_aaaaaaaaaaaaaaaaaaaaaaaa")
+    after = _block(tmp_path)
     assert "Worker: ServerWorker (" in before
     assert "Worker: DesktopWorker (" in after and "on the host" in after
     assert "Other workers in the owner's network: ServerWorker." in after

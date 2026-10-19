@@ -1265,11 +1265,7 @@ async def import_profile(
         # exports map their append text onto the custom content.
         prompt_content = agent_data.system_prompt_content or agent_data.system_prompt_append
         if prompt_content:
-            config["system_prompt"] = {
-                "type": "custom",
-                "content": prompt_content,
-                "inject_env_details": agent_data.system_prompt_inject_env or False
-            }
+            config["system_prompt"] = {"type": "custom", "content": prompt_content}
 
         # Optional fields
         if agent_data.allowed_tools:

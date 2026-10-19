@@ -17,7 +17,6 @@ import pytest
 
 from app.core.environment import (
     TURN_ENV_HEADER,
-    generate_environment_details,
     generate_turn_environment_note,
 )
 from app.core.provider.harness_adapter import HarnessAdapter
@@ -28,41 +27,7 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# ─── the app's <env> block ───────────────────────────────────────────────────
-
-
-def test_env_block_drops_the_facts_that_change_mid_session(tmp_path):
-    block = generate_environment_details(
-        str(tmp_path),
-        execution_mode="worktree",
-        worktree_info={"branch": "feature/x", "base_branch": "main"},
-        include_volatile=False,
-    )
-    assert "Working directory:" in block
-    assert "Execution mode: worktree" in block
-    assert "Today's date" not in block
-    assert "Current branch" not in block
-    assert "Base branch" not in block
-
-
-def test_env_block_is_identical_across_a_date_and_branch_change(tmp_path, monkeypatch):
-    """The two turns a cache miss was observed between: a new day, a new
-    branch, same session."""
-    monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
-    turn_one = generate_environment_details(
-        str(tmp_path),
-        execution_mode="worktree",
-        worktree_info={"branch": "claude/one", "base_branch": "main"},
-        include_volatile=False,
-    )
-    monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-05")
-    turn_two = generate_environment_details(
-        str(tmp_path),
-        execution_mode="worktree",
-        worktree_info={"branch": "claude/two", "base_branch": "develop"},
-        include_volatile=False,
-    )
-    assert _hash(turn_one) == _hash(turn_two)
+# ─── the per-turn environment note ───────────────────────────────────────────
 
 
 def test_turn_note_carries_the_date_and_the_branch_pair(monkeypatch):

@@ -166,7 +166,6 @@ def _create_profile_tools(is_admin: bool) -> list:
                 config["system_prompt"] = {
                     "type": "custom",
                     "content": args["system_prompt_content"],
-                    "inject_env_details": True,
                 }
             elif args.get("system_prompt_append"):
                 config["system_prompt"] = {
@@ -273,7 +272,6 @@ def _create_profile_tools(is_admin: bool) -> list:
                 config["system_prompt"] = {
                     "type": "custom",
                     "content": args["system_prompt_content"],
-                    "inject_env_details": True,
                 }
                 updated_fields.append("system_prompt")
             elif args.get("system_prompt_append"):
