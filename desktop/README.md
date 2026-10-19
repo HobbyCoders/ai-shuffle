@@ -33,7 +33,10 @@ signed `channel` is the one this install follows, it carries a signed source
 recomputes the tree digest over the extracted files and refuses to build on a
 mismatch. For your own testing you can follow **edge** (every `main` revision)
 on one install by writing `{"channel": "edge"}` to `update-channel.json` in the
-profile's `updates` folder; delete the file to return to stable.
+profile's `updates` folder; delete the file to return to stable. The Windows
+installer's channel page (`build/installer-channel.nsh`) writes
+`{"channel":"nightly"}` there when Nightly is chosen and the file does not
+exist yet; silent installs take `/CHANNEL=nightly`.
 
 The `desktop-source.yml` job publishes an edge build of `main` when the owner
 dispatches it manually: it stores the runtime-only source archive as an immutable asset in the private
