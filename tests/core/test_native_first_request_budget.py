@@ -16,6 +16,7 @@ every first request.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -35,9 +36,16 @@ TOOL_ROWS_BUDGET = 10_000
 # wording pass; the margin absorbs host-dependent sections (workspace facts,
 # environment).
 FIRST_REQUEST_BUDGET = 14_300
-# The breakdown before the first turn may miss only the per-turn reminders the
-# host adds while sending (memory snapshot, environment note): ~1.7% measured.
-REPORT_TOLERANCE = 0.03
+# The breakdown before the first turn prices everything the first request
+# carries except the turn itself: the user's text, the host's note appended to
+# it (memory snapshot, Away mode, harness scratch) and fluid's per-turn
+# reminders (environment, ledger, notes). Those are rendered while sending,
+# from the query and live state, and carry host paths (the scratch folder
+# twice, the worker's Python, pytest on PATH), so the comparison leaves them
+# out instead of letting a percentage absorb them: with a long temp or venv
+# path they alone came to 3.1% on Windows. What remains is chars/4 rounding
+# between whole parts and the request's pieces: ~0.2% measured.
+REPORT_TOLERANCE = 0.01
 
 _CHUNKS = [
     StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
@@ -154,6 +162,36 @@ def _request_tokens(request) -> int:
     )
 
 
+def _priced_before_the_turn(request, query: str) -> int:
+    """Tokens of the request without the first turn's own content.
+
+    The turn is the last user message. Its deferred-tool catalog stays: the
+    breakdown prices that block before the turn (``get_context_usage``'s
+    pending catalog). Every other block must be the submitted prompt (with
+    the host's note appended) or a system-reminder; anything else would be
+    content the breakdown should have priced, and fails here.
+    """
+    from fluid.tools.builtins.tool_search import parse_deferred_catalog
+
+    *history, turn = request.messages
+    assert turn.role == "user", turn.role
+    kept = []
+    for block in turn.content:
+        text = getattr(block, "text", None)
+        if text is not None and parse_deferred_catalog(text):
+            kept.append(block)
+            continue
+        assert text is not None and (
+            text.startswith(query) or text.startswith("<system-reminder>")
+        ), repr(block)[:300]
+    messages = [*history, *([replace(turn, content=kept)] if kept else [])]
+    return (
+        estimate_tokens_of_text(request.system or "")
+        + sum(estimate_tokens_of_text(json.dumps(t)) for t in request.tools)
+        + estimate_tokens_of_messages(messages)
+    )
+
+
 def _rows(reported) -> dict[str, int]:
     return {c["name"]: c["tokens"] for c in reported["categories"]}
 
@@ -173,10 +211,23 @@ async def test_default_profile_first_request_stays_under_budget(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("long_paths", [False, True], ids=["host_paths", "long_paths"])
 @pytest.mark.parametrize("code_mode", [True, False], ids=["code_mode", "json_tools"])
 async def test_reported_breakdown_matches_the_first_request(
-    monkeypatch, tmp_path, code_mode
+    monkeypatch, tmp_path, code_mode, long_paths
 ):
+    if long_paths:
+        # A deeper temp folder in the scratch reminder, as under a Windows
+        # profile with a long-named venv. It adds ~600 tokens to the turn,
+        # past the old 3% allowance on any host; the comparison must not move.
+        import app.core.provider.harness_adapter as ha
+
+        scratch_note = ha.HarnessAdapter._scratch_note
+        deep = str(tmp_path / ("deep-folder-" * 200))
+        monkeypatch.setattr(
+            ha.HarnessAdapter, "_scratch_note",
+            lambda self: scratch_note(self).replace(str(tmp_path), deep),
+        )
     _engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
@@ -186,9 +237,9 @@ async def test_reported_breakdown_matches_the_first_request(
         if not c.get("isDeferred") and c["name"] != "Free space"
     )
     assert counted == reported["totalTokens"]
-    actual = _request_tokens(request)
+    actual = _priced_before_the_turn(request, "hello")
     assert abs(reported["totalTokens"] - actual) <= actual * REPORT_TOLERANCE, (
-        reported["totalTokens"], actual, _rows(reported),
+        reported["totalTokens"], actual, _request_tokens(request), _rows(reported),
     )
 
 
