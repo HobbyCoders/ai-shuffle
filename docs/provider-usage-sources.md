@@ -1,6 +1,6 @@
 # Provider usage sources
 
-Source review: 2026-09-30. This describes the implemented readers and their
+Source review: 2026-10-19. This describes the implemented readers and their
 limits. An endpoint returning a successful response does not establish support
 for a third-party integration or permission under a subscription's terms.
 
@@ -33,6 +33,8 @@ popover keeps the rows it already shows.
 | `compatible_headers` | `x-ratelimit-*` from xAI and custom OpenAI-compatible hosts | Provider API key | API key | Request/token rate limits | Passive; stored, hidden | Response metadata | [xAI console](https://console.x.ai/) |
 | `codex_headers` | `x-codex-*` headers on Codex inference responses | ChatGPT sign-in | Subscription | Subscription allowance | Passive; stored, hidden in the popover | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
 | `codex_usage` | `GET https://chatgpt.com/backend-api/wham/usage` | ChatGPT sign-in used for Codex inference | Subscription | Subscription allowance and plan | Polled on demand, 300 s | Unofficial, subscription-specific | [Codex usage](https://chatgpt.com/codex/settings/usage) |
+| `openai_platform_balance` | `GET /v1/dashboard/billing/credit_grants` on api.openai.com | Worker-local Platform dashboard session key | Account | Real remaining prepaid USD | Polled on demand, 300 s | Unofficial / undocumented | [Platform billing](https://platform.openai.com/settings/organization/billing/overview) |
+| `xai_management` | `GET /v1/api-key` on api.x.ai; `prepaid/balance` and `postpaid/invoice/preview` on management-api.x.ai | Inference key for team resolution; worker-local management key for billing | Team | Prepaid remaining USD, cycle usage, spending limit | Polled on demand, 300 s | Documented API | [xAI console](https://console.x.ai/) |
 | `openai_manual` | No endpoint; Analytics usage ledger | User-entered USD balance | API key | Estimated credit balance | Local calculation, no polling | Local estimate, not a provider reading | [Billing](https://platform.openai.com/settings/organization/billing/overview) |
 | `openai_admin` | `GET /v1/organization/costs` and `/v1/organization/usage/completions` | Separate OpenAI Admin key and organization ID (local only) | Organization | Provider-reported spend (current UTC month) and completions counts | Polled on demand, 900 s per endpoint | Documented API | [Usage](https://platform.openai.com/usage) |
 | `openrouter_key` | `GET {provider host}/api/v1/key` | OpenRouter model key | API key | Provider-reported spend and limit of that key | Polled on demand, 300 s | Documented API | [Keys](https://openrouter.ai/settings/keys) |
@@ -65,13 +67,21 @@ reported finite balance is greater than zero. Those credits are **not USD** and
 are unrelated to OpenAI API prepaid billing. They appear in the ChatGPT row's
 expanded details, not on its collapsed header.
 
-OpenAI model keys do not expose a prepaid balance. With neither an Admin
-reading nor an entered balance, the OpenAI row is omitted instead of displaying
-an unavailable placeholder. Previously configured Admin access still reports
-organization spend, not prepaid credit.
+OpenAI inference keys do not expose prepaid balance. The worker-local
+`openai_platform_balance` source reads the account's `total_available` using a
+Platform dashboard session (unofficial). Sign in through the isolated app-owned
+browser or paste a session key in Settings > Providers > the key > Usage.
+The `xai_management` source resolves the team using the inference key and reads
+prepaid balance and invoice preview using a separate management key (official).
+See [setup and endpoint details](content/api-reference/model-providers.md#provider-reported-api-balances).
+Both headline remaining credit, source and fetched time; expired/failed or stale
+readings expose no current amount. Admin usage remains separate organization
+spend. A configured real-balance source always outranks manual estimates,
+including when re-authentication is needed.
 
 In **Settings > Providers > the key > Usage**, enter the current prepaid balance
-in USD (two decimals), then **Save**. The `openai_manual` source displays
+in USD (two decimals), then **Save**, only as a fallback without a Platform
+balance binding. The `openai_manual` source displays
 **~$N left (estimated)**: the entered balance minus this provider's recorded
 costs since Save. **Clear** removes this estimate without removing an Admin key
 or the inference key. Saving again restarts the baseline and timestamp. The

@@ -57,7 +57,8 @@ function start(configured = false) {
 	worker = fakeWorker(
 		{ rows: [router, row()] },
 		{ 'GET /model-providers/:id/openrouter-usage': () => credits(configured),
-			'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: null }) }
+			'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: null }),
+			'GET /model-providers/:id/balance-access': () => ({ configured: false, credits: null }) }
 	);
 	vi.stubGlobal('fetch', worker.fetch);
 }
@@ -97,8 +98,10 @@ it.each([false, true])(
 	}
 );
 
-it('OpenAI: offers an entered balance without asking for another key', async () => {
+it('OpenAI: offers real Platform sign-in first and an entered balance only as fallback', async () => {
 	const panel = await usageOf('mp:p1');
+	expect(within(panel).getByRole('button', { name: 'Sign in to OpenAI Platform' })).toBeTruthy();
+	expect(panel.textContent).toContain('Manual balance (fallback only)');
 	expect(within(panel).getByRole('textbox', { name: 'Current balance (USD)' })).toBeTruthy();
 	expect(within(panel).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
 	expect(worker.sent('GET', '/model-providers/p1/openai-usage')).toHaveLength(1);
@@ -121,6 +124,7 @@ it('OpenAI: saves, reloads and clears a two-decimal balance, including zero', as
 	let manual: Record<string, number> | null = null;
 	worker = fakeWorker({ rows: [row()] }, {
 		'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: manual }),
+		'GET /model-providers/:id/balance-access': () => ({ configured: false, credits: null }),
 		'PUT /model-providers/:id/openai-usage/balance': (body) => {
 			const balance = (body as { balance_usd: number }).balance_usd;
 			manual = { manual_balance: balance, balance_remaining: balance - 1.25, estimated_spend: 1.25, set_at: 1750000000000, unpriced_turns: 0 };

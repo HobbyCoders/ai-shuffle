@@ -388,6 +388,24 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                     source=source_def.label, scope=source_def.scope_label,
                     source_info=_source_info(source_def), last_error_kind="unsupported",
                 ))
+        from app.core import api_key_balances
+
+        for provider in providers:
+            if not provider.get("enabled", True) or not api_key_balances.supported(provider):
+                continue
+            private = await run_sync(db.get_model_provider, provider["id"], include_token=True)
+            balance = api_key_balances.status(private or {})
+            if not balance["configured"]:
+                continue  # Manual balance is a fallback only without a real-balance binding.
+            source_def = usage_sources.SOURCES[balance["source_id"]]
+            entries = [e for e in entries if e.provider_id != provider["id"]]
+            entries.append(ProviderUsageEntry(
+                provider_id=provider["id"], provider_name=provider.get("name"),
+                provider_type=provider["provider_type"], status=balance["status"],
+                credits=balance["credits"], fetched_at=balance["fetched_at"],
+                source=source_def.label, scope=source_def.scope_label,
+                source_info=_source_info(source_def), last_error_kind=balance["last_error_kind"],
+            ))
         return entries
     except Exception:
         logger.debug("provider usage load failed; keeping client rows", exc_info=True)

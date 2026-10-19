@@ -300,6 +300,57 @@ Optional admin keys that let the app read account spend for a provider. Each key
 
 **Auth:** Owner only for every endpoint in this section.
 
+### Provider-reported API balances
+
+In **Settings > Providers > the OpenAI or xAI API key > Usage**, configure balance
+access separately from the inference key. Keys are write-only, encrypted on this
+worker, excluded from network sync, and included in secret re-encryption.
+
+- **xAI (official):** create a management key in console.x.ai → Settings →
+  Management Keys, with billing read permission. The normal API key resolves
+  `team_id` through `GET https://api.x.ai/v1/api-key`; the management key reads
+  `GET https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance`
+  and `/postpaid/invoice/preview`. The UI shows prepaid remaining, cycle usage
+  and postpaid spending limit. The documented `val` fields are **USD cents**;
+  purchases are negative ledger entries, so remaining is `-total.val / 100`.
+  Unknown units/currencies or non-finite amounts are rejected, never guessed.
+- **OpenAI Platform (unofficial):** choose **Sign in to OpenAI Platform** and
+  sign in yourself in the app-owned, isolated browser screen. The supervised
+  browser keeps its existing egress proxy; no agent tools or network transcript
+  get this context. The app captures a dashboard `sess-` key server-side from
+  the login response or dashboard Authorization header, then destroys the
+  temporary cookies/context. If sign-in is refused (including CAPTCHA or popup
+  limitations), paste your own Platform session key in the write-only fallback.
+  The key reads `GET https://api.openai.com/v1/dashboard/billing/credit_grants`;
+  `total_available` is remaining USD, not `total_granted` minus local spend.
+  This undocumented endpoint can change and sessions expire. An inference key
+  or ChatGPT/Codex OAuth token cannot replace a Platform session key.
+
+Polling is demand-driven, at most once per five minutes per credential/endpoint,
+under the existing shared usage budget. Status includes the source and last
+successful fetched time. Failed/expired readings never expose old credit as
+current; 401/403 asks for renewed access and pauses requests until the credential
+changes or is deliberately re-saved. Disconnecting balance access does not remove
+inference/Admin credentials. Changes of inference key, origin, auth type, or
+disabling the provider invalidate its binding and reject in-flight snapshots.
+Balance snapshots are stored independently from Admin spend and passive headers
+so those readers cannot overwrite provider-reported credit.
+
+Owner-only endpoints under `/api/v1/model-providers/{provider_id}`:
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/balance-access` | Configuration, source, freshness, credits, re-auth state; never the key |
+| PUT | `/balance-access` | `{"key": "…"}` management key or Platform `sess-` key |
+| DELETE | `/balance-access` | Remove balance binding and snapshot |
+| POST | `/balance-access/sign-in` | OpenAI only; single-use 60-second browser ticket |
+| WS | `/balance-access/browser` | Owner-authenticated screen/input; first frame supplies the ticket; ten-minute limit |
+
+The Admin-key API below remains available for organization spend. The entered
+balance below is a **fallback only when no real-balance binding exists**; it does
+not mask an expired Platform session. Re-sign in or disconnect that binding to
+use a manual estimate.
+
 ### OpenAI usage key
 
 For an official OpenAI API provider only: `provider_type` `openai`, `base_url` on `https://api.openai.com`, not signed in with ChatGPT. Other providers get `400`. The key is an OpenAI organization Admin API key; the reading covers organization spend and completions token and request counts for the current month (UTC).

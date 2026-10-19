@@ -734,6 +734,30 @@ describe('ContextUsageBar — provider refresh status', () => {
 		if (status === 'stale') expect(container.textContent).toContain('$12.34 left');
 	});
 
+	it.each(['openai', 'xai'] as const)('labels %s real balance sources and hides an expired amount', async (type) => {
+		const source = type === 'openai' ? 'OpenAI Platform balance (unofficial)' : 'xAI Management API';
+		const id = type === 'openai' ? 'openai_platform_balance' : 'xai_management';
+		const source_info = { id, label: source, scope: 'account', scope_label: 'API prepaid credit',
+			measure: 'monetary_credit' as const, measure_label: 'Provider-reported credit balance', collection: 'polled' as const,
+			support: 'documented' as const, support_label: 'API', dashboard_url: 'https://example.com', min_interval_seconds: 300 };
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'real-balance', provider_type: type, provider_name: 'Real balance', status: 'fresh',
+				credits: { balance_remaining: 12.34 }, fetched_at: Date.now(), source, source_info }
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('$12.34 left');
+		expect(container.textContent).toContain(source);
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'real-balance', provider_type: type, provider_name: 'Real balance', status: 'stale',
+				credits: { balance_remaining: 12.34 }, fetched_at: 123, source, source_info, last_error_kind: 'billing_access_denied' }
+		] });
+		await tick();
+		expect(container.textContent).not.toContain('$12.34 left');
+		expect(container.textContent).toContain('Balance unavailable');
+		expect(container.textContent).toContain(type === 'openai' ? 'Sign in again to OpenAI Platform' : 'Replace xAI management key');
+	});
+
 	it.each([12.34, 0])('preserves a successful OpenAI API balance of %s', async (balance) => {
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',

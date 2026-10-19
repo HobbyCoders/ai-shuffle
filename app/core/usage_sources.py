@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
+import re
 
 # What a reading means. The UI must never present one kind as another.
 RATE_LIMIT = "rate_limit"  # short-term request/token headroom
@@ -195,6 +196,27 @@ GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
 _SOURCES: tuple[UsageSource, ...] = (
+    UsageSource(
+        id="openai_platform_balance", snapshot_type="openai_balance",
+        label="OpenAI Platform balance (unofficial)",
+        credential="OpenAI Platform dashboard sign-in (worker-local session key)",
+        scope="account", scope_label="Platform account API credit, not ChatGPT credits",
+        measure=MONETARY_CREDIT, collection=POLLED, support=UNDOCUMENTED,
+        dashboard_url="https://platform.openai.com/settings/organization/billing/overview",
+        endpoints=(Endpoint("https://api.openai.com/v1/dashboard/billing/credit_grants", 300),),
+        poller="_poll_api_balance", applies=is_openai_platform_row,
+    ),
+    UsageSource(
+        id="xai_management", snapshot_type="xai_balance", label="xAI Management API",
+        credential="Separate worker-local xAI management key; inference key resolves team ID",
+        scope="organization", scope_label="Team prepaid credit and current billing cycle",
+        measure=MONETARY_CREDIT, collection=POLLED, support=DOCUMENTED,
+        dashboard_url="https://console.x.ai/",
+        endpoints=(Endpoint("https://api.x.ai/v1/api-key", 300),
+                   Endpoint("https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance", 300),
+                   Endpoint("https://management-api.x.ai/v1/billing/teams/{team_id}/postpaid/invoice/preview", 300)),
+        poller="_poll_api_balance", applies=lambda row: (row or {}).get("provider_type") == "xai",
+    ),
     UsageSource(
         id="anthropic_headers",
         snapshot_type="anthropic",
@@ -456,6 +478,10 @@ def endpoint_for(source_id: str, url: str) -> Endpoint:
     for endpoint in source.endpoints if source else ():
         if endpoint.url == url:
             return endpoint
+        if "{team_id}" in endpoint.url:
+            pattern = re.escape(endpoint.url).replace(r"\{team_id\}", r"[A-Za-z0-9_-]{1,180}")
+            if re.fullmatch(pattern, url):
+                return endpoint
         if "{origin}" in endpoint.url and urlsplit(url).scheme in ("http", "https") \
                 and endpoint.url.replace("{origin}", _origin(url)) == url:
             return endpoint

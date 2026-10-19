@@ -201,7 +201,7 @@
 		{#if tab === 'Models'}
 			{#key row.id}<ModelCuration {row} />{/key}
 		{:else if tab === 'Usage'}
-			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} />{/key}
+			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} xai={row.provider_type === 'xai'} />{/key}
 		{:else}
 			<RowGroup title="Connection" id="providers-connection">
 				<SettingRow label="Name">

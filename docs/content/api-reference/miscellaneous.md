@@ -115,10 +115,11 @@ Which providers get a row:
 - **ChatGPT (Codex) sign-in:** the subscription windows, read from the provider's own replies. Nothing extra is requested.
 - **OpenRouter:** the model key's spend and limit. With an [OpenRouter usage key](/docs/api-reference/model-providers#openrouter-usage-key), a second row (`<provider name> account`) shows the account credit balance.
 - **SuperGrok sign-in:** the subscription allowance.
-- **OpenAI API:** the month's spend, only with an [OpenAI usage key](/docs/api-reference/model-providers#openai-usage-key). Without one, the row reports `last_error_kind` `missing_credentials`.
+- **OpenAI API:** real remaining credit with a worker-local Platform session (unofficial), organization spend with an Admin key, or a clearly labeled manual estimate only without a Platform balance binding. See [API balances](/docs/api-reference/model-providers#provider-reported-api-balances).
+- **xAI API:** real prepaid remaining, cycle usage and spending limit with a separate management key (official); the inference key resolves the team.
 - **fal.ai:** the account credit balance, read with the [fal.ai API key](#post-apiv1settingsintegrationsfal-ai) the media tools use. No extra billing key is needed.
 
-xAI API keys, other OpenAI-compatible hosts and the Anthropic API key get no row: they report only per-minute rate limits. Rows of a deleted provider are dropped.
+Without balance access, xAI API keys get no row. Other OpenAI-compatible hosts and the Anthropic API key report only per-minute rate limits and get no row. Rows of a deleted provider are dropped.
 
 **Auth:** Required. Every reading is the owner's subscription and provider billing, so an API key gets an empty reading (`"available": false`, no `windows`, `"providers": []`) and its request never starts a refresh. The agent tool `GetUsage` likewise returns nothing in an API key's session.
 

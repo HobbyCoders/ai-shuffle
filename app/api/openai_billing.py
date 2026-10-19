@@ -1,4 +1,4 @@
-"""Write-only OpenAI Admin API configuration. Browser billing is retired."""
+"""Write-only API balance bindings and OpenAI Admin spend configuration."""
 
 import asyncio
 import time

@@ -209,7 +209,8 @@ _register(Collection(
             "manual_balance_usd", "manual_balance_set_at"),
     encrypted=("auth_token", "codex_access_token", "codex_refresh_token"),
     local_fields=("codex_refresh_lease_owner", "codex_refresh_lease_expires_at",
-                  "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id"),
+                  "openai_admin_key", "openai_billing_org_id", "openai_billing_instance_id",
+                  "balance_key", "balance_instance_id", "balance_snapshot"),
     resource="settings", priority=30,
     notes="API keys travel encrypted under the network key. Refresh leases and billing bindings stay local."))
 
