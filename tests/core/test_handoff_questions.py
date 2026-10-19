@@ -934,6 +934,54 @@ async def test_queued_agent_move_runs_after_runtime_releases_lease_without_new_i
     move.assert_awaited_once()
 
 
+@pytest.mark.parametrize("by", ["agent", "owner"])
+@pytest.mark.parametrize("client", ["alive", "dead", "dead-streaming", "missing"])
+async def test_queued_move_uses_real_drain_reader_when_client_disappears(client, by):
+    """Losing the client after keep/escalate must not strand a draining turn."""
+    from app.core import session_runtime
+    from app.db import runs
+    from tests.core.test_idle_reader import _make_pool
+    from tests.core.test_session_runtime import _runtime_env
+
+    _chat()
+    turn = turns.enqueue_turn("s1", "user", prompt="move when done")
+    runtime = session_runtime.SessionRuntime(turn)
+    pool, state = _make_pool(alive=not client.startswith("dead"))
+    state.is_streaming = client == "dead-streaming"
+    if client == "missing":
+        pool.peek.return_value = None
+
+    async def pump(**kwargs):
+        if by == "owner":
+            await sh.queue_move("s1", "dev-gaming")
+        else:
+            sh.request("s1", "DesktopWorker")
+        turns.interrupt_turn("s1", "stop", turn_id=turn["id"])
+        turns.escalate_to_draining(turn["id"])
+        runtime._drain_after_cancel = True
+        yield {"type": "done"}
+
+    async def moved(*args):
+        assert runs.get_active_run("s1") is None
+        assert turns.get_turn(turn["id"])["state"] == "aborted"
+
+    move = AsyncMock(side_effect=moved)
+    with (
+        _runtime_env(pump=pump, patch_idle=False),
+        patch("app.core.session_pool.get_session_pool", return_value=pool),
+        patch("app.api.sessions.move_session_to", move),
+        patch.object(sh, "POLL_S", 0.01),
+        patch.object(sh, "_record", AsyncMock()),
+    ):
+        await runtime.execute()
+        assert turns.get_turn(turn["id"])["state"] == "aborted"
+        assert await _settle(lambda: move.await_count)
+        assert await _settle(lambda: "s1" not in sh._running)
+    session_runtime.register_scheduler(None)
+    session_runtime.register_broadcaster(None)
+    move.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "error,code",
     [
