@@ -1,0 +1,145 @@
+{
+  "_comment": "Real fixes from ai-shuffle history. base = the commit before the fix; fix = the merged fix, whose test files are the hidden grader. Prompts follow the original issue text, minus issue/PR numbers, plus the exact names and messages the hidden tests check. Question tasks are graded by regexes over ANSWER.md.",
+  "defaults": {
+    "repo": "/workspace/ai-shuffle",
+    "app_test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+    "fluid_test_cmd": "/usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider"
+  },
+  "tasks": [
+    {
+      "id": "terminal-sigint",
+      "title": "Ctrl-C ignored in app terminals when the worker starts as a background job",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "beaeb8995004e44f035fd15b54f466f62d2ea2c3",
+      "fix": "6d965dcb92b848996ba59804a358819377833712",
+      "hidden_tests": ["tests/core/test_terminals.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2343 / issue #2342",
+      "prompt": "Bug: Ctrl-C in an app terminal never interrupts a running command when the worker was started as a background job of a non-interactive shell (for example `python -m app &` in an entrypoint or wrapper script).\n\nHow to see it: start a terminal through the terminal registry in `app/core/terminals.py` from a process that has SIGINT ignored (`signal.signal(signal.SIGINT, signal.SIG_IGN)`), run `sleep 20` in it, and send `\\x03`. The command keeps running and the terminal stays busy. The same thing makes `tests/core/test_terminals.py::test_busy_terminal_refuses_paste` fail every time when the suite itself is launched as a background job (`sh -c 'pytest ... & wait'`).\n\nExpected: Ctrl-C interrupts the foreground command in an app terminal regardless of how the worker process was launched.\n\nFix the bug in the application code and add a regression test in `tests/core/test_terminals.py`. Run the relevant tests before you finish."
+    },
+    {
+      "id": "listener-cloexec",
+      "title": "Worker listening sockets leak into every child process under uvloop",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "aaf03fae9f1025d1dd0796be01f9c764b49533a0",
+      "fix": "7a96762364651e8a525c30ed3fb8f45e60d0acf8",
+      "hidden_tests": ["tests/core/test_ingress_listeners.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2146 / issue #2145",
+      "prompt": "Bug: every child process the worker spawns holds the worker's own listening sockets for 8000 (local/LAN), 8001 (protected tunnel ingress) and 8002 (agent preview).\n\nObserved on a running worker by scanning `/proc/*/fd` for the three listening inodes: `cloudflared`, `claude -p` agent sessions, the browser MCP `node` process, and agent shell commands (and their children) each hold all three listeners.\n\nuvicorn runs on uvloop here, and uvloop spawns children through libuv, which does not honour `close_fds`. The worker runs uvicorn in a single process, so nothing needs these sockets to be inherited.\n\nImpact: any spawned child can `accept()` on 8001 and receive owner requests arriving through the tunnel, which defeats the ingress boundary. A child that outlives the worker also keeps the ports bound, so the next launch can fail to bind.\n\nExpected: the worker's listening sockets are close-on-exec and no child process holds them. The listeners are created by `bind_listener` in `app/serve.py`.\n\nFix it and add tests in `tests/core/test_ingress_listeners.py`. Run the relevant tests before you finish."
+    },
+    {
+      "id": "boot-recovery-shutdown",
+      "title": "Boot-time hand-off recovery failure escapes app shutdown",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "4911fdca09a9cacd7ac5b54f1fde6c635d72ffd4",
+      "fix": "d74d514b0d53ac5211959c4099cf75455b268a7f",
+      "hidden_tests": ["tests/core/test_session_handoff.py", "tests/test_main.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2081 / issue #2074",
+      "prompt": "Bug (seen as a flaky backend test): boot-time hand-off recovery can raise through app shutdown.\n\n`session_handoff.on_boot()` ends with `await asyncio.to_thread(recover_revoked_transfers)` and no error handling. The step before it, `resume_queued()`, is wrapped in try/except; this one is not.\n\nObserved in CI at teardown of `tests/api/test_analytics.py::TestAnalyticsSummaryEndpoint::test_get_summary_with_only_end_date`:\n\n```\napp/main.py: in lifespan            # await task, in the bg_tasks shutdown loop\napp/core/session_handoff.py: in on_boot\napp/network/handoff.py: in recover_revoked_transfers\napp/network/engine.py: in context\napp/db/network.py: in get_state\nE   sqlite3.ProgrammingError: Cannot operate on a closed database.\n```\n\nThe test client shut down while the boot task was still reading the database. The task ended with that exception, and the shutdown loop in `app/main.py` catches only `CancelledError` around `await task`, so the exception escaped the lifespan.\n\nExpected:\n- A failure in boot-time transfer recovery is logged and does not end the boot task with an exception. Log it at WARNING with the exception attached (`exc_info`), with the message `Could not recover revoked transfers`.\n- App shutdown also finishes when a background task failed. Today one failed task stops the shutdown loop before the remaining tasks are cancelled and before the plugin updater, the resource monitor and the other services are stopped. A failed background task should be logged at ERROR with its exception attached, and shutdown should carry on.\n\nFix it and add regression tests (`tests/core/test_session_handoff.py`, `tests/test_main.py`). Run the relevant tests before you finish."
+    },
+    {
+      "id": "empty-image-read",
+      "title": "Reading a 0-byte image poisons a Fluid session with HTTP 400s",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "d51503b58f7fa70e489a1a06217942db00765388",
+      "fix": "5532d8321a89d2ff953bd2685b65973b55e24b31",
+      "hidden_tests": ["fluid/tests/unit/test_empty_image_serialization.py", "fluid/tests/unit/test_read_images.py", "fluid/tests/unit/test_audit_result_size_honesty.py"],
+      "test_cmd": "/usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider",
+      "source": "PR #2329 / issue #2328",
+      "prompt": "Bug: a Fluid Read of a 0-byte image file sends an empty data URL to OpenAI and kills the session (HTTP 400 on every later turn).\n\nAn agent downloaded a screenshot with curl (the download produced a 0-byte .jpg) and Read it. The Read returned an image block with empty data; the next request failed with:\n\n`provider returned HTTP 400: Invalid 'input[28].output[1].image_url'. Expected a base64-encoded data URL with an image MIME type (...), but got empty base64-encoded bytes.`\n\nBecause the bad block stays in history, every later turn of that session fails the same way.\n\nCode path:\n- `fluid/fluid/tools/builtins/read.py` `_read_image` checks only the size limit; a 0-byte (or non-image) file is base64-encoded to \"\" and returned as an image.\n- `fluid/fluid/providers/openai_responses/serialize.py` `_image_part` emits `data:<type>;base64,` with the empty payload.\n- The MCP result path already guards this (`fluid/fluid/tools/registry.py` requires the data to be non-empty); the builtin Read does not.\n\nExpected:\n1. Read returns a text error (`is_error=True`, no image) for an empty file and for bytes Pillow cannot decode when Pillow is installed, including a truncated JPEG whose pixels cannot be decoded. The message reads `not a readable image: <path> is <n> bytes` (plus any detail you like), and the file must not be recorded as read. Without Pillow, an empty file is still an error; non-empty bytes are passed through as before.\n2. Defensive: every provider serializer (OpenAI Responses, the shared chat/completions translator in `fluid/fluid/providers/_chat_completions.py`, and Anthropic) replaces an Image block with empty data by a text placeholder instead of sending an image part, both at the top level and inside tool results, so an old transcript with such a block still resumes. Serialization must not modify the stored history.\n3. Tests for both, in `fluid/tests/unit/`.\n\nRun the relevant Fluid tests (`python -m pytest fluid/tests/unit/<files> -q`) before you finish."
+    },
+    {
+      "id": "worktree-lock",
+      "title": "Concurrent git worktree add on one repository races",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "6d965dcb92b848996ba59804a358819377833712",
+      "fix": "ab9d2fa9435dc3b89a2f7f0cdc62b2e936a9dfe1",
+      "hidden_tests": ["tests/core/test_checkout_materialization.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2344",
+      "prompt": "Bug: git locks index and ref updates but not worktree creation. Two concurrent `git worktree add` calls on one repository can read each other's half-written `.git/worktrees/<name>/commondir` and die with `fatal: failed to read .git/worktrees/<name>/commondir`.\n\nThe full test suite hits it intermittently in `tests/core/test_checkout_materialization.py::test_concurrent_distinct_branch_materialization_keeps_each_head`, and the app hits the same race whenever two sessions materialise branches of one project at the same time (for example parallel subagent dispatch).\n\nExpected: worktree add, remove and prune on the same repository never run at the same time within the worker process. Provide `repo_worktree_lock(main_dir)` in `app/core/git_worktree_ops.py`, returning the process-wide re-entrant lock (`threading.RLock`) for that repository, and hold it around every `git worktree` add/remove/prune the git service runs (including the list/prune calls `remove_worktree` makes on its own).\n\nFix it and add a test in `tests/core/test_checkout_materialization.py`. Run the relevant tests before you finish."
+    },
+    {
+      "id": "handoff-note-size",
+      "title": "Large 'messages not delivered' hand-off note refused by the new worker",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "c29c23caaf91c0faac27dc6ca74a80ef931a2618",
+      "fix": "be07244f8acbf5e22d9c039bce7eb221b446b6cb",
+      "hidden_tests": ["tests/core/network/test_handoff.py", "tests/core/test_session_handoff.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2017 / issue #1964",
+      "prompt": "Bug: when a chat moves to another worker and some held messages could not be delivered, the 'messages not delivered' note is refused by the new worker's size limits instead of being shortened.\n\nThe new worker's `_note` operation in `app/core/session_handoff.py` refuses a hand-off note that is too large:\n- `content` over 8,000 characters is refused. The old worker builds it from up to about 200 characters per unsent message, so about 38 or more unsent messages exceed it.\n- the data is measured with `json.dumps` default escaping, so non-ASCII text counts about six times its length: 50 messages of 2,000 CJK characters measure about 600,000 against `NOTE_DATA_CHARS` = 120,000.\n\nWhen the note is refused, the old worker records the row on itself (where the chat no longer runs) and sends a notification. No message is lost, but the chat on the new worker does not show which held messages were not delivered.\n\nExpected: the note is shortened to fit and recorded in the chat on the worker that now runs it, with no notification. Shortened `content` is exactly 8,000 characters and ends with `…`; the note's data keeps the full message count and the messages themselves when they fit once measured without ASCII escaping.\n\nFix it and add regression tests (a note for 50 unsent messages of 2,000 non-ASCII characters is recorded on the receiving worker, shortened). Run the relevant tests before you finish."
+    },
+    {
+      "id": "connector-install-message",
+      "title": "Connector runtime install failures hide their cause and always blame PyPI",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "bdbf29d3e884eb3240737d3ccb7c0fe68dc7d367",
+      "fix": "b75afb861727841071f6df94242dcbaf4ff813d5",
+      "hidden_tests": ["tests/test_connector_packages.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2191 / issue #2190",
+      "prompt": "Bug: when a connector app fails to install from Settings → Plugins, the owner always sees the same message: \"The isolated connector environment could not be installed or validated. Check this host's Python support and access to PyPI, then retry.\" Nothing more is written anywhere. The app log has only that sentence. The child's stderr (the pip output or the validation traceback) is captured by `subprocess.run(..., capture_output=True)` and then discarded.\n\nIn a recent case the real cause was `ModuleNotFoundError: No module named 'app.core.detached_tasks'`, a bug in this AI Shuffle version. The message sent the user to check their network and Python instead, and finding the cause meant re-running the worker by hand.\n\nExpected (in `app/core/connector_packages.py` `install()`):\n- The message says which step failed. A failed dependency install (`_prepare_environment`) keeps pointing at the host's Python and PyPI access. A failed runtime validation (`_validate_worker`) says the runtime's \"start-up check\" failed (use that phrase) and does not mention PyPI, since that is a fault in the shipped code.\n- The worker log records the end of the failing step's stderr at WARNING, so support can see the cause.\n- A failed install still leaves no install record behind.\n\nFix it and add a test covering both failures in `tests/test_connector_packages.py`. Run the relevant tests before you finish."
+    },
+    {
+      "id": "connector-sdk-stubs",
+      "title": "Signal, iMessage and BlueBubbles connector runtimes fail to install",
+      "kind": "bugfix",
+      "repo": "/workspace/ai-shuffle",
+      "base": "035ec5fb64f779dc9a7d85067fc5cff2eff9678e",
+      "fix": "5455ff89166d0648c8200bfa49ef1ddd4ce836fd",
+      "hidden_tests": ["tests/test_connector_packages.py"],
+      "test_cmd": "PYTHONPATH=fluid /usr/local/bin/python3 -m pytest {tests} -q -p no:cacheprovider -m 'not slow and not integration'",
+      "source": "PR #2189 / issue #2188",
+      "prompt": "Bug: on a clean install, installing the Signal, iMessage or BlueBubbles app in Settings → Plugins fails with the generic message \"The isolated connector environment could not be installed or validated...\". Because `connector_packages.require_installed` blocks new accounts until the runtime is installed and enabled, a user cannot add a new Signal, iMessage or BlueBubbles account at all. The other catalog runtimes (webhook, telegram, discord, whatsapp, slack, ...) install fine on the same host.\n\nRunning the worker's validation step by hand (`<runtime>/env/bin/python package_worker.py <path> signal_connector SignalConnector validate`) prints:\n\n```\nModuleNotFoundError: No module named 'app.core.detached_tasks'\n```\n\nThe isolated connector worker (`app/core/connectors/package_worker.py`, `sdk()`) stands in for the few `app.*` modules a connector may import, and the connectors are run from their source files under that stub, without the app package. `tests/test_connector_packages.py` stubs out environment preparation and worker validation, so no test imports the connector modules the way the worker does.\n\nExpected:\n- All three runtimes install and validate like the others.\n- A test imports-checks every catalog connector against what the worker's `sdk()` stubs actually provide (no pip, no network) and fails if any connector imports an `app.*` module or name the worker does not provide.\n\nFix it and add that test to `tests/test_connector_packages.py`. Run the relevant tests before you finish."
+    },
+    {
+      "id": "q-codex-routing",
+      "title": "Codebase question: Codex cache routing",
+      "kind": "question",
+      "repo": "/workspace/ai-shuffle",
+      "base": "699bcefbadde1eea8500cbf4d268fdfd58eb317f",
+      "answer_file": "ANSWER.md",
+      "answer_checks": [
+        "FLUID_RESPONSES_ROUTING_ARM",
+        "session-id",
+        "thread-id",
+        "x-client-request-id",
+        "prompt_cache_key",
+        "x-codex-turn-state",
+        "(arm|default)[^\\n]{0,80}\\bB\\b|\\bB\\b[^\\n]{0,80}(default|codex|chatgpt)",
+        "openai_responses/client\\.py"
+      ],
+      "source": "fluid/fluid/providers/openai_responses/client.py",
+      "prompt": "Question about this codebase (no code changes): when Fluid sends a request to the ChatGPT/Codex subscription backend, how does it keep that session's prompt cache warm?\n\nWrite your answer to `ANSWER.md` at the repository root. Cover: which request body field and which HTTP headers carry the session's cache identity; which environment variable switches between the routing variants (\"arms\"), what each arm adds, and which arm is the default on the Codex backend versus other Responses endpoints; and the file(s) where this lives. Be specific and cite file paths."
+    },
+    {
+      "id": "q-stream-bounds",
+      "title": "Codebase question: what stops a silent model stream from hanging",
+      "kind": "question",
+      "repo": "/workspace/ai-shuffle",
+      "base": "699bcefbadde1eea8500cbf4d268fdfd58eb317f",
+      "answer_file": "ANSWER.md",
+      "answer_checks": [
+        "900",
+        "\\b60\\b",
+        "\\b90\\b",
+        "first.?byte",
+        "deadline",
+        "heartbeat",
+        "_transport\\.py"
+      ],
+      "source": "fluid/fluid/providers/_transport.py, openai_responses/client.py",
+      "prompt": "Question about this codebase (no code changes): a Fluid session on the OpenAI Responses / ChatGPT backend sends a request, and the server answers HTTP 200 but then sends only SSE keep-alive heartbeats and no real content. What stops that call from hanging forever?\n\nWrite your answer to `ANSWER.md` at the repository root. List every time bound that applies to such a call in Fluid's own client defaults (not the AI Shuffle app's overrides): what each one measures, its default value in seconds, what happens when it fires (retry, truncated stream, error), and the file and constant name where each default is defined."
+    }
+  ]
+}
