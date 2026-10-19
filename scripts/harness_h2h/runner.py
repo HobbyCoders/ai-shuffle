@@ -224,7 +224,7 @@ def run_one(task: T.Task, arm: str, trial: int, *, out: Path, workspace: Path, m
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
     (run_dir / "prompt.txt").write_text(task.prompt, encoding="utf-8")
-    T.snapshot(task.repo, task.base, workspace, protected=(out,))
+    T.snapshot(task.repo, task.base, workspace, protected=(out,), owner_record=out / T.OWNER_RECORD)
     result: dict[str, Any] = {"task": task.id, "arm": arm, "trial": trial, "model": model,
                               "effort": effort, "started_at": time.time(), "run_id": uuid.uuid4().hex}
     try:
@@ -307,5 +307,5 @@ def run_matrix(*, tasks: list[T.Task], arms: list[str], trials: int, out: Path, 
                 print(f"    passed={g.get('passed')} wall={r.get('wall_s')}s "
                       f"calls={len(tr.get('calls', []))} tools={len(tr.get('tools', []))} "
                       f"err={r.get('harness_error') or ''}", flush=True)
-    T.clear_dir(workspace, (out, *{t.repo for t in tasks}))
+    T.clear_dir(workspace, (out, *{t.repo for t in tasks}), owner_record=out / T.OWNER_RECORD)
     return 0

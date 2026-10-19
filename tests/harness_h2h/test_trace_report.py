@@ -114,17 +114,22 @@ def test_workspace_guard_refuses_real_folders(tmp_path):
             T.check_workspace(bad, (repo, out))
     T.check_workspace(tmp_path / "ws", (repo, out))
     # A non-empty folder the bench did not create is never emptied.
+    record = out / T.OWNER_RECORD
     stranger = tmp_path / "stranger"
     stranger.mkdir()
     (stranger / "keep.txt").write_text("mine")
     with pytest.raises(T.UnsafeWorkspace):
-        T.clear_dir(stranger)
+        T.clear_dir(stranger, owner_record=record)
     assert (stranger / "keep.txt").exists()
     ws = tmp_path / "ws"
-    T.clear_dir(ws)
+    T.clear_dir(ws, owner_record=record)
     (ws / "junk").write_text("x")
-    T.clear_dir(ws)
-    assert [p.name for p in ws.iterdir()] == [T.WORKSPACE_MARKER]
+    # An agent wiping every untracked file (git clean -fdx) leaves the proof intact.
+    T.clear_dir(ws, owner_record=record)
+    assert list(ws.iterdir()) == []
+    assert json.loads(record.read_text())["workspaces"] == [str(ws.resolve())]
+    with pytest.raises(T.UnsafeWorkspace):  # the record may not sit in the workspace
+        T.clear_dir(ws, owner_record=ws / "own.json")
 
 
 def test_contamination_flags_routes_to_the_real_fix():
@@ -194,13 +199,13 @@ def test_snapshot_has_no_history_and_grading_uses_hidden_tests(tmp_path):
                   hidden_tests=["test_lib.py"],
                   test_cmd=f"{sys.executable} -m pytest {{tests}} -q -p no:cacheprovider")
     ws = tmp_path / "ws"
-    T.snapshot(repo, base, ws)
+    T.snapshot(repo, base, ws, owner_record=tmp_path / T.OWNER_RECORD)
     log = subprocess.run(["git", "log", "--oneline"], cwd=ws, capture_output=True, text=True).stdout
     assert len(log.strip().splitlines()) == 1
     assert fix not in subprocess.run(["git", "rev-list", "--all"], cwd=ws, capture_output=True,
                                      text=True).stdout
     assert T.grade(task, ws)["passed"] is False
-    T.snapshot(repo, base, ws)
+    T.snapshot(repo, base, ws, owner_record=tmp_path / T.OWNER_RECORD)
     (ws / "lib.py").write_text("def add(a, b):\n    return a + b\n")
     (ws / "test_lib.py").write_text("def test_agent_cheat():\n    assert True\n")
     graded = T.grade(task, ws)
