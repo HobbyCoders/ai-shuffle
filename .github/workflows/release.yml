@@ -181,7 +181,14 @@ jobs:
             The app fetches the newest stable release and prepares updates in the
             background. No command prompt or new installer is needed.
             Desktop installers are opt-in for manually dispatched releases, not built
-            for every version. Existing desktop users should update inside the app.
+            for every version (`build_desktop` defaults to `false`). Build a Windows
+            installer for native desktop or launcher changes, or when the owner asks.
+            A launcher version bump also needs the owner’s decision to build one.
+            The website uses the hub’s `/v1/desktop/installer`, which serves the last
+            published installer that has not been withdrawn. Its version can trail
+            the signed manifest version; this is expected because new installs can
+            update inside the app. The app only offers an installer when it is newer
+            than the running version. Existing desktop users should update inside the app.
             Other workers are managed inside the app under Devices.
 
             ### Mobile install

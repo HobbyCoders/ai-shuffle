@@ -115,7 +115,10 @@ staging is not a claim that these other surfaces are staged.
    publisher independently refuses prereleases and skips an older final tag.
 5. **android** builds and publishes to Play internal testing only when its
    existing signing/worker-readiness gates pass. This is not a public Play
-   production release. The Windows installer is still opt-in on dispatch.
+   production release. The Windows installer is opt-in on dispatch: `build_desktop`
+   defaults to `false`. Build one for native desktop or launcher changes, or
+   when the owner asks. A launcher version bump also needs the owner’s decision
+   to build an installer.
 6. **linux-build** calls the existing Linux workflow on the exact tag; **linux-release**
    verifies its source revision/version, AppImage and deb hashes, and checksum
    file, then attaches both packages, `SHA256SUMS-linux` and provenance to the
@@ -452,8 +455,13 @@ What the hub does (`hobbycoders-cloud/hub/src/release-admin.ts`, `servedRelease`
   so an older release signed after it would look newer. So while any desktop
   installer newer than the fallback is published, the feed serves **nothing**.
   The manifest returns 404 "The newest release was withdrawn", workers keep
-  what they run, and `held` names the installer. This is the usual case,
-  because every release publishes installers.
+  what they run, and `held` names the installer. This hold applies only when
+  such an installer has been published; Windows installers are opt-in, not
+  published for every release.
+- `/v1/desktop/installer` serves the last published installer that has not been
+  withdrawn. Its version can trail `/v1/desktop/manifest`; that is expected.
+  New installs can update inside the app from the signed manifest, and the app
+  only offers an installer when it is newer than the running version.
 - Edge is not affected.
 - Re-running `release.yml` for a withdrawn tag does not bring it back. The
   publisher's upsert leaves the withdrawal as it is.

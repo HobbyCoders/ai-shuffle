@@ -42,6 +42,18 @@ wired into that job.
 The macOS and Linux artifacts are downloaded from the run and attached to the
 release by hand for now; the hub only serves the Windows installer.
 
+## When to build a Windows installer
+
+Windows installers are opt-in for each release: `release.yml` defaults
+`build_desktop` to `false`. Build one for native desktop or launcher changes,
+or when the owner asks. A launcher version bump also needs the owner’s decision
+to build an installer.
+
+The hub’s `/v1/desktop/installer` serves the last published installer that has
+not been withdrawn. It can trail the signed manifest version. This is expected:
+new installs can update inside the app from the signed manifest, and the app
+only offers an installer when it is newer than the running version.
+
 ## Windows: Authenticode
 
 Pick one method. Azure Trusted Signing is the recommended one: it is the
