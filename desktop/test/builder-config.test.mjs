@@ -9,7 +9,8 @@ import { test } from 'node:test';
 
 const require = createRequire(import.meta.url);
 const desktop = fileURLToPath(new URL('..', import.meta.url));
-const channelScript = readFileSync(path.join(desktop, 'build', 'installer-channel.nsh'), 'utf8');
+// Git may check source fixtures out with CRLF on Windows; assertions compare code, not checkout EOLs.
+const channelScript = readFileSync(path.join(desktop, 'build', 'installer-channel.nsh'), 'utf8').replace(/\r\n/g, '\n');
 // The script without its # comments, so assertions see only NSIS code.
 const channelCode = channelScript.split('\n').map(line => line.replace(/^\s*#.*$/, '')).join('\n');
 const macro = name => {
@@ -60,7 +61,7 @@ test('the channel page writes the file the installed app reads, under the name E
   assert.equal(pkg.productName, undefined);
   assert.doesNotMatch(readFileSync(path.join(desktop, 'electron-builder.yml'), 'utf8'), /^extraMetadata:/m);
   // installed-entry.ts: the update root is <userData>/updates; SourceUpdates reads CHANNEL_FILE there.
-  assert.match(readFileSync(path.join(desktop, 'src', 'main', 'installed-entry.ts'), 'utf8'),
+  assert.match(readFileSync(path.join(desktop, 'src', 'main', 'installed-entry.ts'), 'utf8').replace(/\r\n/g, '\n'),
     /const userData = app\.getPath\('userData'\);\n\s*const root = path\.join\(userData, 'updates'\);/);
   const { SourceUpdates, CHANNEL_FILE } = require('../dist/main/source-updates.js');
   assert.match(channelCode, /!define SHUFFLE_CHANNEL_DIR "\$APPDATA\\\$\{APP_PACKAGE_NAME\}\\updates"/);
