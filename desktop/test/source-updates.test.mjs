@@ -96,6 +96,31 @@ async function rollbackFixture(t, { baseline = false } = {}) {
  };
  return { f, u, db, calls, phases, journal, factory: async previous => { assert.equal(previous, A); return db; } };
 }
+test('launcher-validated copy still requires a ready journal for the exact booting revision', async t => {
+ const { f, u } = await rollbackFixture(t);
+ const { SinglePassClusterCopy, checkRestorePointStructure } = require('../dist/main/update-restore-point.js');
+ const cluster = path.join(f.root, 'postgres');
+ await fs.mkdir(path.join(cluster, 'data', 'global'), { recursive: true });
+ await fs.writeFile(path.join(cluster, 'data', 'PG_VERSION'), '17');
+ await fs.writeFile(path.join(cluster, 'data', 'global', 'pg_control'), 'control');
+ const copy = new SinglePassClusterCopy(cluster, async () => {});
+ await u.prepareRollback(async () => copy); // create the real ready journal and snapshot
+ await u.prepareRollback(async () => copy); // launcher validates the existing copy
+ await u.select();
+ const child = f.create(); await child.attach(B);
+ const validator = { validate: () => checkRestorePointStructure(cluster) };
+ await child.requireRestorePoint(validator);
+ const file = path.join(f.root, 'restore-point.json');
+ const journal = JSON.parse(await fs.readFile(file, 'utf8'));
+ for (const bad of [{ ...journal, revision: C }, { ...journal, phase: 'preparing' }]) {
+  await fs.writeFile(file, JSON.stringify(bad));
+  await assert.rejects(child.requireRestorePoint(validator), /No verified database restore point/);
+ }
+ await fs.writeFile(file, JSON.stringify(journal));
+ await fs.rm(path.join(cluster, 'update-snapshot', 'data', 'global', 'pg_control'));
+ await assert.rejects(child.requireRestorePoint(validator), /validation/);
+});
+
 test('restore journal: baseline C supersedes unused A-to-B snapshot without ever restoring it',async t=>{
  const {f,u,factory,calls,journal}=await rollbackFixture(t);await u.prepareRollback(factory);
  f.options.baseline={revision:C,sequence:300};
