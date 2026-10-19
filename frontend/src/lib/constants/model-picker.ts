@@ -90,6 +90,7 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 	for (const p of getProviders()) {
 		if (providerScope && providerScope !== p.id) continue;
 		if (apiKeyOnly && p.auth_kind !== 'api') continue;
+		if (p.models.length === 0) continue;
 		const display = getProviderDisplay(p);
 		groups.push({
 			key: p.id,

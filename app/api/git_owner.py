@@ -43,7 +43,7 @@ _MUTATING_ACTIONS = {
 }
 
 async def _guard_mutation(action_name, values, endpoint=None):
-    if action_name not in _MUTATING_ACTIONS:
+    if action_name == "get_git_status":
         return
     from app.api.common import check_project_access
     from app.api.git_helpers import get_working_dir_async
@@ -65,9 +65,16 @@ async def _guard_mutation(action_name, values, endpoint=None):
     except HTTPException as exc:
         # GitHub-only projects need not have a local clone. Branch activity is
         # still checked against the authenticated project's canonical aliases.
-        if action_name != 'create_pull_request' or exc.status_code not in {404, 409}:
+        if action_name in _MUTATING_ACTIONS and (action_name != 'create_pull_request' or exc.status_code not in {404, 409}):
             raise
         cwd = None
+    # An unbound project subfolder is usable for chat, but never silently grants
+    # Git controls over its enclosing repository (including parent-wide reads).
+    root = await run_sync(_enclosing_repository, cwd) if cwd else None
+    if root:
+        raise HTTPException(409, f"Inside repository {root}. Open that repository root as a project to use Git controls.")
+    if action_name not in _MUTATING_ACTIONS:
+        return
     branches = [values.get('branch_name')]
     branches.extend(getattr(body, key, None) for key in ('branch_name', 'branch', 'ref', 'head', 'name', 'base_branch'))
     await run_sync(require_idle_git_target, project_id, cwd, branches)
@@ -286,6 +293,26 @@ def _has_git_marker(path):
         current = parent
 
 
+def _enclosing_repository(path):
+    """Return a proven enclosing root, never a failed probe or the folder itself.
+
+    Keep checkout_manager's strict root/branch checks intact: a missing marker
+    on a bound session must not fall through to its parent's repository.
+    """
+    from app.core.git_service import git_service
+
+    if not os.path.isdir(path) or not _has_git_marker(path):
+        return None
+    result = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=5)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    root = os.path.realpath(result.stdout.strip())
+    folder = os.path.realpath(path)
+    if os.path.normcase(root) != os.path.normcase(folder) and os.path.commonpath([root, folder]) == root:
+        return root
+    return None
+
+
 def _is_plain_project_folder(path):
     """Only a real non-repository is an empty Git status, never a failed probe.
 
@@ -355,7 +382,7 @@ async def handle_project_git(body, from_device):
             if name != "get_git_status" or branch is not None or row.get("branch"):
                 continue
             plain_folder = await run_sync(_is_plain_project_folder, path)
-            if not plain_folder:
+            if not plain_folder and not await run_sync(_enclosing_repository, path):
                 continue
         actual = None if plain_folder else await run_sync(git_service.get_current_branch, path)
         if branch is None and row.get("branch"):
