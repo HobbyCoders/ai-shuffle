@@ -8,6 +8,41 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.0.2
+
+Real remaining credit for API keys, Grok Voice calls, tighter compaction, and fixes for hand-offs, git and the composer.
+
+### Usage and credit
+
+- xAI API keys show your remaining prepaid credit, this month's usage and your spending limit. Add an xAI management key (console.x.ai → Settings → Management Keys) on the provider's Usage tab.
+- OpenAI API keys can show your real remaining credit. Sign in to OpenAI Platform from the provider's Usage tab, in a private browser window only you control, or paste a session key. OpenAI has no official balance API, so this is unofficial and may stop working if OpenAI changes it. A typed-in balance is now only a fallback.
+- When access expires or is refused, the amount is hidden and you are asked to sign in again or replace the key, instead of seeing old numbers.
+
+### Voice
+
+- Voice calls can use Grok Voice with an xAI API key, with 28 voices to choose from.
+- Nine more GPT Live voices.
+
+### Context
+
+- Compaction now brings a session down to about 15% of the context limit you chose, for example about 60k on a 400k limit. When an automatic compaction has to wait for a summary, the chat shows "Compacting context…".
+- Agents receive the memory snapshot only when they do not already have it, so prompts are smaller.
+
+### Sessions and agents
+
+- "Compact first" sends your draft after compaction and reactivates a settled chat. "Restore unsent draft" puts attachments back once, in place.
+- A question written in an agent's reply no longer marks a chat as waiting for you while it is still working.
+- Hand-offs keep a pending question answerable across the move, and a queued hand-off starts once the current work finishes.
+- The composer remembers its worktree settings per project.
+
+### Git
+
+- Plain-folder projects hide the Git controls. Creating a repository works without a configured Git identity and can be retried if it fails.
+
+### Updates
+
+- An install that can never run is finished or cleared, so update progress no longer shows a stale error.
+
 ## 1.0.1
 
 Fixes from the first day of public use, plus a built-in Android emulator, faster session search and smaller prompts.
