@@ -283,8 +283,10 @@ def test_a_lapsed_prompt_on_the_parent_denies_and_is_listed(workers, monkeypatch
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
     turn = start_child_turn(a, child)
-    monkeypatch.setattr(permission_module, "PERMISSION_TTL_SECONDS", 1)
-    monkeypatch.setattr(relay, "MIN_TTL_SECONDS", 1)
+    # 3 s, not 1: on a cold process the ask can take over a second to reach B,
+    # and a prompt that lapsed before B shows it never appears as pending.
+    monkeypatch.setattr(permission_module, "PERMISSION_TTL_SECONDS", 3)
+    monkeypatch.setattr(relay, "MIN_TTL_SECONDS", 3)
 
     async def nobody(row):
         return None
