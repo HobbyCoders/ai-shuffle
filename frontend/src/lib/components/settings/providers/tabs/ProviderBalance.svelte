@@ -13,10 +13,10 @@
  const access = getSettingsAccess();
  let status = $state<ProviderBalance | null>(null);
  let now = $state(Date.now());
- const reading = $derived(!error && !status?.last_error_kind && !status?.needs_reauth && status?.status === 'fresh' && status.fetched_at && now - status.fetched_at <= 300_000 ? status.credits : null);
  let key = $state('');
  let busy = $state(false);
  let error = $state('');
+ const reading = $derived(!error && !status?.last_error_kind && !status?.needs_reauth && status?.status === 'fresh' && status.fetched_at && now - status.fetched_at <= 300_000 ? status.credits : null);
  let frame = $state('');
  let signingIn = $state(false);
  let signInButton = $state<HTMLButtonElement>();
