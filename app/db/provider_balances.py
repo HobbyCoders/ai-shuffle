@@ -3,21 +3,15 @@
 These fields deliberately do not appear in network.policy's shared allowlist.
 Poll commits compare the binding and inference credential revision under a lock.
 """
-import hashlib
 import json
 from uuid import uuid4
 
 from app.db.base import get_db
 
 
-def credential_fingerprint(row):
-    from app.core.encryption import decrypt_value
-    identity = [row.get(k) for k in ("provider_type", "base_url", "auth_mode")]
-    identity.append(decrypt_value(row.get("auth_token") or ""))
-    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-
-
 def bind(row, instance_id, encrypted_key):
+    from app.core.api_key_balances import credential_fingerprint
+
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""

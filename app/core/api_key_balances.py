@@ -1,4 +1,5 @@
 """Provider-reported API credit, never inferred from Admin spend or local costs."""
+import hashlib
 import json
 import math
 import re
@@ -18,6 +19,13 @@ OPENAI_CREDIT_URL = "https://api.openai.com/v1/dashboard/billing/credit_grants"
 XAI_KEY_URL = "https://api.x.ai/v1/api-key"
 XAI_BILLING_BASE = "https://management-api.x.ai/v1/billing/teams/"
 INTERVAL = 300
+
+
+def credential_fingerprint(row):
+    """Pure identity check, including inference credentials after network sync."""
+    identity = [row.get(k) for k in ("provider_type", "base_url", "auth_mode")]
+    identity.append(encryption.decrypt_value(row.get("auth_token") or ""))
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
 def supported(row):
@@ -81,7 +89,7 @@ def status(row):
         snap = json.loads(row.get("balance_snapshot") or "{}") if configured else {}
     except (ValueError, TypeError):
         snap = {}
-    if configured and snap.get("credential") != provider_balances.credential_fingerprint(row):
+    if configured and snap.get("credential") != credential_fingerprint(row):
         configured, snap = False, {}
     fetched = snap.get("fetched_at")
     error = snap.get("last_error_kind")
@@ -111,7 +119,7 @@ async def poll(row):
     team, cached = None, {}
     try:
         cached = json.loads(row.get("balance_snapshot") or "{}")
-        if cached.get("credential") != provider_balances.credential_fingerprint(row):
+        if cached.get("credential") != credential_fingerprint(row):
             return
         team = cached.get("team_id")
         key = encryption.decrypt_value(row["balance_key"])
