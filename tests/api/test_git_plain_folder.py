@@ -246,7 +246,7 @@ def test_nested_project_reports_scope_without_parent_files(plain_project, scope,
         git_at(folder, "init", "-b", "nested")
         git_at(folder, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                "commit", "--allow-empty", "-m", "Initial nested repository")
-    session_id = f"nested-chat-{scope}-{own_repository}"
+    session_id = f"nested-chat-{scope}-{repository_kind}"
     database.create_session(session_id, "default", project_v2_id=project["id"])
     assert resolve_existing_cwd(database.get_session(session_id)) == str(folder)
     query = f"?session_id={session_id}" if scope == "session" else "?worker_id=local"
