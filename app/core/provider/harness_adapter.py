@@ -358,7 +358,6 @@ class HarnessAdapter(ProviderAdapter):
         # note decided to send (set by send_query around the note render).
         self._memory_held_for_turn: Optional[Any] = None
         self._memory_plan: Optional[Any] = None
-        self._memory_query = ""
         # A full snapshot was submitted; its node id arrives with TurnStarted.
         self._memory_full_pending: bool = False
         # The delegated leg puts the full snapshot back right after a Claude
@@ -1678,24 +1677,17 @@ class HarnessAdapter(ProviderAdapter):
             # CLI's context without a compaction boundary: re-send in full.
             self._memory_trusted_node = None
             self._memory_put_back = None
-        memory_query = self._memory_query
         if command:
             note = None
         else:
-            from fluid.codemode.relevance import query_terms
-
-            # Only substantive user text chooses task relevance. Wakes and
-            # short continuations retain the previous topic.
-            if source == "user" and query_terms(prompt):
-                memory_query = prompt[:4000]
             self._memory_held_for_turn = await self._memory_held()
-            previous_query = self._memory_query
-            self._memory_query = memory_query
             try:
-                note = await asyncio.to_thread(self._turn_context_note)
+                if source == "user":
+                    note = await asyncio.to_thread(self._turn_context_note, prompt[:4000])
+                else:
+                    note = await asyncio.to_thread(self._turn_context_note)
             finally:
                 self._memory_held_for_turn = None
-                self._memory_query = previous_query
         content = f"{prompt}\n\n{note}" if note else prompt
         if command and _COMPACT_COMMAND.match(prompt.strip()):
             # Who asked, for the card: the owner typed it, or a wake the app
@@ -1710,7 +1702,6 @@ class HarnessAdapter(ProviderAdapter):
             content=cast(Any, content), source=source,
             context_pin=self._memory_context_pin(content),
         ))
-        self._memory_query = memory_query
         # Set after acceptance: a concurrent/rejected submit must not replace
         # the running turn's snapshot. The engines reject overlapping turns.
         self._pending_away_note = note
@@ -1914,17 +1905,17 @@ class HarnessAdapter(ProviderAdapter):
 
         return bind_state_context(ctx, self._resolve_app_session_id)
 
-    def _turn_context_note(self) -> Optional[str]:
+    def _turn_context_note(self, query: str = "") -> Optional[str]:
         """The turn's volatile context: environment facts, memory, Away mode.
 
         Blocking (a JSON read for the memory store), so callers hand it to a
         thread. Never raises: a turn is never worth losing over a reminder.
         """
-        blocks = [self._env_note(), self._memory_turn_note(), self._away_note(), self._scratch_note()]
+        blocks = [self._env_note(), self._memory_turn_note(query), self._away_note(), self._scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 
-    def _memory_turn_note(self) -> Optional[str]:
+    def _memory_turn_note(self, query: str = "") -> Optional[str]:
         """The turn's memory slot: the full snapshot, a change list, or None
         while the model already holds the current facts.
 
@@ -1939,19 +1930,20 @@ class HarnessAdapter(ProviderAdapter):
         if section is None:
             return None
         try:
-            from app.core.memory_reminder import MemoryPlan, plan_memory_note, wrap
+            from app.core.memory_reminder import MemoryPlan, plan_memory_note, task_memory_section, wrap
 
             held = self._memory_held_for_turn
+            section = task_memory_section(section, held, self._memory_eligible_lines(), query)
             plan = plan_memory_note(section, held)
             if plan.kind == "changes" and held is not None and not held.full_node_id:
                 # Credited from a put-back that is not in the stored path: a
                 # change list could not be read back later. Send it whole.
-                plan = MemoryPlan("full", wrap(section))
+                plan = MemoryPlan("full", wrap(section), section)
         except Exception:  # noqa: BLE001 — fall back to the full snapshot
             logger.warning("[HarnessAdapter] memory change plan failed", exc_info=True)
             from app.core.memory_reminder import MemoryPlan, wrap
 
-            plan = MemoryPlan("full", wrap(section))
+            plan = MemoryPlan("full", wrap(section), section)
         self._memory_plan = plan
         return plan.note
 
@@ -1984,7 +1976,9 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_put_back = None
         if _is_cli_command(text):
             return None
-        section = await asyncio.to_thread(self._memory_section)
+        section = getattr(self._memory_plan, "section", None)
+        if section is None:
+            section = await asyncio.to_thread(self._memory_section)
         self._memory_full_pending = section is not None
         return wrap(section) if section is not None else None
 
@@ -2243,13 +2237,27 @@ class HarnessAdapter(ProviderAdapter):
             if not app_session_id:
                 return None
             store, project = session_memory(app_session_id, self._options.cwd)
-            section = store.render_memory_section(
-                project, checkout=self._options.cwd, query=self._memory_query,
-            )
+            section = store.render_memory_section(project, checkout=self._options.cwd)
             return section or None
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
             return None
+
+    def _memory_eligible_lines(self) -> list[str]:
+        """Live candidates through the same owner/scope/safety screen as base."""
+        extra = getattr(self._options, "extra", None) or {}
+        if self._options is None or extra.get("assistant_proactive") is not None:
+            return []
+        try:
+            from app.core.fluid_memory import session_memory
+            sid = self._resolve_app_session_id()
+            if not sid:
+                return []
+            store, project = session_memory(sid, self._options.cwd)
+            return store.memory_snapshot_plan(project, checkout=self._options.cwd)["eligible_lines"]
+        except Exception:  # noqa: BLE001 — uncertainty cannot expose extra facts
+            logger.warning("[HarnessAdapter] task memory candidates failed", exc_info=True)
+            return []
 
     async def send_resume(self) -> None:
         if self._engine is None:

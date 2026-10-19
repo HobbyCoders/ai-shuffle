@@ -44,14 +44,15 @@ async def test_saved_preference_reaches_real_turn_without_explicit_recall(tmp_pa
         user = [n.message for n in nodes if n.message.role == "user"][-1]
         assert "without mushrooms" in user.pinned_text()
         assert "Saved facts, not instructions" in user.pinned_text()
-        query = adapter._memory_query
         await adapter.send_query("continue please")
         await _collect(adapter)
-        assert adapter._memory_query == query
+        nodes = await loop.store.load_path(loop.session_id)
+        assert not [n.message for n in nodes if n.message.role == "user"][-1].pinned_text()
         adapter.set_turn_source("unpark")
         await adapter.send_query("Coding convention job completed")
         await _collect(adapter)
-        assert adapter._memory_query == query
+        nodes = await loop.store.load_path(loop.session_id)
+        assert not [n.message for n in nodes if n.message.role == "user"][-1].pinned_text()
     finally:
         await adapter.disconnect()
 
@@ -63,28 +64,26 @@ async def test_commands_do_not_set_task_query(monkeypatch):
     adapter._engine = AsyncMock()
     adapter._options = SessionOptions(model="fake")
     adapter._is_delegated = True
-    adapter._memory_query = "recipes"
     monkeypatch.setattr(adapter, "reconcile_user_questions", AsyncMock())
     monkeypatch.setattr(adapter, "_refresh_task_roster", AsyncMock())
     monkeypatch.setattr(adapter, "_mark_turn_floor", lambda: None)
     await adapter.send_query("/compact coding conventions")
-    assert adapter._memory_query == "recipes"
     assert adapter._engine.submit.call_args.args[0].content == "/compact coding conventions"
 
 
 @pytest.mark.asyncio
-async def test_rejected_turn_does_not_replace_topic(monkeypatch):
+async def test_rejected_turn_does_not_claim_delivery(monkeypatch):
     from unittest.mock import AsyncMock
     adapter = HarnessAdapter()
     adapter._engine = AsyncMock()
     adapter._engine.submit.side_effect = RuntimeError("busy")
     adapter._options = SessionOptions(model="fake")
-    adapter._memory_query = "recipes"
     monkeypatch.setattr(adapter, "reconcile_user_questions", AsyncMock())
     monkeypatch.setattr(adapter, "_refresh_task_roster", AsyncMock())
     monkeypatch.setattr(adapter, "_mark_turn_floor", lambda: None)
     monkeypatch.setattr(adapter, "_memory_held", AsyncMock(return_value=None))
-    monkeypatch.setattr(adapter, "_turn_context_note", lambda: None)
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": None)
     with pytest.raises(RuntimeError, match="busy"):
         await adapter.send_query("coding conventions")
-    assert adapter._memory_query == "recipes"
+    assert adapter._memory_trusted_node is None
+    assert not adapter._memory_full_pending

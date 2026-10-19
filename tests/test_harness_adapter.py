@@ -1489,7 +1489,7 @@ async def test_native_slash_submission_expands_from_selected_sources(tmp_path, m
                       ctx=ToolCtx(cwd=str(tmp_path)), setting_sources=sources)
     adapter = _adapter_with(loop)
     adapter._options = SessionOptions(model="fake", cwd=str(tmp_path), setting_sources=sources)
-    monkeypatch.setattr(adapter, "_turn_context_note", lambda: None)
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": None)
     await loop._ensure_session()
     try:
         await adapter.send_query("/greet world")

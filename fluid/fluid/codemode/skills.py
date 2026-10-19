@@ -1480,7 +1480,7 @@ class SkillStore:
             _scrub_legacy_previews(self.root / ".synthesis-log.jsonl")
 
 
-    def render_memory_section(self, project: str | None = None, *, checkout: str | None = None, query: str = "") -> str | None:
+    def render_memory_section(self, project: str | None = None, *, checkout: str | None = None) -> str | None:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         An empty store renders a short placeholder (:data:`EMPTY_MEMORY_SECTION`)
@@ -1489,8 +1489,6 @@ class SkillStore:
         and that project's entries render — other projects' facts stay out of
         this session's prompt (a count line says they exist). Unprotected
         facts get a reserved share of the budget (``RESERVED_INFERRED_CHARS``).
-        An optional current-task query reserves a quarter of the same budget
-        for matching live facts; it never widens scope or revives the archive.
         Facts that do not fit are counted on their own "omitted for
         space" line, separate from the other-projects count. Entries pass
         the injection screen; a finding replaces that entry with a note naming
@@ -1511,7 +1509,7 @@ class SkillStore:
         archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
         if not entries and not archived:
             return EMPTY_MEMORY_SECTION
-        plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived, query=query)
+        plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived)
         shown = plan["lines"]
         other_checkout, out_of_scope = plan["other_checkout"], plan["out_of_scope"]
         over_budget, held = plan["over_budget"], plan["held"]
@@ -1570,7 +1568,7 @@ class SkillStore:
 
     def memory_snapshot_plan(self, project: str | None = None, *, checkout: str | None = None,
                              entries: list[MemoryEntry] | None = None,
-                             archived: list[MemoryEntry] | None = None, query: str = "") -> dict:
+                             archived: list[MemoryEntry] | None = None) -> dict:
         """Which facts the ``# Memory`` snapshot shows for ``project``, and
         why the rest are left out. :meth:`render_memory_section` renders it;
         the memory health check measures it without building a prompt.
@@ -1653,29 +1651,10 @@ class SkillStore:
         # to outrank an agent fact recalled every week. What the slice
         # leaves unused goes back to the explicit tier, and the slice is
         # small enough that an inference flood cannot push explicit facts out.
-        from fluid.codemode.relevance import query_terms, relevance
-
-        # Relevance buys a quarter of the EXISTING budget, not extra context.
-        # Only screened, live, in-scope candidates participate. Archived facts
-        # remain explicitly recallable, never silently revived by a keyword.
-        terms = query_terms(query)
-        matches = {
-            i: relevance(f"{e.key or ''} {e.text}", terms)
-            for i, (e, _, costs) in enumerate(candidates) if costs
-        }
+        reserve = min(RESERVED_INFERRED_CHARS, MAX_PROMPT_CHARS)
         reserved: set[int] = set()
-        task_budget = MAX_PROMPT_CHARS // 4
-        for i in sorted(matches, key=lambda i: (-matches[i], i)):
-            cost = len(candidates[i][1]) + 1
-            if matches[i] and cost <= task_budget:
-                reserved.add(i)
-                task_budget -= cost
-        reserve = min(
-            RESERVED_INFERRED_CHARS,
-            MAX_PROMPT_CHARS - sum(len(candidates[i][1]) + 1 for i in reserved),
-        )
         for i in sorted(
-            (i for i, (e, _, costs) in enumerate(candidates) if costs and not e.protected and i not in reserved),
+            (i for i, (e, _, costs) in enumerate(candidates) if costs and not e.protected),
             key=lambda i: (
                 candidates[i][0].provenance != "user",
                 candidates[i][0].uses <= 0,
@@ -1707,6 +1686,9 @@ class SkillStore:
             "in_scope": len(candidates) + held + other_checkout, "over_budget": over_budget,
             "out_of_scope": out_of_scope, "held": held, "other_checkout": other_checkout,
             "archived": in_archive,
+            # Screened live facts only: callers may retrieve omitted facts,
+            # never withheld/conflicted/foreign-checkout text via this field.
+            "eligible_lines": [line for _, line, costs in candidates if costs],
         }
 
     # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────

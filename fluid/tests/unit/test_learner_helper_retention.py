@@ -51,6 +51,22 @@ async def test_journal_to_verified_skill_to_fresh_kernel(tmp_path):
         await kernel.stop()
 
 
+def test_filter_parses_only_reads_and_only_preserves_named_helpers(monkeypatch):
+    import warnings
+    from fluid.codemode import continual
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        assert low_value_entry({"code": r"s = '\q'", "tools": ["Read"]})
+        assert not seen
+    assert low_value_entry({"code": "sorted(rows, key=lambda r: r)", "tools": ["Read"]})
+    assert not low_value_entry({"code": "helper: object = lambda rows: rows", "tools": ["Read"]})
+    def must_not_parse(*args, **kwargs):
+        raise AssertionError("non-read cell parsed")
+    monkeypatch.setattr(continual.ast, "parse", must_not_parse)
+    assert not low_value_entry({"code": "write()", "tools": ["Write"]})
+    assert not low_value_entry({"code": "pure()", "tools": []})
+
+
 def test_learner_knows_the_enforced_fact_length_and_scope():
     assert "1–500 characters" in _SYNTH_SYSTEM
     assert "task-specific choice is not automatically a general habit" in _SYNTH_SYSTEM

@@ -153,7 +153,7 @@ async def _adapter(monkeypatch, tmp_path, mode: str, *, context: int = 0):
     adapter = ha.HarnessAdapter()
     await adapter.connect(options)
     # A turn note to be appended (or, for a command, not).
-    adapter._turn_context_note = lambda: "<turn-note>today and the branch</turn-note>"
+    adapter._turn_context_note = lambda query="": "<turn-note>today and the branch</turn-note>"
     return adapter
 
 

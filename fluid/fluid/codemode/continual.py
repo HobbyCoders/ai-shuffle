@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import time
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -520,6 +521,9 @@ def low_value_entry(entry: dict) -> bool:
         isinstance(c, dict) and c.get("ok") is False for c in calls
     ):
         return False
+    tools = entry.get("tools") or []
+    if not tools or not all(_tool_base(t) in READ_ONLY_TOOLS for t in tools):
+        return False
     code = str(entry.get("code", ""))
     if referenced_skills(code):
         return False
@@ -527,14 +531,21 @@ def low_value_entry(entry: dict) -> bool:
     # Preserve reusable definitions for skill synthesis, without executing any
     # journal code. An unparseable cell is uncertain, not safe to discard.
     try:
-        tree = ast.parse(code)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(code)
     except (SyntaxError, ValueError, RecursionError):
         return False
-    if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
-           for node in ast.walk(tree)):
-        return False
-    tools = entry.get("tools") or []
-    return bool(tools) and all(_tool_base(t) in READ_ONLY_TOOLS for t in tools)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return False
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Lambda):
+            if any(isinstance(target, ast.Name) for target in node.targets):
+                return False
+        if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                and isinstance(node.value, ast.Lambda)):
+            return False
+    return True
 
 
 class Synthesizer:

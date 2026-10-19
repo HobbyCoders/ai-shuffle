@@ -1,8 +1,8 @@
 """Bounded lexical relevance for memory, never a source of authority.
 
 No model call, embedding service or persistent query log. Stop words keep short
-continuations from displacing the task; whole words avoid matching "ci" in
-unrelated prose. Recall's explicit substring search remains unchanged.
+continuations from retrieving spurious matches; whole words avoid matching
+substrings in unrelated prose. Recall's explicit substring search remains unchanged.
 """
 from __future__ import annotations
 
