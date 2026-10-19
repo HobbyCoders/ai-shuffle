@@ -1,5 +1,6 @@
 """ListSessions and MessageSession across workers (#2011): peer chats on another
 worker are listed and messaged through the owning worker's control channel."""
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -71,6 +72,15 @@ def _two_workers(workers, monkeypatch, *, online=True):
     if not online:
         transport._last_contact.pop(a.device_id, None)
     return a, b, served
+
+
+def _serve_reverse(sender, receiver, served):
+    """Route the real authenticated HTTP relay in the opposite direction."""
+    from app.db import network as store
+    served.server = receiver
+    with sender.active():
+        store.touch_member(receiver.device_id, endpoints=[served.base_url])
+    transport._links.pop(receiver.device_id, None)
 
 
 async def test_lists_active_chats_on_another_online_worker(workers, monkeypatch, kicks):
@@ -153,27 +163,32 @@ async def test_explicit_local_owner_survives_legacy_instance_change(workers, mon
 
 
 async def test_remote_reply_credit_is_consumed_once_and_cannot_ping_pong(workers, monkeypatch, kicks):
-    a, b, _ = _two_workers(workers, monkeypatch)
+    a, b, served = _two_workers(workers, monkeypatch)
     with b.active():
         first = await _tool("MessageSession", MESSAGE)
         assert not first.is_error, first.text
     monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
-    transport.note_contact(b.device_id)
+    _serve_reverse(a, b, served)
     args = {"session_id": "caller", "message": "Build completed", "request_id": "reply"}
     with a.active():
         request = agent_turns("target")[0]
-        plan = orch._queue("target", args, "message")
-        assert plan["body"]["reply_to"] == request["id"]
-        retry = orch._queue("target", args, "message")
-        assert retry["body"] == plan["body"]
-        with pytest.raises(ValueError, match="budget"):
-            orch._queue("target", {**args, "request_id": "extra"}, "message")
+        sent = await _tool("MessageSession", args, sender="target")
+        assert not sent.is_error, sent.text
+        reply_id = json.loads(sent.text)["turn_id"]
+        retry = await _tool("MessageSession", args, sender="target")
+        assert json.loads(retry.text)["turn_id"] == reply_id
+        [receipt] = _receipts()
+        assert receipt["payload"]["orchestration_reply_to"] == request["id"]
+        extra = await _tool("MessageSession", {**args, "request_id": "extra"}, sender="target")
+        assert extra.is_error and "budget" in extra.text
     with b.active():
-        received = orch.accept_remote_message(plan["body"], a.device_id)
-        reply = turns.get_turn(received["turn_id"])
+        [reply] = agent_turns("caller")
+        assert reply["id"] == reply_id
         assert reply["payload"]["orchestration_reply_to"] == request["id"]
-        with pytest.raises(ValueError, match="budget"):
-            orch._queue("caller", {**MESSAGE, "request_id": "ack"}, "message")
+        ack = await _tool("MessageSession", {**MESSAGE, "request_id": "ack"})
+        assert ack.is_error and "budget" in ack.text
+    assert kicks == ["target", "caller"]
+    assert served.requests.count(("POST", "/api/v1/network/peer/control/orchestration-message")) == 3
 
 
 async def test_offline_worker_is_named_in_the_listing(workers, monkeypatch, kicks):
@@ -189,7 +204,7 @@ async def test_offline_worker_is_named_in_the_listing(workers, monkeypatch, kick
 
 @pytest.mark.parametrize("stale_fields", [
     {"is_active": False}, {"status": "archived"}, {"hidden": True},
-    {"is_worker": True}, {"provenance_owner": "account:old-owner"},
+    {"is_worker": True},
 ])
 async def test_owner_eligibility_beats_stale_mirror_and_presence(workers, monkeypatch, kicks, stale_fields):
     a, b, _ = _two_workers(workers, monkeypatch, online=False)
@@ -204,6 +219,145 @@ async def test_owner_eligibility_beats_stale_mirror_and_presence(workers, monkey
     with a.active():
         assert len(agent_turns("target")) == 1
     assert kicks == ["target"]
+
+
+@pytest.mark.parametrize("mirrored", [False, True])
+async def test_old_destination_cannot_bypass_carried_owner_fence(workers, monkeypatch, kicks, mirrored):
+    from app.core import preference_identity
+    a, b, served = network(workers, monkeypatch)
+    _chat(a, "target")
+    _chat(a, "stranger")
+    _update(a, "stranger", provenance_owner="account:other-owner")
+    if mirrored:
+        converge([a, b])
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "our-owner")
+    owner, listing = orch._owner, orch.accept_peer_listing
+
+    def old_owner(row):
+        if engine.context().device_id == a.device_id:
+            principal = orch._principal(row["id"]) or {}
+            return orch._as_owner_chat((row.get("api_user_id"), principal.get("owner", "install-admin")))
+        return owner(row)
+
+    def old_listing(body, from_device):
+        result = listing(body, from_device)
+        result.pop("enforces_owner_labels", None)
+        return result
+
+    monkeypatch.setattr(orch, "_owner", old_owner)
+    monkeypatch.setattr(orch, "accept_peer_listing", old_listing)
+    with b.active():
+        result = await _tool("ListSessions", {"scope": "all"})
+        assert not result.is_error, result.text
+        assert {e["id"] for e in json.loads(result.text)["sessions"]} == ({"target"} if mirrored else set())
+        refused = await _tool("MessageSession", {**MESSAGE, "session_id": "stranger"})
+        assert refused.is_error and "eligible peer" in refused.text
+        assert _receipts() == []
+        assert ("POST", "/api/v1/network/peer/control/orchestration-message") not in served.requests
+        if mirrored:
+            accepted = await _tool("MessageSession", MESSAGE)
+            assert not accepted.is_error, accepted.text
+    with a.active():
+        assert agent_turns("stranger") == []
+
+
+@pytest.mark.parametrize("online", [False, True])
+@pytest.mark.parametrize("action", ["ListSessions", "MessageSession"])
+async def test_slow_unreachable_peer_has_overall_deadline(workers, monkeypatch, kicks, online, action):
+    _a, b, _ = _two_workers(workers, monkeypatch, online=online)
+    monkeypatch.setattr(orch, "PEERS_TIMEOUT", 0.05)
+    monkeypatch.setattr(orch, "OFFLINE_PEERS_TIMEOUT", 0.01)
+    cancelled = asyncio.Event()
+
+    async def slow_routes(*args, **kwargs):
+        try:
+            await asyncio.sleep(2)  # Models multiple routes ignoring per-call timeout.
+            raise control.RunnerUnreachable("offline")
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(control, "call", slow_routes)
+    with b.active():
+        args = {"scope": "all"} if action == "ListSessions" else {**MESSAGE, "session_id": "not-mirrored"}
+        result = await asyncio.wait_for(_tool(action, args), timeout=0.5)
+        assert cancelled.is_set()
+        if action == "ListSessions":
+            assert not result.is_error and "timed out" in json.loads(result.text)["note"]
+        else:
+            assert result.is_error and _receipts() == []
+
+
+async def test_complete_discovery_including_local_reads_is_bounded(monkeypatch):
+    async def slow_lookup(*args):
+        await asyncio.sleep(2)
+    monkeypatch.setattr(orch, "_discover_peer_from_workers", slow_lookup)
+    monkeypatch.setattr(orch, "PEERS_TIMEOUT", 0.01)
+    with pytest.raises(ValueError, match="discovery timed out"):
+        await asyncio.wait_for(orch._discover_remote_peer("caller", "unknown"), timeout=0.5)
+
+
+@pytest.mark.parametrize("failure", [control.ControlRefused, control.RunnerUnreachable])
+async def test_definite_remote_reply_failure_returns_credit(workers, monkeypatch, kicks, failure):
+    a, b, served = _two_workers(workers, monkeypatch)
+    with b.active():
+        first = await _tool("MessageSession", MESSAGE)
+        assert not first.is_error, first.text
+    _serve_reverse(a, b, served)
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
+    args = {"session_id": "caller", "message": "Finished", "request_id": "reply"}
+    real_call = control.call
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=failure("not delivered")))
+    with a.active():
+        refused = await _tool("MessageSession", args, sender="target")
+        assert refused.is_error and _receipts() == []
+        monkeypatch.setattr(control, "call", real_call)
+        sent = await _tool("MessageSession", args, sender="target")
+        assert not sent.is_error, sent.text  # Still has its one credit despite MAX_ACTIONS=0.
+        assert len(_receipts()) == 1
+    with b.active():
+        assert len(agent_turns("caller")) == 1
+
+
+async def test_remote_message_deadline_retains_uncertain_receipt(workers, monkeypatch, kicks):
+    _a, b, _ = _two_workers(workers, monkeypatch)
+    monkeypatch.setattr(orch, "REMOTE_TIMEOUT", 0.01)
+    async def slow_send(*args, **kwargs):
+        await asyncio.sleep(2)
+    monkeypatch.setattr(control, "call", slow_send)
+    with b.active():
+        result = await asyncio.wait_for(_tool("MessageSession", MESSAGE), timeout=0.5)
+        assert result.is_error and "delivery is uncertain" in result.text
+        assert len(_receipts()) == 1
+
+
+async def test_old_sender_without_reply_marker_remains_compatible_and_bounded(workers, monkeypatch, kicks):
+    a, b, served = _two_workers(workers, monkeypatch)
+    with b.active():
+        first = await _tool("MessageSession", MESSAGE)
+        assert not first.is_error, first.text
+    _serve_reverse(a, b, served)
+    credit = orch._reply_credit
+    # Model the old sender: all messages charged, no reply marker on the wire.
+    def old_credit(cursor, sender_id, target_id):
+        return None if engine.context().device_id == a.device_id else credit(cursor, sender_id, target_id)
+    monkeypatch.setattr(orch, "_reply_credit", old_credit)
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 1)
+    args = {"session_id": "caller", "message": "Old peer answer", "request_id": "old-answer"}
+    with a.active():
+        sent = await _tool("MessageSession", args, sender="target")
+        assert not sent.is_error, sent.text
+        extra = await _tool("MessageSession", {**args, "request_id": "extra"}, sender="target")
+        assert extra.is_error and "budget" in extra.text
+    with b.active():
+        [answer] = agent_turns("caller")
+        assert "orchestration_reply_to" not in answer["payload"]
+    served.server = a
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
+    with b.active():
+        response = await _tool("MessageSession", {**MESSAGE, "request_id": "new-answer"})
+        assert not response.is_error, response.text
+        extra = await _tool("MessageSession", {**MESSAGE, "request_id": "new-extra"})
+        assert extra.is_error and "budget" in extra.text
 
 
 async def test_other_states_do_not_ask_other_workers(workers, monkeypatch, kicks):
@@ -280,17 +434,21 @@ async def test_offline_owner_is_named_in_the_refusal(workers, monkeypatch, kicks
         outcome = await _tool("MessageSession", MESSAGE)
         assert outcome.is_error and "ServerWorker could not be reached" in outcome.text
         assert "not an eligible peer" not in outcome.text
-        assert len(_receipts()) == 1  # An uncertain delivery retains its retry identity.
+        assert _receipts() == []  # No route reached the peer: no budget consumed.
     call.assert_awaited_once()
 
 
-async def test_unreachable_owner_keeps_the_receipt_for_a_retry(workers, monkeypatch, kicks):
+async def test_uncertain_delivery_keeps_the_receipt_for_a_retry(workers, monkeypatch, kicks):
     _a, b, _ = _two_workers(workers, monkeypatch)
-    monkeypatch.setattr(control, "call", AsyncMock(side_effect=control.RunnerUnreachable("timed out")))
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=control.MaybeApplied("response lost")))
     with b.active():
         outcome = await _tool("MessageSession", MESSAGE)
-        assert outcome.is_error and "ServerWorker could not be reached" in outcome.text
+        assert outcome.is_error and "delivery is uncertain" in outcome.text
         assert len(_receipts()) == 1
+        # A later no-route retry cannot erase the earlier uncertain send.
+        monkeypatch.setattr(control, "call", AsyncMock(side_effect=control.RunnerUnreachable("offline")))
+        retry = await _tool("MessageSession", MESSAGE)
+        assert retry.is_error and len(_receipts()) == 1
 
 
 async def test_owning_worker_applies_its_own_peer_checks(workers, monkeypatch, kicks):

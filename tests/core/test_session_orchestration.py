@@ -86,6 +86,31 @@ async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkey
     await sync_engine.unregister_device("watcher", "peer", handler.websocket)
 
 
+def test_cross_messages_lock_sessions_in_global_order_before_chain(peers, monkeypatch):
+    from tests.pg_shim import ShimCursor
+    execute = ShimCursor.execute
+    locks = []
+
+    def trace(self, sql, params=None):
+        if sql == "SELECT id FROM sessions WHERE id=%s FOR UPDATE":
+            locks.append(("session", params[0]))
+        elif sql == "SELECT id FROM turns WHERE id=%s FOR UPDATE":
+            locks.append(("root", params[0]))
+        return execute(self, sql, params)
+
+    monkeypatch.setattr(ShimCursor, "execute", trace)
+    # The shim cannot emulate PostgreSQL row-lock waits. Assert the actual
+    # producer's acquisition order for both halves of concurrent X<->Y work;
+    # enqueue_turn's later recipient lock must already be held in either case.
+    for sender, target in (("caller", "peer"), ("peer", "caller")):
+        locks.clear()
+        result = orch._queue(sender, {"session_id": target, "message": "Coordinate",
+                                      "request_id": "cross"}, "message")
+        assert result["status"] == "queued"
+        assert locks[:2] == [("session", "caller"), ("session", "peer")]
+        assert locks[2][0] == "root"
+
+
 async def test_existing_message_receipt_after_stop_never_wakes(peers, monkeypatch):
     from unittest.mock import Mock
     from fluid.tools.registry import ToolCtx

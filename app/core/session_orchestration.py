@@ -44,6 +44,8 @@ _OWNER_CHAT = (None, "install-admin")
 REMOTE_TIMEOUT = 20
 # ListSessions waits this long for another worker before listing without it.
 PEERS_TIMEOUT = 8
+# Give stale presence a chance without making powered-off workers delay lists.
+OFFLINE_PEERS_TIMEOUT = 1
 _COMMAND_RE = re.compile(r"orchestration:start:[0-9a-f]{64}")
 _MESSAGE_COMMAND_RE = re.compile(r"orchestration:message:[0-9a-f]{64}")
 _LIST_FIELDS = ("id", "title", "status", "profile_id", "project_id", "project_v2_id",
@@ -223,11 +225,16 @@ def _calling_worker(from_device, what):
     return member
 
 
+def _mirror_owner(row):
+    from app.db.mobile_tool_identity import mirrored
+    return _as_owner_chat((row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin")))
+
+
 def _remote_peer(caller, session_id):
     """The worker that runs ``session_id`` when another worker does, else None.
 
-    The mirror supplies routing only; the owning worker checks its current
-    row before it queues anything.
+    The mirror supplies routing and a fail-closed owner fence (older peers do
+    not enforce carried labels); the destination checks current eligibility.
     """
     from app.db import sessions
     from app.network import control, engine
@@ -239,8 +246,10 @@ def _remote_peer(caller, session_id):
     device = control.owner_of(row)
     if device is None:
         return None
-    # The mirror locates the owner; it is not current eligibility evidence.
-    # Only the destination knows whether the chat is open, stopped or claimed.
+    # Keep the carried-owner fence through rolling upgrades: an older
+    # destination may treat an unbound foreign-labelled chat as install-owned.
+    if _mirror_owner(row) != _owner(caller):
+        raise ValueError("Session is not an eligible peer; use ListSessions.")
     if _owner(caller) != _OWNER_CHAT:
         # A tool identity is a credential of THIS install and cannot travel.
         raise PermissionError("Only the owner's chats can message chats on another worker.")
@@ -271,9 +280,15 @@ async def _ask_for_peers(worker, session_id=None):
     """``(entries, None)`` from one online worker, or ``(None, why not)``."""
     from app.network import control
     name = worker["device_name"]
+    deadline = PEERS_TIMEOUT if worker["online"] else OFFLINE_PEERS_TIMEOUT
     try:
-        answer = await control.call(worker["device_id"], PEERS_ACTION,
-                                    {"session_id": session_id} if session_id else {}, timeout=PEERS_TIMEOUT)
+        # control.call's timeout is per route/attempt, not an overall deadline.
+        answer = await asyncio.wait_for(
+            control.call(worker["device_id"], PEERS_ACTION,
+                         {"session_id": session_id} if session_id else {}, timeout=deadline),
+            timeout=deadline)
+    except asyncio.TimeoutError:
+        return None, f"{name} (timed out)"
     except control.ControlRefused as exc:
         if "Unknown control action" in str(exc):
             return None, f"{name} (runs an older release)"
@@ -283,13 +298,18 @@ async def _ask_for_peers(worker, session_id=None):
     entries = answer.get("sessions") if isinstance(answer, dict) else None
     if not isinstance(entries, list):
         return None, f"{name} (gave an invalid answer)"
-    return entries, None
+    # New peers vouch for carried owner labels. Without a local mirror an
+    # older peer's principal-only listing cannot establish the owner boundary.
+    checked = answer.get("enforces_owner_labels") is True
+    return [{**entry, "_owner_labels_checked": checked} for entry in entries
+            if isinstance(entry, dict)], None
 
 
 def _mirrored_peers(session_id, data, answers):
     """Owner-vouched entries, even before their catalog rows arrive here.
 
-    An existing mirror still fences conflicting execution ownership.
+    Existing mirrors fence execution and account ownership, including when
+    the destination has not yet upgraded its carried-label checks.
     """
     from app.db import sessions
     from app.network import control
@@ -302,7 +322,10 @@ def _mirrored_peers(session_id, data, answers):
             if not isinstance(peer_id, str) or peer_id == session_id:
                 continue
             row = sessions.get_session(peer_id)
-            if row and control.owner_of(row) != worker["device_id"]:
+            if row and (control.owner_of(row) != worker["device_id"]
+                        or _mirror_owner(row) != _OWNER_CHAT):
+                continue
+            if row is None and not entry.get("_owner_labels_checked"):
                 continue
             # The owner just checked eligibility. Catalog replication can lag
             # behind this response, including the very existence of the row.
@@ -314,8 +337,17 @@ def _mirrored_peers(session_id, data, answers):
 
 
 async def _discover_remote_peer(session_id, target_id):
-    """Resolve a missing catalog row using authenticated owner listings, not a
-    model-supplied worker. No mirror or runnable local session is fabricated.
+    """Bound the complete lookup, including local reads and all peer routes."""
+    try:
+        return await asyncio.wait_for(_discover_peer_from_workers(session_id, target_id),
+                                      timeout=PEERS_TIMEOUT)
+    except asyncio.TimeoutError as exc:
+        raise ValueError("Peer discovery timed out; retry ListSessions.") from exc
+
+
+async def _discover_peer_from_workers(session_id, target_id):
+    """Resolve a missing catalog row through authenticated owner listings.
+    No mirror or runnable local session is fabricated.
     """
     from app.db import sessions
     if await asyncio.to_thread(sessions.get_session, target_id):
@@ -323,7 +355,7 @@ async def _discover_remote_peer(session_id, target_id):
     workers = await asyncio.to_thread(_peer_workers, session_id)
     answers = await asyncio.gather(*(_ask_for_peers(w, target_id) for w in workers))
     matches = [w for w, (entries, _) in zip(workers, answers)
-               if entries is not None and any(isinstance(e, dict) and e.get("id") == target_id
+               if entries is not None and any(e.get("id") == target_id and e.get("_owner_labels_checked")
                                               for e in entries)]
     if len(matches) > 1:
         raise ValueError("More than one worker claims this session; retry after synchronization.")
@@ -361,7 +393,8 @@ def accept_peer_listing(body, from_device):
         rows = [row] if row else []
     else:
         rows = sessions.get_sessions(api_user_id="", active_only=True, limit=100)
-    return {"sessions": [_list_entry(row) for row in rows
+    return {"enforces_owner_labels": True,
+            "sessions": [_list_entry(row) for row in rows
                          if _local_top_level(row) and not task_registry.is_user_stopped(row["id"])
                          and _owner(row) == _OWNER_CHAT]}
 
@@ -1011,18 +1044,24 @@ async def _message_remote(plan, sender_id, sender_generation):
         await release()
         raise ValueError("The user stopped this session; nothing was sent.")
     try:
-        answer = await control.call(peer["device_id"], MESSAGE_ACTION, plan["body"], timeout=REMOTE_TIMEOUT)
+        answer = await asyncio.wait_for(
+            control.call(peer["device_id"], MESSAGE_ACTION, plan["body"], timeout=REMOTE_TIMEOUT),
+            timeout=REMOTE_TIMEOUT)
     except control.ControlRefused as exc:
         await release()
         reason = str(exc)
         if "Unknown control action" in reason:
             reason = "it runs an older release; update it first"
         raise ValueError(f"{name} refused the message: {reason}") from exc
-    except control.RunnerUnreachable as exc:
-        # It may have been queued: keep the receipt so a retry with the same
-        # request_id reads it back instead of queueing it twice.
-        raise ValueError(f"{name} could not be reached: {exc} Retry with the same request_id; "
+    except (control.MaybeApplied, asyncio.TimeoutError) as exc:
+        # A lost response or an overall deadline may follow a successful send.
+        raise ValueError(f"{name} delivery is uncertain: {exc} Retry with the same request_id; "
                          "it never queues the message twice.") from exc
+    except control.RunnerUnreachable as exc:
+        # No route reached the peer. Return this call's reservation/credit;
+        # a previous uncertain delivery's receipt must still remain durable.
+        await release()
+        raise ValueError(f"{name} could not be reached: {exc} No route reached the peer on this attempt.") from exc
     if not isinstance(answer, dict) or answer.get("session_id") != session_id:
         raise ValueError(f"{name} gave an invalid answer; retry with the same request_id.")
     return {"session_id": session_id, "turn_id": answer.get("turn_id"),
@@ -1302,9 +1341,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                 if action == "start" and placement is None and remote is None else None)
     with _UnusedCheckout(checkout) as unused, transaction() as conn:
         cursor = conn.cursor()
-        # Serialize reply credit consumption even across separate chains, then
-        # serialize fanout in this autonomous chain. Always this lock order.
-        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sender_id,))
+        # Lock both session rows in a stable order before the chain root:
+        # enqueue_turn locks the recipient too, so sender-first would deadlock
+        # simultaneous X->Y / Y->X replies. This also serializes reply credits.
+        for sid in sorted({sender_id, target["id"]}):
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
         if not cursor.fetchone():
             raise ValueError("Orchestration origin no longer exists.")
