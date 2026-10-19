@@ -5,19 +5,27 @@ resolvers refuse to run once the folder is on another branch
 (``query_options.WorktreeUnavailableError``). That refusal is the last line of
 defence: by the time it fires, the session that owns the folder is already
 stuck. This module stops the cause instead. Before a shell tool runs, its
-command is scanned for branch-changing Git operations (``checkout``/``switch``
-to another branch, ``checkout -b``, ``branch -f``/``-m``/``-d``, a moving or
-``--hard`` ``reset``, ``rebase``, ``worktree move``/``remove``, ``gh pr
-checkout``). Each one aimed at a checkout bound to a different session is
-refused with a message telling the agent to use its own checkout.
+command is scanned for Git operations that change which branch a checkout has
+out, or rename or delete that branch, or move or remove the checkout:
+``checkout``/``switch`` to another branch, ``checkout -b``, ``branch
+-m``/``-d``/``-f`` on a checked-out branch, ``worktree move``/``remove`` and
+``gh pr checkout``. History edits on the same branch (``rebase``, ``reset``)
+keep the branch name and are not locked.
 
-Ownership is the same rule turn end uses when it declines to follow a branch
-switch (``turn_finalize._checkout_shared_with_another_session``): a checkout
-row on this runner records a branch, and every non-archived session on this
-runner bound to that branch is bound to that checkout. The calling session and
-its own workers do not count, so a session's own ``git checkout -b`` in its own
-worktree keeps working (and turn end then follows it). The project's base
-checkout records no branch and is not locked here.
+Who is bound: a checkout row on this runner records a branch, and every
+non-archived session on this runner bound to that branch is bound to that
+checkout (the rule turn end uses, ``turn_finalize``). The calling session and
+its own workers never count. Then:
+
+* A caller not bound to the checkout is refused while any other session is.
+  That is the reported case: a chat started from another one ran ``git
+  checkout -b`` in the first chat's folder.
+* A caller bound to it too (a fork, or a chat started before StartSession
+  gave chats their own worktree) is never blocked when it is the checkout's
+  original owner, the earliest-created bound session. Otherwise only a
+  co-bound session with a live or queued turn blocks it.
+
+The project's base checkout records no branch and is not locked here.
 
 Both harness legs enforce it: the native leg wraps the tool registry's
 dispatch (which also serves the delegated leg's bridged Monitor), and the
@@ -53,7 +61,7 @@ class BranchChange:
     """One branch-changing operation found in a command.
 
     ``directory`` is where it runs. ``ref`` is a word that changes the branch
-    only if it names a commit (``git checkout <ref>``, ``git reset <ref>``).
+    only if it names a commit (``git checkout <ref>``).
     ``branch`` is a branch name whose checkout is affected (``git branch -f``);
     ``worktree`` is a worktree path argument (``git worktree move``).
     """
@@ -61,7 +69,6 @@ class BranchChange:
     text: str
     directory: str
     ref: Optional[str] = None
-    kind: str = ""
     branch: Optional[str] = None
     current_branch: bool = False
     worktree: Optional[str] = None
@@ -69,6 +76,26 @@ class BranchChange:
 
 def _short_name(tool_name: str) -> str:
     return str(tool_name or "").rsplit("__", 1)[-1].strip().lower()
+
+
+_HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+def _strip_heredocs(command: str) -> str:
+    """Drop here-document bodies: their lines are data, not commands."""
+    if "<<" not in command:
+        return command
+    kept: List[str] = []
+    ending: List[tuple] = []
+    for line in command.split("\n"):
+        if ending:
+            dash, word = ending[0]
+            if (line.lstrip("\t") if dash else line) == word:
+                ending.pop(0)
+            continue
+        kept.append(line)
+        ending = [(bool(m.group(1)), m.group(3)) for m in _HEREDOC.finditer(line.replace("<<<", "   "))]
+    return "\n".join(kept)
 
 
 def _lex(command: str) -> Optional[List[str]]:
@@ -179,18 +206,11 @@ def _git_changes(args: List[str], directory: str, text: str) -> List[BranchChang
                                for arg in rest):
             return []  # restoring paths, not switching
         words = _positionals(head)
-        # ``git checkout <commit> <path>…`` restores paths too.
-        return [BranchChange(text, directory, ref=words[0], kind="checkout")] if len(words) == 1 else []
-    if sub == "reset":
-        if "--" in rest or len(_positionals(head)) > 1:
-            return []  # resetting index entries for paths
-        hard = any(arg in ("--hard", "--keep", "--merge") for arg in head)
-        words = _positionals(head)
-        if hard:
-            return [BranchChange(text, directory)]
-        return [BranchChange(text, directory, ref=words[0], kind="reset")] if words else []
-    if sub == "rebase":
-        return [BranchChange(text, directory)]
+        # ``git checkout <commit> <path>…`` restores paths too. A ``$VAR`` or
+        # ``$(…)`` argument cannot be judged before the shell expands it.
+        if len(words) != 1 or "$" in words[0] or "`" in words[0]:
+            return []
+        return [BranchChange(text, directory, ref=words[0])]
     if sub == "branch":
         flags = [arg for arg in head if arg.startswith("-")]
         short = set("".join(flag[1:] for flag in flags if not flag.startswith("--")))
@@ -219,7 +239,7 @@ def branch_changes(command: str, cwd: str, _depth: int = 0) -> List[BranchChange
     """
     if not command or ("git" not in command and "gh" not in command) or _depth > 3:
         return []
-    tokens = _lex(command)
+    tokens = _lex(_strip_heredocs(command))
     if tokens is None:
         return []
     directory = os.path.normpath(cwd) if cwd else os.getcwd()
@@ -309,11 +329,21 @@ def _checkout_row(toplevel: str) -> Optional[Dict[str, Any]]:
     return (active or matches or [None])[0]
 
 
-def checkout_owners(toplevel: str, session_id: str) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    """``(checkout row, other sessions bound to it)`` for the folder ``toplevel``.
+def _has_work(session_id: str) -> bool:
+    from app.db import turns as turns_db
 
-    Others are non-archived sessions on this runner bound to the row's branch,
-    other than ``session_id`` and its own workers.
+    return turns_db.get_live_turn(session_id) is not None or bool(turns_db.get_queued_turns(session_id))
+
+
+def _created(row: Dict[str, Any]) -> tuple:
+    return (str(row.get("created_at") or ""), str(row.get("id") or ""))
+
+
+def checkout_owners(toplevel: str, session_id: str) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """``(checkout row, sessions that keep session_id from changing its branch)``.
+
+    See the module docstring for the rule. Sessions on another runner, archived
+    sessions and the caller's own workers never block.
     """
     from app.core.config import settings
     from app.db import database
@@ -322,16 +352,17 @@ def checkout_owners(toplevel: str, session_id: str) -> tuple[Optional[Dict[str, 
     if not row:
         return None, []
     me = settings.effective_instance_id
-    others = []
-    for other in database.list_sessions_for_v2_branch(row["project_id"], row["branch"]):
-        if other.get("id") == session_id or other.get("parent_session_id") == session_id:
-            continue
-        if (other.get("status") or "") == "archived":
-            continue
-        if other.get("instance_id") not in (None, "", me):
-            continue
-        others.append(other)
-    return row, others
+    bound = [other for other in database.list_sessions_for_v2_branch(row["project_id"], row["branch"])
+             if (other.get("status") or "") != "archived" and other.get("instance_id") in (None, "", me)]
+    others = [other for other in bound
+              if other.get("id") != session_id and other.get("parent_session_id") != session_id]
+    caller = next((other for other in bound if other.get("id") == session_id), None)
+    if caller is None or not others:
+        return row, others
+    # Co-bound: the original owner is never blocked in its own checkout.
+    if min([caller, *others], key=_created) is caller:
+        return row, []
+    return row, [other for other in others if _has_work(other["id"])]
 
 
 def _own_checkout(session_id: str) -> tuple[Optional[str], bool]:
@@ -355,9 +386,13 @@ def _refusal(change: BranchChange, toplevel: str, row: Dict[str, Any],
     more = f" and {len(others) - 1} other session(s)" if len(others) > 1 else ""
     text = change.text if len(change.text) <= 200 else change.text[:197] + "..."
     own, bound = _own_checkout(session_id)
-    if own and _inside(own, toplevel):
-        where = ("This chat is bound to that checkout too, so its branch cannot change here. "
-                 "Leave the branch as it is, or ask the owner for a chat with its own worktree.")
+    if change.worktree:
+        where = (f"To move or remove that worktree, the owner archives {who} first; an archived "
+                 "chat's checkout is not locked.")
+    elif own and _inside(own, toplevel):
+        where = ("This chat is bound to that checkout too, and that session is working in it, "
+                 "so its branch cannot change now. Leave the branch as it is, or ask the owner "
+                 "for a chat with its own worktree.")
     elif own and bound:
         where = f"Use your own checkout ({own}) instead; create or switch branches there."
     else:
@@ -387,9 +422,6 @@ def _changes_branch(change: BranchChange, toplevel: str) -> bool:
     if change.ref is None:
         return True
     target = _git(toplevel, "rev-parse", "--verify", "--quiet", f"{change.ref}^{{commit}}")
-    if change.kind == "reset":
-        # ``git reset <commit>`` moves the branch unless it names HEAD's commit.
-        return target is not None and target != _git(toplevel, "rev-parse", "HEAD")
     if target is None:
         # Not a commit: a path to restore, unless it is not one either
         # (``git checkout <remote-only branch>`` creates and switches).

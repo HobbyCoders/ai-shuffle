@@ -63,7 +63,20 @@ def project(mock_db, tmp_path, monkeypatch):
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
     chat("parent", pv2["id"], branch="parent-branch")
+    # The parent is the checkout's original owner: older than any chat below.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET created_at=%s WHERE id=%s",
+                              ("2026-01-01 00:00:00", "parent"))
     return pv2["id"], base, parent
+
+
+def queue_turn(sid):
+    """Give a chat queued work, as a chat in the middle of something has."""
+    turns.enqueue_turn(sid, "user", prompt="more work", profile_id="agent")
+
+
+def worktrees(base):
+    return git(base, "worktree", "list").count("\n") + 1
 
 
 def bash(command):
@@ -88,20 +101,23 @@ def test_start_session_child_gets_its_own_worktree_and_cannot_switch_the_parents
                                     "request_id": "lock-scenario"}, "start")
     child_id = result["session_id"]
     child = sessions.get_session(child_id)
+    branch = f"chore/chat-{child_id[:8]}"
 
-    # Prevent: its own app-provisioned worktree and unique branch, never the parent's.
-    assert child["branch"] == child["worktree_branch"] == f"task/{child_id}"
+    # Prevent: its own app-provisioned worktree on a pushable branch, never the parent's.
+    assert child["branch"] == child["worktree_branch"] == branch
     assert child["worktree_id"] is None and child["project_v2_id"] == pv2
     own = Path(child["worktree_path"])
     assert own.is_dir() and own.resolve() != parent.resolve()
-    assert branch_of(own) == f"task/{child_id}"
+    assert branch_of(own) == branch
     assert git(own, "rev-parse", "HEAD") == tip
-    assert result["checkout"]["branch"] == f"task/{child_id}"
+    assert result["checkout"]["branch"] == branch
     turn = turns.get_turn(result["turn_id"])
     assert "cwd" not in (turn["overrides"] or {})
-    assert str(own) in turn["overrides"]["system_prompt_append"]
+    note = turn["overrides"]["system_prompt_append"]
+    assert str(own) in note and "(branch 'parent-branch')" in note
 
-    # Lock: the child's `checkout -b` in the parent's folder is refused...
+    # Lock: the child's `checkout -b` in the parent's folder is refused, even
+    # while the parent is idle...
     for command, cwd in (("git checkout -b fix/stable-channel-switch-back", parent),
                          (f"cd {parent} && git checkout -b fix/stable-channel-switch-back", own),
                          (f"git -C {parent} switch main", own)):
@@ -124,17 +140,33 @@ def test_start_session_child_gets_its_own_worktree_and_cannot_switch_the_parents
     assert checkout_lock.tool_denial("parent", "Bash", bash("git checkout -b parent-next"), str(parent)) is None
 
 
-def test_peer_bound_to_the_same_branch_is_refused_too(project):
-    """A chat started before this fix shares the parent's binding; it still
-    cannot move the folder, and neither can any other chat."""
+def test_a_parent_with_a_legacy_co_bound_child_keeps_its_own_checkout(project):
+    """A chat started before this fix is bound to the parent's branch too. The
+    parent, the checkout's original owner, is never blocked by it."""
     pv2, _base, parent = project
-    chat("legacy-peer", pv2, branch="parent-branch")
+    chat("legacy-child", pv2, branch="parent-branch")
+    for command in ("git checkout -b fix/new", "git rebase main", "git switch parent-branch"):
+        assert checkout_lock.tool_denial("parent", "Bash", bash(command), str(parent)) is None
+    queue_turn("legacy-child")  # even while the child is busy
+    outcome = run_guarded("parent", "git checkout -b fix/new", parent)
+    assert not outcome.is_error, outcome.text
+    assert branch_of(parent) == "fix/new"
+
+
+def test_a_co_bound_chat_is_blocked_only_while_the_owner_works(project):
+    pv2, _base, parent = project
+    chat("legacy-child", pv2, branch="parent-branch")
+    assert checkout_lock.tool_denial("legacy-child", "Bash", bash("git switch main"), str(parent)) is None
+    queue_turn("parent")
+    denial = checkout_lock.tool_denial("legacy-child", "Bash", bash("git switch main"), str(parent))
+    assert denial and "bound to that checkout too" in denial
+
+
+def test_an_unbound_chat_is_refused_while_the_owner_is_idle(project):
+    pv2, _base, parent = project
     chat("stranger", pv2)
-    for sid in ("legacy-peer", "stranger"):
-        denial = checkout_lock.tool_denial(sid, "Bash", bash("git switch main"), str(parent))
-        assert denial and "Refused" in denial
-    denial = checkout_lock.tool_denial("legacy-peer", "Bash", bash("git switch main"), str(parent))
-    assert "bound to that checkout too" in denial
+    denial = checkout_lock.tool_denial("stranger", "Bash", bash("git switch main"), str(parent))
+    assert denial and "Refused" in denial
 
 
 def test_archived_sessions_and_the_base_checkout_are_not_locked(project):
@@ -149,10 +181,9 @@ def test_archived_sessions_and_the_base_checkout_are_not_locked(project):
 
 @pytest.mark.parametrize("command", [
     "git branch -m renamed",
-    "git reset --hard main",
-    "git rebase main",
     "gh pr checkout 12",
     "git checkout main 2>&1 | tail -3",
+    "git checkout -",
     "bash -lc 'git switch -c sneaky'",
 ])
 def test_other_branch_changes_in_a_foreign_checkout_are_refused(project, command):
@@ -164,9 +195,12 @@ def test_other_branch_changes_in_a_foreign_checkout_are_refused(project, command
 def test_branch_ops_aimed_by_name_or_path_are_refused(project):
     pv2, base, parent = project
     chat("other", pv2)
+    denial = checkout_lock.tool_denial("other", "Bash", bash(f"git worktree remove {parent}"), str(base))
+    assert denial and "archives session parent" in denial
     assert checkout_lock.tool_denial("other", "Bash", bash(f"git worktree move {parent} {parent}-moved"),
                                      str(base))
     assert checkout_lock.tool_denial("other", "Bash", bash("git branch -D parent-branch"), str(base))
+    assert checkout_lock.tool_denial("other", "Bash", bash("git branch -f parent-branch main"), str(base))
 
 
 @pytest.mark.parametrize("command", [
@@ -174,8 +208,13 @@ def test_branch_ops_aimed_by_name_or_path_are_refused(project):
     "git checkout -- code.txt",
     "git checkout code.txt",
     "git checkout parent-branch",
+    "git checkout $(git rev-parse HEAD)",
     "git reset HEAD code.txt",
-    "git reset HEAD",
+    "git reset --hard main",
+    "git rebase main",
+    "git rebase --abort",
+    "git rebase --continue",
+    "cat > s.sh <<'EOF'\ngit checkout -b x\ngit switch main\nEOF\nbash -n s.sh",
     "echo 'git checkout -b x'",
     "git commit -m 'git switch main'",
     "git branch -a",
@@ -231,6 +270,42 @@ def test_a_failed_start_reclaims_the_checkout_it_made(project, monkeypatch):
     assert branch_of(parent) == "parent-branch"
 
 
+def test_the_checkout_is_made_outside_the_chain_lock_and_dropped_for_a_duplicate(project, monkeypatch):
+    _pv2, base, _parent = project
+    from app.db import base as db_base
+    real_transaction = db_base.transaction
+    state = {"locked": False}
+
+    class Watched:
+        def __init__(self):
+            self.inner = real_transaction()
+
+        def __enter__(self):
+            state["locked"] = True
+            return self.inner.__enter__()
+
+        def __exit__(self, *exc):
+            state["locked"] = False
+            return self.inner.__exit__(*exc)
+
+    real = orch._start_checkout
+    seen = []
+
+    def record(sender, new_id):
+        seen.append(state["locked"])
+        return real(sender, new_id)
+
+    monkeypatch.setattr(db_base, "transaction", Watched)
+    monkeypatch.setattr(orch, "_start_checkout", record)
+    args = {"title": "t", "prompt": "p", "request_id": "dup"}
+    first = orch._queue("parent", args, "start")
+    count = worktrees(base)
+    again = orch._queue("parent", args, "start")
+    assert again["status"] == "already_queued" and again["session_id"] == first["session_id"]
+    assert seen == [False, False]
+    assert worktrees(base) == count  # the retry's checkout was removed again
+
+
 def test_a_chat_in_the_main_checkout_still_shares_it(project):
     pv2, _base, _parent = project
     chat("main-chat", pv2)
@@ -238,3 +313,21 @@ def test_a_chat_in_the_main_checkout_still_shares_it(project):
     child = sessions.get_session(result["session_id"])
     assert not child["branch"] and not child["worktree_path"]
     assert "checkout" not in result and "main checkout" in result["note"]
+
+
+def test_worker_branches_are_pushable_names_and_legacy_ones_still_count():
+    from app.core import worker_checkout
+
+    assert worker_checkout.worker_branch("w1") == "chore/task-w1"
+    assert worker_checkout.chat_branch("0f2dbe68-4491") == "chore/chat-0f2dbe68"
+    assert worker_checkout.is_worker_branch("chore/task-w1", "w1")
+    assert worker_checkout.is_worker_branch("task/w1", "w1")
+    assert not worker_checkout.is_worker_branch("task/w2", "w1")
+
+
+def test_a_branch_name_origin_rules_refuse_gets_a_plain_rename_hint():
+    from app.core import checkout_transfer
+
+    reason = checkout_transfer._push_refused(
+        b"remote: error: GH013: Repository rule violations found for refs/heads/task/x.", "task/x")
+    assert "branch rules refuse the name task/x" in reason and "chore/" in reason

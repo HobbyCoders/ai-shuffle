@@ -150,7 +150,7 @@ def world(workers, monkeypatch, kicks, tmp_path):  # noqa: F811 — the imported
 def test_commits_are_pushed_there_and_fetched_here_without_touching_the_parent(world):
     before = world.parent_state()
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     base = git(world.parent, "rev-parse", "HEAD")
     path = world.child_path(child)
     assert git(path, "rev-parse", "HEAD") == base
@@ -176,7 +176,7 @@ def test_commits_are_pushed_there_and_fetched_here_without_touching_the_parent(w
 
 def test_a_child_with_no_commits_pushes_nothing_and_its_branch_is_cleaned_up(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     path = world.child_path(child)
     base = git(path, "rev-parse", "HEAD")
     assert remote_tip(world.parent, branch) == base  # published by the parent at dispatch
@@ -194,7 +194,7 @@ def test_a_child_with_no_commits_pushes_nothing_and_its_branch_is_cleaned_up(wor
 
 def test_uncommitted_changes_are_reported_not_committed(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     path = world.child_path(child)
     head = commit(path, "done.txt", "committed\n")
     (path / "half-done.txt").write_text("not committed\n")
@@ -226,7 +226,7 @@ def test_uncommitted_changes_without_commits_keep_the_checkout(world):
 
 def test_a_refused_push_is_reported_and_nothing_is_fetched(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     base = git(world.parent, "rev-parse", "HEAD")
     hook = world.origin / "hooks" / "pre-receive"
     hook.write_text("#!/bin/sh\necho 'pushes are not allowed here' >&2\nexit 1\n")
@@ -257,7 +257,7 @@ def test_a_target_without_an_origin_remote_says_so(world):
 
 def test_a_parent_without_an_origin_remote_says_the_fetch_failed(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     head = commit(world.child_path(child), "fix.txt", "the fix\n")
     world.owe(child)
     git(world.parent, "remote", "remove", "origin")
@@ -295,7 +295,7 @@ def test_a_chat_with_no_project_gets_the_same_note(world):
 
 def test_a_failed_fetch_still_delivers_the_report_once(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     commit(world.child_path(child), "fix.txt", "the fix\n")
     world.owe(child)
     # The branch disappears from origin between the push and the fetch.
@@ -340,7 +340,7 @@ def test_an_unexpected_push_error_still_delivers_the_report(world, monkeypatch):
 
 def test_someone_elses_branch_of_the_same_name_on_origin_is_never_forced(world, tmp_path):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     other = clone(world.origin, tmp_path / "someone-else")
     theirs = commit(other, "theirs.txt", "someone else's work\n")
     git(other, "push", "--force", "origin", f"{theirs}:refs/heads/{branch}")
@@ -355,7 +355,7 @@ def test_someone_elses_branch_of_the_same_name_on_origin_is_never_forced(world, 
 
 def test_a_different_local_branch_of_the_same_name_here_is_left_alone(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     # A commit of the owner's own that the child's branch does not contain.
     mine = git(world.parent, "commit-tree", "HEAD^{tree}", "-p", "HEAD~1", "-m", "the owner's own")
     git(world.parent, "branch", branch, mine)
@@ -371,7 +371,7 @@ def test_a_different_local_branch_of_the_same_name_here_is_left_alone(world):
 
 def test_a_local_branch_behind_the_childs_head_is_fast_forwarded(world):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     git(world.parent, "branch", branch, "HEAD~1")
     head = commit(world.child_path(child), "fix.txt", "the fix\n")
     world.deliver(child)
@@ -381,7 +381,7 @@ def test_a_local_branch_behind_the_childs_head_is_fast_forwarded(world):
 
 def test_a_checked_out_branch_here_is_never_moved(world, tmp_path):
     child = world.start()
-    branch = f"task/{child}"
+    branch = f"chore/task-{child}"
     base = git(world.parent, "rev-parse", "HEAD")
     git(world.parent, "worktree", "add", "-b", branch, str(tmp_path / "review"), base)
     commit(world.child_path(child), "fix.txt", "the fix\n")
@@ -410,7 +410,7 @@ def test_credentials_in_a_remote_url_never_reach_the_report_or_logs(world, caplo
 
 def test_the_git_block_is_bounded_and_redacted_on_arrival():
     worker = "abc-123"
-    raw = {"mode": "branch", "branch": "task/abc-123", "base": "a" * 40, "head": "b" * 40,
+    raw = {"mode": "branch", "branch": "chore/task-abc-123", "base": "a" * 40, "head": "b" * 40,
            "commits": 10 ** 9, "pushed": True, "uncommitted_files": -4, "remote": "nothex",
            "reason": f"see {TOKEN_URL} " + "x" * 1000, "extra": "dropped"}
     block = worker_checkout.bound_git_block(raw, worker)
@@ -418,7 +418,7 @@ def test_the_git_block_is_bounded_and_redacted_on_arrival():
     assert block["commits"] == 1_000_000 and block["uncommitted_files"] == 0 and block["remote"] is None
     assert SECRET not in block["reason"] and len(block["reason"]) <= worker_checkout.MAX_GIT_REASON_CHARS
     # Another worker's branch, or the default branch, is never taken as this child's.
-    for branch in ("task/someone-else", "main"):
+    for branch in ("chore/task-someone-else", "main"):
         other = worker_checkout.bound_git_block({**raw, "branch": branch}, worker)
         assert other["branch"] is None and other["pushed"] is False and other["head"] is None
     assert worker_checkout.bound_git_block({"mode": "path"}, worker) is None

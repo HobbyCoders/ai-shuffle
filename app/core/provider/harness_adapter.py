@@ -2564,10 +2564,15 @@ class HarnessAdapter(ProviderAdapter):
         inner_cwd = inner is not None and _policy_accepts_cwd(inner)
 
         async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+            # fluid's to_thread only builds this coroutine; it runs on the
+            # loop. ``inner`` may read the database and run Git (the checkout
+            # lock), so it runs in a thread.
             if inner is None:
                 denial = None
+            elif inner_cwd:
+                denial = await asyncio.to_thread(inner, name, tool_input, cwd=cwd)
             else:
-                denial = inner(name, tool_input, cwd=cwd) if inner_cwd else inner(name, tool_input)
+                denial = await asyncio.to_thread(inner, name, tool_input)
             if inspect.isawaitable(denial):
                 denial = await denial
             if denial:

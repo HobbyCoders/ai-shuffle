@@ -238,10 +238,10 @@ def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(worl
     assert row["profile_id"] == "coder" and row["model"] == "sonnet"
     # Its own checkout, at exactly the parent's committed HEAD.
     path = Path(row["worktree_path"])
-    assert row["branch"] == f"task/{child_id}" and path.is_dir() and path != world.target
+    assert row["branch"] == f"chore/task-{child_id}" and path.is_dir() and path != world.target
     assert git(path, "rev-parse", "HEAD") == world.tip
-    assert git(path, "branch", "--show-current") == f"task/{child_id}"
-    assert result["checkout"] == {"mode": "branch", "branch": f"task/{child_id}"}
+    assert git(path, "branch", "--show-current") == f"chore/task-{child_id}"
+    assert result["checkout"] == {"mode": "branch", "branch": f"chore/task-{child_id}"}
 
     [turn] = child_turns(child_id)
     assert turn["source"] == "provider_agent" and turn["state"] == "queued"
@@ -256,7 +256,7 @@ def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(worl
     assert turn["payload"]["orchestration_remote_origin"] == PARENT
     assert world.kicks == [child_id]
     # A started child keeps the branch it was given.
-    assert remote_tip(world.parent, f"task/{child_id}") == world.tip
+    assert remote_tip(world.parent, f"chore/task-{child_id}") == world.tip
     # Both sides remember it: the parent for the report it expects, the
     # target for the report it owes.
     from app.db import remote_tasks
@@ -295,7 +295,7 @@ def test_research_agents_share_the_target_checkout_read_only(world, monkeypatch)
     assert not row.get("branch") and not row.get("worktree_path")
     [turn] = child_turns(result["worker_session_id"])
     assert turn["overrides"]["cwd"] == str(world.target)
-    assert remote_tip(world.parent, f"task/{result['worker_session_id']}") is None
+    assert remote_tip(world.parent, f"chore/task-{result['worker_session_id']}") is None
 
 
 def test_no_project_runs_in_the_target_workspace(world):
@@ -394,7 +394,7 @@ def test_an_oversized_prompt_is_refused_before_any_push(world, monkeypatch):
     result = dispatch({"prompt": "x" * (remote_task.MAX_PROMPT_CHARS + 1)})
     assert result["ok"] is False and "at most" in result["error"]
     assert result["error"].endswith("; nothing was dispatched.")
-    assert not git(world.parent, "ls-remote", "origin", "refs/heads/task/*")
+    assert not git(world.parent, "ls-remote", "origin", "refs/heads/chore/task-*")
 
 
 # --- target side: who may ask -------------------------------------------------
@@ -480,7 +480,7 @@ def test_an_id_used_by_another_session_is_refused(world):
 
 def _no_child(world, body):
     assert database.get_session(body["worker_session_id"]) is None
-    assert not git(world.target, "branch", "--list", f"task/{body['worker_session_id']}")
+    assert not git(world.target, "branch", "--list", f"chore/task-{body['worker_session_id']}")
 
 
 def test_unknown_agent_is_refused_by_name(world):

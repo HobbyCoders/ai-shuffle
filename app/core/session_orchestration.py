@@ -10,7 +10,6 @@ import hashlib
 import json
 import logging
 import re
-from contextlib import contextmanager
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fluid.context.peer import format_peer_message
@@ -1096,16 +1095,17 @@ def _start_checkout(sender, new_id):
 
     A chat bound to a branch never hands that branch to the chat it starts:
     another chat in the same folder could switch it mid-turn. The new chat gets
-    a ``task/<chat id>`` worktree forked from the caller's committed HEAD, as a
-    Task worker does, whatever its tool surface. A caller in the project's
-    main checkout (no branch) keeps sharing it, as before.
+    a ``chore/chat-<id>`` worktree forked from the caller's committed HEAD, as
+    a Task worker does, whatever its tool surface; the ``chore/`` name is one
+    an origin restricted to fix/, feat/ and chore/ branches accepts. A caller
+    in the project's main checkout (no branch) keeps sharing it, as before.
     """
     if not (sender.get("branch") or sender.get("worktree_branch")):
         return None
-    from app.core.worker_checkout import WorkerCheckoutError, prepare_worker_checkout
+    from app.core.worker_checkout import WorkerCheckoutError, chat_branch, prepare_worker_checkout
     try:
         checkout = prepare_worker_checkout(sender, new_id, sender.get("profile_id"),
-                                           share_read_only=False)
+                                           share_read_only=False, branch=chat_branch(new_id))
     except WorkerCheckoutError as exc:
         raise ValueError(f"Could not give the new chat its own checkout: {exc} "
                          "Nothing was started.") from exc
@@ -1115,30 +1115,37 @@ def _start_checkout(sender, new_id):
     return checkout
 
 
-@contextmanager
-def _discard_unused_on_error(provisioned):
-    """Reclaim checkouts made for a start that then failed (none ran in them)."""
-    try:
-        yield
-    except BaseException:
-        from app.core.worker_checkout import discard_unused_worker_checkout
-        for checkout in provisioned:
+class _UnusedCheckout:
+    """A checkout made for a start before the chain lock, removed again unless
+    the start that made it committed (an error, a refusal or a duplicate
+    request all leave it unused)."""
+
+    def __init__(self, checkout):
+        self.checkout = checkout
+        self.kept = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.checkout is not None and (exc_type is not None or not self.kept):
+            from app.core.worker_checkout import discard_unused_worker_checkout
             try:
-                discard_unused_worker_checkout(checkout)
-            except Exception:  # noqa: BLE001 — keep the original failure
-                log.warning("Could not reclaim the unused checkout %s", checkout.path, exc_info=True)
-        raise
+                discard_unused_worker_checkout(self.checkout)
+            except Exception:  # noqa: BLE001 — keep the original outcome
+                log.warning("Could not reclaim the unused checkout %s", self.checkout.path, exc_info=True)
+        return False
 
 
-def _checkout_note(checkout, parent_branch):
+def _checkout_note(checkout):
     """What the new chat is told about its checkout on its first turn."""
     return ("# Your checkout\n"
             f"This chat runs in its own checkout {checkout.path} on branch "
             f"'{checkout.branch}', forked from commit {checkout.base_commit} of the chat that "
-            f"started it (branch '{parent_branch}'). Uncommitted changes there were not copied. "
-            "Work and commit here; you may rename or switch this checkout's own branch. "
-            "Never check out, switch, reset or rebase a branch in another chat's checkout: "
-            "the app refuses it.")
+            f"started it (branch '{checkout.parent_branch}'). Uncommitted changes there were not "
+            "copied. Work and commit here; you may rename or switch this checkout's own branch "
+            "(push only fix/, feat/ or chore/ names). Never check out, switch, rename or remove "
+            "a branch or worktree of another chat's checkout: the app refuses it.")
 
 
 def _queue(sender_id, data, action, placement=None, model_plan=None):
@@ -1231,10 +1238,12 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     overrides = target_context.get("overrides") or {}
     # Read before the chain lock below: it may look up the sender's agent.
     started_mode = _started_permission_mode(sender, overrides) if action == "start" else None
-    # A checkout made for the new chat is removed again if the start fails.
-    provisioned = []
-    checkout = None
-    with _discard_unused_on_error(provisioned), transaction() as conn:
+    # The new chat's own checkout is made before the chain lock below: Git
+    # work and its nested connections must not run under that lock.
+    new_id = str(uuid4()) if action == "start" else None
+    checkout = (_start_checkout(sender, new_id)
+                if action == "start" and placement is None and remote is None else None)
+    with _UnusedCheckout(checkout) as unused, transaction() as conn:
         cursor = conn.cursor()
         # One database lock serializes all fanout in this autonomous chain.
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
@@ -1293,7 +1302,6 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             return {"remote": remote, "receipt_id": receipt["id"], "reserved": True, "body": body}
         if action == "start":
             title = _text(data, "title", 160)
-            new_id = str(uuid4())
             # A named project runs in that project's checkout here, never in
             # the caller's workspace.
             workspace = {} if placement is not None else {
@@ -1302,10 +1310,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 "worktree_path": sender.get("worktree_path")}
             if placement is not None:
                 workspace["project_v2_id"] = project_v2_id
-            else:
-                checkout = _start_checkout(sender, new_id)
             if checkout is not None:
-                provisioned.append(checkout)
                 workspace.update(project_v2_id=checkout.project_v2_id, worktree_id=None,
                                  worktree_branch=checkout.branch, worktree_path=checkout.path)
             from app.core.provider_agent import _caller_fast
@@ -1336,7 +1341,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             if run["fast"] is not None:
                 overrides["fast"] = run["fast"]
             if checkout is not None:
-                note = _checkout_note(checkout, sender.get("branch") or sender.get("worktree_branch"))
+                note = _checkout_note(checkout)
                 append = overrides.get("system_prompt_append")
                 overrides["system_prompt_append"] = f"{append}\n\n{note}" if append else note
             target = sessions.create_session(
@@ -1350,6 +1355,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             )
             if checkout is not None:
                 cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (checkout.branch, new_id))
+                unused.kept = True
             if "workspace_project_ids" in overrides:
                 # The first turn copies the caller's folder list, and a copied
                 # list runs as the chat's STORED one (#1852): store the

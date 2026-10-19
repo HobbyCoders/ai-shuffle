@@ -4,7 +4,7 @@ Two halves joined by the worker session id, which the parent allocates and
 the target uses as its idempotency key:
 
 * **Parent** (:func:`dispatch_remote`, called by ``task_dispatch``): publish
-  ``task/<worker id>`` to origin, ask the target to start the child with the
+  ``chore/task-<worker id>`` to origin, ask the target to start the child with the
   ``task-start`` control action, and answer with a receipt. A refusal or an
   unreachable target refuses the Task call by name and releases the untouched
   branch.
