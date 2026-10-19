@@ -199,14 +199,14 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    with patch("app.db.error_logs.get_db", return_value=_Conn()):
+    with patch("app.db.retention.get_db", return_value=_Conn()):
         error_logs.prune_errors()
 
     warning_trims = [
         (q, p) for q, p in statements if "level = 'WARNING'" in q
     ]
     assert len(warning_trims) == 1
-    assert warning_trims[0][1] == (250,)
+    assert warning_trims[0][1] == (5000, 250)
     # And it runs BEFORE the table-wide trim, so the surviving errors are the
     # ones that fill the general budget.
     warning_idx = next(
@@ -215,7 +215,7 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
     global_idx = next(
         i
         for i, (q, _) in enumerate(statements)
-        if "ORDER BY updated_at DESC OFFSET" in q and "WARNING" not in q
+        if "ORDER BY updated_at DESC, id DESC LIMIT %s OFFSET %s" in q and "WARNING" not in q
     )
     assert warning_idx < global_idx
 
@@ -242,7 +242,8 @@ def test_warning_ceiling_of_zero_disables_the_trim(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    with patch("app.db.error_logs.get_db", return_value=_Conn()):
+    with patch("app.db.retention.get_db", return_value=_Conn()):
         error_logs.prune_errors()
 
+    assert len(statements) == 2  # age and table-wide pruning still execute
     assert not [q for q in statements if "level = 'WARNING'" in q]

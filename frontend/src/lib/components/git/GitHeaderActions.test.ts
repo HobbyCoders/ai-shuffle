@@ -573,6 +573,16 @@ describe('GitHeaderActions panel rows', () => {
 		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
 	});
 
+	it.each([false, true])('explains an enclosing repository without offering parent-wide controls (compact=%s)', compact => {
+		setSnapshot({ status: { is_git_repo: true, enclosing_repository_root: '/workspace/monorepo', mutations_blocked: true } });
+		renderHeader({ compact });
+		expect(screen.getByText('Inside repository')).toBeTruthy();
+		expect(screen.getByText('/workspace/monorepo')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /^Git actions:/ })).toBeNull();
+		expect(screen.queryByText('Init Repo')).toBeNull();
+		expect(screen.queryByText('Git unavailable · Retry')).toBeNull();
+	});
+
 	it('offers a retry when a real repository is unavailable', async () => {
 		dirtyFeatureBranch();
 		renderHeader({ error: 'boom' });

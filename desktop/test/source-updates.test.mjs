@@ -96,6 +96,64 @@ async function rollbackFixture(t, { baseline = false } = {}) {
  };
  return { f, u, db, calls, phases, journal, factory: async previous => { assert.equal(previous, A); return db; } };
 }
+test('installed-entry factory fully hashes a real ready journal before selection', async t => {
+ const { f, u } = await rollbackFixture(t);
+ const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
+ const { ColdClusterCopy } = require('../dist/main/database-restore.js');
+ const cluster = path.join(f.root, 'postgres');
+ await fs.mkdir(path.join(cluster, 'data', 'global'), { recursive: true });
+ await fs.writeFile(path.join(cluster, 'data', 'PG_VERSION'), '17');
+ await fs.writeFile(path.join(cluster, 'data', 'global', 'pg_control'), 'control');
+ await u.prepareRollback(async () => new SinglePassClusterCopy(cluster, async () => {}));
+ // Execute the actual installed-entry factory initializer. Its deferred binary/stop
+ // dependencies are deliberately absent: validating a ready point must not use them.
+ const ts = require('typescript');
+ const text = await fs.readFile(new URL('../src/main/installed-entry.ts', import.meta.url), 'utf8');
+ const source = ts.createSourceFile('installed-entry.ts', text, ts.ScriptTarget.ES2022, true);
+ let initializer;
+ const visit = node => {
+  if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'database') initializer = node.initializer.getText(source);
+  ts.forEachChild(node, visit);
+ };
+ visit(source);
+ assert.ok(initializer, 'installed launcher must supply its database factory');
+ const factory = vm.runInNewContext(ts.transpileModule(`const database = ${initializer}; database;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 }
+ }).outputText, { ColdClusterCopy, path, userData: f.root });
+ const copy = await factory(A);
+ assert.equal(copy.validate, ColdClusterCopy.prototype.validate, 'ready points use the full ColdClusterCopy validator');
+ await u.prepareRollback(factory);
+ // Same names AND same size: only reading the copied bytes detects this corruption.
+ await fs.writeFile(path.join(cluster, 'update-snapshot', 'data', 'global', 'pg_control'), 'CORRUPT');
+ await assert.rejects(u.prepareRollback(factory), /validation/);
+ assert.equal(u.pendingVersion, B, 'the corrupt point never reaches select');
+});
+
+test('launcher-validated copy still requires a ready journal for the exact booting revision', async t => {
+ const { f, u } = await rollbackFixture(t);
+ const { SinglePassClusterCopy, checkRestorePointStructure } = require('../dist/main/update-restore-point.js');
+ const cluster = path.join(f.root, 'postgres');
+ await fs.mkdir(path.join(cluster, 'data', 'global'), { recursive: true });
+ await fs.writeFile(path.join(cluster, 'data', 'PG_VERSION'), '17');
+ await fs.writeFile(path.join(cluster, 'data', 'global', 'pg_control'), 'control');
+ const copy = new SinglePassClusterCopy(cluster, async () => {});
+ await u.prepareRollback(async () => copy); // create the real ready journal and snapshot
+ await u.prepareRollback(async () => copy); // launcher validates the existing copy
+ await u.select();
+ const child = f.create(); await child.attach(B);
+ const validator = { validate: () => checkRestorePointStructure(cluster) };
+ await child.requireRestorePoint(validator);
+ const file = path.join(f.root, 'restore-point.json');
+ const journal = JSON.parse(await fs.readFile(file, 'utf8'));
+ for (const bad of [{ ...journal, revision: C }, { ...journal, phase: 'preparing' }]) {
+  await fs.writeFile(file, JSON.stringify(bad));
+  await assert.rejects(child.requireRestorePoint(validator), /No verified database restore point/);
+ }
+ await fs.writeFile(file, JSON.stringify(journal));
+ await fs.rm(path.join(cluster, 'update-snapshot', 'data', 'global', 'pg_control'));
+ await assert.rejects(child.requireRestorePoint(validator), /validation/);
+});
+
 test('restore journal: baseline C supersedes unused A-to-B snapshot without ever restoring it',async t=>{
  const {f,u,factory,calls,journal}=await rollbackFixture(t);await u.prepareRollback(factory);
  f.options.baseline={revision:C,sequence:300};

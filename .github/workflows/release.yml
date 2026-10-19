@@ -21,11 +21,6 @@ on:
         description: 'Verified candidate sha256 digest to reuse without rebuilding'
         required: false
         type: string
-      build_desktop:
-        description: 'Also build a Windows installer (desktop normally updates in app)'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -180,8 +175,10 @@ jobs:
             After that, use Download update and Update and restart inside AI Shuffle.
             The app fetches the newest stable release and prepares updates in the
             background. No command prompt or new installer is needed.
-            Desktop installers are opt-in for manually dispatched releases, not built
-            for every version. Existing desktop users should update inside the app.
+            Every release promoted to latest stable publishes Windows, Linux and Android downloads.
+            Older-line patches and prereleases leave stable downloads unchanged and skip Windows.
+            The release fails if any download does not match its version and revision.
+            Existing desktop users can still update inside the app.
             Other workers are managed inside the app under Devices.
 
             ### Mobile install
@@ -351,7 +348,7 @@ jobs:
       needs.source-stable.result == 'success' &&
       needs.android-apk.result == 'success' &&
       needs.linux-release.result == 'success' &&
-      (needs.desktop.result == 'success' || (!inputs.build_desktop && needs.desktop.result == 'skipped'))
+      needs.desktop.result == 'success'
     runs-on: ubuntu-latest
     environment: release-signing
     permissions:
@@ -396,6 +393,45 @@ jobs:
       platform: ${{ matrix.platform }}
       build_run_id: ${{ format('{0}', github.run_id) }}
     secrets: inherit
+
+  promotion-platform-installers:
+    name: Register sealed Linux and Android downloads
+    needs: promotion
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, android]
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    uses: ./.github/workflows/platform-installer.yml
+    with:
+      platform: ${{ matrix.platform }}
+      build_run_id: ''
+      release_assets: true
+    secrets: inherit
+
+  verify-downloads:
+    name: Require current win, linux and android downloads
+    needs: [preflight, create-release, desktop, promote-image, platform-installers, promotion, promotion-platform-installers]
+    # Diagnose missing downloads even if a publishing job failed or was skipped.
+    if: >-
+      always() && !cancelled() && needs.preflight.result == 'success' && !inputs.stage_only &&
+      (needs.create-release.outputs.promote_latest == 'true' || inputs.promote != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read back the public download list
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          ACTIVATION_RESULT: ${{ inputs.promote != '' && needs.promotion.result || needs.promote-image.result }}
+        run: |
+          revision=$(git rev-parse HEAD)
+          python3 scripts/ci/verify_release_downloads.py --tag "$RELEASE_TAG" --revision "$revision" --activation-result "$ACTIVATION_RESULT"
 
   android:
     name: Android Play internal release
@@ -455,8 +491,8 @@ jobs:
     secrets: inherit
 
   desktop:
-    name: Windows installer (opt-in)
-    if: github.event_name == 'workflow_dispatch' && inputs.build_desktop
+    name: Windows installer
+    if: needs.create-release.outputs.promote_latest == 'true'
     needs: create-release
     permissions:
       contents: write
@@ -620,7 +656,7 @@ jobs:
       version: ${{ needs.preflight.outputs.release_version }}
 
   stage-desktop:
-    if: inputs.stage_only && inputs.build_desktop
+    if: inputs.stage_only
     needs: [preflight, stage-begin]
     permissions:
       contents: write
@@ -639,7 +675,7 @@ jobs:
       needs.stage-buyer.result == 'success' && needs.stage-source.result == 'success' &&
       needs.stage-android.result == 'success' && needs.stage-apk.result == 'success' &&
       needs.stage-linux.result == 'success' &&
-      (needs.stage-desktop.result == 'success' || (!inputs.build_desktop && needs.stage-desktop.result == 'skipped'))
+      needs.stage-desktop.result == 'success'
     runs-on: ubuntu-latest
     environment: release-signing
     timeout-minutes: 30
@@ -713,16 +749,13 @@ jobs:
           DESKTOP_APPLICATION_SIGNING_KEY: ${{ secrets.DESKTOP_APPLICATION_SIGNING_KEY }}
           IMAGE_DIGEST: ${{ needs.stage-docker.outputs.digest }}
           PLAY_CODE: ${{ needs.stage-android.outputs.version_code }}
-          WINDOWS: ${{ inputs.build_desktop }}
           STAGING_JOB_RESULTS: >-
             {"docker":"${{ needs.stage-docker.result }}","buyer":"${{ needs.stage-buyer.result }}",
             "source":"${{ needs.stage-source.result }}","linux":"${{ needs.stage-linux.result }}",
             "apk":"${{ needs.stage-apk.result }}","play":"${{ needs.stage-android.result }}",
             "windows":"${{ needs.stage-desktop.result }}"}
         run: |
-          options=()
-          if [ "$WINDOWS" = true ]; then options+=(--windows); fi
-          python -I scripts/ci/release_staging_github.py stage --tag "$RELEASE_TAG" --source-root "$RELEASE_CANDIDATE_CHECKOUT" --directory "$RUNNER_TEMP/stage" --artifacts "$RUNNER_TEMP/stage-artifacts" --image-digest "$IMAGE_DIGEST" --play-code "$PLAY_CODE" "${options[@]}"
+          python -I scripts/ci/release_staging_github.py stage --tag "$RELEASE_TAG" --source-root "$RELEASE_CANDIDATE_CHECKOUT" --directory "$RUNNER_TEMP/stage" --artifacts "$RUNNER_TEMP/stage-artifacts" --image-digest "$IMAGE_DIGEST" --play-code "$PLAY_CODE" --windows
       - name: Attest the signed record and all transitively bound artifact hashes
         uses: actions/attest-build-provenance@v2
         with:

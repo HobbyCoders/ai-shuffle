@@ -532,7 +532,7 @@ async function _loadCore(
 		if (!status.is_git_repo && (worktreeId || _branchSessions.has(sessionId ?? ''))) {
 			throw new Error('Git checkout is unavailable. Check again.');
 		}
-		if (status.is_git_repo) {
+		if (status.is_git_repo && !status.enclosing_repository_root) {
 			_nonRepoProjects.delete(projectId);
 			// Opening a chat: only what the header renders goes out now. Nothing
 			// renders the commit graph, the worktree list belongs to the new-chat
@@ -766,7 +766,7 @@ async function _bgRefreshTick(): Promise<void> {
 	if (_operationInProgress || _worktreeGone || _isBackingOff()) return;
 
 	const projectId = _state.projectId;
-	if (!projectId || _state.status?.is_git_repo !== true) return;
+	if (!projectId || _state.status?.is_git_repo !== true || _state.status.enclosing_repository_root) return;
 
 	const ok = await git.refreshPrState();
 	if (ok === false) {
@@ -1042,7 +1042,8 @@ export const git = {
 			// Reload coherently so branches, diffs and PR state return together.
 			// A positive non-repo answer clears state below immediately, without
 			// requiring a second status request to confirm the same finding.
-			if (status.is_git_repo && !_state.status?.is_git_repo) {
+			if (status.is_git_repo && !status.enclosing_repository_root
+				&& (!_state.status?.is_git_repo || _state.status.enclosing_repository_root)) {
 				await git.retryLoad();
 				return;
 			}
@@ -1050,7 +1051,7 @@ export const git = {
 			if (!status.is_git_repo && (_state.worktreeId || _branchSessions.has(_state.sessionId ?? ''))) {
 				throw new Error('Git checkout is unavailable. Check again.');
 			}
-			if (!status.is_git_repo) {
+			if (!status.is_git_repo || status.enclosing_repository_root) {
 				const empty = { ..._cacheableSlice(EMPTY_STATE), status };
 				_claimSeq('diffStats', 'branches', 'prState', 'changedFiles', 'commits', 'worktrees');
 				_update((s) => ({ ...s, ...empty, hydrated: true, stale: false, error: null }));

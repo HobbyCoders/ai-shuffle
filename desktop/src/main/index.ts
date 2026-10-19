@@ -28,7 +28,8 @@ import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
-import { HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
+import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
+import { launcherImage, launchUpdateSplash } from './update-splash';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { CallPopout } from './call-popout';
@@ -99,10 +100,19 @@ async function main(): Promise<void> {
 			installerNewer: () => installerNewer(app.getVersion())
 		});
 	}
-	// The window closes now and the new version's can take minutes to appear: say it is starting.
+	// A separate source Electron process survives this app quitting. Packaged
+	// executables cannot run its entry script, so retain the notification fallback.
+	let closeUpdateSplash: (() => void) | null = null;
 	updater.onRestarting(() => {
+		const revision = applications?.pendingVersion;
+		if (process.platform === 'win32' && managed && !app.isPackaged && updateRoot && revision) {
+			closeUpdateSplash?.();
+			closeUpdateSplash = launchUpdateSplash({ electron: process.execPath, mainDir: __dirname, root: updateRoot,
+				revision, release: updater.current.release ?? revision.slice(0, 12), profile: path.join(userData, 'update-splash'), launcher: launcherImage(installedExecutable) });
+			// spawn() returning is not proof the child rendered. Keep the notification too.
+		}
 		if (typeof Notification !== 'function' || !Notification.isSupported()) return;
-		new Notification({ title: 'Starting the new version of AI Shuffle', body: 'This can take a few minutes. AI Shuffle opens again by itself; there is no need to open it again.' }).show();
+		new Notification({ title: 'Starting the new version of AI Shuffle', body: 'This can take a few minutes. AI Shuffle opens again by itself. Follow any recovery or installer dialog that appears.' }).show();
 	});
 
 	app.on('second-instance', () => window.focus());
@@ -256,7 +266,11 @@ async function main(): Promise<void> {
 		// A launcher from before restore points made none: this build makes it here (desktop/LAUNCHER.md).
 		// As the launcher does: reap a verified leftover worker before the cluster is stopped and copied.
 		const restorePoint = { database: async () => postgres.updateRestorePoint(() => quiesceRecordedWorker(path.join(userData, 'worker'))), preparing: () => { preparingRestorePoint = true; window.send('desktop:worker-state', desktopState()); } };
-		try { await applications?.requireRestorePoint(postgres.updateRestorePoint(), restorePoint); await applications?.databaseStarting(); }
+		// Only an explicitly audited launcher already hashed this copy before selection.
+		// No installed handoff, an old/unknown launcher, or recovery: hash it here.
+		const launcherChecked = launcherValidatedRestorePoint(process.platform, launcherVersion(process.env[LAUNCHER_VERSION_ENV]), !!managed?.host && !!managed.application, applications?.hasMigrationRisk !== false);
+		const existing = launcherChecked ? { validate: () => checkRestorePointStructure(path.join(userData, 'postgres')) } : postgres.updateRestorePoint();
+		try { await applications?.requireRestorePoint(existing, restorePoint); await applications?.databaseStarting(); }
 		catch (error) {
 			preparingRestorePoint = false;
 			// Keep the supervisor: Try again repeats the copy here. A relaunch would go
@@ -280,7 +294,11 @@ async function main(): Promise<void> {
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
 		restart: async () => {
 			if (restorePointFailure) { restorePointFailure = null; window.send('desktop:worker-state', desktopState()); await startStack(); return; }
-			if (!supervisor) { app.relaunch(); app.quit(); return; }
+			if (!supervisor) {
+				// A direct source relaunch does not pass through the launcher again.
+				delete process.env[LAUNCHER_VERSION_ENV];
+				app.relaunch(); app.quit(); return;
+			}
 			if (window.currentPage !== 'status') await window.showPage('status');
 			try {
 				await supervisor.stop();
@@ -445,10 +463,10 @@ async function main(): Promise<void> {
 	if (!isolation) installTray(actions, identity.name);
 
 	// The restart's restore point: made here, with the window saying so, rather than by the launcher
-	// with no window open (update-restore-point.ts). Only launchers that make restore points (4 and
-	// later) check a ready one instead of making their own; the installer's own app is such a launcher.
+	// with no window open (update-restore-point.ts). Source handoffs need an audited
+	// launcher; the bundled app uses this build's own audited installed-entry factory.
 	const launcherKeepsPoint = !!applications && !!postgres && !isolation && process.platform === 'win32' &&
-		(managed ? !!managed.host && !managed.profile && launcherVersion(process.env[LAUNCHER_VERSION_ENV]) >= 4 : !!installation);
+		(managed ? !!managed.host && !managed.profile && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcherVersion(process.env[LAUNCHER_VERSION_ENV])) : !!installation);
 	if (launcherKeepsPoint) {
 		const restorePoint = async () => new SinglePassClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
 			await quiesceRecordedWorker(path.join(userData, 'worker'));
@@ -503,6 +521,7 @@ async function main(): Promise<void> {
 		catch { return 'Could not check for active sessions; nothing was restarted. Try again.'; }
 		return active === 0 ? null : 'Busy with active sessions; retry when finished.';
 	});
+	updater.onRestartCancelled(() => { closeUpdateSplash?.(); closeUpdateSplash = null; });
 	// An install that failed after the step above leaves the stack down: start it again.
 	updater.onInstallFailed(async (error) => {
 		const reason = error instanceof Error ? error.message : String(error);

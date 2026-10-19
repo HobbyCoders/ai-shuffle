@@ -171,9 +171,9 @@ describe('automatic non-git fallback', () => {
 	const nonGit = { projectId: 'repo', worktreeId: null, sessionId: null,
 		hydrated: true, status: { is_git_repo: false } };
 
-	it('runs a non-git draft locally without changing the remembered toggle', async () => {
+	it.each([{ is_git_repo: false }, { is_git_repo: true, enclosing_repository_root: '/monorepo' }])('runs a non-root draft locally without changing the remembered toggle: %o', async status => {
 		render(ExecutionModeBar);
-		mocks.git.set(nonGit);
+		mocks.git.set({ ...nonGit, status });
 		await tick();
 		expect(activeSession.current.worktreeIntent).toBe('local');
 		expect(composerPreferences.current.worktreeIntent).toBe('worktree');

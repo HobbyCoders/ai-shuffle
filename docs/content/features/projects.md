@@ -31,6 +31,8 @@ When the project folder is a Git repository, you can:
 
 When you sign in to GitHub, you can also create pull requests, follow their checks and merge them.
 
+A project folder inside another repository remains usable for chat. Its Git indicator says **Inside repository** and identifies the enclosing root. Open that root as a project to use Git controls: the subfolder does not display the parent's changes, initialize a nested repository, or offer parent-wide Git actions. A folder with its own nested repository uses that repository normally. Plain folders still work without Git, and a missing or unreadable checkout still reports an error.
+
 ## Separate branches for each chat
 
 A chat can work on its own branch in its own copy of the project (a Git worktree). The agent works there without touching your main folder, so several chats can work on different changes at once.

@@ -9,12 +9,12 @@ import '$lib/test-stubs/composer-dom';
 // Exercise the send guard independently of the context bar's intent-reset effect.
 vi.mock('./ContextPillBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 const capability = vi.hoisted(() => {
-	const state = { isRepo: false };
+	const state = { isRepo: false, enclosingRoot: null as string | null };
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
 		const url = String(input);
 		const data = url.includes('/auth/status')
 			? { authenticated: true, has_any_credential: true, onboarding_complete: true }
-			: url.includes('/git/status') ? { is_git_repo: state.isRepo }
+			: url.includes('/git/status') ? { is_git_repo: state.isRepo, enclosing_repository_root: state.enclosingRoot }
 				: url.includes('/git/branches') ? { branches: [] }
 					: url.includes('/git/graph') ? { commits: [], total: 0 }
 							: url.includes('/git/worktrees') ? { worktrees: [], total: 0 }
@@ -40,6 +40,7 @@ beforeEach(async () => {
 	// The explicit preference is valid only after a positive current-project
 	// capability (#172). The later negative answer still exercises the send guard.
 	capability.isRepo = true;
+	capability.enclosingRoot = null;
 	await git.loadRepository('plain-folder');
 	expect(git.current.hydrated).toBe(true);
 	expect(git.current.status?.is_git_repo).toBe(true);
@@ -56,9 +57,10 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe('plain-folder first send', () => {
+describe.each(['plain', 'enclosed'])('%s folder first send', kind => {
 	it.each(['plain-folder', 'previous-folder'])('uses only current repository capability (%s)', async statusProject => {
-		capability.isRepo = statusProject === 'previous-folder';
+		capability.isRepo = kind === 'enclosed' || statusProject === 'previous-folder';
+		capability.enclosingRoot = kind === 'enclosed' ? '/monorepo' : null;
 		await git.loadRepository(statusProject);
 		if (statusProject === 'previous-folder') {
 			// A positive but unrelated repository must not block an explicit
