@@ -307,7 +307,8 @@ def _ensure_columns(cursor) -> None:
     names; the SQLite shim has no ``IF NOT EXISTS`` for columns, so it asks
     the catalog first.
     """
-    additive = (("network_members", "last_incarnation_accepted", "INTEGER"),
+    additive = (("network_members", "token_binding_required", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("network_members", "last_incarnation_accepted", "INTEGER"),
                 ("network_presence", "instance_id", "TEXT"),
                 ("network_presence", "source_revision", "TEXT"),
                 ("network_session_active", "local_revision", "BIGINT NOT NULL DEFAULT 0"),
@@ -523,6 +524,20 @@ def touch_member(device_id: str, *, capabilities: Optional[dict] = None, endpoin
         return
     with get_db() as conn:
         conn.cursor().execute(sql, tuple(params))
+
+
+def pin_token_binding(device_id: str, signing_public: str) -> None:
+    """Local monotonic evidence; never accepted by upsert/touch or snapshot import.
+
+    Device ids identify signing keys. Re-enrollment/revocation of the same id
+    preserves the pin; a new identity starts unpinned. Network reset deletes it.
+    Call only after verifying a bound proof or a signed capability statement.
+    """
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE network_members SET token_binding_required = TRUE "
+            "WHERE device_id = %s AND signing_public = %s AND status = 'active'",
+            (device_id, signing_public))
 
 
 def rename_member(device_id: str, name: str) -> Optional[dict]:
