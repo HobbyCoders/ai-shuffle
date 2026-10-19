@@ -4,17 +4,24 @@ import vm from 'node:vm';
 import path from 'node:path';
 import { test } from 'node:test';
 
-function fixture(env = {}, modules = {}) {
+function fixture(env = {}, modules = {}, platform = 'win32') {
  const calls = []; const timers = [];
  const app = { relaunch: options => calls.push(options), quit: () => calls.push('quit') };
  const module = { exports: {} };
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
   exports: module.exports, module, require: id => id === 'electron' ? { app } : modules[id] ?? path,
-  process: { env }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
+  process: { env, platform, versions: {electron:'44.2.0'} }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
   setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date, console
  });
  return { updater: new module.exports.Updater(), calls, timers, app };
 }
+test('#99: only installed Linux updates opt into the installed Electron preflight', () => {
+ for (const [platform,executable,expected] of [['linux','/AI Shuffle.AppImage',['44.2.0']],['linux',undefined,[]],['win32','C:/AI Shuffle.exe',[]]]) {
+  const {updater}=fixture({},{},platform),versions=[];
+  updater.useApplications(source({useInstalledElectron:version=>versions.push(version)}),executable);
+  assert.deepEqual(versions,expected);
+ }
+});
 const available = { kind: 'available', version: 'bbbbbbbbbbbb' };
 const ready = { ...available, kind: 'ready' };
 function source(overrides = {}) { return {
@@ -24,6 +31,34 @@ function source(overrides = {}) { return {
  application: async () => ({ node: 'C:/isolated/new-node/node.exe', desktopDir: 'C:/isolated/desktop' }), ...overrides
 }; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
+
+test('initial staged check keeps its notice without a parallel release-info overwrite',async()=>{
+ const {updater}=fixture();let metadataReads=0;
+ updater.useApplications(source({pendingVersion:ready.version,retryCleanup:async()=>{},
+  check:async()=>({...ready,notes:'Staged notes',notice:'A newer release needs the latest installer.'}),
+  releaseInfo:async()=>{metadataReads++;return {notes:'Staged notes'};}}));
+ await new Promise(setImmediate);
+ assert.equal(updater.current.phase,'ready');assert.equal(metadataReads,0);
+ assert.match(updater.current.notes,/A newer release needs the latest installer/);
+});
+
+test('a newer incompatible release is a notice beside the installable staged release, not an error',async()=>{
+ const {updater,calls}=fixture({},'linux');
+ const notice='Install the latest AI Shuffle installer for the newer release. The downloaded update remains ready to install.';
+ const notes=Array.from({length:20},(_,i)=>`Release note line ${i+1}`).join('\n');
+ const result={...ready,release:'1.0.0',notes,notice};
+ const manager=source({check:async()=>result,download:async()=>result,retryCleanup:async()=>{}});
+ updater.useApplications(manager,'/AI Shuffle.AppImage');
+ await updater.check();assert.equal(updater.current.phase,'ready');assert.equal(updater.current.error,null);
+ assert.equal(updater.current.message,null);assert.equal(updater.current.version,ready.version);
+ assert.equal(updater.current.notes,notice+'\n\n'+notes);
+ await updater.install();assert.equal(calls.at(-1),'quit');
+ // The same result arriving from a download must keep its notice too.
+ const second=fixture({},'linux').updater;
+ second.useApplications(source({download:async()=>result}),'/AI Shuffle.AppImage');
+ await second.check();await second.download();assert.equal(second.current.phase,'ready');
+ assert.equal(second.current.notes,notice+'\n\n'+notes);
+});
 
 test('cleanup failing after ready refuses before stopping services and Retry re-enables installation',async()=>{
  const {updater,calls}=fixture();let locked=false;
@@ -527,4 +562,22 @@ test('an install whose database copy failed ends with nothing staged and says so
  await updater.check();await updater.install();
  assert.equal(updater.current.phase,'error');assert.match(updater.current.error,/could not save a copy of your database first \(disk full\)/);
  assert.doesNotMatch(updater.current.error,/did not finish|went back/);assert.equal(restarted,1,'the running version starts its stack again');
+});
+test('#98: a failed download of a newer release keeps the staged one ready to install', async () => {
+ const { updater, calls } = fixture();
+ const staged = 'c'.repeat(40);
+ updater.useApplications(source({ pendingVersion: staged, cleanupError: null, retryCleanup: async () => {},
+  check: async () => available, download: async () => { throw Error('Source archive checksum or size mismatch'); },
+  releaseInfo: async () => ({ release: '1.0.0', notes: 'Staged notes' }), prepareInstall: async () => calls.push('prepare') }));
+ // A modern manager with a staged build checks the feed at once (#98).
+ await new Promise(setImmediate); assert.equal(updater.current.phase, 'available');
+ await updater.download();
+ assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.version, staged.slice(0, 12));
+ assert.match(updater.current.error, /checksum/);
+ await new Promise(setImmediate); assert.equal(updater.current.release, '1.0.0');
+ updater.onBeforeInstall(async () => calls.push('stop')); await updater.install();
+ assert.deepEqual(calls.slice(0, 2), ['stop', 'prepare']);
+ // Without a staged build the failure is an error, as before.
+ const plain = fixture(); plain.updater.useApplications(source({ download: async () => { throw Error('offline'); } }));
+ await plain.updater.check(); await plain.updater.download(); assert.equal(plain.updater.current.phase, 'error');
 });

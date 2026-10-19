@@ -11,9 +11,19 @@ test('#1821 D5: desktop/launcher.json holds a launcher version and a minimum no 
  const { version, minimum } = readLauncher(readFileSync(launcherJson, 'utf8'));
  assert(version >= 3 && minimum >= 3 && minimum <= version);
  assert.deepEqual(readLauncher('{"version":2,"minimum":2}'), { version: 2, minimum: 2 });
+ assert.deepEqual(readLauncher('{"version":4,"minimum":4,"start":3}'), { version: 4, minimum: 4, start: 3 });
  for (const bad of ['{}', 'null', '[]', '{"version":0,"minimum":0}', '{"version":1,"minimum":2}', '{"version":1.5,"minimum":0}',
-  '{"version":"1","minimum":0}', '{"version":1,"minimum":-1}', '{"version":1}'])
+  '{"version":"1","minimum":0}', '{"version":1,"minimum":-1}', '{"version":1}', '{"version":2,"minimum":0,"start":3}',
+  '{"version":2,"minimum":0,"start":-1}', '{"version":2,"minimum":0,"start":null}'])
   assert.throws(() => readLauncher(bad), /launcher\.json must hold/, bad);
+});
+
+test('#97: this source states the oldest launcher that can start it', () => {
+ // Launcher 3 (0.9.6, 1.0.x) starts it through the update's own late restore point;
+ // launchers before the signing-key bridge cannot verify it.
+ const { version, start } = readLauncher(readFileSync(launcherJson, 'utf8'));
+ assert.equal(start, 3);
+ assert(start <= version);
 });
 
 test('#1821 D5: the installer stamp records the launcher version next to the baseline revision', () => {
