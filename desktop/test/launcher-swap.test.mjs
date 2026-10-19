@@ -26,7 +26,7 @@ const passing = async () => {};
 
 function tmp(t) {
  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'launcher-swap-'));
- t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+ t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
  return dir;
 }
 // File symlinks require Developer Mode or elevation on Windows. Probe the
@@ -199,7 +199,14 @@ test('self-test verdicts: only a clean exit with this run\'s verdict for the exp
   'a crash': [`throw new Error('boom')`, /boom/],
  };
  for (const [name, [script, error]] of Object.entries(cases)) await assert.rejects(swap.selfTest(process.execPath, candidateWith(t, script), 2, root), error, name);
- await assert.rejects(swap.selfTest(process.execPath, candidateWith(t, 'setInterval(() => {}, 1000)'), 2, root, 300), /did not finish in time/);
+ // A hung self-test is killed. selfTest rejects without waiting for the exit, and the
+ // child's cwd is its temp folder, which Windows will not delete while the child lives.
+ // Wait for the kill to land, so the test checks it and cleanup never races it.
+ const hung = candidateWith(t, `require('fs').writeFileSync(require('path').join(__dirname, 'pid'), String(process.pid)); setInterval(() => {}, 1000);`);
+ await assert.rejects(swap.selfTest(process.execPath, hung, 2, root, 2000), /did not finish in time/);
+ const pid = Number(fs.readFileSync(path.join(hung, path.dirname(swap.SELF_TEST), 'pid'), 'utf8'));
+ assert(pid > 0, 'the hung self-test started');
+ await until(() => !alive(pid));
  await assert.rejects(swap.selfTest(path.join(root, 'missing.exe'), ok, 2, root), /ENOENT/);
 });
 
@@ -391,6 +398,9 @@ test('settling a swap: a reinstall clears it; an unexplained state is left alone
 function briefProcess(ms) {
  const child = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${ms})`], { stdio: 'ignore' });
  return { pid: child.pid, exited: new Promise(resolve => child.on('exit', resolve)) };
+}
+function alive(pid) {
+ try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 async function until(check, ms = 15000) {
  const end = Date.now() + ms;

@@ -24,7 +24,7 @@ async function androidArtifact(dir, { versionName = '1.2.3', commit = revision, 
 
 async function run(t, platform, prepare, world = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-platform-publish-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const dir = path.join(root, 'artifact');
   const asset = await prepare(dir);
   const env = {

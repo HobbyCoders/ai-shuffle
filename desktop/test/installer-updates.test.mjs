@@ -17,7 +17,7 @@ const other = generateKeyPairSync('ed25519').privateKey;
 /** A fake hub: the signed per-platform list and the installer bytes, recording each request. */
 async function fixture(t, { version = '0.9.0', platform = 'mac', arch = 'arm64', bytes = Buffer.from('installer bytes'), signer = privateKey, fields = {} } = {}) {
  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-installers-'));
- t.after(() => fs.rm(directory, { recursive: true, force: true }));
+ t.after(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
  const file = `AI-Shuffle-Desktop-${version}-${platform}-${arch}.dmg`;
  const payload = Buffer.from(JSON.stringify({ type: 'desktop-installer', format: 1, platform, arch, version, revision: REVISION, file, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), ...fields }));
  const entry = { platform, arch, version, revision: REVISION, file, url: 'https://evil.example/installer', size: 1, sha256: '0'.repeat(64), payload: payload.toString('base64'), signature: sign(null, payload, signer).toString('base64') };

@@ -11,7 +11,7 @@ async function fixture(t, matches) {
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-worker-restore-'));
  const token='a'.repeat(64);
  const child=spawn(process.execPath,['-e',`const http=require('node:http'), crypto=require('node:crypto'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({service:'ai-shuffle',attach:crypto.createHash('sha256').update('${matches?token:'wrong'}').digest('hex')}));});server.listen(0,'127.0.0.1',()=>console.log(server.address().port));`],{detached:process.platform!=='win32',stdio:['ignore','pipe','pipe']});
- t.after(async()=>{await terminateProcessTree(child.pid);await fs.rm(root,{recursive:true,force:true});});
+ t.after(async()=>{await terminateProcessTree(child.pid);await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
  const port=await new Promise((resolve,reject)=>{child.stdout.once('data',chunk=>resolve(Number(chunk.toString().trim())));child.once('error',reject);});
  await fs.writeFile(path.join(root,'worker-process.json'),JSON.stringify({version:1,pid:child.pid,token,port,identity:await readProcessIdentity(child.pid)}));
  return {root,child};

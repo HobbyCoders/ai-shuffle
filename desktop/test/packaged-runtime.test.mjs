@@ -49,6 +49,6 @@ test('real installer resources require the verified client; explicit shell stubs
     await writeFile(manifest, JSON.stringify({ cloudflared: { ...client, path: '../cloudflared.exe' } }));
     await assert.rejects(verify(context), /path is invalid/);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

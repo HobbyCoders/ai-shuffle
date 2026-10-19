@@ -75,7 +75,7 @@ test('DESKTOP_REQUIRE_SIGNING refuses an unsigned Windows or macOS release but n
 
 test('the CLI writes the args file and GitHub outputs and never prints a secret value', async (t) => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-signing-'));
-	t.after(() => rm(dir, { recursive: true, force: true }));
+	t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	const files = { GITHUB_ENV: path.join(dir, 'env'), GITHUB_OUTPUT: path.join(dir, 'out') };
 	const env = { PATH: process.env.PATH, ...files, ...filled(AZURE) };
 	const stdout = execFileSync(process.execPath, [script, 'win', '--args-file', path.join(dir, 'args'), '--github-env'], { env, encoding: 'utf8' });

@@ -49,7 +49,7 @@ test('private directories and credential writes survive reopening beneath a prot
 		}
 	} finally {
 		// root is the exact unique temporary directory created by this test.
-		await fs.rm(root, { recursive: true, force: true });
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -95,6 +95,6 @@ test('an already private directory is not rewritten; a loosened one is', { skip:
 		assert.equal(await protectDirectory(directory), false);
 	} finally {
 		// root is the exact unique temporary directory created by this test.
-		await fs.rm(root, { recursive: true, force: true });
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });

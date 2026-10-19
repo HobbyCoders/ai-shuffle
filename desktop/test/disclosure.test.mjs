@@ -10,7 +10,7 @@ const { AGENT_ACCESS, AGENT_ACCESS_VERSION, DISCLOSURE_ACCEPTED_ENV, DisclosureS
 
 async function profile(t) {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-disclosure-'));
-	t.after(() => rm(dir, { recursive: true, force: true }));
+	t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	return dir;
 }
 

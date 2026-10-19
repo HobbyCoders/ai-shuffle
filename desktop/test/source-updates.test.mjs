@@ -33,7 +33,7 @@ const OldUpdates=oldModule.exports.SourceUpdates;
 const A='a'.repeat(40), B='b'.repeat(40), C='c'.repeat(40), KEY='d'.repeat(64);
 const E='e'.repeat(40);
 async function fixture(t) {
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-source-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-source-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
  const bodies=new Map();const requests=[];let signed;let sequence=100;let builds=0;let fail=false;
  const options={root,publicKey,bootstrapNode:process.execPath,fetch:async url=>{requests.push(url);const feed=url.endsWith('/manifest')||url.endsWith('/manifest/nightly');return new Response(feed?signed:bodies.get(url)||'missing',{status:feed||bodies.has(url)?200:404});},build:async(source,stage,revision)=>{
@@ -647,7 +647,7 @@ test('real healthy main producer remains unaffected by write-provenance tracking
 });
 test('real main missing retry metadata cannot recover below any known healthy or migration floor',async t=>{
  for(const evidence of ['healthy manifest','migration entry','database marker'])for(const sequence of (evidence==='healthy manifest'?[50,100]:[50,100,150]))await t.test(`${evidence}, installer=${sequence}`,async t=>{
-  const {f}=await legacyFailedPair(t);await fs.rm(path.join(f.root,'versions',B),{recursive:true});
+  const {f}=await legacyFailedPair(t);await fs.rm(path.join(f.root,'versions',B),{recursive:true,maxRetries:10,retryDelay:100});
   if(evidence==='migration entry'){const file=path.join(f.root,'state.json');const state=JSON.parse(await fs.readFile(file,'utf8'));state.mayHaveMigrated={[C]:150};await fs.writeFile(file,JSON.stringify(state));}
   if(evidence==='database marker')await fs.writeFile(path.join(f.root,'database-floor.json'),JSON.stringify({schemaVersion:1,revision:C,sequence:150}));
   const baseline={revision:'d'.repeat(40),sequence};
@@ -680,7 +680,7 @@ test('real main healthy completion reconciles the entry fence without a permanen
 });
 test('real main missing failed or retried metadata offers only owner-confirmed installer recovery',async t=>{
  for(const retry of [false,true])for(const sequence of [200,201])await t.test(`retry=${retry}, installer=${sequence}`,async t=>{
-  const {f}=await legacyFailedPair(t,{retry});await fs.rm(path.join(f.root,'versions',B),{recursive:true});
+  const {f}=await legacyFailedPair(t,{retry});await fs.rm(path.join(f.root,'versions',B),{recursive:true,maxRetries:10,retryDelay:100});
   const baseline={revision:C,sequence};
   for(let i=0;i<2;i++){const declined=await installedLauncher(f,null,{baseline});await declined.start();assert.deepEqual(declined.events,['AI Shuffle needs an installer','quit']);assert.equal(declined.manager.recoveryRequired,true);assert.equal(declined.manager.canConfirmBaselineRecovery,true);assert.equal(await declined.manager.retryFailed(),false);}
   const accepted=await installedLauncher(f,null,{baseline,answer:2});await accepted.start();assert.deepEqual(accepted.events,['AI Shuffle needs an installer','bundled']);assert.equal(accepted.manager.hasSourceState,false);
@@ -728,7 +728,7 @@ test('missing retried B plus corrupted state never delegates to remaining A, inc
   const {f}=await migratedPair(t);const retry=f.create();await retry.load();assert.equal(await retry.retryFailed(),true);
   // Legacy main writes no independent marker, but can have this exact retry state.
   if(legacy)await fs.unlink(path.join(f.root,'database-floor.json'));
-  await fs.rm(path.join(f.root,'versions',B),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),text);
+  await fs.rm(path.join(f.root,'versions',B),{recursive:true,maxRetries:10,retryDelay:100});await fs.writeFile(path.join(f.root,'state.json'),text);
   const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);
   assert.equal(launch.manager.recoveryRequired,true);await assert.rejects(launch.manager.select());
   const backup=(await fs.readdir(f.root)).find(name=>name.startsWith('state.json.corrupt-'));assert.equal(await fs.readFile(path.join(f.root,backup),'utf8'),text);
@@ -739,7 +739,7 @@ test('selecting a different producer invalidates a stale floor until databaseSta
  await f.release(B);await u.download();await u.select();
  const marker=JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'),'utf8'));assert.equal(marker.revision,A);assert.equal(marker.uncertain,true);
  // An older delegated producer can migrate B without rewriting the marker.
- await fs.rm(path.join(f.root,'versions',B),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),'[]');
+ await fs.rm(path.join(f.root,'versions',B),{recursive:true,maxRetries:10,retryDelay:100});await fs.writeFile(path.join(f.root,'state.json'),'[]');
  const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);
 });
 test('a marker written before the database-state save keeps the floor across a crash',async t=>{
@@ -750,7 +750,7 @@ test('a marker written before the database-state save keeps the floor across a c
 });
 test('trusted installer at or above the durable floor repairs missing-code recovery without losing quarantine',async t=>{
  for(const delta of [-1,0,1]){
-  const {f,b}=await migratedPair(t);await fs.rm(path.join(f.root,'versions',B),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),'[]');
+  const {f,b}=await migratedPair(t);await fs.rm(path.join(f.root,'versions',B),{recursive:true,maxRetries:10,retryDelay:100});await fs.writeFile(path.join(f.root,'state.json'),'[]');
   const old=await installedLauncher(f);await old.start();assert(old.events.includes('quit'));
   const baseline={revision:C,sequence:b.manifest.sequence+delta};const launch=await installedLauncher(f,null,{baseline,answer:2});await launch.start();
   if(delta<0){assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);continue;}
@@ -890,7 +890,7 @@ test('older signed manifests cannot roll back a healthy revision; corrupt state 
  assert.throws(()=>verifySourceManifest('{}',f.options.publicKey),/Unsigned/);await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:'../elsewhere'}));const recovered=f.create();await recovered.load();assert.equal((await recovered.select()).revision,B);assert.equal(recovered.hasMigrationRisk,true);
 });
 test('cleanup detaches dependency junctions; builds do not inherit credentials',async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-cache-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-cache-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const cache=path.join(root,'cache');await fs.mkdir(cache);await fs.writeFile(path.join(cache,'sentinel'),'keep');
  const version=path.join(root,'version');await fs.mkdir(path.join(version,'source/frontend'),{recursive:true});await fs.symlink(cache,path.join(version,'source/frontend/node_modules'),process.platform==='win32'?'junction':'dir');
  await fs.mkdir(path.join(version,'source/mobile'));await fs.symlink(path.join(version,'source/frontend/node_modules'),path.join(version,'source/mobile/node_modules'),process.platform==='win32'?'junction':'dir');
@@ -1121,7 +1121,7 @@ test('a tree digest that does not match the extracted files stops the update bef
  await f.release(B);assert.equal((await u.download()).kind,'ready');
 });
 test('the desktop tree digest matches the publisher for ordering and non-ASCII paths',async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-tree-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-tree-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const names=['z.txt','a-b/x','a.b','a/b','A/B','é/ü.md','日本/語.txt','a/b c','requirements.lock'];
  const files=names.map(name=>[name,createHash('sha256').update('content of '+name).digest('hex')]);
  // ZIP names are case-sensitive even when the test host's filesystem is not.
@@ -1173,7 +1173,7 @@ test('Python dependencies install only from the hash-pinned locks, like the cont
  const {pythonDependencies}=await import('../scripts/runtime-contract.mjs');
  const repo=fileURLToPath(new URL('../..',import.meta.url));
  assert.equal(await pythonDependencyKey(repo),await pythonDependencies(repo));
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-lock-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-lock-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const source=path.join(root,'source');await fs.mkdir(path.join(source,'fluid'),{recursive:true});
  for(const name of ['requirements.txt','requirements-native.txt','requirements.lock','fluid/pyproject.toml'])await fs.writeFile(path.join(source,name),'x');
  const log=path.join(root,'build.log');const runtime={root,python:'python-not-run',node:'node-not-run',npm:'npm',pythonDependencies:''};

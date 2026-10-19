@@ -34,7 +34,7 @@ test('only generated managed credentials are persisted, encrypted and reusable a
 		assert.equal(typeof again.useBundled, 'undefined');
 		assert.equal(typeof again.postgresPublic, 'undefined');
 		if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o600);
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('legacy external settings are ignored without modifying or importing them', async () => {
@@ -48,7 +48,7 @@ test('legacy external settings are ignored without modifying or importing them',
 			assert.equal(store.postgres(), null);
 			assert.equal(await readFile(file, 'utf8'), original);
 		}
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('private fallback storage persists, and unavailable keyrings do not leak encrypted values', async () => {
@@ -61,5 +61,5 @@ test('private fallback storage persists, and unavailable keyrings do not leak en
 		const broken = new SettingsStore(file, { available: () => true, decrypt: () => { throw Error('keyring locked'); } });
 		await broken.load(); assert.equal(broken.postgres(), null);
 		await writeFile(file, '{broken'); await again.load(); assert.equal(again.postgres(), null);
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
