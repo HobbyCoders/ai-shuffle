@@ -39,7 +39,7 @@ if [ -f "$root/scripts/local_ci.py" ]; then
   # $1 is the remote being pushed to. It bounds a new branch's secret scan by
   # what that remote's main already holds. It goes in the environment because
   # an older checkout's local_ci.py would reject an extra argument.
-  printf '%s\n' "$refs" | LOCAL_CI_PUSH_REMOTE="$1" "$python" "$root/scripts/local_ci.py" pre-push || exit 1
+  printf '%s\n' "$refs" | LOCAL_CI_HOOK=4 LOCAL_CI_PUSH_REMOTE="$1" "$python" "$root/scripts/local_ci.py" pre-push || exit 1
 fi
 user_hook="$(dirname "$0")/pre-push.user"
 if [ -x "$user_hook" ]; then

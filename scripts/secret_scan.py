@@ -74,7 +74,11 @@ def new_ref_boundary(root: Path, push_remote: str | None) -> str | None:
     deleted branch could hide commits the remote no longer has. A named target
     without that ref (not fetched, or a URL) scans all reachable history (fail
     safe). An older hook names no target and keeps the origin/main boundary.
+    This assumes a fresh fetch: an unfetched force-push that rewinds main can
+    hide commits the remote no longer has, as with the old origin/main boundary.
     """
+    if push_remote and push_remote not in git(root, "remote").decode("utf-8").splitlines():
+        return None  # URLs, paths and unknown names must not select a tracking ref.
     ref = "origin/main" if not push_remote else f"refs/remotes/{push_remote}/main"
     exists = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref + "^{commit}"],
                             cwd=root, capture_output=True, check=False, timeout=15)
