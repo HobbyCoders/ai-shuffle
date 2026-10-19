@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
@@ -597,6 +597,7 @@ def set_codex_token_bundle(
     last_refresh: Optional[str] = None,
     needs_reauth: bool = False,
     auth_mode: str = "chatgpt",
+    preserve_refresh_stamp: bool = False,
 ) -> Optional[ModelProviderRow]:
     """Atomically persist an OAuth token bundle on a provider row.
 
@@ -611,11 +612,28 @@ def set_codex_token_bundle(
     be ``enc:``-prefixed blobs (encryption at the call site, same contract as
     ``auth_token``).
 
+    Reconnects and rotations advance beyond the newest stored generation even
+    when this worker's clock is behind. ``last_refresh`` supplies the caller's
+    current time; only reauth-flag changes use ``preserve_refresh_stamp=True``.
+
     Returns the fresh public row (no blobs), or ``None`` if the provider is gone.
     """
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        if not preserve_refresh_stamp:
+            # Serialize with sync's guarded UPSERT as well as other writers.
+            cursor.execute("SELECT codex_last_refresh FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,))
+            stored = cursor.fetchone()
+            stamp = datetime.fromisoformat(str(last_refresh or now))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if stored and stored["codex_last_refresh"] is not None:
+                prior = datetime.fromisoformat(str(stored["codex_last_refresh"]))
+                if prior.tzinfo is None:
+                    prior = prior.replace(tzinfo=timezone.utc)
+                stamp = max(stamp, prior + timedelta(microseconds=1))
+            last_refresh = stamp.isoformat()
         cursor.execute(
             """
             UPDATE model_providers
