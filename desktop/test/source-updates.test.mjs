@@ -1458,6 +1458,25 @@ async function stagedOver(t){
  assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).staged,B);
  return {f,u,b};
 }
+test('#98: a waiting build takes precedence over a failed-start retry offer', async t => {
+ const {f,u,factory}=await rollbackFixture(t);
+ // Produce the failed-start record through the real restore path, not a seeded flag.
+ await u.prepareRollback(factory);await u.select();await u.databaseStarting();await u.failed();
+ await u.recoverRollback(factory);
+ assert.equal(u.hasMigrationRisk,false);
+ u.stageDownloads();await f.release(C);await u.download();
+ // A fresh feed advertises the failed revision after the waiting build was signed.
+ await f.release(B);f.requests.length=0;const builds=f.builds;
+ for(const run of [()=>u.check(),()=>u.download()]){
+  const result=await run();assert.equal(result.kind,'ready');assert.equal(result.version,C.slice(0,12));
+ }
+ assert.equal(u.pendingVersion,C);assert.equal(f.builds,builds);
+ assert.deepEqual(f.requests,Array(2).fill('https://hobbycoders.com/v1/desktop/manifest'));
+ // No refusal means Updater does not invoke failed-start recovery while C waits.
+ // Once the waiting build is gone, the normal retry-triggering refusal returns.
+ assert.equal(await u.discardStaged(C),true);
+ await assert.rejects(u.check(),/This revision failed to start/);
+});
 test('#98: a staged build does not hide a newer release; a download replaces it and removes its files',async t=>{
  const {f,u}=await stagedOver(t);
  await f.release(C,undefined,{version:'1.0.1'});f.requests.length=0;const builds=f.builds;

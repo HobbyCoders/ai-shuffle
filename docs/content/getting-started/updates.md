@@ -60,6 +60,8 @@ The desktop app checks for new releases when it starts and once a day, and offer
 
 A downloaded update that is waiting for **Update and restart** does not hide a newer release: a check still reads the feed, and **Download update** replaces the waiting update with the newer one. If that download fails, the earlier update stays ready. If the newer release needs a different launcher or Electron, a notice before the release notes explains its installer requirement while the earlier download remains ready to install. If a download's release information cannot be verified, it cannot be installed, but a newer verified download can replace it. An update that is installing, starting or held back after a failed start is never replaced.
 
+An existing install that has never taken an in-app update still runs the updater bundled in its installer. A waiting download can therefore keep hiding newer releases until that first in-app update installs code containing this fix. The staged-replacement behaviour above takes effect after that update, on both Windows and Linux.
+
 If a release cannot start on this install's desktop launcher, the app says so before it downloads anything: install the latest AI Shuffle installer from hobbycoders.com. Your data is kept.
 
 On packaged Linux (AppImage/deb), a release requiring a different Electron version also needs the latest installer, to keep the installed Linux sandbox. The signed update feed names the locked Electron version; the app refuses a mismatch before offering or downloading it and shows the installer remedy. Older manifests without that field still use the launch-time compatibility check. This preflight takes effect after the install has received an update containing it.
