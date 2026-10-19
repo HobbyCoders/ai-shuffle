@@ -748,6 +748,7 @@ class SessionRuntime:
         # The run this turn was started under, and whether this runner stopped
         # owning it mid-turn (lease lost or fence superseded, ``_stop_unowned``).
         self._run_id: Optional[str] = None
+        self._renew_task: Optional[asyncio.Task] = None
         self._unowned = False
         self._recorder_closing = False
         # Queued turn ids already handed to the engine as steers THIS turn.
@@ -1003,7 +1004,9 @@ class SessionRuntime:
         # done-frame cleanup.
         _notify_run_change(sid, force=True)
 
-        renew_task = asyncio.create_task(self._renew_loop(run_id, runner_id, fence_token))
+        renew_task = self._renew_task = asyncio.create_task(
+            self._renew_loop(run_id, runner_id, fence_token)
+        )
         renew_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
         outcome: Optional[str] = None
@@ -2703,6 +2706,19 @@ class SessionRuntime:
                     "SessionRuntime: park settle re-check failed for %s", sid,
                     exc_info=True,
                 )
+
+        # From the first park/settle write onward, renew_run deliberately rejects
+        # this turn. Stop and join the heartbeat BEFORE that write, not after
+        # the awaited event recording / git snapshot below: a tick in that gap
+        # must not mistake our own final state for a takeover and interrupt
+        # background work. Keep renewing throughout the earlier cleanup. Any
+        # in-flight SQL still obeys the database ownership/fencing guards.
+        if self._renew_task is not None:
+            self._renew_task.cancel()
+            try:
+                await self._renew_task
+            except asyncio.CancelledError:
+                pass
 
         # Park only on work that is actually outstanding. A gate armed solely
         # by registry records whose durable rows have all settled would park on

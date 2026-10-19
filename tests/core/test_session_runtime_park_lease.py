@@ -9,7 +9,7 @@ uses (``_runtime_env``), so these read as a continuation of that suite.
 
 import asyncio
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -223,6 +223,74 @@ async def test_a_renewal_error_inside_the_ttl_is_retried_not_fatal(mock_db, monk
     lost.assert_not_called()
     assert "SessionRuntime: renew_run raised for run" in caplog.text
     assert turns_db.get_turn(turn["id"])["stop_reason"] != "lease_lost"
+
+
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "parked"])
+@pytest.mark.parametrize("renewal_phase", ["sleeping", "in_flight"])
+async def test_final_state_stops_heartbeat_before_post_write_cleanup(
+    mock_db, monkeypatch, outcome, renewal_phase,
+):
+    """A tick due during final-state cleanup must not interrupt the CLI.
+
+    Drive the real park/settle writer, then hold the awaited cleanup open for
+    multiple heartbeat intervals. Also cover a renewal already awaiting SQL
+    when finalization starts: cancellation must be joined before the write.
+    """
+    sid = f"final-heartbeat-{outcome}-{renewal_phase}"
+    turn = turns_db.enqueue_turn(sid, "user", prompt="finish turn")
+    rt = session_runtime.SessionRuntime(turn)
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.005)
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    real_run_lease = session_runtime.run_lease
+
+    async def renew(*args):
+        if renewal_phase == "in_flight":
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        result = await real_run_lease(*args)
+        entered.set()
+        return result
+
+    monkeypatch.setattr(session_runtime, "run_lease", renew)
+
+    async def pump(**kwargs):
+        await asyncio.wait_for(entered.wait(), 2)
+        yield {"type": "interrupted" if outcome == "aborted" else "done", "metadata": {}}
+
+    after_write = []
+
+    async def cleanup(*args, **kwargs):
+        # This is the producing path's actual row, not a seeded terminal turn.
+        assert turns_db.get_turn(turn["id"])["state"] == outcome
+        assert rt._renew_task.done()
+        assert rt._renew_task.cancelled()
+        # Without the fix a heartbeat here would see the terminal/parked row
+        # and report lease loss while execute() has not reached its finally.
+        await asyncio.sleep(0.03)
+        after_write.append(outcome)
+
+    with _runtime_env(
+        pump=pump, bg_work=[{"id": "background-cli"}] if outcome == "parked" else [],
+    ) as env, patch.object(rt, "_on_lease_lost", wraps=rt._on_lease_lost) as lost, \
+            patch.object(rt, "_stop_unowned", wraps=rt._stop_unowned) as stop, \
+            patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()) as interrupt:
+        if outcome == "parked":
+            env["record_parked"].side_effect = cleanup
+        else:
+            monkeypatch.setattr(rt, "_snapshot_working_set", cleanup)
+        assert await asyncio.wait_for(rt.execute(), 3) == outcome
+        lost.assert_not_called()
+        stop.assert_not_called()
+        interrupt.assert_not_called()
+    assert after_write == [outcome]
+    assert not rt._unowned
+    assert rt._abort_reason is None
+    if renewal_phase == "in_flight":
+        assert cancelled.is_set()
 
 
 # ---------------------------------------------------------------------------

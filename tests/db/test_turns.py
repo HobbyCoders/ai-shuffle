@@ -440,6 +440,26 @@ def test_requeue_keeps_position_and_frees_slot(mock_db):
 # Reaping dead-lease live turns
 # ---------------------------------------------------------------------------
 
+def test_reaper_uses_recovery_timeouts_with_lease_admission(mock_db, monkeypatch):
+    from contextlib import contextmanager
+    from app.db import base
+
+    real_get_lease_db = turns.get_lease_db
+    seen = []
+
+    @contextmanager
+    def observe(**kwargs):
+        seen.append(kwargs)
+        with real_get_lease_db(**kwargs) as conn:
+            assert base._lease_checkout.get() == (5000, 15000)
+            yield conn
+
+    monkeypatch.setattr(turns, "get_lease_db", observe)
+    assert turns.reap_expired() == []
+    assert seen == [{"lock_timeout_ms": 5000, "statement_timeout_ms": 15000}]
+    assert base._lease_checkout.get() is False
+
+
 @pytest.mark.parametrize("source", ["user", "queue", "agent_message"])
 def test_reap_requeues_messages_and_aborts_automatic_work(mock_db, source):
     # Accepted messages on a dead lease stay queued for the replacement runner.

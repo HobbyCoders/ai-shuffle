@@ -1,5 +1,6 @@
 """Real PostgreSQL admission and row-lock races on a private disposable cluster."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import threading
 from uuid import uuid4
 
@@ -188,6 +189,52 @@ def test_lease_sql_timeouts_release_workers_and_do_not_leak(lease_pool):
         cursor.execute("SHOW statement_timeout")
         assert cursor.fetchone()["statement_timeout"] == "0"
     assert runs.renew_run(run["id"], "owner", run["fence_token"], 60)
+
+
+def test_reaper_waits_past_heartbeat_timeout_and_resets_sql_limits(lease_pool, monkeypatch):
+    sid = uuid4().hex
+    run = runs.claim_run(sid, "crashed", -1)
+    turn = turns.enqueue_turn(sid, "user", prompt="recover")
+    assert turns.start_turn(turn["id"], run_id=run["id"])
+    entered = threading.Event()
+    real_get_lease_db = turns.get_lease_db
+
+    @contextmanager
+    def observe(**kwargs):
+        with real_get_lease_db(**kwargs) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SHOW lock_timeout")
+            assert cursor.fetchone()["lock_timeout"] == "5s"
+            cursor.execute("SHOW statement_timeout")
+            assert cursor.fetchone()["statement_timeout"] == "15s"
+            entered.set()
+            yield conn
+
+    monkeypatch.setattr(turns, "get_lease_db", observe)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with base.get_db() as blocker:
+            cursor = blocker.cursor()
+            cursor.execute("SELECT id FROM runs WHERE id=%s FOR UPDATE", (run["id"],))
+            sweep = executor.submit(turns.reap_expired)
+            assert entered.wait(3)
+            # A normal writer holds the row longer than the 500ms heartbeat
+            # budget. The sweep must wait, not abort its whole transaction.
+            cursor.execute("SELECT pg_sleep(0.75)")
+            assert not sweep.done()
+        assert turn["id"] in {row["id"] for row in sweep.result(timeout=5)}
+    assert turns.get_turn(turn["id"])["state"] == "queued"
+    with base.get_lease_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SHOW lock_timeout")
+        assert cursor.fetchone()["lock_timeout"] == "500ms"
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()["statement_timeout"] == "1500ms"
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SHOW lock_timeout")
+        assert cursor.fetchone()["lock_timeout"] == "0"
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()["statement_timeout"] == "0"
 
 
 def test_reaper_fences_even_skipped_local_turns(lease_pool):

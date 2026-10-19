@@ -458,8 +458,9 @@ def _get_pg_connection() -> "_PgDictConnection":
                     # Transaction-local limits also bound workers left finishing
                     # after an async TTL timeout. Never leak these to borrowers.
                     with conn.cursor() as cursor:
-                        cursor.execute("SET LOCAL lock_timeout = '500ms'")
-                        cursor.execute("SET LOCAL statement_timeout = '1500ms'")
+                        lock_ms, statement_ms = _lease_checkout.get()
+                        cursor.execute("SET LOCAL lock_timeout = %s", (f"{lock_ms}ms",))
+                        cursor.execute("SET LOCAL statement_timeout = %s", (f"{statement_ms}ms",))
             except BaseException:
                 _close_connection(conn)
                 raise
@@ -602,9 +603,13 @@ _lease_checkout = ContextVar("db_lease_checkout", default=False)
 
 
 @contextmanager
-def get_lease_db():
-    """Short lease maintenance only; shares the pool budget, not its admission queue."""
-    token = _lease_checkout.set(True)
+def get_lease_db(*, lock_timeout_ms: int = 500, statement_timeout_ms: int = 1500):
+    """Lease maintenance; separate admission, transaction-local SQL limits.
+
+    Heartbeats fail promptly by default. Recovery sweeps can allow longer row
+    lock waits without inheriting ordinary admission or changing later borrowers.
+    """
+    token = _lease_checkout.set((lock_timeout_ms, statement_timeout_ms))
     try:
         with get_db() as conn:
             yield conn
