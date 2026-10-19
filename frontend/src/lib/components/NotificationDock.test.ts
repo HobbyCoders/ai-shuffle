@@ -104,6 +104,21 @@ describe('notification dock', () => {
 		expect(dock.getAttribute('role')).toBe('region');
 	});
 
+	it.each(['anchored', 'fallback'] as const)('caps the %s stack and preserves the newest Undo actions', async (variant) => {
+		const undo = vi.fn();
+		render(NotificationDock, { variant });
+		for (let i = 0; i < 8; i++) {
+			notify.banner(`Archived session ${i}`, { action: { label: 'Undo', onClick: () => undo(i) } });
+		}
+		await screen.findByText('Archived session 7');
+		expect(document.querySelectorAll('.dock-entry')).toHaveLength(3);
+		expect(screen.queryByText('Archived session 4')).toBeNull();
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Undo' })[2]);
+		expect(undo).toHaveBeenCalledWith(7);
+		expect(document.querySelectorAll('.dock-entry')).toHaveLength(2);
+		expect(screen.queryByText('Archived session 4')).toBeNull();
+	});
+
 	it('runs a banner action from the dock and removes the banner', async () => {
 		const undo = vi.fn();
 		render(NotificationDock);
