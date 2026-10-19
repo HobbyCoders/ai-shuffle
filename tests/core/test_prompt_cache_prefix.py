@@ -11,6 +11,7 @@ across turns that changed all three, and the model still reads all three.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import uuid
 
 import pytest
@@ -30,19 +31,17 @@ def _hash(text: str) -> str:
 # ─── the per-turn environment note ───────────────────────────────────────────
 
 
-def test_turn_note_carries_the_date_and_the_branch_pair(monkeypatch):
+def test_turn_note_carries_the_date_and_the_branch(monkeypatch):
     monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
-    note = generate_turn_environment_note(
-        execution_mode="worktree",
-        worktree_info={"branch": "claude/one", "base_branch": "main"},
-    )
+    note = generate_turn_environment_note(branch="claude/one")
     assert TURN_ENV_HEADER in note
     assert "Today's date: 2026-09-04" in note
     assert "Current branch: claude/one" in note
-    assert "Base branch: main" in note
+    # A worktree's base branch is session-stable: it sits in the prompt.
+    assert "Base branch" not in note
 
 
-def test_turn_note_outside_worktree_mode_is_just_the_date(monkeypatch):
+def test_turn_note_without_a_branch_is_just_the_date(monkeypatch):
     monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
     note = generate_turn_environment_note()
     assert "Today's date: 2026-09-04" in note
@@ -153,15 +152,13 @@ async def test_send_query_appends_the_volatile_context(
     adapter._options = SessionOptions(
         model="fake-model",
         cwd=str(tmp_path),
-        extra={
-            "app_session_id": memory_session_id,
-            "turn_env": {
-                "execution_mode": "worktree",
-                "worktree_info": {"branch": "claude/one", "base_branch": "main"},
-            }
-        },
+        extra={"app_session_id": memory_session_id},
     )
-    adapter._is_delegated = False
+    # A delegated leg whose custom prompt replaced Claude Code's preset: the
+    # one shape where the adapter owns the per-turn date and branch.
+    subprocess.run(["git", "init", "-q", "-b", "claude/one", str(tmp_path)], check=True)
+    adapter._is_delegated = True
+    adapter._delegated_replaces_preset = True
     engine = _RecordingEngine()
     adapter._engine = engine
 
@@ -175,12 +172,15 @@ async def test_send_query_appends_the_volatile_context(
 
 
 @pytest.mark.asyncio
-async def test_send_query_is_unchanged_without_an_app_env_block(tmp_path):
-    """A profile whose prompt never carried the app's <env> block does not
-    start getting one on its user messages."""
+@pytest.mark.parametrize("delegated", [True, False], ids=["preset", "native"])
+async def test_send_query_adds_no_second_date_note(tmp_path, delegated):
+    """A preset delegated leg keeps Claude Code's own date and git facts, and
+    the native leg gets fluid's per-turn reminder from the engine, so the
+    adapter adds no copy of its own to either."""
+    subprocess.run(["git", "init", "-q", "-b", "claude/two", str(tmp_path)], check=True)
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(model="fake-model", cwd=str(tmp_path))
-    adapter._is_delegated = True
+    adapter._is_delegated = delegated
     engine = _RecordingEngine()
     adapter._engine = engine
 
@@ -188,7 +188,7 @@ async def test_send_query_is_unchanged_without_an_app_env_block(tmp_path):
 
     content = engine.ops[0].content
     assert content.startswith("do the thing")
-    assert "<env>" not in content
+    assert TURN_ENV_HEADER not in content and "claude/two" not in content
     # The only other rider is the memory reminder, which is not an env block
     # (fluid renders a placeholder for an empty store since audit round 9).
     assert content.replace("do the thing", "", 1).strip().startswith("<system-reminder>") or content == "do the thing"

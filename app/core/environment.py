@@ -914,6 +914,70 @@ def _build_env_with_ai_tools(
     return env
 
 
+#: Appended after the placement line when the session executes on a shared
+#: runner (or inside a container). One session spent nine minutes and a user
+#: interruption starting the app inside the runner and pointing the browser
+#: tool at its loopback address; nothing in the prompt said where it was.
+PLACEMENT_RUNNER_NOTE = (
+    "The app instance the user is looking at is a separate, already-running "
+    "process — not one you can start here, and localhost here is not the "
+    "browser tool's localhost. Do not treat an app you launch here as live "
+    "verification: verify through the browser tool against the user's "
+    "instance, a real-provider probe, or an end-to-end test that drives the "
+    "producing path."
+)
+
+
+def _placement_lines(placement_where: Optional[str]) -> list:
+    """The ``Runtime placement:`` line (plus the shared-runner note), or none.
+
+    ``placement_where`` is ``sessions.placement["where"]`` — ``runner:<id>``
+    for a pinned session, ``anywhere``/a capability token for an elected one,
+    empty/None for the local lane. The note rides along for a ``runner:`` pin
+    and for any session that finds itself inside a container, which are the
+    two shapes where "just run the app and look at it" quietly verifies the
+    wrong process.
+    """
+    where = (placement_where or "").strip()
+    shared = where.startswith("runner:") or _in_container()
+    if not where and not shared:
+        return []
+    label = where or "local"
+    if shared:
+        return [
+            f"Runtime placement: {label} (shared runner). {PLACEMENT_RUNNER_NOTE}"
+        ]
+    return [f"Runtime placement: {label}"]
+
+
+def session_runtime_lines(runtime: Optional[Dict[str, Any]]) -> list:
+    """Where and how this session runs, for every agent's environment section.
+
+    ``runtime`` is what ``build_options_from_profile`` stamps as
+    ``aih_session_runtime``: ``execution_mode`` (``local``/``worktree``),
+    ``base_branch`` (worktree mode only) and ``placement_where``. Renders
+    ``Execution mode: worktree`` + ``Base branch:`` for a worktree session
+    (local is the default and says nothing) and the placement line(s) of
+    :func:`_placement_lines`.
+
+    Session-stable by construction, so the lines sit in the cached half of
+    the prompt next to the ``Worker:`` line: a re-placed session or a new
+    checkout rebuilds the prompt with the rest of its context. The current
+    branch is NOT here; it changes under a running session and rides each
+    turn instead. Never raises.
+    """
+    try:
+        runtime = runtime if isinstance(runtime, dict) else {}
+        lines = []
+        if runtime.get("execution_mode") == "worktree":
+            lines.append("Execution mode: worktree")
+            lines.append(f"Base branch: {runtime.get('base_branch') or 'main'}")
+        lines.extend(_placement_lines(runtime.get("placement_where")))
+        return lines
+    except Exception:  # noqa: BLE001 — a prompt nicety never fails a connect
+        return []
+
+
 def _in_container() -> bool:
     """Whether this process runs inside a container. Never raises."""
     try:
@@ -1069,18 +1133,6 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _worktree_lines(
-    execution_mode: str, worktree_info: Optional[Dict[str, str]]
-) -> list:
-    """``Current branch`` / ``Base branch``, or nothing outside worktree mode."""
-    if execution_mode != "worktree" or not worktree_info:
-        return []
-    return [
-        f"Current branch: {worktree_info.get('branch', 'unknown')}",
-        f"Base branch: {worktree_info.get('base_branch', 'main')}",
-    ]
-
-
 TURN_ENV_HEADER = "Environment facts that change while a session runs"
 
 
@@ -1101,12 +1153,7 @@ def checkout_branch(working_dir: Optional[str]) -> Optional[str]:
     return branch or None
 
 
-def generate_turn_environment_note(
-    execution_mode: str = "local",
-    worktree_info: Optional[Dict[str, str]] = None,
-    *,
-    branch: Optional[str] = None,
-) -> str:
+def generate_turn_environment_note(*, branch: Optional[str] = None) -> str:
     """Today's date and the branch, rendered fresh for one turn.
 
     This rides the turn's user message instead of the system prompt: it sits
@@ -1119,13 +1166,12 @@ def generate_turn_environment_note(
     always current; the header says so, because older turns keep their own
     copies in history and those can name a branch that has since changed.
 
-    ``branch`` names the checkout's branch when worktree mode does not (the
-    worktree lines win when both are present).
+    ``branch`` is the checkout's live branch (:func:`checkout_branch`); a
+    worktree's base branch is session-stable and sits in the prompt instead
+    (:func:`session_runtime_lines`).
     """
     lines = [f"Today's date: {_today()}"]
-    worktree = _worktree_lines(execution_mode, worktree_info)
-    lines.extend(worktree)
-    if branch and not worktree:
+    if branch:
         lines.append(f"Current branch: {branch}")
     body = "\n".join(lines)
     return (

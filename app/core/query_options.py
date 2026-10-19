@@ -451,6 +451,49 @@ def _claim_and_run_pending_checkout(
         return False
 
 
+def _session_runtime(
+    session_id: Optional[str],
+    session_row: Optional[Dict[str, Any]],
+    binding_row: Optional[Dict[str, Any]],
+    working_dir_source: str,
+    *,
+    chat: bool = False,
+) -> Dict[str, Any]:
+    """``{"execution_mode", "base_branch", "placement_where"}`` for this session.
+
+    Worktree mode is a v2 checkout bound to a branch; its base branch comes
+    from the legacy worktree row when there is one, else ``main``.
+    ``placement_where`` is an EXPLICIT
+    ``sessions.placement["where"]`` only: the implicit ``instance_id`` pin is
+    every session, including the local lane, so surfacing it would say "shared
+    runner" everywhere. Best-effort throughout: these are prompt facts, never
+    a gate.
+    """
+    execution_mode, base_branch = "local", None
+    if not chat and working_dir_source == "project-v2" and session_row and (
+        session_row.get("branch") or session_row.get("worktree_branch")
+    ):
+        execution_mode = "worktree"
+        try:
+            wt_row = database.get_worktree_by_session(session_id)
+            base_branch = (wt_row or {}).get("base_branch")
+        except Exception:  # noqa: BLE001 — best-effort base_branch enrichment
+            base_branch = None
+    placement_where: Optional[str] = None
+    try:
+        from app.core.placement import _normalize_placement
+
+        placement = _normalize_placement((binding_row or {}).get("placement"))
+        placement_where = str((placement or {}).get("where") or "").strip() or None
+    except Exception:  # noqa: BLE001 — placement is a prompt nicety, never a gate
+        placement_where = None
+    return {
+        "execution_mode": execution_mode,
+        "base_branch": (base_branch or "main") if execution_mode == "worktree" else None,
+        "placement_where": placement_where,
+    }
+
+
 def _rescue_pending_checkout(session_row: Dict[str, Any]) -> bool:
     """Pre-flight half of the branch-session race guard: materialize this
     session's checkout from a queued ``ensure_worktree`` op BEFORE the cwd
@@ -935,6 +978,14 @@ def build_options_from_profile(
             _binding_row = None
     session_mode = session_mode_of(_binding_row)
 
+    # Where and how this session runs (execution mode, a worktree's base
+    # branch, the runtime placement). The adapter renders it into every
+    # agent's environment section (environment.session_runtime_lines).
+    session_runtime = _session_runtime(
+        session_id, session_row, _binding_row, working_dir_source,
+        chat=session_mode == "chat",
+    )
+
     if session_mode == "chat":
         # A chat session RUNS INSIDE its own uploads folder. This is not
         # cosmetic and it is not about tidiness: it is half of the read fence.
@@ -1008,8 +1059,11 @@ def build_options_from_profile(
             # Start building the prompt. No environment block here, whatever
             # the config says: the retired ``inject_env_details`` key is
             # ignored (app/db/profiles.py drops it on read and write). The
-            # fluid prompt compiler adds the environment section and the
-            # per-turn date/git reminder for every profile.
+            # harness adds the environment for every profile: the compiled
+            # ``# Environment`` section (with ``aih_session_runtime``'s lines
+            # beside the Worker line) and a per-turn date/branch reminder
+            # (fluid's on the native leg, the adapter's on a delegated leg
+            # whose prompt replaces Claude Code's preset).
             prompt_parts = [security_instructions]
 
             # Add custom content if provided
@@ -1921,6 +1975,7 @@ def build_options_from_profile(
     options.aih_assistant_home = assistant_home
     options.aih_assistant_scope = assistant_scope
     # Durable turn provenance must also survive SDK option rebuilding.
+    options.aih_session_runtime = session_runtime
 
     # No per-project memory dir is stamped here and the prompt has no
     # "# Project memory" section: nothing writes one (see

@@ -190,7 +190,7 @@ def test_worker_line_sits_in_the_stable_half_and_is_byte_identical(monkeypatch, 
     # Right after the shell line, in the session-stable section.
     assert one.index("Shell:") < one.index("Worker:") < one.index("Git repository:")
     # The per-turn note never carries it.
-    assert "Worker" not in generate_turn_environment_note("worktree", {"branch": "b"})
+    assert "Worker" not in generate_turn_environment_note(branch="b")
 
 
 def test_moved_session_renders_the_new_worker(monkeypatch, tmp_path):
@@ -234,15 +234,6 @@ def test_native_compile_puts_the_worker_in_fluids_environment_section(isolated_h
     )
     env_sections = [s for s in compiled.sections if s.text.startswith("# Environment")]
     assert len(env_sections) == 1 and WORKER in env_sections[0].text
-    assert compiled.text.count("Worker: ServerWorker") == 1
-
-
-def test_native_compile_with_app_env_block_does_not_double_the_line(isolated_home, tmp_path):
-    system = f"<env>\nWorking directory: {tmp_path}\n{WORKER}\n</env>"
-    options = SessionOptions(model="fake", cwd=str(tmp_path))
-    compiled = ha.HarnessAdapter._compile_prompt_sections(
-        system, None, options, native=True, worker=WORKER
-    )
     assert compiled.text.count("Worker: ServerWorker") == 1
 
 

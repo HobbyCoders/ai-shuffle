@@ -503,9 +503,12 @@ def _strip_retired_prompt_keys(cursor, migrations_applied=None):
 
     The key used to add the app's own ``<env>`` block to a custom prompt; the
     fluid prompt compiler now supplies the environment for every agent, so a
-    stored true or false controls nothing. Removing it from the row keeps it
-    out of raw reads and out of what replication sends to other workers. Only
-    the key goes: the prompt text and every other config field stay as stored.
+    stored true or false controls nothing. This pass cleans the rows present
+    when it runs at startup. A row that arrives later from an older peer is
+    stored as sent until the next pass, and ``app.db.profiles`` drops the key
+    on every read and write in between; raw config readers elsewhere ignore
+    it. Only the key goes: the prompt text and every other config field stay
+    as stored.
 
     Idempotent (a clean row is skipped) and cheap, so it sits in the always-run
     column-migration pass; no ``SCHEMA_VERSION`` bump (the migrations

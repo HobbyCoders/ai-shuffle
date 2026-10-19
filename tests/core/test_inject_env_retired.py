@@ -2,7 +2,8 @@
 
 It once added the app's own ``<env>`` block to a custom system prompt. The
 fluid prompt compiler now supplies the environment for every agent (a stable
-``# Environment`` section plus a per-turn date/git reminder), so a stored
+``# Environment`` section, carrying the session's worktree and placement
+lines, plus a per-turn date/git reminder), so a stored
 true, false or missing value must make no difference, must not be written,
 and must not be read back out of the agent store.
 
@@ -151,6 +152,100 @@ def test_query_options_ignore_the_value(flag, repo):
     options = _build({"id": "t", "config": _legacy_config(flag)}, repo)
     assert options.system_prompt == "SECURITY\n\nCustom agent prompt"
     assert getattr(options, "aih_turn_env", None) is None
+    assert options.aih_session_runtime == {
+        "execution_mode": "local", "base_branch": None, "placement_where": None,
+    }
+
+
+# ─── the session's runtime facts reach every agent automatically ────────────
+
+
+def test_runtime_lines_name_worktree_mode_base_branch_and_placement(monkeypatch):
+    import app.core.environment as env_mod
+
+    monkeypatch.setattr(env_mod, "_in_container", lambda: False)
+    assert env_mod.session_runtime_lines(
+        {"execution_mode": "local", "placement_where": None}
+    ) == []
+    assert env_mod.session_runtime_lines(
+        {"execution_mode": "worktree", "base_branch": "develop", "placement_where": "anywhere"}
+    ) == ["Execution mode: worktree", "Base branch: develop", "Runtime placement: anywhere"]
+    runner = env_mod.session_runtime_lines({"placement_where": "runner:dev_abc"})
+    assert runner == [
+        f"Runtime placement: runner:dev_abc (shared runner). {env_mod.PLACEMENT_RUNNER_NOTE}"
+    ]
+    assert "Do not treat an app you launch here as live verification" in runner[0]
+    # Inside a container the shared-runner note rides even the local lane.
+    monkeypatch.setattr(env_mod, "_in_container", lambda: True)
+    assert env_mod.session_runtime_lines({"execution_mode": "local"}) == [
+        f"Runtime placement: local (shared runner). {env_mod.PLACEMENT_RUNNER_NOTE}"
+    ]
+
+
+def test_session_runtime_reads_worktree_and_placement(monkeypatch):
+    monkeypatch.setattr(
+        qo.database, "get_worktree_by_session", lambda sid: {"base_branch": "release"}
+    )
+    row = {"branch": "task/x", "placement": json.dumps({"where": "runner:dev_abc"})}
+    assert qo._session_runtime("s1", row, row, "project-v2") == {
+        "execution_mode": "worktree", "base_branch": "release",
+        "placement_where": "runner:dev_abc",
+    }
+    # No legacy worktree row -> main.
+    monkeypatch.setattr(qo.database, "get_worktree_by_session", lambda sid: None)
+    assert qo._session_runtime(
+        "s2", {"branch": "task/y"}, None, "project-v2"
+    )["base_branch"] == "main"
+    # A branch-less checkout, a non-v2 cwd and the chat lane are local.
+    assert qo._session_runtime("s3", {}, None, "project-v2")["execution_mode"] == "local"
+    assert qo._session_runtime("s3", row, row, "override")["execution_mode"] == "local"
+    assert qo._session_runtime(
+        "s4", row, row, "project-v2", chat=True
+    )["execution_mode"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_worktree_runtime_reaches_the_compiled_environment(monkeypatch, repo):
+    """The producing path for worktree mode and placement: build options ->
+    the adapter's projection -> its connect-time identity text -> fluid's
+    ``# Environment`` section (native and delegated full-replace)."""
+    import app.core.environment as env_mod
+
+    monkeypatch.setattr(env_mod, "_in_container", lambda: False)
+    monkeypatch.setattr(ha, "_worker_identity_text", lambda: WORKER)
+    _insert_raw("legacy-runtime", _legacy_config(True))
+    session = {"id": "ses-rt", "project_v2_id": "pv2-1", "branch": "task/retire-env",
+               "placement": {"where": "runner:dev_abc"}}
+    with patch.object(qo, "get_security_instructions", return_value="SECURITY"), \
+            patch.object(qo.database, "get_session", return_value=session), \
+            patch.object(qo.database, "get_worktree_by_session",
+                         return_value={"base_branch": "develop"}), \
+            patch("app.core.project_resolver.resolve_cwd", return_value=str(repo)):
+        options, _ = qo.build_options_from_profile(
+            profile=database.get_profile("legacy-runtime"), session_id="ses-rt",
+        )
+    adapter = ha.HarnessAdapter()
+    adapter.connect = AsyncMock()
+    await adapter.connect_with_sdk_options(options)
+    projected = adapter.connect.await_args.args[0]
+    assert projected.extra["session_runtime"]["execution_mode"] == "worktree"
+
+    identity = ha._session_identity_text(projected.extra["session_runtime"])
+    assert identity == "\n".join([
+        WORKER, "Execution mode: worktree", "Base branch: develop",
+        f"Runtime placement: runner:dev_abc (shared runner). {env_mod.PLACEMENT_RUNNER_NOTE}",
+    ])
+    system, append = ha._system_parts(projected.system_prompt)
+    compiled = ha.HarnessAdapter._compile_prompt_sections(
+        system, append, projected, native=True, worker=identity,
+    )
+    env = [s for s in compiled.sections if s.text.startswith("# Environment")]
+    assert len(env) == 1 and identity in env[0].text
+    assert compiled.text.count("Base branch: develop") == 1
+    assert compiled.text.count(env_mod.PLACEMENT_RUNNER_NOTE) == 1
+    delegated = ha.HarnessAdapter._compile_prompt(system, append, projected, identity, None)
+    assert delegated.count("Execution mode: worktree") == 1
+    assert delegated.count(env_mod.PLACEMENT_RUNNER_NOTE) == 1
 
 
 # ─── the producing path: stored row -> adapter -> fluid compiler ────────────
