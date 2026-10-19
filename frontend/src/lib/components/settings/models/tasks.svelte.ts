@@ -248,8 +248,9 @@ export class VoiceDefaults {
 	/** Name of the pinned voice provider, or the automatic choice. */
 	get callProviderName(): string {
 		const id = this.settings?.voice_provider_id;
-		if (!id) return 'OpenAI API key';
-		return getProviders().find((p) => p.id === id)?.name ?? 'OpenAI API key';
+		const fallback = this.settings?.voice_model === 'grok-voice-latest' ? 'xAI API key' : 'OpenAI API key';
+		if (!id) return fallback;
+		return getProviders().find((p) => p.id === id)?.name ?? fallback;
 	}
 }
 

@@ -10,9 +10,11 @@ Voice mode adds a spoken conversation to a chat. You talk, the assistant answers
 
 ## Set up
 
-1. **Add an OpenAI API key** under **Settings → Providers**. Voice calls are paid from your own OpenAI API account. A ChatGPT subscription sign-in cannot pay for them.
-2. **Turn on Voice calls** under **Settings → Voice**. Choose a voice (the play button plays a sample), set **Max call length**, and change the **Call prompts** if you like.
+1. **Add an API key** under **Settings → Providers**: OpenAI for GPT Live, or xAI for Grok Voice. Subscription voice access is not verified; ChatGPT and SuperGrok logins are not offered for calls. An API key is required.
+2. **Turn on Voice calls** under **Settings → Voice**. Choose **GPT Live 1** or **Grok Voice**, then a voice (the play button plays a sample), set **Max call length**, and change the **Call prompts** if you like. Grok defaults to **Eve**, uses server voice activity detection, and delegates work to the same chat agent. Calls keep the engine, provider, voice and prompts they started with.
 3. In the voice chat's composer, **choose the model** that does the work, with its effort and permission mode.
+
+GPT Live includes the nine additional API voices Nuri, Juni, Flitz, Brise, Sillage, Nira, Harema, Shida and Noeul (documentation checked 2026-10-18). GPT Live 1.1 is coming soon to the API; no undocumented model ID is offered. Prompt-to-voice/custom voice creation is not implemented here.
 
 The **Dictation** settings on the same page, including the **Voice input hotkey**, are for speaking into the message box. They do not affect calls.
 
@@ -57,11 +59,11 @@ If breathing or room noise keeps starting a turn, raise the microphone threshold
 
 ## Dropped connections
 
-If the connection drops, for example when your phone moves from Wi-Fi to mobile data, the call shows **reconnecting** and picks up where it left off. Anything said while it shows **reconnecting** is not heard. If it cannot reconnect, the call ends with a message, and you can start it again.
+Grok calls end on a dropped connection; start the call again to rejoin. For GPT Live, if the connection drops, for example when your phone moves from Wi-Fi to mobile data, the call shows **reconnecting** and picks up where it left off. Anything said while it shows **reconnecting** is not heard. If it cannot reconnect, the call ends with a message, and you can start it again.
 
 ## Costs
 
-- Call audio is billed to your OpenAI API account.
+- Call audio and voice samples are billed to your selected engine’s OpenAI or xAI API account. API keys stay on the server; the browser streams PCM audio through the app, not directly to xAI.
 - Work handed to the chat is billed to that chat model's own provider.
 - **Max call length** limits the length of a call, not its cost. Check your provider's usage page for real charges.
 

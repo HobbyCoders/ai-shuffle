@@ -24,6 +24,16 @@ function player(rate = 48000) {
 const frame = (value: number, ms = 100) => new Int16Array(24 * ms).fill(value);
 
 describe('voice playback worklet', () => {
+ it('drops queued speech on provider barge-in and accepts the next reply', () => {
+  const p = player();
+  p.push(frame(8000, 500));
+  p.render(100);
+  p.node.port.onmessage({ data: { type: 'clear' } });
+  expect(p.render(100).every(v => v === 0)).toBe(true);
+  expect(p.messages('speaking').at(-1)).toEqual({ type: 'speaking', active: false });
+  p.push(frame(4000, 100));
+  expect(p.render(500).some(v => v !== 0)).toBe(true);
+ });
  it('plays the end of a reply to its last sample, even below the jitter target', () => {
   const p = player();
   p.push(frame(8000, 60)); // the short tail of a reply

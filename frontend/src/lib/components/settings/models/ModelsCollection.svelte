@@ -103,7 +103,7 @@
 						status: tools.falEnabled === false && voice.settings && voice.inputOnFal ? 'warn' : undefined
 					},
 					...audioTools,
-					{ id: 'voicecall', name: 'Voice calls', summary: `${VOICE_CALL_MODEL}, fixed`, icon: VOICE_CALL_ICON }
+					{ id: 'voicecall', name: 'Voice calls', summary: voice.settings?.voice_model ?? VOICE_CALL_MODEL, icon: VOICE_CALL_ICON }
 				]
 			},
 			{

@@ -290,7 +290,7 @@ class TestVoiceProviders:
         _make_provider(name="Prod OpenAI")
         resp = authenticated_client.get(f"{VOICE_ROOT}/providers")
         assert resp.status_code == 200, resp.text
-        assert resp.json() == [{"id": "prov-openai", "name": "Prod OpenAI"}]
+        assert resp.json() == [{"id": "prov-openai", "name": "Prod OpenAI", "provider_type": "openai"}]
         # The token blob never travels.
         assert RAW_KEY not in resp.text
 
@@ -378,7 +378,7 @@ class TestVoicePreview:
         assert resp.status_code == 200, resp.text
         assert resp.headers["content-type"].startswith("audio/wav")
         assert resp.content == b"RIFF-live-wave"
-        generate.assert_awaited_once_with(RAW_KEY, voice)
+        generate.assert_awaited_once_with(RAW_KEY, voice, "gpt-live-1")
 
     def test_upstream_rejection_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
         from app.core import voice_preview
