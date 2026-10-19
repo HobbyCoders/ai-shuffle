@@ -2727,7 +2727,9 @@ class SessionRuntime:
                 # The pump is finished. A parked/terminal row intentionally
                 # rejects renewals, including one already in flight.
                 self._lease_finalizing = True
-                parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids, usage=usage)
+                parked = await asyncio.to_thread(
+                    turns_db.park_turn, tid, task_ids, usage=usage, run_id=self._run_id,
+                )
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
             if parked is not None:

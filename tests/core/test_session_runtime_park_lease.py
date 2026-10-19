@@ -420,6 +420,42 @@ async def test_finalize_cannot_settle_a_requeued_turn(mock_db, outcome):
     env["scheduler"].assert_not_called()
 
 
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "parked"])
+async def test_finalize_cannot_park_or_settle_a_new_owners_turn(mock_db, outcome):
+    turn = turns_db.enqueue_turn("final-new-owner", "user", prompt="finish")
+    runtime = session_runtime.SessionRuntime(turn)
+    final_write = turns_db.park_turn if outcome == "parked" else turns_db.settle_turn
+    seen = {}
+
+    def take_over_before_write(*args, **kwargs):
+        assert runtime._lease_finalizing
+        assert not runtime._unowned
+        old_run = runs_db.get_active_run(turn["session_id"])
+        assert runs_db.release_run(old_run["id"], old_run["fence_token"])
+        assert turns_db.requeue_turn(turn["id"]) is not None
+        new_run = runs_db.claim_run(turn["session_id"], "new-runner", 60)
+        assert new_run is not None
+        assert turns_db.start_turn(turn["id"], run_id=new_run["id"]) is not None
+        seen["row"] = turns_db.get_turn(turn["id"])
+        seen["run_id"] = new_run["id"]
+        return final_write(*args, **kwargs)
+
+    frames = [{"type": "interrupted" if outcome == "aborted" else "done", "metadata": {}}]
+    with _runtime_env(
+        pump=make_pump(frames), bg_work=[{"id": "old-task"}] if outcome == "parked" else [],
+    ) as env, patch.object(
+        turns_db, "park_turn" if outcome == "parked" else "settle_turn",
+        side_effect=take_over_before_write,
+    ) as write:
+        assert await runtime.execute() == outcome
+
+    assert write.call_args.kwargs["run_id"] == runtime._run_id
+    assert turns_db.get_turn(turn["id"]) == seen["row"]
+    assert runs_db.get_active_run(turn["session_id"])["id"] == seen["run_id"]
+    env["scheduler"].assert_not_called()
+    env["record_parked"].assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # WS tool-input cap (docs: "replaced by a truncation marker when over 4 KB")
 # ---------------------------------------------------------------------------

@@ -1065,12 +1065,14 @@ def absorb_queued_turn(turn_id: str) -> bool:
 
 
 def park_turn(
-    turn_id: str, task_ids: Optional[List[str]] = None, *, usage: Optional[Dict[str, Any]] = None
+    turn_id: str, task_ids: Optional[List[str]] = None, *,
+    usage: Optional[Dict[str, Any]] = None, run_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Park a live turn (it finished the foreground stream but left background
     work running). Records the surviving ``task_ids`` in ``payload.task_ids``.
     Idempotent-ish: only a live turn parks; an already-terminal turn returns
-    ``None``.
+    ``None``. ``run_id`` optionally narrows the write to that run, so an old
+    runtime cannot park a turn that was requeued and started by a new owner.
     """
     task_ids = list(task_ids or [])
     with get_db() as conn:
@@ -1083,12 +1085,15 @@ def park_turn(
         payload["task_ids"] = task_ids
         if usage is not None:
             payload["parked_usage"] = usage
-        cursor.execute(
+        sql = (
             "UPDATE turns SET state='parked', payload=%s, ended_at=NOW() "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
-            "RETURNING *",
-            (json.dumps(payload), turn_id),
         )
+        params: tuple = (json.dumps(payload), turn_id)
+        if run_id is not None:
+            sql += "AND run_id=%s "
+            params += (run_id,)
+        cursor.execute(sql + "RETURNING *", params)
         row = cursor.fetchone()
     # Parking ends the foreground interval: the wait on background work is
     # not counted, and the wake turn that follows banks its own interval.

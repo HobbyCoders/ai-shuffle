@@ -367,6 +367,27 @@ def test_park_records_task_ids_and_frees_slot(mock_db):
     assert turns.settle_turn(t["id"], "completed") is None
 
 
+def test_park_with_run_id_cannot_change_a_requeued_or_reowned_turn(mock_db):
+    turn = turns.enqueue_turn("park-owner", "user", payload={"keep": 1})
+    turns.start_turn(turn["id"], run_id="old-run")
+    assert turns.requeue_turn(turn["id"]) is not None
+    queued = turns.get_turn(turn["id"])
+    assert turns.park_turn(turn["id"], ["old-task"], run_id="old-run") is None
+    assert turns.get_turn(turn["id"]) == queued
+
+    assert turns.start_turn(turn["id"], run_id="new-run") is not None
+    reowned = turns.get_turn(turn["id"])
+    assert turns.park_turn(
+        turn["id"], ["old-task"], usage={"stale": True}, run_id="old-run",
+    ) is None
+    assert turns.get_turn(turn["id"]) == reowned
+
+    parked = turns.park_turn(turn["id"], ["new-task"], run_id="new-run")
+    assert parked["state"] == "parked"
+    assert parked["payload"] == {**reowned["payload"], "task_ids": ["new-task"]}
+    assert parked["run_id"] == "new-run"
+
+
 def test_settle_parked_turns_clears_stale_parked_rows(mock_db):
     """settle_parked_turns flips every 'parked' row for a session to 'completed'
     (the escape hatch settle_turn refuses), and leaves other sessions alone."""
