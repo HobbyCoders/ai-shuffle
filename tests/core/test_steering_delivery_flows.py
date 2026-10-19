@@ -214,7 +214,11 @@ def _pump_env(pump, *, background_work=(), broadcaster=None):
         stack.enter_context(patch(
             "app.core.pending_reconcile.settled_task_ids", return_value=set(),
         ))
-        stack.enter_context(patch("app.core.sync_engine.sync_engine", new=sync))
+        # Patch methods, not the singleton: queue fan-out may first import the
+        # WebSocket handler here, and it must not retain this helper's fake.
+        from app.core.sync_engine import sync_engine
+        for method in ("broadcast_message_added", "broadcast_queue_updated", "_broadcast_user_message"):
+            stack.enter_context(patch.object(sync_engine, method, getattr(sync, method)))
         stack.enter_context(patch(
             "app.core.session_runtime._broadcast_queue_after_start",
             new=_steering_fanout(session_runtime._broadcast_queue_after_start),
