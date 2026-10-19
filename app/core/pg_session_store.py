@@ -871,6 +871,14 @@ def _lazy_backfill_from_jsonl_sync(
     project_key = jsonl_path.parent.name
     main_key: SessionKey = {"project_key": project_key, "session_id": sdk_session_id}
 
+    # Read every file before taking a pool slot and the advisory lock. Slow
+    # disks / large subagent transcripts must not hold either resource.
+    agents = [
+        (agent_id, list(parse_jsonl_file(agent_path)))
+        for agent_id, agent_path in get_agent_jsonl_paths(
+            sdk_session_id, working_dir
+        ).items()
+    ]
     written = 0
     with transaction() as conn:
         cur = conn.cursor()
@@ -888,10 +896,7 @@ def _lazy_backfill_from_jsonl_sync(
         )
         if in_lock_count == 0:
             written += _backfill_entries_sync(main_key, entries, _conn=conn)
-            for agent_id, agent_path in get_agent_jsonl_paths(
-                sdk_session_id, working_dir
-            ).items():
-                sub_entries = list(parse_jsonl_file(agent_path))
+            for agent_id, sub_entries in agents:
                 if not sub_entries:
                     continue
                 sub_key: SessionKey = {

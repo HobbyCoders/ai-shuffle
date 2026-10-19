@@ -7,9 +7,10 @@ carries a strictly monotonic ``fence_token`` that stamps every event append
 has lost ownership.
 
 Ownership is time-bounded: a claim sets ``lease_expires_at`` from a ttl, and the
-runner must ``renew_run`` (heartbeat) before it lapses. A lapsed lease is
-reaped at the next ``claim_run``, which frees the session for a fresh claim with
-an incremented fence token.
+runner heartbeats with ``renew_run``. A lapsed lease is eligible for reaping at
+``claim_run`` or the turn sweep. A delayed heartbeat can recover only if its
+guarded UPDATE wins before either fences the old run; takeover increments the
+fence token.
 
 Every transition is a single guarded UPDATE/INSERT so concurrency is resolved by
 the database, not by read-modify-write races in Python.
@@ -24,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import psycopg2
 
-from app.db.base import get_db
+from app.db.base import get_db, get_lease_db
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +74,25 @@ def claim_run(
 def renew_run(
     run_id: str, runner_id: str, fence_token: int, ttl_seconds: int
 ) -> bool:
-    """Extend a still-live lease (heartbeat). False if the run is not the
-    caller's active, unexpired run."""
-    with get_db() as conn:
+    """Renew the same active owner, even after a delayed local checkout.
+
+    Claim and reaping fence expired runs with a guarded UPDATE first. Whichever
+    UPDATE wins the row lock owns the outcome; a reaped/replaced owner cannot
+    revive itself. Stop/settle fence lapsed runs in the abort transaction too.
+    Terminal or reassigned turns also refuse renewal. Expiry alone is
+    eligibility for takeover, not a takeover.
+    """
+    with get_lease_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE runs SET lease_expires_at=NOW() + (%s * INTERVAL '1 second'), "
             "heartbeat_at=NOW(), updated_at=NOW() "
             "WHERE id=%s AND runner_id=%s AND fence_token=%s AND state='active' "
-            "AND lease_expires_at >= NOW()",
+            "AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id=runs.session_id "
+            "AND t.run_id=runs.id AND t.state IN ('completed','aborted','parked')) "
+            "AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id=runs.session_id "
+            "AND t.state IN ('running','interrupting','draining') "
+            "AND t.run_id <> runs.id)",
             (ttl_seconds, run_id, runner_id, fence_token),
         )
         return cursor.rowcount > 0

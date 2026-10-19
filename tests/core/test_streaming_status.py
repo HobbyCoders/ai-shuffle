@@ -356,6 +356,22 @@ def test_draining_turn_reads_busy_without_active_run(mock_db):
     assert streaming_status.has_active_run("s1") is True
 
 
+async def test_failed_reap_sweep_logs_warning(monkeypatch, caplog):
+    import logging
+    from app.db import turns as turns_db
+
+    def fail(*args):
+        raise RuntimeError("recovery lock timeout")
+
+    monkeypatch.setattr(turns_db, "reap_expired", fail)
+    with caplog.at_level(logging.WARNING):
+        assert await streaming_status._reap_and_kick_turns() == 0
+    assert any(
+        record.levelno == logging.WARNING and "turn reap sweep failed" in record.message
+        for record in caplog.records
+    )
+
+
 async def test_sweep_reaps_dead_lease_turns_and_kicks(mock_db, monkeypatch):
     from app.core import turn_scheduler
     from app.db import turns as turns_db

@@ -49,6 +49,7 @@ from app.core.turn_recorder import (
 )
 from app.db import runs as runs_db
 from app.db import turns as turns_db
+from app.db.async_database import run_lease
 
 logger = logging.getLogger(__name__)
 
@@ -748,6 +749,7 @@ class SessionRuntime:
         # owning it mid-turn (lease lost or fence superseded, ``_stop_unowned``).
         self._run_id: Optional[str] = None
         self._unowned = False
+        self._lease_finalizing = False
         self._recorder_closing = False
         # Queued turn ids already handed to the engine as steers THIS turn.
         # ``try_steer_pending`` fires once per send, so without this a message
@@ -2722,6 +2724,9 @@ class SessionRuntime:
                     (self.turn.get("payload") or {}).get("parked_usage", {}),
                     (self._pending_done or {}).get("metadata") or {},
                 )
+                # The pump is finished. A parked/terminal row intentionally
+                # rejects renewals, including one already in flight.
+                self._lease_finalizing = True
                 parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids, usage=usage)
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
@@ -2766,6 +2771,11 @@ class SessionRuntime:
         # A runner that lost its lease settles the row only while it is still
         # bound to that run. Once another install's sweep requeued it (or a
         # new owner started it), the row is theirs and this settle is a no-op.
+        # Stop interpreting heartbeat rejection before the first terminal write
+        # (recorder.settle may write it too). DB ownership/fence guards remain
+        # authoritative for these writes; this only suppresses teardown of a
+        # finished pump and its unrelated background work during slow cleanup.
+        self._lease_finalizing = True
         if recorder is not None and self._terminal == "done" and not self._unowned:
             # Resolve older, incompatible parked turns before this completion,
             # so terminal readers still see the current turn last.
@@ -3392,22 +3402,38 @@ class SessionRuntime:
         """Heartbeat the run lease every ``RUN_LEASE_RENEW_SECONDS`` until
         cancelled or the lease is lost.
 
-        The lease is lost when a renewal misses its guard (expired, or the run
+        The lease is lost when a renewal misses its ownership guard (the run
         was reaped or taken over) or when renewals kept failing for a whole
         TTL, which is when the DB lets the lease lapse. Either way the turn
         stops itself (``_on_lease_lost``) instead of running on unowned."""
         loop = asyncio.get_running_loop()
         renewed_at = loop.time()
+        delay = RUN_LEASE_RENEW_SECONDS
         while True:
-            await asyncio.sleep(RUN_LEASE_RENEW_SECONDS)
+            await asyncio.sleep(delay)
+            if self._lease_finalizing:
+                return
             attempt_at = loop.time()
             try:
-                ok = await asyncio.to_thread(
-                    runs_db.renew_run, run_id, runner_id, fence_token,
-                    RUN_LEASE_TTL_SECONDS,
+                remaining = RUN_LEASE_TTL_SECONDS - (attempt_at - renewed_at)
+                if remaining <= 0:
+                    self._on_lease_lost()
+                    return
+                ok = await asyncio.wait_for(
+                    run_lease(
+                        runs_db.renew_run, run_id, runner_id, fence_token,
+                        RUN_LEASE_TTL_SECONDS,
+                    ),
+                    timeout=remaining,
                 )
             except Exception:
-                if loop.time() - renewed_at < RUN_LEASE_TTL_SECONDS:
+                if self._lease_finalizing:
+                    return
+                remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)
+                if remaining > 0:
+                    # Retry promptly instead of burning another full heartbeat
+                    # interval after each two-second pool admission failure.
+                    delay = min(1.0, RUN_LEASE_RENEW_SECONDS, remaining)
                     logger.warning(
                         "SessionRuntime: renew_run raised for run %s", run_id, exc_info=True,
                     )
@@ -3417,8 +3443,11 @@ class SessionRuntime:
                     "%ss lease TTL", run_id, RUN_LEASE_TTL_SECONDS, exc_info=True,
                 )
                 ok = False
+            if self._lease_finalizing:
+                return
             if ok:
                 renewed_at = attempt_at
+                delay = RUN_LEASE_RENEW_SECONDS
                 continue
             logger.warning(
                 "SessionRuntime: lease renewal lost for run %s — stopping heartbeat",

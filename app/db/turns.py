@@ -44,7 +44,7 @@ from typing import Any, Callable, Collection, Dict, List, Optional
 import psycopg2
 
 from app.core.config import settings
-from app.db.base import get_db, parse_jsonb as _parse_json
+from app.db.base import get_db, get_lease_db, parse_jsonb as _parse_json
 from app.db.compat import phs
 
 logger = logging.getLogger(__name__)
@@ -840,6 +840,21 @@ def stop_orphaned_turns(
     """
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
+        # Fence before aborting, in this transaction. Serialize with renewal:
+        # if it wins, the live-lease guard below leaves the turn alone; if Stop
+        # wins, that owner can never revive after the UI reports it stopped.
+        fence_sql = (
+            "UPDATE runs SET state='expired', updated_at=NOW() "
+            "WHERE session_id=%s AND state='active' AND lease_expires_at < NOW()"
+        )
+        fence_params = [session_id]
+        if turn_id is not None:
+            fence_sql += (
+                " AND EXISTS (SELECT 1 FROM turns t WHERE t.id=%s "
+                "AND t.run_id=runs.id AND t.state IN ('running','interrupting','draining'))"
+            )
+            fence_params.append(turn_id)
+        cursor.execute(fence_sql, tuple(fence_params))
         sql = (
             "UPDATE turns SET state='aborted', stop_reason='interrupted', "
             "interrupt_mode='stop', stop_background=%s, ended_at=NOW() "
@@ -1541,7 +1556,8 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
     ``skip_turn_ids`` are turns the calling process is still executing. Their
     lease can be dead while the task runs on (it stops itself once the
     heartbeat notices), and requeueing one would let the next claim start it a
-    second time. They are left live and not returned.
+    second time. They are left live and not returned, but their lapsed runs
+    are still fenced: the local heartbeat must stop, not recover after a sweep.
 
     A dead-lease live turn is resolved by its ``source`` and ``state``:
 
@@ -1557,8 +1573,17 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
     Returns the list of turn rows as they were BEFORE resolution (so a caller
     can see what was reaped and how each was routed via its ``source``).
     """
-    with get_db() as conn:
+    # Recovery may wait on ordinary row holders and sweep many runs. Keep the
+    # reserved admission, but do not inherit the short heartbeat SQL deadline.
+    with get_lease_db(lock_timeout_ms=5000, statement_timeout_ms=15000) as conn:
         cursor = conn.cursor()
+        # Serialize with late heartbeats and claims before resolving any turn.
+        # A heartbeat that wins keeps its turn; a reaper that wins fences the
+        # old owner permanently, so it cannot revive a requeued turn.
+        cursor.execute(
+            "UPDATE runs SET state='expired', updated_at=NOW() "
+            "WHERE state='active' AND lease_expires_at < NOW()",
+        )
         cursor.execute(
             "SELECT t.* FROM turns t "
             "LEFT JOIN runs r ON t.run_id = r.id "

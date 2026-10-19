@@ -45,6 +45,36 @@ def _fake_transaction(cur: RecordingCursor):
 
 SID = "11111111-2222-3333-4444-555555555555"
 
+def test_reads_all_jsonl_before_borrowing_connection(seams, project_dir, monkeypatch):
+    import app.core.jsonl_parser as jp
+
+    agent_path = project_dir / SID / "subagents" / "agent-a1.jsonl"
+    _write_jsonl(agent_path, [{"uuid": "s0"}])
+    seams.agent_paths.return_value = {"a1": agent_path}
+    held = False
+    parsed = []
+    original = jp.parse_jsonl_file
+
+    def parse(path):
+        assert not held, "filesystem parsing held a database connection"
+        parsed.append(path)
+        yield from original(path)
+
+    @contextmanager
+    def transaction():
+        nonlocal held
+        assert parsed == [seams.main_path, agent_path]
+        held = True
+        try:
+            yield RecordingConn(seams.cursor)
+        finally:
+            held = False
+
+    monkeypatch.setattr(jp, "parse_jsonl_file", parse)
+    monkeypatch.setattr(pss, "transaction", transaction)
+    assert pss._lazy_backfill_from_jsonl_sync(SID) == 3
+
+
 
 def _write_jsonl(path: Path, entries: list[dict], *, age_s: float = 3600.0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
