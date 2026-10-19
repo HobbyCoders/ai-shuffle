@@ -138,13 +138,22 @@ async def get_git_status(
     # Check the filesystem before native status: an already-open native repo
     # handle can outlive a permission change to .git. Never hide that failure
     # behind either a cached success or a false non-repository answer.
-    from app.api.git_owner import _is_plain_project_folder
+    from app.api.git_owner import _enclosing_repository, _is_plain_project_folder
     try:
         plain_folder = await run_git(_is_plain_project_folder, working_dir)
+        enclosing = None if plain_folder else await run_git(_enclosing_repository, working_dir)
     except (OSError, subprocess.SubprocessError) as exc:
         raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
     if plain_folder:
         return GitStatusResponse(is_git_repo=False)
+    if enclosing:
+        # A warm cwd cache must not turn a damaged session worktree into an
+        # enclosing-project notice after its own .git marker disappears.
+        session = await run_sync(database.get_session, session_id) if session_id else None
+        if worktree_id or (session and (session.get("branch") or session.get("worktree_branch"))):
+            raise HTTPException(503, "Git checkout is unavailable. Check again.")
+        return GitStatusResponse(is_git_repo=True, enclosing_repository_root=enclosing,
+                                 mutations_blocked=True)
 
     # Coalesced: concurrent polls for the same dir share one in-flight call
     status_data = await _coalescer.get_or_run(

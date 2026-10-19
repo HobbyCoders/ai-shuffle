@@ -230,16 +230,28 @@ Every `check` (including `--only`) and `full` first scans the whole working tree
 (tracked files plus non-ignored untracked files) for leaked credentials. The
 pre-push hook also scans the changed blobs in **every outgoing commit**, before
 consulting its cached test pass. A token added and removed in separate commits
-still blocks the push. Existing refs use the remote tip through the pushed tip;
-new branches/tags exclude commits already on local `origin/main` (or scan all
-reachable history if it is unavailable). Tags are scanned; deletions need no scan.
+still blocks the push. Existing refs use the remote tip through the pushed tip.
+New branches and tags exclude commits already on the local `main` tracking ref of
+the remote being pushed to (`public/main` for `git push public ...`). If that ref
+is unavailable, for example on a remote that was never fetched, they scan all
+reachable history. The v4 hook marks its remote argument; ambient remote values
+without that marker are ignored. The scanner checks the name against `git remote`;
+unknown names, bare URLs and repository paths scan all reachable history rather
+than using a tracking ref. A hook installed before v4 keeps using `origin/main`.
+Tags are scanned; deletions need no scan.
 The hook uses local Git objects only: it never downloads a scanner or contacts a
-provider. Fetch `origin/main` before starting a branch so that baseline is current.
+provider. Fetch the push remote's `main` before starting a branch so that baseline
+is current. This boundary assumes a fresh fetch: if main was force-pushed back
+and has not been fetched, the stale tracking ref can hide commits the remote no
+longer has. That limitation also applied to the previous `origin/main` boundary.
 The installed hook refuses a checkout missing the scanner/config or the required
 security-gate version, including branches that predate these checks: update that
 branch before pushing. Re-run `python scripts/local_ci.py install` to upgrade an
-older installed hook. Each scanner invocation has a 120-second deadline and its
-Git subprocesses have 15-second deadlines; timeouts block rather than pass.
+older installed hook. The installer refuses to replace a newer shared hook unless
+`install --force` is given. Installers on branches predating that version check
+cannot enforce it; update those branches before running install. Each scanner
+invocation has a 120-second deadline and its Git subprocesses have 15-second
+deadlines; timeouts block rather than pass.
 
 The vendored stdlib fallback, `scripts/secret_scan.py`, reads the deliberately
 small gitleaks-compatible `.gitleaks.toml` ruleset. Gitleaks is not bundled or

@@ -77,6 +77,7 @@ export class Updater {
   private installFailed: (error: unknown) => Promise<void> = async () => {};
   private installGuard: () => Promise<string | null> = async () => null;
   private restarting: () => void = () => {};
+  private restartCancelled: () => void = () => {};
   private prepared: { prepare: () => Promise<void>; discard: () => Promise<void> } | null = null;
   private failedStarts: FailedStartRecovery | null = null;
   private policy: () => Promise<boolean> = async () => true;
@@ -174,6 +175,8 @@ export class Updater {
    * owner is told here that it is starting (a system notification).
    */
   onRestarting(action: () => void): void { this.restarting = action; }
+  /** Close restart notices even when a retained point forbids restarting the stack. */
+  onRestartCancelled(action: () => void): void { this.restartCancelled = action; }
   /**
    * Runs once the update is pending and the stack is stopped, before the app
    * quits: the app makes the update's database restore point here, with its
@@ -346,6 +349,7 @@ export class Updater {
       app.relaunch({ execPath: current.node, args: [path.join(current.desktopDir, 'scripts/bootstrap.mjs'), '--root', this.applications.options.root] });
       app.quit();
     } catch (error) {
+      try { this.restartCancelled(); } catch (failure) { console.error('Could not close the restart notice', failure); }
       if (stopping && this.prepared) {
         try { await this.prepared.discard(); }
         catch (failure) {

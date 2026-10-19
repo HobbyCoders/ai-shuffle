@@ -69,9 +69,9 @@ def checks(root, args):
         expected = "always() && !failure() && !cancelled() && needs.create-release.outputs.promote_latest == 'true' && "
         expected += " && ".join(f"needs.{job}.result == 'success'" for job in
                                 ("create-release", "docker", "buyer-install", "source-stable", "android-apk", "linux-release"))
-        expected += " && (needs.desktop.result == 'success' || (!inputs.build_desktop && needs.desktop.result == 'skipped'))"
+        expected += " && needs.desktop.result == 'success'"
         if "".join(promotion.get("if", "").split()) != "".join(expected.split()):
-            raise ValueError("Promotion must require successful artifacts and allow skipped Windows only when not requested")
+            raise ValueError("Promotion must require successful artifacts including Windows")
         if jobs.get("docker", {}).get("with", {}).get("promote_latest") != "false":
             raise ValueError("Release builder must not move aliases")
         if jobs.get("linux-build", {}).get("uses") != "./.github/workflows/desktop-linux-artifact.yml":
@@ -79,7 +79,9 @@ def checks(root, args):
         linux = jobs.get("linux-release", {})
         if "linux-build" not in linux.get("needs", []) or not any("attach_linux.py" in s.get("run", "") for s in linux.get("steps", [])):
             raise ValueError("Linux artifacts/checksums need durable release attachment and read-back")
-        if "build_desktop" not in inputs or jobs.get("desktop", {}).get("uses") != "./.github/workflows/desktop-installer.yml":
+        desktop = jobs.get("desktop", {})
+        if ("build_desktop" in inputs or desktop.get("if") != "needs.create-release.outputs.promote_latest == 'true'"
+                or desktop.get("uses") != "./.github/workflows/desktop-installer.yml"):
             raise ValueError("Windows installer release wiring is missing")
         if jobs.get("android-apk", {}).get("uses") != "./.github/workflows/android.yml":
             raise ValueError("Merge the Play-preparation android-apk release caller before cutover")

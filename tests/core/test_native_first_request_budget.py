@@ -16,6 +16,9 @@ every first request.
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,9 +38,16 @@ TOOL_ROWS_BUDGET = 10_000
 # wording pass; the margin absorbs host-dependent sections (workspace facts,
 # environment).
 FIRST_REQUEST_BUDGET = 14_300
-# The breakdown before the first turn may miss only the per-turn reminders the
-# host adds while sending (memory snapshot, environment note): ~1.7% measured.
-REPORT_TOLERANCE = 0.03
+# The breakdown before the first turn prices everything the first request
+# carries except the turn itself: the user's text, the host's note appended to
+# it (memory snapshot, Away mode, harness scratch) and fluid's per-turn
+# reminders (environment, ledger, notes). Those are rendered while sending,
+# from the query and live state, and carry host paths (the scratch folder
+# twice, the worker's Python, pytest on PATH), so the comparison leaves them
+# out instead of letting a percentage absorb them: with a long temp or venv
+# path they alone came to 3.1% on Windows. What remains is chars/4 rounding
+# between whole parts and the request's pieces: ~0.2% measured.
+REPORT_TOLERANCE = 0.01
 
 _CHUNKS = [
     StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
@@ -154,6 +164,69 @@ def _request_tokens(request) -> int:
     )
 
 
+def _priced_before_the_turn(request, query: str) -> int:
+    """Tokens of the request without the first turn's own content.
+
+    The turn is the last user message. Its deferred-tool catalog stays: the
+    breakdown prices that block before the turn (``get_context_usage``'s
+    pending catalog). Every other block must be the submitted prompt (with
+    the host's note appended) or a recognized harness reminder. This fixture
+    expects memory, harness scratch and environment only; a new kind needs
+    an explicit pricing decision, not a blanket reminder exemption.
+    """
+    from app.core.harness_reminders import HARNESS_REMINDER_OPENERS, strip_harness_reminders
+    from fluid.tools.builtins.tool_search import parse_deferred_catalog
+
+    expected = {"# Memory\n", "# Harness scratch\n", "Environment as of this message ("}
+    assert expected <= set(HARNESS_REMINDER_OPENERS)
+    seen = set()
+    prompts = []
+    *history, turn = request.messages
+    assert turn.role == "user", turn.role
+    kept = []
+    for block in turn.content:
+        text = getattr(block, "text", None)
+        if text is not None and parse_deferred_catalog(text):
+            kept.append(block)
+            continue
+        assert text is not None, repr(block)[:300]
+        for body in re.findall(r"<system-reminder>\n(.*?)\n</system-reminder>", text, re.DOTALL):
+            opener = next((o for o in HARNESS_REMINDER_OPENERS if body.startswith(o)), None)
+            assert opener in expected, f"Unexpected reminder: {body[:100]!r}"
+            seen.add(opener)
+        remainder = strip_harness_reminders(text)
+        assert remainder in ("", query), f"Unpriced turn content: {remainder[:100]!r}"
+        if remainder:
+            prompts.append(remainder)
+    assert prompts == [query], prompts
+    assert seen == expected, seen
+    messages = [*history, *([replace(turn, content=kept)] if kept else [])]
+    return (
+        estimate_tokens_of_text(request.system or "")
+        + sum(estimate_tokens_of_text(json.dumps(t)) for t in request.tools)
+        + estimate_tokens_of_messages(messages)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("appended_to_query", [False, True], ids=["separate_block", "query_suffix"])
+async def test_unpriced_unknown_reminder_is_rejected(monkeypatch, tmp_path, appended_to_query):
+    from fluid.messages.content import Text
+
+    _engine, request, _reported = await _first_request(monkeypatch, tmp_path, code_mode=True)
+    *history, turn = request.messages
+    unknown = "<system-reminder>\n# Unpriced surprise\nNew unbudgeted instructions.\n</system-reminder>"
+    content = list(turn.content)
+    if appended_to_query:
+        index = next(i for i, block in enumerate(content) if getattr(block, "text", "").startswith("hello"))
+        content[index] = replace(content[index], text=content[index].text + "\n" + unknown)
+    else:
+        content.append(Text(unknown))
+    request = replace(request, messages=[*history, replace(turn, content=content)])
+    with pytest.raises(AssertionError):
+        _priced_before_the_turn(request, "hello")
+
+
 def _rows(reported) -> dict[str, int]:
     return {c["name"]: c["tokens"] for c in reported["categories"]}
 
@@ -173,10 +246,32 @@ async def test_default_profile_first_request_stays_under_budget(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("long_paths", [False, True], ids=["host_paths", "long_paths"])
 @pytest.mark.parametrize("code_mode", [True, False], ids=["code_mode", "json_tools"])
 async def test_reported_breakdown_matches_the_first_request(
-    monkeypatch, tmp_path, code_mode
+    monkeypatch, tmp_path, code_mode, long_paths
 ):
+    if long_paths:
+        # Exercise both producers: scratch paths and the environment's worker
+        # Python / pytest paths. No long directory needs to exist on disk.
+        import app.core.provider.harness_adapter as ha
+        import fluid.context.runtime_facts as runtime
+
+        scratch_note = ha.HarnessAdapter._scratch_note
+        deep = str(tmp_path / ("deep-folder-" * 200))
+        monkeypatch.setattr(
+            ha.HarnessAdapter, "_scratch_note",
+            lambda self: scratch_note(self).replace(str(tmp_path), deep),
+        )
+        python_path = deep + "/venv/Scripts/python.exe"
+        pytest_path = deep + "/venv/Scripts/pytest.exe"
+        # Replace only the producer's module references, not process-wide sys
+        # or shutil: other parts of session startup still use the real host.
+        monkeypatch.setattr(runtime, "sys", SimpleNamespace(executable=python_path))
+        which = runtime.shutil.which
+        monkeypatch.setattr(runtime, "shutil", SimpleNamespace(
+            which=lambda name: pytest_path if name == "pytest" else which(name),
+        ))
     _engine, request, reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode
     )
@@ -186,9 +281,19 @@ async def test_reported_breakdown_matches_the_first_request(
         if not c.get("isDeferred") and c["name"] != "Free space"
     )
     assert counted == reported["totalTokens"]
-    actual = _request_tokens(request)
+    if long_paths:
+        environment = next(
+            block.text for block in request.messages[-1].content
+            if getattr(block, "text", "").startswith("<system-reminder>\nEnvironment as of")
+        )
+        assert f"Worker Python: {json.dumps(python_path)}" in environment
+        assert f"pytest executable on PATH: {json.dumps(pytest_path)}" in environment
+        # Prove the previous whole-request comparison rejects this fixture.
+        whole = _request_tokens(request)
+        assert abs(reported["totalTokens"] - whole) > whole * 0.03
+    actual = _priced_before_the_turn(request, "hello")
     assert abs(reported["totalTokens"] - actual) <= actual * REPORT_TOLERANCE, (
-        reported["totalTokens"], actual, _rows(reported),
+        reported["totalTokens"], actual, _request_tokens(request), _rows(reported),
     )
 
 

@@ -66,6 +66,41 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
   }
 }
 
+/** Audited Windows launchers that hash a ready point in prepareRollback before select.
+ * A new version is NOT trusted automatically: review its factory and ready-journal path. */
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4]);
+
+/** Unknown handoffs and fenced recovery must keep full validation. */
+export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {
+  return platform === 'win32' && Number.isSafeInteger(launcher) && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcher) && installedHandoff && !migrationRisk;
+}
+
+/**
+ * Only for a point the installed launcher just hashed. Compare every file and
+ * directory with its manifest without reading the database contents again.
+ * requireRestorePoint still checks the journal's phase and booting revision.
+ */
+export async function checkRestorePointStructure(root: string): Promise<void> {
+  const snapshot = path.join(root, 'update-snapshot');
+  const manifest = JSON.parse(await fs.readFile(path.join(snapshot, 'manifest.json'), 'utf8'));
+  const invalid = () => new Error('Database restore point failed validation');
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw invalid();
+  const expected = Object.entries(manifest).map(([key, value]) => {
+    if (value !== 'directory' && (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) throw invalid();
+    return `${key}\0${value === 'directory'}`;
+  }).sort();
+  const actual: string[] = [];
+  const walk = async (relative: string): Promise<void> => {
+    const file = path.join(snapshot, 'data', relative);
+    const stat = await fs.lstat(file);
+    if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw invalid();
+    actual.push(`${relative}${stat.isDirectory() ? '/' : ''}\0${stat.isDirectory()}`);
+    if (stat.isDirectory()) for (const name of (await fs.readdir(file)).sort()) await walk(path.join(relative, name));
+  };
+  await walk('');
+  if (JSON.stringify(expected) !== JSON.stringify(actual.sort())) throw invalid();
+}
+
 /** Every entry below `root`: "directory", or the file's size and modification time. */
 async function shape(root: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
