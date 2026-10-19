@@ -1,10 +1,10 @@
 <script lang="ts">
 	/**
 	 * NightlyConfirm: the step before a worker moves to the nightly channel,
-	 * opened under System > Updates > Update channel. It repeats the one cost
-	 * that cannot be undone from here. Focus starts on Cancel; Esc cancels.
+	 * opened under System > Updates > Update channel. It says when the switch
+	 * can be undone. Focus starts on Cancel; Esc cancels.
 	 */
-	import { REINSTALL_TEXT } from '../update-channel.svelte';
+	import { NIGHTLY_RETURN_TEXT } from '../update-channel.svelte';
 
 	interface Props {
 		onConfirm: () => void;
@@ -44,7 +44,7 @@
 	<div class="nc-body">
 		<p class="nc-q" id="{uid}-q">Move this worker to nightly?</p>
 		<p class="nc-why" id="{uid}-why">
-			Nightly has the newest changes and may break. <strong>{REINSTALL_TEXT}</strong>
+			Nightly has the newest changes and may break. <strong>{NIGHTLY_RETURN_TEXT}</strong>
 		</p>
 		<div class="st-acts">
 			<button type="button" class="st-btn ghost" bind:this={cancel} onclick={onCancel}>Cancel</button>

@@ -25,6 +25,11 @@ _desktop_request = None
 # shell is sent a check and gets the download once it reports "available".
 _desktop_followup = None
 _desktop_channel_request = None
+# A return to stable carries the signed stable manifest it was checked against,
+# so the shell verifies the same release itself (desktop/src/main/channel-return.ts).
+_desktop_stable_manifest = None
+# Why the shell refused the last return to stable; cleared by the next request.
+_desktop_channel_error = None
 # The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
 # desktop/src/main/updater.ts) and at once on a phase change. One missed
 # report means about 60 s of silence, so presence spans two intervals plus
@@ -68,7 +73,10 @@ def _epoch(value):
 def desktop_exchange(state):
     """Only called by the token-authenticated local launcher, never a browser."""
     global _desktop_state, _desktop_seen, _desktop_request, _desktop_followup, _desktop_channel_request
+    global _desktop_stable_manifest, _desktop_channel_error
     state = dict(state)
+    # Reported once, after the shell refused a return to stable it was sent.
+    refused = state.pop("channel_error", None)
     # When the shell last asked its feed. A worker that is idle but checked
     # before another worker found an update has simply not seen it yet.
     state["checked_at"] = _epoch(state.pop("checkedAt", None))
@@ -80,10 +88,16 @@ def desktop_exchange(state):
         if _desktop_channel_request:
             config = state.get("channel_config") or {}
             if config.get("channel") == _desktop_channel_request:
-                _desktop_channel_request = None
+                _desktop_channel_request = _desktop_stable_manifest = None
+            elif refused and _desktop_stable_manifest:
+                _desktop_channel_request = _desktop_stable_manifest = None
+                _desktop_channel_error = str(refused)
             elif config.get("editable") and state.get("phase") in ("idle", "error", "available"):
-                return {"action": "set_channel", "channel": _desktop_channel_request,
-                        "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
+                request = {"action": "set_channel", "channel": _desktop_channel_request,
+                           "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
+                if _desktop_stable_manifest:
+                    request["stable_manifest"] = _desktop_stable_manifest
+                return request
         # A phase-change report can race an already accepted action. The shell
         # refuses actions while checking or downloading, so leave the request
         # queued until it can accept it, without extending its original expiry.
@@ -214,7 +228,8 @@ def channel_status():
     with _bridge_lock:
         config = _desktop_state.get("channel_config") if _desktop_present() else None
         if config:
-            return {**config, "available": list(CHANNELS), "restart_required": False}
+            return {**config, "available": list(CHANNELS), "restart_required": False,
+                    "error": _desktop_channel_error}
     return {"channel": "stable", "available": list(CHANNELS), "source": "default",
             "editable": False, "restart_required": False}
 
@@ -230,29 +245,67 @@ def set_channel(value):
 def _set_channel(value):
     from app.core.update_channel import normalize
 
-    global _desktop_channel_request
+    global _desktop_channel_request, _desktop_stable_manifest, _desktop_channel_error
     channel = normalize(value)
     current = channel_status()
     if not current["editable"]:
         raise ValueError("Update channel is controlled by UPDATE_CHANNEL or this launcher does not support editing it")
-    if current["channel"] == "nightly" and channel == "stable":
-        raise ValueError("Returning from nightly to stable requires a reinstall; migrations do not run backwards")
     root = control_root()
     if root:
+        if current["channel"] == "nightly" and channel == "stable":
+            _container_return(root)
         atomic_json(root / "update-channel.json", {"channel": channel})
-    else:
-        with _bridge_lock:
-            # The launcher may have written nightly while its acknowledgement
-            # is still in flight. Never queue a reversal based on stale status.
-            latest = (_desktop_state.get("channel_config") or {}).get("channel")
-            if channel == "stable" and (_desktop_channel_request == "nightly" or latest == "nightly"):
-                raise ValueError("Returning from nightly to stable requires a reinstall; migrations do not run backwards")
-            if _desktop_state.get("phase") not in ("idle", "error", "available"):
-                raise ValueError("Finish the current update before changing channel")
-            _desktop_channel_request = channel
+        return channel_status()
+    with _bridge_lock:
+        # The launcher may have written nightly while its acknowledgement
+        # is still in flight. Never queue a reversal based on stale status.
+        if channel == "stable" and _desktop_channel_request == "nightly":
+            raise ValueError("The switch to nightly has not been confirmed yet. Try again once it has.")
+        returning = channel == "stable" and (current["channel"] == "nightly"
+                                             or (_desktop_state.get("channel_config") or {}).get("channel") == "nightly")
+        installed = _desktop_state.get("installed_release")
+        _desktop_channel_error = None
+    signed = _desktop_return(installed) if returning else None
+    with _bridge_lock:
+        if _desktop_state.get("phase") not in ("idle", "error", "available"):
+            raise ValueError("Finish the current update before changing channel")
+        _desktop_channel_request = channel
+        _desktop_stable_manifest = signed
     # Desktop reports the old value until its next authenticated heartbeat
     # acknowledges the write. The picker must poll GET, not assume it persisted.
     return channel_status()
+
+
+def _container_return(root):
+    """Refuses going back to stable when this container runs code ahead of it."""
+    from app.core import stable_return
+    from app.core.config import settings
+
+    with service_files():
+        installed = stable_return.container_installed(root, settings.version)
+    _, stable = stable_return.fetch_stable()
+    reason = stable_return.refusal(installed, stable)
+    if reason:
+        raise stable_return.Refused(reason)
+
+
+def _desktop_return(installed):
+    """The signed stable manifest a desktop may return to, or Refused.
+
+    Shells that do not report what they run cannot check the release they are
+    handed; they still refuse to leave nightly, so the switch is refused here."""
+    from app.core import stable_return
+
+    if not isinstance(installed, dict):
+        raise stable_return.Refused("This desktop app cannot check whether it may switch back to stable yet. "
+                                    "Install the next update, then try again.")
+    signed, stable = stable_return.fetch_stable()
+    reason = stable_return.refusal({"revision": installed.get("revision"),
+                                    "sequence": installed.get("container_sequence"),
+                                    "version": installed.get("version")}, stable)
+    if reason:
+        raise stable_return.Refused(reason)
+    return signed
 
 
 def status():

@@ -2,6 +2,7 @@
 import { app } from 'electron';
 import path from 'node:path';
 import type { SourceUpdates } from './source-updates';
+import { installedRelease, returnToStable, type InstalledRelease } from './channel-return';
 import type { InstallerUpdates } from './installer-updates';
 
 export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'unsupported';
@@ -10,6 +11,10 @@ export interface UpdateState {
   error: string | null; checkedAt: string | null; message?: string | null;
   running_version?: string | null;
   channel_config?: { channel: 'stable' | 'nightly'; source: 'file' | 'default'; editable: boolean };
+  /** What this install runs: lets the worker check a return from nightly to stable. */
+  installed_release?: InstalledRelease;
+  /** Why the last return to stable was refused; sent once. */
+  channel_error?: string;
   /** Release name and notes from the signed manifest of the offered update. */
   release?: string | null; notes?: string | null;
   /** macOS and Linux: the verified installer just saved, for the web UI to announce. */
@@ -53,6 +58,8 @@ export class Updater {
   private bridgeTimer: ReturnType<typeof setInterval> | null = null;
   private exchanging = false;
   private exchangeAgain = false;
+  private installed: InstalledRelease | null = null;
+  private channelError: string | null = null;
   setBridge(exchange: (state: UpdateState) => Promise<Record<string, unknown>>, safeToRestart: () => Promise<boolean>): void {
     this.bridge = exchange; this.safeToRestart = safeToRestart;
   }
@@ -63,11 +70,25 @@ export class Updater {
     try {
       const state = this.current;
       const channel_config = await this.applications?.channelConfig();
-      const request = await this.bridge({ ...state, ...(channel_config ? { channel_config } : {}) });
+      const installed_release = await this.installedRelease();
+      const channel_error = this.channelError;
+      const request = await this.bridge({ ...state, ...(channel_config ? { channel_config } : {}),
+        ...(installed_release ? { installed_release } : {}), ...(channel_error ? { channel_error } : {}) });
+      // Delivered: the worker has dropped the refused request.
+      if (channel_error && this.channelError === channel_error) this.channelError = null;
       if (!this.bridgeTimer || typeof request.expires_at !== 'number' || request.expires_at * 1000 < Date.now()) return;
       if (request.action === 'set_channel' && (request.channel === 'stable' || request.channel === 'nightly')) {
-        if (this.checking || this.downloading || this.installing) return;
-        await this.applications?.setChannel(request.channel);
+        if (this.checking || this.downloading || this.installing || !this.applications) return;
+        if (request.channel === 'stable' && typeof request.stable_manifest === 'string' && await this.applications.channel() === 'nightly') {
+          // The launcher's setChannel refuses every return to stable. The
+          // worker checked this one is safe; channel-return verifies it again.
+          try { await returnToStable(this.applications, request.stable_manifest, app.getVersion()); }
+          catch (error) {
+            this.channelError = error instanceof Error ? error.message : String(error);
+            this.exchangeAgain = true;
+            return;
+          }
+        } else await this.applications.setChannel(request.channel);
         this.set({ phase: 'idle', version: null, release: null, notes: null, error: null });
         this.exchangeAgain = true;
       }
@@ -84,6 +105,16 @@ export class Updater {
       this.exchanging = false; this.exchangeAgain = false;
       if (again) void this.exchange();
     }
+  }
+  /** Read once per running revision; null without a source updater. */
+  private async installedRelease(): Promise<InstalledRelease | null> {
+    const applications = this.applications;
+    if (!applications?.version) return null;
+    if (this.installed?.revision !== applications.version) {
+      try { this.installed = await installedRelease(applications, app.getVersion()); }
+      catch { return null; }
+    }
+    return this.installed;
   }
   constructor(private readonly releaseUpdates = true) {}
   setPolicy(policy: () => Promise<boolean>): void { this.policy = policy; }

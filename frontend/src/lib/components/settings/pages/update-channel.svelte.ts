@@ -16,8 +16,11 @@
  * It says the switch is pending, keeps checking every CHANNEL_LATE_POLL_MS,
  * and offers "Check status" and "Send again".
  *
- * Going from nightly back to stable needs a reinstall; the server refuses it
- * with 409 and the picker says why.
+ * Going from nightly back to stable works while this worker is not ahead of
+ * the current stable release (app/core/stable_return.py). Otherwise the server
+ * refuses with 409 and a plain sentence the picker shows as it is. A desktop
+ * shell checks the signed release again; if it refuses, GET reports `error`
+ * and the wait ends with that sentence.
  */
 import { api, getErrorMessage } from '$lib/api/client';
 import { isForbidden } from '$lib/settings/access.svelte';
@@ -31,6 +34,8 @@ export interface ChannelStatus {
 	source: 'env' | 'file' | 'default';
 	editable: boolean;
 	restart_required: boolean;
+	/** Desktop: why the app refused the last switch back to stable. */
+	error?: string | null;
 }
 
 export const CHANNEL_POLL_MS = 3_000;
@@ -41,8 +46,11 @@ export const CHANNEL_READ_MS = 10_000;
 /** After the deadline, a queued switch is still checked this often. */
 export const CHANNEL_LATE_POLL_MS = 30_000;
 
-export const REINSTALL_TEXT =
-	'Nightly changes how your data is stored, so you cannot switch back to stable without reinstalling.';
+export const NIGHTLY_RETURN_TEXT =
+	'Nightly may change how your data is stored. You can switch back to stable once a stable release is at least as new as the version this worker runs.';
+
+/** Older workers refuse every switch back to stable. */
+export const LEGACY_RETURN_TEXT = 'This worker’s version cannot switch back to stable. Install its next update, then try again.';
 
 /** One plain sentence for each refusal the channel API can give. */
 export function channelError(cause: unknown): string {
@@ -51,8 +59,10 @@ export function channelError(cause: unknown): string {
 	if (status === 403) return 'Only the owner can change the update channel, and not from a preview link.';
 	if (status === 422) return 'This worker does not offer that update channel.';
 	if (status === 409) {
-		if (/reinstall|backwards/i.test(detail)) return REINSTALL_TEXT;
+		if (/reinstall|backwards/i.test(detail)) return LEGACY_RETURN_TEXT;
 		if (/current update/i.test(detail)) return 'An update is in progress. Change the channel after it finishes.';
+		// The return-to-stable check explains itself in plain sentences.
+		if (/stable/i.test(detail) && detail.length <= 400) return detail;
 		if (/UPDATE_CHANNEL|launcher/i.test(detail)) return 'This worker’s environment or launcher sets its channel, so it cannot be changed here.';
 		return 'This worker cannot change its update channel right now.';
 	}
@@ -126,6 +136,15 @@ export class UpdateChannelState {
 	/** Takes a fresh status; ends a pending switch once the worker reports it. */
 	#apply(next: ChannelStatus): void {
 		this.status = next;
+		if (this.target && next.channel !== this.target && next.error) {
+			// The desktop app refused the switch; nothing stays queued.
+			this.#stop();
+			this.target = null;
+			this.stalled = false;
+			this.dismissed = false;
+			this.error = next.error;
+			return;
+		}
 		if (this.target && next.channel === this.target) {
 			this.#stop();
 			this.target = null;

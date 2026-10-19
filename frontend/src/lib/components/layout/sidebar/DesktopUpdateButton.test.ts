@@ -191,6 +191,17 @@ it('shows startup failures for retry without a success animation', async()=>{
  await fireEvent.click(button);expect(api.post).toHaveBeenCalledWith('/settings/application-updates',{action:'install'});
 });
 
+it('offers a newly staged update plainly once the worker settled an old failed install as replaced', async()=>{
+ // app/core/update_progress.py settles a failed install whose worker staged a
+ // different update: complete, with nothing verified, so nothing celebrates.
+ const replaced={...operation,phase:'complete',workers:operation.workers.map(w=>({...w,status:'replaced',message:'Update 24b1105c7276 replaces this one'}))};
+ api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready',version:'24b1105c7276'}],operation:replaced});
+ render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Update and restart'});
+ expect(button.classList.contains('failed')).toBe(false);expect(button.classList.contains('ready')).toBe(true);
+ expect(button.title).not.toContain('startup could not be confirmed');expect(button.title).toContain('Update ready');
+ expect(document.querySelector('.complete')).toBeNull();
+});
+
 it('suppresses stale updater availability for the running revision, but shows a newer update', async()=>{
  localStorage.setItem('application-update-completed','install-1');
  api.get.mockResolvedValue({...settled,workers:[{...worker,phase:'ready',version:'bbbbbbbbbbbb',running_version:'b'.repeat(40)}]});

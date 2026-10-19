@@ -54,7 +54,7 @@ export const entries: SettingEntry[] = [
 		section: 'Updates',
 		label: 'Update channel',
 		hint: 'Tested releases',
-		help: 'Stable gets tested releases. Nightly has the newest changes and may break. Nightly changes how your data is stored, so you cannot switch back to stable without reinstalling. This applies to the connected worker only.',
+		help: 'Stable gets tested releases. Nightly has the newest changes and may break. Nightly may change how your data is stored, so you can switch back to stable only once a stable release is at least as new as the version this worker runs. This applies to the connected worker only.',
 		keywords: ['stable', 'nightly', 'edge', 'beta', 'release channel', 'main'],
 		default: 'stable'
 	},

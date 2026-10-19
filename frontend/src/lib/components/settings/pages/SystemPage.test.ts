@@ -12,7 +12,7 @@ vi.mock('$lib/api/client', () => ({
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { loadProjects: vi.fn() } }));
 
 import SystemPage from './SystemPage.svelte';
-import { CHANNEL_LATE_POLL_MS, CHANNEL_POLL_MS, CHANNEL_READ_MS, CHANNEL_WAIT_MS, channelError, REINSTALL_TEXT } from './update-channel.svelte';
+import { CHANNEL_LATE_POLL_MS, CHANNEL_POLL_MS, CHANNEL_READ_MS, CHANNEL_WAIT_MS, channelError, LEGACY_RETURN_TEXT, NIGHTLY_RETURN_TEXT } from './update-channel.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
@@ -350,12 +350,12 @@ describe('update channel', () => {
 		expect(within(channelRow()).getByText('Newest changes, may break')).toBeTruthy();
 	});
 
-	it('asks before nightly, repeats the reinstall cost, and saves only after confirming', async () => {
+	it('asks before nightly, says when it can be undone, and saves only after confirming', async () => {
 		render(SystemPage);
 		await ready();
 		await fireEvent.click(choice('Nightly'));
 		expect(screen.getByText('Move this worker to nightly?')).toBeTruthy();
-		expect(screen.getByText(REINSTALL_TEXT)).toBeTruthy();
+		expect(screen.getByText(NIGHTLY_RETURN_TEXT)).toBeTruthy();
 		expect(pressed()).toBe('Stable');
 		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 		await waitFor(() => expect(screen.queryByText('Move this worker to nightly?')).toBeNull());
@@ -381,17 +381,48 @@ describe('update channel', () => {
 	});
 
 	it('explains a refused switch from nightly back to stable and keeps nightly', async () => {
+		const ahead =
+			'This worker runs code that is newer than the current stable release (1.0.2), so it cannot switch back to stable yet: nightly may already have changed how its data is stored. It can switch once a stable release catches up with the version it runs.';
 		channelStatus = { ...channelStatus, channel: 'nightly', source: 'file' };
-		transport.put.mockRejectedValue({
-			status: 409,
-			detail: 'Returning from nightly to stable requires a reinstall; migrations do not run backwards'
-		});
+		transport.put.mockRejectedValue({ status: 409, detail: ahead });
 		render(SystemPage);
 		await waitFor(() => expect(choice('Stable').disabled).toBe(false));
 		await fireEvent.click(choice('Stable'));
 		expect(screen.queryByText('Move this worker to nightly?')).toBeNull();
-		expect((await screen.findByRole('alert')).textContent).toBe(REINSTALL_TEXT);
+		expect((await screen.findByRole('alert')).textContent).toBe(ahead);
 		await waitFor(() => expect(pressed()).toBe('Nightly'));
+	});
+
+	it('switches a desktop back to stable, or ends the wait with the reason the app refused it', async () => {
+		let refusal: string | null = null;
+		let saved: 'stable' | 'nightly' = 'nightly';
+		channelStatus = { ...channelStatus, channel: 'nightly', source: 'file' };
+		const get = transport.get.getMockImplementation()!;
+		transport.get.mockImplementation(async (path: string) =>
+			path === '/updates/channel' ? { ...channelStatus, channel: saved, error: refusal } : get(path)
+		);
+		transport.put.mockImplementation(async () => ({ ...channelStatus, error: null }));
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		render(SystemPage);
+		await waitFor(() => expect(choice('Stable').disabled).toBe(false));
+		await fireEvent.click(choice('Stable'));
+		expect(await screen.findByText(/Switching to stable\./)).toBeTruthy();
+		refusal = 'This app runs code that is newer than the current stable release (1.0.2).';
+		await vi.advanceTimersByTimeAsync(CHANNEL_POLL_MS + 50);
+		expect((await screen.findByRole('alert')).textContent).toBe(refusal);
+		expect(screen.queryByText(/Switching to stable/)).toBeNull();
+		await waitFor(() => expect(pressed()).toBe('Nightly'));
+		expect(choice('Stable').disabled).toBe(false);
+
+		refusal = null;
+		await fireEvent.click(choice('Stable'));
+		expect(await screen.findByText(/Switching to stable\./)).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
+		saved = 'stable';
+		await vi.advanceTimersByTimeAsync(CHANNEL_POLL_MS + 50);
+		await waitFor(() => expect(screen.queryByText(/Switching to stable/)).toBeNull());
+		expect(pressed()).toBe('Stable');
+		expect(screen.queryByRole('alert')).toBeNull();
 	});
 
 	it('waits for the desktop launcher after a 202 and shows the channel once it catches up', async () => {
@@ -566,7 +597,8 @@ describe('update channel', () => {
 		[{ status: 422, detail: 'Input should be stable or nightly' }, 'This worker does not offer that update channel.'],
 		[{ status: 409, detail: 'Update channel is controlled by UPDATE_CHANNEL or this launcher does not support editing it' }, 'This worker’s environment or launcher sets its channel, so it cannot be changed here.'],
 		[{ status: 409, detail: 'Finish the current update before changing channel' }, 'An update is in progress. Change the channel after it finishes.'],
-		[{ status: 409, detail: 'Returning from nightly to stable requires a reinstall; migrations do not run backwards' }, REINSTALL_TEXT],
+		[{ status: 409, detail: 'Returning from nightly to stable requires a reinstall; migrations do not run backwards' }, LEGACY_RETURN_TEXT],
+		[{ status: 409, detail: 'Cannot tell whether this worker’s version is older than the current stable release, so it stays on nightly.' }, 'Cannot tell whether this worker’s version is older than the current stable release, so it stays on nightly.'],
 		[{ status: 409, detail: 'Something new' }, 'This worker cannot change its update channel right now.']
 	])('maps refusal %o to one sentence', (cause, sentence) => {
 		expect(channelError(cause)).toBe(sentence);

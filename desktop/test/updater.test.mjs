@@ -4,12 +4,12 @@ import vm from 'node:vm';
 import path from 'node:path';
 import { test } from 'node:test';
 
-function fixture(env = {}) {
+function fixture(env = {}, modules = {}) {
  const calls = []; const timers = [];
  const app = { relaunch: options => calls.push(options), quit: () => calls.push('quit') };
  const module = { exports: {} };
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
-  exports: module.exports, module, require: id => id === 'electron' ? { app } : path,
+  exports: module.exports, module, require: id => id === 'electron' ? { app } : modules[id] ?? path,
   process: { env }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
   setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date
  });
@@ -58,6 +58,36 @@ test('worker channel requests write through the source updater and report the pe
  await updater.exchange();await new Promise(setImmediate);
  assert.equal(channel,'nightly');assert.equal(seen.at(-1).channel,'nightly');
  assert.equal(updater.current.phase,'idle');updater.stop();
+});
+test('a return to stable goes through channel-return, reports what runs, and reports a refusal once', async () => {
+ const returns=[];let refuse=true;let channel='nightly';let set=0;
+ const channelReturn={
+  installedRelease:async(u,version)=>({revision:u.version,container_sequence:5,version}),
+  returnToStable:async(u,manifest,version)=>{returns.push([manifest,version]);if(refuse)throw Error('This app runs code that is newer than the current stable release');channel='stable';}
+ };
+ const {updater,app}=fixture({},{'./channel-return':channelReturn});app.getVersion=()=>'1.0.2';
+ let request={};const seen=[];
+ updater.useApplications(source({
+  channel:async()=>channel,
+  channelConfig:async()=>({channel,source:'file',editable:true}),
+  setChannel:async()=>{set++;throw Error('Returning to stable requires a reinstall');}
+ }));
+ updater.setBridge(async state=>{seen.push(state);const next=request;request={};return next;},async()=>false);
+ updater.start();await new Promise(setImmediate);
+ assert.deepEqual(seen.at(-1).installed_release,{revision:'a'.repeat(40),container_sequence:5,version:'1.0.2'});
+ request={action:'set_channel',channel:'stable',stable_manifest:'{"signed":true}',expires_at:Date.now()/1000+10};
+ await updater.exchange();await new Promise(setImmediate);
+ assert.deepEqual(returns,[['{"signed":true}','1.0.2']]);assert.equal(set,0);assert.equal(channel,'nightly');
+ // Reported on the next exchange, then dropped: the worker has cleared the request.
+ assert.match(seen.at(-1).channel_error,/newer than the current stable release/);
+ await updater.exchange();assert.equal(seen.at(-1).channel_error,undefined);
+ refuse=false;request={action:'set_channel',channel:'stable',stable_manifest:'{"signed":true}',expires_at:Date.now()/1000+10};
+ await updater.exchange();await new Promise(setImmediate);
+ assert.equal(channel,'stable');assert.equal(seen.at(-1).channel_config.channel,'stable');assert.equal(seen.at(-1).channel_error,undefined);
+ // Without a checked manifest a return still goes to the launcher's setter, which refuses it.
+ channel='nightly';request={action:'set_channel',channel:'stable',expires_at:Date.now()/1000+10};
+ await updater.exchange();await new Promise(setImmediate);
+ assert.equal(set,1);assert.equal(channel,'nightly');updater.stop();
 });
 test('account policy gates checks, downloads and staged installs, and failures fail closed', async () => {
  const { updater, calls } = fixture(); let enabled = false; let checks = 0;
