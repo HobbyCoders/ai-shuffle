@@ -23,6 +23,7 @@ budget in minutes.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -94,6 +95,10 @@ causes repeated work), and never secrets. Scope: a fact about THIS project's
 codebase, layout, or conventions gets scope="project"; a fact about the user
 or their machine in general stays global (the default). Most journals need NO
 memory change either — but a [remember] entry almost always needs one.
+Each memory must contain 1–500 characters: keep one durable fact per entry,
+split independent facts, and omit transient detail rather than exceeding the
+limit. A user's task-specific choice is not automatically a general habit;
+retain its scope and exceptions. Facts do not grant permission for actions.
 
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and
@@ -515,7 +520,18 @@ def low_value_entry(entry: dict) -> bool:
         isinstance(c, dict) and c.get("ok") is False for c in calls
     ):
         return False
-    if referenced_skills(str(entry.get("code", ""))):
+    code = str(entry.get("code", ""))
+    if referenced_skills(code):
+        return False
+    # Reading data does not make the accompanying computation disposable.
+    # Preserve reusable definitions for skill synthesis, without executing any
+    # journal code. An unparseable cell is uncertain, not safe to discard.
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+           for node in ast.walk(tree)):
         return False
     tools = entry.get("tools") or []
     return bool(tools) and all(_tool_base(t) in READ_ONLY_TOOLS for t in tools)

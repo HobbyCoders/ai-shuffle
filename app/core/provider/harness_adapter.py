@@ -358,6 +358,7 @@ class HarnessAdapter(ProviderAdapter):
         # note decided to send (set by send_query around the note render).
         self._memory_held_for_turn: Optional[Any] = None
         self._memory_plan: Optional[Any] = None
+        self._memory_query = ""
         # A full snapshot was submitted; its node id arrives with TurnStarted.
         self._memory_full_pending: bool = False
         # The delegated leg puts the full snapshot back right after a Claude
@@ -1677,14 +1678,24 @@ class HarnessAdapter(ProviderAdapter):
             # CLI's context without a compaction boundary: re-send in full.
             self._memory_trusted_node = None
             self._memory_put_back = None
+        memory_query = self._memory_query
         if command:
             note = None
         else:
+            from fluid.codemode.relevance import query_terms
+
+            # Only substantive user text chooses task relevance. Wakes and
+            # short continuations retain the previous topic.
+            if source == "user" and query_terms(prompt):
+                memory_query = prompt[:4000]
             self._memory_held_for_turn = await self._memory_held()
+            previous_query = self._memory_query
+            self._memory_query = memory_query
             try:
                 note = await asyncio.to_thread(self._turn_context_note)
             finally:
                 self._memory_held_for_turn = None
+                self._memory_query = previous_query
         content = f"{prompt}\n\n{note}" if note else prompt
         if command and _COMPACT_COMMAND.match(prompt.strip()):
             # Who asked, for the card: the owner typed it, or a wake the app
@@ -1699,6 +1710,7 @@ class HarnessAdapter(ProviderAdapter):
             content=cast(Any, content), source=source,
             context_pin=self._memory_context_pin(content),
         ))
+        self._memory_query = memory_query
         # Set after acceptance: a concurrent/rejected submit must not replace
         # the running turn's snapshot. The engines reject overlapping turns.
         self._pending_away_note = note
@@ -2231,7 +2243,9 @@ class HarnessAdapter(ProviderAdapter):
             if not app_session_id:
                 return None
             store, project = session_memory(app_session_id, self._options.cwd)
-            section = store.render_memory_section(project, checkout=self._options.cwd)
+            section = store.render_memory_section(
+                project, checkout=self._options.cwd, query=self._memory_query,
+            )
             return section or None
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
