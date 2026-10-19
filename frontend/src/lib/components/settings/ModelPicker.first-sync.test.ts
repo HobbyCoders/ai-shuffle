@@ -40,6 +40,38 @@ it('populates the open picker from first sync without visiting Settings or reloa
  expect(api.post).not.toHaveBeenCalled();
 });
 
+it('omits empty providers from picker catalogs without removing their registry rows', async () => {
+ const populated = { ...synced.providers[0], auth_kind: 'api' };
+ const unavailable = { ...populated, id: 'empty', models: [] };
+ api.get.mockResolvedValue({ ...empty, providers: [populated] });
+ await hydrateModelRegistry();
+ const expected = buildModelPickerCatalog();
+ api.get.mockResolvedValue({ ...empty, providers: [unavailable, populated] });
+ await hydrateModelRegistry();
+ expect(buildModelPickerCatalog()).toEqual(expected);
+ expect(buildModelPickerCatalog({ apiKeyOnly: true })).toEqual(expected);
+ expect(buildModelPickerCatalog({ providerScope: 'empty' })).toEqual({ groups: [], options: [] });
+ expect(buildModelPickerCatalog({ providerScope: populated.id })).toEqual(expected);
+ expect(getProviders().map(p => p.id)).toEqual(['empty', populated.id]);
+});
+
+it('moves the open picker off a provider that loses its last model', async () => {
+ const first = { ...synced.providers[0], id: 'first', name: 'OpenRouter', provider_type: 'openrouter' };
+ api.get.mockResolvedValue({ ...empty, providers: [first, ...synced.providers] });
+ await hydrateModelRegistry();
+ render(ModelPicker, { value: '', onSelect: vi.fn(), allowEmpty: true, emptyLabel: 'Agent default' });
+ await fireEvent.click(screen.getByRole('button', { name: 'Agent default' }));
+ await fireEvent.click(screen.getByRole('tab', { name: 'OpenRouter · API' }));
+ api.get.mockResolvedValue({ ...empty, providers: [{ ...first, models: [] }, ...synced.providers] });
+ await hydrateModelRegistry();
+ await tick();
+ expect(screen.queryByRole('tab', { name: 'OpenRouter · API' })).toBeNull();
+ expect(screen.getByRole('tab', { name: 'OpenAI · API' }).getAttribute('aria-selected')).toBe('true');
+ expect(screen.getByRole('option', { name: /My saved model/ })).toBeTruthy();
+ await fireEvent.click(screen.getByRole('tab', { name: /Favorites/ }));
+ expect(screen.getByRole('tab', { name: /Favorites/ }).getAttribute('aria-selected')).toBe('true');
+});
+
 it('accepts provider-only snapshots with no native models', async () => {
  api.get.mockResolvedValue({ ...synced, models: [] });
  expect(await hydrateModelRegistry()).toBe(true);

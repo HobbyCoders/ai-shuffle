@@ -150,6 +150,7 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
             f"ensure_worktree: unknown project_v2 {project_v2_id!r}"
         )
 
+    checkout_manager.require_worktree_project(project)
     if params.get("create_new_branch"):
         # A "new" branch must really be new (#1528), exactly like local intake:
         # minting a name that already exists here would bind this session to

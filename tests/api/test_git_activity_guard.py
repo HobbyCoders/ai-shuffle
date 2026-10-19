@@ -1,3 +1,4 @@
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -163,11 +164,39 @@ async def test_checkout_checks_the_requested_ref(monkeypatch):
     assert 'other-active' in check.call_args.args[2]
 
 @pytest.mark.asyncio
-async def test_read_only_action_does_not_resolve_or_lock_git(monkeypatch):
-    resolve = AsyncMock(side_effect=AssertionError('read must remain available'))
+@pytest.mark.parametrize("action", ["get_file_diff", "stage_files"])
+@pytest.mark.parametrize("failure", [PermissionError("unreadable"), subprocess.TimeoutExpired("git", 5)])
+async def test_scope_probe_failure_stays_unavailable(monkeypatch, action, failure):
+    monkeypatch.setattr('app.api.common.check_project_access', lambda *a: None)
+    monkeypatch.setattr('app.api.git_helpers.get_working_dir_async', AsyncMock(return_value='/checkout'))
+    monkeypatch.setattr(git_owner, '_enclosing_repository', Mock(side_effect=failure))
+    check = Mock(side_effect=AssertionError('must stop before mutation checks'))
+    monkeypatch.setattr(activity, 'require_idle_git_target', check)
+    with pytest.raises(HTTPException) as error:
+        await git_owner._guard_mutation(action, {'request': object(), 'project_id': 'p'})
+    assert error.value.status_code == 503
+    assert error.value.detail == 'Git checkout is unavailable. Check again.'
+    check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_status_does_not_resolve_or_lock_git(monkeypatch):
+    resolve = AsyncMock(side_effect=AssertionError('status must remain available'))
     monkeypatch.setattr('app.api.git_helpers.get_working_dir_async', resolve)
-    await git_owner._guard_mutation('get_file_diff', {})
+    await git_owner._guard_mutation('get_git_status', {})
     resolve.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_read_only_action_checks_scope_but_never_locks_git(monkeypatch, tmp_path):
+    monkeypatch.setattr('app.api.common.check_project_access', lambda *a: None)
+    resolve = AsyncMock(return_value=str(tmp_path))
+    monkeypatch.setattr('app.api.git_helpers.get_working_dir_async', resolve)
+    check = Mock(side_effect=AssertionError('reads must remain available while busy'))
+    monkeypatch.setattr(activity, 'require_idle_git_target', check)
+    await git_owner._guard_mutation('get_file_diff', {'request': object(), 'project_id': 'p'})
+    resolve.assert_awaited_once_with('p', None, None)
+    check.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_merge_checks_base_branch_before_github_write(monkeypatch):
