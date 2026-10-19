@@ -31,7 +31,8 @@
 	 *      credit-billed providers, and one meta line ("Checked 4m ago" or the
 	 *      action to take, plus the dashboard link). A state change swaps text in
 	 *      place; it never adds or removes a line. Figures stay those of the last
-	 *      report.
+	 *      report. Numbers render directly, without replaying old readings or
+	 *      animating digits, so opening and refreshing never hide the latest value.
 	 *
 	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
 	 * set by the SSE-fed reducer. Rate-limit windows come from the `rateLimit`
@@ -47,7 +48,6 @@
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
 	import { AGENT_PROVIDER_ORDER } from '$lib/components/settings/providers/providers-model';
-	import { createUsageNumberAnimation } from './usage-number-animation';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
@@ -104,8 +104,6 @@
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance, usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
-
-	const usageNumber = createUsageNumberAnimation();
 
 	/** The user's own usage page; AI Shuffle never fetches it. */
 	const CLAUDE_USAGE_URL = 'https://claude.ai/settings/usage';
@@ -912,7 +910,7 @@
 
 <!-- A window row: label, reset text and percent on one line over a thin bar.
      A placeholder (pct null) keeps the same shape with "—" and an empty bar. -->
-{#snippet windowRow(slot: RowSlot, numberKey: string, suffix: string)}
+{#snippet windowRow(slot: RowSlot, suffix: string)}
 	<div class="popover-row" class:placeholder={slot.pct == null}>
 		<div class="row-line">
 			<span class="row-label">{slot.label}</span>
@@ -921,7 +919,7 @@
 				{#if slot.pct == null}
 					<span class="row-pct row-pct-empty">—</span>
 				{:else}
-					<span class="row-pct {slot.severity}" use:usageNumber={{ key: numberKey, text: `${slot.pct}%${suffix}` }}></span>
+					<span class="row-pct {slot.severity}">{slot.pct}%{suffix}</span>
 				{/if}
 			</span>
 		</div>
@@ -984,8 +982,7 @@
      reported), any other reported window, then the meta line. -->
 {#snippet claudeSummary()}
 	{#if planSummaryRemaining != null}
-		<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary"
-			use:usageNumber={{ key: `plan:${resolvedKey}:summary`, text: `${planSummaryRemaining}% left` }}></span>
+		<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary">{planSummaryRemaining}% left</span>
 	{:else}
 		<span class="sec-summary sec-credits sec-empty">—</span>
 	{/if}
@@ -995,7 +992,7 @@
 	{@render sectionHeader('plan', claudeDisplay.name, claudeSubtext, planRowsVisible, 'Plan usage limits', claudeSummary)}
 	{#if planRowsVisible}
 		{#each claudeSlots as slot (slot.type)}
-			{@render windowRow(slot, `plan:${resolvedKey}:${slot.type}`, ' left')}
+			{@render windowRow(slot, ' left')}
 		{/each}
 		<!-- AI Shuffle only sees the windows the CLI reports during a run;
 		     the full picture is on the user's own claude.ai usage page. -->
@@ -1022,13 +1019,12 @@
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
 		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if pbSummary}
-			<span class="row-pct {pbSummary.severity} sec-summary"
-				use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${suffix}` }}></span>
+			<span class="row-pct {pbSummary.severity} sec-summary">{pbSummary.pct}%{suffix}</span>
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
-			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal'}
 			<span class="sec-summary sec-credits">Balance unavailable</span>
 		{:else}
@@ -1038,11 +1034,11 @@
 	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, `${pbDisplay.name} usage`, providerSummary)}
 	{#if pbOpen}
 		{#each providerSlots(pb, pbWindows, pbShowsRemaining, now) as slot (slot.type)}
-			{@render windowRow(slot, `${resolvedKey}:${sectionId}:${slot.type}`, suffix)}
+			{@render windowRow(slot, suffix)}
 		{/each}
 		{@const credits = creditsLine(pb)}
 		{#if credits}
-			<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
+			<div class="row-reset usage-credits">{credits}</div>
 		{/if}
 		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
 	{/if}
@@ -1096,8 +1092,7 @@
 					<span class="ctx-value">
 						{usedOfMax}
 						{#if windowKnown}
-							<span class="ctx-pct {displayBreakdown.severity}"
-								use:usageNumber={{ key: `context:${resolvedKey}:${sessionId ?? 'new'}:${effectiveProviderId}:${effectiveModel}`, text: displayBreakdown.overLimit ? '(over limit)' : `(${Math.round(displayBreakdown.totalPercent)}%)` }}></span>
+							<span class="ctx-pct {displayBreakdown.severity}">{displayBreakdown.overLimit ? '(over limit)' : `(${Math.round(displayBreakdown.totalPercent)}%)`}</span>
 						{:else}
 							<span class="ctx-pct unknown">· window unknown</span>
 						{/if}
