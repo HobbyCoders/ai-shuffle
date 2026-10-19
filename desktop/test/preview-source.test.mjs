@@ -90,7 +90,7 @@ test('preview Git overrides repository fsmonitor without changing it or leaving 
       assert.equal(status.status, 1, 'preview status must not start a detached fsmonitor');
     }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
   await assert.rejects(lstat(root), { code: 'ENOENT' });
 });
@@ -119,7 +119,7 @@ test('failed protection explains recovery, preserves its cause and removes only 
     // A failed attempt must not block retrying the same unused name.
     await reservePreviewRoot(root);
   } finally {
-    await rm(parent, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -133,7 +133,7 @@ test('failed protection never recursively deletes files added to the new root', 
     }), /preview directory remains; inspect it/);
     assert.equal(await readFile(path.join(root, 'sentinel'), 'utf8'), 'preserve');
   } finally {
-    await rm(parent, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -157,7 +157,7 @@ test('reservation refuses existing files and directory links without protecting 
   } finally {
     // Remove the junction itself, never recurse through its target on Windows.
     await rm(link, { force: true });
-    await rm(parent, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -170,6 +170,6 @@ test('reserving a profile refuses an existing directory without changing it', as
     await assert.rejects(reservePreviewRoot(root), { code: 'EEXIST' });
     assert.equal(await readFile(path.join(root, 'sentinel'), 'utf8'), 'preserve');
   } finally {
-    await rm(parent, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

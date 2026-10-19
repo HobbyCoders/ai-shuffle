@@ -87,7 +87,7 @@ test('managed descriptor is private, exact, atomic, reusable, and rejects extern
 		if (process.platform !== 'win32') {
 			assert.equal((await stat(dir)).mode & 0o777, 0o700); assert.equal((await stat(file)).mode & 0o777, 0o600);
 		}
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('worker config strips legacy database entries while preserving unrelated persisted settings across starts', async () => {
@@ -98,7 +98,7 @@ test('worker config strips legacy database entries while preserving unrelated pe
 		const clean = await readFile(file, 'utf8');
 		assert.equal(clean, '# keep\nPORT=8000\nMODEL=keep-me\n');
 		await prepareWorkerConfig(file); assert.equal(await readFile(file, 'utf8'), clean);
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('preview refuses an existing healthy worker without attaching or writing its connection', async () => {
@@ -111,7 +111,7 @@ test('preview refuses an existing healthy worker without attaching or writing it
 		const state = await supervisor.start(); assert.equal(state.phase, 'failed'); assert.equal(state.external, false);
 		assert.match(state.error, /in use/); assert.equal(requests, 0, 'preview does not even probe an unrelated worker');
 		assert.deepEqual(await readdir(dir), []);
-	} finally { await new Promise((resolve) => server.close(resolve)); await rm(dir, { recursive: true, force: true }); }
+	} finally { await new Promise((resolve) => server.close(resolve)); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('preview updater cannot register, check, download, install, or schedule updates', async () => {
@@ -191,5 +191,5 @@ test('closing during private descriptor preparation cancels startup and joins cl
 		const stop = worker.stop(); release(); await Promise.all([start, stop]);
 		assert.equal(spawns, 0); assert.equal(worker.state.phase, 'stopped');
 		await worker.clearConnectionFile(); await assert.rejects(readFile(path.join(dir, 'managed-postgres.json')), { code: 'ENOENT' });
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

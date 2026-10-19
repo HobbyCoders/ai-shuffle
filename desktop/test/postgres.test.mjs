@@ -525,5 +525,5 @@ test('generated supervisor connection is handed off atomically BEFORE worker spa
 		await assert.rejects(readFile(descriptor), { code: 'ENOENT' });
 		assert.equal(store.current.password, 'generated-secret', 'restart custody remains');
 		assert.equal(fs.has(path.join(DATA, 'PG_VERSION')), false, 'fake runtime does not pretend to be a real database');
-	} finally { await pg.stop(); await rm(dir, { recursive: true, force: true }); }
+	} finally { await pg.stop(); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

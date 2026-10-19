@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 const { ColdClusterCopy, durableJson, durableRename, WINDOWS_MOVE_SCRIPT } = createRequire(import.meta.url)('../dist/main/database-restore.js');
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-restore-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   await fs.mkdir(path.join(root, 'data/global'), { recursive: true });
   await fs.mkdir(path.join(root, 'data/empty'));
   await fs.writeFile(path.join(root, 'data/PG_VERSION'), '16');
@@ -97,7 +97,7 @@ test('the Windows move retries only transient sharing errors, for a bounded time
 const windowsOnly = { skip: process.platform !== 'win32' && 'MoveFileEx is Windows only' };
 test('a Windows move waits for a file another process holds open', windowsOnly, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-move-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const file = path.join(root, 'state.json.tmp'), target = path.join(root, 'state.json');
   await fs.writeFile(file, '{}');
   // No FILE_SHARE_DELETE, like a scanner's handle: the move fails until it closes.
@@ -113,7 +113,7 @@ test('a Windows move waits for a file another process holds open', windowsOnly, 
 });
 test('a Windows move that cannot succeed reports the real Windows error at once', windowsOnly, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-move-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const started = Date.now();
   await assert.rejects(durableRename(path.join(root, 'missing'), path.join(root, 'moved')), /Windows error 2: /);
   assert.ok(Date.now() - started < 30_000);

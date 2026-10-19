@@ -7,7 +7,7 @@ import os from 'node:os';
 import {generateKeyPairSync} from 'node:crypto';
 const require=createRequire(import.meta.url);
 const {createProfile,readProfile,isolatedRoot,localFeed}=require('../scripts/source-profile.cjs');
-function directory(t){const root=mkdtempSync(path.join(os.tmpdir(),'shuffle-profile-'));t.after(()=>rmSync(root,{recursive:true,force:true}));return root;}
+function directory(t){const root=mkdtempSync(path.join(os.tmpdir(),'shuffle-profile-'));t.after(()=>rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));return root;}
 test('isolation persists ports and never overlaps normal data',t=>{
  const root=directory(t);const p=createProfile(root,{port:18080,protectedPort:18081,debugPort:19228});assert.deepEqual(readProfile(root),p);
  assert.throws(()=>createProfile(root,{port:18082,protectedPort:18083}),/before the first/);

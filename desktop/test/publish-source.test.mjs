@@ -10,7 +10,7 @@ const script=fileURLToPath(new URL('../scripts/publish-source.mjs',import.meta.u
 const preload=new URL('./helpers/publish-source-preload.mjs',import.meta.url).href;
 const stable=scenario=>['stable','stable-reuse','offmain','side-branch','older','prerelease'].includes(scenario);
 for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regression','moved','newer-attested','stale-feed','pointer-race','corrupt','stable','offmain','side-branch','older','prerelease','overlays'])test(`publisher ${scenario}: immutable runtime archive and signed D1 publication`,async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-publish-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-publish-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const env={...process.env,RUNNER_TEMP:root,GITHUB_SHA:'a'.repeat(40),GH_TOKEN:'fixture',RELEASE_GITHUB_REPO_ID:'42',ACCOUNT_HUB_DATABASE_ID:'11111111-1111-1111-1111-111111111111',PUBLISH_TEST_CASE:scenario};
  delete env.SOURCE_CHANNEL;
  if(scenario==='nightly'||scenario==='edge')env.SOURCE_CHANNEL=scenario;
@@ -68,7 +68,7 @@ for(const scenario of ['new','nightly','edge','reuse','stable-reuse','clock-regr
 
 test('whole-release staging signs source bytes but never writes a D1 pointer', async t => {
  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-stage-source-'));
- t.after(() => fs.rm(root, { recursive: true, force: true }));
+ t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
  const stage = path.join(root, 'source-evidence.json');
  const env = { ...process.env, RUNNER_TEMP: root, GITHUB_SHA: 'a'.repeat(40), GH_TOKEN: 'fixture',
   RELEASE_GITHUB_REPO_ID: '42', ACCOUNT_HUB_DATABASE_ID: '11111111-1111-1111-1111-111111111111',

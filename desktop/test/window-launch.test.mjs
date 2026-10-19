@@ -17,7 +17,7 @@ test('Windows source launches show the splash after closing and reopening', {
   timeout: 60000,
 }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-window-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const entry = path.join(root, 'main.cjs');
   const report = path.join(root, 'report.json');
   await fs.writeFile(entry, `

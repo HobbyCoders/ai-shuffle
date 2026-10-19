@@ -49,7 +49,7 @@ test('resolveRuntime finds a bundled runtime under resources/worker', async () =
 		assert.equal(runtime.toolsDir, path.join(dir, 'worker', 'server', 'tools'));
 		assert.equal(runtime.manifest.python.version, '3.12.14');
 	} finally {
-		await rm(dir, { recursive: true, force: true });
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -74,7 +74,7 @@ test('bundled gh precedes host gh and shares the worker config in agent commands
 			baseEnv: { PATH: hostBin, GH_CONFIG_DIR: config } });
 		assert.ok(!repoEnv.PATH.split(':').includes(bundledBin));
 	} finally {
-		await rm(dir, { recursive: true, force: true });
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -86,7 +86,7 @@ test('resolveRuntime explains a stub or missing bundle', async () => {
 		await writeFile(path.join(dir, 'worker', 'manifest.json'), JSON.stringify({ stub: true }));
 		assert.match(resolveRuntime({ packaged: true, resourcesPath: dir, repoDir: '/nowhere' }).error, /without a worker runtime/);
 	} finally {
-		await rm(dir, { recursive: true, force: true });
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -104,7 +104,7 @@ test('resolveRuntime uses the repository venv in development', async () => {
 		assert.equal(runtime.serverDir, dir);
 		assert.equal(runtime.nodeBinDir, null);
 	} finally {
-		await rm(dir, { recursive: true, force: true });
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -149,7 +149,7 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 		assert.equal(parts[2], path.join(runtime.root, 'bin'));
 		assert.equal(parts[3], 'C:\\Windows');
 	} finally {
-		await rm(dir, { recursive: true, force: true });
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -168,7 +168,7 @@ test('D5: the packaged (non-preview) worker runs on the user\'s own home and Cla
 			assert.equal(custom.CLAUDE_CONFIG_DIR, '/home/me/.config/claude', platform);
 		}
 	} finally {
-		await rm(dir, { recursive: true, force: true });
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -213,7 +213,7 @@ test('isolated worker prepares redirected Windows AppData before spawning', asyn
 		profileDir, port, protectedPort, allowAttach: false, baseEnv: process.env,
 		postgres: () => ({ host: '127.0.0.1', port: 5432, user: 'fixture', password: 'fixture', database: 'fixture' }),
 	});
-	t.after(async () => { await supervisor.stop(); await rm(dir, { recursive: true, force: true }); });
+	t.after(async () => { await supervisor.stop(); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 	// Node refuses Python's -m switch; no app or database connection is made.
 	const state = await supervisor.start();
 	assert.equal(state.phase, 'failed');
@@ -224,7 +224,7 @@ test('isolated worker prepares redirected Windows AppData before spawning', asyn
 /** A runtime whose "python" runs the fake worker; spawns are appended to `log`. */
 async function fakeSupervisor(t, extraEnv = {}, options = {}) {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-supervisor-'));
-	t.after(() => rm(dir, { recursive: true, force: true }));
+	t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	const python = path.join(dir, 'python');
 	await writeFile(python, '#!/bin/sh\nexec "$FAKE_WORKER_NODE" "$FAKE_WORKER_SCRIPT"\n', { mode: 0o755 });
 	await mkdir(path.join(dir, 'server'), { recursive: true });
@@ -268,7 +268,7 @@ async function foreignWorker(t, port, health) {
 
 test('a start that fails before the spawn reports failed instead of rejecting or staying starting', async (t) => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-logdir-'));
-	t.after(() => rm(dir, { recursive: true, force: true }));
+	t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	await writeFile(path.join(dir, 'blocker'), '');
 	const runtime = { mode: 'bundled', root: dir, python: path.join(dir, 'python'), serverDir: dir, nodeBinDir: null, toolsDir: dir, browserMcpEntry: dir, manifest: null };
 	const supervisor = new WorkerSupervisor({
@@ -375,7 +375,7 @@ test('DESK-03: SHUFFLE_DESKTOP_ATTACH_ANY=1 restores attaching to any local work
 
 test('DESK-03: the attach token reaches the worker and never leaks in from the parent environment', async (t) => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));
-	t.after(() => rm(dir, { recursive: true, force: true }));
+	t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	await fakeBundle(path.join(dir, 'worker'), 'linux');
 	const runtime = resolveRuntime({ packaged: true, resourcesPath: dir, repoDir: '/nowhere', platform: 'linux' });
 	const env = buildWorkerEnv({ runtime, port: 8000, baseEnv: { PATH: '/bin', SHUFFLE_DESKTOP_ATTACH_TOKEN: 'inherited', shuffle_desktop_attach_token: 'inherited', SHUFFLE_DESKTOP_LISTENER_TOKEN: 'inherited', shuffle_desktop_listener_token: 'inherited' } });

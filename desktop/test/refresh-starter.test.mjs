@@ -7,7 +7,7 @@ import { refreshStarter } from '../scripts/refresh-starter.mjs';
 
 async function fixture(t, version = 3) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'starter-refresh-'));
-  t.after(() => rm(temporary, { recursive: true, force: true }));
+  t.after(() => rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const desktop = path.join(temporary, 'desktop'), root = path.join(temporary, 'install');
   await mkdir(desktop); await mkdir(root);
   for (const name of ['src', 'scripts', 'build']) await mkdir(path.join(desktop, name));

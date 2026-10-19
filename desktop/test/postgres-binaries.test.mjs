@@ -19,7 +19,7 @@ import { validateBundledSymlinks } from '../scripts/bundled-symlinks.mjs';
 
 async function postgresFixture(t) {
 	const scratch = await mkdtemp(path.join(os.tmpdir(), 'shuffle-postgres-links-'));
-	t.after(() => rm(scratch, { recursive: true, force: true }));
+	t.after(() => rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	const dir = path.join(scratch, 'postgres');
 	await mkdir(path.join(dir, 'lib'), { recursive: true });
 	return dir;
@@ -37,7 +37,7 @@ test('relative PostgreSQL links remain valid after copying and removing staging'
 	await symlink('../lib/libpq.5.dylib', path.join(dir, 'bin', 'client-library'));
 	const copied = path.join(path.dirname(dir), 'copied');
 	await cp(dir, copied, { recursive: true, verbatimSymlinks: true });
-	await rm(dir, { recursive: true });
+	await rm(dir, { recursive: true, maxRetries: 10, retryDelay: 100 });
 	assert.equal(await readlink(path.join(copied, 'lib', 'libpq.so.5')), 'libpq.so.5.16');
 	await validateBundledSymlinks(copied);
 });
@@ -92,7 +92,7 @@ test('nested npm bin links work after staging removal and the old copy is reject
 	const broken = path.join(scratch, 'broken-worker');
 	await cp(staging, copied, { recursive: true, verbatimSymlinks: true });
 	await cp(staging, broken, { recursive: true });
-	await rm(staging, { recursive: true });
+	await rm(staging, { recursive: true, maxRetries: 10, retryDelay: 100 });
 	await assert.rejects(validateBundledSymlinks(broken), /Bundled symlink is absolute/);
 	await validateBundledSymlinks(copied);
 	for (const [name, target] of Object.entries(links)) {

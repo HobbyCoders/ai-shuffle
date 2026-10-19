@@ -11,7 +11,7 @@ import { reuseBundledPython } from '../scripts/build-worker.mjs';
 
 const desktop=fileURLToPath(new URL('..',import.meta.url));
 test('bundled Python reuse requires identical locks, interpreter, platform and architecture',async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-python-reuse-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-python-reuse-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const worker=path.join(root,'bundle');const destination=path.join(root,'staged-python');
  const expected={platform:'linux',arch:'x64',pythonDependencies:'a'.repeat(64),python:{version:'3.12.14',build:'20260901',triple:'x86_64-unknown-linux-gnu'}};
  await fs.mkdir(path.join(worker,'python/bin'),{recursive:true});await fs.writeFile(path.join(worker,'python/bin/python3.12'),'bundled interpreter');
@@ -34,7 +34,7 @@ test('bundled Python reuse requires identical locks, interpreter, platform and a
  await fs.writeFile(path.join(worker,'manifest.json'),'{');await assert.rejects(reuseBundledPython(worker,path.join(root,'corrupt'),expected),SyntaxError);
 });
 test('Python reuse rejects root links and copy-time swaps on Linux and Windows before execution',async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-root-link-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-root-link-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  for(const platform of ['linux','win32']){
   const worker=path.join(root,platform);const source=path.join(worker,'python');const external=path.join(root,'external-'+platform);
   const expected={platform,arch:'x64',pythonDependencies:'a'.repeat(64),python:{version:'3.12.14',build:'20260901',triple:'x86_64-unknown-linux-gnu'}};
@@ -51,7 +51,7 @@ test('Python reuse rejects root links and copy-time swaps on Linux and Windows b
  }
 });
 test('CLI never executes Python through a rejected bundle root link',{skip:process.platform!=='linux'||process.arch!=='x64'},async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-no-linked-exec-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-no-linked-exec-'));t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const worker=path.join(root,'worker');const external=path.join(root,'external');const sentinel=path.join(root,'executed');
  await fs.mkdir(worker);await fs.mkdir(path.join(external,'bin'),{recursive:true});
  await fs.writeFile(path.join(external,'bin/python3'),`#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(sentinel)},'executed');\n`,{mode:0o755});
@@ -62,7 +62,7 @@ test('CLI never executes Python through a rejected bundle root link',{skip:proce
  await assert.rejects(fs.stat(sentinel),{code:'ENOENT'});
 });
 test('build:worker stamps the trusted baseline on Linux; repeated Windows stamping is identical',async t=>{
- const out=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-baseline-'));t.after(()=>fs.rm(out,{recursive:true,force:true}));
+ const out=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-baseline-'));t.after(()=>fs.rm(out,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  // The same npm entry used by the Linux artifact workflow, without downloads.
  execFileSync(process.platform==='win32'?'npm.cmd':'npm',['run','build:worker','--','--stub','--platform','linux','--arch','x64','--out',out],{cwd:desktop,shell:process.platform==='win32'});
  const file=path.join(out,'desktop-build.json');const bytes=await fs.readFile(file,'utf8');const baseline=JSON.parse(bytes);

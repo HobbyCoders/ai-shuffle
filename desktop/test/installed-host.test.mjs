@@ -13,7 +13,7 @@ test('an explicit Chromium debugging port survives even when Electron omits it f
  assert.deepEqual(installedLaunchArgs(['--remote-debugging-port=19229'],'19229'),['--remote-debugging-port=19229']);
 });
 test('installed source versions preserve the original profile and EXE across restarts',async t=>{
- const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-test-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
+ const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-test-'));t.after(()=>fs.rm(userData,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const root=path.join(userData,'updates');await fs.mkdir(root);
  const host={executable:path.join(userData,'Programs','AI Shuffle.exe'),userData,name:'ai-shuffle-desktop'};
  assert.equal(readInstalledHostSync(root),null);await saveInstalledHost(root,host);assert.deepEqual(readInstalledHostSync(root),host);
@@ -27,7 +27,7 @@ test('installed source versions preserve the original profile and EXE across res
 });
 
 test('Linux compatibility requires the installed Electron exact pinned version before source activation',async t=>{
- const desktopDir=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-electron-preflight-'));t.after(()=>fs.rm(desktopDir,{recursive:true,force:true}));
+ const desktopDir=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-electron-preflight-'));t.after(()=>fs.rm(desktopDir,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const application={desktopDir};const file=path.join(desktopDir,'package-lock.json');
  await fs.mkdir(path.join(desktopDir,'dist/main'),{recursive:true});const entry=path.join(desktopDir,'dist/main/managed-entry.js');
  await fs.writeFile(entry,'exports.startManagedSource = startManagedSource; if (require.main === module) start();');
@@ -40,7 +40,7 @@ test('Linux compatibility requires the installed Electron exact pinned version b
 test('Linux keeps the original AppImage rather than its temporary mount, and deb uses execPath', {skip:process.platform!=='linux'},async t=>{
  const saved=process.env.APPIMAGE;t.after(()=>{if(saved===undefined)delete process.env.APPIMAGE;else process.env.APPIMAGE=saved;});
  process.env.APPIMAGE='/home/me/Applications/AI Shuffle.AppImage';assert.equal(installedExecutable(),process.env.APPIMAGE);
- const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-linux-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
+ const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-linux-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const root=path.join(userData,'updates');await fs.mkdir(root);
  const host={executable:installedExecutable(),userData,name:'AI Shuffle'};
  await saveInstalledHost(root,host);assert.deepEqual(readInstalledHostSync(root),host);
@@ -97,7 +97,7 @@ test('#1821 D5: the updated app reads a missing or malformed launcher version as
 });
 
 test('a corrupt or foreign installed-host.json fails closed instead of choosing a profile',async t=>{
- const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
+ const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
  const root=path.join(userData,'updates');await fs.mkdir(root);const file=path.join(root,'installed-host.json');
  const host={executable:path.join(userData,'Programs','AI Shuffle.exe'),userData,name:'AI Shuffle'};
  // Truncated by a crash or an editor: an error, never "no host" (which would start a fresh default profile).

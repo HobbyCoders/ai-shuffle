@@ -18,7 +18,7 @@ function signed(fields, privateKey = keys.privateKey) {
 }
 async function root(t, channel = 'nightly') {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-channel-return-'));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   if (channel) await fs.writeFile(path.join(dir, 'update-channel.json'), JSON.stringify({ channel }));
   return dir;
 }

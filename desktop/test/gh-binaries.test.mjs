@@ -11,7 +11,7 @@ import { validateBundledSymlinks } from '../scripts/bundled-symlinks.mjs';
 
 async function scratch(t) {
 	const dir = await mkdtemp(path.join(os.tmpdir(), 'shuffle-gh-test-'));
-	t.after(() => rm(dir, { recursive: true, force: true }));
+	t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	return dir;
 }
 const digest = (data) => createHash('sha256').update(data).digest('hex');

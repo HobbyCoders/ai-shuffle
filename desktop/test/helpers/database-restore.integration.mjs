@@ -21,7 +21,7 @@ async function fixture(t) {
  let credentials=null;
  const store={load:()=>credentials,save:async config=>{credentials=config;}};
  const pg=new PostgresSupervisor({root:path.join(root,'postgres'),logDir:path.join(root,'logs'),binaries,credentials:store});
- t.after(async()=>{await pg.quiesce();await fs.rm(root,{recursive:true,force:true});});
+ t.after(async()=>{await pg.quiesce();await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
  assert.equal((await pg.start()).phase,'ready',pg.state.error);
  const sqlEnv=()=>({ ...process.env,PGHOST:credentials.host,PGPORT:String(credentials.port),PGUSER:credentials.user,PGPASSWORD:credentials.password,PGDATABASE:credentials.database });
  const sql=query=>execFileSync(binaries.psql,['-X','-A','-t','-v','ON_ERROR_STOP=1','-c',query],{env:sqlEnv(),encoding:'utf8'}).trim();
