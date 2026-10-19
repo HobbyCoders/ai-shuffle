@@ -37,7 +37,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple
 
-from app.db.base import get_db
+from app.db.retention import BATCH_SIZE, delete_batches
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,8 @@ def prune_fluid_delta_events(
     ``sessions`` row are left alone entirely: there is no signal to age them by,
     and pruning something we cannot date is not worth the rows.
 
-    Pass ``cursor`` to run inside a caller's transaction (the maintenance job
-    does); otherwise this opens its own.
+    Pass ``cursor`` to retain a caller's transaction; otherwise each bounded
+    batch commits and releases its connection (including the maintenance job).
 
     Returns the number of rows deleted.
     """
@@ -87,23 +87,16 @@ def prune_fluid_delta_events(
 
     placeholders = ", ".join(["%s"] * len(PRUNABLE_EVENT_CLASSES))
     sql = (
-        "DELETE FROM fluid_session_events "
+        "DELETE FROM fluid_session_events WHERE (session_id, seq) IN ("
+        "SELECT session_id, seq FROM fluid_session_events "
         f"WHERE event ->> '_cls' IN ({placeholders}) "
         "AND session_id IN ("
         "    SELECT sdk_session_id FROM sessions "
         "    WHERE sdk_session_id IS NOT NULL AND updated_at < %s"
-        ")"
+        ") LIMIT %s)"
     )
-    params = (*PRUNABLE_EVENT_CLASSES, cutoff)
-
-    if cursor is not None:
-        cursor.execute(sql, params)
-        deleted = cursor.rowcount or 0
-    else:
-        with get_db() as conn:
-            own = conn.cursor()
-            own.execute(sql, params)
-            deleted = own.rowcount or 0
+    params = (*PRUNABLE_EVENT_CLASSES, cutoff, BATCH_SIZE)
+    deleted = delete_batches(sql, params, cursor=cursor)
 
     if deleted:
         logger.info(
