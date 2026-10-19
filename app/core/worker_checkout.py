@@ -159,11 +159,14 @@ def _tool_surface(profile_id, tool_allowlist):
     return None
 
 
-def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None, *, base_commit=None):
+def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allowlist=None, *,
+                            base_commit=None, share_read_only=True):
     """Provision write-capable project workers; explicit research may share.
 
     Shares only explicitly declared surfaces of known, non-mutating builtins
     (no Write/Edit, no shell). Unknown/unrestricted surfaces are isolated.
+    ``share_read_only=False`` isolates every surface: a top-level chat started
+    with StartSession keeps its checkout after its owner changes its tools.
     A mismatched/unavailable bound Git checkout is a refusal, never a fallback.
     Non-project and non-Git tasks retain their normal working-directory behavior.
     """
@@ -172,7 +175,8 @@ def prepare_worker_checkout(parent_row, worker_session_id, profile_id, tool_allo
 
     if base_commit is not None and (not isinstance(base_commit, str) or not _SHA.fullmatch(base_commit)):
         raise WorkerCheckoutError("base_commit must be a full commit SHA already available locally.")
-    if base_commit is None and _is_shared_surface(_tool_surface(profile_id, tool_allowlist)):
+    if (share_read_only and base_commit is None
+            and _is_shared_surface(_tool_surface(profile_id, tool_allowlist))):
         return None
     if parent_row is None:
         raise WorkerCheckoutError("The calling session is unavailable; refusing worker checkout inheritance.")

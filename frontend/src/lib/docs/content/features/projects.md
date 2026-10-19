@@ -41,6 +41,8 @@ Choose the branch in the new chat's branch picker, or pick **New branch…**. Br
 
 When upgrading, an old global worktree **On** is remembered only for the last selected project recorded on this device. An old branch choice stays with the project already recorded in that choice. Other projects still start **Off**; existing chats keep their own checkout.
 
+A chat's branch belongs to that chat. When an agent in a chat on its own branch starts another chat, the new chat gets its own worktree on a new branch, starting from the first chat's last commit. Uncommitted changes are not copied. An agent cannot switch, reset or rename the branch of a worktree that belongs to another chat: AI Shuffle refuses the command and tells the agent to use its own checkout. Chats in the project's main folder still share it.
+
 ## Per-project settings
 
 Each project has its own tabs for:

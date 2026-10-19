@@ -2561,8 +2561,13 @@ class HarnessAdapter(ProviderAdapter):
         if not getattr(DelegatedLoop, "supports_async_tool_policy", False):
             return inner
 
-        async def policy(name: str, tool_input: Dict[str, Any]) -> Optional[str]:
-            denial = inner(name, tool_input) if inner is not None else None
+        inner_cwd = inner is not None and _policy_accepts_cwd(inner)
+
+        async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+            if inner is None:
+                denial = None
+            else:
+                denial = inner(name, tool_input, cwd=cwd) if inner_cwd else inner(name, tool_input)
             if inspect.isawaitable(denial):
                 denial = await denial
             if denial:
@@ -4965,6 +4970,12 @@ class HarnessAdapter(ProviderAdapter):
 
         if not builtins_registered and not recorded and not inproc_servers and not external_mcp:
             return None
+        # Every shell call this registry serves (native Bash/Monitor, the
+        # delegated leg's bridged Monitor) is refused when it would switch the
+        # branch of another session's checkout. The CLI's own Bash is checked
+        # by _delegated_tool_policy.
+        from app.core.checkout_lock import install_registry_guard
+        install_registry_guard(registry, options.extra.get("app_session_id"), options.cwd)
         if not native and _assistant_scope(options) is not None:
             # The claude CLI skips PreToolUse for the bundled app tools and
             # this leg has no permission engine, so the owner check for them
@@ -5653,6 +5664,15 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     return sorted(banned)
 
 
+def _policy_accepts_cwd(policy: Any) -> bool:
+    """Whether a PreToolUse policy takes the CLI's ``cwd`` keyword."""
+    try:
+        params = inspect.signature(policy).parameters
+    except (TypeError, ValueError):
+        return False
+    return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 def _delegated_tool_policy(
     options: SessionOptions,
     permissions: Optional[PermissionEngine],
@@ -5677,9 +5697,12 @@ def _delegated_tool_policy(
 
     surface = _delegated_surface(options)
     rules = list(getattr(permissions, "rules", None) or ())
-    cwd = options.cwd
+    session_cwd = options.cwd
 
-    def policy(name: str, tool_input: Dict[str, Any]) -> Optional[str]:
+    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+        """``cwd`` is the CLI's shell directory for this call when fluid
+        passes it (its Bash keeps a ``cd`` between calls)."""
+        from app.core.checkout_lock import tool_denial
         from app.core.session_modes import proactive_tool_denial
         denial = proactive_tool_denial(
             options.extra.get("assistant_proactive"),
@@ -5687,11 +5710,15 @@ def _delegated_tool_policy(
         )
         if denial:
             return denial
+        shell_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else session_cwd
+        denial = tool_denial(options.extra.get("app_session_id"), name, tool_input, shell_cwd)
+        if denial:
+            return denial
         if blocked and matches_any(name, blocked):
             return f"Tool '{name}' is disabled in this profile"
         if surface and not tool_permitted(name, surface, None):
             return f"Tool '{name}' is not enabled in this profile"
-        rule = match_rule(rules, name, tool_input, cwd=cwd)
+        rule = match_rule(rules, name, tool_input, cwd=session_cwd)
         if rule is not None and rule.decision == "deny":
             return Verdict("deny", "rule", "", rule).deny_message()
         return None

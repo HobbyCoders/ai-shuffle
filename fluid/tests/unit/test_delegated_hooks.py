@@ -148,6 +148,33 @@ async def test_pre_tool_use_policy_deny_blocks_the_call(tmp_path) -> None:
     assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+async def test_pre_tool_use_policy_with_cwd_gets_the_cli_shell_directory(tmp_path) -> None:
+    """The CLI's Bash keeps a ``cd`` between calls; a policy that takes
+    ``cwd`` sees the directory the hook payload reports, others keep the
+    two-argument call."""
+    seen = []
+
+    def policy(name, tool_input, cwd=None):
+        seen.append(cwd)
+        return "elsewhere" if cwd == "/other/checkout" else None
+
+    loop, written = await _loop(tmp_path, tool_policy=policy)
+    denied = await _fire(loop, written, "PreToolUse", {
+        "tool_name": "Bash", "tool_input": {"command": "git switch main"},
+        "tool_use_id": "t1", "cwd": "/other/checkout",
+    })
+    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == "elsewhere"
+    assert await _fire(loop, written, "PreToolUse", {
+        "tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_use_id": "t2",
+    }) == {}
+    assert seen == ["/other/checkout", "."]
+
+    two_args, written = await _loop(tmp_path / "two", tool_policy=lambda name, _input: None)
+    assert await _fire(two_args, written, "PreToolUse", {
+        "tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_use_id": "t3", "cwd": "/x",
+    }) == {}
+
+
 async def test_pre_tool_use_falls_back_to_permission_deny_rules(tmp_path) -> None:
     """With no explicit policy, the permission engine's deny rules are the
     policy; its asks stay with the CLI's own permission prompt."""
