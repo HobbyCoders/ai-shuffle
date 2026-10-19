@@ -433,18 +433,36 @@ def windows_installer_changes(changed: Iterable[str], base: Reader, head: Reader
     if base(LAUNCHER_JSON) != head(LAUNCHER_JSON):
         relevant.add(LAUNCHER_JSON)
 
-    def electron(read):
+    # Source-managed app code can update in-app, but the bootstrap runtimes,
+    # their assembly/signing hooks and the compiler/packager affect the installer.
+    installer_inputs = (
+        "desktop/scripts/build-worker.*", "desktop/scripts/postgres-binaries.*",
+        "desktop/scripts/gh-binaries.*", "desktop/scripts/bundled-symlinks.*",
+        "desktop/scripts/runtime-contract.*", "desktop/scripts/stamp-desktop-build.*",
+        "desktop/scripts/launcher-contract.*", "desktop/scripts/signing.*",
+        "desktop/scripts/signing-preflight.*", "desktop/scripts/verify-packaged-runtime.cjs",
+        "desktop/runtime-contract.json", "desktop/tsconfig.json",
+        ".github/workflows/desktop-installer.yml", "desktop/vendor/*",
+        "requirements.lock", "requirements-native.lock", "fluid/pyproject.toml",
+        "app/core/cloudflared.py",
+    )
+    relevant.update(p for p in changed if matches(p, installer_inputs))
+
+    def build_tools(read):
         package = json.loads(read("desktop/package.json") or b"{}")
         lock = json.loads(read(LAUNCHER_LOCK) or b"{}")
         root = lock.get("packages", {}).get("", {})
-        return (package.get("devDependencies", {}).get("electron"),
-                package.get("dependencies", {}).get("electron"),
-                root.get("devDependencies", {}).get("electron"),
-                root.get("dependencies", {}).get("electron"),
-                lock.get("packages", {}).get("node_modules/electron", {}).get("version"),
-                lock.get("dependencies", {}).get("electron", {}).get("version"))
+        # npm scripts (including lifecycle hooks) and all locked build-tool
+        # dependencies can affect the output, not just the top-level Electron,
+        # electron-builder and TypeScript versions. Ignore only app versions
+        # and descriptive lock metadata, never versions of actual dependencies.
+        package.pop("version", None)
+        root.pop("version", None)
+        packages = {path: {key: data.get(key) for key in ("version", "resolved", "integrity")}
+                    for path, data in lock.get("packages", {}).items() if path}
+        return package, root, packages, lock.get("dependencies")
 
-    if electron(base) != electron(head):
+    if build_tools(base) != build_tools(head):
         relevant.update(p for p in changed if p in {"desktop/package.json", LAUNCHER_LOCK})
     return sorted(relevant)
 

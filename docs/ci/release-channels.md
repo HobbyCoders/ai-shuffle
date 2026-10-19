@@ -79,11 +79,19 @@ build Windows only when needed, avoiding paid Windows CI for ordinary releases.
 build revision and the new tag, never by version numbers or tags**, which always
 differ between releases. The read-only **windows-policy** job reads
 `/v1/desktop/installers`, verifies the Windows download's bytes against its size
-and SHA-256 and its revision against its release tag, then reuses
-`scripts/ci/update_reach.py`'s launcher/installer classification. It compares
-`desktop/launcher.json`, the launcher import/runtime/dependency closure,
-`desktop/build/**`, `desktop/electron-builder.yml`, and Electron in the package
-manifest/lockfile. An app version-only bump does not require an installer.
+and SHA-256 and its revision against its release tag. The same size and digest
+must match that tag's GitHub Windows asset and `SHA256SUMS`, and the release's
+`desktop-build.json` must name the same revision. Missing or mismatched release
+assets require a build, even if the unsigned hub row matches its own download.
+The policy then reuses `scripts/ci/update_reach.py`'s launcher/installer
+classification. It compares `desktop/launcher.json`, the launcher
+import/runtime/dependency closure, `desktop/build/**`, `desktop/electron-builder.yml`,
+the worker/runtime assembly and signing scripts, the packaged-runtime verifier,
+`desktop/runtime-contract.json`, `desktop/tsconfig.json`, and the Windows installer
+workflow. Bundled Python dependency locks, native vendor wheels, Fluid's package
+metadata and the cloudflared bundler also count. Package build scripts and locked
+build-tool dependencies (including Electron, electron-builder, TypeScript and
+their transitive dependencies) count; app version-only bumps do not.
 
 A changed input, missing Windows download, unreadable hub, checksum mismatch or
 unverifiable history requires a build. To force one, dispatch `release.yml` from
@@ -93,6 +101,8 @@ This never overrides the newest-final-stable or owner/actor gates. Otherwise the
 Windows job is skipped: existing installs update in-app, and a fresh install from
 the older installer updates itself on first start. Linux and Android still build
 and register the new tag. The same rule applies when staging a candidate.
+Promotion of a sealed candidate without Windows requires both an explicit
+not-needed decision and a previous-installer snapshot before activation begins.
 Older-line patches and prereleases do not publish Windows or move the hub's
 stable download pointers. macOS remains separate.
 

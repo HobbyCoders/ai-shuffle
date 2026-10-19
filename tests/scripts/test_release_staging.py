@@ -215,15 +215,18 @@ def test_upload_never_clobbers_existing_asset(candidate, tmp_path, monkeypatch):
     assert all("upload" not in call for call in calls)
 
 
-@pytest.mark.parametrize("sealed_windows,needed,allowed", [(True, True, True), (True, False, True),
-                                                         (False, False, True), (False, True, False)])
+@pytest.mark.parametrize("sealed_windows,needed,previous,allowed", [
+    (True, True, None, True), (True, False, None, True),
+    (False, False, {}, True), (False, True, {}, False),
+    (False, False, None, False), (False, False, [], False),
+])
 def test_promotion_checks_windows_intent_before_any_activation(candidate, tmp_path, monkeypatch,
-                                                              sealed_windows, needed, allowed):
+                                                              sealed_windows, needed, previous, allowed):
     record = {**candidate.record, "windows": sealed_windows}
     envelope = p.sign_record(record, candidate.private)
     monkeypatch.setattr(gh, "Backend", lambda _: Fake(candidate))
     monkeypatch.setattr(gh, "load", lambda *_: envelope)
-    monkeypatch.setenv("WINDOWS_POLICY", json.dumps({"build": needed}))
+    monkeypatch.setenv("WINDOWS_POLICY", json.dumps({"build": needed, "previous": previous}))
     monkeypatch.setattr("sys.argv", ["stage", "promote", "--tag", "v1.2.3", "--source-root", str(tmp_path),
                                    "--directory", str(tmp_path)])
     writes = []

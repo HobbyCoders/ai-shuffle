@@ -11,7 +11,12 @@ from scripts.ci import verify_release_downloads as check
 
 
 @pytest.fixture
-def release(tmp_path, monkeypatch):
+def github():
+    return {}
+
+
+@pytest.fixture
+def release(tmp_path, monkeypatch, github):
     def git(*args):
         return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
     git("init", "-q")
@@ -42,10 +47,22 @@ def release(tmp_path, monkeypatch):
     row = {"version": "1.0.0", "revision": base, "size": len(data),
            "sha256": hashlib.sha256(data).hexdigest(), "url": policy.INSTALLER_URL}
     payload = {"platforms": {"win": row}}
+    name = "AI-Shuffle-Desktop-1.0.0-win-x64.exe"
+    github.update({
+        "release": {"tag_name": "v1.0.0", "draft": False, "assets": [
+            {"name": name, "size": len(data), "digest": "sha256:" + row["sha256"]},
+            {"name": "SHA256SUMS"}, {"name": "desktop-build.json"}]},
+        "SHA256SUMS": (row["sha256"] + "  " + name + "\n").encode(),
+        "desktop-build.json": json.dumps({"revision": base}).encode(),
+    })
     def fetch(request, timeout):
         assert timeout == 30
         if request.full_url == policy.URL:
             return io.StringIO(json.dumps(payload))
+        if request.full_url == policy.RELEASE_API + "v1.0.0":
+            return io.StringIO(json.dumps(github["release"]))
+        if request.full_url.startswith(policy.RELEASE_DOWNLOAD + "v1.0.0/"):
+            return io.BytesIO(github[request.full_url.rsplit("/", 1)[1]])
         assert request.full_url == policy.INSTALLER_URL
         return io.BytesIO(data)
     monkeypatch.setattr(policy, "urlopen", fetch)
@@ -74,6 +91,24 @@ def test_two_consecutive_stable_versions_without_installer_changes_skip(release)
     ("desktop/launcher.json", '{"version":2,"minimum":0}'),
     ("desktop/build/new/nested.ico", "icon bytes"),
     ("desktop/electron-builder.yml", "appId: changed"),
+    ("desktop/scripts/build-worker.mjs", "changed installer input"),
+    ("desktop/scripts/postgres-binaries.mjs", "changed installer input"),
+    ("desktop/scripts/gh-binaries.mjs", "changed installer input"),
+    ("desktop/scripts/bundled-symlinks.mjs", "changed installer input"),
+    ("desktop/scripts/runtime-contract.mjs", "changed installer input"),
+    ("desktop/scripts/stamp-desktop-build.mjs", "changed installer input"),
+    ("desktop/scripts/launcher-contract.mjs", "changed installer input"),
+    ("desktop/scripts/signing.mjs", "changed installer input"),
+    ("desktop/scripts/signing-preflight.mjs", "changed installer input"),
+    ("desktop/scripts/verify-packaged-runtime.cjs", "changed installer input"),
+    ("desktop/runtime-contract.json", "changed installer input"),
+    ("desktop/tsconfig.json", "changed installer input"),
+    (".github/workflows/desktop-installer.yml", "changed installer input"),
+    ("desktop/vendor/new.whl", "changed installer input"),
+    ("requirements.lock", "changed installer input"),
+    ("requirements-native.lock", "changed installer input"),
+    ("fluid/pyproject.toml", "changed installer input"),
+    ("app/core/cloudflared.py", "changed installer input"),
     ("desktop/package.json", '{"devDependencies":{"electron":"43.0.0"}}'),
     ("desktop/package-lock.json", '{"packages":{"node_modules/electron":{"version":"43.0.0","dev":true},"node_modules/production-dep":{"version":"1.0.0"}}}'),
     ("desktop/package-lock.json", '{"packages":{"node_modules/electron":{"version":"42.0.0","dev":true},"node_modules/production-dep":{"version":"2.0.0"}}}'),
@@ -82,7 +117,9 @@ def test_installer_input_change_needs_build(release, path, data):
     write, commit, *_ = release
     write(path, data)
     revision = commit("v1.0.1")
-    assert policy.decide("v1.0.1", revision)["build"] is True
+    decision = policy.decide("v1.0.1", revision)
+    assert decision["build"] is True
+    assert decision["reason"] == "installer inputs changed"
 
 
 @pytest.mark.parametrize("failure", ["unreadable", "absent", "checksum", "revision", "unknown-revision", "size", "malformed"])
@@ -111,7 +148,7 @@ def test_unverifiable_hub_needs_build(release, monkeypatch, failure):
     assert "private HTTP body" not in decision["reason"]
 
 
-def test_non_installer_build_metadata_does_not_need_windows(release):
+def test_typescript_build_change_needs_windows(release):
     write, commit, _, _, directory = release
     package = json.loads((directory / "desktop/package.json").read_text())
     package["devDependencies"]["typescript"] = "99.0.0"
@@ -121,7 +158,77 @@ def test_non_installer_build_metadata_does_not_need_windows(release):
     lock["packages"]["node_modules/typescript"] = {"version": "99.0.0", "dev": True}
     write("desktop/package-lock.json", json.dumps(lock))
     revision = commit("v1.0.1")
+    assert policy.decide("v1.0.1", revision)["build"] is True
+
+
+@pytest.mark.parametrize("dependency", ["electron", "electron-builder", "typescript", "@types/node", "builder-transitive"])
+def test_locked_build_dependency_change_needs_windows(release, dependency):
+    write, commit, _, _, directory = release
+    lock = json.loads((directory / "desktop/package-lock.json").read_text())
+    lock["packages"]["node_modules/" + dependency] = {"version": "99.0.0", "dev": True}
+    write("desktop/package-lock.json", json.dumps(lock))
+    revision = commit("v1.0.1")
+    assert policy.decide("v1.0.1", revision)["reason"] == "installer inputs changed"
+
+
+def test_package_build_script_change_needs_windows(release):
+    write, commit, _, _, directory = release
+    package = json.loads((directory / "desktop/package.json").read_text())
+    package["scripts"] = {"build": "tsc --new-build-option"}
+    write("desktop/package.json", json.dumps(package))
+    revision = commit("v1.0.1")
+    assert policy.decide("v1.0.1", revision)["reason"] == "installer inputs changed"
+
+
+def test_lock_descriptive_metadata_does_not_need_windows(release):
+    write, commit, _, _, directory = release
+    lock = json.loads((directory / "desktop/package-lock.json").read_text())
+    lock["packages"]["node_modules/electron"]["license"] = "MIT"
+    write("desktop/package-lock.json", json.dumps(lock))
+    revision = commit("v1.0.1")
     assert policy.decide("v1.0.1", revision)["build"] is False
+
+
+@pytest.mark.parametrize("api_digest", [True, False])
+def test_github_release_assets_match_hub(release, github, api_digest):
+    _, commit, row, _, _ = release
+    if not api_digest:
+        del github["release"]["assets"][0]["digest"]
+    policy.verify_installer(row)
+    revision = commit("v1.0.1")
+    assert policy.decide("v1.0.1", revision)["build"] is False
+
+
+@pytest.mark.parametrize("fault", ["digest", "size", "checksum", "build-revision", "missing-build-revision",
+                                  "missing-exe", "missing-sums", "missing-build", "duplicate-exe",
+                                  "draft", "wrong-tag", "unreadable-build"])
+def test_unverifiable_github_release_needs_build(release, github, fault):
+    _, commit, row, _, _ = release
+    assets = github["release"]["assets"]
+    if fault == "digest":
+        assets[0]["digest"] = "sha256:" + "0" * 64
+    elif fault == "size":
+        assets[0]["size"] += 1
+    elif fault == "checksum":
+        github["SHA256SUMS"] = b"0" * 64 + b"  " + assets[0]["name"].encode()
+    elif fault in {"build-revision", "missing-build-revision"}:
+        github["desktop-build.json"] = json.dumps({"revision": "0" * 40} if fault == "build-revision" else {}).encode()
+    elif fault.startswith("missing-"):
+        index = {"missing-exe": 0, "missing-sums": 1, "missing-build": 2}[fault]
+        assets.pop(index)
+    elif fault == "duplicate-exe":
+        assets.append(dict(assets[0]))
+    elif fault == "draft":
+        github["release"]["draft"] = True
+    elif fault == "wrong-tag":
+        github["release"]["tag_name"] = "v0.9.9"
+    elif fault == "unreadable-build":
+        github["desktop-build.json"] = b"invalid JSON"
+    revision = commit("v1.0.1")
+    decision = policy.decide("v1.0.1", revision)
+    assert decision["build"] is True
+    assert "cannot be verified" in decision["reason"]
+    assert decision["previous"] is None
 
 
 def test_forced_build_does_not_need_hub(release, monkeypatch):

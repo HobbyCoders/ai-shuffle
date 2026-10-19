@@ -19,6 +19,46 @@ from scripts.ci import update_reach as reach
 
 URL = "https://hobbycoders.com/v1/desktop/installers"
 INSTALLER_URL = "https://hobbycoders.com/v1/desktop/installer"
+RELEASE_API = "https://api.github.com/repos/HobbyCoders/ai-shuffle/releases/tags/"
+RELEASE_DOWNLOAD = "https://github.com/HobbyCoders/ai-shuffle/releases/download/"
+
+
+def verify_release(row):
+    """Anchor the unsigned hub row to the independently published GitHub assets."""
+    tag = "v" + row["version"]
+    request = Request(RELEASE_API + tag, headers={"User-Agent": "ai-shuffle-release-check"})
+    with urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    if release.get("tag_name") != tag or release.get("draft") is not False:
+        raise ValueError("win: missing published installer release")
+
+    def asset(name):
+        matches = [a for a in release["assets"] if a.get("name") == name]
+        if len(matches) != 1:
+            raise ValueError("win: missing or ambiguous installer release asset")
+        return matches[0]
+
+    def contents(name):
+        asset(name)
+        request = Request(RELEASE_DOWNLOAD + tag + "/" + name,
+                          headers={"User-Agent": "ai-shuffle-release-check"})
+        with urlopen(request, timeout=30) as response:
+            return response.read()
+
+    name = "AI-Shuffle-Desktop-" + row["version"] + "-win-x64.exe"
+    installer = asset(name)
+    if (type(installer.get("size")) is not int or installer["size"] != row["size"]
+            or installer.get("digest") not in (None, "sha256:" + row["sha256"])):
+        raise ValueError("win: GitHub installer digest or size mismatch")
+    # Older releases may have no API digest. The checksum published beside the
+    # installer still provides an independent digest, never the hub's own claim.
+    sums = contents("SHA256SUMS").decode("utf-8").splitlines()
+    entries = [line.split() for line in sums if line.strip()]
+    checksums = [parts[0] for parts in entries if len(parts) == 2 and parts[1] == name]
+    if checksums != [row["sha256"]]:
+        raise ValueError("win: GitHub installer checksum mismatch")
+    if json.loads(contents("desktop-build.json")).get("revision") != row["revision"]:
+        raise ValueError("win: GitHub installer build revision mismatch")
 
 
 def downloads():
@@ -42,6 +82,7 @@ def verify_installer(row):
     revision = reach.git("rev-parse", f"refs/tags/v{row['version']}^{{commit}}")
     if revision != row["revision"]:
         raise ValueError("win: installer revision does not match its release tag")
+    verify_release(row)
     digest, size = hashlib.sha256(), 0
     request = Request(INSTALLER_URL, headers={"Cache-Control": "no-cache", "User-Agent": "ai-shuffle-release-check"})
     with urlopen(request, timeout=30) as response:

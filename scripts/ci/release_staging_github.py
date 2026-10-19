@@ -429,7 +429,8 @@ def main():
         if args.action == "promote":
             record = protocol.verify_signed(envelope, backend.public_key)
             policy = json.loads(os.environ["WINDOWS_POLICY"])
-            if not record["windows"] and policy.get("build") is not False:
+            if not record["windows"] and (policy.get("build") is not False
+                                          or not isinstance(policy.get("previous"), dict)):
                 raise ValueError("win: sealed candidate lacks a required Windows installer; stage a candidate with Windows first")
         protocol.activate(envelope, backend, play_only=args.action == "play")
     print("PASS whole-release " + args.action + ": " + args.tag)
