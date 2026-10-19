@@ -1125,6 +1125,8 @@ def last_touch_ms(snapshot: Mapping[str, Any]) -> int | None:
 
 def _snapshot_id(source: usage_sources.UsageSource, row: Mapping[str, Any] | None) -> str | None:
     """The ``provider_usage_snapshots`` row a source's poller writes."""
+    if source.id in {"openai_platform_balance", "xai_management"}:
+        return "balance:" + str((row or {}).get("id"))
     if source.id == "fal_billing":
         return FAL_USAGE_PROVIDER_ID
     provider_id = (row or {}).get("id")
@@ -1239,6 +1241,11 @@ class ProviderUsageMonitor:
         # than the later rows being deferred by the budget the first one spent.
         with usage_polling.shared_pass():
             await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def _poll_api_balance(self, row: Dict[str, Any]) -> None:
+        from app.core.api_key_balances import poll
+
+        await poll(row)
 
     async def _poll_openrouter_account(self, row: Dict[str, Any]) -> None:
         from app.core.openrouter_usage import poll

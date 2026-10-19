@@ -14,15 +14,18 @@
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import ValueText from '../../rows/ValueText.svelte';
+	import ProviderBalance from './ProviderBalance.svelte';
 
 	interface Props {
 		providerId: string;
 		credits: OpenRouterUsageStatus | null;
 		openRouter: boolean;
 		openAI: boolean;
+		xai?: boolean;
 	}
 
-	let { providerId, credits, openRouter, openAI }: Props = $props();
+	let { providerId, credits, openRouter, openAI, xai = false }: Props = $props();
+	let realBalanceConfigured = $state(false);
 	const access = getSettingsAccess();
 	let manual = $state<ManualBalance | null>(null);
 	let amount = $state('');
@@ -61,6 +64,10 @@
 	}
 </script>
 
+{#if openAI || xai}
+	<ProviderBalance {providerId} {openAI} onconfigured={(configured) => { realBalanceConfigured = configured; }} />
+{/if}
+
 {#if openRouter}
 	<RowGroup title="Credits">
 		<SettingRow
@@ -84,8 +91,8 @@
 			>
 		</SettingRow>
 	</RowGroup>
-{:else}
-	<RowGroup title="Billing">
+{:else if !realBalanceConfigured && !xai}
+	<RowGroup title={openAI ? 'Manual balance (fallback only)' : 'Billing'}>
 		<SettingRow
 			label="Balance"
 			help={openAI

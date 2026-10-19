@@ -174,6 +174,86 @@ async def _cdp_answers(port: int) -> bool:
     return await cdp_get(path="/json/version", port=port) is not None
 
 
+async def wait_until_answering(port: int, task=None):
+    """Bounded startup wait shared by tab creation and private sign-in."""
+    async with asyncio.timeout(10):
+        while not await _cdp_answers(port):
+            if task is not None and task.done():
+                return False
+            await asyncio.sleep(0.1)
+    return True
+
+
+def _owns_cdp_port(port: int) -> bool:
+    """Verify the listener's process ancestry, not just an answering CDP URL.
+
+    Docker's launcher is outside this Python process. Require both its Chrome
+    supervisor and egress launcher. Inspection failures are deliberately closed.
+    """
+    import psutil
+
+    try:
+        if not _in_container():
+            if _proc is None or _proc.returncode is not None:
+                return False
+            # macOS denies system-wide connection inspection without root.
+            # Inspect only our supervised launcher and its own descendants.
+            process = psutil.Process(_proc.pid)
+            for child in [process, *process.children(recursive=True)]:
+                connections = getattr(child, "net_connections", None) or child.connections
+                if any(c.status == psutil.CONN_LISTEN and c.laddr.port == port
+                       for c in connections(kind="tcp")):
+                    return True
+            return False
+        listeners = [c for c in psutil.net_connections(kind="tcp")
+                     if c.status == psutil.CONN_LISTEN and c.laddr.port == port]
+        if not listeners:
+            return False
+        for listener in listeners:
+            if not listener.pid:
+                return False
+            process = psutil.Process(listener.pid)
+            chain = [process, *process.parents()]
+            supervisor = egress = False
+            for ancestor in chain:
+                names = {Path(arg).name for arg in ancestor.cmdline()}
+                supervisor |= bool(names & {"chrome-supervisor", "chrome-supervisor.sh"})
+                egress |= "egress-launch.js" in names
+                if supervisor and egress:
+                    break  # Do not inspect protected ancestors above our supervisor.
+            if not (supervisor and egress):
+                return False
+        return True
+    except (psutil.Error, OSError):
+        return False
+
+
+class BrowserSignInUnavailable(RuntimeError):
+    """Fixed, credential-free startup errors safe to show in the owner viewer."""
+
+
+async def sign_in_browser_version():
+    from app.core.config import settings
+
+    if not settings.start_chrome:
+        raise BrowserSignInUnavailable("Browser disabled. Enable the built-in browser before signing in.")
+    await ensure_started()
+    task = _supervisor_task
+    if not _in_container() and (task is None or task.done()):
+        raise BrowserSignInUnavailable("App-supervised browser unavailable; external browsers cannot be used for sign-in.")
+    try:
+        if not await wait_until_answering(_cdp_port(), task):
+            raise BrowserSignInUnavailable("App-supervised browser stopped during startup.")
+    except TimeoutError:
+        raise BrowserSignInUnavailable("App-supervised browser startup timed out.") from None
+    if not await asyncio.to_thread(_owns_cdp_port, _cdp_port()):
+        raise BrowserSignInUnavailable("CDP port is not owned by this worker's supervised egress-protected browser.")
+    version = await cdp_get("/json/version")
+    if not version:
+        raise BrowserSignInUnavailable("App-supervised browser disconnected.")
+    return version
+
+
 async def create_page(url: str, port: Optional[int] = None) -> Optional[dict]:
     """Open a new tab via DevTools ``PUT /json/new``. Returns the tab dict or None.
 
@@ -194,11 +274,8 @@ async def create_page(url: str, port: Optional[int] = None) -> Optional[dict]:
             await ensure_started()
             task = _supervisor_task
             if task is not None and not task.done():
-                async with asyncio.timeout(10):
-                    while not await _cdp_answers(p):
-                        if task.done():
-                            return None
-                        await asyncio.sleep(0.1)
+                if not await wait_until_answering(p, task):
+                    return None
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.put(f"http://127.0.0.1:{p}{path}")
             resp.raise_for_status()

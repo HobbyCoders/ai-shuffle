@@ -10,6 +10,7 @@ on page load, before any live ``usage_snapshot`` WS event arrives.
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, List, Literal, Optional
 
 from fastapi import APIRouter, Depends
@@ -167,6 +168,7 @@ class UsageSourceInfo(BaseModel):
     support_label: str
     dashboard_url: str
     min_interval_seconds: int | None = None
+    freshness_seconds: int | None = None
     unavailable: list[str] = []
 
 
@@ -193,6 +195,7 @@ class ProviderUsageEntry(BaseModel):
     fetched_at: Optional[int] = None
     status: Literal["fresh", "stale", "unavailable", "never_fetched"] = "never_fetched"
     last_error_kind: ErrorKind | None = None
+    last_error_scope: str | None = None
     # Short labels kept for older clients; ``source_info`` has the full entry.
     source: str | None = None
     scope: str | None = None
@@ -270,6 +273,8 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
 
         entries: List[ProviderUsageEntry] = []
         now_ms = time.time() * 1000
+        month_start_ms = datetime.fromtimestamp(now_ms / 1000, timezone.utc).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
         for row in rows:
             try:
                 # Usage history can outlive a provider (including an in-flight poll
@@ -388,6 +393,38 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                     source=source_def.label, scope=source_def.scope_label,
                     source_info=_source_info(source_def), last_error_kind="unsupported",
                 ))
+        from app.core import api_key_balances
+
+        for provider in providers:
+            if not provider.get("enabled", True) or not api_key_balances.supported(provider):
+                continue
+            private = await run_sync(db.get_model_provider, provider["id"], include_token=True)
+            balance = api_key_balances.status(private or {})
+            if not balance["configured"]:
+                continue  # Manual balance is a fallback only without a real-balance binding.
+            source_def = usage_sources.SOURCES[balance["source_id"]]
+            # Admin access reports organization spend, not remaining credit.
+            # Preserve only its spend fields; never resurrect a manual balance.
+            admin_spend = {}
+            for entry in entries:
+                if (entry.provider_id == provider["id"] and entry.source_info
+                        and entry.source_info.id == "openai_admin"
+                        and entry.status == "fresh" and not entry.last_error_kind
+                        and entry.fetched_at and month_start_ms <= entry.fetched_at <= now_ms):
+                    # Do not relabel an old/failed or prior-month Admin total
+                    # with the balance's newer timestamp and current-month label.
+                    admin_spend = {k: v for k, v in (entry.credits or {}).items()
+                                   if k in {"spend_month", "input_tokens", "output_tokens", "num_model_requests"}}
+            credits = {**admin_spend, **(balance["credits"] or {})} or None
+            entries = [e for e in entries if e.provider_id != provider["id"]]
+            entries.append(ProviderUsageEntry(
+                provider_id=provider["id"], provider_name=provider.get("name"),
+                provider_type=provider["provider_type"], status=balance["status"],
+                credits=credits, fetched_at=balance["fetched_at"],
+                last_error_scope=balance["last_error_scope"],
+                source=source_def.label, scope=source_def.scope_label,
+                source_info=_source_info(source_def), last_error_kind=balance["last_error_kind"],
+            ))
         return entries
     except Exception:
         logger.debug("provider usage load failed; keeping client rows", exc_info=True)

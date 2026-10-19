@@ -94,7 +94,7 @@ _PUBLIC_COLUMNS = (
 # passes ``include_token=True`` (server-side use: env overlay / re-encryption /
 # the Codex refresh worker). Kept off ``_PUBLIC_COLUMNS`` so they never travel on
 # a normal read.
-_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, openai_admin_key"
+_TOKEN_COLUMNS = "auth_token, codex_access_token, codex_refresh_token, openai_admin_key, balance_key, balance_instance_id, balance_snapshot"
 
 # Columns that update_model_provider accepts as direct partial updates. JSON
 # columns are handled specially (see _dump_json_value); auth_token and the two
@@ -118,6 +118,7 @@ _UPDATABLE_COLUMNS = (
     "codex_access_token",
     "codex_refresh_token",
     "openai_admin_key",
+    "balance_key",
     "codex_account_id",
     "codex_id_token_expires_at",
     "codex_last_refresh",
@@ -434,7 +435,7 @@ def update_model_provider(
     if "models_json" in kwargs:
         kwargs["models_json"] = _normalize_model_capabilities(kwargs["models_json"])
     changed = False
-    if "auth_token" in kwargs or "base_url" in kwargs:
+    if any(k in kwargs for k in ("auth_token", "base_url", "provider_type", "auth_mode")):
         # A new key or endpoint has not been checked: forget the last result.
         # Only a real change counts: an edit that resends the same endpoint,
         # or a re-encryption of the same key, keeps it.
@@ -444,9 +445,9 @@ def update_model_provider(
             and not _auth_token_reencrypted
             and not _same_secret(current.get("auth_token"), kwargs["auth_token"])
         )
-        changed = key_changed or (
-            "base_url" in kwargs
-            and (kwargs["base_url"] or None) != (current.get("base_url") or None)
+        changed = key_changed or any(
+            k in kwargs and (kwargs[k] or None) != (current.get(k) or None)
+            for k in ("base_url", "provider_type", "auth_mode")
         )
         if key_changed:
             # A balance belongs to the credential's account, not this row ID.
@@ -462,6 +463,8 @@ def update_model_provider(
             values.append(_dump_json_value(column, kwargs[column]))
     if not updates:
         return get_model_provider(provider_id)
+    if changed or kwargs.get("enabled") is False:
+        updates.extend(["balance_key = NULL", "balance_instance_id = NULL", "balance_snapshot = NULL"])
     if changed:
         updates.append("credential_status = NULL")
     updates.append("updated_at = %s")
@@ -563,8 +566,9 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
+        clear_balance = ", balance_key = NULL, balance_instance_id = NULL, balance_snapshot = NULL" if not enabled else ""
         cursor.execute(
-            "UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s WHERE id = %s",
+            f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
             (enabled, now, str(uuid4()), provider_id),
         )
         if cursor.rowcount == 0:

@@ -49,6 +49,7 @@
 	import { AGENT_PROVIDER_ORDER } from '$lib/components/settings/providers/providers-model';
 	import { createUsageNumberAnimation } from './usage-number-animation';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
+	import { providerStatusAt } from '$lib/stores/rate-limit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import { isContextWindowChoice } from '$lib/constants/model-context';
@@ -603,10 +604,26 @@
 		return { text, guidance: false, title: [text, ...detail, ...lagging].join('\n') };
 	}
 
+	function reportedBalanceSource(pb: ProviderUsageBucket): boolean {
+		return pb.sourceInfo?.id === 'openai_platform_balance' || pb.sourceInfo?.id === 'xai_management';
+	}
+	function providerCredits(pb: ProviderUsageBucket) {
+		if (reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)) {
+			// Admin spend has its own source; only the unconfirmed balance is hidden.
+			return pb.providerType === 'openai' && pb.credits?.spend_month != null
+				? { spend_month: pb.credits.spend_month } : null;
+		}
+		return pb.credits;
+	}
+
 	/** Something the user can act on for this provider row, or null. */
 	function providerGuidance(pb: ProviderUsageBucket): string | null {
-		// An OpenAI API key never has a readable balance (see `creditsLine`):
-		// no sign-in or billing access would change that, so ask for nothing.
+		if (reportedBalanceSource(pb) && pb.lastErrorKind === 'billing_access_denied') {
+			if (pb.providerType === 'xai' && pb.lastErrorScope === 'inference') return 'Replace or fix the xAI API key';
+			return pb.providerType === 'openai' ? 'Sign in again to OpenAI Platform' : 'Replace xAI management key';
+		}
+		// Legacy Admin-spend rows have no balance credential to repair here.
+		// Platform sessions above have their own explicit re-sign-in guidance.
 		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return null;
 		// OpenRouter and fal.ai read the balance with the key already saved; no
 		// extra billing access exists to add, so a refusal is about that key
@@ -632,7 +649,8 @@
 	 * the line.
 	 */
 	function creditsLine(pb: ProviderUsageBucket): string | null {
-		const text = creditsSummary(pb.credits, pb.providerType);
+		const text = creditsSummary(providerCredits(pb), pb.providerType);
+		if (!text && reportedBalanceSource(pb)) return 'Balance unavailable';
 		if (text) return text;
 		if (pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal') return 'Balance unavailable for this key';
 		return null;
@@ -1017,7 +1035,7 @@
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
 	{#snippet providerSummary()}
 		{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
-		{@const pbCreditsShort = creditsShort(pb.credits, pb.providerType)}
+		{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
 		<!-- An account credit balance is the headline the user cares about, so
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
@@ -1029,7 +1047,7 @@
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
 			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
-		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal'}
+		{:else if reportedBalanceSource(pb) || pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal'}
 			<span class="sec-summary sec-credits">Balance unavailable</span>
 		{:else}
 			<span class="sec-summary sec-credits sec-empty">—</span>
@@ -1044,6 +1062,7 @@
 		{#if credits}
 			<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
 		{/if}
+		{#if reportedBalanceSource(pb)}<div class="row-reset usage-credits">{pb.source}</div>{/if}
 		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
 	{/if}
 {/snippet}

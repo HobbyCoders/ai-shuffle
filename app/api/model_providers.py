@@ -43,7 +43,7 @@ from app.core import (
 from app.db import database as db
 from app.db.async_database import run_sync
 
-from app.api import openai_billing, openrouter_billing
+from app.api import openai_billing, openrouter_billing, provider_balances  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
