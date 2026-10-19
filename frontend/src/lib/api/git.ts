@@ -32,6 +32,7 @@ export interface StagedFileEntry {
  */
 export interface RawGitStatus {
     is_git_repo: boolean;
+    enclosing_repository_root?: string | null;
     mutations_blocked?: boolean | null;
     current_branch?: string | null;
     is_detached?: boolean;
@@ -66,6 +67,7 @@ export interface RawGitStatus {
  */
 export interface GitStatus {
     is_git_repo: boolean;
+    enclosing_repository_root?: string | null;
     mutations_blocked?: boolean;
     current_branch: string | null;
     is_detached: boolean;
@@ -124,6 +126,7 @@ export function transformGitStatus(raw: RawGitStatus): GitStatus {
     const isClean = raw.is_clean ?? (staged + modified + untracked + conflicts === 0);
     return {
         is_git_repo: raw.is_git_repo ?? false,
+        enclosing_repository_root: raw.enclosing_repository_root ?? null,
         mutations_blocked: typeof raw.mutations_blocked === 'boolean' ? raw.mutations_blocked : undefined,
         current_branch: raw.current_branch ?? null,
         is_detached: raw.is_detached ?? false,
@@ -168,6 +171,7 @@ export function gitStatusEqual(a: GitStatus | null, b: GitStatus | null): boolea
     if (!a || !b) return false;
     return (
         a.is_git_repo === b.is_git_repo &&
+        a.enclosing_repository_root === b.enclosing_repository_root &&
         a.mutations_blocked === b.mutations_blocked &&
         a.current_branch === b.current_branch &&
         a.is_detached === b.is_detached &&

@@ -82,11 +82,11 @@ const base = {
 };
 
 describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) => {
-	it('hides active-chat branch and worktree context for a plain folder, and restores it after git init', async () => {
+	it.each([{ is_git_repo: false }, { is_git_repo: true, enclosing_repository_root: '/monorepo' }])('hides non-root branch/worktree context and restores it after git init: %o', async status => {
 		session.store.set(base);
 		const { container } = render(ContextPillBar, { sheetMode });
 		expect(container.querySelector('.branch-wt-row')).not.toBeNull();
-		(git as any).set({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status: { is_git_repo: false } });
+		(git as any).set({ projectId: 'project', sessionId: 'saved-session', worktreeId: null, hydrated: true, status });
 		(gitStatus as any).set({ current_branch: null, is_git_repo: false });
 		await tick();
 		expect(container.querySelector('.branch-wt-row')).toBeNull();

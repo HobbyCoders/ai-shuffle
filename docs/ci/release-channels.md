@@ -71,6 +71,30 @@ installer pointers and Play artifacts is tracked separately in
 [#2335](https://github.com/HobbyCoders/ai-shuffle/issues/2335); Docker candidate
 staging is not a claim that these other surfaces are staged.
 
+## Ship-release notes: all-platform completion
+
+The ship-release checklist must not recommend skipping Windows when native
+launcher code is unchanged. Every release promoted to latest stable needs its
+own installer for new installs and recovery; existing users can still update
+inside the app. Do not pass the removed `build_desktop` input. A latest-stable
+dispatch and a staged candidate both include Windows, Linux and Android.
+Older-line patches and prereleases do not publish Windows or move the hub's
+stable download pointers. macOS remains separate.
+
+Before declaring a release complete, require **verify-downloads** to pass and
+read back the download list for the exact tag/revision. Do not substitute a
+successful Docker promotion or Play upload for this check. If release gates
+failed or were skipped, fix those jobs and retry the release first: do not
+manually register downloads to bypass them. Only after successful activation,
+inspect any failed platform registration: Windows uses `desktop-installer.yml`;
+Linux/Android use `platform-installer.yml` from the tag with `release_assets=true`
+and no build run ID. This reuses retained release assets even after the one-day
+Actions artifacts expire, without rebuilding packages with different bytes.
+For a sealed candidate, retry promotion to reuse the retained assets rather
+than rebuilding them. Legacy seals made without Windows cannot satisfy the
+all-platform completion gate unless the matching Windows installer is published;
+the error names the Windows recovery workflow. Never report such a run complete.
+
 ## The path of a release
 
 `release.yml`, on an owner manual dispatch **from an existing `vX.Y.Z` tag**
@@ -96,9 +120,9 @@ staging is not a claim that these other surfaces are staged.
    rebuild. The lifecycle and clean buyer-install checks still run. Only the
    final **promote-image** job, after buyer-install, source signing, Linux release
    attachment and Android APK publication, moves `X.Y`, `X` and `latest` by that
-   exact digest and reads them back. Windows must also succeed when requested;
-   it may be skipped only when `build_desktop` was not requested. Failed or
-   cancelled artifact jobs never permit alias promotion.
+   exact digest and reads them back. Windows must also succeed on every release;
+   there is no `build_desktop` opt-out. Failed, skipped or cancelled artifact
+   jobs never permit alias promotion.
 3. **buyer-install** pulls that image on a fresh GitHub-hosted runner and
    installs it with `docs/install/compose` exactly as a buyer would
    (`scripts/ci/verify_buyer_compose.py`), then checks the first session
@@ -115,7 +139,10 @@ staging is not a claim that these other surfaces are staged.
    publisher independently refuses prereleases and skips an older final tag.
 5. **android** builds and publishes to Play internal testing only when its
    existing signing/worker-readiness gates pass. This is not a public Play
-   production release. The Windows installer is still opt-in on dispatch.
+   production release. **desktop** builds and publishes the Windows installer
+   whenever `promote_latest=true`, through `desktop-installer.yml` and its existing
+   signing/verification. Older final releases and prereleases skip Windows so
+   they cannot overwrite the latest stable installer or fail its stable-tag gate.
 6. **linux-build** calls the existing Linux workflow on the exact tag; **linux-release**
    verifies its source revision/version, AppImage and deb hashes, and checksum
    file, then attaches both packages, `SHA256SUMS-linux` and provenance to the
@@ -128,8 +155,24 @@ staging is not a claim that these other surfaces are staged.
    `release-signing` environment, signing/checksum/provenance checks and optional
    R2 copy as a manual publish. No separate Linux or Android dispatch is needed.
    `platform-installer.yml` remains available from the tag for manual re-publishes
-   (and macOS publication). Staging and sealed-candidate promotion do not run
-   these artifact-based registrations.
+   (and macOS publication).
+8. Staging (`stage_only=true`) also requires Windows before sealing, but moves no
+   download pointers. Sealed-candidate promotion (`promote=vX.Y.Z`) activates the
+   sealed Windows installer, then **promotion-platform-installers** calls the same
+   platform publisher with `release_assets=true`. It downloads Linux and Android
+   from the durable release assets already checked by promotion, not expired
+   Actions artifacts. It never rebuilds or re-signs the packages; only the hub
+   installer entries are signed using the existing publisher.
+9. **verify-downloads** runs after either publication path, even when a registration
+   job failed or was skipped. It reads the public `/v1/desktop/installers` response
+   and requires `win`, `linux` and `android` to match both the tag version and exact
+   revision. A missing/stale platform fails the run and names the platform and
+   recovery workflow only after successful activation. If **promote-image** (or
+   **promotion** on the sealed path) failed or was skipped, the check instead
+   tells the owner to fix the release gates and not manually register installers.
+   A hub read failure also fails closed. This is a completion gate, not a
+   transaction: Windows can publish after its own checks before Docker/buyer
+   gates finish; earlier successful publications are not rolled back.
 
 Complete release workflows are serialized without cancelling an active
 publish. A failed gate stops its dependent jobs; a partial release must not
@@ -473,8 +516,8 @@ Nothing on the hub can recall that download. Tell users not to choose it
    ref and the `version` input, for example:
    `gh workflow run release.yml --repo HobbyCoders/ai-shuffle --ref v0.9.3 -f version=v0.9.3`.
    This is an owner publication action, not part of preparing the source fix.
-   The release run has taken 10 to 15 minutes, and the optional installer run
-   another 10 to 15.
+   Budget for the required Windows installer as well as Docker, Linux and
+   Android builds; Windows has taken another 10 to 15 minutes.
 4. Verify the run's required jobs actually completed (not skipped), the public
    image's clean-buyer install, and the signed stable manifest/feed for the
    patched version. Check that an installed worker is offered the fix before

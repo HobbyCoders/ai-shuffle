@@ -31,6 +31,164 @@ def git_at(folder, *args):
     return subprocess.run(["git", "-C", str(folder), *args], check=True, capture_output=True, text=True)
 
 
+@pytest.mark.parametrize("route", ["local", "remote"])
+@pytest.mark.parametrize("create_new", [False, True])
+@pytest.mark.parametrize("branch", ["main", "feature/new"])
+@pytest.mark.parametrize("marker_kind", ["absent", "empty", "missing-head"])
+async def test_enclosed_project_refuses_worktrees_before_parent_lookup_or_config(plain_project, monkeypatch, route, create_new, branch, marker_kind):
+    from app.api import sessions_worktree
+    from app.api.sessions_helpers import CreateWorktreeSessionRequest
+    from app.core import checkout_manager, git_ops_runner
+    project, folder, _ = plain_project
+    git_at(folder.parent, "init", "-b", "main")
+    if marker_kind != "absent":
+        (folder / ".git").mkdir()
+        if marker_kind == "missing-head":
+            (folder / ".git" / "objects").mkdir()
+            (folder / ".git" / "refs").mkdir()
+    before = (folder.parent / ".git" / "config").read_bytes()
+    lookup = Mock(side_effect=AssertionError("must not look up parent branches"))
+    record = Mock(side_effect=AssertionError("must not write parent config"))
+    monkeypatch.setattr(checkout_manager, "local_branch_exists", lookup)
+    monkeypatch.setattr(checkout_manager, "record_new_branch_owner", record)
+    if route == "local":
+        with pytest.raises(HTTPException) as error:
+            await sessions_worktree._create_v2_branch_session(
+                body=CreateWorktreeSessionRequest(project_v2_id=project["id"], branch_name=branch,
+                                                  create_new_branch=create_new),
+                project=None, api_user_id=None,
+            )
+        assert error.value.status_code == 409
+        assert "Inside repository" in error.value.detail
+    else:
+        monkeypatch.setattr("app.db.git_ops.touch_op", lambda _: None)
+        with pytest.raises(checkout_manager.WorktreeError, match="Inside repository"):
+            git_ops_runner.execute_ensure_worktree({"id": "nested-op", "project_v2_id": project["id"],
+                "params": {"branch": branch, "create_new_branch": create_new}})
+    lookup.assert_not_called()
+    record.assert_not_called()
+    assert (folder.parent / ".git" / "config").read_bytes() == before
+    assert not (folder / ".fluid").exists()
+    assert (folder / ".git").exists() == (marker_kind != "absent")
+
+
+@pytest.mark.parametrize("marker_kind", ["directory", "file", "valid-link"])
+def test_enclosing_probe_skips_own_markers_without_a_git_process(tmp_path, monkeypatch, marker_kind):
+    from app.api.git_owner import _enclosing_repository
+    marker = tmp_path / ".git"
+    if marker_kind == "directory":
+        git_at(tmp_path, "init", "-b", "main")
+    elif marker_kind == "file":
+        marker.write_text("gitdir: /missing")
+    else:
+        target = tmp_path / "repo"
+        target.mkdir()
+        git_at(target, "init", "-b", "main")
+        try:
+            marker.symlink_to(target / ".git", target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    probe = Mock(side_effect=AssertionError("normal roots must not spawn Git"))
+    monkeypatch.setattr(git.git_service, "_run_git", probe)
+    assert _enclosing_repository(str(tmp_path)) is None
+    probe.assert_not_called()
+
+
+_MUTATION_CASES = [
+    ("init_repository", "POST", "git/init", {}),
+    ("clone_repository", "POST", "git/clone", {"clone_url": "local-source"}),
+    ("create_branch", "POST", "git/branches", {"name": "feature/new"}),
+    ("delete_branch", "DELETE", "git/branches/spare", None),
+    ("checkout_branch", "POST", "git/checkout", {"ref": "spare"}),
+    ("fetch_from_remote", "POST", "git/fetch", None),
+    ("stage_files", "POST", "git/stage", {"files": ["../outside.txt"]}),
+    ("unstage_files", "POST", "git/unstage", {"files": ["../staged.txt"]}),
+    ("discard_changes", "POST", "git/discard", {"files": ["../outside.txt"]}),
+    ("create_commit", "POST", "git/commit", {"message": "must not commit parent"}),
+    ("push_commits", "POST", "git/push", {}),
+    ("pull_from_remote", "POST", "git/pull", {}),
+    ("create_pull_request", "POST", "github/pulls", {"title": "No", "head": "spare", "base": "main"}),
+    ("finish", "POST", "git/finish", {}),
+    ("ship", "POST", "git/ship", {}),
+]
+
+
+@pytest.mark.parametrize("scope", ["project", "session", "worker"])
+@pytest.mark.parametrize("marker_kind", [
+    "empty", "missing-head", "broken-link", "symlink-to-empty",
+    "head-only", "missing-objects", "garbage-head",
+])
+def test_damaged_markers_never_allow_parent_mutations(plain_project, monkeypatch, scope, marker_kind):
+    from app.api import git_operations, git_owner, github
+    from app.db import database
+
+    assert {case[0] for case in _MUTATION_CASES} == git_owner._MUTATING_ACTIONS
+    project, folder, client = plain_project
+    # Legacy project scope still resolves projects.path; session/worker scope
+    # uses the canonical checkout row created by the fixture.
+    database.create_project(project["id"], "Damaged marker", None, str(folder))
+    client.app.include_router(git_operations.router)
+    client.app.include_router(github.router)
+    # A regression must not touch a real GitHub account while testing refusal.
+    monkeypatch.setattr(github, "check_github_auth", AsyncMock(side_effect=AssertionError("GitHub must not be reached")))
+    parent = folder.parent
+    git_at(parent, "init", "-b", "main")
+    (parent / "outside.txt").write_text("committed parent content")
+    git_at(parent, "add", "outside.txt")
+    git_at(parent, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "Initial")
+    git_at(parent, "branch", "spare")
+    (parent / "outside.txt").write_text("modified parent content")
+    (parent / "staged.txt").write_text("staged parent content")
+    git_at(parent, "add", "staged.txt")
+    marker = folder / ".git"
+    if marker_kind in ("broken-link", "symlink-to-empty"):
+        target = parent / "marker-target"
+        if marker_kind == "symlink-to-empty":
+            target.mkdir()
+        try:
+            marker.symlink_to(target, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    else:
+        marker.mkdir()
+        if marker_kind != "empty":
+            (marker / "refs").mkdir()
+        if marker_kind in ("missing-head", "garbage-head"):
+            (marker / "objects").mkdir()
+        if marker_kind not in ("empty", "missing-head"):
+            (marker / "HEAD").write_text("not a head\n" if marker_kind == "garbage-head" else "ref: refs/heads/main\n")
+        if marker_kind == "head-only":
+            (marker / "refs").rmdir()
+    assert git_at(folder, "rev-parse", "--show-toplevel").stdout.strip() == str(parent)
+    sid = f"damaged-marker-{scope}-{marker_kind}"
+    database.create_session(sid, "default", project_v2_id=project["id"])
+    query = f"?session_id={sid}" if scope == "session" else "?worker_id=local" if scope == "worker" else ""
+    base = f"/api/v1/projects/{project['id']}"
+    # Exercise real status first, but never trust its structural fast path to
+    # authorize a mutation (a complete-looking directory can have garbage HEAD).
+    status = client.get(f"{base}/git/status{query}")
+    assert status.status_code in (200, 503), status.text
+    assert "outside.txt" not in status.text
+    before = {name: (parent / ".git" / name).read_bytes() for name in ("index", "config", "HEAD")}
+    refs = git_at(parent, "show-ref").stdout
+    for action, method, route, payload in _MUTATION_CASES:
+        body = dict(payload) if payload is not None else None
+        if action == "clone_repository":
+            body["clone_url"] = str(parent)
+        if scope == "session" and action in ("finish", "ship", "create_pull_request"):
+            body["session_id"] = sid
+        response = client.request(method, f"{base}/{route}{query}", json=body)
+        assert response.status_code == 409, (marker_kind, scope, action, response.text)
+        assert {name: (parent / ".git" / name).read_bytes() for name in before} == before, action
+        assert git_at(parent, "show-ref").stdout == refs, action
+        assert (parent / "outside.txt").read_text() == "modified parent content", action
+        assert (parent / "staged.txt").read_text() == "staged parent content", action
+    for route in ("diff-stats", "changed-files"):
+        response = client.get(f"{base}/git/{route}{query}")
+        assert response.status_code == 409, response.text
+        assert "outside.txt" not in response.text
+
+
 def deny_read_access(monkeypatch, target):
     access = os.access
     target = os.path.normcase(os.path.realpath(target))
@@ -70,13 +228,11 @@ def test_plain_status_then_external_git_init(plain_project, monkeypatch, worker)
         assert call.await_count == 2
 
 
-@pytest.mark.parametrize("state", ["missing", "two-plain", "plain-and-repo", "nested"])
+@pytest.mark.parametrize("state", ["missing", "two-plain", "plain-and-repo"])
 def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
     project, folder, client = plain_project
     if state == "missing":
         folder.rmdir()
-    elif state == "nested":
-        git_at(folder.parent, "init", "-b", "main")
     else:
         other = folder.parent / "other"
         other.mkdir()
@@ -99,9 +255,11 @@ def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, 
     monkeypatch.setattr(git.git_service, "_run_git", lambda *args, **kwargs:
                         subprocess.CompletedProcess(["git", "rev-parse"], 128, stdout="", stderr=diagnostic))
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
-    assert response.status_code == (200 if is_plain else 500)
+    assert response.status_code == (200 if is_plain else 503)
     if is_plain:
         assert response.json()["is_git_repo"] is False
+    else:
+        assert response.json()["detail"] == "Git checkout is unavailable. Check again."
 
 
 def test_non_english_environment_uses_c_locale_for_confirmation(plain_project, monkeypatch):
@@ -157,7 +315,8 @@ def test_probe_failure_is_never_a_positive_non_repo(plain_project, monkeypatch, 
         raise failure
     monkeypatch.setattr(git.git_service, "_run_git", fail)
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
-    assert response.status_code == 500
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Git checkout is unavailable. Check again."
 
 
 @pytest.mark.parametrize("action,body", [("commit", {"message": "no"}),
@@ -167,6 +326,50 @@ def test_worker_mutations_keep_refusing_plain_folder(plain_project, action, body
     response = client.post(f"/api/v1/projects/{project['id']}/git/{action}?worker_id=local", json=body)
     assert response.status_code in (400, 409), response.text
     assert list(folder.iterdir()) == []
+
+
+@pytest.mark.parametrize("scope", ["session", "worker"])
+@pytest.mark.parametrize("repository_kind", ["enclosed", "empty-marker", "missing-head", "own"])
+def test_nested_project_reports_scope_without_parent_files(plain_project, scope, repository_kind):
+    from app.db import database
+    from app.core.project_resolver import resolve_existing_cwd
+    project, folder, client = plain_project
+    git_at(folder.parent, "init", "-b", "main")
+    (folder.parent / "outside.txt").write_text("parent-only content")
+    own_repository = repository_kind == "own"
+    invalid_marker = repository_kind in ("empty-marker", "missing-head")
+    if invalid_marker:
+        (folder / ".git").mkdir()
+        if repository_kind == "missing-head":
+            (folder / ".git" / "objects").mkdir()
+            (folder / ".git" / "refs").mkdir()
+    if own_repository:
+        git_at(folder, "init", "-b", "nested")
+        git_at(folder, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+               "commit", "--allow-empty", "-m", "Initial nested repository")
+    session_id = f"nested-chat-{scope}-{repository_kind}"
+    database.create_session(session_id, "default", project_v2_id=project["id"])
+    assert resolve_existing_cwd(database.get_session(session_id)) == str(folder)
+    query = f"?session_id={session_id}" if scope == "session" else "?worker_id=local"
+    response = client.get(f"/api/v1/projects/{project['id']}/git/status{query}")
+    assert response.status_code == 200, response.text
+    status = response.json()
+    assert status["is_git_repo"] is True
+    assert status["enclosing_repository_root"] == (None if own_repository else str(folder.parent.resolve()))
+    assert status["untracked"] == []
+    if own_repository:
+        assert status["current_branch"] == "nested"
+    else:
+        assert status["mutations_blocked"] is True
+        assert (folder / ".git").exists() == invalid_marker
+        for action in ("diff-stats", "changed-files"):
+            refused = client.get(f"/api/v1/projects/{project['id']}/git/{action}{query}")
+            assert refused.status_code == 409, refused.text
+            assert "outside.txt" not in refused.text
+        for action, body in [("stage", {"files": ["../outside.txt"]}), ("init", {})]:
+            refused = client.post(f"/api/v1/projects/{project['id']}/git/{action}{query}", json=body)
+            assert refused.status_code == 409, refused.text
+        assert git_at(folder.parent, "diff", "--cached", "--name-only").stdout == ""
 
 
 def test_real_discovery_ceiling_ignores_repository_above_it(plain_project, monkeypatch):

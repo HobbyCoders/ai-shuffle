@@ -218,33 +218,27 @@ def prune_errors(keep_days: int = 7, max_rows: int = 5000) -> int:
     deleted = 0
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM error_log WHERE updated_at < %s", (cutoff,))
-            deleted += cursor.rowcount or 0
-            warning_cap = _max_warning_rows()
-            if warning_cap:
-                cursor.execute(
-                    """DELETE FROM error_log
-                        WHERE id IN (
-                            SELECT id FROM error_log
-                             WHERE level = 'WARNING'
-                             ORDER BY updated_at DESC
-                             OFFSET %s
-                        )""",
-                    (warning_cap,),
-                )
-                deleted += cursor.rowcount or 0
-            cursor.execute(
-                """DELETE FROM error_log
-                    WHERE id IN (
-                        SELECT id FROM error_log
-                         ORDER BY updated_at DESC
-                         OFFSET %s
-                    )""",
-                (max_rows,),
+        from app.db.retention import BATCH_SIZE, delete_batches
+
+        deleted += delete_batches(
+            "DELETE FROM error_log WHERE id IN ("
+            "SELECT id FROM error_log WHERE updated_at < %s LIMIT %s)",
+            (cutoff, BATCH_SIZE),
+        )
+        warning_cap = _max_warning_rows()
+        if warning_cap:
+            deleted += delete_batches(
+                """DELETE FROM error_log WHERE id IN (
+                       SELECT id FROM error_log WHERE level = 'WARNING'
+                       ORDER BY updated_at DESC, id DESC LIMIT %s OFFSET %s)""",
+                (BATCH_SIZE, warning_cap),
             )
-            deleted += cursor.rowcount or 0
+        deleted += delete_batches(
+            """DELETE FROM error_log WHERE id IN (
+                   SELECT id FROM error_log ORDER BY updated_at DESC, id DESC
+                   LIMIT %s OFFSET %s)""",
+            (BATCH_SIZE, max_rows),
+        )
     except Exception:
         logger.debug("prune_errors failed", exc_info=True)
     return deleted

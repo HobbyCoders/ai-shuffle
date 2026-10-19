@@ -74,6 +74,9 @@ class StagedFile(BaseModel):
 class GitStatusResponse(BaseModel):
     """Response for git status endpoint"""
     is_git_repo: bool
+    # A project subfolder, not a checkout root: chat works, Git controls require
+    # opening the named root as a project. Never includes the parent's diff.
+    enclosing_repository_root: Optional[str] = None
     current_branch: Optional[str] = None
     # None on inline/legacy payloads; GET status always supplies a fresh check.
     mutations_blocked: Optional[bool] = None

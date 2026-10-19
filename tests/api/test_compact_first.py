@@ -46,7 +46,8 @@ def send(client, payload=None):
 
 
 @pytest.mark.parametrize("unsettle", [True, False])
-async def test_settle_wait_then_compact_starts_fresh(compact_chat, unsettle):
+@pytest.mark.parametrize("then_send", [True, False])
+async def test_settle_wait_then_compact_starts_fresh(compact_chat, unsettle, then_send):
     from app.core.user_question_handler import user_question_handler
     old = turns.enqueue_turn("compact-chat", "user", prompt="old")
     turns.start_turn(old["id"])
@@ -59,7 +60,7 @@ async def test_settle_wait_then_compact_starts_fresh(compact_chat, unsettle):
     assert turns.get_turn(old["id"])["stop_reason"] == "parked_settled"
     if unsettle:
         await session_active.set_shared("compact-chat", True)
-    result = send(compact_chat)
+    result = send(compact_chat, {"then_send": {"prompt": "continue"}} if then_send else None)
     assert result.status_code == 200, result.text
     assert sessions.get_session("compact-chat")["is_active"]
     compact = turns.get_turn(result.json()["turn_id"])
@@ -67,6 +68,12 @@ async def test_settle_wait_then_compact_starts_fresh(compact_chat, unsettle):
     assert compact["state"] == "queued"
     assert turns.start_turn(compact["id"])
     assert turns.get_turn(old["id"])["stop_reason"] == "parked_settled"
+    if then_send:
+        turns.settle_turn(compact["id"], "completed")
+        followup = turns.pop_ready("compact-chat")
+        assert followup["id"] == result.json()["queued_turn_id"]
+        assert followup["prompt"] == "continue"
+        assert turns.start_turn(followup["id"])
 
 
 @pytest.mark.parametrize("busy", [False, True])

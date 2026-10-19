@@ -74,6 +74,22 @@ def test_clean_new_session_does_not_inherit_base_changes(checkout_client):
     assert _git(base, "status", "--porcelain") != ""
 
 
+def test_warm_session_with_missing_marker_does_not_become_enclosing_project(checkout_client):
+    client, base, branch, _ = checkout_client
+    url = "/api/v1/projects/p1/git/status?session_id=s1"
+    assert client.get(url).status_code == 200
+    marker = branch / ".git"
+    marker.rename(branch / "saved-git-marker")
+    response = client.get(url)
+    assert response.status_code == 503, response.text
+    assert "unavailable" in response.json()["detail"]
+    response = client.post("/api/v1/projects/p1/git/stage?session_id=s1", json={"files": ["tracked.txt"]})
+    assert response.status_code == 503, response.text
+    assert "unavailable" in response.json()["detail"]
+    assert "Inside repository" not in response.text
+    assert (base / "tracked.txt").read_text() == "unrelated base edit\n"
+
+
 def test_session_status_still_reports_its_own_edits(checkout_client):
     client, _, branch, _ = checkout_client
     (branch / "own.txt").write_text("own edit\n")

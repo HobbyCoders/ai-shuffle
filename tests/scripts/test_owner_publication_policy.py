@@ -15,6 +15,7 @@ TAG = "refs/tags/v0.8.19"
 MAIN_SHA = "a" * 40
 JOBS = [
     ("release.yml", "preflight", "tag"),
+    ("platform-installer.yml", "publish", "tag"),
     ("release.yml", "create-release", "tag"),
     ("release.yml", "source-stable", "tag"),
     ("desktop-installer.yml", "build", "release"),
@@ -49,6 +50,7 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")
     expression = expression.replace("needs.create-release.", "needs.create_release.")
+    expression = expression.replace("needs.android-build.", "needs.android_build.")
     expression = re.sub(r"(?<![\w'\"])true(?![\w'\"])", "True", expression)
     expression = re.sub(r"(?<![\w'\"])false(?![\w'\"])", "False", expression)
     expression = re.sub(r"!(?!=)", " not ", expression)
@@ -62,9 +64,9 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
                                       pull_requests=[NS(head=NS(sha=head)) for head in open_pr_heads],
                                       head_repository=NS(full_name=REPO)))),
         inputs=NS(**inputs),
-        needs=NS(build=NS(result="success"), verify=NS(result="success"),
+        needs=NS(build=NS(result="success"), verify=NS(result="success"), android_build=NS(result="skipped"),
                  create_release=NS(outputs=NS(promote_latest="true"))),
-        startsWith=lambda value, prefix: value.startswith(prefix), always=lambda: True,
+        startsWith=lambda value, prefix: value.startswith(prefix), always=lambda: True, cancelled=lambda: False,
         contains=lambda items, value: value in items,
         format=lambda template, *values: template.format(*values),
         _path=lambda item, path: functools.reduce(getattr, path.split("."), item),

@@ -416,6 +416,24 @@ def test_install_adds_a_hook_without_touching_hooks_path(tmp_path, monkeypatch):
     assert not (tmp_path / "pre-push.user").exists()
 
 
+@pytest.mark.parametrize("source_version,installed_version", [(3, 4), (4, 5)])
+def test_install_refuses_to_downgrade_shared_hook(tmp_path, monkeypatch, source_version, installed_version):
+    source = tmp_path / "source"
+    source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v{source_version}\n")
+    monkeypatch.setattr(local_ci, "HOOK_SOURCE", source)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    target = hooks / "pre-push"
+    installed = f"#!/bin/sh\n{local_ci.HOOK_MARKER} v{installed_version}\n"
+    target.write_text(installed)
+    with pytest.raises(local_ci.Failure, match="newer.*--force"):
+        local_ci.install_hook(hooks)
+    assert target.read_text() == installed
+    assert not (hooks / "pre-push.user").exists()
+    local_ci.install_hook(hooks, force=True)
+    assert target.read_bytes() == source.read_bytes().replace(b"\r\n", b"\n")
+
+
 def test_install_skips_a_python_without_pytest(tmp_path, monkeypatch):
     # ServerWorker: python3 on PATH is the app venv (no pytest); /usr/local/bin/python3 has it.
     venv, system = tmp_path / "venv-python", tmp_path / "system-python"
