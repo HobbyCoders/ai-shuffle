@@ -267,7 +267,7 @@ def test_full_attest_accepts_a_completed_stage_set(gate, monkeypatch):
     args.attest, args.budget = False, 40
     step(args)
     ran = len(calls)
-    monkeypatch.setattr(ci, "attest_preflight", lambda revision: calls.append("preflight"))
+    monkeypatch.setattr(ci, "attest_preflight", lambda revision, **kw: calls.append("preflight"))
     monkeypatch.setattr(ci, "python_preflight", lambda python: None)
     monkeypatch.setattr(ci, "choose_python", lambda: sys.executable)
     assert ci.main(["full", "--attest"]) == 0
@@ -276,7 +276,7 @@ def test_full_attest_accepts_a_completed_stage_set(gate, monkeypatch):
 
 def test_full_attest_without_completed_stages_runs_the_suites(gate, monkeypatch):
     calls, _ = gate
-    monkeypatch.setattr(ci, "attest_preflight", lambda revision: calls.append("preflight"))
+    monkeypatch.setattr(ci, "attest_preflight", lambda revision, **kw: calls.append("preflight"))
     monkeypatch.setattr(ci, "python_preflight", lambda python: None)
     monkeypatch.setattr(ci, "choose_python", lambda: sys.executable)
     monkeypatch.setattr(ci, "run_suites", lambda mode, only, python: (calls.append(("suites", mode)) or ([], [], [])))

@@ -147,6 +147,14 @@ def completed(ci, args, python: str, revision: str) -> bool:
     return state.get("identity") == identity and state.get("completed") == plan
 
 
+def started(ci, revision: str) -> bool:
+    """Whether a staged run for this exact clean checkout is already under way (or done)."""
+    if not ci.clean_checkout():
+        return False
+    identity = _load(_state_path(ci)).get("identity") or {}
+    return identity.get("revision") == revision and identity.get("tree") == ci.tree_of("HEAD")
+
+
 def _times_path(ci) -> Path:
     # Beside the backend test map: shared by this machine's worktrees.
     return ci.MAP_PATH.parent / "full-stage-times.json"

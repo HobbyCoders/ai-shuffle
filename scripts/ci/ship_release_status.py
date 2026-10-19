@@ -236,9 +236,30 @@ def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optio
                                    skip_rows=skip_rows)
 
 
+def pinned_candidate(candidate: str, tip: str, blockers: list) -> str:
+    """``candidate`` resolved to a full sha on ``tip``'s first-parent history, else "" plus a blocker."""
+    sha = _try("git", "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}") or ""
+    if not sha:
+        blockers.append(f"Pinned candidate {candidate} is not a commit in this clone; fetch public main and retry.")
+        return ""
+    history = (_try("git", "rev-list", "--first-parent", tip) or "").split()
+    if sha not in history:
+        blockers.append(f"Pinned candidate {sha[:9]} is not on public main's first-parent history; "
+                        "only a merged main revision can be tagged.")
+        return ""
+    return sha
+
+
 def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = None,
             smoke_dir: Optional[str] = None, skip_windows: Optional[str] = None,
-            skip_smoke_rows: Optional[list] = None) -> dict:
+            skip_smoke_rows: Optional[list] = None, candidate: Optional[str] = None) -> dict:
+    """Release gates for public main's tip, or for ``candidate`` when one is pinned.
+
+    A pinned candidate must be on public main's first-parent history. Pinning
+    lets other sessions keep merging while the tested revision is tagged:
+    every gate (local suites, hosted Windows run, live smoke) is read for the
+    pinned commit, so a later merge no longer resets them.
+    """
     blockers = []
     try:
         ref = public_main_ref()
@@ -247,13 +268,16 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         blockers.append(str(error))
     remote = ref.split("/", 1)[0] if ref else None
     remote_url = _try("git", "remote", "get-url", remote) if remote else None
-    head, tag, tag_sha = "", None, None
+    head, tip, tag, tag_sha = "", "", None, None
     commits = []
     changed: list = []
     if ref:
         branch = ref.split("/", 1)[1]
         _try("git", "fetch", "--quiet", "--no-tags", remote, f"+refs/heads/{branch}:refs/remotes/{ref}")
         head = _try("git", "rev-parse", ref) or ""
+        tip = head
+        if candidate:
+            head = pinned_candidate(candidate, tip, blockers)
         tags = release_tags(remote, ref)
         tag = latest_final_tag(tags)
         tag_sha = _commit(remote, tag, tags.get(tag)) if tag else None
@@ -290,6 +314,14 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         if context == WINDOWS_CONTEXT and skip_windows:
             notes.append(f"Windows full suite not run on this release (--skip-windows): {skip_windows}")
             continue
+        if head and tip and head != tip:
+            # Suites start only on main's tip, so a missing pass cannot be made for this revision now.
+            skip = " or --skip-windows \"<reason>\"" if context == WINDOWS_CONTEXT else ""
+            blockers.append(
+                f"{context} on pinned {head[:9]} is {local[context]}, and main has moved to {tip[:9]}: "
+                f"a suite run now would test {tip[:9]}, not the pinned revision. Pin a revision that "
+                f"already passed, or drop --candidate and test main's tip{skip}.")
+            continue
         if context == WINDOWS_CONTEXT:
             hosted = f" (the hosted run on it is {hosted_state})" if hosted_state not in (None, "missing") else ""
             blockers.append(
@@ -305,6 +337,8 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         "main_ref": ref,
         "remote": {"name": remote, "url": remote_url},
         "main_head": head,
+        "main_tip": tip,
+        "pinned": bool(candidate),
         "last_release": {"tag": tag, "sha": tag_sha},
         "suggested_tag": next_patch(tag),
         "commits_since_release": len(commits),
@@ -325,8 +359,10 @@ def render(report: dict) -> str:
     remote = report.get("remote") or {}
     source = (f"{report.get('main_ref')} (remote '{remote.get('name')}' = {report.get('repository')})"
               if report.get("main_ref") else f"no remote for {report.get('repository')}")
+    pinned = (f" pinned; main is at {report['main_tip'][:9]}"
+              if report.get("pinned") and report.get("main_tip") != report["main_head"] else "")
     lines = [
-        f"Candidate: {source} {report['main_head'][:9]}  "
+        f"Candidate: {source} {report['main_head'][:9]}{pinned}  "
         f"(last release {report['last_release']['tag']}, {report['commits_since_release']} commits since)",
         f"Suggested tag: {report['suggested_tag']}",
         "Local suites on candidate: " + ", ".join(f"{k}={v}" for k, v in report["local_suites_on_main_head"].items())
@@ -340,6 +376,9 @@ def render(report: dict) -> str:
         lines += [f"  owner to-do: {t}" for t in smoke.get("owner_todo", [])]
         lines += [f"  skipped blocker: {b}" for b in smoke.get("would_block", [])]
     lines += [f"  release notes must say: {line}" for line in report.get("release_notes_lines", [])]
+    if pinned:
+        lines.append("  (edge publication usually skips a superseded revision; 'edge published: no' "
+                     "does not block a pinned release)")
     for name, info in report["platform_builds"].items():
         lines.append(f"{name}: {'changed' if info['needed'] else 'no changes'}"
                      + (f" (e.g. {', '.join(info['example_paths'][:3])})" if info["needed"] else ""))
@@ -360,10 +399,14 @@ def main(argv: Optional[list] = None) -> int:
                              "failed rows still block and the reason goes into the release notes")
     parser.add_argument("--skip-windows", metavar="REASON", default=None,
                         help="tag without a Windows full-suite pass; the reason goes into the release notes")
+    parser.add_argument("--candidate", metavar="SHA", default=None,
+                        help="check and tag this already-merged main revision instead of main's tip, so "
+                             "merges after the suites ran do not reset the gates")
     parser.add_argument("--smoke-dir", default=None,
                         help="smoke results folder (default $AI_SHUFFLE_SMOKE_DIR or <data dir>/smoke)")
     args = parser.parse_args(argv)
-    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_windows, args.skip_smoke_rows)
+    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_windows, args.skip_smoke_rows,
+                     candidate=args.candidate)
     print(json.dumps(report, indent=2) if args.json else render(report))
     return 0
 
