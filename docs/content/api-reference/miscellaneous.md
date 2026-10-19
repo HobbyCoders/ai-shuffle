@@ -167,6 +167,8 @@ A git or GitHub route given a subagent's `session_id` (a Task or Swarm child's c
 
 Get git status for a project.
 
+For an unbound project subfolder inside an enclosing repository, status returns `200` with `is_git_repo: true`, `enclosing_repository_root` naming that root, and `mutations_blocked: true`. Its file lists are empty: parent-wide changes are not exposed through the subfolder. Open the named repository root as a project to use Git controls. Other checkout-scoped Git actions on that subfolder return `409`. A project with its own nested repository behaves like any repository root (`enclosing_repository_root: null`). Plain folders return `is_git_repo: false`; unavailable checkouts still return an error.
+
 ```bash
 curl http://localhost:8000/api/v1/projects/proj_abc123/git/status \
   -H "Authorization: Bearer aih_your_key"

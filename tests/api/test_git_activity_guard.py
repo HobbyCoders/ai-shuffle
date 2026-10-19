@@ -163,11 +163,23 @@ async def test_checkout_checks_the_requested_ref(monkeypatch):
     assert 'other-active' in check.call_args.args[2]
 
 @pytest.mark.asyncio
-async def test_read_only_action_does_not_resolve_or_lock_git(monkeypatch):
-    resolve = AsyncMock(side_effect=AssertionError('read must remain available'))
+async def test_status_does_not_resolve_or_lock_git(monkeypatch):
+    resolve = AsyncMock(side_effect=AssertionError('status must remain available'))
     monkeypatch.setattr('app.api.git_helpers.get_working_dir_async', resolve)
-    await git_owner._guard_mutation('get_file_diff', {})
+    await git_owner._guard_mutation('get_git_status', {})
     resolve.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_read_only_action_checks_scope_but_never_locks_git(monkeypatch, tmp_path):
+    monkeypatch.setattr('app.api.common.check_project_access', lambda *a: None)
+    resolve = AsyncMock(return_value=str(tmp_path))
+    monkeypatch.setattr('app.api.git_helpers.get_working_dir_async', resolve)
+    check = Mock(side_effect=AssertionError('reads must remain available while busy'))
+    monkeypatch.setattr(activity, 'require_idle_git_target', check)
+    await git_owner._guard_mutation('get_file_diff', {'request': object(), 'project_id': 'p'})
+    resolve.assert_awaited_once_with('p', None, None)
+    check.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_merge_checks_base_branch_before_github_write(monkeypatch):
