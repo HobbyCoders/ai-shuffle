@@ -3,6 +3,8 @@ worker are listed and messaged through the owning worker's control channel."""
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from fluid.tools.builtins.session_orchestration import SPECS
 from fluid.tools.registry import ToolCtx
 
@@ -92,6 +94,86 @@ async def test_lists_active_chats_on_another_online_worker(workers, monkeypatch,
     assert remote["target"]["title"] == "ServerWorker chat"
     assert "MessageSession relays to them" in result["note"]
     assert ("POST", "/api/v1/network/peer/control/orchestration-peers") in served.requests
+
+
+async def test_discovery_and_message_before_catalog_replication(workers, monkeypatch, kicks):
+    a, b, served = network(workers, monkeypatch)
+    _chat(a, "target")  # Published, but deliberately not converged to b.
+    with b.active():
+        assert database.get_session("target") is None
+        listing = await _tool("ListSessions", {"state": "active", "scope": "all"})
+        assert not listing.is_error, listing.text
+        entries = json.loads(listing.text)["sessions"]
+        assert [(e["id"], e["owner_device_id"]) for e in entries] == [("target", a.device_id)]
+        result = await _tool("MessageSession", MESSAGE)
+        assert not result.is_error, result.text
+        assert database.get_session("target") is None  # No fabricated local execution row.
+        again = await _tool("MessageSession", MESSAGE)
+        assert json.loads(again.text)["turn_id"] == json.loads(result.text)["turn_id"]
+    with a.active():
+        assert len(agent_turns("target")) == 1
+    assert kicks == ["target"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"is_active": False}, {"hidden": True}, {"is_worker": True},
+    {"status": "archived"}, {"mode": "voice"}, {"parent_session_id": "caller"},
+])
+async def test_missing_mirror_discovery_keeps_destination_fences(workers, monkeypatch, kicks, fields):
+    a, b, _ = network(workers, monkeypatch)
+    _chat(a, "target")
+    _update(a, "target", publish=False, **fields)
+    with b.active():
+        assert database.get_session("target") is None
+        listed = await _tool("ListSessions", {"scope": "all"})
+        assert json.loads(listed.text)["sessions"] == []
+        refused = await _tool("MessageSession", MESSAGE)
+        assert refused.is_error
+        assert _receipts() == []
+    with a.active():
+        assert agent_turns("target") == []
+    assert kicks == []
+
+
+async def test_explicit_local_owner_survives_legacy_instance_change(workers, monkeypatch, kicks):
+    a, b, _ = _two_workers(workers, monkeypatch)
+    _chat(a, "local-caller")
+    _update(a, "target", publish=False, instance_id="previous-install")
+    _update(a, "local-caller", publish=False, instance_id="previous-install")
+    with a.active():
+        listing = await _tool("ListSessions", {"scope": "all"}, sender="local-caller")
+        assert not listing.is_error, listing.text
+        assert "target" in {e["id"] for e in json.loads(listing.text)["sessions"]}
+        sent = await _tool("MessageSession", MESSAGE, sender="local-caller")
+        assert not sent.is_error, sent.text
+    with b.active():
+        # Authoritative remote eligibility uses the same explicit owner rule.
+        listed = await _tool("ListSessions", {"scope": "all"})
+        assert "target" in {e["id"] for e in json.loads(listed.text)["sessions"]}
+
+
+async def test_remote_reply_credit_is_consumed_once_and_cannot_ping_pong(workers, monkeypatch, kicks):
+    a, b, _ = _two_workers(workers, monkeypatch)
+    with b.active():
+        first = await _tool("MessageSession", MESSAGE)
+        assert not first.is_error, first.text
+    monkeypatch.setattr(orch, "MAX_ACTIONS", 0)
+    transport.note_contact(b.device_id)
+    args = {"session_id": "caller", "message": "Build completed", "request_id": "reply"}
+    with a.active():
+        request = agent_turns("target")[0]
+        plan = orch._queue("target", args, "message")
+        assert plan["body"]["reply_to"] == request["id"]
+        retry = orch._queue("target", args, "message")
+        assert retry["body"] == plan["body"]
+        with pytest.raises(ValueError, match="budget"):
+            orch._queue("target", {**args, "request_id": "extra"}, "message")
+    with b.active():
+        received = orch.accept_remote_message(plan["body"], a.device_id)
+        reply = turns.get_turn(received["turn_id"])
+        assert reply["payload"]["orchestration_reply_to"] == request["id"]
+        with pytest.raises(ValueError, match="budget"):
+            orch._queue("caller", {**MESSAGE, "request_id": "ack"}, "message")
 
 
 async def test_offline_worker_is_named_in_the_listing(workers, monkeypatch, kicks):

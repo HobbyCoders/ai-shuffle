@@ -75,9 +75,13 @@ def _top_level(row, *, allow_settled=False):
 def _local_top_level(row, *, allow_settled=False):
     from app.core.config import settings
     from app.network.runners import self_device_id
-    return bool(_top_level(row, allow_settled=allow_settled)
-                and row.get("instance_id") == settings.effective_instance_id
-                and row.get("owner_device_id") in (None, self_device_id()))
+    if not _top_level(row, allow_settled=allow_settled):
+        return False
+    # Explicit execution ownership supersedes the legacy install identifier
+    # (which can survive a handoff or a reinstall).
+    owner = row.get("owner_device_id")
+    return (owner == self_device_id() if owner else
+            row.get("instance_id") == settings.effective_instance_id)
 
 
 def _as_owner_chat(owner):
@@ -268,12 +272,13 @@ def _peer_workers(session_id):
     return runners.other_workers()
 
 
-async def _ask_for_peers(worker):
+async def _ask_for_peers(worker, session_id=None):
     """``(entries, None)`` from one online worker, or ``(None, why not)``."""
     from app.network import control
     name = worker["device_name"]
     try:
-        answer = await control.call(worker["device_id"], PEERS_ACTION, {}, timeout=PEERS_TIMEOUT)
+        answer = await control.call(worker["device_id"], PEERS_ACTION,
+                                    {"session_id": session_id} if session_id else {}, timeout=PEERS_TIMEOUT)
     except control.ControlRefused as exc:
         if "Unknown control action" in str(exc):
             return None, f"{name} (runs an older release)"
@@ -287,8 +292,10 @@ async def _ask_for_peers(worker):
 
 
 def _mirrored_peers(session_id, data, answers):
-    """The entries other workers vouched for that are also eligible peers in
-    this worker's mirror, so MessageSession can reach every one listed."""
+    """Owner-vouched entries, even before their catalog rows arrive here.
+
+    An existing mirror still fences conflicting ownership and provenance.
+    """
     from app.db import sessions
     from app.network import control
     caller = _caller(session_id, allow_settled=True)
@@ -300,14 +307,34 @@ def _mirrored_peers(session_id, data, answers):
             if not isinstance(peer_id, str) or peer_id == session_id:
                 continue
             row = sessions.get_session(peer_id)
-            if (not row or control.owner_of(row) != worker["device_id"] or not _top_level(row)
-                    or _mirror_owner(row) != _OWNER_CHAT):
+            if row and (control.owner_of(row) != worker["device_id"] or not _top_level(row)
+                        or _mirror_owner(row) != _OWNER_CHAT):
                 continue
-            if scope == "project" and not _same_project(row, caller):
+            # The owner just checked eligibility. Catalog replication can lag
+            # behind this response, including the very existence of the row.
+            if scope == "project" and not _same_project(entry, caller):
                 continue
-            out.append({**_list_entry(row), "owner_device_id": worker["device_id"],
+            out.append({**_list_entry(entry), "owner_device_id": worker["device_id"],
                         "worker": worker["device_name"]})
     return out
+
+
+async def _discover_remote_peer(session_id, target_id):
+    """Resolve a missing catalog row using authenticated owner listings, not a
+    model-supplied worker. No mirror or runnable local session is fabricated.
+    """
+    from app.db import sessions
+    if await asyncio.to_thread(sessions.get_session, target_id):
+        return None
+    workers = await asyncio.to_thread(_peer_workers, session_id)
+    online = [w for w in workers if w["online"]]
+    answers = await asyncio.gather(*(_ask_for_peers(w, target_id) for w in online))
+    matches = [w for w, (entries, _) in zip(online, answers)
+               if entries is not None and any(isinstance(e, dict) and e.get("id") == target_id
+                                              for e in entries)]
+    if len(matches) > 1:
+        raise ValueError("More than one worker claims this session; retry after synchronization.")
+    return matches[0] if matches else None
 
 
 async def list_everywhere(session_id, data):
@@ -338,7 +365,11 @@ def accept_peer_listing(body, from_device):
     from app.db import sessions
     from app.core.task_registry import task_registry
     _calling_worker(from_device, "list chats here")
-    rows = sessions.get_sessions(api_user_id="", active_only=True, limit=100)
+    if body.get("session_id") is not None:
+        row = sessions.get_session(_text(body, "session_id", 200))
+        rows = [row] if row else []
+    else:
+        rows = sessions.get_sessions(api_user_id="", active_only=True, limit=100)
     return {"sessions": [_list_entry(row) for row in rows
                          if _local_top_level(row) and not task_registry.is_user_stopped(row["id"])
                          and _owner(row) == _OWNER_CHAT]}
@@ -894,6 +925,26 @@ _QUEUED_NOTE = ("Queued is not delivered. Retry the same request_id to read queu
                 "status. No automatic reply or completion notification; peers must use MessageSession.")
 
 
+def _reply_credit(cursor, sender_id, target_id):
+    """One reply per durable incoming request, including one still queued while
+    the recipient works. Replies never grant another credit. The caller holds
+    the sender session lock, so different chains cannot spend the same credit.
+    Receipts are the consumption record: a definitely refused remote delivery
+    deletes its receipt and returns the credit; an uncertain delivery keeps it.
+    """
+    cursor.execute(
+        "SELECT incoming.id FROM turns incoming WHERE incoming.session_id=%s "
+        "AND incoming.source='agent_message' AND incoming.state<>'aborted' "
+        "AND incoming.payload ->> 'orchestration_sender'=%s "
+        "AND incoming.payload ->> 'orchestration_reply_to' IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM turns reply WHERE reply.session_id IN (%s, %s) "
+        "AND reply.payload ->> 'orchestration_reply_to'=incoming.id) "
+        "ORDER BY incoming.created_at DESC LIMIT 1",
+        (sender_id, target_id, target_id, REMOTE_MESSAGE_PREFIX + target_id))
+    row = cursor.fetchone()
+    return row["id"] if row else None
+
+
 def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id, depth,
                             command_id, fingerprint):
     """Reserve a MessageSession to a chat ``peer`` runs: a settled receipt in
@@ -908,6 +959,7 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
             "sender_label": str(sender.get("title") or sender["id"])[:400], "depth": depth + 1}
     with transaction() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sender["id"],))
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
         if not cursor.fetchone():
             raise ValueError("Orchestration origin no longer exists.")
@@ -924,21 +976,27 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
                         "status": "already_queued", "delivery_status": _delivery_status(previous),
                         "created": False, "note": "Existing request receipt. " + _QUEUED_NOTE}
             # Re-ask the owning worker: it answers with the message it queued.
+            if previous["payload"].get("orchestration_reply_to"):
+                body["reply_to"] = previous["payload"]["orchestration_reply_to"]
             return {"remote_message": peer, "receipt_id": previous["id"], "reserved": False, "body": body}
-        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%'",
-                       (root_id,))
-        if len(cursor.fetchall()) >= MAX_ACTIONS:
+        reply_to = _reply_credit(cursor, sender["id"], session_id)
+        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%' "
+                       "AND payload ->> 'orchestration_reply_to' IS NULL", (root_id,))
+        if reply_to is None and len(cursor.fetchall()) >= MAX_ACTIONS:
             raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); "
                              "ask the user to continue.")
         if context.get("state") == "aborted":
             raise ValueError("A participating session was aborted; the user must continue it first.")
         if task_registry.is_user_stopped(sender["id"]):
             raise ValueError("The user stopped a participating session.")
+        receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": peer["device_id"],
+                           "remote_session_id": session_id}
+        if reply_to:
+            receipt_payload["orchestration_reply_to"] = body["reply_to"] = reply_to
         receipt = turns.enqueue_turn(
             REMOTE_MESSAGE_PREFIX + session_id, "agent_message", profile_id=sender["profile_id"],
             command_id=command_id, parent_turn_id=root_id,
-            payload={"orchestration_fingerprint": fingerprint, "remote_device_id": peer["device_id"],
-                     "remote_session_id": session_id}, _conn=conn)
+            payload=receipt_payload, _conn=conn)
         # Settled at birth: a receipt is accounting, never runnable work.
         cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
                        "stop_reason='remote_message' WHERE id=%s", (receipt["id"],))
@@ -1026,6 +1084,8 @@ def accept_remote_message(body, from_device):
                    peer_message_content=content,
                    peer_sender_label=f"{sender_label} (on {member.name or from_device})",
                    forwarded_by_device=from_device)
+    if body.get("reply_to") is not None:
+        payload["orchestration_reply_to"] = _remote_text(body, "reply_to", 200)
     principals = {session_id: _principal(session_id)}
     with transaction() as conn:
         cursor = conn.cursor()
@@ -1148,7 +1208,7 @@ def _checkout_note(checkout):
             "a branch or worktree of another chat's checkout: the app refuses it.")
 
 
-def _queue(sender_id, data, action, placement=None, model_plan=None):
+def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_peer=None):
     """``placement`` is :func:`_project_placement`'s answer for a StartSession
     that named a project (the owner's assistant only). ``model_plan`` is
     :func:`_confirm_start_model`'s answer when the call passed ``model``: a
@@ -1213,6 +1273,12 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
     if action != "start":
         peer = _remote_peer(sender, _text(data, "session_id", 200))
+        if (peer is None and discovered_peer is not None
+                and sessions.get_session(data["session_id"]) is None):
+            # Revalidate the caller and membership after the network lookup.
+            if _owner(sender) != _OWNER_CHAT:
+                raise PermissionError("Only the owner's chats can message chats on another worker.")
+            peer = _remote_worker(discovered_peer["device_id"])
         if peer is not None:
             return _reserve_remote_message(
                 sender, context, peer, session_id=_text(data, "session_id", 200), text=text,
@@ -1245,7 +1311,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 if action == "start" and placement is None and remote is None else None)
     with _UnusedCheckout(checkout) as unused, transaction() as conn:
         cursor = conn.cursor()
-        # One database lock serializes all fanout in this autonomous chain.
+        # Serialize reply credit consumption even across separate chains, then
+        # serialize fanout in this autonomous chain. Always this lock order.
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sender_id,))
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
         if not cursor.fetchone():
             raise ValueError("Orchestration origin no longer exists.")
@@ -1272,9 +1340,14 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                     "status": "already_queued", "delivery_status": _delivery_status(previous),
                     "created": False,
                     "note": "Existing request receipt. No automatic reply; retry the same request_id to read delivery status."}
-        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%'", (root_id,))
+        reply_to = _reply_credit(cursor, sender_id, target["id"]) if action == "message" else None
+        if reply_to:
+            payload["orchestration_reply_to"] = reply_to
+        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%' "
+                       "AND payload ->> 'orchestration_reply_to' IS NULL", (root_id,))
         commands = [row["command_id"] for row in cursor.fetchall()]
-        if len(commands) >= MAX_ACTIONS or (action == "start" and sum(c.startswith("orchestration:start:") for c in commands) >= MAX_STARTS):
+        if ((reply_to is None and len(commands) >= MAX_ACTIONS)
+                or (action == "start" and sum(c.startswith("orchestration:start:") for c in commands) >= MAX_STARTS)):
             raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); ask the user to continue.")
         # A receipt may be read after Stop, but fresh work must still fail closed.
         if context.get("state") == "aborted" or target_context.get("state") == "aborted":
@@ -1717,8 +1790,11 @@ def make_handler(supplier):
                 # A model choice may wait for the owner's answer: also before the lock.
                 model_plan = (await _confirm_start_model(sender_id, data, placement)
                               if action == "start" else None)
+                discovered_peer = (await _discover_remote_peer(sender_id, _text(data, "session_id", 200))
+                                   if action == "message" else None)
                 async with turn_scheduler.message_resume_lock(target_id):
-                    result = await asyncio.to_thread(_queue, sender_id, data, action, placement, model_plan)
+                    result = await asyncio.to_thread(_queue, sender_id, data, action, placement, model_plan,
+                                                     discovered_peer)
                     if "remote" in result:
                         # The destination kicks and publishes its own chat;
                         # nothing here is local work to wake or broadcast.
