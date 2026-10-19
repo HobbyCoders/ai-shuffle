@@ -423,8 +423,13 @@ def test_uncached_push_never_invokes_network_audits(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(local_ci, 'choose_python', lambda: sys.executable)
     monkeypatch.setattr(local_ci, 'save_record', lambda *args: None)
     monkeypatch.setattr(local_ci, 'run_suites', lambda *args: ([], [], []))
+    monkeypatch.setenv("LOCAL_CI_HOOK", "4")
+    monkeypatch.setenv(local_ci.PUSH_REMOTE_ENV, "public")
     calls = []
     def run(argv, **kwargs):
+        # Nested checks must not inherit the outer push's remote and marker.
+        assert "LOCAL_CI_HOOK" not in os.environ
+        assert local_ci.PUSH_REMOTE_ENV not in os.environ
         assert argv[1] == 'scripts/secret_scan.py', 'automatic push attempted network audit'
         assert kwargs['timeout'] == 120
         calls.append(argv)

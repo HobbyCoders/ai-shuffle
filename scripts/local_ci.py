@@ -1008,11 +1008,12 @@ def cmd_pre_push(args) -> int:
     zero = "0" * 40
     records = load_records()
     head = git("rev-parse", "HEAD")
-    push_remote = None
-    if os.environ.get("LOCAL_CI_HOOK") == "4":
-        push_remote = os.environ.get(PUSH_REMOTE_ENV, "") or None
-        # The scanner validates this against configured remotes before using
-        # any tracking ref; a URL/path or unknown name scans all history.
+    # Consume hook-only inputs so nested Git checks cannot inherit this push.
+    hook_version = os.environ.pop("LOCAL_CI_HOOK", None)
+    remote_argument = os.environ.pop(PUSH_REMOTE_ENV, "")
+    push_remote = (remote_argument or None) if hook_version == "4" else None
+    # The scanner validates this against configured remotes before using
+    # any tracking ref; a URL/path or unknown name scans all history.
     for line in sys.stdin.read().splitlines():
         parts = line.split()
         if len(parts) != 4:
