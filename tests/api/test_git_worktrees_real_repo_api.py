@@ -666,7 +666,7 @@ def test_forget_requires_owner_and_refuses_preview_cookie(wt_api, monkeypatch, i
     monkeypatch.setattr(auth.owner_auth, "local_access", lambda request: identity == "preview_owner")
     monkeypatch.setattr(preview_access, "verify", lambda token: object() if token == "fixture-preview" else None)
     if identity == "preview_owner":
-        client.cookies.set(preview_access.COOKIE_NAME, "fixture-preview")
+        client.cookies.set(preview_access.cookie_name(), "fixture-preview")
     (path / ".git").unlink()
     response = client.post(f"{BASE}/wt-1/forget")
     assert response.status_code == 403, response.text

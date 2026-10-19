@@ -28,9 +28,7 @@ def manager():
 
 def _patch_settings():
     """Patch the settings singleton so start_all sees effective_instance_id=ME."""
-    mock_settings = MagicMock()
-    mock_settings.effective_instance_id = ME
-    return patch("app.core.config.settings", mock_settings)
+    return patch("app.core.config.settings.instance_id", ME)
 
 
 # =============================================================================

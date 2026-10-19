@@ -99,6 +99,9 @@ def _drop_host_worker_environment() -> None:
 
 _drop_host_worker_environment()
 
+# Check after all fixture finalizers, including monkeypatch restoration.
+pytest_plugins = ("tests.settings_guard",)
+
 # ─── No real ``claude`` CLI in tests ────────────────────────────────────────
 # A test that forgets to point the delegated leg at a fake would otherwise run
 # the machine's real ``claude`` binary, which spends the developer's Claude
