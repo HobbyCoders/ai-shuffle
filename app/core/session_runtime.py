@@ -2727,7 +2727,9 @@ class SessionRuntime:
                 # The pump is finished. A parked/terminal row intentionally
                 # rejects renewals, including one already in flight.
                 self._lease_finalizing = True
-                parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids, usage=usage)
+                parked = await asyncio.to_thread(
+                    turns_db.park_turn, tid, task_ids, usage=usage, run_id=self._run_id,
+                )
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
             if parked is not None:
@@ -2784,7 +2786,9 @@ class SessionRuntime:
             except Exception:
                 logger.warning("SessionRuntime: resolved park cleanup failed for %s", sid, exc_info=True)
             await recorder.settle("completed", (self.turn.get("payload") or {}).get("parked_usage", {}))
-        owned_run = self._run_id if self._unowned else None
+        # Fence settlement even if a finalizing renewal exited quietly and the
+        # reap sweep requeued the row before this write reached the database.
+        owned_run = self._run_id
         if (self._abort_reason == "recording_failed"
                 or self._terminal in ("interrupted", "error") or self._terminal is None):
             stop_reason = (self._abort_reason
@@ -3405,19 +3409,22 @@ class SessionRuntime:
         The lease is lost when a renewal misses its ownership guard (the run
         was reaped or taken over) or when renewals kept failing for a whole
         TTL, which is when the DB lets the lease lapse. Either way the turn
-        stops itself (``_on_lease_lost``) instead of running on unowned."""
+        stops itself (``_on_lease_lost``) instead of running on unowned.
+        Finalization keeps renewing (and retrying transient errors) until the
+        parked/terminal write lands; a rejected renewal or an exhausted TTL then
+        exits quietly, because the pump is finished.
+        """
         loop = asyncio.get_running_loop()
         renewed_at = loop.time()
         delay = RUN_LEASE_RENEW_SECONDS
         while True:
             await asyncio.sleep(delay)
-            if self._lease_finalizing:
-                return
             attempt_at = loop.time()
             try:
                 remaining = RUN_LEASE_TTL_SECONDS - (attempt_at - renewed_at)
                 if remaining <= 0:
-                    self._on_lease_lost()
+                    if not self._lease_finalizing:
+                        self._on_lease_lost()
                     return
                 ok = await asyncio.wait_for(
                     run_lease(
@@ -3427,8 +3434,9 @@ class SessionRuntime:
                     timeout=remaining,
                 )
             except Exception:
-                if self._lease_finalizing:
-                    return
+                # Retry while finalizing too: pool pressure is what slows the
+                # final write, so giving up on the first transient error would
+                # let the lease lapse before the parked/terminal write lands.
                 remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)
                 if remaining > 0:
                     # Retry promptly instead of burning another full heartbeat
@@ -3443,12 +3451,12 @@ class SessionRuntime:
                     "%ss lease TTL", run_id, RUN_LEASE_TTL_SECONDS, exc_info=True,
                 )
                 ok = False
-            if self._lease_finalizing:
-                return
             if ok:
                 renewed_at = attempt_at
                 delay = RUN_LEASE_RENEW_SECONDS
                 continue
+            if self._lease_finalizing:
+                return
             logger.warning(
                 "SessionRuntime: lease renewal lost for run %s — stopping heartbeat",
                 run_id,

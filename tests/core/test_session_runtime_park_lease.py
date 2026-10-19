@@ -238,7 +238,9 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
     started = asyncio.Event()
     renewing = asyncio.Event()
     heartbeat_done = asyncio.Event()
+    retried = asyncio.Event()
     rejected = []
+    errors = []
     real_loop = runtime._renew_loop
     monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.001)
 
@@ -255,6 +257,9 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
         renewing.set()
         await written.wait()
         if renewal == "error":
+            errors.append(1)
+            if len(errors) >= 2:
+                retried.set()
             raise RuntimeError("delayed SQL failure")
         ok = await asyncio.to_thread(fn, *args)
         rejected.append(ok)
@@ -269,8 +274,13 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
     async def slow_cleanup(*args, **kwargs):
         assert turns_db.get_turn(turn["id"])["state"] == outcome
         written.set()
-        # The heartbeat must finish on its own, not via execute's final cancel.
-        await asyncio.wait_for(heartbeat_done.wait(), 3)
+        if renewal == "error":
+            # A transient error is retried (not treated as loss) until
+            # execute's final cancel ends the heartbeat.
+            await asyncio.wait_for(retried.wait(), 3)
+        else:
+            # The heartbeat must finish on its own, not via execute's final cancel.
+            await asyncio.wait_for(heartbeat_done.wait(), 3)
 
     with _runtime_env(
         pump=pump, bg_work=[{"id": "background"}] if outcome == "parked" else [],
@@ -285,12 +295,188 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
         assert await asyncio.wait_for(runtime.execute(), 5) == outcome
 
     assert written.is_set()
-    assert rejected == ([False] if renewal == "rejected" else [])
+    assert rejected == ([] if renewal == "error" else [False])
+    if renewal == "error":
+        assert len(errors) >= 2
     lost.assert_not_called()
     stop.assert_not_called()
     interrupt.assert_not_called()
     assert runtime._abort_reason is None
     assert not runtime._unowned
+
+
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "parked"])
+@pytest.mark.parametrize("renewal", ["success", "rejected", "error"])
+async def test_finalizing_tick_before_the_write_keeps_renewing_or_exits_quietly(
+    mock_db, monkeypatch, caplog, outcome, renewal,
+):
+    """The finalizing flag precedes the DB write; it must not stop renewal."""
+    turn = turns_db.enqueue_turn("pre-write-heartbeat", "user", prompt="finish")
+    runtime = session_runtime.SessionRuntime(turn)
+    writing = asyncio.Event()
+    tick_ready = asyncio.Event()
+    real_to_thread = asyncio.to_thread
+    real_loop = runtime._renew_loop
+    final_write = turns_db.park_turn if outcome == "parked" else turns_db.settle_turn
+    successes = []
+    attempts = []
+    errors = []
+    seen = {}
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.001)
+
+    async def heartbeat(*args):
+        try:
+            await real_loop(*args)
+        finally:
+            if renewal != "success":
+                tick_ready.set()
+
+    async def renew(fn, *args):
+        # Make this tick land after the flag, but BEFORE the actual DB write.
+        await asyncio.wait_for(writing.wait(), 3)
+        assert runtime._lease_finalizing
+        attempts.append(fn)
+        if turns_db.get_turn(turn["id"])["state"] == outcome:
+            return await real_to_thread(fn, *args)
+        if renewal == "error":
+            # Transient errors are retried while finalizing; release the
+            # final write once a retry has proven the loop kept going.
+            errors.append(1)
+            if len(errors) >= 2:
+                tick_ready.set()
+            raise RuntimeError("SQL failure before final write")
+        if renewal == "rejected":
+            return False
+        ok = await real_to_thread(fn, *args)
+        successes.append(ok)
+        seen["after"] = _lease(runtime._run_id)
+        if len(successes) >= 2:
+            tick_ready.set()
+        return ok
+
+    async def slow_write(fn, *args, **kwargs):
+        if fn is final_write:
+            assert runtime._lease_finalizing
+            run = runs_db.get_active_run(turn["session_id"])
+            # A shorter initial lease makes extension observable even with the
+            # shim's second-resolution clocks, without sleeping for a second.
+            assert runs_db.renew_run(run["id"], run["runner_id"], run["fence_token"], 1)
+            seen["before"] = _lease(run["id"])
+            writing.set()
+            await asyncio.wait_for(tick_ready.wait(), 3)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    frames = [{"type": "interrupted" if outcome == "aborted" else "done", "metadata": {}}]
+    with _runtime_env(
+        pump=make_pump(frames), bg_work=[{"id": "background"}] if outcome == "parked" else [],
+    ), patch.object(runtime, "_renew_loop", new=heartbeat), patch.object(
+        session_runtime, "run_lease", new=renew,
+    ), patch.object(asyncio, "to_thread", new=slow_write), patch.object(
+        runtime, "_on_lease_lost", wraps=runtime._on_lease_lost,
+    ) as lost, patch.object(
+        runtime, "_stop_unowned", wraps=runtime._stop_unowned,
+    ) as stop, patch("app.core.query_session_lifecycle.interrupt_session") as interrupt:
+        assert await asyncio.wait_for(runtime.execute(), 5) == outcome
+
+    assert writing.is_set()
+    assert tick_ready.is_set()
+    assert attempts and all(fn is runs_db.renew_run for fn in attempts)
+    if renewal == "success":
+        # A successful finalizing tick must continue at the normal cadence.
+        assert successes[:2] == [True, True]
+        assert str(seen["after"]["lease_expires_at"]) > str(seen["before"]["lease_expires_at"])
+    if renewal == "error":
+        assert len(errors) >= 2
+        assert "SessionRuntime: renew_run raised" in caplog.text
+    else:
+        assert "SessionRuntime: renew_run" not in caplog.text
+    lost.assert_not_called()
+    stop.assert_not_called()
+    interrupt.assert_not_called()
+    assert "kept failing" not in caplog.text
+    assert "SessionRuntime: lease renewal lost" not in caplog.text
+    assert runtime._abort_reason is None
+    assert not runtime._unowned
+    assert turns_db.get_turn(turn["id"])["state"] == outcome
+
+
+async def test_finalizing_tick_after_local_ttl_exits_quietly(mock_db, monkeypatch):
+    turn = turns_db.enqueue_turn("final-expired-heartbeat", "user", prompt="finish")
+    runtime = session_runtime.SessionRuntime(turn)
+    runtime._lease_finalizing = True
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_TTL_SECONDS", 0.001)
+    monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.01)
+    with patch.object(session_runtime, "run_lease") as renew, patch.object(
+        runtime, "_on_lease_lost", wraps=runtime._on_lease_lost,
+    ) as lost, patch.object(
+        runtime, "_stop_unowned", wraps=runtime._stop_unowned,
+    ) as stop, patch("app.core.query_session_lifecycle.interrupt_session") as interrupt:
+        await asyncio.wait_for(runtime._renew_loop("run", "runner", 1), 1)
+    renew.assert_not_awaited()
+    lost.assert_not_called()
+    stop.assert_not_called()
+    interrupt.assert_not_called()
+    assert not runtime._unowned
+
+
+@pytest.mark.parametrize("outcome", ["completed", "aborted"])
+async def test_finalize_cannot_settle_a_requeued_turn(mock_db, outcome):
+    """A finalizing runtime still needs its run binding when it settles."""
+    turn = turns_db.enqueue_turn("final-requeue", "user", prompt="finish")
+    runtime = session_runtime.SessionRuntime(turn)
+    real_settle = turns_db.settle_turn
+
+    def requeue_before_settle(*args, **kwargs):
+        assert runtime._lease_finalizing
+        assert not runtime._unowned
+        assert turns_db.requeue_turn(turn["id"]) is not None
+        return real_settle(*args, **kwargs)
+
+    frames = [{"type": "interrupted" if outcome == "aborted" else "done", "metadata": {}}]
+    with _runtime_env(pump=make_pump(frames)) as env, patch.object(
+        turns_db, "settle_turn", side_effect=requeue_before_settle,
+    ) as settle:
+        assert await runtime.execute() == outcome
+
+    assert settle.call_args.kwargs["run_id"] == runtime._run_id
+    assert turns_db.get_turn(turn["id"])["state"] == "queued"
+    env["scheduler"].assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "parked"])
+async def test_finalize_cannot_park_or_settle_a_new_owners_turn(mock_db, outcome):
+    turn = turns_db.enqueue_turn("final-new-owner", "user", prompt="finish")
+    runtime = session_runtime.SessionRuntime(turn)
+    final_write = turns_db.park_turn if outcome == "parked" else turns_db.settle_turn
+    seen = {}
+
+    def take_over_before_write(*args, **kwargs):
+        assert runtime._lease_finalizing
+        assert not runtime._unowned
+        old_run = runs_db.get_active_run(turn["session_id"])
+        assert runs_db.release_run(old_run["id"], old_run["fence_token"])
+        assert turns_db.requeue_turn(turn["id"]) is not None
+        new_run = runs_db.claim_run(turn["session_id"], "new-runner", 60)
+        assert new_run is not None
+        assert turns_db.start_turn(turn["id"], run_id=new_run["id"]) is not None
+        seen["row"] = turns_db.get_turn(turn["id"])
+        seen["run_id"] = new_run["id"]
+        return final_write(*args, **kwargs)
+
+    frames = [{"type": "interrupted" if outcome == "aborted" else "done", "metadata": {}}]
+    with _runtime_env(
+        pump=make_pump(frames), bg_work=[{"id": "old-task"}] if outcome == "parked" else [],
+    ) as env, patch.object(
+        turns_db, "park_turn" if outcome == "parked" else "settle_turn",
+        side_effect=take_over_before_write,
+    ) as write:
+        assert await runtime.execute() == outcome
+
+    assert write.call_args.kwargs["run_id"] == runtime._run_id
+    assert turns_db.get_turn(turn["id"]) == seen["row"]
+    assert runs_db.get_active_run(turn["session_id"])["id"] == seen["run_id"]
+    env["scheduler"].assert_not_called()
+    env["record_parked"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
