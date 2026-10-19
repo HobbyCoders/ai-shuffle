@@ -73,10 +73,12 @@ afterEach(() => {
 });
 
 describe('mirrored chat sync drains (#2227)', () => {
-	it('keeps the transcript and the feed cursor across later drains', async () => {
+	it.each(['current', 'opening-checkpoint'])('keeps the transcript and feed cursor after %s', async (initial) => {
 		const deps = attachRecordingDeps();
 		const fetch = vi.fn()
-			.mockResolvedValueOnce(status('current'))
+			.mockResolvedValueOnce(initial === 'current' ? status('current') : new Response(JSON.stringify({
+				state: 'syncing', pending_updates: 8, initial_caught_up: true,
+			})))
 			.mockResolvedValueOnce(status('syncing', 5))
 			.mockResolvedValueOnce(status('current'))
 			.mockResolvedValueOnce(status('syncing', 3))

@@ -188,8 +188,13 @@ def note_session_watermarks(owner_device_id: str, requested: list[str], heads: A
                 _session_watermarks.pop(key, None)
 
 
-def session_sync_status(session_id: str, owner_device_id: str | None) -> dict:
-    """Compare this log with its last observed owner seq/epoch, not other chats."""
+def session_sync_status(session_id: str, owner_device_id: str | None, *,
+                        initial_target: dict | None = None) -> dict:
+    """Report live freshness and progress to a viewer's fixed opening checkpoint.
+
+    The checkpoint is UI progress, not authorization. Session access is checked
+    by the API; it cannot change replication or permit a transcript read.
+    """
     from app.db.session_events import get_watermark
 
     ctx = engine.context()
@@ -222,9 +227,29 @@ def session_sync_status(session_id: str, owner_device_id: str | None) -> dict:
     tail_applied = local["tail_id"] == head["tail_id"]
     if same_epoch and not tail_applied:
         pending = max(1, pending)  # at least one replacement remains; not a message count
-    return {"state": "current" if same_epoch and tail_applied and not pending else "syncing",
+    # A viewer pins its first observed head. Do not make opening a busy chat
+    # wait for the writer to go quiet. A clear or rewind past that checkpoint
+    # starts a new target; the normal live-head proof can also supersede a
+    # retracted checkpoint (e.g. a same-epoch tail rewrite).
+    target = initial_target or head
+    if target["epoch"] != head["epoch"] or target["seq"] > head["seq"]:
+        target = head
+    initial_local = local if target == head else get_watermark(session_id, at_seq=target["seq"])
+    current = same_epoch and tail_applied and not pending
+    initial_pending = target["seq"]
+    initial_complete = False
+    if initial_local is not None:
+        initial_same_epoch = initial_local["epoch"] == target["epoch"]
+        initial_pending = max(0, target["seq"] - initial_local["seq"]) if initial_same_epoch else target["seq"]
+        initial_complete = (initial_same_epoch and not initial_pending
+                            and initial_local["tail_id"] == target["tail_id"])
+        if initial_same_epoch and not initial_complete:
+            initial_pending = max(1, initial_pending)
+    return {"state": "current" if current else "syncing",
             "pending_updates": pending, "scope": "session", "seq": local["seq"], "epoch": local["epoch"],
-            "owner_seq": head["seq"], "owner_epoch": head["epoch"]}
+            "owner_seq": head["seq"], "owner_epoch": head["epoch"],
+            "initial_target": dict(target), "initial_caught_up": current or initial_complete,
+            "initial_pending_updates": 0 if current else initial_pending}
 
 
 def owner_sync_status(owner_device_id: str | None) -> dict:

@@ -2187,6 +2187,9 @@ async def get_session_sync_status(
     request: Request,
     session_id: str,
     token: str = Depends(require_auth),
+    initial_seq: Optional[int] = Query(None, ge=0, le=9223372036854775807),
+    initial_epoch: Optional[str] = Query(None, min_length=1, max_length=128),
+    initial_tail_id: Optional[str] = Query(None, min_length=1, max_length=128),
 ):
     """Freshness of this session's materialized transcript, relative to its owner.
 
@@ -2201,6 +2204,13 @@ async def get_session_sync_status(
     do not affect this comparison.
     These are observed watermarks, not a guarantee that the owner is online.
 
+    The response also supplies an ``initial_target`` (seq, epoch, tail_id).
+    A viewer may echo it via the three ``initial_*`` query parameters until
+    ``initial_caught_up`` is true, then reveal the conversation even if live
+    freshness is still ``syncing``. This fixed opening barrier avoids chasing
+    a continuously writing owner. Epoch changes / truncation reset the target.
+    The witness must actually be materialized, not just allocated locally.
+
     Initial transcript downloads remain syncing. Until a local copy and an
     owner session watermark are available (including older peers), ``scope=owner``
     retains the conservative owner-wide operation count and state fallback.
@@ -2211,6 +2221,12 @@ async def get_session_sync_status(
     if await run_sync(transcripts.prioritise, session_id):
         # A worker that just joined has not copied this transcript yet; it is next.
         return {"state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner"}
+    target_parts = (initial_seq, initial_epoch, initial_tail_id)
+    if any(part is not None for part in target_parts):
+        if any(part is None for part in target_parts):
+            raise HTTPException(status_code=422, detail="Supply all three initial checkpoint fields")
+        return await run_sync(session_sync_status, session_id, session.get("owner_device_id"),
+                              initial_target={"seq": initial_seq, "epoch": initial_epoch, "tail_id": initial_tail_id})
     return await run_sync(session_sync_status, session_id, session.get("owner_device_id"))
 
 

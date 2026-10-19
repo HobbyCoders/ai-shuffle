@@ -12,6 +12,73 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const statusText = () => screen.queryByRole('status')?.textContent?.trim() ?? '';
 
 describe('mirrored session freshness', () => {
+	it('reveals a fixed opening checkpoint while live updates keep arriving', async () => {
+		vi.useFakeTimers();
+		const target = { seq: 10, epoch: 'first/event', tail_id: 'tail&event' };
+		const reply = (initial_caught_up: boolean, initial_pending_updates: number, pending_updates: number) => new Response(JSON.stringify({
+			state: 'syncing', scope: 'session', initial_target: target,
+			initial_caught_up, initial_pending_updates, pending_updates,
+		}));
+		const fetch = vi.fn().mockResolvedValueOnce(reply(false, 4, 4))
+			.mockRejectedValueOnce(new Error('temporary outage'))
+			.mockResolvedValueOnce(reply(false, 2, 15))
+			.mockImplementation(() => Promise.resolve(reply(true, 0, 20)));
+		vi.stubGlobal('fetch', fetch);
+		const onCaughtUp = vi.fn();
+		render(MirrorSyncGate, { sessionId: 'busy', onCaughtUp, children });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(screen.getByText('4 updates remaining')).toBeTruthy();
+		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(screen.getByText('2 updates remaining')).toBeTruthy();
+		expect(onCaughtUp).not.toHaveBeenCalled();
+		for (const call of fetch.mock.calls.slice(1)) {
+			const url = new URL(String(call[0]), 'http://test');
+			expect(url.searchParams.get('initial_seq')).toBe('10');
+			expect(url.searchParams.get('initial_epoch')).toBe(target.epoch);
+			expect(url.searchParams.get('initial_tail_id')).toBe(target.tail_id);
+		}
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		expect(screen.getByText('2 running tasks, 2 agents')).toBeTruthy();
+		expect(statusText()).toContain('20 updates remaining');
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		expect(String(fetch.mock.calls.at(-1)![0])).not.toContain('initial_seq');
+	});
+
+	it('adopts a replacement checkpoint on clear and discards it on session switch', async () => {
+		vi.useFakeTimers();
+		const reply = (epoch: string) => new Response(JSON.stringify({ state: 'syncing',
+			initial_target: { seq: 4, epoch, tail_id: `${epoch}-tail` }, initial_caught_up: false,
+		}));
+		const fetch = vi.fn().mockResolvedValueOnce(reply('old'))
+			.mockImplementation(() => Promise.resolve(reply('new')));
+		vi.stubGlobal('fetch', fetch);
+		const props = { sessionId: 'one', onCaughtUp: vi.fn(), children };
+		const view = render(MirrorSyncGate, props);
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(String(fetch.mock.calls[1][0])).toContain('initial_epoch=old');
+		expect(String(fetch.mock.calls[2][0])).toContain('initial_epoch=new');
+		expect(props.onCaughtUp).not.toHaveBeenCalled();
+		await view.rerender({ ...props, sessionId: 'two' });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(String(fetch.mock.calls.at(-1)![0])).toContain('/two/sync-status');
+		expect(String(fetch.mock.calls.at(-1)![0])).not.toContain('initial_seq');
+	});
+
+	it('does not label owner-wide operation counts as this chat remaining updates', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+			state: 'syncing', scope: 'owner', pending_updates: 900,
+		}))));
+		render(MirrorSyncGate, { sessionId: 'new', onCaughtUp: vi.fn(), children });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(screen.queryByText('900 updates remaining')).toBeNull();
+		expect(screen.queryByText('2 running tasks, 2 agents')).toBeNull();
+	});
+
+
 	it('holds stale task/agent state, keeps the notice on poll errors, and refreshes on drain', async () => {
 		vi.useFakeTimers();
 		const fetch = vi.fn().mockResolvedValueOnce(status('syncing', 40))
