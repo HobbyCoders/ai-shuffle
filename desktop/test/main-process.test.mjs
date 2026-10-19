@@ -17,6 +17,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
 	const errors = [];
+	const splashes = [];
 	const app = {
 		// Linux delegation only ever runs inside the packaged app.
 		isPackaged: !!installers || !!delegatedApplication,
@@ -82,11 +83,12 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		async start() { if (postgresStart) await postgresStart(); this.state = { ...this.state, phase: 'ready', port: 5432 }; return this.state; }
 		async stop() { this.state = { ...this.state, phase: 'stopped' }; }
 		async quiesce() { await this.stop(); }
-		updateRestorePoint() { return { validate: async () => {} }; }
+		updateRestorePoint() { return { validate: async () => { this.validations = (this.validations ?? 0) + 1; } }; }
 		connection() { return {}; }
 		tail() { return []; }
 	}
 	class FakeUpdater {
+		get current() { return { release: '1.0.2' }; }
 		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
 		async check() {}
 	}
@@ -100,6 +102,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./close-dialog': { showCloseDialog: async () => true },
 		'./call-popout': { CallPopout: class { register() {} } },
 		'./managed-context': { managedContext: () => managed, setManagedContext: context => { managed = context; } },
+		'./update-splash': { launcherImage: localRequire('./update-splash').launcherImage, launchUpdateSplash: options => { const splash = { options, closed: false }; splashes.push(splash); return () => { splash.closed = true; }; } },
 		'./installed-entry': { installedContext: () => installed },
 		'./installed-host': { installedLaunchArgs: () => [], launcherVersion: localRequire('./installed-host').launcherVersion, LAUNCHER_VERSION_ENV: 'SHUFFLE_LAUNCHER_VERSION' },
 		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
@@ -146,8 +149,29 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	} else runIndex();
 	for (let i = 0; i < 20 && !(worker && worker.state.phase === 'ready'); i++) await tick();
 	await tick();
-	return { app, appEvents, pages, errors, serviceWorkerClears, get postgres() { return postgres; }, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get trayName() { return trayName; }, get ipc() { return ipc; }, get updater() { return updater; } };
+	return { app, appEvents, pages, errors, splashes, serviceWorkerClears, get postgres() { return postgres; }, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get trayName() { return trayName; }, get ipc() { return ipc; }, get updater() { return updater; } };
 }
+
+test('Windows source restart shows the release window and a failed relaunch closes it', async () => {
+  const revision = 'b'.repeat(40);
+  const updates = { options: { root: '/isolated/no-root' }, pendingVersion: revision, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
+  const managed = { root: '/isolated/no-root', updates, application: { revision: 'a'.repeat(40), resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' }, host: { executable: 'C:/AI Shuffle.exe' } };
+  const f = await launch({ platform: 'win32', managed });
+  f.updater.restarting();
+  assert.equal(f.splashes.length, 1);
+  assert.equal(f.splashes[0].options.release, '1.0.2');
+  assert.equal(f.splashes[0].options.revision, revision);
+  assert.equal(f.splashes[0].options.launcher, 'AI Shuffle.exe');
+  await f.updater.installFailed(Error('relaunch failed'));
+  assert.equal(f.splashes[0].closed, true);
+});
+
+for (const launcher of [undefined, '3', 'unknown', '4']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
+  const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false, async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
+  const f = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', updates, application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } }, env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.postgres.validations, 1);
+});
 
 function electronFake(app, errors, messageBox) {
 	return {

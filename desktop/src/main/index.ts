@@ -28,7 +28,8 @@ import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
-import { HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
+import { checkRestorePointStructure, launcherValidatedRestorePoint, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError, SinglePassClusterCopy } from './update-restore-point';
+import { launcherImage, launchUpdateSplash } from './update-splash';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { CallPopout } from './call-popout';
@@ -99,8 +100,17 @@ async function main(): Promise<void> {
 			installerNewer: () => installerNewer(app.getVersion())
 		});
 	}
-	// The window closes now and the new version's can take minutes to appear: say it is starting.
+	// A separate source Electron process survives this app quitting. Packaged
+	// executables cannot run its entry script, so retain the notification fallback.
+	let closeUpdateSplash: (() => void) | null = null;
 	updater.onRestarting(() => {
+		const revision = applications?.pendingVersion;
+		if (process.platform === 'win32' && managed && !app.isPackaged && updateRoot && revision) {
+			closeUpdateSplash?.();
+			closeUpdateSplash = launchUpdateSplash({ electron: process.execPath, mainDir: __dirname, root: updateRoot,
+				revision, release: updater.current.release ?? revision.slice(0, 12), profile: path.join(userData, 'update-splash'), launcher: launcherImage(installedExecutable) });
+			if (closeUpdateSplash) return;
+		}
 		if (typeof Notification !== 'function' || !Notification.isSupported()) return;
 		new Notification({ title: 'Starting the new version of AI Shuffle', body: 'This can take a few minutes. AI Shuffle opens again by itself; there is no need to open it again.' }).show();
 	});
@@ -256,7 +266,11 @@ async function main(): Promise<void> {
 		// A launcher from before restore points made none: this build makes it here (desktop/LAUNCHER.md).
 		// As the launcher does: reap a verified leftover worker before the cluster is stopped and copied.
 		const restorePoint = { database: async () => postgres.updateRestorePoint(() => quiesceRecordedWorker(path.join(userData, 'worker'))), preparing: () => { preparingRestorePoint = true; window.send('desktop:worker-state', desktopState()); } };
-		try { await applications?.requireRestorePoint(postgres.updateRestorePoint(), restorePoint); await applications?.databaseStarting(); }
+		// Launcher 4+ already hashed this copy before selecting the source build.
+		// No installed handoff, an old/unknown launcher, or recovery: hash it here.
+		const launcherChecked = launcherValidatedRestorePoint(process.platform, launcherVersion(process.env[LAUNCHER_VERSION_ENV]), !!managed?.host && !!managed.application, applications?.hasMigrationRisk !== false);
+		const existing = launcherChecked ? { validate: () => checkRestorePointStructure(path.join(userData, 'postgres')) } : postgres.updateRestorePoint();
+		try { await applications?.requireRestorePoint(existing, restorePoint); await applications?.databaseStarting(); }
 		catch (error) {
 			preparingRestorePoint = false;
 			// Keep the supervisor: Try again repeats the copy here. A relaunch would go
@@ -505,6 +519,7 @@ async function main(): Promise<void> {
 	});
 	// An install that failed after the step above leaves the stack down: start it again.
 	updater.onInstallFailed(async (error) => {
+		closeUpdateSplash?.(); closeUpdateSplash = null;
 		const reason = error instanceof Error ? error.message : String(error);
 		try {
 			await startStack();
