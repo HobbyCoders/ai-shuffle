@@ -1205,6 +1205,36 @@ def redact_stored_conflicts() -> int:
     return rewritten
 
 
+def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]:
+    """An enforced child dependency that was deleted, not merely slow to arrive.
+
+    Only CASCADE children are terminal on parent deletion. Optional references
+    and RESTRICT relationships retain their existing materialization/retry rules.
+    Never infer deletion from absence alone, or from a tombstone while a
+    re-created local parent is present.
+    """
+    dependencies = {
+        "session_tags": (("session_id", "sessions"), ("tag_id", "tags")),
+        "permission_rules": (("profile_id", "agents"),),
+        "note_attachments": (("note_id", "notes"),),
+        "api_user_credentials": (("api_user_id", "api_users"),),
+        "api_user_profiles": (("api_user_id", "api_users"),),
+        "user_credential_policies": (("api_user_id", "api_users"),),
+    }.get(env.collection, ())
+    if env.op != OP_UPSERT or not dependencies:
+        return None
+    from app.network.keyring import open_envelope
+    row, _key = open_envelope(ctx, env)
+    for field, parent in dependencies:
+        rid = row.get(field)
+        if not isinstance(rid, str) or not rid:
+            continue
+        version = store.get_record(cursor, parent, rid)
+        if version and version["deleted"] and _read_row(cursor, policy.collection(parent), rid) is None:
+            return f"parent deleted: {parent}/{rid}"
+    return None
+
+
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     """Apply the next op of a stream; classify what cannot be applied.
 
@@ -1228,14 +1258,20 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
         import sqlite3
         from psycopg2.errors import ForeignKeyViolation
 
+        reason = "storage refused the record: " + type(exc).__name__
         if (isinstance(exc, ForeignKeyViolation) or getattr(exc, "pgcode", None) == "23503"
                 or getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY):
-            # Ordering is per origin, not global. Consuming this op now would
-            # permanently lose a valid child whose parent is still in flight.
-            raise TransientApplyError("Referenced record has not arrived yet") from exc
-        reason = "storage refused the record: " + type(exc).__name__
+            deleted = _deleted_parent(cursor, ctx, env)
+            if deleted is None:
+                # Ordering is per origin, not global. A genuinely missing
+                # parent can still arrive; retain the child and its position.
+                raise TransientApplyError("Referenced record has not arrived yet") from exc
+            # CASCADE deletion wins over an in-flight child. Keep the refusal
+            # as a conflict, then allow its retraction and later lifecycle ops
+            # to drain instead of retrying an impossible dependency forever.
+            reason = deleted
         logger.warning("Operation %s/%s from %s could not be stored (%s); kept as a conflict",
-                       env.collection, env.record_id, env.origin_device_id, type(exc).__name__)
+                       env.collection, env.record_id, env.origin_device_id, reason)
         try:
             from app.network.keyring import open_envelope
             plaintext, _key = open_envelope(ctx, env)

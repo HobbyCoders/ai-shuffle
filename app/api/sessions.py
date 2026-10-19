@@ -1729,17 +1729,26 @@ async def delete_session(
     await _delete_session(existing, background_tasks)
 
 
-async def _delete_session(existing: dict, background_tasks: BackgroundTasks) -> None:
+async def _delete_session(existing: dict, background_tasks: BackgroundTasks, *,
+                          unreachable: Optional[dict[str, str]] = None) -> None:
     """Delete on the execution owner before removing a read-only catalog copy."""
-    from app.network import control
+    from app.network import control, engine, membership
 
     session_id = existing["id"]
     await refuse_assistant_home_mutation(session_id, "deleted")
     owner = control.owner_of(existing)
-    if owner is not None:
+    ctx = engine.context()
+    member = ctx.member(owner) if ctx is not None and owner else None
+    # A removed/unknown owner can no longer authorize control. Preserve the
+    # ability to discard its orphaned local copy without contacting it.
+    if owner is not None and member is not None and member.status == membership.STATUS_ACTIVE:
+        if unreachable is not None and owner in unreachable:
+            raise HTTPException(503, unreachable[owner])
         try:
             response = await control.call(owner, "session-delete", {"session_id": session_id})
         except control.RunnerUnreachable as exc:
+            if unreachable is not None:
+                unreachable[owner] = str(exc)
             raise HTTPException(503, str(exc)) from exc
         except control.ControlRefused as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -2111,14 +2120,16 @@ async def batch_delete_sessions(
     """
     deleted_count = 0
     errors = []
+    unreachable: dict[str, str] = {}
 
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
-            await _delete_session(existing, background_tasks)
+            await _delete_session(existing, background_tasks, unreachable=unreachable)
             deleted_count += 1
         except HTTPException as e:
-            errors.append(f"Access denied for session {session_id}: {e.detail}")
+            label = "Access denied" if e.status_code in (401, 403) else "Deletion failed"
+            errors.append(f"{label} for session {session_id}: {e.detail}")
         except Exception as e:
             errors.append(f"Error deleting session {session_id}: {str(e)}")
 

@@ -1257,7 +1257,7 @@ class TestAssistantHomeMutations:
         assert response.json() == {
             "deleted_count": 2,
             "total_requested": 3,
-            "errors": [f"Access denied for session {sid}: Your personal assistant is a persistent conversation and cannot be deleted"],
+            "errors": [f"Deletion failed for session {sid}: Your personal assistant is a persistent conversation and cannot be deleted"],
         }
         assert database.get_session(sid) == before
         assert store.get_state(service.assistant_id())["home_session_id"] == sid

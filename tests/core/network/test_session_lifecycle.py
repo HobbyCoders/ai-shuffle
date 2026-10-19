@@ -119,3 +119,50 @@ async def test_peer_delete_refuses_foreign_session_and_is_idempotent(workers, mo
         await api.handle_delete({"session_id": "owned"}, b.device_id)
         assert database.get_session("owned") is None
     cleanup.assert_awaited_once()
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_orphaned_mirror_can_be_deleted_locally(workers, monkeypatch, unknown):
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Lifecycle")
+    join(a, b)
+    _new_session(b, "orphan", "Orphan")
+    converge([a, b])
+    call = AsyncMock(side_effect=AssertionError("Never contact a removed owner"))
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        if unknown:
+            a.sql("UPDATE sessions SET owner_device_id=? WHERE id=?", ("unknown-owner", "orphan"))
+        else:
+            engine.revoke_device(b.device_id)
+        tasks = BackgroundTasks()
+        await api.delete_session(Request({"type": "http", "headers": []}), "orphan", tasks, token="admin")
+        assert database.get_session("orphan") is None
+        assert not tasks.tasks
+    call.assert_not_called()
+    with b.active():
+        assert database.get_session("orphan"), "local orphan cleanup must not impersonate its owner"
+
+
+async def test_batch_skips_repeated_offline_owner_but_deletes_local_items(workers, monkeypatch):
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Lifecycle")
+    join(a, b)
+    for sid in ("remote-one", "remote-two"):
+        _new_session(b, sid, sid)
+    _new_session(a, "local", "Local")
+    converge([a, b])
+    call = AsyncMock(side_effect=control.RunnerUnreachable("offline"))
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        result = await api.batch_delete_sessions(
+            Request({"type": "http", "headers": []}),
+            api.BatchDeleteRequest(session_ids=["remote-one", "remote-two", "local"]), BackgroundTasks(), token="admin")
+        assert result["deleted_count"] == 1
+        assert len(result["errors"]) == 2
+        assert all("Access denied" not in error and "offline" in error for error in result["errors"])
+        assert database.get_session("local") is None
+        assert database.get_session("remote-one") and database.get_session("remote-two")
+    call.assert_awaited_once()
