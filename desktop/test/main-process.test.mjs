@@ -533,7 +533,7 @@ test('an update\'s first start gives its worker 10 minutes to become ready; othe
 			// The previous version's updater can offer a put-back first start again.
 			assert.equal(typeof main.updater.failedStart?.release, 'function');
 			assert.equal(typeof main.updater.restarting, 'function');
-		} finally { await fs.rm(root, { recursive: true, force: true }); }
+		} finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 	}
 });
 
@@ -599,5 +599,5 @@ test('while a restore point is ready for an update that has not started, nothing
 		const held = [];
 		await launch({ installed: { executable: path.resolve('Programs/AI Shuffle.exe'), updates: { ...updates, async databaseStarting() { held.push('floor'); } }, root }, postgresStart: async () => held.push('postgres') });
 		assert.deepEqual(held, [], 'an unreadable journal holds the database closed too');
-	} finally { await fs.rm(root, { recursive: true, force: true }); }
+	} finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

@@ -75,7 +75,7 @@ test('the channel page writes the file the installed app reads, under the name E
     assert.equal(await updates.channel(), 'stable', 'a Stable install writes nothing, which reads as stable');
     await fs.writeFile(path.join(root, CHANNEL_FILE), writes[0]);
     assert.equal(await updates.channel(), 'nightly');
-  } finally { await fs.rm(root, { recursive: true, force: true }); }
+  } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('the channel page never overwrites an existing choice and writes nothing for Stable', () => {
