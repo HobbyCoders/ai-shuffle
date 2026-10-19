@@ -33,6 +33,7 @@ export const FAL_VOICE_PROVIDER_ID = '__fal_voice__';
 export interface VoiceProvider {
 	id: string;
 	name: string;
+	provider_type?: string;
 }
 
 export type VoiceLoad = 'loading' | 'ok' | 'forbidden' | 'error';
@@ -160,7 +161,7 @@ export class VoicePreview {
 	}
 
 	/** Play `voice`, or stop it when it is the one playing. */
-	async toggle(voice: string): Promise<void> {
+	async toggle(voice: string, model = 'gpt-live-1'): Promise<void> {
 		const stopping = this.playing === voice;
 		this.stop();
 		this.error = '';
@@ -172,13 +173,14 @@ export class VoicePreview {
 		const player = new Audio();
 		this.#audio = player;
 		try {
-			let url = this.#samples.get(voice);
+			const key = `${model}:${voice}`;
+			let url = this.#samples.get(key);
 			if (!url) {
 				this.loading = true;
-				const blob = await previewVoice(voice, controller.signal);
+				const blob = await previewVoice(voice, controller.signal, model);
 				if (!this.#current() || controller.signal.aborted) return;
 				url = URL.createObjectURL(blob);
-				this.#samples.set(voice, url);
+				this.#samples.set(key, url);
 			}
 			if (!this.#current() || controller.signal.aborted) return;
 			this.loading = false;

@@ -10,12 +10,13 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
 	import { getModelsState, VOICE_CALL_MODEL } from './tasks.svelte';
+	import { voiceModelLabel } from '$lib/api/voice';
 	import { VOICE_CALL_ICON } from './icons';
 
 	const { voice } = getModelsState();
 
 	const facts = $derived<Fact[]>([
-		{ label: 'Model', value: VOICE_CALL_MODEL, mono: true },
+		{ label: 'Model', value: voice.settings?.voice_model ?? VOICE_CALL_MODEL, mono: true },
 		{ label: 'Runs on', value: voice.settings ? voice.callProviderName : null },
 		{ label: 'Voice', value: voice.callVoiceLabel || null },
 		{
@@ -29,16 +30,16 @@
 	name="Voice calls"
 	icon={VOICE_CALL_ICON}
 	status="ok"
-	statusText="Fixed model"
+	statusText="Voice engine"
 	badge="Audio"
-	subtitle="Set by AI Shuffle"
+	subtitle="Selected in Voice settings"
 	{facts}
 	category="models"
 	item="voicecall"
 >
 	<RowGroup title="Model">
 		<SettingRow id="models.voiceCallModel">
-			<ValueText value={VOICE_CALL_MODEL} mono tone="fg" />
+			<LinkValue label={voiceModelLabel(voice.settings?.voice_model ?? VOICE_CALL_MODEL)} target={{ category: 'voice' }} />
 		</SettingRow>
 		<SettingRow label="Runs on">
 			<LinkValue

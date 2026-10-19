@@ -16,7 +16,7 @@ vi.mock('$lib/api/client', () => ({
 	getErrorMessage: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 }));
 vi.mock('$lib/services/sttStream', () => ({ invalidateSttCapability: mocks.invalidate }));
-vi.mock('$lib/api/voice', () => ({ loadVoiceSettings: mocks.loadVoice, saveVoiceSettings: mocks.saveVoice }));
+vi.mock('$lib/api/voice', async (importOriginal) => ({ ...await importOriginal<typeof import('$lib/api/voice')>(), loadVoiceSettings: mocks.loadVoice, saveVoiceSettings: mocks.saveVoice }));
 
 import { catalogStore } from '$lib/stores/catalog';
 import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -110,7 +110,8 @@ describe('ModelsCollection', () => {
 		await waitFor(() => expect(item('Text tasks').textContent).toContain('Sonnet, low effort'));
 		expect(item('Text to image').textContent).toContain('Flux Pro Ultra');
 		await waitFor(() => expect(item('Dictation').textContent).toContain('GPT-4o Transcribe'));
-		expect(item('Voice calls').textContent).toContain('gpt-live-1, fixed');
+		expect(item('Voice calls').textContent).toContain('gpt-live-1');
+		expect(item('Voice calls').textContent).not.toContain('fixed');
 		expect(item('All fal.ai models').textContent).toContain('4 models');
 		const a2a = item('Audio to audio');
 		expect(a2a.textContent).toContain('No model chosen');

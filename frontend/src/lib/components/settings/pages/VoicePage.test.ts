@@ -54,7 +54,7 @@ const settings = (voice = 'marin', minutes = 60) => ({
 type Settings = ReturnType<typeof settings>;
 
 let server: Settings;
-let providers: { id: string; name: string }[];
+let providers: { id: string; name: string; provider_type?: string }[];
 
 function changeAccount() {
 	identity.epoch++;
@@ -98,6 +98,24 @@ async function mountPage() {
 		}
 	};
 }
+
+it('switches engines, shows xAI funding and server-provided voices without retaining the OpenAI pin', async () => {
+ providers.push({ id: 'xai-key', name: 'xAI API key', provider_type: 'xai' });
+ transport.put.mockImplementation(async (_path: string, patch: Partial<Settings>) => {
+  server = { ...server, ...patch, voice_voice: 'eve', model_details: {
+   ...server.model_details, model: 'grok-voice-latest', voices: [{ id: 'eve', label: 'Eve' }, { id: 'ara', label: 'Ara' }]
+  }};
+  return structuredClone(server);
+ });
+ await mountPage();
+ await fireEvent.change(screen.getByRole('combobox', { name: 'Voice engine' }), { target: { value: 'grok-voice-latest' } });
+ await waitFor(() => expect(transport.put).toHaveBeenCalledWith('/settings/voice', { voice_model: 'grok-voice-latest', voice_provider_id: null }));
+ await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe('eve'));
+ expect(screen.getByRole('option', { name: 'Ara' })).toBeTruthy();
+ expect(screen.getByText('xAI API key · server VAD')).toBeTruthy();
+ expect(screen.getByText('Subscription voice access is not verified; an API key is required.')).toBeTruthy();
+ expect(screen.getByRole('button', { name: /Calls run on xAI API key/ })).toBeTruthy();
+});
 
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 
@@ -316,7 +334,7 @@ describe('voice preview playback', () => {
 			const view = await mountPage();
 			await fireEvent.click(screen.getByRole('button', { name: 'Play marin sample' }));
 			await waitFor(() => expect(play).toHaveBeenCalledOnce());
-			expect(preview).toHaveBeenCalledWith('marin', expect.any(AbortSignal));
+			expect(preview).toHaveBeenCalledWith('marin', expect.any(AbortSignal), 'gpt-live-1');
 			expect(transport.put).not.toHaveBeenCalled();
 			await fireEvent.click(screen.getByRole('button', { name: 'Stop marin sample' }));
 			expect(pause).toHaveBeenCalledOnce();

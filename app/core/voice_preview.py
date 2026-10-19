@@ -17,7 +17,7 @@ from app.core.voice_stream import live_opening_event
 _active_previews = 0
 
 
-async def generate_live_preview(api_key: str, voice: str) -> bytes:
+async def generate_live_preview(api_key: str, voice: str, model: str = LIVE_MODEL) -> bytes:
     global _active_previews
     if _active_previews >= 2:
         from fastapi import HTTPException
@@ -25,7 +25,8 @@ async def generate_live_preview(api_key: str, voice: str) -> bytes:
     _active_previews += 1
     try:
         async with asyncio.timeout(30):
-            return await _generate(api_key, voice)
+            from app.core.voice_models import GROK_MODEL
+            return await _generate_grok(api_key, voice) if model == GROK_MODEL else await _generate(api_key, voice)
     finally:
         _active_previews -= 1
 
@@ -104,4 +105,48 @@ async def _generate(api_key: str, voice: str) -> bytes:
             wav.setsampwidth(2)
             wav.setframerate(24000)
             wav.writeframes(audio[:last_sound + 9600])
+        return output.getvalue()
+
+async def _generate_grok(api_key: str, voice: str) -> bytes:
+    from app.core.voice_models import GROK_MODEL, GROK_URL
+    from app.core.voice_grok import grok_session
+    from app.core.voice_options import validate_options
+
+    async with connect(GROK_URL, additional_headers={"Authorization": f"Bearer {api_key}"},
+                       open_timeout=10, close_timeout=2, max_size=2_000_000) as ws:
+        session = grok_session({"voice": voice}, validate_options(GROK_MODEL, {}))
+        session["session"].update({"tools": [], "turn_detection": {"type": None},
+                                   "instructions": "Speak only the requested short greeting, then stay quiet."})
+        await ws.send(json.dumps(session))
+        while True:
+            event = json.loads(await ws.recv())
+            if event.get("type") == "error":
+                raise ValueError("xAI rejected the voice preview settings.")
+            if event.get("type") == "session.updated":
+                break
+        await ws.send(json.dumps({"type": "conversation.item.create", "item": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text":
+                "Say: Hello! This is a short sample of my voice. What would you like to work on?"}],
+        }}))
+        await ws.send(json.dumps({"type": "response.create"}))
+        audio = bytearray()
+        async for raw in ws:
+            event = json.loads(raw)
+            if event.get("type") in ("response.output_audio.delta", "response.audio.delta"):
+                frame = base64.b64decode(event.get("delta") or "", validate=True)
+                if len(frame) % 2 or len(audio) + len(frame) > 48_000 * 20:
+                    raise ValueError("xAI returned invalid or oversized preview audio.")
+                audio.extend(frame)
+            elif event.get("type") == "response.done":
+                break
+            elif event.get("type") == "error":
+                raise ValueError("xAI rejected the voice preview.")
+        if not audio:
+            raise ValueError("xAI returned no preview audio.")
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24000)
+            wav.writeframes(audio)
         return output.getvalue()

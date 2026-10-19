@@ -217,6 +217,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
        else pending.reject(new Error(message.message || 'The voice call could not accept your message.'));
       }
      }
+     else if (message.type === 'clear') player?.port.postMessage({ type: 'clear' });
      else if (message.type === 'caption') handlers.caption(message.id, message.role, message.delta);
      else if (message.type === 'status') {
       reconnecting = message.state === 'reconnecting';

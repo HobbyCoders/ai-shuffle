@@ -62,3 +62,25 @@ async def test_preview_capacity_and_errors_release_slots(monkeypatch):
     monkeypatch.setattr(voice_preview, "_generate", AsyncMock(side_effect=ValueError("no voice")))
     with pytest.raises(ValueError): await voice_preview.generate_live_preview("secret", "stone")
     assert voice_preview._active_previews == 0
+
+@pytest.mark.asyncio
+async def test_grok_sample_uses_its_own_voice_protocol_and_key(monkeypatch):
+    frame = base64.b64encode(b"\xff\x0f" * 2400).decode()
+    class GrokSocket(Socket):
+        async def recv(self): return json.dumps({"type": "session.updated"})
+    socket = GrokSocket([{"type": "response.output_audio.delta", "delta": frame}, {"type": "response.done"}])
+    connections = []
+    def connect(url, **kwargs):
+        connections.append((url, kwargs))
+        return socket
+    monkeypatch.setattr(voice_preview, "connect", connect)
+    data = await voice_preview.generate_live_preview("xai-test-key", "ara", "grok-voice-latest")
+    assert connections[0][0] == "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
+    assert connections[0][1]["additional_headers"] == {"Authorization": "Bearer xai-test-key"}
+    assert socket.sent[0]["session"]["voice"] == "ara"
+    assert socket.sent[0]["session"]["tools"] == []
+    assert socket.sent[0]["session"]["turn_detection"] == {"type": None}
+    assert socket.sent[-1] == {"type": "response.create"}
+    with wave.open(io.BytesIO(data)) as wav:
+        assert (wav.getframerate(), wav.getnframes()) == (24000, 2400)
+    assert voice_preview._active_previews == 0

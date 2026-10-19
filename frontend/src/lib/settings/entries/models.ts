@@ -50,7 +50,7 @@ export const entries: SettingEntry[] = [
 		section: 'Model',
 		item: 'voicecall',
 		label: 'Model',
-		hint: 'Fixed for new calls',
+		hint: 'Selected in Voice settings',
 		keywords: ['voice calls model', 'gpt live', 'gpt-live-1', 'realtime']
 	},
 	{ ...OPTIONS, id: 'models.imageAspect', item: 't2i', label: 'Aspect ratio', keywords: ['image aspect ratio', 'text to image'] },
