@@ -32,6 +32,10 @@ on:
       build_run_id:
         required: true
         type: string
+      release_assets:
+        description: Register durable assets already verified by sealed-candidate promotion
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       platform:
@@ -60,7 +64,7 @@ jobs:
       actions: read
       pull-requests: read
     name: Build and verify the release APK
-    if: inputs.platform == 'android' && inputs.build_run_id == '' && github.ref_type == 'tag'
+    if: inputs.platform == 'android' && inputs.build_run_id == '' && !inputs.release_assets && github.ref_type == 'tag'
     uses: ./.github/workflows/android.yml
     with:
       publish_download: true
@@ -70,7 +74,9 @@ jobs:
   publish:
     needs: android-build
     # Runs after a successful APK build, or without one for a given run ID.
-    if: ${{ !cancelled() && (needs.android-build.result == 'success' || needs.android-build.result == 'skipped') }}
+    if: >-
+      github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') &&
+      !cancelled() && (needs.android-build.result == 'success' || needs.android-build.result == 'skipped')
     runs-on: ubuntu-latest
     # Holds DESKTOP_APPLICATION_SIGNING_KEY, CLOUDFLARE_API_TOKEN,
     # CLOUDFLARE_ACCOUNT_ID and ACCOUNT_HUB_DATABASE_ID, and only runs for v* tags.
@@ -90,6 +96,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Name the build artifact of this tag
+        if: ${{ !inputs.release_assets }}
         id: artifact
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::Stable vX.Y.Z tag required'; exit 1; }
@@ -105,11 +112,29 @@ jobs:
           revision=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
           echo "name=$prefix-desktop-${RELEASE_TAG#v}-$revision" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
+        if: ${{ !inputs.release_assets }}
         with:
           name: ${{ steps.artifact.outputs.name }}
           path: artifact
           github-token: ${{ github.token }}
           run-id: ${{ inputs.build_run_id || github.run_id }}
+      - name: Download the sealed release assets without rebuilding
+        if: inputs.release_assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::Stable vX.Y.Z tag required'; exit 1; }
+          mkdir -p artifact
+          case "$PLATFORM" in
+            linux)
+              gh release download "$RELEASE_TAG" --dir artifact --pattern '*.AppImage' --pattern '*.deb' --pattern linux-build-provenance.json --pattern SHA256SUMS-linux
+              cp artifact/SHA256SUMS-linux artifact/SHA256SUMS
+              ;;
+            android)
+              gh release download "$RELEASE_TAG" --dir artifact --pattern AI-Shuffle-Android.apk --pattern AI-Shuffle-Android.apk.sha256 --pattern android-build.json
+              ;;
+            *) echo "::error::No sealed release asset registration for $PLATFORM"; exit 1;;
+          esac
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -118,6 +143,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
         working-directory: scripts/source-publisher
       - name: Upload packages to the release
+        if: ${{ !inputs.release_assets }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

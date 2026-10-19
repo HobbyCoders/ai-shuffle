@@ -41,7 +41,8 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "older Play version cannot" in body
     assert "**internal testing**, not public production" in body
     assert "separate owner-approved Play Console step" in body
-    assert "Desktop installers are opt-in" in body
+    assert "Every stable release publishes Windows, Linux and Android downloads." in body
+    assert "Desktop installers are opt-in" not in body
     assert "https://github.com/orgs/HobbyCoders/packages/container/package/ai-shuffle-server" in body
     assert "docs/install" in body
     assert "Downloads, local use and updates are free" in body
@@ -121,11 +122,9 @@ def test_release_version_outputs_feed_play_and_docker(tmp_path):
 def test_release_orchestration_defaults_to_docker_play_and_signed_apk():
     workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     desktop = workflow["jobs"]["desktop"]
-    assert workflow["on"]["workflow_dispatch"]["inputs"]["build_desktop"] == {
-        "description": "Also build a Windows installer (desktop normally updates in app)",
-        "required": "false", "type": "boolean", "default": "false",
-    }
-    assert desktop["if"] == "github.event_name == 'workflow_dispatch' && inputs.build_desktop"
+    assert "build_desktop" not in workflow["on"]["workflow_dispatch"]["inputs"]
+    assert "if" not in desktop
+    assert desktop["needs"] == "create-release"
     assert desktop["uses"] == "./.github/workflows/desktop-installer.yml"
     assert workflow["jobs"]["docker"]["uses"] == "./.github/workflows/docker-publish.yml"
     assert workflow["permissions"]["packages"] == "write"

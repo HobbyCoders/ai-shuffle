@@ -325,15 +325,15 @@ def test_new_workflow_paths_hold_publication_and_never_rebuild_promotion():
     assert "promotion" in jobs["promotion-play"]["needs"]
     assert any(s.get("uses", "").startswith("actions/attest-build-provenance@") for s in jobs["stage-record"]["steps"])
 
-def test_default_release_graph_is_byte_semantically_unchanged():
-    # Canonical YAML digest of the default release graph, including #157's
-    # automatic platform registration (pinned in test_release_download_instructions).
+def test_default_release_graph_contract():
+    # Canonical YAML digest includes mandatory Windows and the all-platform
+    # read-back gate (#223/#166); explicit behavior tests cover both paths.
     # Remove ONLY opt-in staging inputs/jobs and guards that are true at defaults.
     wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     del wf["on"]["workflow_dispatch"]["inputs"]["stage_only"]
     del wf["on"]["workflow_dispatch"]["inputs"]["promote"]
     for name in list(wf["jobs"]):
-        if name.startswith("stage-") or name in {"promotion", "promotion-play"}:
+        if name.startswith("stage-") or name.startswith("promotion"):
             del wf["jobs"][name]
     jobs = wf["jobs"]
     condition = jobs["create-release"]["if"]
@@ -345,7 +345,7 @@ def test_default_release_graph_is_byte_semantically_unchanged():
     opt_in = next(s for s in steps if s.get("name") == "Validate opt-in two-phase request")
     assert opt_in["if"] == "inputs.stage_only || inputs.promote != ''"
     steps.remove(opt_in)
-    assert p.sha256(p.canonical(wf)) == "c07e32c780ca1a05470033a4cec84b8dd65e63f2f6ff1647b659ba29ae41467c"
+    assert p.sha256(p.canonical(wf)) == "673c66ea8c2850f3aa455b6d7689cc59977af39b8f89f0f51ca83c77bd2c0585"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):
