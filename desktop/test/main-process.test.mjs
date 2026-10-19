@@ -87,7 +87,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		tail() { return []; }
 	}
 	class FakeUpdater {
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed() {} onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onFailedStart(recovery) { this.failedStart = recovery; } start() {} stop() {}
 		async check() {}
 	}
 	let updater;
@@ -166,7 +166,7 @@ function loadUpdater(electron) {
 	vm.runInNewContext(readFileSync(path.join(desktopDir, 'dist/main/updater.js'), 'utf8'), {
 		// Its own imports (./channel-return) resolve beside it, as in the packaged app.
 		module, exports: module.exports, require: (id) => (id === 'electron' ? electron : createRequire(path.join(desktopDir, 'dist/main/updater.js'))(id)),
-		process: { env: {} }, setTimeout: inert, clearTimeout: inert, setInterval: inert, clearInterval: inert, Date, Error
+		process: { env: {} }, setTimeout: inert, clearTimeout: inert, setInterval: inert, clearInterval: inert, Date, Error, console
 	});
 	return module.exports.Updater;
 }
@@ -516,4 +516,23 @@ test('quitting a first boot before its database started lets the next launch ret
 	assert.equal(started.deferred, 0);
 	assert.equal(started.starting, 1, 'the launcher is told before the database starts');
 	assert.equal(waiting.starting, undefined);
+});
+
+test('an update\'s first start gives its worker 10 minutes to become ready; other starts keep the usual limit', async () => {
+	const { promises: fs } = await import('node:fs');
+	const os = await import('node:os');
+	const R = 'b'.repeat(40);
+	for (const [booting, expected] of [[R, 10 * 60_000], [undefined, undefined]]) {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-first-start-'));
+		try {
+			await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: 'a'.repeat(40), ...(booting ? { pending: R, booting, waiting: R } : {}) }, null, 2) + '\n');
+			const updates = { options: { root }, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {}, async load() {} };
+			const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
+			const main = await launch({ managed: { root, application, updates, host: null } });
+			assert.equal(main.worker.options.readyTimeoutMs, expected, booting ? 'first start' : 'ordinary start');
+			// The previous version's updater can offer a put-back first start again.
+			assert.equal(typeof main.updater.failedStart?.release, 'function');
+			assert.equal(typeof main.updater.restarting, 'function');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	}
 });

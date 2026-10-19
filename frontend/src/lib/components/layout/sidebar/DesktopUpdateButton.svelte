@@ -107,10 +107,12 @@
 	const reports = $derived(showOperation
 		? operation!.workers.map(w => `${w.device_name}: ${w.message}`).join('; ')
 		: rows.map(row => `${row.worker.device_name}: ${row.label}`).join('; '));
+	// A desktop's first start after an update can take minutes before its window returns; never look hung.
+	const FIRST_START_NOTE = 'Starting the new version can take a few minutes.';
 	const headline = $derived(celebrating ? 'Update complete' : waiting ? 'Waiting on all workers to finish startup' : deferred ? 'Restarts when work finishes' : error ? 'Update needs attention' : busy ? 'Preparing updates…' : action);
 	const progressNote = $derived(targets.length > 1 ? ` ${staged} of ${targets.length} staged.` : '');
 	const summary = $derived(error || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'));
-	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
+	const status = $derived(waiting ? `${headline}. ${FIRST_START_NOTE} ${reports}` : celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
 	$effect(() => { canCheck = !!snapshot?.allow_updates; });
 
 	const same = (a?: string | null, b?: string | null) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
@@ -477,7 +479,7 @@
 						<div class="notes-text">{offered.notes}</div>
 					</div>
 				{/if}
-				{#if waiting}<p>Checking that every worker included in this update has the new version.</p>{/if}
+				{#if waiting}<p>Checking that every worker included in this update has the new version. {FIRST_START_NOTE}</p>{/if}
 			</div>
 		{/if}
 	</div>

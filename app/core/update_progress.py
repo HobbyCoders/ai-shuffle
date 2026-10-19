@@ -8,7 +8,11 @@ from app.core.config import settings
 from app.core.application_updates import atomic_json
 
 _lock = threading.RLock()
-STARTUP_TIMEOUT = 10 * 60
+# From the install request until every worker runs its target. A desktop's
+# first start can take minutes before its window appears (a freshly built
+# runtime scanned by antivirus software), and its worker may then take up to
+# 10 minutes (FIRST_START_READY_MS in desktop/src/main/index.ts).
+STARTUP_TIMEOUT = 20 * 60
 # Records saved before ``from_version`` existed cannot tell a failed start from
 # a worker that moved on. After this long, a worker running another version
 # than the target has moved on as far as this install is concerned.

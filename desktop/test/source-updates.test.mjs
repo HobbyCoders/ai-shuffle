@@ -524,6 +524,39 @@ test('restore journal: bundled-baseline first-start failure returns to the bundl
  assert.equal(restart.version,A); assert.equal(restart.hasSourceState,false); assert.equal(restart.hasMigrationRisk,false);
  const launcher=await installedLauncher(f); await launcher.start(); assert.ok(launcher.events.includes('bundled')); assert.ok(!launcher.events.includes(B));
 });
+test('a first start that never reached attach is put back by the launcher, then offered again and installs',async t=>{
+ const {retryableStarts,releaseStarts}=require('../dist/main/failed-start.js');
+ const {f,u,calls,factory}=await rollbackFixture(t);
+ // The owner installs B: the launcher makes the restore point and selects B (booting, floor uncertain).
+ await u.prepareRollback(factory); await u.select();
+ // B's process is still loading (a freshly built Electron being scanned) when the app is opened again.
+ // That launch sees booting without waiting, marks B failed and puts the database back.
+ const next=f.create(); await next.load(); assert.equal(await next.recoverRollback(factory),true);
+ assert.deepEqual(calls,['snapshot','restore','discard']);
+ const left=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.deepEqual([left.active,left.failed,left.supersededFailed,left.blocked,left.mayHaveMigrated],[A,[B],[B],undefined,undefined]);
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'),'utf8')).revision,A,'B never opened the database');
+ // Before this fix the feed's B was refused for good, with only an installer to offer.
+ await assert.rejects(next.check(),/This revision failed to start/);
+ // The previous version (the app now running) offers it again.
+ assert.deepEqual(await releaseStarts(f.root,await retryableStarts(f.root)),[B]); await next.load();
+ assert.equal((await next.check()).kind,'available');
+ // The retry is an ordinary install: a new restore point, then B starts and becomes healthy.
+ next.stageDownloads(); await next.download(); await next.prepareInstall();
+ await next.prepareRollback(factory); assert.equal((await next.select()).revision,B);
+ const app=f.create(); await app.attach(B); await app.databaseStarting(); await app.healthy();
+ assert.equal(app.version,B); assert.equal(app.hasMigrationRisk,false);
+ assert.deepEqual(calls,['snapshot','restore','discard','snapshot']);
+});
+test('a failed first start that may have migrated the database and was not put back is never offered again',async t=>{
+ const {retryableStarts}=require('../dist/main/failed-start.js');
+ const f=await fixture(t);const u=f.create();await u.load();
+ await f.release(A);await u.download();await u.select();await u.databaseStarting();await u.healthy();
+ // A launcher without restore points: no journal, so the failure stays fenced.
+ await f.release(B);await u.download();await u.select();
+ const next=f.create();await next.load();
+ assert.equal(next.blocked,true);assert.deepEqual(await retryableStarts(f.root),[]);
+});
 test('Linux startup drops only incomplete unselected downloads, validates healthy code and permits a real re-download',async t=>{
  for(const active of [false,true])for(const missing of ['build.json','release.json']){
   const f=await fixture(t);const seed=f.create();await seed.load();

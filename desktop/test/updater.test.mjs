@@ -11,7 +11,7 @@ function fixture(env = {}, modules = {}) {
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
   exports: module.exports, module, require: id => id === 'electron' ? { app } : modules[id] ?? path,
   process: { env }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
-  setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date
+  setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date, console
  });
  return { updater: new module.exports.Updater(), calls, timers, app };
 }
@@ -439,4 +439,49 @@ test('a bridge that fails or a session count that cannot be read never installs 
  await updater.exchange(); await new Promise(setImmediate);
  assert.equal(installs, 0);
  updater.stop();
+});
+
+const FAILED_START = 'Error: This revision failed to start. Check again after a newer update. Previous files and data have been retained.';
+test('a check refused for a failed first start the launcher put back offers that update again and says why', async () => {
+ const {updater}=fixture();const B='b'.repeat(40);let failed=true;const released=[];
+ updater.useApplications(source({check:async()=>{if(failed)throw Error(FAILED_START.slice(7));return {...available,version:B.slice(0,12),release:'1.0.2'};}}));
+ updater.onFailedStart({release:async()=>{released.push(B);failed=false;return [B];},installerNewer:async()=>assert.fail('a retry needs no installer')});
+ await updater.check();
+ assert.deepEqual(released,[B]);
+ assert.equal(updater.current.phase,'available');assert.equal(updater.current.version,B.slice(0,12));assert.equal(updater.current.release,'1.0.2');
+ assert.match(updater.current.message,/did not finish.*try again.*can take a few minutes/i);assert.equal(updater.current.error,null);
+ // Downloading it is the retry; the hint goes once the update is no longer the one that failed.
+ await updater.download();assert.equal(updater.current.phase,'ready');assert.equal(updater.current.message,null);
+});
+test('a failed first start that cannot be retried reports whether the installer is newer, and nothing else does', async () => {
+ for (const newer of [false,true,null]) {
+  const {updater}=fixture();
+  updater.useApplications(source({check:async()=>{throw Error(FAILED_START.slice(7));}}));
+  updater.onFailedStart({release:async()=>[],installerNewer:async()=>newer});
+  await updater.check();
+  assert.equal(updater.current.phase,'error');assert.equal(updater.current.error,FAILED_START);assert.equal(updater.current.installer_newer,newer);
+ }
+ const {updater}=fixture();let asked=0;
+ updater.useApplications(source({check:async()=>{throw Error('Source update request failed (503)');}}));
+ updater.onFailedStart({release:async()=>{asked++;return [];},installerNewer:async()=>{asked++;return true;}});
+ await updater.check();assert.equal(asked,0);assert.equal(updater.current.installer_newer,null);
+ // A release that fails leaves the original refusal.
+ const broken=fixture().updater;
+ broken.useApplications(source({check:async()=>{throw Error(FAILED_START.slice(7));}}));
+ broken.onFailedStart({release:async()=>{throw Error('locked');},installerNewer:async()=>false});
+ await broken.check();assert.equal(broken.current.error,FAILED_START);assert.equal(broken.current.installer_newer,false);
+});
+test('restarting into an update says the new version is starting before the window goes', async () => {
+ const {updater,calls}=fixture();const seen=[];
+ updater.useApplications(source({check:async()=>ready,prepareInstall:async()=>calls.push('prepare')}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onRestarting(()=>calls.push('announce'));updater.subscribe(state=>seen.push(state.message));
+ await updater.check();await updater.install();
+ assert.deepEqual(calls.slice(0,2),['prepare','announce']);assert.equal(calls.at(-1),'quit');
+ assert.match(seen.at(-1),/Starting the new version\. This can take a few minutes/);
+ // A notification that cannot be shown never stops the restart.
+ const second=fixture();second.updater.useApplications(source({check:async()=>ready}),'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ second.updater.onRestarting(()=>{throw Error('no notifications');});
+ const error=console.error;console.error=()=>{};
+ try{await second.updater.check();await second.updater.install();}finally{console.error=error;}
+ assert.equal(second.calls.at(-1),'quit');
 });

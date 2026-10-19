@@ -175,6 +175,31 @@ takes the install through a bundled previous build, a failed copy with Try
 again, a kill during the copy and a kill after PostgreSQL started, then the
 launcher swap.
 
+## A first start that did not finish
+
+At step 4 a launcher that finds `booting` without `waiting` marks that build
+failed (`failed()`), and, when a restore point exists, puts the database back
+(`recoverRollback`). It cannot tell a build that crashed from one whose process
+was only slow to load: a freshly built Electron that an antivirus scans can
+take minutes to reach `attach`, and opening the app again in that time starts
+the launcher. The launcher's behaviour here is frozen.
+
+The updated app reads what the launcher left (`src/main/failed-start.ts`, not
+in the launcher closure). A revision in both `failed` and `supersededFailed`,
+with nothing in flight (`booting`, `pending`, `waiting`), no fence or block, no
+restore-point journal, and a readable, certain database floor that is not that
+revision, was fully put back: retrying it is as safe as the first attempt, with
+a new restore point. When the feed offers it and the source updater refuses it
+("This revision failed to start"), the app takes it out of `failed` (a write in
+the updater's own serialization), reloads, and offers it again with a note that
+the last attempt did not finish. Each revision is offered again at most three
+times (`start-retries.json`). Otherwise the refusal stands, and the app reports
+whether the hub's installer is a newer release (`installer_newer`) so the worker
+only suggests an installer that can help.
+
+An update's first start also gives its worker 10 minutes to become ready
+instead of 3: a worker that times out marks the update failed.
+
 ## Replacing an older launcher
 
 All of these files are in the installed `resources` folder unless shown

@@ -6,7 +6,7 @@
  * to one already running on this computer), and opens its web UI. A first
  * run needs no setup: the embedded cluster is created on the spot.
  */
-import { app, dialog, safeStorage, session, shell } from 'electron';
+import { app, dialog, Notification, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -27,10 +27,18 @@ import { plainCipher, SettingsStore, type Cipher } from './settings';
 import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
+import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
 import { CallPopout } from './call-popout';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
+
+/**
+ * How long an update's first start may take before its worker counts as failed
+ * (which marks the update failed). A freshly built Python runtime on a disk an
+ * antivirus is scanning can take several minutes; the status page says so.
+ */
+const FIRST_START_READY_MS = 10 * 60_000;
 
 // Packaged previews use metadata; source tests require an explicit isolated profile.
 const isolation = managedContext()?.profile;
@@ -76,6 +84,25 @@ async function main(): Promise<void> {
 	const updateRoot = managed?.root ?? installation?.root;
 	const updatePolicyFile = updateRoot ? path.join(updateRoot, 'allow-updates.json') : undefined;
 	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')).filter(arg => arg.startsWith('--')));
+	// An update's first start: a freshly built runtime may be scanned by antivirus software as it loads.
+	const firstStart = !!managed?.root && !!managed.application?.revision && await isFirstStart(managed.root, managed.application.revision);
+	if (applications && updateRoot) {
+		// The launcher marks an update failed when its process never reported back, even one that
+		// was only slow to load. When the launcher put everything back, offer it again (failed-start.ts).
+		updater.onFailedStart({
+			release: async () => {
+				const released = await releaseStarts(updateRoot, await retryableStarts(updateRoot));
+				if (released.length) await applications.load();
+				return released;
+			},
+			installerNewer: () => installerNewer(app.getVersion())
+		});
+	}
+	// The window closes now and the new version's can take minutes to appear: say it is starting.
+	updater.onRestarting(() => {
+		if (typeof Notification !== 'function' || !Notification.isSupported()) return;
+		new Notification({ title: 'Starting the new version of AI Shuffle', body: 'This can take a few minutes. AI Shuffle opens again by itself; there is no need to open it again.' }).show();
+	});
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {
@@ -148,6 +175,8 @@ async function main(): Promise<void> {
 						protectedPort: identity.protectedPort,
 						isolated: !!isolation,
 						allowAttach: applications ? false : identity.allowAttach,
+						// An update's first start may also migrate the database: give it longer than the usual 3 minutes.
+						...(firstStart ? { readyTimeoutMs: FIRST_START_READY_MS } : {}),
 						postgres: () => postgres?.connection() ?? null
 					});
 		observeWorker();

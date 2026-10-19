@@ -146,9 +146,12 @@ it('restores waiting after reload instead of offering a stale ready update', asy
  const view=render(DesktopUpdateButton);
  let button=await screen.findByRole('button',{name:'Waiting on all workers to finish startup'});
  expect(button.title).toContain('Worker 2: Waiting for startup');
+ // A first start after an update can take minutes: say so rather than look hung.
+ expect(button.title).toContain('Starting the new version can take a few minutes.');
  await fireEvent.click(button);expect(api.post).not.toHaveBeenCalled();
  await fireEvent.focus(button);
  expect(screen.getByRole('tooltip').textContent).toContain('Worker 2');
+ expect(screen.getByRole('tooltip').textContent).toContain('can take a few minutes');
  view.unmount();render(DesktopUpdateButton);
  button=await screen.findByRole('button',{name:'Waiting on all workers to finish startup'});
  expect(button.getAttribute('aria-disabled')).toBe('true');
@@ -587,6 +590,27 @@ it.each([true,false])('offers the latest installer instead of a retry (data kept
   expect(api.post).not.toHaveBeenCalled();
   expect(open).not.toHaveBeenCalled();
  } finally { open.mockRestore(); }
+});
+// A failed first start whose installer is not newer than the running version
+// (remedy null from update_workers.py): no dead-end installer link, a retry instead.
+const FAILED_START='This revision failed to start. Check again after a newer update. Previous files and data have been retained.';
+it('offers a retry, not the installer, when the installer would reinstall the same version', async () => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'error',version:null,error:FAILED_START,role:'unknown',label:FAILED_START,remedy:null,data_kept:false}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Check for updates'});
+ expect(button.title).toContain(FAILED_START);
+ expect(screen.queryByRole('button',{name:'Update needs the latest installer'})).toBeNull();
+ await fireEvent.click(button);
+ await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'check'}));
+ expect(screen.queryByRole('link',{name:'Download the latest installer'})).toBeNull();
+});
+// The desktop offers the put-back update again and says why (its message is the row's label).
+it('shows why a failed first start is offered again', async () => {
+ const why='The last attempt to start this update did not finish, and AI Shuffle went back to the previous version with your data as it was. Download it to try again.';
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'available',message:why,role:'available',label:why}]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Download update'});
+ expect(button.title).toContain(why);
 });
 it('puts the installer action on a manual check that finds the installer state', async () => {
  vi.useFakeTimers({shouldAdvanceTime:true});

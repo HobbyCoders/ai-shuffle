@@ -405,7 +405,7 @@ def test_startup_timeout_and_launcher_errors_never_celebrate(setup, monkeypatch)
     assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
     updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
     saved = fleet.progress.load()
-    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.STARTUP_TIMEOUT + 1)
     result = asyncio.run(fleet.snapshot())["operation"]
     assert result["phase"] == "error"
     assert "Startup not confirmed" in result["workers"][0]["message"]
@@ -420,7 +420,7 @@ def test_install_replaced_by_another_version_finishes_without_error_or_celebrati
     asyncio.run(fleet.dispatch("install"))
     assert fleet.progress.load()["workers"][0]["from_version"] == A
     saved = fleet.progress.load()
-    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.STARTUP_TIMEOUT + 1)
     updates.desktop_exchange({"phase": "idle", "running_version": C})
     result = asyncio.run(fleet.snapshot())["operation"]
     assert result["phase"] == "complete"
@@ -433,7 +433,7 @@ def test_failed_start_on_the_old_version_is_not_mistaken_for_a_replacement(setup
     updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
     asyncio.run(fleet.dispatch("install"))
     saved = fleet.progress.load()
-    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.STARTUP_TIMEOUT + 1)
     updates.desktop_exchange({"phase": "idle", "running_version": A})
     assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
 
@@ -443,7 +443,7 @@ def test_a_new_check_clears_a_failed_install_saved_without_its_starting_version(
     fleet.progress.begin("old", [{"device_id": "self", "device_name": "Local"}])
     fleet.progress.record("old", "self", target_version=B[:12], result={"accepted": True})
     saved = fleet.progress.load()
-    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.STARTUP_TIMEOUT + 1)
     updates.desktop_exchange({"phase": "idle", "running_version": C})
     assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
     asyncio.run(fleet.dispatch("check"))
@@ -456,7 +456,7 @@ def test_a_failed_install_gives_way_to_a_newer_staged_update(setup, monkeypatch)
     updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
     asyncio.run(fleet.dispatch("install"))
     saved = fleet.progress.load()
-    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.STARTUP_TIMEOUT + 1)
     updates.desktop_exchange({"phase": "ready", "version": C[:12], "running_version": A})
     snapshot = asyncio.run(fleet.snapshot())
     assert snapshot["operation"]["phase"] == "complete"
@@ -479,7 +479,7 @@ def test_a_legacy_failed_install_settles_once_the_worker_moved_on(setup, monkeyp
         {"device_id": "self", "device_name": "Local", "target_version": B[:12], "accepted": True, "reason": ""}]}
     updates.atomic_json(fleet.progress._path(), saved)
     updates.desktop_exchange({"phase": "idle", "running_version": C})
-    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.STARTUP_TIMEOUT + 1)
     assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
     monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.LEGACY_SETTLE)
     assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "complete"
@@ -920,7 +920,6 @@ LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely
 @pytest.mark.parametrize("phase,error,kept", [
     ("error", NO_BUILD, True),
     ("ready", NO_RESTORE_POINT, True),
-    ("error", FAILED_START, True),
     # The database may have changed: never say the data is untouched.
     ("error", MAY_HAVE_MIGRATED, False),
     ("error", MIGRATED_NEWER_BUILD, False),
@@ -931,6 +930,29 @@ LINUX_ENTRY = "Install the latest AI Shuffle installer to run this update safely
 def test_desktop_states_only_an_installer_fixes_name_it(phase, error, kept):
     row = {"kind": "desktop", "online": True, "phase": phase, "error": error}
     assert fleet.remedy(row) == {"remedy": "installer", "data_kept": kept}
+
+
+@pytest.mark.parametrize("installer_newer,remedy", [
+    # The hub's installer is a newer release than the one running: it can move this desktop on.
+    (True, {"remedy": "installer", "data_kept": True}),
+    # The same release (or older): its link would reinstall what already runs, a dead end.
+    (False, {"remedy": None, "data_kept": False}),
+    # Unknown, or a desktop too old to say: the refusal itself says to check again after a newer update.
+    (None, {"remedy": None, "data_kept": False}),
+])
+def test_a_failed_first_start_offers_the_installer_only_when_it_is_newer(installer_newer, remedy):
+    row = {"kind": "desktop", "online": True, "phase": "error", "error": FAILED_START}
+    if installer_newer is not None:
+        row["installer_newer"] = installer_newer
+    assert fleet.remedy(row) == remedy
+
+
+def test_a_desktop_offering_a_failed_start_again_says_why():
+    row = {"kind": "desktop", "online": True, "supported": True, "allow_updates": True, "phase": "available",
+           "version": "b" * 12, "running_version": "a" * 40, "message": "The last attempt to start this update did not finish."}
+    assert fleet.classify(row, False, {}) == {"role": "available", "label": row["message"]}
+    # A container's available status keeps the plain label.
+    assert fleet.classify({**row, "kind": None}, False, {})["label"] == "Update available; not downloaded"
 
 
 @pytest.mark.parametrize("row", [
@@ -947,6 +969,17 @@ def test_desktop_states_only_an_installer_fixes_name_it(phase, error, kept):
 ])
 def test_other_states_need_no_installer(row):
     assert fleet.remedy(row) == {"remedy": None, "data_kept": False}
+
+
+def test_snapshot_reads_a_peer_desktops_installer_hint(setup, monkeypatch):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    monkeypatch.setattr(updates, "_desktop_seen", 0)
+    updates.desktop_exchange({"phase": "error", "version": None, "error": FAILED_START, "installer_newer": False})
+    remote.return_value = {"supported": True, "allow_updates": True, "kind": "desktop", "phase": "error",
+                           "error": FAILED_START, "installer_newer": True}
+    workers = asyncio.run(fleet.snapshot())["workers"]
+    assert [w["remedy"] for w in workers][:2] == [None, "installer"]
 
 
 def test_snapshot_reports_the_installer_remedy_for_this_desktop_and_a_peer(setup, monkeypatch):
