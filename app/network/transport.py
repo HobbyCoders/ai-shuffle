@@ -1472,17 +1472,23 @@ PRUNE_STARTUP_DELAY_SECONDS = 5 * 60.0
 
 async def prune_loop() -> None:
     """Retention must never hold up presence or compete with startup catch-up."""
-    await asyncio.sleep(PRUNE_STARTUP_DELAY_SECONDS)
-    while True:
-        try:
-            pruned = await asyncio.to_thread(store.prune_ops)
-            if pruned:
-                logger.info("Pruned %d old sync operations", pruned)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            logger.warning("Sync operation pruning failed", exc_info=True)
-        await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
+    stop = threading.Event()
+    try:
+        await asyncio.sleep(PRUNE_STARTUP_DELAY_SECONDS)
+        while True:
+            try:
+                pruned = await asyncio.to_thread(store.prune_ops, stop=stop)
+                if pruned:
+                    logger.info("Pruned %d old sync operations", pruned)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.warning("Sync operation pruning failed", exc_info=True)
+            await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
+    finally:
+        # Cancelling to_thread alone does not stop its worker. Each SQL statement
+        # is timeout-bounded; do not let the thread start another batch on stop.
+        stop.set()
 
 
 async def presence_loop() -> None:

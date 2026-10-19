@@ -1,5 +1,6 @@
 """Retention cannot stall heartbeats, and preserves snapshot heads in batches."""
 import asyncio
+import re
 import threading
 from contextlib import contextmanager
 from unittest.mock import MagicMock
@@ -46,7 +47,17 @@ def test_prune_batches_preserve_latest_and_recent_ops(tmp_path, monkeypatch):
             monkeypatch.setattr(retention, "get_db", tracked_db)
             expected = len(rows) - len(keep)
             assert expected >= 4
-            assert store.prune_ops() == expected
+            queries = []
+            worker.raw.set_trace_callback(queries.append)
+            try:
+                assert store.prune_ops() == expected
+            finally:
+                worker.raw.set_trace_callback(None)
+            boundaries = [int(m.group(1)) for q in queries
+                          if (m := re.search(r"o.ingest_id > (\d+)", q))]
+            assert len(boundaries) >= 3
+            assert boundaries[0] == 0
+            assert all(a < b for a, b in zip(boundaries, boundaries[1:]))
             assert transactions == ["acquire", "release"] * (expected // 2 + 1)
             remaining = worker.sql("SELECT ingest_id FROM sync_ops")
             assert {r["ingest_id"] for r in remaining} == keep
@@ -88,7 +99,7 @@ async def test_slow_or_raising_prune_does_not_block_presence(monkeypatch, raises
     count = 0
     cleanup = MagicMock()
 
-    def prune():
+    def prune(*, stop):
         entered.set()
         assert release.wait(5), "test did not release prune"
         if raises:
@@ -145,3 +156,47 @@ async def test_prune_delays_first_run_and_waits_between_failures(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await transport.prune_loop()
     assert delays == [300, 86400]
+    assert prune.call_args.kwargs["stop"].is_set()
+
+
+def test_stop_between_batches_commits_current_batch_and_does_not_reacquire(monkeypatch):
+    stop = threading.Event()
+    cur = MagicMock()
+    cur.rowcount = retention.BATCH_SIZE
+    acquisitions = []
+
+    @contextmanager
+    def get_db():
+        acquisitions.append("acquire")
+        yield MagicMock(cursor=lambda: cur)
+        stop.set()
+        acquisitions.append("commit-release")
+
+    monkeypatch.setattr(retention, "get_db", get_db)
+    assert retention.delete_batches("DELETE bounded", (), stop=stop) == retention.BATCH_SIZE
+    assert acquisitions == ["acquire", "commit-release"]
+    assert retention.delete_batches("DELETE bounded", (), stop=stop) == 0
+    assert acquisitions == ["acquire", "commit-release"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_prune_signals_running_thread(monkeypatch):
+    entered = asyncio.Event()
+    finished = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def prune(*, stop):
+        loop.call_soon_threadsafe(entered.set)
+        assert stop.wait(3), "cancellation did not signal the pruning thread"
+        loop.call_soon_threadsafe(finished.set)
+        return 0
+
+    monkeypatch.setattr(transport, "PRUNE_STARTUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(store, "prune_ops", prune)
+    task = asyncio.create_task(transport.prune_loop())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    await asyncio.wait_for(finished.wait(), 2)

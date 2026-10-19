@@ -766,19 +766,24 @@ def count_ops(_conn=None) -> int:
         return _query(conn.cursor())
 
 
-def prune_ops(*, keep_days: int = 30, _conn=None) -> int:
+def prune_ops(*, keep_days: int = 30, _conn=None, stop=None) -> int:
     """Drop old ops but never a record's latest op (snapshots still need it)."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
     from app.db.retention import BATCH_SIZE, delete_batches
 
     sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                  SELECT o.ingest_id FROM sync_ops o
-                 WHERE o.created_at < %s AND EXISTS (
+                 WHERE o.created_at < %s AND o.ingest_id > %s AND EXISTS (
                      SELECT 1 FROM sync_ops n
                      WHERE n.collection = o.collection AND n.record_id = o.record_id
                        AND n.ingest_id > o.ingest_id)
-                 LIMIT %s)"""
-    return delete_batches(sql, (cutoff, BATCH_SIZE),
+                 ORDER BY o.ingest_id LIMIT %s) RETURNING ingest_id"""
+
+    def advance(cursor):
+        rows = cursor.fetchall()
+        return cutoff, max((r["ingest_id"] for r in rows), default=0), BATCH_SIZE
+
+    return delete_batches(sql, (cutoff, 0, BATCH_SIZE), advance=advance, stop=stop,
                           cursor=_conn.cursor() if _conn is not None else None)
 
 

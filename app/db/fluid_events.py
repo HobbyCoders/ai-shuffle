@@ -89,14 +89,26 @@ def prune_fluid_delta_events(
     sql = (
         "DELETE FROM fluid_session_events WHERE (session_id, seq) IN ("
         "SELECT session_id, seq FROM fluid_session_events "
-        f"WHERE event ->> '_cls' IN ({placeholders}) "
+        "WHERE (%s IS NULL OR (session_id, seq) > (%s, %s)) "
+        f"AND event ->> '_cls' IN ({placeholders}) "
         "AND session_id IN ("
         "    SELECT sdk_session_id FROM sessions "
         "    WHERE sdk_session_id IS NOT NULL AND updated_at < %s"
-        ") LIMIT %s)"
+        ") ORDER BY session_id, seq LIMIT %s) RETURNING session_id, seq"
     )
-    params = (*PRUNABLE_EVENT_CLASSES, cutoff, BATCH_SIZE)
-    deleted = delete_batches(sql, params, cursor=cursor)
+    filters = (*PRUNABLE_EVENT_CLASSES, cutoff, BATCH_SIZE)
+
+    def advance(cur):
+        rows = cur.fetchall()
+        # RETURNING order is unspecified. Every eligible key through this
+        # batch's database-order maximum is gone, so any returned key is safe
+        # to advance past (even if the database uses a different collation).
+        session_id, seq = max(((r["session_id"], r["seq"]) for r in rows),
+                              default=(None, None))
+        return session_id, session_id, seq, *filters
+
+    deleted = delete_batches(sql, (None, None, None, *filters),
+                             cursor=cursor, advance=advance)
 
     if deleted:
         logger.info(
