@@ -52,6 +52,14 @@ class EnrollmentError(RuntimeError):
     pass
 
 
+class EndpointEnrollmentError(EnrollmentError):
+    """Safe locally generated remedy; preserve it in the join-status UI."""
+
+
+def _join_error(exc: Exception) -> str:
+    return str(exc)[:1024 if isinstance(exc, EndpointEnrollmentError) else 200]
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -353,7 +361,7 @@ async def _wait_for_approval(join_id: str, endpoint: str, poll_secret: str, devi
                     await _bootstrap_join(join_id, endpoint, device_name, legacy_instance_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Enrollment failed")
-                    await run_sync(store.update_join, join_id, status="syncing", error=str(exc)[:200])
+                    await run_sync(store.update_join, join_id, status="syncing", error=_join_error(exc))
                 return
             await run_sync(store.update_join, join_id, status=status or "failed", error=data.get("error"))
             return
@@ -374,7 +382,7 @@ async def _bootstrap_join(join_id: str, endpoint: str, device_name: str,
                                     join_id=join_id)
             return
         except Exception as exc:  # noqa: BLE001
-            await run_sync(store.update_join, join_id, status="syncing", error=str(exc)[:200])
+            await run_sync(store.update_join, join_id, status="syncing", error=_join_error(exc))
             if attempt + 1 == SNAPSHOT_RETRY_ATTEMPTS:
                 raise
             await asyncio.sleep(min(2 ** attempt, 4))
@@ -407,6 +415,8 @@ def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, devi
     dialed = dial_endpoints(endpoints)
     try:
         _copy_snapshot_sync(ctx, issuer_id, dialed)
+    except EndpointEnrollmentError:
+        raise
     except EnrollmentError as exc:
         if dialed != endpoints and all(is_secure_endpoint(base) for base in dialed):
             raise EnrollmentError(
@@ -427,10 +437,11 @@ def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, devi
 
 def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpoints: list) -> None:
     """Synchronous snapshot copy (runs in a worker thread)."""
-    from app.network import tokens
+    from app.network import tokens, transport
     if not issuer_id:
         raise EnrollmentError("Join response names no issuer to copy from")
     last_error = "unreachable"
+    binding_refusal = None
     with httpx.Client(follow_redirects=False, timeout=60.0) as client:
         for base in endpoints:
             base = base.rstrip("/")
@@ -440,8 +451,20 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                 signature = tokens.sign_challenge(ctx.identity.signing_private, challenge, issuer_id)
                 token_response = client.post(base + "/api/v1/network/peer/auth/token", json={
                     "device_id": ctx.device_id, "challenge": challenge, "signature": signature,
+                    "endpoint": tokens.canonical_endpoint(base),
+                    "bound_signature": tokens.sign_bound_challenge(
+                        ctx.identity.signing_private, challenge, issuer_id, base),
                     "incarnation": ctx.identity.incarnation, "endpoints": engine._own_endpoints(),
                     "version": settings.version, "platform": identity_mod.platform_name()})
+                if token_response.status_code == 403:
+                    try:
+                        payload = token_response.json()
+                    except ValueError:
+                        payload = None
+                    detail = payload.get("detail") if isinstance(payload, dict) else None
+                    if isinstance(detail, dict) and detail.get("code") == tokens.ENDPOINT_NOT_ADVERTISED:
+                        binding_refusal = str(transport.PeerEndpointNotAdvertised(issuer_id, base))
+                        raise EnrollmentError(binding_refusal)
                 if token_response.status_code >= 400:
                     raise EnrollmentError(f"token HTTP {token_response.status_code}")
                 headers = {"Authorization": "Bearer " + token_response.json()["token"]}
@@ -489,6 +512,8 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
             except (httpx.HTTPError, KeyError, ValueError, EnrollmentError, engine.ApplyError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"[:200]
                 continue
+    if binding_refusal:
+        raise EndpointEnrollmentError(binding_refusal)
     raise EnrollmentError("Snapshot copy failed: " + last_error)
 
 

@@ -53,6 +53,84 @@ Remove a worker, phone or browser from **Settings → Devices**. A removed worke
 
 If you remove a worker you no longer trust, also change the provider keys it had, in **Settings → Providers**.
 
+## Device-token upgrade protection
+
+This compatibility release sends both the legacy device-key proof and a versioned
+endpoint-bound proof on every token request; rejection never retries legacy-only.
+The bound transcript is the canonical JSON array
+`["shuffle-device-token-bound-v1", challenge, server_device_id, canonical_base_endpoint]`.
+The server checks the endpoint against its current locally advertised tunnel and
+LAN addresses, never against HTTP Host or forwarded headers. Tunnel rotation
+accepts the new advertisement immediately and rejects the removed address,
+including challenges issued before rotation; peers must refresh discovery.
+A valid proof for an unadvertised address receives HTTP 403 with
+`detail.code="endpoint_not_advertised"`. The response reveals no other server
+addresses. The dialing worker records an actionable message in its peer status,
+shows it in the worker's Devices detail and logs a warning at most once per five
+minutes per peer. Invalid signatures still receive the generic binding refusal.
+
+Before upgrading, make sure the URL peers actually dial is advertised. An invite,
+manual address or cached URL may differ from the worker's advertised address
+(Docker port mappings, reverse proxies and hostname/IP aliases are common examples).
+New clients send a bound proof even before pinning, so an unadvertised alias is
+refused even with `NETWORK_REQUIRE_TOKEN_BINDING=false`.
+
+On the worker being dialed, open **Settings → Devices → This worker → Network →
+Advertised addresses** and enter the additional base URLs, separated by commas.
+These are explicit owner-approved aliases, including public reverse proxies,
+hostnames and mapped ports. They remain advertised alongside a managed tunnel and
+do not depend on the LAN-direct switch. Configure only URLs you control that
+actually reach this worker; they are shared with your network, not secrets.
+HTTPS is recommended: adding an HTTP alias does not encrypt bearer tokens.
+
+At most **two additional URLs**, each at most **512 characters**, are accepted.
+Use `http://` or `https://`, ASCII (punycode) hostnames, and an optional base path;
+credentials, queries, fragments, Unicode hosts and ambiguous paths are refused.
+Saving replaces the alias list, immediately updates the binding allowlist, and
+publishes the same signed presence used for primary addresses. Removing an alias
+makes new token requests to it fail; existing short-lived tokens are not revoked.
+The configuration is local to this worker and persists across restarts.
+
+The owner-only `GET /api/v1/network/advertised-addresses` API returns
+`addresses` (the additional URLs) and `advertised` (the complete dial list).
+`PUT` with `{"addresses":["https://proxy.example/worker"]}` replaces the extras;
+`{"addresses":[]}` clears them. Peer device tokens cannot read or change this
+setting. Previous-release peers still receive the ordinary endpoint list, bounded
+to their eight-address protocol limit; there is no membership migration.
+
+For direct workers without a managed tunnel, the existing `CLUSTER_ADVERTISE_URL`
+or owner-only `PUT /api/v1/cluster/advertise` API can also set the primary address.
+The separate **Extra LAN addresses** control accepts private literal HTTP LAN
+addresses while LAN-direct is on; use **Advertised addresses** for public aliases.
+
+Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
+IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames
+must be supplied as ASCII A-labels (punycode); Unicode hosts are rejected in both
+proofs and advertisements, never re-encoded with a different IDNA version. Path case and interior
+slashes remain significant; unreserved percent escapes are decoded and other
+escapes use uppercase hex. A DNS trailing dot remains significant. Credentials,
+queries, fragments, scoped IPv6, whitespace, backslashes, dot path segments and
+non-ASCII paths are rejected rather than guessed.
+
+A successful bound proof, or a device-key-signed binding-support statement in an
+authenticated exchange, permanently pins that peer to binding on the receiving
+worker. Mutable version/capability fields cannot set or clear this local database
+pin. It survives restarts, membership generation changes and re-admission of the
+same identity. A new signing identity (new device id), a fresh network or recovery
+onto a fresh database starts without those local pins. Downgrading a pinned peer
+to an old release will fail token authentication; upgrade it again rather than
+clearing security evidence.
+
+Old peers still work **before pinning**. During this rollout an intermediary that
+can redirect a peer's first connection can strip both the new proof and capability
+statement and relay legacy authentication. Old servers have the same exposure.
+Once all peers are upgraded, set `NETWORK_REQUIRE_TOKEN_BINDING=true` on each
+worker to reject even unpinned legacy requests (default: `false`). The follow-up
+protocol release must remove legacy acceptance after the rolling-upgrade window;
+this compatibility release does not claim complete first-contact relay protection.
+Binding also does not encrypt plain-HTTP bearer tokens: use HTTPS or the sealed
+LAN transport, and keep advertised endpoint provenance protected.
+
 ## Your account's network wins
 
 A worker with separate settings that later signs in to your account joins your account's network. Settings your account already has replace the worker's own, and anything only that worker had is added.

@@ -5,8 +5,8 @@ A peer proves it holds the private key of an active member:
     1. ``POST /api/v1/network/peer/auth/challenge`` -> ``{challenge}``
        (the challenge is issued to one member device id and only that
        device's signature can spend it)
-    2. the peer signs ``"shuffle-device-token-v1" || challenge || audience``
-       with its Ed25519 key and posts the signature
+    2. the peer signs a versioned transcript of challenge, audience and dialed
+       base endpoint, plus the legacy proof during the compatibility window
     3. this worker checks the member is active, mints an HMAC token bound to
        the device id, this network and its membership generation, with an
        expiry (five minutes), and returns it
@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import secrets
 import ipaddress
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -32,7 +33,10 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, Request, status
 
 from app.network import crypto, engine, membership
+from app.core.config import settings
+from app.db import network as store
 
+ENDPOINT_NOT_ADVERTISED = "endpoint_not_advertised"
 TOKEN_TTL_SECONDS = 300
 CHALLENGE_TTL_SECONDS = 120
 # Outstanding challenges per (requester address, member device). A member
@@ -188,7 +192,90 @@ def sign_challenge(signing_private: bytes, challenge: str, audience: str) -> str
     return crypto.b64u_encode(crypto.sign(signing_private, challenge_message(challenge, audience)))
 
 
-def issue_token(*, device_id: str, challenge: str, signature: str) -> dict:
+def canonical_endpoint(endpoint: str) -> str:
+    """Canonical HTTP(S) base, never obtained from request/forwarded headers.
+
+    Lowercase scheme and ASCII host; compress/bracket IPv6; omit default ports
+    and trailing slashes. Preserve path case and interior slashes, decode
+    unreserved escapes and uppercase other escapes. Reject ambiguous dot paths,
+    credentials, queries, fragments, scoped IPv6, whitespace and backslashes.
+    """
+    if not isinstance(endpoint, str) or not endpoint or any(
+            c.isspace() or ord(c) < 32 or ord(c) == 127 for c in endpoint):
+        raise ValueError("Invalid endpoint")
+    if "\\" in endpoint or "?" in endpoint or "#" in endpoint:
+        raise ValueError("Invalid endpoint")
+    url = urlsplit(endpoint)
+    if url.scheme not in ("http", "https") or not url.hostname or url.username is not None or url.password is not None:
+        raise ValueError("Invalid endpoint")
+    # Reject before .hostname lowercases Unicode (e.g. the Kelvin sign).
+    # Never use the stdlib IDNA-2003 codec: HTTPX dials IDNA-2008 names, so
+    # faß.example and fass.example must not collapse to one signed endpoint.
+    # International names must arrive as literal ASCII A-labels on both sides.
+    if not url.netloc.isascii():
+        raise ValueError("Endpoint hosts must use ASCII A-labels")
+    host = url.hostname
+    if "%" in host:
+        raise ValueError("Scoped or escaped host is not supported")
+    if ":" in host:
+        host = "[" + str(ipaddress.IPv6Address(host)) + "]"
+    else:
+        host = host.lower()
+        labels = host.removesuffix(".").split(".")
+        if len(host.removesuffix(".")) > 253 or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels):
+            raise ValueError("Invalid ASCII endpoint host")
+    port = url.port
+    authority = host if port is None or port == {"http": 80, "https": 443}[url.scheme] else f"{host}:{port}"
+    path = url.path
+    if not path.isascii() or re.search(r"%(?![0-9a-fA-F]{2})", path):
+        raise ValueError("Invalid escaped path")
+    def escape(match):
+        char = chr(int(match.group()[1:], 16))
+        return char if char.isascii() and (char.isalnum() or char in "-._~") else match.group().upper()
+    path = re.sub(r"%[0-9a-fA-F]{2}", escape, path)
+    if any(part in (".", "..") for part in path.split("/")):
+        raise ValueError("Dot path segments are not supported")
+    return f"{url.scheme}://{authority}{path.rstrip('/')}"
+
+
+def bound_challenge_message(challenge: str, audience: str, endpoint: str) -> bytes:
+    return crypto.canonical_json(["shuffle-device-token-bound-v1", challenge, audience,
+                                  canonical_endpoint(endpoint)])
+
+
+def sign_bound_challenge(signing_private: bytes, challenge: str, audience: str, endpoint: str) -> str:
+    return crypto.b64u_encode(crypto.sign(signing_private, bound_challenge_message(challenge, audience, endpoint)))
+
+
+def _binding_support_message(network_id: str, device_id: str) -> bytes:
+    return crypto.canonical_json(["shuffle-device-token-binding-support-v1", network_id, device_id, 1])
+
+
+def binding_support_proof(ctx: engine.NetworkContext) -> str:
+    return crypto.b64u_encode(crypto.sign(ctx.identity.signing_private,
+                                       _binding_support_message(ctx.network_id, ctx.device_id)))
+
+
+def remember_binding_support(device_id: str, proof: Optional[str]) -> None:
+    """Only a key-signed capability statement may set the local durable pin."""
+    if proof is None:
+        return
+    ctx = engine.require_context()
+    member = ctx.member(device_id)
+    try:
+        ok = member is not None and member.status == membership.STATUS_ACTIVE and crypto.verify(
+            member.signing_public, _binding_support_message(ctx.network_id, device_id), crypto.b64u_decode(proof))
+    except (crypto.CryptoError, ValueError, TypeError):
+        ok = False
+    if not ok:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid token binding capability proof")
+    store.pin_token_binding(device_id, crypto.b64u_encode(member.signing_public))
+
+
+def issue_token(*, device_id: str, challenge: str, signature: str,
+                endpoint: Optional[str] = None, bound_signature: Optional[str] = None,
+                token_binding_proof: Optional[str] = None, binding_present: bool = False) -> dict:
     """Verify the challenge signature and mint a token for an active member."""
     ctx = engine.context()
     if ctx is None:
@@ -211,6 +298,36 @@ def issue_token(*, device_id: str, challenge: str, signature: str) -> dict:
         ok = False
     if not ok:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Challenge signature is invalid")
+    remember_binding_support(device_id, token_binding_proof)
+    # Any supplied binding is fail-closed, even for an unpinned legacy peer.
+    # The allowlist is current local advertisement, never Host/X-Forwarded-*.
+    bound = binding_present or endpoint is not None or bound_signature is not None
+    if bound:
+        try:
+            canonical = canonical_endpoint(endpoint)
+            allowed = set()
+            for advertised in engine._own_endpoints():
+                try:
+                    allowed.add(canonical_endpoint(advertised))
+                except ValueError:
+                    continue
+            ok = crypto.verify(
+                member.signing_public, bound_challenge_message(challenge, ctx.device_id, canonical),
+                crypto.b64u_decode(bound_signature))
+        except (crypto.CryptoError, ValueError, TypeError):
+            ok = False
+        if not ok:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Endpoint binding is invalid")
+        if canonical not in allowed:
+            # Only distinguish this after verifying the proof. Do not disclose
+            # our other addresses, the challenge, signatures or any token.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, {
+                "code": ENDPOINT_NOT_ADVERTISED,
+                "message": "The signed endpoint is not advertised by this worker",
+            })
+        store.pin_token_binding(device_id, crypto.b64u_encode(member.signing_public))
+    elif settings.network_require_token_binding or (store.get_member(device_id) or {}).get("token_binding_required"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Endpoint binding is required")
     # The member's key signed a challenge issued to this address: it keeps
     # headroom past the global ceiling from now on.
     _remember_member_address(device_id, requester)
