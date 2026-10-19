@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.ci import verify_release_downloads as check
+import scripts.ci.verify_release_downloads as check
 
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "a" * 40
