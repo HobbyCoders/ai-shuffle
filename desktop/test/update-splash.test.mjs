@@ -63,7 +63,8 @@ async function entry(phases, { running = true, stalled = false } = {}) {
   class Window {
     constructor(options) { events.push(options); this.webContents = { setWindowOpenHandler() {}, on() {}, executeJavaScript: async code => events.push(code) }; }
     setMenu() {} async loadURL(url) { events.push(url); }
-    isDestroyed() { return false; } isVisible() { return false; } show() { events.push('show'); }
+    isDestroyed() { return false; } isVisible() { return false; } // Simulate minimizing after the first show.
+    show() { events.push('show'); assert.fail('the notice must not steal focus'); } showInactive() { events.push('showInactive'); }
   }
   let reads = 0;
   const file = new URL('../dist/main/update-splash-main.js', import.meta.url);
@@ -75,11 +76,12 @@ async function entry(phases, { running = true, stalled = false } = {}) {
   });
   if (stalled) { await new Promise(resolve => setImmediate(resolve)); timers[0](); }
   await ended;
+  assert.ok(!events.includes('show'), 'the notice must not steal focus, even if the entry catches the error');
   return { events, now, timers };
 }
 for (const terminal of ['attached', 'stopped']) test(`compiled window closes when ${terminal}`, async () => {
   const { events, timers } = await entry(['checking', 'starting', terminal]);
-  assert.ok(events.includes('show'));
+  assert.equal(events.filter(event => event === 'showInactive').length, 1, 'a minimized notice stays minimized across polls');
   assert.ok(events.some(event => typeof event === 'string' && event.includes('Starting the update to AI Shuffle 1.0.2')));
   const options = events.find(event => event?.webPreferences);
   assert.equal(options.webPreferences.sandbox, true);
