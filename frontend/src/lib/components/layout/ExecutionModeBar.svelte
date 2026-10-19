@@ -112,7 +112,7 @@
 		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
 		&& $git.worktreeId === $activeSession.worktreeId
 		&& $git.sessionId === $activeSession.sessionId
-		&& $git.status?.is_git_repo === false));
+		&& ($git.status?.is_git_repo === false || !!$git.status?.enclosing_repository_root)));
 
 	$effect(() => {
 		// Non-git drafts run Local, but this is not a new account-wide preference.

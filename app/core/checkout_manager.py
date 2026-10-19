@@ -1434,6 +1434,29 @@ def new_branch_exists_detail(branch: str) -> str:
     )
 
 
+def require_worktree_project(project_v2_row: dict[str, Any], runner_id: str | None = None) -> None:
+    """Reject an enclosing project before branch lookup or ownership config writes.
+
+    Run on the selected worker, not the caller's potentially different checkout.
+    Plain-folder/missing-root handling remains with the normal materializer.
+    """
+    # Read-only intake: do not self-seed a clone just to validate the scope.
+    rows = checkouts_db.list_checkouts_with_legacy_fallback(
+        project_v2_row["id"], runner_id or settings.effective_instance_id
+    )
+    path = next((_resolve_checkout_path(row["path"]) for row in rows
+                 if row.get("path") and os.path.isdir(_resolve_checkout_path(row["path"]))), None)
+    if not path or os.path.lexists(os.path.join(path, ".git")):
+        return
+    result = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=5)
+    if result.returncode == 0 and result.stdout.strip():
+        root, folder = os.path.realpath(result.stdout.strip()), os.path.realpath(path)
+        if os.path.normcase(root) != os.path.normcase(folder) and os.path.commonpath([root, folder]) == root:
+            raise WorktreeError(
+                f"Inside repository {root}. Open that repository root as a project to use worktrees."
+            )
+
+
 def local_branch_exists(
     project_v2_row: dict[str, Any] | None,
     branch: str,

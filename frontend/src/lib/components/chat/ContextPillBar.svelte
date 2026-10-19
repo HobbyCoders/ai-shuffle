@@ -97,7 +97,7 @@
 		&& ($git.projectId === $activeSession.projectV2Id || $git.projectId === $activeSession.project)
 		&& $git.sessionId === $activeSession.sessionId
 		&& $git.worktreeId === $activeSession.worktreeId
-		&& $git.status?.is_git_repo === false));
+		&& ($git.status?.is_git_repo === false || !!$git.status?.enclosing_repository_root)));
 	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
 	// Auto naming starts before the session has a worktree ID or branch.
 	const isWorktreeSelected = $derived(isWorktreeSession || $activeSession.isCreatingWorktree);

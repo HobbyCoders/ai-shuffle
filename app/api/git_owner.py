@@ -70,8 +70,14 @@ async def _guard_mutation(action_name, values, endpoint=None):
         cwd = None
     # An unbound project subfolder is usable for chat, but never silently grants
     # Git controls over its enclosing repository (including parent-wide reads).
-    root = await run_sync(_enclosing_repository, cwd) if cwd else None
+    try:
+        root = await run_sync(_enclosing_repository, cwd) if cwd else None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
     if root:
+        session = await run_sync(database.get_session, sid) if sid else None
+        if wid or (session and (session.get("branch") or session.get("worktree_branch"))):
+            raise HTTPException(503, "Git checkout is unavailable. Check again.")
         raise HTTPException(409, f"Inside repository {root}. Open that repository root as a project to use Git controls.")
     if action_name not in _MUTATING_ACTIONS:
         return
@@ -301,6 +307,10 @@ def _enclosing_repository(path):
     """
     from app.core.git_service import git_service
 
+    # The hot status/read path for ordinary roots must stay subprocess-free.
+    # lexists also covers broken markers: Git refuses those, never discovers a parent.
+    if os.path.lexists(os.path.join(path, ".git")):
+        return None
     if not os.path.isdir(path) or not _has_git_marker(path):
         return None
     result = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=5)

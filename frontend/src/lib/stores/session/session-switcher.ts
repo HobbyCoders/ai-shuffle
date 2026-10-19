@@ -154,7 +154,7 @@ export function projectSupportsWorktrees(projectId: string, projectV2Id: string 
 	const status = git.current;
 	if (status.projectId && (status.projectId === projectId || status.projectId === projectV2Id)) {
 		return status.hydrated && !status.worktreeId && !status.sessionId
-			&& status.status?.is_git_repo === true;
+			&& status.status?.is_git_repo === true && !status.status.enclosing_repository_root;
 	}
 	if (projectId) return false;
 	// Remote-only catalog entries describe a Git origin, not an arbitrary folder.
@@ -167,7 +167,8 @@ export function projectRejectsWorktrees(projectId: string, projectV2Id: string |
 	if (!projectId && !projectV2Id) return true;
 	const status = git.current;
 	return !!status.projectId && (status.projectId === projectId || status.projectId === projectV2Id)
-		&& status.hydrated && !status.worktreeId && !status.sessionId && status.status?.is_git_repo === false;
+		&& status.hydrated && !status.worktreeId && !status.sessionId
+		&& (status.status?.is_git_repo === false || !!status.status?.enclosing_repository_root);
 }
 
 /** New-chat defaults only. Existing sessions restore their own checkout binding. */

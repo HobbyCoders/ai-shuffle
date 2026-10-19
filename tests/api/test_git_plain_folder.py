@@ -31,6 +31,60 @@ def git_at(folder, *args):
     return subprocess.run(["git", "-C", str(folder), *args], check=True, capture_output=True, text=True)
 
 
+@pytest.mark.parametrize("route", ["local", "remote"])
+@pytest.mark.parametrize("create_new", [False, True])
+@pytest.mark.parametrize("branch", ["main", "feature/new"])
+async def test_enclosed_project_refuses_worktrees_before_parent_lookup_or_config(plain_project, monkeypatch, route, create_new, branch):
+    from app.api import sessions_worktree
+    from app.api.sessions_helpers import CreateWorktreeSessionRequest
+    from app.core import checkout_manager, git_ops_runner
+    project, folder, _ = plain_project
+    git_at(folder.parent, "init", "-b", "main")
+    before = (folder.parent / ".git" / "config").read_bytes()
+    lookup = Mock(side_effect=AssertionError("must not look up parent branches"))
+    record = Mock(side_effect=AssertionError("must not write parent config"))
+    monkeypatch.setattr(checkout_manager, "local_branch_exists", lookup)
+    monkeypatch.setattr(checkout_manager, "record_new_branch_owner", record)
+    if route == "local":
+        with pytest.raises(HTTPException) as error:
+            await sessions_worktree._create_v2_branch_session(
+                body=CreateWorktreeSessionRequest(project_v2_id=project["id"], branch_name=branch,
+                                                  create_new_branch=create_new),
+                project=None, api_user_id=None,
+            )
+        assert error.value.status_code == 409
+        assert "Inside repository" in error.value.detail
+    else:
+        monkeypatch.setattr("app.db.git_ops.touch_op", lambda _: None)
+        with pytest.raises(checkout_manager.WorktreeError, match="Inside repository"):
+            git_ops_runner.execute_ensure_worktree({"id": "nested-op", "project_v2_id": project["id"],
+                "params": {"branch": branch, "create_new_branch": create_new}})
+    lookup.assert_not_called()
+    record.assert_not_called()
+    assert (folder.parent / ".git" / "config").read_bytes() == before
+    assert not (folder / ".fluid").exists()
+    assert not (folder / ".git").exists()
+
+
+@pytest.mark.parametrize("marker_kind", ["directory", "file", "broken-link"])
+def test_enclosing_probe_skips_own_markers_without_a_git_process(tmp_path, monkeypatch, marker_kind):
+    from app.api.git_owner import _enclosing_repository
+    marker = tmp_path / ".git"
+    if marker_kind == "directory":
+        marker.mkdir()
+    elif marker_kind == "file":
+        marker.write_text("gitdir: /missing")
+    else:
+        try:
+            marker.symlink_to(tmp_path / "missing")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    probe = Mock(side_effect=AssertionError("normal roots must not spawn Git"))
+    monkeypatch.setattr(git.git_service, "_run_git", probe)
+    assert _enclosing_repository(str(tmp_path)) is None
+    probe.assert_not_called()
+
+
 def deny_read_access(monkeypatch, target):
     access = os.access
     target = os.path.normcase(os.path.realpath(target))

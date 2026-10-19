@@ -1,6 +1,6 @@
 import {beforeEach, expect, it, vi} from 'vitest';
 const mocks = vi.hoisted(() => ({
- git: {projectId:null as string | null, hydrated:true, stale:false, status:null as {is_git_repo:boolean} | null},
+ git: {projectId:null as string | null, hydrated:true, stale:false, status:null as {is_git_repo:boolean; enclosing_repository_root?:string} | null},
  gitListeners: new Set<(state:any)=>void>(),
  catalog: {projects:[{id:'a'},{id:'b'},{id:'notes'}], clusterProjects:[], profiles:[], sessions:[]},
 }));
@@ -60,6 +60,17 @@ it('never enables no-project, unknown, non-repo, or another project’s stale st
  status('notes',true); expect(active.current.worktreeIntent).toBe('worktree');
  status('notes',false); expect(active.current.worktreeIntent).toBe('local');
  active.setProject(''); expect(active.current.worktreeIntent).toBe('local');
+});
+it('refuses remembered and explicit worktree intent for an enclosing project', async () => {
+ status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
+ mocks.git.status = {is_git_repo:true, enclosing_repository_root:'/monorepo'};
+ for (const listener of mocks.gitListeners) listener(mocks.git);
+ active.applyComposerDefaults();
+ expect(active.current.worktreeIntent).toBe('local');
+ active.setWorktreeIntent('worktree');
+ expect(active.current.worktreeIntent).toBe('local');
+ active.newChat();
+ expect(active.current.worktreeIntent).toBe('local');
 });
 it('uses canonical Git status for a linked project, never another checkout’s status', async () => {
  const {composerPreferences:p}=await import('./composer-preferences');

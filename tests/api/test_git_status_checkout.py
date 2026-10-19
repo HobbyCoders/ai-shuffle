@@ -83,6 +83,10 @@ def test_warm_session_with_missing_marker_does_not_become_enclosing_project(chec
     response = client.get(url)
     assert response.status_code == 503, response.text
     assert "unavailable" in response.json()["detail"]
+    response = client.post("/api/v1/projects/p1/git/stage?session_id=s1", json={"files": ["tracked.txt"]})
+    assert response.status_code == 503, response.text
+    assert "unavailable" in response.json()["detail"]
+    assert "Inside repository" not in response.text
     assert (base / "tracked.txt").read_text() == "unrelated base edit\n"
 
 
