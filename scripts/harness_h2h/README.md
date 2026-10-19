@@ -32,7 +32,12 @@ its calls are rebuilt from the session's event log.
   run's tool calls are scanned for routes to the real fix (`gh`, github.com,
   the source checkout) and flagged as contamination in the report.
 - The `app` arm uses the neutral `harness-h2h-bench` profile (stock preset, no
-  extra instructions, no subagents), fast mode off, `bypassPermissions`.
+  extra instructions), fast mode off, `bypassPermissions`. The profile's
+  `disallowed_tools` blocks `Task`, `Swarm` and `StartSession`: app subagents
+  run on the owner's subagent default model, not the model under test. A run
+  that still delegates, or that the app aborts on an error (for example a
+  signed-out provider), is recorded as a harness error and redone on the next
+  `run`. While the app's ChatGPT provider is not usable the app arm is skipped.
 - Arm order rotates per task and trial.
 - Cost is an estimate: the subscription bills nothing per token, so tokens are
   priced at one list-price row for every arm (see `report.PRICE`).
@@ -43,6 +48,11 @@ its calls are rebuilt from the session's event log.
 plus the exact names and messages the hidden tests check) and 2 codebase
 questions graded by regexes over `ANSWER.md`. `validate` proves every bug-fix
 task's hidden tests fail on the base commit and pass on the fix.
+
+The base and fix SHAs come from the pre-release development history, which is
+not part of this public repository. The tasks run from a checkout that still
+has those commits (`repo` in each task); to bench elsewhere, point the tasks at
+commits from public history.
 
 ## Running
 
