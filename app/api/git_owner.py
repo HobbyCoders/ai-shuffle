@@ -71,7 +71,9 @@ async def _guard_mutation(action_name, values, endpoint=None):
     # An unbound project subfolder is usable for chat, but never silently grants
     # Git controls over its enclosing repository (including parent-wide reads).
     try:
-        root = await run_sync(_enclosing_repository, cwd) if cwd else None
+        # Only status polling may trust the structural fast path. All actions
+        # must use Git's actual discovery, including reads of parent-wide data.
+        root = await run_sync(_enclosing_repository, cwd, allow_fast_path=False) if cwd else None
     except (OSError, subprocess.SubprocessError) as exc:
         raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
     if root:
@@ -299,7 +301,7 @@ def _has_git_marker(path):
         current = parent
 
 
-def _enclosing_repository(path):
+def _enclosing_repository(path, *, allow_fast_path=True):
     """Return a proven enclosing root, never a failed probe or the folder itself.
 
     Keep checkout_manager's strict root/branch checks intact: a missing marker
@@ -307,15 +309,22 @@ def _enclosing_repository(path):
     """
     from app.core.git_service import git_service
 
-    # The hot status/read path for ordinary roots must stay subprocess-free.
-    # Invalid directories without HEAD can fall through to a parent repository.
-    # Files/symlinks (even broken ones) instead stop Git's upward discovery.
-    marker = os.path.join(path, ".git")
-    if (os.path.isfile(marker) or os.path.islink(marker)
-            or (os.path.isdir(marker) and os.path.exists(os.path.join(marker, "HEAD")))):
+    # A not-yet-created clone target has no repository to discover. Its normal
+    # materializer/endpoint remains responsible for missing-path handling.
+    if not os.path.isdir(path):
         return None
-    if not os.path.isdir(path) or not _has_git_marker(path):
-        return None
+    # Keep ordinary status polls subprocess-free, not authorization decisions.
+    # Broken links and incomplete directories can fall through to a parent;
+    # even a structurally complete marker can contain an invalid HEAD.
+    if allow_fast_path:
+        marker = os.path.join(path, ".git")
+        if (os.path.isfile(marker)
+                or (os.path.isdir(marker) and os.path.isfile(os.path.join(marker, "HEAD"))
+                    and os.path.isdir(os.path.join(marker, "objects"))
+                    and os.path.isdir(os.path.join(marker, "refs")))):
+            return None
+        if not _has_git_marker(path):
+            return None
     result = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=5)
     if result.returncode != 0 or not result.stdout.strip():
         return None
@@ -394,9 +403,12 @@ async def handle_project_git(body, from_device):
         if not await run_sync(_dir_is_worktree, path):
             if name != "get_git_status" or branch is not None or row.get("branch"):
                 continue
-            plain_folder = await run_sync(_is_plain_project_folder, path)
-            if not plain_folder and not await run_sync(_enclosing_repository, path):
-                continue
+            try:
+                plain_folder = await run_sync(_is_plain_project_folder, path)
+                if not plain_folder and not await run_sync(_enclosing_repository, path):
+                    continue
+            except (OSError, subprocess.SubprocessError):
+                return {"status": 503, "detail": "Git checkout is unavailable. Check again."}
         actual = None if plain_folder else await run_sync(git_service.get_current_branch, path)
         if branch is None and row.get("branch"):
             continue
