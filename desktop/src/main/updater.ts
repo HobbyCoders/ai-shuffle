@@ -13,8 +13,9 @@ export interface UpdateState {
   channel_config?: { channel: 'stable' | 'nightly'; source: 'file' | 'default'; editable: boolean };
   /** What this install runs: lets the worker check a return from nightly to stable. */
   installed_release?: InstalledRelease;
-  /** Why the last return to stable was refused; sent once. */
+  /** Why the last return to stable was refused, and which attempt; sent once. */
   channel_error?: string;
+  channel_attempt?: number;
   /** Release name and notes from the signed manifest of the offered update. */
   release?: string | null; notes?: string | null;
   /** macOS and Linux: the verified installer just saved, for the web UI to announce. */
@@ -59,7 +60,7 @@ export class Updater {
   private exchanging = false;
   private exchangeAgain = false;
   private installed: InstalledRelease | null = null;
-  private channelError: string | null = null;
+  private channelError: { message: string; attempt: number } | null = null;
   setBridge(exchange: (state: UpdateState) => Promise<Record<string, unknown>>, safeToRestart: () => Promise<boolean>): void {
     this.bridge = exchange; this.safeToRestart = safeToRestart;
   }
@@ -71,11 +72,12 @@ export class Updater {
       const state = this.current;
       const channel_config = await this.applications?.channelConfig();
       const installed_release = await this.installedRelease();
-      const channel_error = this.channelError;
+      const refusal = this.channelError;
       const request = await this.bridge({ ...state, ...(channel_config ? { channel_config } : {}),
-        ...(installed_release ? { installed_release } : {}), ...(channel_error ? { channel_error } : {}) });
+        ...(installed_release ? { installed_release } : {}),
+        ...(refusal ? { channel_error: refusal.message, channel_attempt: refusal.attempt } : {}) });
       // Delivered: the worker has dropped the refused request.
-      if (channel_error && this.channelError === channel_error) this.channelError = null;
+      if (refusal && this.channelError === refusal) this.channelError = null;
       if (!this.bridgeTimer || typeof request.expires_at !== 'number' || request.expires_at * 1000 < Date.now()) return;
       if (request.action === 'set_channel' && (request.channel === 'stable' || request.channel === 'nightly')) {
         if (this.checking || this.downloading || this.installing || !this.applications) return;
@@ -84,7 +86,9 @@ export class Updater {
           // worker checked this one is safe; channel-return verifies it again.
           try { await returnToStable(this.applications, request.stable_manifest, app.getVersion()); }
           catch (error) {
-            this.channelError = error instanceof Error ? error.message : String(error);
+            // The worker accepts at most 1000 characters; a longer report would fail every heartbeat.
+            const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+            this.channelError = { message, attempt: typeof request.attempt === 'number' ? request.attempt : 0 };
             this.exchangeAgain = true;
             return;
           }

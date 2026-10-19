@@ -225,14 +225,19 @@ def test_desktop_return_to_stable_hands_the_checked_manifest_to_the_shell(client
     request = updates.desktop_exchange(nightly)
     assert request["action"] == "set_channel" and request["channel"] == "stable"
     assert request["stable_manifest"] == "signed-stable"
+    # A refusal naming another attempt (a late answer to an earlier one) is ignored.
+    assert updates.desktop_exchange({**nightly, "channel_error": "old", "channel_attempt": request["attempt"] - 1})["channel"] == "stable"
+    assert client.get("/api/v1/updates/channel").json()["error"] is None
     # The shell refused it: the request is dropped and the picker is told why.
-    assert updates.desktop_exchange({**nightly, "channel_error": "This app runs newer code"}) == {}
+    assert updates.desktop_exchange({**nightly, "channel_error": "This app runs newer code",
+                                     "channel_attempt": request["attempt"]}) == {}
     assert client.get("/api/v1/updates/channel").json()["error"] == "This app runs newer code"
     assert updates._desktop_channel_request is None and updates.desktop_exchange(nightly) == {}
     # A new attempt clears the old refusal and is acknowledged once the shell saves it.
     client.put("/api/v1/updates/channel", json={"channel": "stable"})
     assert client.get("/api/v1/updates/channel").json()["error"] is None
-    assert updates.desktop_exchange(nightly)["stable_manifest"] == "signed-stable"
+    second = updates.desktop_exchange(nightly)
+    assert second["stable_manifest"] == "signed-stable" and second["attempt"] == request["attempt"] + 1
     updates.desktop_exchange({**nightly, "channel_config": {"channel": "stable", "source": "file", "editable": True}})
     assert updates._desktop_channel_request is None and updates._desktop_stable_manifest is None
     assert client.get("/api/v1/updates/channel").json()["channel"] == "stable"
@@ -244,7 +249,7 @@ def test_desktop_ahead_of_stable_or_too_old_to_check_is_refused_at_once(client, 
     monkeypatch.setattr(stable_return, "fetch_stable", lambda: ("signed-stable", STABLE))
     _desktop(monkeypatch)
     old = client.put("/api/v1/updates/channel", json={"channel": "stable"})
-    assert old.status_code == 409 and "Install the next update" in old.json()["detail"]
+    assert old.status_code == 409 and "Install the next update (on macOS, the latest installer)" in old.json()["detail"]
     _desktop_state = {"phase": "idle", "channel_config": {"channel": "nightly", "source": "file", "editable": True},
                       "installed_release": {"revision": A, "container_sequence": 51, "version": None}}
     updates.desktop_exchange(_desktop_state)

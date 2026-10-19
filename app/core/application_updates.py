@@ -30,6 +30,9 @@ _desktop_channel_request = None
 _desktop_stable_manifest = None
 # Why the shell refused the last return to stable; cleared by the next request.
 _desktop_channel_error = None
+# Numbers each return to stable; the shell names it when refusing, so a late
+# refusal of an earlier request never ends a newer one.
+_desktop_channel_attempt = 0
 # The desktop shell reports every 30 s (BRIDGE_INTERVAL_MS in
 # desktop/src/main/updater.ts) and at once on a phase change. One missed
 # report means about 60 s of silence, so presence spans two intervals plus
@@ -77,6 +80,7 @@ def desktop_exchange(state):
     state = dict(state)
     # Reported once, after the shell refused a return to stable it was sent.
     refused = state.pop("channel_error", None)
+    refused_attempt = state.pop("channel_attempt", None)
     # When the shell last asked its feed. A worker that is idle but checked
     # before another worker found an update has simply not seen it yet.
     state["checked_at"] = _epoch(state.pop("checkedAt", None))
@@ -89,14 +93,14 @@ def desktop_exchange(state):
             config = state.get("channel_config") or {}
             if config.get("channel") == _desktop_channel_request:
                 _desktop_channel_request = _desktop_stable_manifest = None
-            elif refused and _desktop_stable_manifest:
+            elif refused and _desktop_stable_manifest and refused_attempt == _desktop_channel_attempt:
                 _desktop_channel_request = _desktop_stable_manifest = None
                 _desktop_channel_error = str(refused)
             elif config.get("editable") and state.get("phase") in ("idle", "error", "available"):
                 request = {"action": "set_channel", "channel": _desktop_channel_request,
                            "expires_at": time.time() + DESKTOP_REQUEST_SECONDS}
                 if _desktop_stable_manifest:
-                    request["stable_manifest"] = _desktop_stable_manifest
+                    request.update(stable_manifest=_desktop_stable_manifest, attempt=_desktop_channel_attempt)
                 return request
         # A phase-change report can race an already accepted action. The shell
         # refuses actions while checking or downloading, so leave the request
@@ -245,7 +249,7 @@ def set_channel(value):
 def _set_channel(value):
     from app.core.update_channel import normalize
 
-    global _desktop_channel_request, _desktop_stable_manifest, _desktop_channel_error
+    global _desktop_channel_request, _desktop_stable_manifest, _desktop_channel_error, _desktop_channel_attempt
     channel = normalize(value)
     current = channel_status()
     if not current["editable"]:
@@ -260,7 +264,8 @@ def _set_channel(value):
         # The launcher may have written nightly while its acknowledgement
         # is still in flight. Never queue a reversal based on stale status.
         if channel == "stable" and _desktop_channel_request == "nightly":
-            raise ValueError("The switch to nightly has not been confirmed yet. Try again once it has.")
+            raise ValueError("The switch to nightly has not been confirmed yet, so this worker cannot go back to stable "
+                             "until it has. Try again in a minute.")
         returning = channel == "stable" and (current["channel"] == "nightly"
                                              or (_desktop_state.get("channel_config") or {}).get("channel") == "nightly")
         installed = _desktop_state.get("installed_release")
@@ -271,6 +276,8 @@ def _set_channel(value):
             raise ValueError("Finish the current update before changing channel")
         _desktop_channel_request = channel
         _desktop_stable_manifest = signed
+        if signed:
+            _desktop_channel_attempt += 1
     # Desktop reports the old value until its next authenticated heartbeat
     # acknowledges the write. The picker must poll GET, not assume it persisted.
     return channel_status()
@@ -298,7 +305,7 @@ def _desktop_return(installed):
 
     if not isinstance(installed, dict):
         raise stable_return.Refused("This desktop app cannot check whether it may switch back to stable yet. "
-                                    "Install the next update, then try again.")
+                                    "Install the next update (on macOS, the latest installer), then try again.")
     signed, stable = stable_return.fetch_stable()
     reason = stable_return.refusal({"revision": installed.get("revision"),
                                     "sequence": installed.get("container_sequence"),

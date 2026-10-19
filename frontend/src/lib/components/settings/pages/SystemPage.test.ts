@@ -599,6 +599,7 @@ describe('update channel', () => {
 		[{ status: 409, detail: 'Finish the current update before changing channel' }, 'An update is in progress. Change the channel after it finishes.'],
 		[{ status: 409, detail: 'Returning from nightly to stable requires a reinstall; migrations do not run backwards' }, LEGACY_RETURN_TEXT],
 		[{ status: 409, detail: 'Cannot tell whether this worker’s version is older than the current stable release, so it stays on nightly.' }, 'Cannot tell whether this worker’s version is older than the current stable release, so it stays on nightly.'],
+		[{ status: 409, detail: 'The switch to nightly has not been confirmed yet, so this worker cannot go back to stable until it has. Try again in a minute.' }, 'The switch to nightly has not been confirmed yet, so this worker cannot go back to stable until it has. Try again in a minute.'],
 		[{ status: 409, detail: 'Something new' }, 'This worker cannot change its update channel right now.']
 	])('maps refusal %o to one sentence', (cause, sentence) => {
 		expect(channelError(cause)).toBe(sentence);

@@ -33,9 +33,11 @@ def load():
 
 
 def begin(request_id, rows):
+    # from_version is present from the start (None until recorded), so a record
+    # without the key is one saved before it existed (moved_on).
     value = {"id": request_id, "started_at": time.time(), "phase": "waiting", "workers": [
         {"device_id": row["device_id"], "device_name": row["device_name"],
-         "target_version": None, "accepted": None} for row in rows
+         "target_version": None, "from_version": None, "accepted": None} for row in rows
     ]}
     with _lock:
         atomic_json(_path(), value)
@@ -105,10 +107,11 @@ def superseded(current, target):
 
 
 def moved_on(current, target, age):
-    """A record without ``from_version``, settled long ago, on a worker that runs
-    another version than its target."""
+    """A record saved before ``from_version`` existed, settled long ago, on a
+    worker that runs another version than its target. A current record whose
+    starting version was unknown keeps its error: that may be a failed start."""
     running = current.get("running_version")
-    return (age >= LEGACY_SETTLE and not target.get("from_version")
+    return (age >= LEGACY_SETTLE and "from_version" not in target
             and bool(current.get("online") and current.get("supported")) and _commit(running)
             and _commit(target.get("target_version")) and not same_version(running, target["target_version"]))
 

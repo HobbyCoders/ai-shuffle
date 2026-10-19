@@ -75,6 +75,8 @@ class DesktopUpdateState(BaseModel):
     installed_release: DesktopInstalledRelease | None = None
     # Why the shell refused the last return to stable it was sent; reported once.
     channel_error: str | None = Field(default=None, max_length=1000)
+    # The attempt the refusal answers (the set_channel request's ``attempt``).
+    channel_attempt: int | None = Field(default=None, ge=0, lt=2**53)
     phase: Literal["idle", "checking", "available", "downloading", "ready", "error", "unsupported"]
     version: str | None = Field(default=None, max_length=64)
     running_version: str | None = Field(default=None, max_length=64)

@@ -56,6 +56,14 @@ if (channel === 'stable') {
  git('fetch', '--quiet', '--tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
  try { git('merge-base', '--is-ancestor', revision, 'refs/remotes/origin/main'); }
  catch { throw new Error(`${releaseTag} (${revision}) is not on main; refusing to sign it as a stable release`); }
+ // Workers order code by container.sequence, main's first-parent count
+ // (scripts/ci/public_cutover.py), and accept a return from nightly while that
+ // is below stable's (app/core/stable_return.py). A commit reached only through
+ // a merged branch counts lower than main commits it lacks, so stable must be a
+ // first-parent main commit, as every release so far has been.
+ if (!git('rev-list', '--first-parent', 'refs/remotes/origin/main').split('\n').includes(revision)) {
+  throw new Error(`${releaseTag} (${revision}) is not on main's first-parent history; tag the merge commit on main instead`);
+ }
  version = releaseTag.slice(1);
  // Release notes come from the annotated tag message (git tag -a vX.Y.Z -F notes.md).
  if (git('cat-file', '-t', `refs/tags/${releaseTag}`) === 'tag') {

@@ -63,7 +63,7 @@ test('a return to stable goes through channel-return, reports what runs, and rep
  const returns=[];let refuse=true;let channel='nightly';let set=0;
  const channelReturn={
   installedRelease:async(u,version)=>({revision:u.version,container_sequence:5,version}),
-  returnToStable:async(u,manifest,version)=>{returns.push([manifest,version]);if(refuse)throw Error('This app runs code that is newer than the current stable release');channel='stable';}
+  returnToStable:async(u,manifest,version)=>{returns.push([manifest,version]);if(refuse)throw Error('This app runs code that is newer than the current stable release'+'.'.repeat(2000));channel='stable';}
  };
  const {updater,app}=fixture({},{'./channel-return':channelReturn});app.getVersion=()=>'1.0.2';
  let request={};const seen=[];
@@ -75,12 +75,14 @@ test('a return to stable goes through channel-return, reports what runs, and rep
  updater.setBridge(async state=>{seen.push(state);const next=request;request={};return next;},async()=>false);
  updater.start();await new Promise(setImmediate);
  assert.deepEqual(seen.at(-1).installed_release,{revision:'a'.repeat(40),container_sequence:5,version:'1.0.2'});
- request={action:'set_channel',channel:'stable',stable_manifest:'{"signed":true}',expires_at:Date.now()/1000+10};
+ request={action:'set_channel',channel:'stable',stable_manifest:'{"signed":true}',attempt:7,expires_at:Date.now()/1000+10};
  await updater.exchange();await new Promise(setImmediate);
  assert.deepEqual(returns,[['{"signed":true}','1.0.2']]);assert.equal(set,0);assert.equal(channel,'nightly');
  // Reported on the next exchange, then dropped: the worker has cleared the request.
  assert.match(seen.at(-1).channel_error,/newer than the current stable release/);
- await updater.exchange();assert.equal(seen.at(-1).channel_error,undefined);
+ // Capped to what the worker accepts, and tied to the attempt it answers.
+ assert.equal(seen.at(-1).channel_error.length,1000);assert.equal(seen.at(-1).channel_attempt,7);
+ await updater.exchange();assert.equal(seen.at(-1).channel_error,undefined);assert.equal(seen.at(-1).channel_attempt,undefined);
  refuse=false;request={action:'set_channel',channel:'stable',stable_manifest:'{"signed":true}',expires_at:Date.now()/1000+10};
  await updater.exchange();await new Promise(setImmediate);
  assert.equal(channel,'stable');assert.equal(seen.at(-1).channel_config.channel,'stable');assert.equal(seen.at(-1).channel_error,undefined);

@@ -62,7 +62,7 @@ export function channelError(cause: unknown): string {
 		if (/reinstall|backwards/i.test(detail)) return LEGACY_RETURN_TEXT;
 		if (/current update/i.test(detail)) return 'An update is in progress. Change the channel after it finishes.';
 		// The return-to-stable check explains itself in plain sentences.
-		if (/stable/i.test(detail) && detail.length <= 400) return detail;
+		if (/stable|nightly/i.test(detail) && detail.length <= 400) return detail;
 		if (/UPDATE_CHANNEL|launcher/i.test(detail)) return 'This worker’s environment or launcher sets its channel, so it cannot be changed here.';
 		return 'This worker cannot change its update channel right now.';
 	}
