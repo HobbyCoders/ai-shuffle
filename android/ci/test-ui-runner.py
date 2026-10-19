@@ -10,6 +10,8 @@ import tempfile
 import unittest
 
 CI = Path(__file__).resolve().parent
+# Match test-publish-apk.py: PATH's bash.exe can be the unconfigured WSL launcher.
+BASH = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == "nt" else "bash"
 
 
 class UiRunnerTest(unittest.TestCase):
@@ -33,7 +35,7 @@ if name == "timeout":
     args.pop(0)  # Recorded host deadline; do not sleep in this self-test.
     # Native Windows exec cannot launch an extensionless Bash shim. Resolve it
     # through Bash just like the real runner, preserving the child's exit code.
-    sys.exit(subprocess.call(["bash", "-c", 'exec "$@"', "timeout-shim", *args]))
+    sys.exit(subprocess.call([os.environ["UI_RUNNER_TEST_BASH"], "-c", 'exec "$@"', "timeout-shim", *args]))
 if "instrument" in args:
     suite = "notClass" in args
     mode = os.environ["MODE"] if suite == (os.environ["PHASE"] == "suite") else "pass"
@@ -61,16 +63,17 @@ if "instrument" in args:
             for name in ("adb", "timeout"):
                 executable = root / "bin" / name
                 executable.write_text(
-                    '#!/usr/bin/env bash\n'
+                    '#!/bin/bash\n'
                     f'exec "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" {name} "$@"\n',
                     encoding="utf-8", newline="\n")
                 executable.chmod(0o755)
             env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
                        GITHUB_STEP_SUMMARY=str(root / "summary"),
+                       UI_RUNNER_TEST_BASH=BASH,
                        UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
                        UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
-            result = subprocess.run(["bash", str(CI / "run-android-ui-tests.sh")], cwd=root,
+            result = subprocess.run([BASH, str(CI / "run-android-ui-tests.sh")], cwd=root,
                                     env=env, text=True, capture_output=True, timeout=10)
             self.assertTrue((root / "calls").exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]

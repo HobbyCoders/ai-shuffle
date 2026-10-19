@@ -15,6 +15,7 @@ import local_ci_stages  # noqa: E402  pyright: ignore[reportMissingImports]
 import windows_parts  # noqa: E402  pyright: ignore[reportMissingImports]
 
 WORKFLOW = ROOT / ".github" / "workflows" / "windows-suite.yml"
+BASH = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == "nt" else "bash"
 
 
 def workflow():
@@ -55,13 +56,13 @@ def test_selected_tests_route_to_their_runner_and_preserve_failures(tmp_path, te
     for name in ("python", "npm", "npx"):
         shim = bin_dir / name
         shim.write_text(
-            '#!/usr/bin/env bash\n'
+            '#!/bin/bash\n'
             'printf "%s:%s\\n" "${0##*/}" "$*" >> "$CALLS"\n'
             'if [[ -n "$FAIL_MATCH" && "$*" == *"$FAIL_MATCH"* ]]; then exit 9; fi\n',
             encoding="utf-8", newline="\n")
         shim.chmod(0o755)
     calls = tmp_path / "calls"
-    result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], cwd=tmp_path,
+    result = subprocess.run([BASH, "-eo", "pipefail", "-c", command], cwd=tmp_path,
                             env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                                  "LOCAL_CI_PYTHON": (bin_dir / "python").as_posix(), "TESTS": tests,
                                  "RUNNER_TEMP": tmp_path.as_posix(), "CALLS": calls.as_posix(),
