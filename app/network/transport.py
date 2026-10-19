@@ -67,6 +67,10 @@ STATE_POLL_SECONDS = 1.0
 STATE_POLL_MAX_SECONDS = 10.0
 # A regular pass keeps pulling full batches for this long before it pushes.
 SYNC_PULL_SECONDS = 3.0
+# Retry ordinary ordered exchange first (including dependencies from other
+# streams), then repair a persistently blocked prefix through verified state.
+STALLED_PULL_PASSES = 3
+STALLED_COPY_RETRY_SECONDS = 60.0
 # Set for the launch barrier's requests only (a context variable, so the
 # background sync loop keeps its own timeouts): a dead address fails fast.
 connect_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
@@ -350,6 +354,10 @@ class PeerLink:
         self.token: str | None = None
         self.token_expires = 0.0
         self.last_error: str | None = None
+        self.sync_warning: str | None = None
+        self._stalled_streams: dict[tuple[str, str], dict] = {}
+        self.last_sync_repair: dict | None = None
+        self._repair_after = 0.0
         self.backoff_until = 0.0
         self.failures = 0
         # Set once an inbound contact has cut a failure streak's backoff short;
@@ -641,6 +649,7 @@ class PeerLink:
         target = None
         marks = await asyncio.to_thread(store.local_watermarks)
         pull_deadline = time.monotonic() + SYNC_PULL_SECONDS
+        checked_stalls: set[tuple[str, str]] = set()
         while True:
             session_ids = requested_session_watermarks(self.device_id)
             exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange", json_body={
@@ -678,6 +687,16 @@ class PeerLink:
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
                 self.batches += 1
+            # A quiet exchange did not change our frontier. Preserve its cheap
+            # path rather than issuing another head query on every idle poll.
+            current = (await asyncio.to_thread(store.local_watermarks)
+                       if ops or exchange.get("snapshot_required") else marks)
+            if not exchange.get("snapshot_required"):
+                repaired = await self._repair_stalled_pull(
+                    client, ctx, marks, current, theirs, checked_stalls, summary)
+                if repaired:
+                    current = await asyncio.to_thread(store.local_watermarks)
+                    ctx = engine.require_context()
             if not catch_up:
                 # A backlog drains in one pass instead of one batch per
                 # SYNC_ACTIVE_SECONDS; the time budget keeps the push below
@@ -685,12 +704,10 @@ class PeerLink:
                 if (len(ops) < BATCH_LIMIT or exchange.get("snapshot_required")
                         or time.monotonic() >= pull_deadline):
                     break
-                current = await asyncio.to_thread(store.local_watermarks)
                 if current == marks:
                     break  # nothing applied; the same batch would come back
                 marks = current
                 continue
-            current = await asyncio.to_thread(store.local_watermarks)
             caught_up = all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
                             for origin, streams in target.items() for inc, seq in streams.items())
             if caught_up:
@@ -752,8 +769,84 @@ class PeerLink:
             summary["snapshot_required"] = True
         self.failures = 0
         self.contact_kick_used = False
-        self.last_error = None
+        self.last_error = self.sync_warning
         return summary
+
+    async def _repair_stalled_pull(self, client, ctx, before, current, theirs, checked, summary) -> bool:
+        """Never skip a hole: recover only by committing the normal signed state copy.
+
+        Track each stream separately so a busy unrelated stream cannot conceal
+        a blocked catalog. Count once per pass, not once per full batch.
+        """
+        stalled = {}
+        for origin, streams in theirs.items():
+            if origin == ctx.device_id:
+                continue
+            local = current.get(origin, {})
+            highest = max((int(inc) for inc in local), default=0)
+            for inc, head in streams.items():
+                key = (origin, str(inc))
+                seq = int(local.get(str(inc), 0))
+                if int(inc) < highest or seq >= int(head):
+                    self._stalled_streams.pop(key, None)
+                    continue
+                if seq > int(before.get(origin, {}).get(str(inc), 0)):
+                    self._stalled_streams.pop(key, None)
+                    continue
+                entry = self._stalled_streams.get(key)
+                if entry is None or entry["watermark"] != seq:
+                    entry = {"origin_device_id": origin, "incarnation": int(inc),
+                             "watermark": seq, "head_seq": seq + 1, "passes": 0,
+                             "first_seen_at": time.time(), "reason": "missing ordered prefix"}
+                for blocked in summary.get("apply", {}).get("blocked", []):
+                    if (blocked.get("origin_device_id") == origin
+                            and str(blocked.get("incarnation")) == str(inc)
+                            and blocked.get("seq") == seq + 1):
+                        entry["reason"] = blocked["reason"]
+                        break
+                if key not in checked:
+                    entry["passes"] += 1
+                    checked.add(key)
+                self._stalled_streams[key] = entry
+                stalled[key] = entry
+        if not stalled:
+            self.sync_warning = None
+            return False
+        (origin, inc), entry = max(stalled.items(), key=lambda item: item[1]["passes"])
+        seq, count, reason = entry["watermark"], entry["passes"], entry["reason"]
+        warning = f"Sync blocked at {origin}/{inc}/{seq + 1}: {reason}"
+        if warning != self.sync_warning:
+            logger.warning("%s (peer %s)", warning, self.device_id)
+        self.sync_warning = warning
+        summary["sync_warning"] = warning
+        summary.setdefault("apply", {}).setdefault("reasons", []).append(warning)
+        if count < STALLED_PULL_PASSES or time.monotonic() < self._repair_after:
+            return False
+        self._repair_after = time.monotonic() + STALLED_COPY_RETRY_SECONDS
+        logger.warning("Repairing stalled sync from %s with a verified state copy: %s", self.device_id, warning)
+        summary["repair_snapshot"] = True
+        self.last_sync_repair = {**entry, "started_at": time.time(), "state": "copying"}
+        try:
+            summary["received"] += await self.receive_state(client, ctx)
+        except PeerStateUnavailable as exc:
+            self.last_sync_repair["state"] = "deferred"
+            summary["snapshot_deferred"] = True
+            logger.warning("Stalled sync repair from %s deferred: %s", self.device_id, exc)
+            return False
+        except Exception:
+            self.last_sync_repair["state"] = "failed"
+            raise
+        after = await asyncio.to_thread(store.local_watermarks)
+        if int(after.get(origin, {}).get(inc, 0)) <= seq:
+            # An older cached copy is not evidence that the missing prefix was
+            # covered. Keep the warning and retry later; never adopt an invented
+            # frontier or report success for the stalled stream.
+            self.last_sync_repair["state"] = "no_progress"
+            return False
+        self.last_sync_repair.update(state="repaired", finished_at=time.time())
+        self._stalled_streams.pop((origin, inc), None)
+        self.sync_warning = None
+        return True
 
     async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
                             *, on_wait=None) -> int:
@@ -1031,7 +1124,9 @@ def link_status() -> List[dict]:
         out.append({"device_id": link.device_id, "base_url": link.active_url, "endpoints": link.endpoints,
                     "lan_endpoints": link.lan_endpoints, "route": link.route,
                     "lan_error": link.lan_last_error if link.lan is None and link.lan_endpoints else None,
-                    "last_error": link.last_error, "seconds_since_contact": age,
+                    "last_error": link.last_error, "sync_warning": link.sync_warning,
+                    "stalled_streams": list(link._stalled_streams.values()),
+                    "last_sync_repair": link.last_sync_repair, "seconds_since_contact": age,
                     "online": age is not None and age <= ONLINE_WINDOW_SECONDS, "syncing": link.syncing})
     return out
 

@@ -12,6 +12,12 @@ AI Shuffle no longer ships a default built-in agent. For ordinary session creati
 
 An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
 
+## Lifecycle synchronization
+
+Active/Settled membership is shared across paired workers; archive and delete run on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. If a stream makes no progress for three exchange passes, the receiving worker requests a verified state copy rather than skipping missing operations. Failed or unavailable copies preserve the existing frontier and retry no more than once per minute.
+
+`GET /api/v1/network/status` includes each peer's `sync_warning`, `stalled_streams` (origin, incarnation, next required `head_seq`, reason, pass count and Unix `first_seen_at`) and `last_sync_repair`. A successful HTTP exchange does not erase a blocked-stream warning. A completed copy clears the blockage only when its verified frontier advances; normal ordered replication then resumes. Diagnostic counters are in-memory and restart with the worker.
+
 ## User-message revision
 
 Session list (including paginated/cursor lists) and detail responses include
@@ -414,6 +420,8 @@ curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Tit
 ### DELETE /api/v1/sessions/{session_id}
 
 Delete a session and all its messages.
+
+For a session owned by another paired worker, deletion runs on that worker before the local catalog copy is removed. The owner publishes a deletion record so other workers remove their copies when synchronization catches up. If the owner is unreachable, the request returns `503`; if it refuses the request or does not support remote deletion, it returns `409`. Neither failure removes the local copy. The same routing applies to batch deletion, where failures are listed in `errors` and other items continue.
 
 The assistant’s built-in home chat returns `409` with `{"detail": "Your personal assistant is a persistent conversation and cannot be deleted"}`. Its conversation and home binding are preserved.
 
