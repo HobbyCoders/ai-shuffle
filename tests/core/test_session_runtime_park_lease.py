@@ -238,7 +238,9 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
     started = asyncio.Event()
     renewing = asyncio.Event()
     heartbeat_done = asyncio.Event()
+    retried = asyncio.Event()
     rejected = []
+    errors = []
     real_loop = runtime._renew_loop
     monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.001)
 
@@ -255,6 +257,9 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
         renewing.set()
         await written.wait()
         if renewal == "error":
+            errors.append(1)
+            if len(errors) >= 2:
+                retried.set()
             raise RuntimeError("delayed SQL failure")
         ok = await asyncio.to_thread(fn, *args)
         rejected.append(ok)
@@ -269,8 +274,13 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
     async def slow_cleanup(*args, **kwargs):
         assert turns_db.get_turn(turn["id"])["state"] == outcome
         written.set()
-        # The heartbeat must finish on its own, not via execute's final cancel.
-        await asyncio.wait_for(heartbeat_done.wait(), 3)
+        if renewal == "error":
+            # A transient error is retried (not treated as loss) until
+            # execute's final cancel ends the heartbeat.
+            await asyncio.wait_for(retried.wait(), 3)
+        else:
+            # The heartbeat must finish on its own, not via execute's final cancel.
+            await asyncio.wait_for(heartbeat_done.wait(), 3)
 
     with _runtime_env(
         pump=pump, bg_work=[{"id": "background"}] if outcome == "parked" else [],
@@ -286,6 +296,8 @@ async def test_final_write_stops_heartbeat_without_lease_loss(
 
     assert written.is_set()
     assert rejected == ([] if renewal == "error" else [False])
+    if renewal == "error":
+        assert len(errors) >= 2
     lost.assert_not_called()
     stop.assert_not_called()
     interrupt.assert_not_called()
@@ -308,6 +320,7 @@ async def test_finalizing_tick_before_the_write_keeps_renewing_or_exits_quietly(
     final_write = turns_db.park_turn if outcome == "parked" else turns_db.settle_turn
     successes = []
     attempts = []
+    errors = []
     seen = {}
     monkeypatch.setattr(session_runtime, "RUN_LEASE_RENEW_SECONDS", 0.001)
 
@@ -326,6 +339,11 @@ async def test_finalizing_tick_before_the_write_keeps_renewing_or_exits_quietly(
         if turns_db.get_turn(turn["id"])["state"] == outcome:
             return await real_to_thread(fn, *args)
         if renewal == "error":
+            # Transient errors are retried while finalizing; release the
+            # final write once a retry has proven the loop kept going.
+            errors.append(1)
+            if len(errors) >= 2:
+                tick_ready.set()
             raise RuntimeError("SQL failure before final write")
         if renewal == "rejected":
             return False
@@ -367,10 +385,15 @@ async def test_finalizing_tick_before_the_write_keeps_renewing_or_exits_quietly(
         # A successful finalizing tick must continue at the normal cadence.
         assert successes[:2] == [True, True]
         assert str(seen["after"]["lease_expires_at"]) > str(seen["before"]["lease_expires_at"])
+    if renewal == "error":
+        assert len(errors) >= 2
+        assert "SessionRuntime: renew_run raised" in caplog.text
+    else:
+        assert "SessionRuntime: renew_run" not in caplog.text
     lost.assert_not_called()
     stop.assert_not_called()
     interrupt.assert_not_called()
-    assert "SessionRuntime: renew_run" not in caplog.text
+    assert "kept failing" not in caplog.text
     assert "SessionRuntime: lease renewal lost" not in caplog.text
     assert runtime._abort_reason is None
     assert not runtime._unowned

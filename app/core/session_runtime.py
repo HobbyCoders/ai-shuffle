@@ -3410,8 +3410,9 @@ class SessionRuntime:
         was reaped or taken over) or when renewals kept failing for a whole
         TTL, which is when the DB lets the lease lapse. Either way the turn
         stops itself (``_on_lease_lost``) instead of running on unowned.
-        Finalization keeps renewing until the parked/terminal write lands, but
-        a rejected or failed renewal then exits quietly: the pump is finished.
+        Finalization keeps renewing (and retrying transient errors) until the
+        parked/terminal write lands; a rejected renewal or an exhausted TTL then
+        exits quietly, because the pump is finished.
         """
         loop = asyncio.get_running_loop()
         renewed_at = loop.time()
@@ -3433,8 +3434,9 @@ class SessionRuntime:
                     timeout=remaining,
                 )
             except Exception:
-                if self._lease_finalizing:
-                    return
+                # Retry while finalizing too: pool pressure is what slows the
+                # final write, so giving up on the first transient error would
+                # let the lease lapse before the parked/terminal write lands.
                 remaining = RUN_LEASE_TTL_SECONDS - (loop.time() - renewed_at)
                 if remaining > 0:
                     # Retry promptly instead of burning another full heartbeat
