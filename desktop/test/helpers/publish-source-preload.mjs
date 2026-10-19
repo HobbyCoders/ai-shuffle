@@ -33,6 +33,7 @@ cp.execFileSync=(exe,args,options={})=>{
   if(args[0]==='rev-parse'&&args[1]==='HEAD')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='refs/tags/v1.2.3^{commit}')return revision+'\n';
   if(args[0]==='rev-parse'&&args[1]==='--is-shallow-repository')return 'false\n';
+  if(args.join(' ')==='rev-list --first-parent refs/remotes/origin/main'){events.push('first-parent');return scenario==='side-branch'?'e'.repeat(40)+'\n':'e'.repeat(40)+'\n'+revision+'\n';}
   if(args[0]==='rev-list')return '42\n';
   if(args[0]==='show'&&args.includes('--format=%ct'))return '1\n';
   if(args[0]==='show'&&args[1]===`${revision}:desktop/launcher.json`)return fs.readFileSync(new URL('../../launcher.json',import.meta.url),'utf8');

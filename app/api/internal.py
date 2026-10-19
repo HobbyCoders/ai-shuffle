@@ -60,8 +60,23 @@ class DesktopChannelConfig(BaseModel):
     editable: bool
 
 
+class DesktopInstalledRelease(BaseModel):
+    """The signed release the shell runs, for the return-to-stable check
+    (app/core/stable_return.py). container_sequence is its main-history
+    ordinal; None for an installer's bundled build, which has no signed release."""
+    revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    container_sequence: int | None = Field(default=None, ge=1, lt=2**53)
+    version: str | None = Field(default=None, max_length=80)
+
+
 class DesktopUpdateState(BaseModel):
     channel_config: DesktopChannelConfig | None = None
+    # Shells that report it can verify a return from nightly to stable.
+    installed_release: DesktopInstalledRelease | None = None
+    # Why the shell refused the last return to stable it was sent; reported once.
+    channel_error: str | None = Field(default=None, max_length=1000)
+    # The attempt the refusal answers (the set_channel request's ``attempt``).
+    channel_attempt: int | None = Field(default=None, ge=0, lt=2**53)
     phase: Literal["idle", "checking", "available", "downloading", "ready", "error", "unsupported"]
     version: str | None = Field(default=None, max_length=64)
     running_version: str | None = Field(default=None, max_length=64)

@@ -451,6 +451,52 @@ def test_a_new_check_clears_a_failed_install_saved_without_its_starting_version(
     assert asyncio.run(fleet.snapshot())["operation"] is None
 
 
+def test_a_failed_install_gives_way_to_a_newer_staged_update(setup, monkeypatch):
+    # The restart into B was never confirmed; the worker has since staged C.
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    asyncio.run(fleet.dispatch("install"))
+    saved = fleet.progress.load()
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    updates.desktop_exchange({"phase": "ready", "version": C[:12], "running_version": A})
+    snapshot = asyncio.run(fleet.snapshot())
+    assert snapshot["operation"]["phase"] == "complete"
+    assert snapshot["operation"]["workers"][0]["message"] == f"Update {C[:12]} replaces this one"
+    assert "completed_at" not in snapshot["operation"]
+    assert fleet.progress.load()["phase"] == "complete"  # settled for good, never an error again
+
+
+def test_a_newer_offer_does_not_end_an_install_still_starting(setup, monkeypatch):
+    updates.desktop_exchange({"phase": "ready", "version": B[:12], "running_version": A})
+    asyncio.run(fleet.dispatch("install"))
+    updates.desktop_exchange({"phase": "available", "version": C[:12], "running_version": A})
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "waiting"
+
+
+def test_a_legacy_failed_install_settles_once_the_worker_moved_on(setup, monkeypatch):
+    # Saved without from_version, as installs before it were: a failed start and
+    # a worker that moved on look alike until it has been a day.
+    saved = {"id": "old", "started_at": time.time(), "phase": "waiting", "workers": [
+        {"device_id": "self", "device_name": "Local", "target_version": B[:12], "accepted": True, "reason": ""}]}
+    updates.atomic_json(fleet.progress._path(), saved)
+    updates.desktop_exchange({"phase": "idle", "running_version": C})
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + 601)
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: saved["started_at"] + fleet.progress.LEGACY_SETTLE)
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "complete"
+    # A current record whose starting version was never learned keeps its error:
+    # that may be a failed start.
+    fleet.progress.begin("new", [{"device_id": "self", "device_name": "Local"}])
+    fleet.progress.record("new", "self", target_version=B[:12], result={"accepted": True})
+    fresh = fleet.progress.load()
+    assert fresh["workers"][0]["from_version"] is None
+    monkeypatch.setattr(fleet.progress.time, "time", lambda: fresh["started_at"] + fleet.progress.LEGACY_SETTLE)
+    assert asyncio.run(fleet.snapshot())["operation"]["phase"] == "error"
+    # A worker still on its target is verified, never "moved on"; one on the
+    # version a recorded install started from keeps the error.
+    assert not fleet.progress.moved_on({"online": True, "supported": True, "running_version": C},
+                                       {"target_version": B[:12], "from_version": C}, fleet.progress.LEGACY_SETTLE)
+
+
 @pytest.mark.parametrize("running,target", [(None, B), (B, None), ("", ""), (A, B), ("b", B), ("latest", "latest")])
 def test_version_verification_requires_a_matching_commit(running, target):
     assert not fleet.progress.same_version(running, target)

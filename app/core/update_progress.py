@@ -9,6 +9,10 @@ from app.core.application_updates import atomic_json
 
 _lock = threading.RLock()
 STARTUP_TIMEOUT = 10 * 60
+# Records saved before ``from_version`` existed cannot tell a failed start from
+# a worker that moved on. After this long, a worker running another version
+# than the target has moved on as far as this install is concerned.
+LEGACY_SETTLE = 24 * 60 * 60
 
 
 def _path():
@@ -29,9 +33,11 @@ def load():
 
 
 def begin(request_id, rows):
+    # from_version is present from the start (None until recorded), so a record
+    # without the key is one saved before it existed (moved_on).
     value = {"id": request_id, "started_at": time.time(), "phase": "waiting", "workers": [
         {"device_id": row["device_id"], "device_name": row["device_name"],
-         "target_version": None, "accepted": None} for row in rows
+         "target_version": None, "from_version": None, "accepted": None} for row in rows
     ]}
     with _lock:
         atomic_json(_path(), value)
@@ -89,6 +95,27 @@ def replaced(current, target):
             and not same_version(running, before) and not same_version(running, target.get("target_version")))
 
 
+def superseded(current, target):
+    """The worker offers, downloads or has staged a different update: a failed
+    install of the old target has nothing left to do, and its error must not
+    hide the newer update's own button state."""
+    offered = current.get("version")
+    return (bool(current.get("online") and current.get("supported"))
+            and current.get("phase") in ("available", "downloading", "ready")
+            and _commit(offered) and _commit(target.get("target_version"))
+            and not same_version(offered, target.get("target_version")))
+
+
+def moved_on(current, target, age):
+    """A record saved before ``from_version`` existed, settled long ago, on a
+    worker that runs another version than its target. A current record whose
+    starting version was unknown keeps its error: that may be a failed start."""
+    running = current.get("running_version")
+    return (age >= LEGACY_SETTLE and "from_version" not in target
+            and bool(current.get("online") and current.get("supported")) and _commit(running)
+            and _commit(target.get("target_version")) and not same_version(running, target["target_version"]))
+
+
 def observe(operation, rows):
     if not operation:
         return None
@@ -96,6 +123,7 @@ def observe(operation, rows):
     if operation["phase"] == "complete":
         return operation
     live = {row["device_id"]: row for row in rows}
+    age = time.time() - operation["started_at"]
     workers = []
     for target in operation["workers"]:
         current = live.get(target["device_id"], {})
@@ -106,10 +134,14 @@ def observe(operation, rows):
         if (current.get("online") and current.get("supported")
                 and same_version(current.get("running_version"), target.get("target_version"))):
             worker.update(status="verified", message="Updated and verified")
-        elif replaced(current, target):
+        elif replaced(current, target) or moved_on(current, target, age):
             worker.update(status="replaced", message=f"Now runs {current['running_version'][:12]}; nothing left to install")
         elif target["accepted"] is False:
             worker.update(status="skipped", message=target.get("reason") or "Not queued")
+        elif (current.get("error") or age >= STARTUP_TIMEOUT) and superseded(current, target):
+            # Only once this install has failed or timed out: while it runs, a
+            # newer offer does not end the wait for its restart.
+            worker.update(status="replaced", message=f"Update {current['version'][:12]} replaces this one")
         elif current.get("error"):
             worker.update(status="error", message=current["error"])
         else:
@@ -121,7 +153,7 @@ def observe(operation, rows):
         phase = "complete"
     elif not included or any(worker["status"] == "error" for worker in included):
         phase = "error"
-    elif time.time() - operation["started_at"] >= STARTUP_TIMEOUT:
+    elif age >= STARTUP_TIMEOUT:
         phase = "error"
         for worker in included:
             if worker["status"] == "waiting":

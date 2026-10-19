@@ -202,8 +202,14 @@ stay on their selected channel: publication never switches, installs or restarts
 them. Docker accepts `UPDATE_CHANNEL=stable|nightly`; desktop accepts
 `{"channel":"nightly"}` in `updates/update-channel.json` under its user-data
 directory. Both default to stable. Manual `docker-publish.yml` runs on `main`
-produce the `nightly` image tag. Returning from nightly to stable needs a
-reinstall, because database migrations do not run backwards.
+produce the `nightly` image tag. Database migrations do not run backwards, so
+returning from nightly to stable is accepted only while the worker runs code
+that is not newer than the current stable release: the same revision, a lower
+signed `container.sequence` (main-history ordinal), or, for a desktop on its
+installer's bundled build, a final version no later than stable's
+(`app/core/stable_return.py`; the desktop re-verifies the signed stable
+manifest in `desktop/src/main/channel-return.ts`). Otherwise the worker stays on
+nightly until stable catches up.
 
 ### Two-step edge transition
 

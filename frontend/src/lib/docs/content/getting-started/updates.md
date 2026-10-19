@@ -12,7 +12,7 @@ AI Shuffle never changes under you. Your install runs the version you chose unti
 
 **Stable** is the default: tested releases. **Nightly** follows yesterday's `main`: it may break. A signed nightly is published at 06:00 UTC only when `main` changed and that exact revision has a local full-suite pass. If the pass is missing, the previous nightly stays available. Both channels verify signatures before installing.
 
-**There is no way back from nightly to stable without a reinstall.** Database migrations do not run backwards. Keep a backup before switching; pointing an older stable version at a nightly database is not a downgrade path.
+**Switching back to stable works only while this worker is not ahead of the current stable release.** Database migrations do not run backwards, so a worker running newer nightly code stays on nightly until a stable release catches up with it; the switch then works from Settings without a reinstall. A worker that runs the stable release itself, or an older version, can switch back at once. Keep a backup before switching; pointing an older stable version at a nightly database is not a downgrade path.
 
 For Docker, set `UPDATE_CHANNEL=nightly` (or `stable`). An explicit environment value overrides the saved local choice and makes it read-only in the channel API. Without that override, the owner API saves `application-updates/update-channel.json` in the data volume; restart the container to apply a change. Desktop stores `{"channel":"nightly"}` in `updates/update-channel.json` under its user-data directory. The choice applies to this install, not every worker on the account.
 
