@@ -601,3 +601,19 @@ test('while a restore point is ready for an update that has not started, nothing
 		assert.deepEqual(held, [], 'an unreadable journal holds the database closed too');
 	} finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
+test('a restore point that cannot be discarded after a failed restart makes the status page say to quit and open the app again', async () => {
+	const R = 'b'.repeat(40);
+	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
+	const host = { executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe', userData: 'C:/Users/owner/AppData/Roaming/AI Shuffle', name: 'AI Shuffle' };
+	const updates = { options: { root: '/isolated/no-root' }, async requireRestorePoint() {}, async databaseStarting() {}, healthy: () => new Promise(() => {}), async finishRollback() {}, async failed() {}, async load() {},
+		async prepareRollback() {}, async rollbackVersion() { return '1.0.1'; }, async rollbackNotice() { return null; },
+		async cancelPreparedRollback() { throw new Error('EBUSY: restore-point.json is locked'); } };
+	const main = await launch({ managed: { root: '/isolated/no-root', application, updates, host }, platform: 'win32', env: { SHUFFLE_LAUNCHER_VERSION: '4' } });
+	await main.updater.prepared.prepare();
+	const before = main.window.sent.length;
+	await assert.rejects(main.updater.prepared.discard(), /EBUSY/);
+	const states = main.window.sent.slice(before).filter(([channel]) => channel === 'desktop:worker-state');
+	assert.equal(states.length, 1, 'the page is told straight away');
+	assert.equal(states[0][1].phase, 'failed');
+	assert.match(states[0][1].error, /Quit AI Shuffle and open it again to finish installing the update/);
+});
