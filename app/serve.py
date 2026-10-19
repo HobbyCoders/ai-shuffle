@@ -98,12 +98,13 @@ class IngressApplication:
         if scope["type"] == "http" and scope.get("path") == preview_access.REDIRECT_PATH \
                 and scope.get("method") == "GET":
             return True
-        token = _cookie(scope, preview_access.COOKIE_NAME)
-        if not token:
-            return False
         try:
             from app.db.async_database import run_sync
 
+            name = await run_sync(preview_access.cookie_name)
+            token = _cookie(scope, name)
+            if not token:
+                return False
             return await run_sync(preview_access.verify, token) is not None
         except Exception:  # noqa: BLE001 - an unreadable grant is a denial
             return False

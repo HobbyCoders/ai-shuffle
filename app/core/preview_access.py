@@ -62,7 +62,7 @@ from urllib.parse import quote, urlsplit
 
 logger = logging.getLogger(__name__)
 
-COOKIE_NAME = "ais_preview"
+COOKIE_PREFIX = "ais_preview_"
 QUERY_PARAM = "token"
 REDIRECT_PATH = "/api/v1/auth/preview-access"
 KEY_FILE = "preview-access.key"
@@ -346,6 +346,28 @@ def mutation_allowed(path: str, method: str) -> bool:
     return not path.startswith(MUTATION_DENY_PREFIXES)
 
 
+def cookie_name() -> str:
+    """A stable namespace per install, independent of listener/proxy ports.
+
+    Browsers share cookies across ports on a host. Isolated previews use
+    different signing keys, so their grants must have different names too.
+    Derive at use time, not import time: the data dir is configured at startup.
+    """
+    fingerprint = sha256(b"ai-shuffle-preview-cookie\0" + _key()).hexdigest()[:24]
+    return COOKIE_PREFIX + fingerprint
+
+
+def cookie_token(cookies) -> Optional[str]:
+    """Read only this install's grant; unknown/legacy cookies grant nothing."""
+    if not cookies:
+        return None
+    try:
+        return cookies.get(cookie_name())
+    except Exception:  # noqa: BLE001 — an unreadable key is a denial
+        logger.debug("preview access: cookie lookup failed", exc_info=True)
+        return None
+
+
 def enforce_limits(request) -> None:
     """A valid preview cookie restricts *all* HTTP authentication paths.
 
@@ -356,7 +378,7 @@ def enforce_limits(request) -> None:
     """
     from fastapi import HTTPException
 
-    token = request.cookies.get(COOKIE_NAME)
+    token = cookie_token(request.cookies)
     found = verify(token) if token else None
     request.state.preview_grant = found
     if found is not None and not mutation_allowed(request.url.path, request.method):
@@ -371,7 +393,7 @@ def grant(request) -> Optional[Grant]:
     """
     try:
         cookies = getattr(request, "cookies", None) or {}
-        token = cookies.get(COOKIE_NAME)
+        token = cookie_token(cookies)
         if not token:
             return None
         if not _private_peer(request):

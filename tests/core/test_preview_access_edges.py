@@ -114,8 +114,8 @@ def test_mint_refuses_missing_session_and_out_of_range_ttl(session_id, ttl):
 
 def test_grant_without_client_address_is_refused():
     token = preview_access.mint(SESSION)
-    assert preview_access.grant(_request(cookies={preview_access.COOKIE_NAME: token}, client=False)) is None
-    assert preview_access.grant(_request(cookies={preview_access.COOKIE_NAME: token}, peer="bogus")) is None
+    assert preview_access.grant(_request(cookies={preview_access.cookie_name(): token}, client=False)) is None
+    assert preview_access.grant(_request(cookies={preview_access.cookie_name(): token}, peer="bogus")) is None
 
 
 def test_grant_swallows_verification_errors(monkeypatch):
@@ -123,19 +123,19 @@ def test_grant_swallows_verification_errors(monkeypatch):
         raise RuntimeError("key file unreadable")
 
     monkeypatch.setattr(preview_access, "verify", boom)
-    request = _request(cookies={preview_access.COOKIE_NAME: "x"})
+    request = _request(cookies={preview_access.cookie_name(): "x"})
     assert preview_access.grant(request) is None
 
 
 def test_grant_refuses_protected_mutation_but_allows_chat_mutation():
     token = preview_access.mint(SESSION)
-    cookies = {preview_access.COOKIE_NAME: token}
+    cookies = {preview_access.cookie_name(): token}
     assert preview_access.grant(_request(cookies=cookies, method="POST", path="/api/v1/settings/x")) is None
     assert preview_access.grant(_request(cookies=cookies, method="POST", path="/api/v1/sessions/x")) is not None
 
 
 def test_enforce_limits_ignores_invalid_cookie_for_ordinary_clients():
-    request = _request(cookies={preview_access.COOKIE_NAME: "forged"}, method="POST", path="/api/v1/settings/x")
+    request = _request(cookies={preview_access.cookie_name(): "forged"}, method="POST", path="/api/v1/settings/x")
     preview_access.enforce_limits(request)  # no raise: an invalid cookie restricts nothing
     assert request.state.preview_grant is None
 

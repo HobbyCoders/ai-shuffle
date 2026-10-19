@@ -31,7 +31,7 @@ _SENSITIVE = {
 }
 _ASSIGNMENT = re.compile(
     r"\b(?:password|passwd|pwd|client[_-]?secret|api[_-]?(?:key|token)|"
-    r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|ais_preview)"
+    r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|ais_preview(?:_[0-9a-f]{24})?)"
     r"[\"']?\s*[:=]\s*(?:\"((?:\\.|[^\"\r\n])+)\"|"
     r"'((?:\\.|[^'\r\n])+)'|([^\s,;&\"'<>}]+))",
     re.IGNORECASE,
@@ -112,7 +112,10 @@ def redact_external_export(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             redact_export_text(k) if isinstance(k, str) else k:
-            REDACTED if isinstance(k, str) and re.sub(r"[-_ ]", "", k).lower() in _SENSITIVE
+            REDACTED if isinstance(k, str) and (
+                re.sub(r"[-_ ]", "", k).lower() in _SENSITIVE
+                or re.fullmatch(r"ais_preview_[0-9a-f]{24}", k, re.IGNORECASE)
+            )
             else redact_external_export(v)
             for k, v in value.items()
         }

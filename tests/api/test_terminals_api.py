@@ -613,10 +613,10 @@ def test_a_valid_peer_worker_token_is_refused(ctx, monkeypatch):
 def test_preview_cookie_is_refused_even_alongside_the_owner(ctx):
     preview = preview_access.mint("agent-session")
     alone = client(ctx)
-    alone.cookies.set(preview_access.COOKIE_NAME, preview)
+    alone.cookies.set(preview_access.cookie_name(), preview)
     _every_route_refused(ctx, alone)
     both = owner(ctx)
-    both.cookies.set(preview_access.COOKIE_NAME, preview)
+    both.cookies.set(preview_access.cookie_name(), preview)
     _every_route_refused(ctx, both, api.PREVIEW_REFUSED)
     tid = create(owner(ctx), shell="sh")["id"]
     with wsc(both, ws_url(tid, ctx.owner)) as ws:

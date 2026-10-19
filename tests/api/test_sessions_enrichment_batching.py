@@ -24,11 +24,12 @@ from app.api.auth import require_auth
 
 
 @pytest.fixture
-def install_settings():
-    """Settings whose instance id owns 'me-install'."""
-    mock_settings = MagicMock()
-    mock_settings.effective_instance_id = "me-install"
-    return mock_settings
+def install_settings(monkeypatch):
+    """Keep lazy imports bound to the real singleton, with a temporary id."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "instance_id", "me-install")
+    return settings
 
 
 def _sessions(count, *, project_prefix="proj", instance="me-install"):
@@ -51,7 +52,6 @@ def _enrich(sessions, install_settings, *, users=None, tags=None, forks=None):
                   return_value=forks or {}) as mock_forks, \
             patch("app.api.sessions_helpers.get_api_users_by_ids",
                   return_value=users or {}) as mock_users, \
-            patch("app.core.config.settings", install_settings), \
             patch.object(sessions_helpers.database, "get_installs_map",
                          return_value={"me-install": {"device_name": "Mine", "online": True}}):
         result = sessions_helpers.enrich_sessions_with_tags(sessions)
@@ -108,7 +108,6 @@ class TestEnrichmentOutputIsUnchanged:
         sessions = [{"id": "s0", "instance_id": "other-install"}]
         with patch("app.api.sessions_helpers.get_tags_for_sessions", return_value={}), \
                 patch("app.api.sessions_helpers.get_fork_info_for_sessions", return_value={}), \
-                patch("app.core.config.settings", install_settings), \
                 patch.object(sessions_helpers.database, "get_installs_map",
                              return_value={"other-install": {"device_name": "Worker", "online": True}}):
             sessions_helpers.enrich_sessions_with_tags(sessions)
@@ -240,7 +239,6 @@ class TestClaimableAndPlacementAreBatched:
         with patch("app.api.sessions_helpers.get_tags_for_sessions", return_value={}), \
                 patch("app.api.sessions_helpers.get_fork_info_for_sessions", return_value={}), \
                 patch("app.api.sessions_helpers.get_api_users_by_ids", return_value={}), \
-                patch("app.core.config.settings", install_settings), \
                 patch("app.db.turns.list_claimable_sessions", claimable_mock), \
                 patch.object(sessions_helpers.database, "get_installs_map",
                              _read_installs):

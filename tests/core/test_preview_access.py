@@ -163,7 +163,7 @@ def test_preview_url_carries_the_token_and_a_safe_next():
 
 def test_grant_requires_cookie_local_listener_and_private_peer():
     token = preview_access.mint(SESSION)
-    cookie = {preview_access.COOKIE_NAME: token}
+    cookie = {preview_access.cookie_name(): token}
     assert preview_access.grant(_request(cookies=cookie)).session_id == SESSION
     assert preview_access.grant(_request()) is None  # no cookie
     assert preview_access.grant(_request(cookies=cookie, ingress="remote")) is None
@@ -196,7 +196,7 @@ def test_grant_requires_cookie_local_listener_and_private_peer():
 ])
 def test_mutation_policy(path, method, allowed):
     assert preview_access.mutation_allowed(path, method) is allowed
-    cookie = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    cookie = {preview_access.cookie_name(): preview_access.mint(SESSION)}
     found = preview_access.grant(_request(path, method, cookies=cookie))
     assert (found is not None) is allowed
 
@@ -244,7 +244,7 @@ def test_redirect_sets_the_cookie_and_the_ui_reads_as_owner(app):
     assert landing.status_code == 303
     assert landing.headers["location"] == "/chat/abc"
     set_cookie = landing.headers["set-cookie"]
-    assert preview_access.COOKIE_NAME in set_cookie and "HttpOnly" in set_cookie
+    assert preview_access.cookie_name() in set_cookie and "HttpOnly" in set_cookie
     # Every later request rides the cookie.
     assert c.get("/api/v1/sessions").json() == {"ok": True}
     posted = c.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.30:18090"})
@@ -275,7 +275,7 @@ def test_branch_preview_routes_accept_the_cookie(monkeypatch):
 
     from app import preview
 
-    cookie = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    cookie = {preview_access.cookie_name(): preview_access.mint(SESSION)}
     vite = {"X-Forwarded-Host": "localhost:5173"}
     with pytest.raises(HTTPException):
         preview._require_preview_owner(_request("/chat", headers=vite))
@@ -322,7 +322,7 @@ def test_preview_ceiling_precedes_every_authentication_path(monkeypatch, depende
     monkeypatch.setattr(auth_api.db, "update_api_user_last_used", lambda ident: None)
     cookies = {}
     if cookie_state != "missing":
-        cookies[preview_access.COOKIE_NAME] = ("invalid" if cookie_state == "invalid" else
+        cookies[preview_access.cookie_name()] = ("invalid" if cookie_state == "invalid" else
             preview_access.mint(SESSION, ttl_seconds=60))
         if cookie_state == "expired":
             now = time.time()
@@ -388,7 +388,7 @@ def test_direct_owner_preview_cannot_reach_protected_handler(prefix, method, dep
     client = TestClient(IngressApplication(api, local_port=18090),
                         base_url="http://10.0.0.30:18090", client=("10.0.0.20", 54321),
                         headers={"Origin": "http://10.0.0.30:18090"})
-    client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
+    client.cookies.set(preview_access.cookie_name(), preview_access.mint(SESSION))
     assert client.request(method, prefix + "/test-only").status_code == 403
     handler.assert_not_called()
 
@@ -402,10 +402,10 @@ def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, p
     client = _client(app)
     if not proxied:
         client.headers.pop("X-Forwarded-Host")
-    client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
+    client.cookies.set(preview_access.cookie_name(), preview_access.mint(SESSION))
     assert client.get("/api/v1/sessions").status_code == 200
     assert client.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.30:18090"}).status_code == 200
-    cookies = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    cookies = {preview_access.cookie_name(): preview_access.mint(SESSION)}
     request = _request("/api/v1/settings/test-only", cookies=cookies, headers=_VITE if proxied else {})
     # Owner-only pages can be READ on the grant alone ("what the local owner
     # has for reading"), so a proxied or preview-listener visit renders them.
@@ -435,7 +435,7 @@ def test_preview_listener_reads_owner_pages_but_never_changes_them(method, admit
 
     from app.api.auth import require_admin
 
-    cookies = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    cookies = {preview_access.cookie_name(): preview_access.mint(SESSION)}
     request = _request("/api/v1/assistant", method, port=8002, ingress="preview", peer="172.17.0.2",
                        cookies=cookies, headers={"Origin": "http://10.0.0.30:8002"})
     if admitted:
