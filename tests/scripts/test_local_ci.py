@@ -770,6 +770,52 @@ def test_attestation_refuses_dirty_or_non_public_head(base_repo, monkeypatch, cl
     assert posted == []
 
 
+@pytest.mark.parametrize("resumed,history,ok", [
+    (True, "tip\nhead\nroot", True),   # staged run started on head, then main moved: finish it
+    (False, "tip\nhead\nroot", False),  # a new run must start on the current tip
+    (True, "tip\nroot", False),          # head is not (or no longer) a merged main revision
+])
+def test_a_started_staged_attest_survives_main_moving(base_repo, monkeypatch, capsys, resumed, history, ok):
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci, "fetch_base", lambda base, **kw: None)
+    monkeypatch.setattr(local_ci, "resolve_base", lambda public_only=False: "public/main")
+    monkeypatch.setattr(local_ci, "use_private_checkout", lambda: None)
+    reach = []
+    monkeypatch.setattr(local_ci, "attest_update_reach", reach.append)
+
+    def git(*args):
+        if args == ("rev-parse", "public/main"):
+            return "tip"
+        if args == ("rev-list", "--first-parent", "public/main"):
+            return history
+        return base_repo(*args)
+
+    monkeypatch.setattr(local_ci, "git", git)
+    if ok:
+        local_ci.attest_preflight("head", resumed=resumed)
+        assert reach == ["head"]
+        assert "Main moved to tip after this staged run started; finishing head" in capsys.readouterr().out
+    else:
+        with pytest.raises(local_ci.Failure, match="current public main"):
+            local_ci.attest_preflight("head", resumed=resumed)
+        assert reach == []
+
+
+def test_step_attest_resumes_only_a_run_started_on_this_checkout(monkeypatch):
+    import local_ci_stages
+    seen = []
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "python_preflight", lambda python: None)
+    monkeypatch.setattr(local_ci, "attest_preflight", lambda revision, resumed=False: seen.append(resumed))
+    monkeypatch.setattr(local_ci_stages, "run_step", lambda *a: 0)
+    monkeypatch.setattr(local_ci, "git", lambda *a: "head")
+    for started, restart, expected in [(True, False, True), (False, False, False), (True, True, False)]:
+        monkeypatch.setattr(local_ci_stages, "started", lambda ci, revision, s=started: s)
+        args = local_ci.argparse.Namespace(command="full", attest=True, only=None, step=True, restart=restart)
+        assert local_ci.cmd_check(args) == 0
+        assert seen[-1] is expected
+
+
 def test_checks_never_inherit_the_pushing_repository_from_git(monkeypatch, tmp_path):
     """A pre-push hook runs with GIT_DIR set (in a worktree). Test fixtures
     that call `git -C <tmp> init/commit/config` must not reach this repo."""

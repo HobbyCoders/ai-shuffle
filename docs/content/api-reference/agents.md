@@ -149,7 +149,7 @@ The top-level object has `id`, `name`, `description`, `avatar_color`, `is_builti
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append, inject_env_details}` |
+| `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append}` |
 | `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
 | `provider_models` | object | The model this agent is pinned to when another agent dispatches it as a subagent, keyed by the **caller's** provider (`__native__` for Claude, `__voice__` for voice calls). Values are a Claude alias or a `prov:<providerId>:<modelId>` composite and may name any configured provider. A missing key means the agent runs on the [subagent default](/docs/api-reference/miscellaneous#get-apiv1settingssubagent-default); with no default set, the start is refused. Voice calls still dispatch only agents with a `__voice__` entry |
 | `tool_selection_mode` | string | `all`, `none`, `allow`, or `disallow` — decides what the two lists below mean. `all` and `none` carry no list |

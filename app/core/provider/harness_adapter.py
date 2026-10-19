@@ -405,7 +405,14 @@ class HarnessAdapter(ProviderAdapter):
         # The app's ``Worker:`` lines (which of the owner's machines this
         # process is), rendered once per connect so a mid-session recompile
         # reuses the same bytes. See ``app.core.environment.worker_identity_lines``.
+        # The session's runtime lines (execution mode, base branch, placement:
+        # ``session_runtime_lines``) follow them, so they reach every prompt
+        # shape the Worker line does.
         self._worker_identity: Optional[str] = None
+        # A delegated leg whose plain-string prompt replaces Claude Code's
+        # preset, and with it the CLI's own date and git facts: the adapter's
+        # per-turn note (``_env_note``) puts the date and branch back.
+        self._delegated_replaces_preset: bool = False
         # Everything a prompt recompile needs (the Task roster refresh, see
         # ``_refresh_task_roster``) — captured at connect, never rebuilt.
         self._prompt_inputs: Optional[Dict[str, Any]] = None
@@ -567,7 +574,10 @@ class HarnessAdapter(ProviderAdapter):
         permissions = self._build_permissions(options)
         # Which worker this is, once per connect: a session moved to another
         # worker reconnects there and renders that worker's name.
-        self._worker_identity = await asyncio.to_thread(_worker_identity_text)
+        self._worker_identity = await asyncio.to_thread(
+            _session_identity_text, (options.extra or {}).get("session_runtime")
+        )
+        self._delegated_replaces_preset = self._is_delegated and system is not None
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
@@ -612,15 +622,18 @@ class HarnessAdapter(ProviderAdapter):
                     system, append_system, agents_index
                 )
                 # The CLI's own environment block is replaced along with its
-                # preset, so the worker's name rides the append — unless the
-                # profile's prompt already carries the app's <env> block, which
-                # renders the same lines.
-                if self._worker_identity and "<env>" not in system:
-                    delegated_append = "\n\n".join(
-                        part for part in (
-                            delegated_append, _worker_block(self._worker_identity)
-                        ) if part
-                    )
+                # preset, so fluid's session-stable environment section (cwd,
+                # platform, shell, the Worker and runtime lines) rides the
+                # append, as it does in the compiled shape. The date and the
+                # branch ride each turn (``_env_note``).
+                delegated_append = "\n\n".join(
+                    part for part in (
+                        delegated_append,
+                        await asyncio.to_thread(
+                            _stable_environment_block, options.cwd, self._worker_identity
+                        ),
+                    ) if part
+                )
                 if self._workspace_card:
                     delegated_append = "\n\n".join(
                         part for part in (delegated_append, self._workspace_card) if part
@@ -1353,14 +1366,12 @@ class HarnessAdapter(ProviderAdapter):
         declared_agents = getattr(sdk_options, "aih_declared_agents", None)
         if declared_agents:
             opts.extra["declared_agents"] = list(declared_agents)
-        # Inputs for the per-turn environment note (execution mode + branch
-        # pair). Present only when the profile's prompt carries the app's <env>
-        # block; ``send_query`` renders the note from these each turn, which is
-        # what keeps the date and the branch out of the cached prefix without
-        # keeping them from the model.
-        turn_env = getattr(sdk_options, "aih_turn_env", None)
-        if turn_env:
-            opts.extra["turn_env"] = dict(turn_env)
+        # Where and how the session runs (execution mode, a worktree's base
+        # branch, runtime placement), stamped by query_options. ``connect``
+        # renders it next to the Worker line in every agent's environment.
+        session_runtime = getattr(sdk_options, "aih_session_runtime", None)
+        if isinstance(session_runtime, dict) and session_runtime:
+            opts.extra["session_runtime"] = dict(session_runtime)
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission). Without it, the delegated leg answers prompts
         # from the saved rules and the permission mode (_answer_without_approver).
@@ -2143,23 +2154,12 @@ class HarnessAdapter(ProviderAdapter):
     def _compact_note(self) -> Optional[str]:
         """:meth:`_turn_context_note`, always with today's date and the branch.
 
-        The turn note carries them only when the profile's prompt has the
-        app's <env> block (the branch only in worktree mode). A compaction
-        drops whatever the conversation said about them, so here a note
-        without a branch gets the checkout's date-and-branch reminder instead
-        (#1794: after /compact the agent ran git to answer "what branch").
+        The turn note carries them only where nothing else does (see
+        :meth:`_env_note`). A compaction drops whatever the conversation said
+        about them, so the put-back note always names both (#1794: after
+        /compact the agent ran git to answer "what branch").
         """
-        env = self._env_note()
-        if not env or "Current branch:" not in env:
-            try:
-                from app.core.environment import (
-                    checkout_branch, generate_turn_environment_note,
-                )
-
-                cwd = getattr(self._options, "cwd", None)
-                env = generate_turn_environment_note(branch=checkout_branch(cwd))
-            except Exception:  # noqa: BLE001 — a reminder never fails a turn
-                logger.warning("[HarnessAdapter] compaction env note failed", exc_info=True)
+        env = self._env_note() or self._checkout_env_note()
         section = self._memory_section()
         self._memory_put_back_section = section
         memory = f"<system-reminder>\n{section}\n</system-reminder>" if section else None
@@ -2185,21 +2185,27 @@ class HarnessAdapter(ProviderAdapter):
             return ""
 
     def _env_note(self) -> Optional[str]:
-        """The volatile half of the app's <env> block for this turn.
+        """Today's date and the checkout's branch for this turn, or ``None``.
 
-        ``None`` unless the profile's prompt actually carries that block —
-        the stable half and this one arrive together or not at all.
+        Only for a delegated leg whose prompt replaced Claude Code's preset:
+        that drops the CLI's own date and git facts, and the compiled prompt
+        holds the session-stable half only. The native leg gets both from
+        fluid's own per-turn reminder (``NativeLoop._environment_reminder``)
+        and a preset keeps the CLI's, so neither gets a second copy here.
         """
-        turn_env = (getattr(self._options, "extra", None) or {}).get("turn_env")
-        if not isinstance(turn_env, dict) or not turn_env:
+        if not self._delegated_replaces_preset:
             return None
-        try:
-            from app.core.environment import generate_turn_environment_note
+        return self._checkout_env_note()
 
-            return generate_turn_environment_note(
-                execution_mode=str(turn_env.get("execution_mode") or "local"),
-                worktree_info=turn_env.get("worktree_info"),
+    def _checkout_env_note(self) -> Optional[str]:
+        """The date-and-branch reminder for the session's checkout. Never raises."""
+        try:
+            from app.core.environment import (
+                checkout_branch, generate_turn_environment_note,
             )
+
+            cwd = getattr(self._options, "cwd", None)
+            return generate_turn_environment_note(branch=checkout_branch(cwd))
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] turn env note failed", exc_info=True)
             return None
@@ -4430,16 +4436,15 @@ class HarnessAdapter(ProviderAdapter):
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
-        ``worker`` is the app's ``Worker:`` text, rendered at connect. It goes
-        into fluid's environment section (stable half). A profile that injects
-        the app's own ``<env>`` already carries the same lines there.
+        ``worker`` is the app's ``Worker:`` text plus the session's runtime
+        lines (:func:`_session_identity_text`), rendered at connect. It goes
+        into fluid's environment section (stable half), which every profile
+        gets, whatever its own prompt text says.
 
         ``workspace_card`` is the app's "# Workspace facts" bootstrap card
         (:func:`app.core.environment.workspace_facts_card`), rendered once at
         connect. It is slotted as an ``environment`` section right after the
-        compiler's own env block — or where that block would have been when a
-        profile injects its own ``<env>`` — so the facts are present whether
-        or not fluid's environment section is.
+        compiler's own env block.
 
         ``wired`` is the set of host capabilities on the leg's tool context
         (``ctx.extra`` keys plus the ones NativeLoop wires itself). Given it,
@@ -4490,10 +4495,6 @@ class HarnessAdapter(ProviderAdapter):
                 CompiledPrompt, PromptInputs, PromptSection, compile_prompt,
             )
 
-            # A profile with ``inject_env_details`` on already carries the
-            # app's <env> block (which knows worktree/execution mode fluid
-            # doesn't) — skip fluid's env section rather than injecting twice.
-            has_app_env = bool(system) and "<env>" in system
             # The prompt never describes a tool the session cannot
             # call. ``tools`` is the permitted name set; fluid drops its skills
             # index when ``Skill`` is missing from it and its agents index when
@@ -4517,7 +4518,7 @@ class HarnessAdapter(ProviderAdapter):
                     extra_blocks=([append_system] if append_system else [])
                     + _workflow_prompt_blocks(options, permitted),
                     cwd=options.cwd or ".",
-                    include_env=not has_app_env,
+                    include_env=True,
                     worker=worker,
                     include_agents=False,
                     memories_dir=None,
@@ -4572,9 +4573,8 @@ class HarnessAdapter(ProviderAdapter):
                         break
                 sections.insert(insert_at, PromptSection(kind="agents", text=index))
             if workspace_card:
-                # After fluid's environment section when there is one, else
-                # before the first extra block — the same slot either way, so
-                # a profile's own <env> never pushes the card around.
+                # After fluid's environment section (else before the first
+                # extra block, should the compiler ever leave it out).
                 insert_at = len(sections)
                 for position, section in enumerate(sections):
                     if section.kind == "extra":
@@ -7265,8 +7265,8 @@ def _delegated_append_text(
     return "\n\n".join(parts) or None
 
 
-#: Header of the worker block on the delegated leg, whose environment section
-#: is Claude Code's own (fluid's and the app's renderers carry the lines inline).
+#: Header of the worker block on a delegated preset leg, whose environment
+#: section is Claude Code's own (fluid's renderer carries the lines inline).
 WORKER_BLOCK_HEADER = "# Worker"
 
 
@@ -7283,6 +7283,39 @@ def _worker_identity_text() -> Optional[str]:
     except Exception:  # noqa: BLE001 — identity never fails a connect
         logger.warning("[HarnessAdapter] worker identity unavailable", exc_info=True)
         return None
+
+
+def _stable_environment_block(cwd: Optional[str], worker: Optional[str]) -> Optional[str]:
+    """Fluid's ``# Environment`` section, session-stable half, or None. Never raises."""
+    try:
+        from fluid.context.environment import environment_block
+
+        return environment_block(cwd or ".", include_volatile=False, worker=worker)
+    except Exception:  # noqa: BLE001 — a prompt section never fails a connect
+        logger.warning("[HarnessAdapter] environment section unavailable", exc_info=True)
+        return _worker_block(worker) if worker else None
+
+
+def _session_identity_text(runtime: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The Worker text plus the session's runtime lines, or None.
+
+    ``runtime`` is ``extra["session_runtime"]`` (query_options'
+    ``aih_session_runtime``): execution mode, a worktree's base branch and the
+    runtime placement with its shared-runner note. Absent (options built
+    without query_options) it adds nothing. Both halves are session-stable, so
+    they share the cached slot the Worker line already has on every prompt
+    shape. Never raises.
+    """
+    lines = [_worker_identity_text() or ""]
+    if isinstance(runtime, dict) and runtime:
+        try:
+            from app.core.environment import session_runtime_lines
+
+            lines.extend(session_runtime_lines(runtime))
+        except Exception:  # noqa: BLE001 — identity never fails a connect
+            logger.warning("[HarnessAdapter] session runtime lines unavailable", exc_info=True)
+    text = "\n".join(line for line in lines if line and line.strip())
+    return text or None
 
 
 def _agent_context(

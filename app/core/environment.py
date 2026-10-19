@@ -937,10 +937,6 @@ def _placement_lines(placement_where: Optional[str]) -> list:
     and for any session that finds itself inside a container, which are the
     two shapes where "just run the app and look at it" quietly verifies the
     wrong process.
-
-    Session-stable by construction: a re-placed session is rebuilt by the
-    runner that adopts it (new working directory, new prompt), so the line
-    regenerates with the rest of the block rather than drifting mid-prefix.
     """
     where = (placement_where or "").strip()
     shared = where.startswith("runner:") or _in_container()
@@ -952,6 +948,34 @@ def _placement_lines(placement_where: Optional[str]) -> list:
             f"Runtime placement: {label} (shared runner). {PLACEMENT_RUNNER_NOTE}"
         ]
     return [f"Runtime placement: {label}"]
+
+
+def session_runtime_lines(runtime: Optional[Dict[str, Any]]) -> list:
+    """Where and how this session runs, for every agent's environment section.
+
+    ``runtime`` is what ``build_options_from_profile`` stamps as
+    ``aih_session_runtime``: ``execution_mode`` (``local``/``worktree``),
+    ``base_branch`` (worktree mode only) and ``placement_where``. Renders
+    ``Execution mode: worktree`` + ``Base branch:`` for a worktree session
+    (local is the default and says nothing) and the placement line(s) of
+    :func:`_placement_lines`.
+
+    Session-stable by construction, so the lines sit in the cached half of
+    the prompt next to the ``Worker:`` line: a re-placed session or a new
+    checkout rebuilds the prompt with the rest of its context. The current
+    branch is NOT here; it changes under a running session and rides each
+    turn instead. Never raises.
+    """
+    try:
+        runtime = runtime if isinstance(runtime, dict) else {}
+        lines = []
+        if runtime.get("execution_mode") == "worktree":
+            lines.append("Execution mode: worktree")
+            lines.append(f"Base branch: {runtime.get('base_branch') or 'main'}")
+        lines.extend(_placement_lines(runtime.get("placement_where")))
+        return lines
+    except Exception:  # noqa: BLE001 — a prompt nicety never fails a connect
+        return []
 
 
 def _in_container() -> bool:
@@ -1084,9 +1108,8 @@ def _render_worker_lines(identity: Dict[str, Any]) -> list:
 def worker_identity_lines() -> list:
     """The ``Worker:`` line (plus the other-workers note), or none. Never raises.
 
-    Both prompt renderers carry these lines in their session-stable half: the
-    app's ``<env>`` block (:func:`generate_environment_details`) and fluid's
-    ``# Environment`` section (the harness adapter passes them in). A failed
+    Fluid's ``# Environment`` section carries these lines in its
+    session-stable half (the harness adapter passes them in). A failed
     lookup reuses this process's last good answer; with none, it renders
     nothing rather than failing the prompt.
     """
@@ -1106,93 +1129,8 @@ def worker_identity_text() -> Optional[str]:
     return "\n".join(lines) if lines else None
 
 
-def generate_environment_details(
-    working_dir: str,
-    execution_mode: str = "local",
-    worktree_info: Optional[Dict[str, str]] = None,
-    include_volatile: bool = True,
-    placement_where: Optional[str] = None,
-) -> str:
-    """
-    Generate environment details block for custom system prompts.
-    Similar to Claude Code's dynamic environment injection.
-
-    Args:
-        working_dir: The working directory path
-        execution_mode: Either "local" or "worktree"
-        worktree_info: Dict with branch and base_branch info when in worktree mode
-        include_volatile: Whether to render the facts that change WITHIN a
-            session (today's date, the checked-out branch). False renders the
-            session-stable half only — see :func:`generate_turn_environment_note`
-            for where the other half goes and why.
-        placement_where: ``sessions.placement["where"]`` for this session, when
-            the caller has the row. Renders WHERE the session executes — see
-            :func:`_placement_lines`.
-
-    Every line here lands in the provider's cached prompt prefix, so a line
-    that changes mid-session re-bills the whole prefix (system + tools +
-    history) on the next turn. What stays:
-
-    * working directory — the model's whole frame of reference for every path
-      it reads or writes, and it only ever changes together with the session's
-      checkout (which invalidates the prefix on its own merits);
-    * is-git / platform / OS / shell — properties of the machine and checkout,
-      fixed for the life of the process;
-    * execution mode — local vs worktree, which moves in lockstep with the
-      working directory above;
-    * runtime placement — where this session executes. It changes only when
-      the session is re-placed onto another runner, and that already moves the
-      working directory and the whole prompt with it;
-    * worker — this machine's name as the owner sees it in the app (see
-      :func:`worker_identity_lines`). Same lifetime as the placement line: a
-      move to another worker rebuilds the prompt there.
-
-    What leaves: today's date and the branch pair. Both change under a session
-    that is otherwise untouched (UTC midnight; a checkout switch), and neither
-    is worth a full prefix miss.
-    """
-    is_git = _is_git_repo(working_dir)
-    os_version = _get_os_version()
-
-    lines = [
-        f"Working directory: {working_dir}",
-        f"Is directory a git repo: {'Yes' if is_git else 'No'}",
-        f"Platform: {sys.platform}",
-        f"OS Version: {os_version}",
-        "Shell: " + (
-            "cmd.exe (use Windows cmd syntax)" if os.name == "nt"
-            else "/bin/sh-compatible (use POSIX shell syntax)"
-        ),
-    ]
-    if include_volatile:
-        lines.append(f"Today's date: {_today()}")
-    lines.append(f"Execution mode: {execution_mode}")
-    lines.extend(_placement_lines(placement_where))
-    lines.extend(worker_identity_lines())
-    if include_volatile:
-        lines.extend(_worktree_lines(execution_mode, worktree_info))
-
-    body = "\n".join(lines)
-    return (
-        "Here is useful information about the environment you are running in:\n"
-        f"<env>\n{body}\n</env>"
-    )
-
-
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _worktree_lines(
-    execution_mode: str, worktree_info: Optional[Dict[str, str]]
-) -> list:
-    """``Current branch`` / ``Base branch``, or nothing outside worktree mode."""
-    if execution_mode != "worktree" or not worktree_info:
-        return []
-    return [
-        f"Current branch: {worktree_info.get('branch', 'unknown')}",
-        f"Base branch: {worktree_info.get('base_branch', 'main')}",
-    ]
 
 
 TURN_ENV_HEADER = "Environment facts that change while a session runs"
@@ -1215,13 +1153,8 @@ def checkout_branch(working_dir: Optional[str]) -> Optional[str]:
     return branch or None
 
 
-def generate_turn_environment_note(
-    execution_mode: str = "local",
-    worktree_info: Optional[Dict[str, str]] = None,
-    *,
-    branch: Optional[str] = None,
-) -> str:
-    """The volatile half of the <env> block, rendered fresh for one turn.
+def generate_turn_environment_note(*, branch: Optional[str] = None) -> str:
+    """Today's date and the branch, rendered fresh for one turn.
 
     This rides the turn's user message instead of the system prompt: it sits
     after every cache breakpoint (system tail, tool-defs tail, last stable
@@ -1233,13 +1166,12 @@ def generate_turn_environment_note(
     always current; the header says so, because older turns keep their own
     copies in history and those can name a branch that has since changed.
 
-    ``branch`` names the checkout's branch when worktree mode does not (the
-    worktree lines win when both are present).
+    ``branch`` is the checkout's live branch (:func:`checkout_branch`); a
+    worktree's base branch is session-stable and sits in the prompt instead
+    (:func:`session_runtime_lines`).
     """
     lines = [f"Today's date: {_today()}"]
-    worktree = _worktree_lines(execution_mode, worktree_info)
-    lines.extend(worktree)
-    if branch and not worktree:
+    if branch:
         lines.append(f"Current branch: {branch}")
     body = "\n".join(lines)
     return (

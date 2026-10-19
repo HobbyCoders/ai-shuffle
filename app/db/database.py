@@ -498,6 +498,53 @@ def _migrate_agent_tool_access(cursor, migrations_applied=None):
         logger.info("v82: stamped tool_selection_mode onto %d agent(s)", stamped)
 
 
+def _strip_retired_prompt_keys(cursor, migrations_applied=None):
+    """Drop retired ``system_prompt`` keys (``inject_env_details``) from stored agents.
+
+    The key used to add the app's own ``<env>`` block to a custom prompt; the
+    fluid prompt compiler now supplies the environment for every agent, so a
+    stored true or false controls nothing. This pass cleans the rows present
+    when it runs at startup. A row that arrives later from an older peer is
+    stored as sent until the next pass, and ``app.db.profiles`` drops the key
+    on every read and write in between; raw config readers elsewhere ignore
+    it. Only the key goes: the prompt text and every other config field stay
+    as stored.
+
+    Idempotent (a clean row is skipped) and cheap, so it sits in the always-run
+    column-migration pass; no ``SCHEMA_VERSION`` bump (the migrations
+    fingerprint re-runs the pass once after this edit).
+    """
+    import json as _json
+
+    from app.db.profiles import without_retired_prompt_keys
+
+    if not table_exists(cursor, "agents"):
+        return
+    cursor.execute("SELECT id, config FROM agents")
+    stripped = 0
+    for row in cursor.fetchall() or []:
+        raw = row["config"]
+        if isinstance(raw, str):
+            try:
+                config = _json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            config = raw
+        cleaned = without_retired_prompt_keys(config)
+        if cleaned is config:
+            continue
+        cursor.execute(
+            "UPDATE agents SET config = %s WHERE id = %s",
+            (_json.dumps(cleaned), row["id"]),
+        )
+        stripped += 1
+    if stripped and migrations_applied is not None:
+        migrations_applied.append(f"agents.system_prompt.inject_env_details({stripped})")
+    if stripped:
+        logger.info("Dropped the retired inject_env_details key from %d agent(s)", stripped)
+
+
 def _migrate_preference_revisions(cursor):
     """Backfill opaque preference revisions without changing values/timestamps."""
     from uuid import uuid4
@@ -2501,6 +2548,7 @@ def _run_column_migrations(cursor):
     # lists. Runs once — an agent that already carries a valid mode is skipped,
     # which is also what makes this idempotent across restarts.
     _migrate_agent_tool_access(cursor, migrations_applied)
+    _strip_retired_prompt_keys(cursor, migrations_applied)
 
     if (
         table_exists(cursor, "sessions")

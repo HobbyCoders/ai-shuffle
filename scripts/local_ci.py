@@ -911,12 +911,31 @@ def use_private_checkout() -> None:
           f"'{remote}' ({common}).")
 
 
-def attest_preflight(revision: str) -> None:
-    """Everything --attest needs, checked before any commit status or suite."""
+def on_first_parent_history(revision: str, ref: str) -> bool:
+    """Whether ``revision`` is on ``ref``'s first-parent history (a merged main revision)."""
+    try:
+        return revision in git("rev-list", "--first-parent", ref).split()
+    except subprocess.CalledProcessError:
+        return False
+
+
+def attest_preflight(revision: str, resumed: bool = False) -> None:
+    """Everything --attest needs, checked before any commit status or suite.
+
+    A new run must start on the current public main. A staged run that already
+    started on this revision (``resumed``) may finish after main moved on, as
+    long as the revision is still on main's first-parent history: otherwise a
+    merge between two ``--step`` chunks would throw the whole run away.
+    """
     public_base = resolve_base(public_only=True)
     fetch_base(public_base, strict=True)
-    if not clean_checkout() or revision != git("rev-parse", public_base):
+    tip = git("rev-parse", public_base)
+    moved_on = resumed and revision != tip and on_first_parent_history(revision, public_base)
+    if not clean_checkout() or (revision != tip and not moved_on):
         raise Failure(f"--attest runs only on a clean checkout of the current public main ({public_base})")
+    if moved_on:
+        print(f"Main moved to {tip[:9]} after this staged run started; finishing {revision[:9]}, "
+              "which is still on public main's history.")
     use_private_checkout()
     attest_update_reach(revision)
 
@@ -933,7 +952,11 @@ def cmd_check(args) -> int:
     if args.attest:
         # Seconds, not after a long run: public main, a clean tree and update
         # reach (with its private-archive bridge) before any status or suite.
-        attest_preflight(revision)
+        resumed = False
+        if getattr(args, "step", False) and not getattr(args, "restart", False):
+            import local_ci_stages
+            resumed = local_ci_stages.started(sys.modules[__name__], revision)
+        attest_preflight(revision, resumed=resumed)
     if getattr(args, "step", False) or args.attest:
         import local_ci_stages
         if getattr(args, "step", False) or local_ci_stages.completed(sys.modules[__name__], args, python, revision):

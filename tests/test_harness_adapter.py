@@ -3281,9 +3281,10 @@ async def test_native_leg_compiler_failure_degrades_sections_to_none(
 
 
 @pytest.mark.asyncio
-async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
-    """inject_env_details profiles already carry the app's <env> block —
-    fluid's env section must be skipped, not doubled."""
+async def test_native_leg_env_section_survives_a_quoted_env_tag(monkeypatch, tmp_path):
+    """A prompt whose own text contains ``<env>`` (the retired
+    inject_env_details block, or a profile quoting one) still gets fluid's
+    environment section: no prompt text can switch it off."""
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
@@ -3300,7 +3301,8 @@ async def test_native_leg_app_env_block_not_duplicated(monkeypatch, tmp_path):
     )
     system = _CapturingLoop.captured["system"]
     assert "<env>" in system
-    assert "# Environment" not in system
+    assert system.count("# Environment") == 1
+    assert f"Working directory: {tmp_path.resolve()}" in system
 
 
 # ─── Native Anthropic leg: registry alias → API model id ─────────────────────
@@ -3496,6 +3498,45 @@ async def test_delegated_plain_prompt_full_replace_compiles(monkeypatch, tmp_pat
     assert _CapturingLoop.captured["append_system_prompt"] is None
     assert system.startswith("BASE PROMPT")
     assert "# Environment" in system
+
+
+@pytest.mark.asyncio
+async def test_delegated_plain_prompt_without_full_replace_keeps_the_environment(
+    monkeypatch, tmp_path
+):
+    """PROMPT_FULL_REPLACE=0: the plain prompt goes out uncompiled and still
+    replaces the CLI's preset (with its environment), so fluid's stable
+    environment section rides the append, Worker and runtime lines inside it,
+    even when the prompt text quotes an <env> block."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "prompt_full_replace", False)
+    monkeypatch.setattr(ha, "_worker_identity_text", lambda: "Worker: W1 (device dev_1).")
+
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable",
+            system_prompt="BASE PROMPT\n<env>\nquoted\n</env>",
+            cwd=str(tmp_path),
+            extra={
+                "fluid_registry": ToolRegistry(),
+                "session_runtime": {"execution_mode": "worktree", "base_branch": "develop"},
+            },
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    append = _CapturingLoop.captured["append_system_prompt"]
+    assert system.startswith("BASE PROMPT") and "# Environment" not in system
+    assert append.count("# Environment") == 1
+    assert f"Working directory: {tmp_path.resolve()}" in append
+    assert "Shell: " in append
+    assert "Worker: W1 (device dev_1)." in append
+    assert "Execution mode: worktree\nBase branch: develop" in append
+    # Session-stable half only: the date and branch ride each turn.
+    assert "Today's date" not in append
 
 
 @pytest.mark.asyncio
@@ -7985,9 +8026,9 @@ def test_verification_block_has_a_budget_the_preview_flow_and_the_ops_rule():
 
 
 def test_workspace_card_is_slotted_as_an_environment_section():
-    """Item 2: the card lands whether or not the profile injects its own
-    <env> (which suppresses fluid's environment section), right where the
-    environment block sits — before the extras, after the env."""
+    """Item 2: the card lands right after fluid's environment section,
+    before the extras — also when the profile's own text quotes an <env>
+    block, which no longer suppresses that section."""
     import app.core.provider.harness_adapter as ha
 
     card = "# Workspace facts\n- Node: node_modules MISSING in frontend"
@@ -7996,8 +8037,9 @@ def test_workspace_card_is_slotted_as_an_environment_section():
         workspace_card=card,
     )
     kinds = [(s.kind, s.text.split("\n", 1)[0]) for s in with_env.sections]
-    assert ("environment", "# Workspace facts") in kinds
-    assert not any(s.text.startswith("Here is useful information") for s in with_env.sections)
+    assert kinds.index(("environment", "# Environment")) + 1 == kinds.index(
+        ("environment", "# Workspace facts")
+    )
 
     without_env = ha.HarnessAdapter._compile_prompt_sections(
         "BASE", None, _native_opts(), workspace_card=card,
