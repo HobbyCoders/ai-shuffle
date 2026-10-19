@@ -28,15 +28,17 @@ export const OLD_ASAR = 'app.asar.old';
 const ENTRY = 'dist/main/managed-entry.js';
 export const SELF_TEST = 'dist/main/launcher-self-test.js';
 const SELF_TEST_TIMEOUT_MS = 60_000;
+const SELF_TEST_KILL_WAIT_MS = 10_000;
 
 /** Same contract as scripts/launcher-contract.mjs (tested to agree). */
-export function parseLauncher(text: string): { version: number; minimum: number } {
+export function parseLauncher(text: string): { version: number; minimum: number; start?: number } {
   const value = JSON.parse(text);
   const count = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
-  if (!value || typeof value !== 'object' || !count(value.version) || value.version < 1 || !count(value.minimum) || value.minimum > value.version) {
-    throw new Error('desktop/launcher.json must hold {"version": n >= 1, "minimum": 0..version}');
+  if (!value || typeof value !== 'object' || !count(value.version) || value.version < 1 || !count(value.minimum) || value.minimum > value.version ||
+      ('start' in value && (!count(value.start) || value.start > value.version))) {
+    throw new Error('desktop/launcher.json must hold {"version": n >= 1, "minimum": 0..version, "start"?: 0..version}');
   }
-  return { version: value.version, minimum: value.minimum };
+  return { version: value.version, minimum: value.minimum, ...('start' in value ? { start: value.start as number } : {}) };
 }
 
 export type SwapPhase = 'trial' | 'restoring' | 'confirmed' | 'restored' | 'rejected';
@@ -143,12 +145,24 @@ export function selfTest(executable: string, candidate: string, expect: number, 
     const child = spawn(executable, [path.join(candidate, SELF_TEST), `--nonce=${nonce}`, `--expect=${expect}`, `--root=${root}`],
       { env: selfTestEnvironment(executable), cwd: path.dirname(candidate), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; let errors = '';
-    const timer = setTimeout(() => { child.kill(); reject(new Error('The launcher self-test did not finish in time')); }, timeoutMs);
+    let timedOut = false;
+    let killWait: ReturnType<typeof setTimeout> | undefined;
+    const timeoutError = new Error('The launcher self-test did not finish in time');
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Windows may still hold app.new.asar after kill() returns. Let close
+      // release the process handles before replaceLauncher removes the archive.
+      // Bound the wait even if the child never closes (or kill emits an error).
+      killWait = setTimeout(() => reject(timeoutError), SELF_TEST_KILL_WAIT_MS);
+      child.kill();
+    }, timeoutMs);
     child.stdout!.on('data', chunk => { if (output.length < 65536) output += chunk; });
     child.stderr!.on('data', chunk => { if (errors.length < 4096) errors += chunk; });
-    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('error', error => { if (!timedOut) { clearTimeout(timer); reject(error); } });
     child.on('close', code => {
       clearTimeout(timer);
+      clearTimeout(killWait);
+      if (timedOut) { reject(timeoutError); return; }
       const verdict = output.split(/\r?\n/).map(line => { try { return JSON.parse(line); } catch { return null; } })
         .find(value => value?.launcherSelfTest === 1 && value.nonce === nonce);
       if (code === 0 && verdict?.ok === true && verdict.version === expect) resolve();

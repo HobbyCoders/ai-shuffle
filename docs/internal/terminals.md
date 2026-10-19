@@ -62,8 +62,9 @@ Everything else is refused (`403`, or WebSocket close `4001`):
 - passwordless local access (plain loopback, trusted LAN), which
   `require_admin` alone would admit. An agent's shell reaches the API over
   loopback, so that path must never open a shell;
-- an agent-preview cookie (`ais_preview`), even when an owner credential
-  rides along;
+- an agent-preview cookie (`ais_preview_<install-key fingerprint>`), even
+  when an owner credential rides along. The legacy `ais_preview` name is
+  also recognized during the upgrade transition;
 - API keys, non-owner paired devices, peer-worker device tokens and share
   links;
 - owner sessions on the remote (protected) listener.

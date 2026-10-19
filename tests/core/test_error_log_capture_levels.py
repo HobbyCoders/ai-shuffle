@@ -133,11 +133,11 @@ def test_db_layer_records_are_still_skipped(recorded):
 def test_capture_level_falls_back_to_error_when_config_is_unreadable():
     """Logging must not depend on config loading cleanly."""
 
-    class _Exploding:
-        def __getattr__(self, name):
-            raise RuntimeError("settings unavailable")
+    from unittest.mock import PropertyMock
+    from app.core.config import Settings
 
-    with patch("app.core.config.settings", _Exploding()):
+    with patch.object(Settings, "error_log_capture_warnings", create=True,
+                      new_callable=PropertyMock, side_effect=RuntimeError("settings unavailable")):
         assert elh._capture_level() == logging.ERROR
 
 

@@ -265,7 +265,8 @@ def test_managed_database_attribution_rejects_stale_or_foreign_pid(tmp_path, mon
     monkeypatch.delenv("AI_SHUFFLE_ENV_FILE", raising=False)
     if layout == "installed_desktop":
         monkeypatch.setenv("AI_SHUFFLE_ENV_FILE", str(cluster_root / "worker" / ".env"))
-    monkeypatch.setattr(config, "settings", SimpleNamespace(effective_data_dir=data_root, get_database_connection=lambda: {"port": 5432}))
+    monkeypatch.setattr(config.settings, "data_dir", data_root)
+    monkeypatch.setattr(type(config.settings), "get_database_connection", lambda self: {"port": 5432})
     process = SimpleNamespace(name=lambda: "postgres.exe", create_time=lambda: 1000)
     monkeypatch.setattr(psutil, "Process", lambda pid: process)
     pidfile.write_text(f"42\n{data}\n1000\n5432\n", encoding="utf-8")

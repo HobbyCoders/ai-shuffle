@@ -47,11 +47,111 @@ Automations and connectors run on one worker each. Your other workers show them 
 
 If two workers change the same setting while they cannot reach each other, the later change wins. The other version is kept for 30 days, so nothing is lost without a trace.
 
+ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer refresh timestamp wins, independently of edits to the provider's name, models or enabled switch. Update every worker to get this protection everywhere. An older worker still replaces the whole provider row and can restore a spent token on itself; upgrade the renewing worker first. The network founder renews these logins; if the founder is no longer an active worker, the active worker with the lowest device id takes over. If a renewal has not reached this worker, the login-expired message names the renewing worker. This cannot repair a login whose refresh token has already been invalidated.
+
 ## Remove a device
 
 Remove a worker, phone or browser from **Settings → Devices**. A removed worker stops receiving your settings. Its chats stay on your other workers as read-only copies, and **Fork here** continues them.
 
 If you remove a worker you no longer trust, also change the provider keys it had, in **Settings → Providers**.
+
+## Device-token upgrade protection
+
+**Endpoint binding is opt-in and defaults off.** Upgrade existing paired workers
+one at a time without re-pairing or changing their working LAN, tunnel, Docker
+port-mapping or proxy addresses. With `NETWORK_TOKEN_BINDING_ENABLED=false`
+(the default), workers send legacy proofs and do not enforce endpoint allowlists
+or stored binding pins. `NETWORK_REQUIRE_TOKEN_BINDING` has no effect in this mode.
+This preserves existing authentication, not relay protection.
+
+When `NETWORK_TOKEN_BINDING_ENABLED=true`, this release sends both the legacy
+device-key proof and a versioned endpoint-bound proof on every token request;
+rejection never retries legacy-only. The following enforcement rules apply only
+with this rollout gate enabled.
+The bound transcript is the canonical JSON array
+`["shuffle-device-token-bound-v1", challenge, server_device_id, canonical_base_endpoint]`.
+The server checks the endpoint against its current locally advertised tunnel and
+LAN addresses. The token request's own Host and forwarded headers are never
+consulted. One advertised source does come from a Host header: on a Docker
+worker without `CLUSTER_ADVERTISE_URL`, the "observed" advertise URL is the
+address the owner used for a direct (unproxied) LAN sign-in. Only the owner can
+set it, and the owner can already add aliases. Tunnel rotation
+accepts the new advertisement immediately and rejects the removed address,
+including challenges issued before rotation; peers must refresh discovery.
+A valid proof for an unadvertised address receives HTTP 403 with
+`detail.code="endpoint_not_advertised"`. The response reveals no other server
+addresses. The dialing worker records an actionable message in its peer status,
+shows it in the worker's Devices detail and logs a warning at most once per five
+minutes per peer. Invalid signatures still receive the generic binding refusal.
+
+Before **enabling binding**, upgrade every peer and make sure each URL peers
+actually dial is advertised. An invite, manual address or cached URL may differ
+from the advertised address (Docker port mappings, reverse proxies and hostname/IP
+aliases are common examples). Configure aliases first, then enable binding on the
+workers and restart them. In enabled mode an unadvertised alias is refused even
+before pinning and even with `NETWORK_REQUIRE_TOKEN_BINDING=false`.
+
+On the worker being dialed, open **Settings → Devices → This worker → Network →
+Advertised addresses** and enter the additional base URLs, separated by commas.
+These are explicit owner-approved aliases, including public reverse proxies,
+hostnames and mapped ports. They remain advertised alongside a managed tunnel and
+do not depend on the LAN-direct switch. Configure only URLs you control that
+actually reach this worker; they are shared with your network, not secrets.
+HTTPS is recommended: adding an HTTP alias does not encrypt bearer tokens.
+
+At most **two additional URLs**, each at most **512 characters**, are accepted.
+Use `http://` or `https://`, ASCII (punycode) hostnames, and an optional base path;
+credentials, queries, fragments, Unicode hosts and ambiguous paths are refused.
+Saving replaces the alias list, immediately updates the binding allowlist, and
+publishes the same signed presence used for primary addresses. Removing an alias
+makes new bound token requests to it fail when binding is enabled; existing
+short-lived tokens are not revoked.
+The configuration is local to this worker and persists across restarts.
+
+The owner-only `GET /api/v1/network/advertised-addresses` API returns
+`addresses` (the additional URLs) and `advertised` (the complete dial list).
+`PUT` with `{"addresses":["https://proxy.example/worker"]}` replaces the extras;
+`{"addresses":[]}` clears them. Peer device tokens cannot read or change this
+setting. Previous-release peers still receive the ordinary endpoint list, bounded
+to their eight-address protocol limit; there is no membership migration.
+
+For direct workers without a managed tunnel, the existing `CLUSTER_ADVERTISE_URL`
+or owner-only `PUT /api/v1/cluster/advertise` API can also set the primary address.
+The separate **Extra LAN addresses** control accepts private literal HTTP LAN
+addresses while LAN-direct is on; use **Advertised addresses** for public aliases.
+
+Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
+IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames
+must be supplied as ASCII A-labels (punycode) for bound proofs and new owner
+aliases. With binding enabled, Unicode peer authorities are rejected before dialing.
+With binding disabled, existing international peer routes remain usable; their
+HTTPX-normalized destination is still checked against the link-local restriction. Path case and interior
+slashes remain significant; unreserved percent escapes are decoded and other
+escapes use uppercase hex. A DNS trailing dot remains significant. Credentials,
+queries, fragments, scoped IPv6, whitespace, backslashes, dot path segments and
+non-ASCII paths are rejected rather than guessed.
+
+A successful bound proof, or a device-key-signed binding-support statement in an
+authenticated exchange, permanently pins that peer to binding on the receiving
+worker. Mutable version/capability fields cannot set or clear this local database
+pin. It survives restarts, membership generation changes and re-admission of the
+same identity. A new signing identity (new device id), a fresh network or recovery
+onto a fresh database starts without those local pins. Downgrading a pinned peer
+to an old release will fail token authentication while enforcement is enabled.
+For rollback, turn `NETWORK_TOKEN_BINDING_ENABLED=false` on the receiving workers
+and restart them. Pins are retained but ignored while disabled, and enforced again
+on re-enabling; disabling deliberately restores the legacy security posture.
+
+Old peers still work **before pinning**. During this rollout an intermediary that
+can redirect a peer's first connection can strip both the new proof and capability
+statement and relay legacy authentication. Old servers have the same exposure.
+Once all peers have binding enabled and their dial addresses configured, set
+`NETWORK_REQUIRE_TOKEN_BINDING=true` on each worker to reject even unpinned legacy
+requests (default: `false`, effective only with the rollout gate enabled). The follow-up
+protocol release must remove legacy acceptance after the rolling-upgrade window;
+this compatibility release does not claim complete first-contact relay protection.
+Binding also does not encrypt plain-HTTP bearer tokens: use HTTPS or the sealed
+LAN transport, and keep advertised endpoint provenance protected.
 
 ## Your account's network wins
 

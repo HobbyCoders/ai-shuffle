@@ -66,10 +66,10 @@ def test_key_session_token_cannot_reach_owner_routes():
                          follow_redirects=False)
     assert landing.status_code == 403
     # ... and a cookie planted by hand authenticates as nobody.
-    client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(KEY))
+    client.cookies.set(preview_access.cookie_name(), preview_access.mint(KEY))
     assert client.get("/api/v1/mcp/servers").status_code == 401
     # The owner's own session still gets its preview.
-    client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(OWNER))
+    client.cookies.set(preview_access.cookie_name(), preview_access.mint(OWNER))
     assert client.get("/api/v1/mcp/servers").json() == {"ok": True}
 
 

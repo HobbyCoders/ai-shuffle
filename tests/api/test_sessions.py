@@ -2171,9 +2171,8 @@ class TestImportSession:
             "format_version": "1.0"
         }
 
-        with patch("app.core.config.settings") as mock_settings:
-            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-            mock_settings.workspace_dir = temp_dir
+        with patch("app.core.config.settings.claude_projects_dir", temp_dir / ".claude" / "projects"), \
+                patch("app.core.config.settings.workspace_dir", temp_dir):
 
             # Create the claude projects directory
             (temp_dir / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
@@ -2248,9 +2247,8 @@ class TestForkSession:
             {"type": "assistant", "message": {"role": "assistant", "content": "Hi!"}}
         ]
 
-        with patch("app.core.config.settings") as mock_settings:
-            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-            mock_settings.workspace_dir = temp_dir
+        with patch("app.core.config.settings.claude_projects_dir", temp_dir / ".claude" / "projects"), \
+                patch("app.core.config.settings.workspace_dir", temp_dir):
 
             with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
                 jsonl_file = temp_dir / "test.jsonl"
@@ -2338,8 +2336,7 @@ class TestForkSession:
             {"type": "user", "message": {"role": "user", "content": "Hello"}}
         ]
 
-        with patch("app.core.config.settings") as mock_settings:
-            mock_settings.workspace_dir = temp_dir
+        with patch("app.core.config.settings.workspace_dir", temp_dir):
 
             with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
                 jsonl_file = temp_dir / "test.jsonl"
@@ -2370,9 +2367,8 @@ class TestForkSession:
             {"type": "user", "message": {"role": "user", "content": "More"}},
         ]
 
-        with patch("app.core.config.settings") as mock_settings:
-            mock_settings.get_claude_projects_dir = temp_dir / ".claude" / "projects"
-            mock_settings.workspace_dir = temp_dir
+        with patch("app.core.config.settings.claude_projects_dir", temp_dir / ".claude" / "projects"), \
+                patch("app.core.config.settings.workspace_dir", temp_dir):
 
             with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
                 jsonl_file = temp_dir / "test.jsonl"
@@ -2398,8 +2394,7 @@ class TestForkSession:
         sample_session["sdk_session_id"] = "sdk-123"
         mock_database.get_session.return_value = sample_session
 
-        with patch("app.core.config.settings") as mock_settings:
-            mock_settings.workspace_dir = temp_dir
+        with patch("app.core.config.settings.workspace_dir", temp_dir):
 
             with patch("app.core.jsonl_parser.get_session_jsonl_path") as mock_jsonl_path:
                 jsonl_file = temp_dir / "test.jsonl"

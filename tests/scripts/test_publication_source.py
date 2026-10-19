@@ -130,11 +130,14 @@ def test_two_checkouts_publish_without_executing_candidate_helpers(tmp_path, wit
                  "requirements.lock", "requirements-native.lock"]:
         put(candidate, name, "candidate data, not control data")
     put(candidate, "desktop/launcher.json", '{"version": 9, "minimum": 7}')
+    put(candidate, "desktop/package-lock.json", json.dumps({"packages": {"node_modules/electron": {"version": "44.9.1"}}}))
     put(candidate, "release/container-sequence-offset", "0\n")
     commit(candidate)
     git(candidate, "tag", "v1.2.3")
     put(candidate, "app/later.txt", "new candidate revision")
     revision = commit(candidate)
+    # The signed runtime must come from that commit, not a dirty candidate or control checkout.
+    put(candidate, "desktop/package-lock.json", json.dumps({"packages": {"node_modules/electron": {"version": "99.0.0"}}}))
     wrangler = "scripts/source-publisher/node_modules/wrangler/bin/wrangler.js"
     put(candidate, wrangler, f"require('node:fs').writeFileSync({json.dumps(str(sentinel))}, 'node'); process.exit(99);")
     put(candidate, "scripts/source-publisher/package.json", '{"scripts":{"postinstall":"exit 99"}}')
@@ -161,7 +164,7 @@ def test_two_checkouts_publish_without_executing_candidate_helpers(tmp_path, wit
     manifest = json.loads(payload)
     assert manifest["revision"] == revision
     assert manifest["version"].startswith("1.2.3-dev.1+")
-    assert manifest["desktop"] == {"launcher": 7}
+    assert manifest["desktop"] == {"launcher": 7, "electron": "44.9.1"}
     assert manifest["container"]["sequence"] == 2
     assert manifest["container"]["recommends"] == ["source-supervisor"]
     if with_overlays:

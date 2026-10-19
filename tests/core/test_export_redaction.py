@@ -49,6 +49,12 @@ def test_narrow_recognized_text_credentials(text, expected):
     assert redact_export_text(text) == expected
 
 
+@pytest.mark.parametrize("name", ["ais_preview", "ais_preview_" + "a" * 24])
+def test_preview_cookie_names_redact_opaque_values(name):
+    assert redact_export_text(f"{name}=fixture-cookie") == f"{name}=***"
+    assert redact_external_export({name: "fixture-cookie", "ok": True}) == {name: "***", "ok": True}
+
+
 def test_structure_and_useful_content_survive_without_mutation():
     data = {
         "content": "notes " + PREVIEW,

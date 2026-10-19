@@ -485,7 +485,7 @@ async def preview_access_redirect(request: Request):
     target = preview_access.safe_next(request.query_params.get('next'))
     response = RedirectResponse(target, status_code=303)
     response.set_cookie(
-        preview_access.COOKIE_NAME, token, max_age=max(1, found.expires_at - int(time.time())),
+        preview_access.cookie_name(), token, max_age=max(1, found.expires_at - int(time.time())),
         httponly=True, samesite='lax', path='/',
     )
     return response

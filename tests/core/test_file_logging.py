@@ -20,7 +20,7 @@ Covers:
   (not silently returns) when there is no loop.
 
 The module reads ``app.core.config.settings`` lazily inside each function, so we
-patch that singleton with a lightweight fake pointed at a tmp data dir. Each test
+patch fields on that singleton to point at a tmp data dir. Each test
 detaches any handler it attaches so the root logger is left clean. The conftest
 sets TESTING=1 process-wide, which setup_file_logging treats as a no-op — the
 fixture removes it so the code under test actually runs.
@@ -43,25 +43,6 @@ from app.core import file_logging
 _INSTANCE = "ai-shuffle-testinst"
 
 
-class _FakeSettings:
-    def __init__(self, tmp_path: Path, **overrides):
-        self._data_dir = tmp_path
-        self.file_logging_enabled = overrides.get("file_logging_enabled", True)
-        self.file_log_level = overrides.get("file_log_level", "INFO")
-        self.file_log_max_bytes = overrides.get("file_log_max_bytes", 10 * 1024 * 1024)
-        self.file_log_backup_count = overrides.get("file_log_backup_count", 5)
-        self.version = "9.9.9-test"
-        self.service_name = "ai-shuffle-test"
-
-    @property
-    def effective_data_dir(self) -> Path:
-        return self._data_dir
-
-    @property
-    def effective_instance_id(self) -> str:
-        return _INSTANCE
-
-
 def _log_dir(tmp_path: Path) -> Path:
     """The per-instance log dir the module should use for the fake settings."""
     return tmp_path / "logs" / _INSTANCE
@@ -79,8 +60,23 @@ def fake_settings(tmp_path, monkeypatch):
     monkeypatch.delenv("TESTING", raising=False)
 
     def _make(**overrides):
-        settings = _FakeSettings(tmp_path, **overrides)
-        monkeypatch.setattr("app.core.config.settings", settings, raising=True)
+        from app.core.config import settings
+
+        # Logging lazily imports other settings consumers. Replacing settings
+        # would leave those modules holding the fake after fixture teardown.
+        fields = {
+            "data_dir": tmp_path,
+            "instance_id": _INSTANCE,
+            "file_logging_enabled": True,
+            "file_log_level": "INFO",
+            "file_log_max_bytes": 10 * 1024 * 1024,
+            "file_log_backup_count": 5,
+            "version": "9.9.9-test",
+            "service_name": "ai-shuffle-test",
+            **overrides,
+        }
+        for name, value in fields.items():
+            monkeypatch.setattr(settings, name, value)
         return settings
 
     # Reset module singletons before AND clean up after so root logger stays clean.
