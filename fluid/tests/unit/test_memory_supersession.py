@@ -141,10 +141,11 @@ def test_lineage_survives_expiry_and_replacement_has_budget_priority(tmp_path, m
     old, new = pair(store, protected=False)
     for i in range(20):
         store.save_memory(f"Generic unrelated protected fact {i}. " * 12, protected=True, key=f"profile.filler{i}")
-    monkeypatch.setattr(facts.time, "time", lambda: new.updated_at + facts.ARCHIVE_RETENTION * 3)
-    store.reap()
-    assert next(e for e in store.archived_memories() if e.id == old.id).superseded_by
-    assert NEW in store.render_memory_section("project:fixture")
+    with monkeypatch.context() as patch:
+        patch.setattr(facts.time, "time", lambda: new.updated_at + facts.ARCHIVE_RETENTION * 3)
+        store.reap()
+        assert next(e for e in store.archived_memories() if e.id == old.id).superseded_by
+        assert NEW in store.render_memory_section("project:fixture")
     explicit = SkillStore(tmp_path / "explicit")
     pair(explicit)
     for i in range(20):
