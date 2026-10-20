@@ -31,6 +31,7 @@ beforeEach(() => {
 	memoryHealth = { state: 'healthy', checked_at: 1, signals: [], repairs: [] };
 	channelStatus = { channel: 'stable', available: ['stable', 'nightly'], source: 'default', editable: true, restart_required: false };
 	transport.get.mockImplementation(async (path: string) => {
+		if (path === '/support/capabilities') return { basic_report: true, can_report_ai_content: true };
 		if (path === '/updates/channel') return { ...channelStatus };
 		if (path === '/memory/health') {
 			if (memoryHealth instanceof Error) throw memoryHealth;
@@ -720,6 +721,20 @@ describe('help: report a problem', () => {
 		});
 		afterEach(() => {
 			delete window.__SHUFFLE_MOBILE__;
+		});
+
+		it('lets a non-owner open the AI content form without enabling problem reports', async () => {
+			const get = transport.get.getMockImplementation()!;
+			transport.get.mockImplementation(async (path: string) => path === '/support/capabilities'
+				? { basic_report: false, can_report_ai_content: true } : get(path));
+			aiContentPrefill.value = { excerpt: 'Reported reply', sessionId: 'sess-42' };
+			render(SystemPage);
+			expect((await screen.findByLabelText('The AI output') as HTMLTextAreaElement).value).toBe('Reported reply');
+			await fireEvent.input(screen.getByLabelText('Why are you reporting it?'), { target: { value: 'Harmful' } });
+			await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+			expect(supportReportDialog.request?.source).toEqual({ kind: 'ai_content', excerpt: 'Reported reply', session_id: 'sess-42' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+			await waitFor(() => expect(screen.queryByText('Report a problem')).toBeNull());
 		});
 
 		it('opens prefilled as an AI content report from a chat message, and as a problem report afterwards', async () => {

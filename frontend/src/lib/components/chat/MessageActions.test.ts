@@ -5,7 +5,7 @@ const rewind = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/client', async (importOriginal) => ({ ...(await importOriginal<object>()), executeRewind: rewind }));
 const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
 vi.mock('$lib/settings/navigation.svelte', () => nav);
-import { aiContentPrefill } from '$lib/stores/support-report.svelte';
+import { aiContentPrefill, supportCaps } from '$lib/stores/support-report.svelte';
 import MessageActions from './MessageActions.svelte';
 
 beforeEach(() => { rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
@@ -127,8 +127,12 @@ describe('MessageActions: Report message', () => {
 			...(platform ? { native: { platform, bridge: 1, capabilities: [] } } : {})
 		};
 	};
-	beforeEach(() => { nav.openSettings.mockClear(); });
-	afterEach(() => { delete window.__SHUFFLE_MOBILE__; aiContentPrefill.take(); });
+	beforeEach(() => {
+		nav.openSettings.mockClear();
+		supportCaps.status = 'ready';
+		supportCaps.current = { basic_report: false, can_report_ai_content: true } as any;
+	});
+	afterEach(() => { delete window.__SHUFFLE_MOBILE__; aiContentPrefill.take(); supportCaps.reset(); });
 
 	it('offers no report entry and no overflow menu on the web UI and desktop app', () => {
 		render(MessageActions, assistant);
