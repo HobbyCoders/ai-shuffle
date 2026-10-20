@@ -33,6 +33,18 @@ async def _drain_runners():
     assert not sh._tasks
 
 
+@pytest.mark.parametrize("by, reason", [
+    ("agent", ", as you requested with HandOffSession."),
+    ("owner", " at the owner's request."),
+    ("unknown", " at the owner's request."),
+])
+def test_handoff_context_attributes_the_actual_requester(by, reason):
+    pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "Keep the note", time.time(), by=by)
+    with patch.object(sh, "_self_label", return_value="Source"):
+        assert sh._handoff_context(pending, "Target") == (
+            f"[hand-off] Moved from Source to Target{reason} Your hand-off note: Keep the note")
+
+
 async def test_cleanup_drains_callbacks_of_already_finished_runners():
     import asyncio
 
@@ -1347,7 +1359,7 @@ def _moving(gaming, call, move=None):
     return stack
 
 
-RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker at the owner's request. Your hand-off note: "
+RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker, as you requested with HandOffSession. Your hand-off note: "
                  "tests pass; next: wire the UI Continue the work from where you left off. If it was already "
                  "complete, stop after a brief acknowledgement; do not invent new work.")
 

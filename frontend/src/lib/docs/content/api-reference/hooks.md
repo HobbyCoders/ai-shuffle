@@ -217,6 +217,7 @@ A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` hold
 - `HOOK_DATA` is always valid JSON. When it would be too long, its longest strings are shortened, each ending in `...[truncated]`, and `"truncated": true` is added at the top level. A guard that reads `HOOK_DATA` should block when `truncated` is `true`.
 - A `PreToolUse` bash hook runs in the session's working directory. `Stop` hooks and hooks on the background events run in the app's working directory; `cwd` in `HOOK_DATA` names the session's.
 - Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not get AI Shuffle's own passwords, tokens and keys from the environment. Model-provider keys, `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are kept. List extra variable names to keep in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated).
+- The worker's `PYTHONPATH`, `PYTHONHOME` and `VIRTUAL_ENV` are not inherited by project subprocesses (including hooks, Git, Bash, Monitor and terminals), even through `FLUID_CHILD_ENV_PASSTHROUGH`. This prevents the worker runtime from changing a project's Python imports or Git hooks. Explicit project settings `env` overlays for agent commands are still honored; app-internal Python helpers receive the import paths they need separately.
 
 ## Blocking a tool call
 

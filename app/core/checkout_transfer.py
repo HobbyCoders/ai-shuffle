@@ -308,7 +308,9 @@ def export_checkout(cwd, branch, expected_remote=None):
     _branch(cwd, branch)
     remote = remote_identity(cwd)
     if expected_remote is not None and remote != expected_remote:
-        raise ValueError("The workers' origin remotes refer to different repositories.")
+        raise ValueError("The workers' origin remotes refer to different repositories. "
+                         "Both workers' checkouts must use the same repository as origin. "
+                         "Fix the checkout's remote with `git remote rename` or `git remote set-url`, then retry.")
     _preflight(cwd)
     default = _default_branch(cwd)
     cached_default = _run(cwd, "symbolic-ref", "refs/remotes/origin/HEAD")
@@ -356,7 +358,7 @@ def export_checkout(cwd, branch, expected_remote=None):
         if pushed.returncode:
             # A plain reason (Git's stderr can carry credentials), e.g. a
             # branch name origin's rules refuse.
-            raise ValueError(_push_refused(pushed.stderr, branch) + " Ownership has not moved.")
+            raise ValueError(_push_refused(pushed.stderr, branch, cwd) + " Ownership has not moved.")
         upstream = head
     published = git(cwd, "ls-remote", "--exit-code", "origin", "refs/heads/" + branch).decode().split()
     if not published or published[0] != upstream or fingerprint(cwd) != head:
@@ -396,7 +398,9 @@ def import_checkout(base, destination, state):
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
         raise ValueError("Invalid resume commit.")
     if remote_identity(base) != state["remote"]:
-        raise ValueError("The workers' origin remotes refer to different repositories.")
+        raise ValueError("The workers' origin remotes refer to different repositories. "
+                         "Both workers' checkouts must use the same repository as origin. "
+                         "Fix the checkout's remote with `git remote rename` or `git remote set-url`, then retry.")
     # Forced: a remote-tracking ref is only a cache of origin, and a rebased
     # branch must not fail the fetch.
     git(base, "fetch", "--no-tags", "origin", "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
@@ -485,9 +489,38 @@ def _remote_tip(cwd, branch):
     return (fields[0] if fields else None), True
 
 
-def _push_refused(stderr, branch):
+def _has_pre_push_hook(cwd):
+    """Check Git's effective hook path, including core.hooksPath overrides."""
+    if cwd is None:
+        return False
+    try:
+        result = _run(cwd, "rev-parse", "--git-path", "hooks/pre-push", timeout=10)
+        if result.returncode or not result.stdout:
+            return False
+        hook = Path(os.fsdecode(result.stdout.rstrip(b"\r\n")))
+        if not hook.is_absolute():
+            hook = Path(cwd) / hook
+        return hook.is_file() and os.access(hook, os.X_OK)
+    except (OSError, ValueError):
+        return False  # Preserve the original refusal if the hook probe fails.
+
+
+def _push_refused(stderr, branch, cwd=None):
     """A plain reason for a failed push, classified without echoing stderr."""
     text = stderr.decode(errors="replace").lower()
+    # A local hook can print anything (local_ci uses "FAILED:"), or nothing.
+    # Do not mistake repository names containing "hook" for hook diagnostics.
+    # Git's local-hook failure has only its final error, not a server response,
+    # a ref rejection, or a fatal transport/authentication error.
+    lines = [line.strip() for line in text.splitlines()]
+    local_failure = (
+        any(line.startswith("error: failed to push some refs") for line in lines)
+        and not any(line.startswith(("remote:", "fatal:")) or re.match(r"!\s*\[", line) for line in lines)
+        and "hook declined" not in text
+    )
+    if local_failure and _has_pre_push_hook(cwd):
+        return (f"This worker's pre-push hook stopped the push of {branch}. "
+                "Run `git push` in that checkout to see why; ownership has not moved.")
     if any(mark in text for mark in ("rule violation", "gh013", "creations being restricted",
                                      "cannot create ref")):
         return (f"Origin's branch rules refuse the name {branch}. Rename the branch to a name origin "
@@ -535,7 +568,7 @@ def publish_task_branch(cwd, branch, sha) -> dict:
         result["reason"] = "Git timed out reaching origin from this worker. Check its connection to origin and retry."
         return result
     if pushed.returncode:
-        result["reason"] = _push_refused(pushed.stderr, branch)
+        result["reason"] = _push_refused(pushed.stderr, branch, cwd)
         return result
     result["pushed"] = True
     return result
@@ -593,7 +626,7 @@ def delete_untouched_task_branch(cwd, branch, base) -> dict:
     except ValueError:
         return dict(deleted=False, reason="Git timed out reaching origin; the branch was left in place.")
     if removed.returncode:
-        return dict(deleted=False, reason=_push_refused(removed.stderr, branch) + " The branch was left in place.")
+        return dict(deleted=False, reason=_push_refused(removed.stderr, branch, cwd) + " The branch was left in place.")
     return dict(deleted=True, reason=None)
 
 
@@ -697,7 +730,7 @@ def push_task_result(cwd, branch, base, *, timeout=RESULT_PUSH_TIMEOUT) -> dict:
         result["reason"] = "Git timed out reaching origin from this worker, so the commits stay in its checkout here."
         return result
     if pushed.returncode:
-        result["reason"] = _push_refused(pushed.stderr, branch)
+        result["reason"] = _push_refused(pushed.stderr, branch, cwd)
         return result
     result["pushed"] = True
     return result

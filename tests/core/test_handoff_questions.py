@@ -87,8 +87,12 @@ async def test_question_only_move_keeps_answerable_card(by):
 
 
 @pytest.mark.parametrize("missing_tool_id", [False, True])
+@pytest.mark.parametrize("by, reason", [
+    ("agent", "as you requested with HandOffSession."),
+    ("owner", "at the owner's request."),
+])
 async def test_blocking_producer_is_cancelled_and_same_question_reasked(
-    missing_tool_id,
+    missing_tool_id, by, reason,
 ):
     _chat()
     callback = await _post(
@@ -121,7 +125,7 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
 
         runtime = SimpleNamespace(interrupt=AsyncMock(side_effect=interrupt))
         pending = sh.PendingHandoff(
-            "dev-gaming", "DesktopWorker", "Finish the regression tests", time.time()
+            "dev-gaming", "DesktopWorker", "Finish the regression tests", time.time(), by=by
         )
         from app.core import interaction_wait
 
@@ -152,6 +156,7 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
         assert turns.get_turn(turn["id"])["state"] == "aborted"
         assert replacement["payload"]["handoff_detached"] is True
         assert replacement["payload"]["handoff_id"] == pending.handoff_id
+        assert reason in replacement["payload"]["handoff_context"]
         assert sh.resume_plan("s1", pending, "dev-gaming") == "question"
 
         async def record_moved(sid, owner, content, data):
@@ -195,6 +200,7 @@ async def test_blocking_producer_is_cancelled_and_same_question_reasked(
             )
         [answer] = turns.get_queued_turns("s1")
         assert answer["prompt"].startswith("[hand-off] Moved from ")
+        assert reason in answer["prompt"]
         assert "Your hand-off note: Finish the regression tests" in answer["prompt"]
         assert "Answer to your question:\nWhich branch?\nExisting" in answer["prompt"]
     finally:

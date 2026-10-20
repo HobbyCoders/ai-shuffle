@@ -156,6 +156,110 @@ def repositories(tmp_path):
     return source, target
 
 
+def test_export_push_hook_does_not_inherit_worker_python_env(repositories, monkeypatch):
+    source, target = repositories
+    hook = source / ".git" / "hooks" / "pre-push"
+    hook.write_text('#!/bin/sh\nif [ "${PYTHONPATH+x}${PYTHONHOME+x}${VIRTUAL_ENV+x}" ]; then\n'
+                    '  echo "pre-push: worker Python env leaked" >&2; exit 1\nfi\n')
+    hook.chmod(0o755)
+    for name in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        monkeypatch.setenv(name, "worker-runtime")
+    # Demonstrate the producing failure first, not just a scrubbed fixture.
+    rejected = subprocess.run(["git", "push", "--dry-run", "origin", "HEAD"], cwd=source, capture_output=True)
+    assert rejected.returncode != 0 and b"worker Python env leaked" in rejected.stderr
+    (source / "new.txt").write_text("also exercise the app's commit path")
+    state = export_checkout(source, "feature/only-on-worker", remote_identity(target))
+    assert git(source, "ls-remote", "origin", "refs/heads/" + state["branch"]).decode().split()[0] == state["head"]
+
+
+def test_git_service_commit_hook_drops_worker_python_env(repositories, monkeypatch):
+    from app.core.git_service import GitService
+    from fluid.tools.child_env import child_env_with_overlay
+
+    source, _ = repositories
+    hook = source / ".git" / "hooks" / "pre-commit"
+    hook.write_text('#!/bin/sh\nif [ "${PYTHONPATH+x}${PYTHONHOME+x}${VIRTUAL_ENV+x}" ]; then exit 1; fi\n')
+    hook.chmod(0o755)
+    for name in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        monkeypatch.setenv(name, "worker-runtime")
+    service = GitService()
+    result = service._run_git(str(source), ["commit", "--allow-empty", "-m", "test hook"])
+    assert result.returncode == 0, result.stderr
+    # Explicit callers still have the option of handing over project settings.
+    result = service._run_git(str(source), ["commit", "--allow-empty", "-m", "test hook"],
+                              env=child_env_with_overlay({"PYTHONPATH": "deliberate-project-path"}))
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "pre-push: local checks failed secret-sentinel",
+    "FAILED: Inherited PYTHONPATH points outside this checkout. secret-sentinel",
+    "FAILED: tests/core/test_example.py exited 1; secret-sentinel",
+    "",  # Even a silent executable hook produces Git's final error line.
+])
+def test_export_local_pre_push_failure_has_actionable_private_message(repositories, diagnostic):
+    source, _ = repositories
+    hook = source / ".git" / "hooks" / "pre-push"
+    hook.write_text('#!/bin/sh\necho "' + diagnostic + '" >&2\nexit 1\n')
+    hook.chmod(0o755)
+    with pytest.raises(ValueError) as raised:
+        export_checkout(source, "feature/only-on-worker")
+    message = str(raised.value)
+    assert "This worker's pre-push hook stopped the push of feature/only-on-worker" in message
+    assert "Run `git push` in that checkout" in message
+    assert "ownership has not moved" in message
+    assert "credentials" not in message and "secret-sentinel" not in message
+
+
+@pytest.mark.parametrize("hooks_path", ["default", "relative", "absolute"])
+def test_push_refused_uses_effective_executable_hook_path(repositories, tmp_path, hooks_path):
+    from app.core.checkout_transfer import _push_refused
+
+    source, _ = repositories
+    directory = source / ".git" / ("hooks" if hooks_path == "default" else "custom-hooks")
+    directory.mkdir(exist_ok=True)
+    if hooks_path != "default":
+        git(source, "config", "core.hooksPath", str(directory) if hooks_path == "absolute" else ".git/custom-hooks")
+    hook = directory / "pre-push"
+    stderr = b"FAILED: tests/core/test_example.py exited 1\nerror: failed to push some refs to 'private-url'\n"
+    assert "pre-push hook" not in _push_refused(stderr, "fix/test", source)
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    if os.name != "nt":  # Windows does not enforce POSIX executable bits.
+        hook.chmod(0o644)
+        assert "pre-push hook" not in _push_refused(stderr, "fix/test", source)
+    hook.chmod(0o755)
+    assert "This worker's pre-push hook" in _push_refused(stderr, "fix/test", source)
+
+
+@pytest.mark.parametrize("stderr, expected", [
+    (b"remote: Permission to acme/webhook-relay.git denied 403\n", "Origin refused"),
+    (b"fatal: Authentication failed for 'https://example.com/git-hooks.git/'\n", "Origin refused"),
+    (b"remote: pre-receive hook declined\n ! [remote rejected] fix/test -> fix/test (hook declined)\n", "Origin refused"),
+    (b" ! [rejected] fix/test -> fix/test (non-fast-forward)\n", "changed meanwhile"),
+    (b"remote: server temporarily unavailable\n", "Could not update"),
+    (b"fatal: unable to access 'https://example.com/git-hooks.git/'\n", "Could not update"),
+    (b" ! [remote rejected] fix/test -> fix/test (server unavailable)\n", "Could not update"),
+])
+def test_push_refused_does_not_confuse_server_or_credentials_with_local_hook(repositories, stderr, expected):
+    from app.core.checkout_transfer import _push_refused
+
+    source, _ = repositories
+    hook = source / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    message = _push_refused(stderr + b"error: failed to push some refs to 'private-url'\n", "fix/test", source)
+    assert expected in message
+    assert "pre-push hook" not in message
+    assert "private-url" not in message and "example.com" not in message
+
+
+def test_push_refused_keeps_server_hook_declined_meaning():
+    from app.core.checkout_transfer import _push_refused
+
+    assert _push_refused(b"remote: pre-push hook declined", "fix/test") == (
+        "Origin refused fix/test. Check this worker's Git credentials and push rights for origin.")
+
+
 def test_round_trip_commits_pushes_and_fetches_all_nonignored_work(repositories, tmp_path):
     source, target = repositories
     (source / "file.txt").write_text("staged\n")
@@ -232,10 +336,26 @@ def test_remote_mismatch_refuses_before_commit(repositories):
     source, target = repositories
     (source / "new.txt").write_text("private work")
     before = git(source, "rev-parse", "HEAD")
-    with pytest.raises(ValueError, match="different repositories"):
+    with pytest.raises(ValueError, match="different repositories") as raised:
         export_checkout(source, "feature/only-on-worker", "wrong")
+    message = str(raised.value)
+    assert "Both workers' checkouts must use the same repository as origin" in message
+    assert "`git remote rename`" in message and "`git remote set-url`" in message
+    assert str(source) not in message and str(target) not in message
     assert git(source, "rev-parse", "HEAD") == before
     assert git(source, "status", "--porcelain")
+
+
+def test_import_remote_mismatch_has_repair_guidance(repositories, tmp_path):
+    source, target = repositories
+    state = export_checkout(source, "feature/only-on-worker")
+    state["remote"] = "different-repository"
+    with pytest.raises(ValueError, match="different repositories") as raised:
+        import_checkout(target, tmp_path / "resumed", state)
+    message = str(raised.value)
+    assert "Both workers' checkouts must use the same repository as origin" in message
+    assert "`git remote rename`" in message and "`git remote set-url`" in message
+    assert not (tmp_path / "resumed").exists()
 
 
 def test_push_rejection_keeps_local_commit_without_force(repositories):
