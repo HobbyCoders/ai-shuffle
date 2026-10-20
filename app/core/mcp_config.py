@@ -433,6 +433,7 @@ def _build_plugins_list(
         List of plugin dicts for SDK, or None if no plugins enabled/needed
     """
     # Import here to avoid circular imports
+    from app.core import plugin_authored
     from app.core.plugin_service import get_plugin_service
     service = get_plugin_service()
 
@@ -496,6 +497,10 @@ def _build_plugins_list(
 
         # Check if this is a plugin ID format (name@marketplace)
         if "@" in plugin_entry and not plugin_entry.startswith("/") and not plugin_entry.startswith("."):
+            # Fluid discovers authored skills/commands with approval checks; they have no hooks.
+            if plugin_authored.is_authored(plugin_entry):
+                logger.debug("Skipping authored plugin (handled by Fluid discovery): %s", plugin_entry)
+                continue
             # Look up in installed_plugins registry
             if plugin_entry in installed_plugins:
                 installations = installed_plugins[plugin_entry]
