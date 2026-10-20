@@ -306,6 +306,13 @@ def test_boot_retries_deferred_index_even_with_matching_migration_fingerprint(pg
     def unexpected_migration(*args):
         pytest.fail("a matching fingerprint must not replay all column migrations")
     monkeypatch.setattr(database, "_run_column_migrations", unexpected_migration)
+    # Production probes public; this fixture isolates every test in a private
+    # search_path. Keep the marker existence probe on that same real schema.
+    def table_exists(cursor, table):
+        cursor.execute("""SELECT EXISTS (SELECT 1 FROM information_schema.tables
+            WHERE table_schema=current_schema() AND table_name=%s) AS present""", (table,))
+        return cursor.fetchone()["present"]
+    monkeypatch.setattr(database, "table_exists", table_exists)
     with connect(False) as reader:
         reader.cursor().execute("SELECT ingest_id FROM sync_ops")
         database.init_database()  # timeout is nonfatal and the index remains
