@@ -106,7 +106,9 @@ def test_non_owner_local_report_keeps_reporter_id(paired_env, tmp_path):
     draft = client.post("/api/v1/support/reports", json=AI_INPUT).json()
     result = client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True})
     assert result.status_code == 200 and result.json()["state"] == "not_signed_in"
-    saved = json.loads((tmp_path / "support-reports" / f"{draft['report_id']}.json").read_text())
+    file = result.json()["local_record"]["file"]
+    assert file.startswith("support-reports/users/") and file.endswith(f"/{draft['report_id']}.json")
+    saved = json.loads((tmp_path / file).read_text())
     assert saved["reporter_user_id"].endswith("#user-1")
     assert saved["reporter_user_id"] in saved["body"]
 
@@ -169,11 +171,95 @@ def test_ai_content_payload_is_bounded(paired_env):
                          ("session_id", "x" * (reports.SESSION_REF_MAX + 1)),
                          ("reporter_user_id", "spoofed-user")):
         assert client.post("/api/v1/support/reports", json={**AI_INPUT, field: value}).status_code == 422
+
+
+def test_owner_problem_report_preserves_large_valid_trace_payloads(env):
     import json
-    # Whitespace is valid JSON, but may not bypass the byte-size bound.
-    oversized = json.dumps(AI_INPUT) + " " * api.REPORT_PAYLOAD_MAX_BYTES
-    assert client.post("/api/v1/support/reports", content=oversized,
-                       headers={"Content-Type": "application/json"}).status_code == 413
+    client, _, _ = env
+    # JSON escaping makes an otherwise valid 40,000-character trace exceed 64 KiB.
+    body = {"error": {"message": "boom", "detail": "\u03bb" * 40000}}
+    encoded = json.dumps(body)
+    assert len(encoded.encode()) > 64 * 1024
+    assert client.post("/api/v1/support/reports", content=encoded,
+                       headers={"Content-Type": "application/json"}).status_code == 200
+
+
+@pytest.mark.parametrize("identity", ["api-user", "connector"])
+def test_api_keys_and_connectors_cannot_submit_reports(paired_env, monkeypatch, identity):
+    from app.api import auth
+    client, state = paired_env
+    draft = client.post("/api/v1/support/reports", json=AI_INPUT).json()
+    path = f"/api/v1/support/reports/{draft['report_id']}"
+    user = {"id": identity, "username": identity, "is_active": True}
+    monkeypatch.setattr(auth.db, "get_api_user_by_key_hash", lambda key: user)
+    monkeypatch.setattr(auth.db, "update_api_user_last_used", lambda user_id: None)
+    client.headers["Authorization"] = "Bearer service-key"
+    caps = client.get("/api/v1/support/capabilities")
+    assert caps.status_code == 200 and caps.json()["can_report_ai_content"] is False
+    assert client.post("/api/v1/support/reports", json=AI_INPUT).status_code == 403
+    assert client.post("/api/v1/support/reports", json={"error": {"message": "boom"}}).status_code == 403
+    assert client.post(path + "/note", json={"user_note": "changed"}).status_code == 403
+    assert client.post(path + "/send", json={"confirm": True}).status_code == 403
+    assert state["calls"] == []
+
+
+def test_non_owner_drafts_never_evict_owner_or_other_users(paired_env, monkeypatch):
+    client, _ = paired_env
+    monkeypatch.setattr(reports, "MAX_PREVIEWS", 2)
+    monkeypatch.setattr(reports, "MAX_USER_PREVIEWS", 2)
+    owner = reports.build_basic(error={"message": "owner draft, possibly being diagnosed"})
+    owner_ai = reports.build_ai_content(excerpt="owner AI report", user_note="reason")
+    users = {}
+    for token in ("phone-a", "other-user"):
+        client.headers["Authorization"] = f"Bearer {token}"
+        drafts = []
+        for _ in range(3):
+            response = client.post("/api/v1/support/reports", json=AI_INPUT)
+            assert response.status_code == 200
+            drafts.append(response.json()["report_id"])
+        with pytest.raises(reports.ReportError) as expired:
+            reports.get_draft(drafts[0])
+        assert expired.value.status == 404
+        users[token] = drafts[1:]
+        for retained in (owner["report_id"], owner_ai["report_id"], *sum(users.values(), [])):
+            assert reports.get_draft(retained)
+    # Owner reports retain their existing cap but never prune non-owner reports.
+    reports.build_basic(error={"message": "new owner draft"})
+    with pytest.raises(reports.ReportError):
+        reports.get_draft(owner["report_id"])
+    for retained in (owner_ai["report_id"], *sum(users.values(), [])):
+        assert reports.get_draft(retained)
+
+
+def test_non_owner_local_saves_never_evict_owner_or_other_users(paired_env, monkeypatch, tmp_path):
+    client, state = paired_env
+    state["binding"] = None
+    monkeypatch.setattr(reports, "MAX_LOCAL_REPORTS", 2)
+    monkeypatch.setattr(reports, "MAX_USER_LOCAL_REPORTS", 2)
+    owners = [reports.build_basic(error={"message": f"owner {i}"}) for i in range(2)]
+    for owner in owners:
+        reports.send(owner["report_id"])
+    owner_files = {path: path.read_bytes() for path in (tmp_path / "support-reports").glob("*.json")}
+    assert len(owner_files) == 2
+    user_folders = []
+    for token in ("phone-a", "other-user"):
+        client.headers["Authorization"] = f"Bearer {token}"
+        for _ in range(3):
+            draft = client.post("/api/v1/support/reports", json=AI_INPUT).json()
+            result = client.post(f"/api/v1/support/reports/{draft['report_id']}/send", json={"confirm": True})
+            assert result.status_code == 200
+            file = result.json()["local_record"]["file"]
+            assert file.startswith("support-reports/users/")
+        user_folders.append((tmp_path / file).parent)
+        for path, contents in owner_files.items():
+            assert path.read_bytes() == contents
+        for folder in user_folders:
+            assert len(list(folder.glob("*.json"))) == 2
+    assert user_folders[0] != user_folders[1]
+    # Owner retention remains bounded, without pruning either user's files.
+    reports.send(reports.build_basic(error={"message": "new owner report"})["report_id"])
+    assert len(list((tmp_path / "support-reports").glob("*.json"))) == 2
+    assert all(len(list(folder.glob("*.json"))) == 2 for folder in user_folders)
 
 
 def _wait(client, run_id):
