@@ -225,6 +225,40 @@ async def test_refusal_logs_once_even_when_deferred_status_is_replayed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ["idle", "question", "claim"])
+async def test_real_begin_admission_refusal_logs_only_once(pair, monkeypatch, caplog, gate):
+    import asyncio
+    import logging
+    from app.db import interactions
+
+    a, b, source, target = pair
+    reason = "admission refused"
+    monkeypatch.setattr(handoff, "_operations", {})
+    monkeypatch.setattr(handoff, "_wake_queued", lambda: None)
+    if gate == "idle":
+        def refuse(*args):
+            raise ValueError(reason)
+        monkeypatch.setattr(handoff, "_idle", refuse)
+    elif gate == "question":
+        monkeypatch.setattr(interactions, "get_pending_interactions", lambda sid: [{"kind": "question"}])
+        monkeypatch.setattr(handoff, "question_carry", lambda target: None)
+        reason = "Wait for the target worker to report its capabilities before moving an unanswered question."
+    else:
+        monkeypatch.setattr(runs, "claim_run", lambda *args: None)
+        reason = "The owning worker is busy. Wait for its turn to finish before resuming here."
+    with a.active(), caplog.at_level(logging.INFO, logger=handoff.__name__):
+        payload = {"session_id": "handoff-test", "phase": "begin", "deferred": True,
+                   "remote": checkout_transfer.remote_identity(target)}
+        receipt = await handoff.handle(payload, b.device_id)
+        for _ in range(2):
+            assert await asyncio.wait_for(handoff.handle(
+                {"session_id": "handoff-test", "phase": "status", **receipt}, b.device_id), 2
+            ) == {"error": reason}
+    messages = [r.getMessage() for r in caplog.records if r.name == handoff.__name__]
+    assert messages == [f"Refused hand-off begin for session handoff-test: {reason}"]
+
+
+@pytest.mark.asyncio
 async def test_deferred_client_retries_only_status_and_surfaces_terminal_failure(monkeypatch):
     from unittest.mock import AsyncMock
     from app.network import runners

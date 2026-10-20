@@ -1068,17 +1068,22 @@ async def _prepare_questions_once(session_id: str, state: Dict[str, Any], pendin
 
 async def _wait_idle(session_id: str, pending: PendingHandoff) -> bool:
     last_log = 0.0
+    last_kick = None
     while time.time() < pending.expires_at:
         if pending.cancelled:
             return False
         state = await asyncio.to_thread(busy_state, session_id)
-        if state.get("queued"):
-            # Admission is still owned by the scheduler/run lease. Re-nudge a
-            # missed enqueue kick, rather than needing another owner message
-            # to start the accepted turns that must run before this move.
+        now = time.monotonic()
+        if state.get("queued") and (last_kick is None or now - last_kick >= 60):
+            # Only repair a missed kick when admission could succeed. Repeated
+            # kicks over live work create refusal logs and lease churn.
             from app.core import turn_manager
+            from app.db import runs, turns as turns_db
 
-            turn_manager._kick(session_id)
+            if (not await asyncio.to_thread(turns_db.get_live_turn, session_id)
+                    and not await asyncio.to_thread(runs.get_active_run, session_id)):
+                turn_manager._kick(session_id)
+                last_kick = now
         prepared = await _prepare_questions(session_id, state, pending)
         if prepared and not await asyncio.to_thread(_busy, session_id):
             return True

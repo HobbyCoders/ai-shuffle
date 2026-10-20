@@ -1088,6 +1088,40 @@ async def test_live_stream_finishing_after_drain_starts_releases_queued_move():
             session_runtime.register_broadcaster(None)
 
 
+@pytest.mark.parametrize("blocker", [None, "live_turn", "active_run"])
+async def test_waiter_bounds_nudges_and_never_kicks_over_live_work(blocker):
+    from app.db import runs
+
+    _chat()
+    turns.enqueue_turn("s1", "user", prompt="waiting for admission")
+    if blocker == "live_turn":
+        live = turns.enqueue_turn("s1", "user", prompt="already running")
+        turns.start_turn(live["id"], None, "runner")
+    elif blocker == "active_run":
+        assert runs.claim_run("s1", "runner", 300)
+    clock = SimpleNamespace(now=1000.0)
+    pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", None, clock.now,
+                                expires_at=clock.now + 600)
+    kicks = []
+
+    async def tick(delay):
+        clock.now += delay
+
+    with (
+        patch.object(sh, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now)),
+        patch.object(sh, "busy_state", return_value={"running": True, "tasks": [], "queued": 1, "wake": False}),
+        patch.object(sh, "_prepare_questions", AsyncMock(return_value=False)),
+        patch.object(sh.asyncio, "sleep", tick),
+        patch("app.core.turn_manager._kick", side_effect=lambda sid: kicks.append(clock.now)),
+    ):
+        assert not await sh._wait_idle("s1", pending)
+    if blocker:
+        assert kicks == []
+    else:
+        assert len(kicks) == 10
+        assert all(b - a >= 60 for a, b in zip(kicks, kicks[1:]))
+
+
 async def test_wait_logs_busy_reason_once_per_minute(caplog):
     import logging
 

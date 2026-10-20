@@ -94,10 +94,12 @@ class _Timing:
         self.last = now
         self.current = ("next step", now)
 
-    def log(self, outcome):
+    def log(self, outcome, *, quiet=False):
         self.finished = True
         if self.progress_handle is not None:
             self.loop.call_soon_threadsafe(self.progress_handle.cancel)
+        if quiet:
+            return
         logger.info("Hand-off %s for session %s %s after %.1fs: %s", self.role, self.sid, outcome,
                     monotonic() - self.start, ", ".join(self.steps) or "no steps")
 
@@ -669,7 +671,9 @@ def begin(sid, target, remote=None, note=None, wake_barrier=False):
     try:
         reply = _begin(sid, target, remote, note, wake_barrier, timing)
     except BaseException:
-        timing.log("failed")
+        # Admission refusals are already logged by the control boundary. Still
+        # cancel the progress timer, but don't add a second "failed: no steps".
+        timing.log("failed", quiet=not timing.steps and timing.current[0] == "admission")
         raise
     timing.log("exported")
     return reply

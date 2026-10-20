@@ -147,6 +147,48 @@ async def test_drain_settlement_is_fenced_to_the_captured_runtime_run(mock_db):
     scheduler.assert_not_called()
 
 
+@pytest.mark.parametrize("background_until", [0, 180])
+async def test_stuck_stream_times_out_and_logs_at_most_once_a_minute(
+    mock_db, monkeypatch, caplog, background_until,
+):
+    import logging
+    from types import SimpleNamespace
+
+    turn = _draining_turn("s1")
+    pool, state = _make_pool()
+    state.is_streaming = True
+    scheduler = MagicMock()
+    session_runtime.register_scheduler(scheduler)
+    clock = SimpleNamespace(now=0.0)
+
+    deadline = max(120, background_until)
+
+    async def tick(delay):
+        clock.now += delay
+        assert clock.now <= deadline + 2, "streaming drain exceeded its cleanup deadline"
+
+    monkeypatch.setattr(idle_reader, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(idle_reader, "IDLE_READ_POLL_SECONDS", 2)
+    with (
+        patch("app.core.session_pool.get_session_pool", return_value=pool),
+        patch.object(idle_reader.asyncio, "sleep", tick),
+        patch.object(session_runtime, "_should_evict_after_escalation",
+                     side_effect=lambda sid: clock.now >= background_until),
+        caplog.at_level(logging.INFO, logger=idle_reader.__name__),
+    ):
+        await idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"])
+    assert clock.now == deadline
+    pool.remove_broken.assert_awaited_once_with("s1")
+    assert turns_db.get_turn(turn["id"])["state"] == "aborted"
+    assert state.idle_reader_active is False
+    assert not session_runtime.get_reader_lock("s1").locked()
+    scheduler.assert_called_once_with("s1", turn["id"], "aborted")
+    waiting = [r for r in caplog.records if "waiting for streaming cleanup" in r.getMessage()]
+    expired = [r for r in caplog.records if "streaming cleanup timed out" in r.getMessage()]
+    assert len(waiting) == deadline // 60
+    assert len(expired) == 1
+
+
 async def test_missing_client_still_settles_the_draining_turn(mock_db):
     turn = _draining_turn("s1")
     pool = MagicMock()
