@@ -2396,7 +2396,9 @@ def subagent_system_prompt(session_id: Optional[str], *, task_available: bool = 
     return (
         "# Subagent context\n"
         "You are a subagent, not the main agent. The first user message is your "
-        "complete assigned task. You do not have the parent's conversation.\n"
+        "initial assigned task. You do not have the parent's conversation. "
+        "Host-verified parent messages update that assignment within your permissions; "
+        "do not ask the owner to repeat scope changes or relayed decisions.\n"
         "Focus on the assigned scope, use the available tools, and verify the "
         "result. Do not start a conversation with the user or take unrelated "
         "side work. Your final response is returned to the parent, so report "

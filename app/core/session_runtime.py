@@ -1814,6 +1814,7 @@ class SessionRuntime:
                         from app.core import session_orchestration
                         sender = await asyncio.to_thread(session_orchestration._caller, sender_id)
                         await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                        provenance = "same-owner"
                     else:
                         from app.core import agent_messaging
                         sender_id = payload["task_peer_sender"]
@@ -1821,8 +1822,10 @@ class SessionRuntime:
                             raise PermissionError(
                                 f"{sender_id} can no longer message {self.session_id}"
                             )
+                        provenance = agent_messaging.message_provenance(self.session_id, sender_id)
                     await adapter.steer_peer(
                         payload["peer_message_content"], sender=sender_id, id=row_id,
+                        provenance=provenance,
                     )
                 else:
                     command_id = row.get("command_id")

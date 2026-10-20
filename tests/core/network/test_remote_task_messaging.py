@@ -158,7 +158,7 @@ def test_a_running_child_takes_the_message_at_its_next_tool_result(workers, monk
     with a.active():
         [queued] = message_turns(child)
     adapter.steer_peer.assert_awaited_once_with("Also check the logs.", sender="caller",
-                                                id=queued["id"])
+                                                id=queued["id"], provenance="parent")
     assert queued["id"] in runtime._steer_attempted
     with a.active():
         on_target.append(True)

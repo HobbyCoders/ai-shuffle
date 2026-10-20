@@ -1408,7 +1408,10 @@ async def _on_agent_message_locked(
     owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
     if reply_to and task_registry.is_user_stopped(reply_to):
         return None
-    prompt = format_peer_message(sender, defang_harness_markers(text)).strip()
+    from app.core.agent_messaging import message_provenance
+    prompt = format_peer_message(
+        sender, defang_harness_markers(text), message_provenance(session_id, sender),
+    ).strip()
     extra_payload = (
         {**(continuation_payload or {}), "agent_message_reply_to": reply_to}
         if reply_to else None

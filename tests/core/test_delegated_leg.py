@@ -148,7 +148,9 @@ def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
     options = _preset_options(tmp_path, github_connected=True)
     options.tool_allowlist = ["Read"]
     text = ha._delegated_append_text("APPEND TEXT", options, _memory_registry())
-    assert text == "APPEND TEXT"
+    # Incoming peer work is independent of the receiver's outgoing tool surface.
+    from fluid.context.peer import PROMPT_BLOCK
+    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK
 
 
 @pytest.mark.asyncio

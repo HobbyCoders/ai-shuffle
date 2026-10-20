@@ -2398,7 +2398,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         peers, self._pending_peers = self._pending_peers, []
         context = "".join(
             format_steer(op.text) if isinstance(op, Steer)
-            else format_peer_message(op.sender, op.text)
+            else format_peer_message(op.sender, op.text, op.provenance)
             for op in peers
         ).strip()
         specific = output.get("hookSpecificOutput")
@@ -3311,7 +3311,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 steers=[
                     {"id": op.id, "text": op.text, "tool_use_id": tool_use_id}
                     if isinstance(op, Steer)
-                    else {"id": op.id, "text": op.text, "from": op.sender}
+                    else {"id": op.id, "text": op.text, "from": op.sender,
+                          **({"origin": op.provenance} if op.provenance != "peer" else {})}
                     for op in peers
                 ],
             ))

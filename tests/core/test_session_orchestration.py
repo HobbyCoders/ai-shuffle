@@ -52,7 +52,7 @@ async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkey
     result = json.loads(outcome.text)
     assert result["delivery_status"] == "queued"
     row = turns.get_turn(result["turn_id"])
-    expected_prompt = format_peer_message("caller", "Coordinate edits").strip().replace(
+    expected_prompt = format_peer_message("caller", "Coordinate edits", "same-owner").strip().replace(
         "another agent in this session", "another top-level session", 1)
     assert row["prompt"] == expected_prompt
     assert _v2_queue_view("peer") == []
@@ -280,7 +280,7 @@ async def test_live_peer_producer_reaches_native_tool_boundary_without_user_auth
         assert receipt.seq > tool_result.seq
         assert "[agent message from='caller'" in tool_result.output
         assert "Coordinate edits" in tool_result.output and STEER_OPEN not in tool_result.output
-        assert receipt.steers == [{"id": result["turn_id"], "text": "Coordinate edits", "from": "caller"}]
+        assert receipt.steers == [{"id": result["turn_id"], "text": "Coordinate edits", "from": "caller", "origin": "same-owner"}]
         assert turns.get_turn(live["id"])["state"] == "running" and engine.turn_running
         recorder = TurnRecorder("peer", "original-human", None, None, None)
         recorder.turn_id = live["id"]
@@ -581,7 +581,7 @@ async def test_actual_delegated_peer_joins_the_running_query_at_its_tool_boundar
         [receipt] = [e for e in events if isinstance(e, SteerDelivered)]
         complete = next(e for e in events if isinstance(e, TurnComplete))
         assert receipt.seq < complete.seq
-        assert receipt.steers == [{"id": produced["turn_id"], "text": "Coordinate edits", "from": "caller"}]
+        assert receipt.steers == [{"id": produced["turn_id"], "text": "Coordinate edits", "from": "caller", "origin": "same-owner"}]
         seen = json.loads([e.text for e in events if isinstance(e, TextDelta)][-1])
         assert "[agent message from='caller'" in seen["main"] and STEER_OPEN not in seen["main"]
         assert seen["main"].count("Coordinate edits") == 1 and seen["sub"] == ""

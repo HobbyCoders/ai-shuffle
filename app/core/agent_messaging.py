@@ -125,6 +125,17 @@ def may_message(sender: str, target: str) -> bool:
     }
 
 
+def message_provenance(receiver: str, sender: str) -> str:
+    """Fail closed: only the receiver's host-owned direct-parent row qualifies."""
+    try:
+        if any(row.get("worker_session_id") == sender and row.get("kind") == "parent"
+               for row in peer_rows(receiver)):
+            return "parent"
+    except Exception:  # noqa: BLE001 - missing registry/remote identity is not proof
+        logger.debug("Could not verify message parent", exc_info=True)
+    return "peer"
+
+
 def sender_label(receiver: str | None, sender: str) -> str | None:
     """What ``receiver``'s transcript calls ``sender``: the worker's task
     description (its roster name when the task has none), or ``main`` for the
@@ -290,6 +301,7 @@ async def deliver_message(target: str, sender: str, text: str, *,
             # also covers a runtime still starting or an engine just done.
             await engine.submit(AgentMessage(
                 text=text, sender=sender, wake=False, urgent=urgent,
+                provenance=message_provenance(target, sender),
             ))
         except RuntimeError:
             # Refusal means not accepted; keep it on the durable queue.

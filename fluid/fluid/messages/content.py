@@ -58,7 +58,7 @@ class SteerDelivery:
         if self.origin == "system":
             return format_system_notice(self.text)
         if self.sender is not None:
-            return format_peer_message(self.sender, self.text)
+            return format_peer_message(self.sender, self.text, self.origin)
         return format_steer(self.text)
 
 

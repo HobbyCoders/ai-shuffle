@@ -119,6 +119,8 @@ class AgentMessage(Op):
 
     text: str
     sender: str
+    # Host-authored relationship, never read from the message body.
+    provenance: str = "peer"
     id: str | None = None
     wake: bool = True
     # A receiver that is parked on background tasks (a parent waiting for

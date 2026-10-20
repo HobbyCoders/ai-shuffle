@@ -673,6 +673,7 @@ class SubagentEvent(Event):
     # rides the completion so a woken parent can open the report directly.
     # Optional and last so events persisted before the field existed rehydrate.
     report_path: str | None = None
+    peer_provenance: str = "peer"
 
 
 @dataclass(frozen=True, kw_only=True)
