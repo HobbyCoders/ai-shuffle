@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -38,6 +39,7 @@ from app.db import network as store
 from app.db.async_database import run_sync
 from app.network import catalog, engine, enrollment, identity as identity_mod, lan, policy, recovery, runners, tokens, transport
 from app.network import endpoints as endpoints_mod
+from app.network import request_metrics
 from app.api.network_usage import router as usage_budget_router
 
 logger = logging.getLogger(__name__)
@@ -573,54 +575,57 @@ async def peer_token(body: TokenRequest) -> dict:
 
 @router.get("/peer/ping")
 async def peer_ping(device_id: str = Depends(tokens.require_device)) -> dict:
-    ctx = engine.require_context()
-    transport.note_contact(device_id)
-    return {"device_id": ctx.device_id, "network_id": ctx.network_id, "generation": ctx.generation,
-            "incarnation": ctx.identity.incarnation, "version": settings.version,
-            **(await run_sync(transport._description))}
+    with request_metrics.metrics.measure("tunnel", "GET /peer/ping"):
+        ctx = engine.require_context()
+        transport.note_contact(device_id)
+        return {"device_id": ctx.device_id, "network_id": ctx.network_id, "generation": ctx.generation,
+                "incarnation": ctx.identity.incarnation, "version": settings.version,
+                **(await run_sync(transport._description))}
 
 
 @router.post("/peer/exchange")
 async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.require_device)) -> dict:
-    ctx = engine.require_context()
-    transport.note_contact(device_id)
-    transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog)
+    with request_metrics.metrics.measure("tunnel", "POST /peer/exchange"):
+        ctx = engine.require_context()
+        transport.note_contact(device_id)
+        transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog)
 
-    def _work():
-        released = False
-        if engine.outbox_held():
-            # The journal is the durable offline buffer. Once this comparison
-            # opens the hold, publish its delta in this very response (#1978).
-            released = transport.release_hold_for_peer_view(device_id, body.watermarks.get(ctx.device_id) or {})
-        if body.flush:
-            engine.scan_all(strict=True)
-        elif released:
-            catalog.publish_owned()
-        tokens.remember_binding_support(device_id, body.token_binding_proof)
-        store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
-                           version=body.version, incarnation=body.incarnation, platform=body.platform)
-        ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
-                                                   exclude_origin=device_id)
-        return {"ops": ops, "watermarks": heads, "generation": ctx.generation,
-                "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
-                "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
-                "version": settings.version, "snapshot_required": snapshot,
-                "peer_state": 1, "flushed": body.flush,
-                **({"token_binding_proof": tokens.binding_support_proof(ctx)}
-                   if settings.network_token_binding_enabled else {}),
-                "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),
-                "catalog_backlog": catalog.has_events_backlog(ctx=ctx)}
+        def _work():
+            released = False
+            if engine.outbox_held():
+                # The journal is the durable offline buffer. Once this comparison
+                # opens the hold, publish its delta in this very response (#1978).
+                released = transport.release_hold_for_peer_view(device_id, body.watermarks.get(ctx.device_id) or {})
+            if body.flush:
+                engine.scan_all(strict=True)
+            elif released:
+                catalog.publish_owned()
+            tokens.remember_binding_support(device_id, body.token_binding_proof)
+            store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
+                               version=body.version, incarnation=body.incarnation, platform=body.platform)
+            ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
+                                                       exclude_origin=device_id)
+            return {"ops": ops, "watermarks": heads, "generation": ctx.generation,
+                    "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
+                    "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
+                    "version": settings.version, "snapshot_required": snapshot,
+                    "peer_state": 1, "flushed": body.flush,
+                    **({"token_binding_proof": tokens.binding_support_proof(ctx)}
+                       if settings.network_token_binding_enabled else {}),
+                    "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),
+                    "catalog_backlog": catalog.has_events_backlog(ctx=ctx)}
 
-    return await run_sync(_work)
+        return await run_sync(_work)
 
 
 @router.post("/peer/ops")
 async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_device)) -> dict:
-    transport.note_contact(device_id)
-    result = await run_sync(engine.apply_batch, body.ops)
-    if result.applied:
-        transport.forward_pushed(device_id)
-    return result.as_dict()
+    with request_metrics.metrics.measure("tunnel", "POST /peer/ops"):
+        transport.note_contact(device_id)
+        result = await run_sync(engine.apply_batch, body.ops)
+        if result.applied:
+            transport.forward_pushed(device_id)
+        return result.as_dict()
 
 
 @router.get("/peer/ops/{origin}/{incarnation}/{seq}")
@@ -632,18 +637,19 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
     the advertised head: pruning can remove that head after another origin
     replaces its record. A bare watermark is never rollback proof.
     """
-    transport.note_contact(device_id)
-    if len(origin) > 64 or incarnation < 1 or seq < 1:
-        raise HTTPException(400, "Invalid stream identity")
+    with request_metrics.metrics.measure("tunnel", "GET /peer/ops/{param}/{param}/{param}"):
+        transport.note_contact(device_id)
+        if len(origin) > 64 or incarnation < 1 or seq < 1:
+            raise HTTPException(400, "Invalid stream identity")
 
-    def _work():
-        with store.get_db() as conn:
-            return store.get_op(conn.cursor(), origin, incarnation, seq, at_or_after=at_or_after)
+        def _work():
+            with store.get_db() as conn:
+                return store.get_op(conn.cursor(), origin, incarnation, seq, at_or_after=at_or_after)
 
-    op = await run_sync(_work)
-    if op is None:
-        raise HTTPException(404, "No such operation")
-    return {"op": op}
+        op = await run_sync(_work)
+        if op is None:
+            raise HTTPException(404, "No such operation")
+        return {"op": op}
 
 
 @router.post("/peer/control/{action}")
@@ -664,21 +670,36 @@ async def peer_control(action: str, request: Request,
     # the private-access UI; a forwarded-proto header on the LAN does not.
     secure = control.inbound_https.set(
         request.url.scheme == "https" or request.scope.get("shuffle.forwarded_https") is True)
+    # Controls use device tokens, not the encrypted LAN sync wrapper. Keep
+    # them a separate transport so sync apply time cannot be blamed on Git.
+    started = time.monotonic()
+    metric_status = 500
     try:
-        return await control.handle(action, body, from_device=device_id)
+        result = await control.handle(action, body, from_device=device_id)
+        returned = result.get("status") if isinstance(result, dict) else None
+        metric_status = returned if type(returned) is int and 100 <= returned <= 599 else 200
+        return result
     except control.UnknownControlAction:
+        metric_status = 404
         raise HTTPException(404, "Unknown control action") from None
     except KeyError as exc:
         # A missing field inside a handler is a bad request, not an unknown action.
         logger.exception("Control action %s from %s failed on a missing field", action, device_id)
+        metric_status = 400
         raise HTTPException(400, f"Missing field: {exc.args[0] if exc.args else exc}") from exc
     except (LookupError, PermissionError, ValueError) as exc:
         if action in ("handoff", "session-move"):
             logger.warning("Refused %s control for session %s: %s", action, body.get("session_id"), exc)
         code = 404 if isinstance(exc, LookupError) else 409 if isinstance(exc, PermissionError) else 400
+        metric_status = code
         raise HTTPException(code, str(exc)) from exc
+    except HTTPException as exc:
+        metric_status = exc.status_code
+        raise
     finally:
         control.inbound_https.reset(secure)
+        endpoint = action if re.fullmatch(r"[a-z0-9-]{1,64}", action) else "unknown"
+        request_metrics.metrics.record("control", endpoint, metric_status, time.monotonic() - started)
 
 
 @router.post("/sessions/{session_id}/fork-here", status_code=status.HTTP_201_CREATED)
@@ -722,13 +743,14 @@ async def hydrate_session(device_id: str, session_id: str, request: Request, _: 
 @router.get("/peer/snapshot")
 async def peer_snapshot(collection: Optional[str] = None, offset: int = 0,
                         device_id: str = Depends(tokens.require_device)) -> dict:
-    transport.note_contact(device_id)
-    if collection is None:
-        return await run_sync(engine.snapshot_manifest)
-    # Retired collections answer with an empty page for joiners on older builds.
-    if collection not in policy.COLLECTIONS and collection not in policy.RETIRED_COLLECTIONS:
-        raise HTTPException(404, "Unknown collection")
-    return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
+    with request_metrics.metrics.measure("tunnel", "GET /peer/snapshot"):
+        transport.note_contact(device_id)
+        if collection is None:
+            return await run_sync(engine.snapshot_manifest)
+        # Retired collections answer with an empty page for joiners on older builds.
+        if collection not in policy.COLLECTIONS and collection not in policy.RETIRED_COLLECTIONS:
+            raise HTTPException(404, "Unknown collection")
+        return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
 
 
 @router.post("/startup-sync")
@@ -740,22 +762,25 @@ async def desktop_startup_sync(_: str = Depends(require_admin)) -> dict:
 @router.post("/peer/state")
 async def peer_state(prepare: bool = False, format: int = 1, device_id: str = Depends(tokens.require_device)) -> dict:
     """A state copy for ``device_id``. ``format`` 2 leaves transcripts out (see ``peer_snapshot``)."""
-    from app.network import peer_snapshot
-    try:
-        return await run_sync(peer_snapshot.state, device_id, prepare=prepare,
-                              fmt=peer_snapshot.requested_format(format))
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+    with request_metrics.metrics.measure("tunnel", _state_metric_endpoint(prepare)):
+        from app.network import peer_snapshot
+        try:
+            return await run_sync(peer_snapshot.state, device_id, prepare=prepare,
+                                  fmt=peer_snapshot.requested_format(format))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/peer/transcripts")
 async def peer_transcripts(request: Request, device_id: str = Depends(tokens.require_device)) -> dict:
     """Transcript events a worker still needs after a first copy that left them out."""
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
-    return await _peer_transcripts(body, device_id)
+    with request_metrics.metrics.measure("tunnel-setup", "POST /peer/transcripts"):
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+    with request_metrics.metrics.measure("tunnel", "POST /peer/transcripts"):
+        return await _peer_transcripts(body, device_id)
 
 
 async def _peer_transcripts(body: Any, device_id: str) -> dict:
@@ -774,25 +799,27 @@ async def _peer_transcripts(body: Any, device_id: str) -> dict:
 
 @router.get("/peer/state/{transfer}/{index}")
 async def peer_state_page(transfer: str, index: int, device_id: str = Depends(tokens.require_device)):
-    from app.network import peer_snapshot
-    try:
-        raw = await run_sync(peer_snapshot.page, device_id, transfer, index)
-    except (ValueError, FileNotFoundError) as exc:
-        raise HTTPException(409, "Peer transfer expired; start a new transfer") from exc
-    return Response(raw, media_type="application/json")
+    with request_metrics.metrics.measure("tunnel", "GET /peer/state/{param}/{param}"):
+        from app.network import peer_snapshot
+        try:
+            raw = await run_sync(peer_snapshot.page, device_id, transfer, index)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(409, "Peer transfer expired; start a new transfer") from exc
+        return Response(raw, media_type="application/json")
 
 
 @router.get("/peer/blob/{hash_value}/parts/{index}")
 async def peer_file_part(hash_value: str, index: int, device_id: str = Depends(tokens.require_device)) -> dict:
-    from app.network import peer_files
-    if len(hash_value) != 64 or any(c not in "0123456789abcdef" for c in hash_value):
-        raise HTTPException(400, "Invalid hash")
-    try:
-        return await run_sync(peer_files.part, hash_value, index, device_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, "File not held here") from exc
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    with request_metrics.metrics.measure("tunnel", "GET /peer/blob/{param}/parts/{param}"):
+        from app.network import peer_files
+        if len(hash_value) != 64 or any(c not in "0123456789abcdef" for c in hash_value):
+            raise HTTPException(400, "Invalid hash")
+        try:
+            return await run_sync(peer_files.part, hash_value, index, device_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "File not held here") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +879,10 @@ def _int(value: Any) -> int:
         return 1
 
 
+def _state_metric_endpoint(prepare: bool) -> str:
+    return f"POST /peer/state?prepare={int(bool(prepare))}"
+
+
 _LAN_PREFIX = "/api/v1/network/peer"
 # The sync subset of the peer plane: every one is safe to repeat over the
 # tunnel when a LAN answer is lost. Control, workspace, browser and usage
@@ -872,6 +903,25 @@ _LAN_ROUTES = (
 )
 
 
+_LAN_METRIC_ROUTES = tuple(
+    (verb, pattern, verb + " /peer" + re.sub(r"\([^)]*\)", "{param}", pattern.pattern))
+    for verb, pattern, _ in _LAN_ROUTES
+)
+
+
+def _lan_metric_endpoint(call: dict) -> str:
+    """Only registered route shapes, never raw peer-selected paths/IDs."""
+    method, path = call["m"], call["p"]
+    if path.startswith(_LAN_PREFIX):
+        for verb, pattern, endpoint in _LAN_METRIC_ROUTES:
+            if verb == method and pattern.fullmatch(path[len(_LAN_PREFIX):]):
+                if endpoint == "POST /peer/state":
+                    query = call.get("q") if isinstance(call.get("q"), dict) else {}
+                    return _state_metric_endpoint(_flag(query.get("prepare", False)))
+                return endpoint
+    return "unmatched"
+
+
 async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
     method, path = call["m"], call["p"]
     query = call.get("q") if isinstance(call.get("q"), dict) else {}
@@ -884,6 +934,7 @@ async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
                 break
     if handler is None:
         return 404, "application/json", b'{"detail":"Not available on the LAN session"}'
+    metric_context = request_metrics.in_lan_dispatch.set(True)
     try:
         result = await handler(match, query, call.get("b"), device_id)
     except HTTPException as exc:
@@ -894,6 +945,8 @@ async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
     except Exception:  # noqa: BLE001
         logger.exception("LAN call %s %s from %s failed", method, path, device_id)
         return 500, "application/json", b'{"detail":"Internal error"}'
+    finally:
+        request_metrics.in_lan_dispatch.reset(metric_context)
     if isinstance(result, Response):
         return result.status_code, result.media_type or "application/octet-stream", bytes(result.body)
     return 200, "application/json", json.dumps(jsonable_encoder(result), separators=(",", ":")).encode("utf-8")
@@ -902,28 +955,34 @@ async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
 @router.post(lan.CALL_PATH.removeprefix("/api/v1/network"))
 async def peer_lan_call(request: Request) -> Response:
     """One sealed request; the answer is sealed to the same session and sequence number."""
-    ctx = await _require_lan()
-    session_id = request.headers.get(lan.SESSION_HEADER, "")
+    with request_metrics.metrics.measure("lan-setup", "POST /peer/lan/call"):
+        ctx = await _require_lan()
+        session_id = request.headers.get(lan.SESSION_HEADER, "")
+        try:
+            seq = int(request.headers.get(lan.SEQ_HEADER, ""))
+        except ValueError:
+            raise HTTPException(401, "LAN session refused") from None
+        # Refuse a session this worker does not hold before reading a body of up
+        # to CALL_MAX_BYTES (the caller opens a new session or uses the tunnel).
+        if not lan.session_known(session_id):
+            raise HTTPException(401, "LAN session refused")
+        body = bytearray()
+        async for piece in request.stream():
+            body.extend(piece)
+            if len(body) > lan.CALL_MAX_BYTES:
+                raise HTTPException(413, "Call too large")
+        try:
+            session, call = await run_sync(lan.server_open_call, ctx, session_id, seq, bytes(body))
+        except lan.LanRejected as exc:
+            # Unsealed and generic: the caller opens a new session or uses the tunnel.
+            logger.debug("LAN call refused: %s", exc)
+            raise HTTPException(401, "LAN session refused") from exc
+    endpoint = _lan_metric_endpoint(call)
+    started, status_code = time.monotonic(), 500
     try:
-        seq = int(request.headers.get(lan.SEQ_HEADER, ""))
-    except ValueError:
-        raise HTTPException(401, "LAN session refused") from None
-    # Refuse a session this worker does not hold before reading a body of up
-    # to CALL_MAX_BYTES (the caller opens a new session or uses the tunnel).
-    if not lan.session_known(session_id):
-        raise HTTPException(401, "LAN session refused")
-    body = bytearray()
-    async for piece in request.stream():
-        body.extend(piece)
-        if len(body) > lan.CALL_MAX_BYTES:
-            raise HTTPException(413, "Call too large")
-    try:
-        session, call = await run_sync(lan.server_open_call, ctx, session_id, seq, bytes(body))
-    except lan.LanRejected as exc:
-        # Unsealed and generic: the caller opens a new session or uses the tunnel.
-        logger.debug("LAN call refused: %s", exc)
-        raise HTTPException(401, "LAN session refused") from exc
-    status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
+        status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
+    finally:
+        request_metrics.metrics.record("lan", endpoint, status_code, time.monotonic() - started)
     return Response(lan.seal_reply(session, seq, status_code, media_type, raw), media_type="application/octet-stream")
 
 

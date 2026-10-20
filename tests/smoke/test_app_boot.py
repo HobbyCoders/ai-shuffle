@@ -564,6 +564,10 @@ def test_owner_settings_usage_catalog_api_users(server):
 def test_sigterm_exits_cleanly_without_tracebacks(server):
     process = server.process
     assert process.poll() is None, "the server exited before shutdown was requested"
+    # An unenrolled peer call records setup but cannot mutate this isolated
+    # server. Its fresh 60-second window must flush on SIGTERM, not its timer.
+    response = server.client.post("/api/v1/network/peer/lan/call", content=b"probe")
+    assert response.status_code == 404
     sent = time.monotonic()
     os.killpg(process.pid, signal.SIGTERM)  # what the container supervisor sends
     try:
@@ -586,6 +590,12 @@ def test_sigterm_exits_cleanly_without_tracebacks(server):
     assert "Application shutdown complete." in console
     assert "Finished server process" in console
     assert "AI Shuffle shutting down" in app_log
+    peer_summaries = [entry for line in app_log.splitlines() if "Peer request summary " in line
+                      for entry in json.loads(line.split("endpoints=", 1)[1])
+                      if entry["transport"] == "lan-setup"]
+    assert len(peer_summaries) == 1
+    assert peer_summaries[0]["endpoint"] == "POST /peer/lan/call"
+    assert peer_summaries[0]["count"] == peer_summaries[0]["errors"] == 1
     assert fatal.strip() == "", f"fatal.log is not empty:\n{fatal}"
 
     problems = _problem_lines(console) + _problem_lines(app_log)
