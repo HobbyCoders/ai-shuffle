@@ -135,6 +135,11 @@ def _kick(session_id: str) -> None:
 # carries no prompt of its own.
 _WAKEUP_SUPERSEDING_SOURCES = ("user", "queue", "resume")
 
+# Explicit sends (including REST/worktree intake) resume sidebar membership.
+# Background work must not undo a person's decision to settle a chat. Keep
+# this separate from wake cancellation / Stop: those source policies are unchanged.
+_REACTIVATING_SOURCES = (*_WAKEUP_SUPERSEDING_SOURCES, "api", "worktree")
+
 # Turns whose text the OWNER wrote (typed, or a spoken transcript). Only these
 # may answer a yes/no question the assistant is waiting on.
 _OWNER_ANSWER_SOURCES = ("user", "queue")
@@ -288,9 +293,10 @@ def _submit_blocking(
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     window_pin: Optional[Dict[str, int]] = None,
+    reactivated: dict[str, Any] | None = None,
 ) -> str:
-    """Every BLOCKING part of :func:`submit` — up to three DB round trips (run
-    binding, wakeup supersede, enqueue) — and nothing else.
+    """Every BLOCKING part of :func:`submit` (reactivation, run binding,
+    wakeup supersede, enqueue) — and nothing else.
 
     Split out so :func:`submit_async` can pay ONE thread hop for the whole
     logical operation instead of one per write, while the kick (which needs a
@@ -303,6 +309,10 @@ def _submit_blocking(
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
     work is never lost — a later kick or the periodic reap sweep starts it.
+
+    Explicit sends reactivate settled membership before admission. When given,
+    ``reactivated`` receives the owning user id for the async caller's fan-out.
+    This does not revive old turns or change the wake/Stop source policies.
 
     A turn from a human-facing source also PERSISTS its model / effort /
     permission overrides onto the session row. Agents do not pin a
@@ -327,6 +337,17 @@ def _submit_blocking(
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
+    if source in _REACTIVATING_SOURCES:
+        from app.db import database
+
+        row = database.get_session(session_id)
+        if row and not row.get("is_active", True):
+            # The same shared-membership write as a normal chat send. Do this
+            # before admission/kick so an old settle snapshot cannot dismiss
+            # the new turn. Never revive or rewrite the old parked turn.
+            database.set_session_active(session_id, True)
+            if reactivated is not None:
+                reactivated["user_id"] = row.get("api_user_id") or "admin"
     if command_id and (payload or {}).get("compact_first"):
         from app.db import turns as turns_db
         existing = turns_db.get_turn_by_command(session_id, command_id)
@@ -550,6 +571,7 @@ async def submit_async(
 
         await assistant_confirm.on_owner_message(session_id, prompt)
     window_pin: Dict[str, int] = {}
+    reactivated: dict[str, Any] = {}
     turn_id = await asyncio.to_thread(
         _submit_blocking,
         session_id,
@@ -565,12 +587,30 @@ async def submit_async(
         parent_turn_id=parent_turn_id,
         instance_id=instance_id,
         window_pin=window_pin,
+        reactivated=reactivated,
     )
+    if reactivated:
+        await _announce_reactivated(session_id, reactivated["user_id"])
     if not no_kick:
         _kick(session_id)
     if window_pin:
         await _announce_window_pin(session_id, window_pin["context_window"])
     return turn_id
+
+
+async def _announce_reactivated(session_id: str, user_id: str) -> None:
+    """Reach watchers and unopened sidebars, including the sending device."""
+    from app.core.sync_engine import sync_engine
+
+    try:
+        await sync_engine.broadcast_session_updated(
+            session_id=session_id, updates={"is_active": True}, source_device_id=None,
+        )
+        await sync_engine.broadcast_user_session_updated(
+            user_id=user_id, session_id=session_id, updates={"is_active": True}, source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — membership and the queued turn are durable.
+        logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
 
 
 async def _announce_window_pin(session_id: str, window: int) -> None:
