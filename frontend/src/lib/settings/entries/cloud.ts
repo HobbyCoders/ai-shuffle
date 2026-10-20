@@ -12,7 +12,7 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Account',
 		label: 'Cloud account',
-		help: 'Everything on your own machines and network is free and needs no account. A free Cloud account adds one remote worker with no card; a paid plan adds three, plus sync across networks.',
+		help: 'Everything on your own machines and network is free and needs no account. A free Cloud account adds two remote workers with no card; a paid plan adds four, plus sync across networks.',
 		keywords: ['license', 'licence', 'plan', 'status', 'subscription', 'account', 'hobbycoders', 'free', 'paid', 'beta', 'lease']
 	},
 	{
@@ -20,7 +20,7 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Account',
 		label: 'Link an account',
-		hint: 'One remote worker, no card',
+		hint: 'Two remote workers, no card',
 		keywords: ['sign in', 'link account', 'shuffle account', 'connect', 'free account']
 	},
 	{
@@ -49,7 +49,7 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Plan',
 		label: 'Upgrade',
-		hint: 'Three remote workers, sync',
+		hint: 'Four remote workers, sync',
 		keywords: ['pricing', 'buy', 'paid plan', 'price', 'upgrade']
 	},
 	{

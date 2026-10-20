@@ -127,7 +127,7 @@ def test_free_account_uses_the_actual_binding_store(store):
     mobile_hub.bind("https://hub.example.com", "server-1", "encrypted-secret", "account-1")
     s = licensing.status()
     assert s["state"] == "free" and s["linked"]
-    assert s["remote_worker_limit"] == s["seats"] == 1
+    assert s["remote_worker_limit"] == s["seats"] == 2
     assert s["allowed"] and s["banner"] is None
 
 
@@ -160,11 +160,11 @@ async def test_linked_paid_account_falls_back_to_free_on_expiry_and_release(stor
     paid = await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
     assert paid["state"] == "paid" and paid["remote_worker_limit"] == 3
     expired = licensing.status(now=time.time() + 15 * DAY)
-    assert expired["state"] == "free" and expired["remote_worker_limit"] == 1
+    assert expired["state"] == "free" and expired["remote_worker_limit"] == 2
     assert expired["allowed"] and expired["banner"] is None
     server.answers["deactivate"] = (200, {"ok": True})
     released = await licensing.deactivate()
-    assert released["state"] == "free" and released["remote_worker_limit"] == 1
+    assert released["state"] == "free" and released["remote_worker_limit"] == 2
     assert released["allowed"] and licensing.lease_header() is None
 
 

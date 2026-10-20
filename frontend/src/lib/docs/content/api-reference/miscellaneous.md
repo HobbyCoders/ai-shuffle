@@ -1101,13 +1101,13 @@ Cloud account, paid lease and remote-worker capacity for Settings. The historica
   "mode": "cloud",
   "state": "paid",
   "linked": true,
-  "remote_worker_limit": 3,
+  "remote_worker_limit": 4,
   "lease_state": "active",
   "message": "Paid Cloud plan. Local use does not depend on this plan.",
   "allowed": true,
   "reason": null,
   "banner": null,
-  "seats": 3,
+  "seats": 4,
   "seats_used": 1,
   "install_id": "...",
   "expires_at": "2026-10-02T00:00:00+00:00",
@@ -1118,7 +1118,7 @@ Cloud account, paid lease and remote-worker capacity for Settings. The historica
 }
 ```
 
-The response also has `plan`, `account_id`, `license_id`, `key_hint`, `issued_at`, `grace_until`, `server_status` and `server_configured`. `state` is `not_linked`, `free` or `paid`; `linked` reports the local account binding independently of paid-key activation. `remote_worker_limit` is 0 without an account, 1 for a free account, or the valid signed lease's seat count. The hub enforces actual capacity. `lease_state` is `none`, `active`, `grace`, `expiring`, `ending`, `expired`, `invalid` or `seat_lost`. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, and `reason` and `banner` are always `null`. No Cloud state blocks local runs or updates. An expired lease falls back to `free` if linked, otherwise `not_linked`; renewal timestamps and errors remain available.
+The response also has `plan`, `account_id`, `license_id`, `key_hint`, `issued_at`, `grace_until`, `server_status` and `server_configured`. `state` is `not_linked`, `free` or `paid`; `linked` reports the local account binding independently of paid-key activation. `remote_worker_limit` is 0 without an account, 2 for a free account, or the valid signed lease's seat count (4 on the paid plan by default). The hub enforces actual capacity. `lease_state` is `none`, `active`, `grace`, `expiring`, `ending`, `expired`, `invalid` or `seat_lost`. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, and `reason` and `banner` are always `null`. No Cloud state blocks local runs or updates. An expired lease falls back to `free` if linked, otherwise `not_linked`; renewal timestamps and errors remain available.
 
 ### POST /api/v1/license/activate
 

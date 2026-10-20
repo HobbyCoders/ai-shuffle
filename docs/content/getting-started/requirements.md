@@ -40,7 +40,7 @@ Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chr
 
 ## Accounts you need
 
-- **No AI Shuffle account or key is required** for local use. An optional [Cloud account](/docs/getting-started/cloud) gives you one remote worker for free, with no card.
+- **No AI Shuffle account or key is required** for local use. An optional [Cloud account](/docs/getting-started/cloud) gives you two remote workers for free, with no card.
 - **Your own AI account** with at least one supported provider: Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway. AI Shuffle includes no AI usage. See [Modes and costs](/docs/getting-started/modes-and-costs).
 - **Optional:** more AI providers, fal.ai for images, video and audio, a GitHub account for repository features, and a free HobbyCoders account for the Android app and remote access.
 

@@ -2,12 +2,12 @@
 	/**
 	 * Cloud: what the AI Shuffle Cloud account gives this worker. Local use is
 	 * free and never depends on it; the account only sets how many remote
-	 * workers the hub serves (none, one on a free account, the plan's seats on
+	 * workers the hub serves (none, two on a free account, the plan's seats on
 	 * a paid one). Three states, from `GET /api/v1/license`:
 	 *
 	 * - not_linked: what a free account adds, Link an account (the Devices
 	 *   sign-in), pricing, and the paid key entry.
-	 * - free: 1 remote worker, Upgrade, the key entry.
+	 * - free: 2 remote workers, Upgrade, the key entry.
 	 * - paid: plan, seats, paid access date with Check now, the key and Deactivate.
 	 *
 	 * A saved activation can outlive paid access: after expiry, an invalid key
@@ -50,7 +50,7 @@
 	import './editors/editors.css';
 
 	/** Remote workers on the paid plan when the status does not say. */
-	const PAID_WORKERS = 3;
+	const PAID_WORKERS = 4;
 
 	let status = $state<LicenseStatus | null>(null);
 	let load = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
@@ -135,12 +135,12 @@
 
 	const tiers = $derived([
 		{ id: 'local', name: 'This worker', figure: 'Free', unit: 'Local use, no account' },
-		{ id: 'free', name: 'Free account', figure: '1', unit: 'remote worker, no card' },
+		{ id: 'free', name: 'Free account', figure: '2', unit: 'remote workers, no card' },
 		{
 			id: 'paid',
 			name: 'Paid plan',
-			figure: String(paid && status?.seats ? status.seats : PAID_WORKERS),
-			unit: 'remote workers and sync'
+			figure: paid && (status?.seats ?? 0) >= 100 ? 'Unlimited' : String(paid && status?.seats ? status.seats : PAID_WORKERS),
+			unit: paid && (status?.seats ?? 0) >= 100 ? 'remote workers' : 'remote workers and sync'
 		}
 	]);
 	const currentTier = $derived(tier === 'paid' ? 'paid' : tier === 'free' ? 'free' : tier ? 'local' : null);
@@ -221,7 +221,7 @@
 	const seatsValue = $derived(
 		seatHolders?.length && !hasLease
 			? `${seatHolders.length} in use`
-			: `${status?.seats_used ?? '?'} of ${status?.seats ?? PAID_WORKERS}`
+			: (status?.seats ?? 0) >= 100 ? 'Unlimited remote workers' : `${status?.seats_used ?? '?'} of ${status?.seats ?? PAID_WORKERS}`
 	);
 
 	onMount(() => void loadStatus());
@@ -269,11 +269,13 @@
 		<RowGroup title="Plan">
 			<SettingRow
 				id="cloud.remoteWorkers"
-				hint={tier === 'not_linked' && !seatHolders?.length ? 'A free account adds one' : undefined}
+				hint={tier === 'not_linked' && !seatHolders?.length ? 'A free account adds two' : undefined}
 				expanded={seatsOpen && seatHolders?.length ? seatList : undefined}
 			>
 				{#if seatHolders?.length}
 					<ExpandToggle value={seatsValue} bind:open={seatsOpen} />
+				{:else if paid && (status.seats ?? 0) >= 100}
+					<span data-testid="cloud-seats"><ValueText value="Unlimited remote workers" tone="fg" /></span>
 				{:else if paid && status.seats_used !== null && status.seats}
 					<span data-testid="cloud-seats"><Meter used={status.seats_used} cap={status.seats} label="Remote workers in use" warnAt={1} /></span>
 				{:else if paid}

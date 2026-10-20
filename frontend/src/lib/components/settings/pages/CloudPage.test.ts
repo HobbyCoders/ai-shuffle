@@ -41,16 +41,16 @@ const notLinked = {
 	server_status: null,
 	server_configured: true
 };
-const free = { ...notLinked, state: 'free', linked: true, message: 'Free account: 1 remote worker.', remote_worker_limit: 1, plan: 'free', seats: 1 };
+const free = { ...notLinked, state: 'free', linked: true, message: 'Free account: 2 remote workers.', remote_worker_limit: 2, plan: 'free', seats: 2 };
 const paid = {
 	...notLinked,
 	state: 'paid',
 	linked: true,
 	message: 'Paid Cloud plan. Local use does not depend on this plan.',
-	remote_worker_limit: 3,
+	remote_worker_limit: 4,
 	lease_state: 'active',
 	plan: 'monthly',
-	seats: 3,
+	seats: 4,
 	seats_used: 1,
 	account_id: 'acct-example',
 	license_id: 'plan-example',
@@ -91,8 +91,8 @@ describe('not linked', () => {
 		expect(screen.getByRole('heading', { level: 1, name: 'Cloud' })).toBeTruthy();
 		expect(screen.getByTestId('cloud-message').textContent).toContain('Local use is free');
 		expect(tierNamed('This worker').getAttribute('aria-current')).toBe('true');
-		expect(tierNamed('Free account').textContent).toContain('remote worker, no card');
-		expect(screen.getByText('A free account adds one')).toBeTruthy();
+		expect(tierNamed('Free account').textContent).toContain('remote workers, no card');
+		expect(screen.getByText('A free account adds two')).toBeTruthy();
 		expect(screen.getByTestId('cloud-seats').textContent).toContain('None');
 		const plans = screen.getByRole('link', { name: /See plans/ });
 		expect(plans.getAttribute('href')).toBe('https://hobbycoders.com/ai-shuffle/pricing');
@@ -122,13 +122,31 @@ describe('not linked', () => {
 	});
 });
 
+it('keeps the meter for 99 seats, just under unlimited', async () => {
+	status = { ...paid, seats: 99, seats_used: 2, remote_worker_limit: 99 };
+	render(CloudPage);
+	await waitFor(() => expect(state()).toContain('Paid'));
+	expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('2 of 99');
+	expect(tierNamed('Paid plan').textContent).toContain('99');
+	expect(tierNamed('Paid plan').textContent).not.toContain('Unlimited');
+});
+
+it.each([100, 1000])('shows unlimited remote workers for %i seats without a meter', async (seats) => {
+	status = { ...paid, seats, remote_worker_limit: seats };
+	render(CloudPage);
+	await waitFor(() => expect(state()).toContain('Paid'));
+	expect(screen.getByTestId('cloud-seats').textContent?.trim()).toBe('Unlimited remote workers');
+	expect(tierNamed('Paid plan').textContent).toContain('Unlimited');
+	expect(screen.queryByRole('meter')).toBeNull();
+});
+
 describe('free', () => {
 	it('shows the included remote worker, not a usage count, and an upgrade link', async () => {
 		status = { ...free };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Free'));
 		expect(screen.getByText('Linked to AI Shuffle Cloud')).toBeTruthy();
-		expect(screen.getByTestId('cloud-seats').textContent).toContain('1 remote worker included');
+		expect(screen.getByTestId('cloud-seats').textContent).toContain('2 remote workers included');
 		expect(screen.getByTestId('cloud-seats').textContent).not.toContain('1 of 1');
 		expect(tierNamed('Free account').getAttribute('aria-current')).toBe('true');
 		expect(tierNamed('This worker').classList.contains('reached')).toBe(true);
@@ -146,7 +164,7 @@ describe('paid', () => {
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
 		expect(screen.getByText('Monthly')).toBeTruthy();
-		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 3');
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 4');
 		expect(screen.getByText('Paid access until')).toBeTruthy();
 		expect(screen.getByTestId('cloud-renewal').textContent).toContain('Oct 25, 2026');
 		expect(screen.getByRole('button', { name: /^Plan key/ }).textContent).toContain('ASH-…7QK2');
@@ -263,7 +281,7 @@ describe('plan key', () => {
 						activated: false,
 						code: 'seats_full',
 						detail: 'All seats are in use.',
-						seats: 3,
+						seats: 4,
 						installs: [{ install_id: 'old-box-1', name: 'Old worker', last_seen: '2026-10-11T00:00:00Z' }]
 					}
 				: { ok: true, seats_used: 2 }

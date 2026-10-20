@@ -89,7 +89,7 @@ Fluid is the engine that runs your agents: it talks to the model, runs tools, as
 
 The app is free: run it on your own hardware, on your home network or your own VPN, with no HobbyCoders account. Updates and same-network worker sync are free too.
 
-[AI Shuffle Cloud](docs/content/getting-started/cloud.md) is the optional paid part for reaching your workers from anywhere without a VPN: remote access, sync across networks, public connector endpoints, plugin sign-in relays and in-app support. A free account includes one remote worker, no card needed. Ending a plan never disables the local app, and AI usage is always between you and your provider.
+[AI Shuffle Cloud](docs/content/getting-started/cloud.md) is the optional paid part for reaching your workers from anywhere without a VPN: remote access, sync across networks, public connector endpoints, plugin sign-in relays and in-app support. A free account includes two remote workers, no card needed. Ending a plan never disables the local app, and AI usage is always between you and your provider.
 
 ## Contributing, security and license
 
