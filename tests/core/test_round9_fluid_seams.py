@@ -97,9 +97,12 @@ def test_memory_snapshot_passes_a_non_empty_placeholder_through(monkeypatch):
     import app.core.provider.harness_adapter as ha
     from app.core.provider.types import SessionOptions
 
+    ranked_queries = []
+
     class _Store:
-        def render_memory_section(self, project, *, checkout=None, query=""):
-            assert project == "project:x" and checkout == "." and query == ""
+        def render_memory_section(self, project, *, checkout=None, task_query=""):
+            assert project == "project:x" and checkout == "."
+            ranked_queries.append(task_query)
             return "# Memory\n(no saved facts yet — Remember saves one, Recall searches)"
 
     monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda *a: (_Store(), "project:x"))
@@ -111,9 +114,14 @@ def test_memory_snapshot_passes_a_non_empty_placeholder_through(monkeypatch):
     assert note is not None and "# Memory" in note and "no saved facts yet" in note
     assert note.startswith("<system-reminder>")
 
+    assert ranked_queries == [""]
+    adapter._memory_initial_task = "memory backend"
+    assert adapter._memory_snapshot() == note
+    assert ranked_queries == ["", "memory backend"]
+
     class _Empty(_Store):
-        def render_memory_section(self, project, *, checkout=None, query=""):
-            assert project == "project:x" and checkout == "." and query == ""
+        def render_memory_section(self, project, *, checkout=None, task_query=""):
+            assert project == "project:x" and checkout == "." and task_query == "memory backend"
             return None
 
     monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda *a: (_Empty(), "project:x"))
