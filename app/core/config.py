@@ -352,7 +352,7 @@ class Settings(BaseSettings):
 
     # Optional paid Cloud leases (app/core/license.py), never local run gates.
     # With no server URL, LICENSE_BETA=true, or no verification keys, skip
-    # acquisition/renewal. Linked free accounts still have one remote worker.
+    # acquisition/renewal. Linked free accounts still have two remote workers.
     # A release build sets LICENSE_SERVER_URL=https://hobbycoders.com.
     license_server_url: str = ""
     license_beta: bool = False

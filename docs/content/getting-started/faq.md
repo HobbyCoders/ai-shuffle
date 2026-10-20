@@ -45,11 +45,11 @@ The **Android app** is optional, for using your workspace away from your desk. A
 
 ## How many machines can I use?
 
-Run as many local workers as you need on your LAN or VPN. An optional free Cloud account serves 1 remote worker; the paid plan serves 3. See [AI Shuffle Cloud](/docs/getting-started/cloud).
+Run as many local workers as you need on your LAN or VPN. An optional free Cloud account serves 2 remote workers; the paid plan serves 4. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
 ## How much does AI Shuffle cost?
 
-The app and updates are free. AI Shuffle Cloud has a free account with 1 remote worker and no card, or a paid plan with 3 remote workers. Founder pricing is $14/month or $140/year; regular pricing is $20/month or $200/year.
+The app and updates are free. AI Shuffle Cloud has a free account with 2 remote workers and no card, or a paid plan with 4 remote workers. Founder pricing is $14/month or $140/year; regular pricing is $20/month or $200/year.
 
 ## Is there a free account?
 
@@ -61,7 +61,7 @@ Yes. Local use has no license checks or time limit. Your AI provider may still n
 
 ## What happens if I cancel?
 
-Your paid Cloud plan stays active until the end of the period you paid for. After that, the hub stops serving extra tunnels; your free account keeps one remote worker. Nothing in the app stops working, and updates stay free. Your projects, sessions and database stay on your machine, untouched. At any time, **Settings → System → Export all data** downloads every chat (as a private backup `.jsonl` and as Markdown), every agent and your project list in one ZIP. To keep everything else, including project files, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
+Your paid Cloud plan stays active until the end of the period you paid for. After that, the hub stops serving extra tunnels; your free account keeps two remote workers. Nothing in the app stops working, and updates stay free. Your projects, sessions and database stay on your machine, untouched. At any time, **Settings → System → Export all data** downloads every chat (as a private backup `.jsonl` and as Markdown), every agent and your project list in one ZIP. To keep everything else, including project files, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
 
 ## Can I get a refund?
 

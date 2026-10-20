@@ -85,7 +85,7 @@
 				<h2 class="text-sm font-semibold text-foreground mb-1">Local use is free</h2>
 				<p class="text-sm text-muted-foreground">
 					Everything works on your own machines and network without an account or key. A free AI Shuffle Cloud
-					account adds one remote worker, with no card. You can link it later in Settings > Cloud.
+					account adds two remote workers, with no card. You can link it later in Settings > Cloud.
 				</p>
 			</div>
 		</div>

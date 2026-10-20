@@ -297,9 +297,9 @@ def _account_status() -> dict:
     return {
         "mode": "cloud", "state": "free" if linked else "not_linked",
         "linked": linked, "allowed": True, "reason": None, "banner": None,
-        "message": "Free account: 1 remote worker." if linked else "Not linked to AI Shuffle Cloud. Local use is free.",
-        "remote_worker_limit": 1 if linked else 0, "lease_state": "none",
-        "plan": "free" if linked else None, "seats": 1 if linked else 0,
+        "message": "Free account: 2 remote workers." if linked else "Not linked to AI Shuffle Cloud. Local use is free.",
+        "remote_worker_limit": 2 if linked else 0, "lease_state": "none",
+        "plan": "free" if linked else None, "seats": 2 if linked else 0,
         "seats_used": None, "account_id": None, "license_id": None,
         "key_hint": None, "install_id": None, "issued_at": None, "expires_at": None,
         "grace": False, "grace_until": None, "last_refresh_at": None, "next_refresh_at": None,
