@@ -32,6 +32,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 import zlib
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -142,6 +143,13 @@ def outbox_held() -> bool:
 
 
 @dataclass
+class _PendingRetry:
+    seq: int
+    delay: float
+    until: float
+
+
+@dataclass
 class NetworkContext:
     identity: identity_mod.DeviceIdentity
     network_id: str
@@ -156,6 +164,9 @@ class NetworkContext:
     key_candidates: Dict[int, Dict[str, bytes]] = field(default_factory=dict)
     key_recipients: Dict[str, set] = field(default_factory=dict)
     key_generations: Dict[str, int] = field(default_factory=dict)
+    # Context/key/membership reloads invalidate cooldowns; never retain errors
+    # or tracebacks here. Inactive entries are pruned by the background pass.
+    _pending_retries: Dict[Tuple[str, int], _PendingRetry] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def device_id(self) -> str:
@@ -1696,6 +1707,25 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into._pending_drains.update(part._pending_drains)
 
 
+PENDING_RETRY_BASE = 30.0
+PENDING_RETRY_MAX = 600.0
+
+
+def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int, error: Exception) -> None:
+    """One retry schedule and at most one unexpected traceback per retry step."""
+    now = time.monotonic()
+    with _lock:
+        old = ctx._pending_retries.get((origin, incarnation))
+        if old is not None and old.seq == seq and now < old.until:
+            return
+        delay = (min(PENDING_RETRY_MAX, old.delay * 2)
+                 if old is not None and old.seq == seq else PENDING_RETRY_BASE)
+        ctx._pending_retries[(origin, incarnation)] = _PendingRetry(seq, delay, now + delay)
+    if not isinstance(error, ApplyError):
+        logger.warning("Applying buffered operations failed; retry backoff %.0fs", delay,
+                       exc_info=(type(error), error, error.__traceback__))
+
+
 def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                          result: ApplyResult) -> None:
     """Drain at most APPLY_CHUNK successors under one state lock.
@@ -1708,6 +1738,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
     box = [0]
     _deferred_clock.box = box
     first_seq = next_seq = 0
+    failure = None
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -1724,8 +1755,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                     _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_envelope")
                     _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
                     if not isinstance(exc, ApplyError) or isinstance(exc, TransientApplyError):
-                        if not isinstance(exc, ApplyError):
-                            logger.warning("Applying a buffered operation failed", exc_info=True)
+                        failure = exc
                         store.stash_pending(cursor, buffered)
                         reason = str(exc) if isinstance(exc, TransientApplyError) else "buffered apply failed"
                         part.retry_operation(buffered, reason)
@@ -1743,14 +1773,19 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                 part._pending_drains.add((origin, incarnation))
             if box[0]:
                 store.observe_clock(cursor, box[0])
-    except Exception:  # noqa: BLE001 - peer can resend from the committed frontier
-        logger.warning("Applying buffered operations failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - peer can resend from the committed frontier
+        _pending_failed(ctx, origin, incarnation, first_seq, exc)
         result.retry_operation({"origin_device_id": origin,
                                 "origin_incarnation": incarnation,
                                 "origin_seq": first_seq}, "buffered apply failed")
         return
     finally:
         _deferred_clock.box = None
+    if failure is not None:
+        _pending_failed(ctx, origin, incarnation, next_seq, failure)
+    else:
+        with _lock:
+            ctx._pending_retries.pop((origin, incarnation), None)
     _merge_result(result, part)
 
 
@@ -1956,11 +1991,22 @@ def resume_pending() -> ApplyResult:
     ctx = cached_context()
     if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY:
         return ApplyResult()
+    now = time.monotonic()
+    with _lock:
+        ctx._pending_retries = {stream: retry for stream, retry in ctx._pending_retries.items()
+                                if now < retry.until + PENDING_RETRY_MAX}
+        retrying = dict(ctx._pending_retries)
+    # Every skipped/deprioritized stream gets an extra probe slot. A fixed
+    # overscan cap would merely move starvation to the stream after that cap.
     with get_db() as conn:
-        streams = store.ready_pending_streams(conn.cursor(), limit=4)
+        candidates = store.ready_pending_streams(conn.cursor(), limit=4 + len(retrying))
+    with _lock:
+        streams = [stream for stream in candidates
+                   if stream not in ctx._pending_retries or now >= ctx._pending_retries[stream].until]
+    streams.sort(key=lambda stream: stream in retrying)
     if not streams:
-        return ApplyResult()
-    return apply_batch((), ctx=ctx, _pending_streams=streams)
+        return ApplyResult()  # Do not flash applying_batch() for skipped heads.
+    return apply_batch((), ctx=ctx, _pending_streams=streams[:4])
 
 
 def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
