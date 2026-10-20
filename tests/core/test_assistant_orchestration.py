@@ -65,7 +65,7 @@ async def test_peer_message_joins_safe_boundary_with_non_user_attribution(mock_d
             content = queued["prompt"]
             assert queued["source"] == "agent_message"
             assert queued["payload"]["orchestration_sender"] == "sender"
-            assert "another top-level session" in content and "direct message from the user" not in content
+            assert "host-verified same-owner session delegation" in content and "direct message from the user" not in content
             assert turns.get_live_turn("receiver")["id"] == live["id"]
             assert queued["state"] == "queued"
             recorder = AsyncMock()

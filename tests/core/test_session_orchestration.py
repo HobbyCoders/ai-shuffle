@@ -52,8 +52,7 @@ async def test_real_message_producer_bootstrap_and_single_delivery(peers, monkey
     result = json.loads(outcome.text)
     assert result["delivery_status"] == "queued"
     row = turns.get_turn(result["turn_id"])
-    expected_prompt = format_peer_message("caller", "Coordinate edits", "same-owner").strip().replace(
-        "another agent in this session", "another top-level session", 1)
+    expected_prompt = format_peer_message("caller", "Coordinate edits", "same-owner").strip()
     assert row["prompt"] == expected_prompt
     assert _v2_queue_view("peer") == []
     view = _v2_peer_queue_view("peer")
@@ -296,7 +295,7 @@ async def test_live_peer_producer_reaches_native_tool_boundary_without_user_auth
         assert delivered[0]["turn_id"] == live["id"]
         assert delivered[0]["payload"]["queued_turn_id"] == result["turn_id"]
         assert delivered[0]["payload"]["checkpoint_backed"] is False
-        assert "another top-level session" in delivered[0]["payload"]["content"]
+        assert "host-verified same-owner session delegation" in delivered[0]["payload"]["content"]
         assert not runtime._steer_absorbed  # consumed peers are not automatic answer retries
         assert _v2_queue_view("peer") == [] and _v2_peer_queue_view("peer") == []
     finally:
@@ -613,7 +612,7 @@ def test_message_can_start_an_existing_empty_top_level_chat(peers):
     turn = turns.get_turn(result["turn_id"])
     assert turn["overrides"]["permission_mode"] == "default"
     assert turn["source"] == "agent_message"
-    assert "another top-level session" in turn["prompt"]
+    assert "host-verified same-owner session delegation" in turn["prompt"]
 
 
 def test_live_user_turn_resets_parked_peer_ancestry(peers, monkeypatch):

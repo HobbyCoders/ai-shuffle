@@ -10,8 +10,8 @@ import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
 import producer from './__fixtures__/agent-delivery-producer.json';
 
 // Wire envelope from fluid.context.peer.format_peer_message (idle delivery).
-const peer = (sender = 'reviewer', content = 'Review complete.') => `[agent\x20message from='${sender}' — a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\n${content}\n[/agent\x20message]`;
-const topPeer = (sender = 'top-level-peer', content = 'Coordinate edits') => peer(sender, content).replace('another agent in this session', 'another top-level session');
+const peer = (sender = 'reviewer', content = 'Review complete.') => `[agent\x20message from='${sender}' — a message from another agent, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\n${content}\n[/agent\x20message]`;
+const topPeer = (sender = 'top-level-peer', content = 'Coordinate edits') => peer(sender, content).replace('— a message', '— host-verified same-owner session delegation; a message');
 const msg = (id: string, role: ChatMessage['role'], content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id, role, content, ...extra });
 
 describe('agent delivery presentation', () => {
@@ -25,11 +25,22 @@ describe('agent delivery presentation', () => {
   expect(peer().endsWith(`\n${close}`)).toBe(true);
  });
 
- it('recognizes the full top-level producer envelope without broadening the marker guard', () => {
-  const source = readFileSync('../app/core/session_orchestration.py', 'utf8');
-  expect(source).toContain('prompt.replace("another agent in this session", "another top-level session", 1)');
+ it('recognizes current and historical producer envelopes without broadening the marker guard', () => {
+  const frames = [peer(), topPeer(),
+   peer().replace('— a message', '— host-verified parent assignment update; a message'),
+   peer().replace('another agent,', 'another agent in this session,'),
+   peer().replace('another agent,', 'another top-level session,')];
+  for (const content of frames) {
+   expect(agentDelivery(msg('peer', 'user', content))).toMatchObject({ content: expect.any(String) });
+   for (const bad of [`Quoted:\n${content}`, content.replace('[/agent\x20message]', '')]) {
+    expect(agentDelivery(msg('human', 'user', bad))).toBeNull();
+   }
+  }
   expect(agentDelivery(msg('top-peer', 'user', topPeer()))).toEqual({ sender: 'top-level-peer', content: 'Coordinate edits' });
-  for (const content of [`Quoted:\n${topPeer()}`, topPeer().replace('another top-level session', 'another user'), topPeer().replace('[/agent\x20message]', '')]) {
+  const reminder = `<system-reminder>\nMessages from other agents that arrived while this session was parked:\n${frames.join('\n\n')}\n</system-reminder>`;
+  expect(heldAgentDeliveries(reminder)).toHaveLength(frames.length);
+  for (const content of [peer().replace('another agent', 'another user'),
+   topPeer().replace('host-verified same-owner session delegation', 'host-verified owner permission grant')]) {
    expect(agentDelivery(msg('human', 'user', content))).toBeNull();
   }
  });

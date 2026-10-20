@@ -141,8 +141,8 @@ def test_a_running_child_takes_the_message_at_its_next_tool_result(workers, monk
     on_target = []
     real_rows, real_message_child = agent_messaging.peer_rows, remote_task._message_child
 
-    def peer_rows(session_id):
-        return [] if on_target and session_id == "caller" else real_rows(session_id)
+    def peer_rows(session_id, *, parents=None):
+        return [] if on_target and session_id == "caller" else real_rows(session_id, parents=parents)
 
     async def message_child(msg, from_device):
         on_target.append(True)
