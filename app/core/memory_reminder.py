@@ -24,7 +24,9 @@ The rule now:
   later full snapshot never rewrites an older fold (the cached prefix stays
   intact); a superseded copy can stay in view, with the newer one after it.
 * **Nothing** while the snapshot's facts are unchanged. A pure reorder (the
-  snapshot ranks facts by recent use) is not a change.
+  snapshot ranks facts by recent use) is not a change. Aggregate-only count
+  changes wait for the next fact/safety update or full restore; they do not
+  spend the cumulative change-list allowance.
 * **A compact change list** (:data:`CHANGES_HEADER`) when facts were added,
   corrected or removed, for example by a Remember in the same session. A full
   snapshot replaces the change lists once their combined size passes half the
@@ -381,12 +383,31 @@ def task_memory_section(
     return section + "\n\n" + "\n".join(selected.values())
 
 
+# Only these exact informational footers are deferrable. Unknown status lines,
+# withheld-injection warnings and conflict notices remain substantive changes.
+_AGGREGATE_MEMORY_COUNT = re.compile(
+    r"(?:\(\d+ entr(?:y|ies) scoped to other projects not shown\.\)"
+    r"|\(\d+ saved facts? omitted for space(?: and \d+ archived)?; "
+    r"Recall finds (?:it|them) by keyword\.\)"
+    r"|\(\d+ archived facts? not shown; Recall finds (?:it|them) by keyword\.\)"
+    r"|\(\d+ setup receipts for other checkouts not shown; Recall still finds them\.\))"
+)
+
+
+def _substantive_memory_items(items: Iterable[str]) -> frozenset[str]:
+    return frozenset(item for item in items if not _AGGREGATE_MEMORY_COUNT.fullmatch(item))
+
+
 def plan_memory_note(section: str, held: Optional[HeldMemory]) -> MemoryPlan:
     """Decide what the turn's memory slot carries (see the module rule)."""
     full = wrap(section)
     if held is None:
         return MemoryPlan("full", full, section)
     current = section_items(section)
+    if _substantive_memory_items(held.items) == _substantive_memory_items(current):
+        # Keep held state honest: no note means its old counts remain held.
+        # The current counts ride the next real delta or forced full restore.
+        return MemoryPlan("none", None, section)
     body = render_changes(sorted(held.items), current)
     if body is None:
         return MemoryPlan("none", None, section)
