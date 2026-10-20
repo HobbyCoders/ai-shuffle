@@ -30,6 +30,8 @@ def test_short_names_keys_punctuation_repeated_terms_and_stop_words(tmp_path):
     assert [e.id for e, _ in store.search_memories("UI.THEME")] == [good.id]
     assert recall_terms("the THE ui UI") == frozenset({"ui"})
     assert not store.search_memories("the with")
+    assert recall_terms("Go") == frozenset({"go"})
+    assert recall_terms("Make") == frozenset({"make"})
     assert len(recall_terms(" ".join(f"word{i}" for i in range(100)))) == 64
 
 

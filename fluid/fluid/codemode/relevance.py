@@ -33,8 +33,10 @@ def recall_terms(text: str) -> frozenset[str]:
     a two-character tool. Punctuation separates key/path components; stop words
     never earn relevance merely by appearing in ordinary prose.
     """
-    words = re.findall(r"[^\W_]+", text[:4000].casefold())
-    return frozenset(list(dict.fromkeys(w for w in words if w not in _STOP))[:64])
+    words = list(dict.fromkeys(re.findall(r"[^\W_]+", text[:4000].casefold())))
+    # A literal one-keyword search may intentionally name Go or Make. Do not
+    # erase it merely because it is also an English stop word.
+    return frozenset((words if len(words) == 1 else [w for w in words if w not in _STOP])[:64])
 
 
 def relevance(text: str, terms: frozenset[str]) -> int:
