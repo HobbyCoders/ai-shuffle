@@ -1070,8 +1070,8 @@ test('automatic checks and downloads use the public source transport without acc
  await u.check();assert.deepEqual(requests,[['https://hobbycoders.com/v1/desktop/manifest']]);
  await u.download();assert.equal(requests.length,3);assert(requests.every(args=>args.length===1));await u.select();await u.healthy();await f.release(B);
  await u.check();assert.equal(requests.length,4);assert.equal(f.builds,1);
- // With a lease, the public transport receives it as its second argument.
- u.useLease(async()=>'lease-value_1');await u.check();assert.deepEqual(requests.at(-1),['https://hobbycoders.com/v1/desktop/manifest','lease-value_1']);
+ assert.equal(u.useLease,undefined,'the updater has no lease transport');
+ await u.check();assert.deepEqual(requests.at(-1),['https://hobbycoders.com/v1/desktop/manifest']);
 });
 
 test('installer baseline checks main without a source directory and transitions to a signed source update',async t=>{
