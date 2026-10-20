@@ -82,6 +82,13 @@ async def _collect_metrics() -> dict:
     metrics["browser_available_workspaces"] = sum(bool(b.state["available"]) for b in brokers)
     metrics["browser_tab_counts_are_last_reported"] = True
 
+    # Count all adapters, including those retained outside the session pool.
+    from app.core.provider.harness_adapter import HarnessAdapter
+    adapters = tuple(HarnessAdapter._instances)
+    metrics["harness_adapters"] = len(adapters)
+    metrics["harness_adapters_with_store"] = sum(a._store is not None for a in adapters)
+    del adapters
+
     # --- Session Pool ---
     try:
         from app.core.session_pool import (

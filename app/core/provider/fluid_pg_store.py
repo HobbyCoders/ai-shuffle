@@ -6,10 +6,10 @@ PostgreSQL database (tables ``fluid_sessions`` / ``fluid_session_nodes`` /
 durability — resume, fork, and event replay all survive a process restart and
 work from any app instance sharing the database.
 
-Semantics mirror ``fluid.store.jsonl.JsonlStore``: per-session lazy load into a
-memory cache, then write-through on every mutation. The cache makes the hot
-read paths (``load_path`` on every prompt build, ``events_since`` on every
-receive loop) synchronous-fast; Postgres writes ride ``run_sync`` so the event
+Semantics mirror ``fluid.store.jsonl.JsonlStore``, with durable writes on every
+mutation. Only metadata and a bounded event tail are cached: node/path reads
+load the requested branch from Postgres, never retain the entire transcript
+tree for the life of an adapter. Database work rides ``run_sync`` so the event
 loop never blocks on the driver.
 
 Event appends are idempotent per (session_id, seq) — ``ON CONFLICT DO
@@ -91,7 +91,7 @@ def _create_session_sync(meta: SessionMeta) -> None:
 
 
 def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
-    """Load the node tree without retaining the unbounded event history."""
+    """Load metadata only; transcript branches are read on demand."""
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -101,18 +101,51 @@ def _load_session_sync(session_id: str) -> Optional[Dict[str, Any]]:
         row = cur.fetchone()
         if row is None:
             return None
-        meta = SessionMeta(**dict(row))
+        return {"meta": SessionMeta(**dict(row))}
+
+
+def _decode_node(row: Dict[str, Any]) -> SessionNode:
+    return SessionNode(
+        node_id=row["node_id"], parent_id=row["parent_id"], ts=row["ts"],
+        message=Message.from_dict(_as_dict(row["message"])),
+    )
+
+
+def _get_node_sync(session_id: str, node_id: str) -> Optional[SessionNode]:
+    with get_db() as conn:
+        cur = conn.cursor()
         cur.execute(
             "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
-            "WHERE session_id = %s", (session_id,),
+            "WHERE session_id = %s AND node_id = %s", (session_id, node_id),
+        )
+        row = cur.fetchone()
+    return _decode_node(row) if row else None
+
+
+def _load_path_sync(session_id: str, leaf_node_id: str) -> List[SessionNode]:
+    # Follow the composite primary key: siblings/abandoned branches are neither
+    # fetched nor decoded. One query rather than a round trip per ancestor.
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "WITH RECURSIVE path AS ("
+            "SELECT session_id, node_id, parent_id, ts, message, 0 AS depth "
+            "FROM fluid_session_nodes WHERE session_id = %s AND node_id = %s "
+            "UNION ALL "
+            "SELECT n.session_id, n.node_id, n.parent_id, n.ts, n.message, p.depth + 1 "
+            "FROM fluid_session_nodes n JOIN path p "
+            "ON n.session_id = p.session_id AND n.node_id = p.parent_id"
+            ") SELECT node_id, parent_id, ts, message FROM path ORDER BY depth DESC",
+            (session_id, leaf_node_id),
         )
         rows = cur.fetchall()
-    # Decode off the event loop, and release the connection first.
-    nodes = {r["node_id"]: SessionNode(
-        node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
-        message=Message.from_dict(_as_dict(r["message"])),
-    ) for r in rows}
-    return {"meta": meta, "nodes": nodes}
+    # Release the connection before decoding; no returned nodes are cached.
+    path = [_decode_node(row) for row in rows]
+    if not path:
+        raise KeyError(leaf_node_id)
+    if path[0].parent_id is not None:
+        raise KeyError(path[0].parent_id)
+    return path
 
 
 def _events_since_sync(session_id: str, seq: int) -> List[Event]:
@@ -1250,7 +1283,6 @@ class PgFluidStore:
 
     def __init__(self) -> None:
         self._sessions: Dict[str, SessionMeta] = {}
-        self._nodes: Dict[str, Dict[str, SessionNode]] = {}
         self._events: Dict[str, List[Event]] = {}
         self._event_floor: Dict[str, int] = {}
         self._pending_events: Dict[str, List[Event]] = {}
@@ -1268,7 +1300,6 @@ class PgFluidStore:
             # A failed read must be retryable; never publish a half-loaded cache.
             if data is not None:
                 self._sessions[session_id] = data["meta"]
-                self._nodes[session_id] = data["nodes"]
             self._loaded.add(session_id)
             return data is not None
 
@@ -1340,7 +1371,6 @@ class PgFluidStore:
         )
         await run_sync(_create_session_sync, meta)
         self._sessions[meta.session_id] = meta
-        self._nodes[meta.session_id] = {}
         self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
         return meta
@@ -1354,28 +1384,23 @@ class PgFluidStore:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
         await run_sync(_append_node_sync, session_id, node)
-        self._nodes.setdefault(session_id, {})[node.node_id] = node
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node.node_id
 
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
-        await self._ensure_loaded(session_id)
-        return self._nodes.get(session_id, {}).get(node_id)
+        if not await self._ensure_loaded(session_id):
+            return None
+        return await run_sync(_get_node_sync, session_id, node_id)
 
     async def load_path(
         self, session_id: str, leaf_node_id: Optional[str] = None
     ) -> List[SessionNode]:
         await self._ensure_loaded(session_id)
         meta = self._sessions[session_id]
-        nodes = self._nodes[session_id]
-        cursor = leaf_node_id or meta.head_node_id
-        path: List[SessionNode] = []
-        while cursor is not None:
-            node = nodes[cursor]
-            path.append(node)
-            cursor = node.parent_id
-        path.reverse()
-        return path
+        leaf = leaf_node_id or meta.head_node_id
+        if leaf is None:
+            return []
+        return await run_sync(_load_path_sync, session_id, leaf)
 
     async def set_head(self, session_id: str, node_id: Optional[str]) -> None:
         await self._ensure_loaded(session_id)
