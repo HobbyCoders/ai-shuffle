@@ -8,8 +8,10 @@ Semantics:
   already on disk instead of restarting at 1 and colliding with them.
 - The in-process log is a ring of the newest ``log_ring_size`` events per
   session, also bounded by ``log_ring_max_bytes`` estimated bytes (8 MiB by
-  default). A single oversized event is delivered live but not kept in the ring.
-  Everything older is the store's job: ``subscribe(since_seq=N)``
+  default). With a durable source, oversized events are delivered live but not
+  kept in the ring. Without a source, active subscribers retain the original
+  count-bounded window for lossless lag recovery; the byte bound resumes when
+  the last subscriber closes. Everything older is the store's job: ``subscribe(since_seq=N)``
   with N below the ring's floor asks the replay source (the store's
   ``events_since``, attached by the engine) for the gap before streaming from
   the ring. Without a replay source it starts at the floor. A live renderer
@@ -42,6 +44,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import fields, is_dataclass, replace
+from functools import lru_cache
 
 from fluid.events.model import Event
 
@@ -53,13 +56,19 @@ LOG_RING_SIZE = 2048
 LOG_RING_MAX_BYTES = 8 * 1024 * 1024
 
 
+@lru_cache(maxsize=128)
+def _field_names(event_type):
+    return tuple(field.name for field in fields(event_type))
+
+
 def _retained_size(value, depth=0) -> int:
     """Conservative estimate for JSON-shaped event fields, without copying them."""
     size = sys.getsizeof(value)
     if depth >= 12:
         return size
     if is_dataclass(value) and not isinstance(value, type):
-        size += sum(_retained_size(getattr(value, f.name), depth + 1) for f in fields(value))
+        size += sum(_retained_size(getattr(value, name), depth + 1)
+                    for name in _field_names(type(value)))
     elif isinstance(value, dict):
         size += sum(_retained_size(k, depth + 1) + _retained_size(v, depth + 1)
                     for k, v in value.items())
@@ -75,6 +84,7 @@ class _Subscriber:
     def __init__(self, maxsize: int, generation: int = 0) -> None:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize) if maxsize else asyncio.Queue()
         self.cursor: int = 0  # seq of the last event delivered
+        self.replay_history = True
         self.lagging: bool = False
         # The close generation this subscription was opened under. A close
         # ends the subscriptions of its generation; one opened afterwards
@@ -143,6 +153,9 @@ class EventBus:
         """
         if int(last_seq) > self._last_seq.get(session_id, 0):
             self._last_seq[session_id] = int(last_seq)
+            for sub in self._subs.get(session_id, ()):
+                if not sub.replay_history:
+                    sub.cursor = max(sub.cursor, int(last_seq))
 
     @property
     def replay_source(self) -> ReplaySource | None:
@@ -173,10 +186,7 @@ class EventBus:
         ring.append(sequenced)
         sizes.append(size)
         self._log_bytes[sid] += size
-        while ring and (len(ring) > self._ring_size
-                        or self._log_bytes[sid] > self._ring_max_bytes):
-            ring.popleft()
-            self._log_bytes[sid] -= sizes.popleft()
+        self._trim_log(sid)
         # Even an event larger than the entire ring budget is delivered live
         # below and persisted by the engine. The ring remains a contiguous
         # suffix (possibly empty), so durable gap replay still works.
@@ -188,6 +198,17 @@ class EventBus:
             except asyncio.QueueFull:
                 sub.lagging = True  # stop buffering; iterator falls back to the log
         return sequenced
+
+    def _trim_log(self, sid: str) -> None:
+        ring = self._logs.get(sid)
+        # Without a durable source, active consumers still need the original
+        # count-bounded replay window. Restore the byte bound on unsubscribe.
+        live_only = self._replay_source is None and bool(self._subs.get(sid))
+        while ring and (len(ring) > self._ring_size or (
+            not live_only and self._log_bytes[sid] > self._ring_max_bytes
+        )):
+            ring.popleft()
+            self._log_bytes[sid] -= self._log_sizes[sid].popleft()
 
     async def _after(
         self, session_id: str, cursor: int, *, from_store: bool = True
@@ -206,7 +227,8 @@ class EventBus:
             idx = cursor - floor + 1
             if idx < len(ring) and ring[idx].seq == cursor + 1:
                 return [ring[i] for i in range(idx, len(ring))]
-            return [e for e in ring if e.seq > cursor]
+            events = [e for e in ring if e.seq > cursor]
+            return events if events and events[0].seq == cursor + 1 else []
         # Older than the ring: the store has the gap.
         if from_store and self._replay_source is not None:
             try:
@@ -215,8 +237,9 @@ class EventBus:
                 stored = []
             stored = sorted((e for e in stored if e.seq > cursor), key=lambda e: e.seq)
             if stored:
-                return stored
-        return list(ring) if ring else []
+                return stored if stored[0].seq == cursor + 1 else []
+        # A newer ring suffix must never jump over a still-uncommitted event.
+        return list(ring) if ring and ring[0].seq <= cursor + 1 else []
 
     async def subscribe(
         self, session_id: str, *, since_seq: int = 0, from_store: bool = True
@@ -227,25 +250,38 @@ class EventBus:
         older than the ring starts at its floor. Live renderers use it — the
         cursor they take before a turn starts predates the resume seed, and
         the persisted history is not part of the turn they are watching.
+        Subsequent lag recovery can use the store, but never predates that floor.
+        Without a store, active consumers retain the count-bounded ring window.
         """
         sub = _Subscriber(self._maxsize, self._close_generation)
-        sub.cursor = since_seq
+        sub.replay_history = from_store
+        sub.cursor = (since_seq if from_store and self._replay_source is not None
+                      else max(since_seq, self.floor_seq(session_id) - 1))
         subs = self._subs.setdefault(session_id, [])
         subs.append(sub)
         try:
             while True:
+                if self._replay_source is None:
+                    sub.cursor = max(sub.cursor, self.floor_seq(session_id) - 1)
                 # Catch up from the log first (covers replay and lag recovery).
                 while sub.cursor < self.last_seq(session_id):
                     batch = await self._after(
-                        session_id, sub.cursor, from_store=from_store
+                        session_id, sub.cursor, from_store=True
                     )
                     if not batch:
                         break
                     for event in batch:
                         if event.seq <= sub.cursor:
                             continue
+                        if event.seq != sub.cursor + 1:
+                            break
                         sub.cursor = event.seq
                         yield event
+                if sub.cursor < self.last_seq(session_id) and self._replay_source is not None:
+                    # Persistence can lag publication. Retry without spinning or
+                    # waiting forever for another publish after the commit.
+                    await asyncio.sleep(0.05)
+                    continue
                 if sub.lagging:
                     # Caught up with the log; drain stale buffer and resume live.
                     while not sub.queue.empty():
@@ -259,13 +295,15 @@ class EventBus:
                     # Drain anything published after close was signalled.
                     while sub.cursor < self.last_seq(session_id):
                         batch = await self._after(
-                            session_id, sub.cursor, from_store=from_store
+                            session_id, sub.cursor, from_store=True
                         )
                         if not batch:
                             break
                         for event in batch:
                             if event.seq <= sub.cursor:
                                 continue
+                            if event.seq != sub.cursor + 1:
+                                break
                             sub.cursor = event.seq
                             yield event
                     return
@@ -280,6 +318,7 @@ class EventBus:
             subs.remove(sub)
             if not subs and self._subs.get(session_id) is subs:
                 del self._subs[session_id]
+                self._trim_log(session_id)
 
     async def close(self) -> None:
         """Signal the current subscribers to finish after draining the log.

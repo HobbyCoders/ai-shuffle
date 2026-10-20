@@ -102,11 +102,18 @@ def test_git_expiry_releases_payload(monkeypatch):
     assert len(cache._data) == 0
 
 
-def test_git_oversize_result_is_returnable_but_not_retained():
+def test_git_oversize_result_has_a_short_lived_slot(monkeypatch):
+    import app.core.git_cache as module
+    now = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     cache = _GitResultCache()
-    cache.put("status:big", "previous")
-    cache.put("status:big", {"untracked": ["x" * (3 * 1024 * 1024)]})
+    value = {"untracked": ["x" * (3 * 1024 * 1024)]}
+    cache.put("status:big", value)
+    assert cache.get("status:big", 2) is value
+    assert len(cache._data) == 0
+    now[0] += 2
     assert cache.get("status:big", 2) is None
+    assert not cache._oversized
 
 
 def test_git_cache_invalidation_and_falsy_values(monkeypatch):
@@ -120,7 +127,7 @@ def test_git_cache_invalidation_and_falsy_values(monkeypatch):
     assert cache.get("status:a", 2) is False
     assert cache.get("status:b", 2) == []
     cache.invalidate_prefix("status:")
-    assert len(cache._data) == 1
+    assert cache.memory_stats()["git_cache_entries"] == 1
     now[0] += 301
     assert cache.purge_expired() == 1
     assert len(cache._data) == 0

@@ -45,7 +45,9 @@ async def test_byte_eviction_replays_gap_from_durable_source(tmp_path):
 
 
 async def test_oversize_event_still_delivered_live():
-    bus = EventBus(log_ring_max_bytes=1024)
+    from fluid.store.base import MemoryStore
+    store = MemoryStore()
+    bus = EventBus(log_ring_max_bytes=1024, replay_source=store.events_since)
     sub = bus.subscribe("s", from_store=False)
     receive = asyncio.create_task(anext(sub))
     await asyncio.sleep(0)

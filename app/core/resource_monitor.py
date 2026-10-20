@@ -263,8 +263,7 @@ async def _collect_metrics() -> dict:
     # --- Git caches ---
     try:
         from app.core.git_cache import _git_cache
-        metrics["git_cache_entries"] = len(_git_cache._data)
-        metrics["git_cache_estimated_bytes"] = _git_cache._data.current_bytes
+        metrics.update(_git_cache.memory_stats())
     except Exception:
         pass
     try:
@@ -307,7 +306,10 @@ async def _collect_metrics() -> dict:
     except Exception:
         pass
 
-    metrics.update(_retention_metrics())
+    try:
+        metrics.update(_retention_metrics())
+    except Exception:
+        logger.debug("Retention metrics unavailable", exc_info=True)
     return metrics
 
 
@@ -332,38 +334,59 @@ def _retention_metrics() -> dict:
     Byte counts are the caches' insertion-time estimates, NOT heap measurements.
     """
     metrics = {}
-    module = sys.modules.get("app.core.jsonl_parser")
-    if module is not None:
-        for name in ("_parse_cache", "_store_parse_cache"):
-            cache = getattr(module, name)
-            metrics[f"{name.lstrip('_')}_entries"] = len(cache)
-            metrics[f"{name.lstrip('_')}_estimated_bytes"] = cache.current_bytes
-    module = sys.modules.get("app.core.session_runtime")
-    if module is not None:
-        metrics["session_reader_locks"] = len(module._reader_locks)
-        metrics["session_live_runtimes"] = len(module._live_runtimes)
-        metrics["session_executions"] = len(module._executions)
-        metrics["session_idle_readers"] = len(module._idle_readers)
-        metrics["session_done_idle_readers"] = sum(t.done() for t in module._idle_readers.values())
-    module = sys.modules.get("app.core.event_gateway")
-    if module is not None and module._gateway is not None:
-        metrics.update(module._gateway.memory_stats())
-    module = sys.modules.get("app.core.detached_tasks")
-    if module is not None:
-        metrics["detached_tasks"] = len(module._DETACHED_TASKS)
-    module = sys.modules.get("app.network.transport")
-    if module is not None:
-        for name in ("_session_interests", "_session_watermarks", "_applying", "_links"):
-            metrics[f"network{name}"] = len(getattr(module, name))
-    module = sys.modules.get("app.core.task_persistence")
-    if module is not None:
-        metrics["task_persistence_pending"] = len(module._pending)
-    module = sys.modules.get("app.mcp.builtin_tools")
-    if module is not None:
-        tasks = list(module._background_tasks.values())
-        metrics["monitor_shells"] = len(tasks)
-        metrics["monitor_running_shells"] = sum(t.is_running() for t in tasks)
-        metrics["monitor_buffered_lines"] = sum(len(t.lines) for t in tasks)
+    try:
+        module = sys.modules.get("app.core.jsonl_parser")
+        if module is not None:
+            for name in ("_parse_cache", "_store_parse_cache"):
+                cache = getattr(module, name)
+                metrics[f"{name.lstrip('_')}_entries"] = len(cache)
+                metrics[f"{name.lstrip('_')}_estimated_bytes"] = cache.current_bytes
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
+    try:
+        module = sys.modules.get("app.core.session_runtime")
+        if module is not None:
+            metrics["session_reader_locks"] = len(module._reader_locks)
+            metrics["session_live_runtimes"] = len(module._live_runtimes)
+            metrics["session_executions"] = len(module._executions)
+            metrics["session_idle_readers"] = len(module._idle_readers)
+            metrics["session_done_idle_readers"] = sum(t.done() for t in module._idle_readers.values())
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
+    try:
+        module = sys.modules.get("app.core.event_gateway")
+        if module is not None and module._gateway is not None:
+            metrics.update(module._gateway.memory_stats())
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
+    try:
+        module = sys.modules.get("app.core.detached_tasks")
+        if module is not None:
+            metrics["detached_tasks"] = len(module._DETACHED_TASKS)
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
+    try:
+        module = sys.modules.get("app.network.transport")
+        if module is not None:
+            for name in ("_session_interests", "_session_watermarks", "_applying", "_links"):
+                metrics[f"network{name}"] = len(getattr(module, name))
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
+    try:
+        module = sys.modules.get("app.core.task_persistence")
+        if module is not None:
+            metrics["task_persistence_pending"] = len(module._pending)
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
+    try:
+        module = sys.modules.get("app.mcp.builtin_tools")
+        if module is not None:
+            tasks = list(module._background_tasks.values())
+            metrics["monitor_shells"] = len(tasks)
+            metrics["monitor_running_shells"] = sum(t.is_running() for t in tasks)
+            metrics["monitor_buffered_lines"] = sum(len(t.lines) for t in tasks)
+    except Exception:
+        logger.debug("Retention metric section unavailable", exc_info=True)
     return metrics
 
 
