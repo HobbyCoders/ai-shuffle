@@ -47,10 +47,12 @@ async def test_current_fact_survives_adapter_restoration_and_compaction(tmp_path
         current._observe_memory_event(ContextCompaction(session_id=loop.session_id, tier=3, reason=reason))
         await _turn(current, "Continue the code review")
         assert (await _memory_kinds(loop))[-1] == expected
-        current = adapter()  # fresh adapter cannot assume a delivered snapshot
+        current = adapter()  # recover the host-marked snapshot chain
         await _turn(current, "Continue after restoring the session")
-        assert (await _memory_kinds(loop))[-1] == "full"
-        users = [n.message for n in await loop.store.load_path(loop.session_id) if n.message.role == "user"]
-        assert NEW in users[-1].pinned_text() and OLD not in users[-1].pinned_text()
+        assert (await _memory_kinds(loop))[-1] is None
+        restored = await current._memory_held()
+        assert any(NEW in line for line in restored.items)
+        assert not any(OLD in line for line in restored.items)
+        assert any("unresolved conflict" in line for line in restored.items)
     finally:
         await current.disconnect()
