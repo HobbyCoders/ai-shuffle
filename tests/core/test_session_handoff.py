@@ -372,7 +372,7 @@ async def test_owner_move_is_queued_while_running_and_runs_when_the_turn_ends():
         assert sh.pending_for("s1").by == "owner"
         state = await sh.owner_op("s1", "status")
         assert state["pending"] == {"worker": "DesktopWorker", "target_id": "dev-gaming", "by": "owner",
-                                    "moving": False, "handoff_id": result["handoff_id"]}
+                                    "moving": False, "handoff_id": result["handoff_id"], "progress": None}
         assert state["busy"]["running"] is True
         busy.idle = True
         assert await _settle(lambda: move.await_count and sh.pending_for("s1") is None)

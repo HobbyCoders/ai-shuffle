@@ -73,6 +73,20 @@ def drop_legacy_sync_ops_index(cursor) -> bool:
 
 
 def create_schema(cursor) -> None:
+    # Private, unindexed import staging: bounded commits must not expose a
+    # half-installed mirror. Published atomically with the receiver's owner row.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS handoff_history_chunks (
+            token TEXT NOT NULL,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            sdk_session_id TEXT,
+            table_name TEXT NOT NULL,
+            batch_no INTEGER NOT NULL,
+            rows JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (token, table_name, batch_no)
+        )
+    """)
     # Owner-produced display state only: never runner leases or executable work.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_session_runtime (

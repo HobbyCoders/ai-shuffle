@@ -1184,7 +1184,9 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     with _hold_lock:
         pending.holding = False
     resume = None
-    if plan == "send":
+    from app.network.handoff import target_resume
+
+    if plan == "send" and not await asyncio.to_thread(target_resume, owner):
         try:
             resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
         except Exception:  # noqa: BLE001 — the held messages still go
@@ -1268,10 +1270,16 @@ async def run_pending(session_id: str) -> Optional[str]:
 
 
 def _owner_state(session_id: str) -> Dict[str, Any]:
+    """GET /handoff pending.progress is null until the first receiver poll, then
+    {step: str, elapsed_seconds: float, step_elapsed_seconds: float}. Times are
+    receiver-measured seconds, not a percentage or a source wall-clock epoch.
+    """
     pending = _active(session_id)
+    from app.network.handoff import progress
+
     return {"busy": busy_state(session_id),
             "pending": ({"handoff_id": pending.handoff_id, "worker": pending.label, "target_id": pending.target_id, "by": pending.by,
-                         "moving": session_id in _moving}
+                         "moving": session_id in _moving, "progress": progress(session_id)}
                         if pending else None)}
 
 

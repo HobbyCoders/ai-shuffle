@@ -486,6 +486,7 @@ async def _fire(row: Dict[str, Any]) -> None:
                 profile_id=profile_id,
                 project_id=row.get("project_id"),
                 overrides=overrides,
+                **({"command_id": str(wakeup_id)} if row.get("source") == "handoff_resume" else {}),
                 payload={"api_user_id": api_user_id} if api_user_id else None,
             )
     except asyncio.CancelledError:
