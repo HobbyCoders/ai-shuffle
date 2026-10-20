@@ -13,7 +13,7 @@ from app.core import account_hub
 from app.db import mobile_hub
 
 PLAN_TTL = 600.0
-RETRY_INTERVAL = 30.0
+RETRY_INTERVAL = PLAN_TTL  # Failed reads must also respect the hub polling budget.
 PLAN_TIMEOUT = 2.0
 _LOCK = threading.Lock()
 _entry = None
@@ -60,7 +60,8 @@ def _normalize(value):
     if seats is not None and not _count(seats):
         raise ValueError("Invalid account seats")
     used = value.get("used")
-    if used is not None and not _count(used):
+    # A downgrade can leave more live tunnels than the new plan allows.
+    if used is not None and (not isinstance(used, int) or isinstance(used, bool) or used < 0):
         raise ValueError("Invalid account usage")
     renewal = value.get("renews_at")
     if renewal is not None:
@@ -91,8 +92,9 @@ def _account_plan(binding):
     try:
         value = _normalize(account_hub.call(binding, "GET", "plan", timeout=PLAN_TIMEOUT))
     except Exception as exc:
-        if account_hub.hub_status(exc) == 404:
-            value = _free_plan()  # Hub rollout compatibility, not a lease fallback.
+        if account_hub.hub_status(exc) in (403, 404):
+            # Inactive servers and hubs awaiting the plan endpoint are free.
+            value = _free_plan()
         else:
             ttl = RETRY_INTERVAL
     finally:

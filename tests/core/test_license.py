@@ -36,8 +36,9 @@ def test_not_linked_never_calls_hub(monkeypatch):
     call.assert_not_called()
 
 
-def test_free_before_hub_deployment(monkeypatch):
-    monkeypatch.setattr(account_hub, "call", Mock(side_effect=account_hub.HubResponseError("unavailable", 404)))
+@pytest.mark.parametrize("hub_status", [403, 404])
+def test_free_before_hub_deployment_or_activation(monkeypatch, hub_status):
+    monkeypatch.setattr(account_hub, "call", Mock(side_effect=account_hub.HubResponseError("unavailable", hub_status)))
     result = licensing.status()
     assert result["state"] == "free" and result["remote_worker_limit"] == 2
     assert result["message"] == "Free account: 2 remote workers."
@@ -73,10 +74,11 @@ def test_paid_defaults_to_four(monkeypatch):
     assert result["expires_at"] is None
 
 
-def test_cache_ttl_and_error_keeps_last_good(monkeypatch):
+@pytest.mark.parametrize("hub_status", [429, 503])
+def test_cache_ttl_and_error_keeps_last_good(monkeypatch, hub_status):
     now = [1000.0]
     monkeypatch.setattr(licensing.time, "monotonic", lambda: now[0])
-    call = Mock(side_effect=[plan(), account_hub.HubResponseError("offline", 503), plan(plan="free", remote_worker_limit=2)])
+    call = Mock(side_effect=[plan(), account_hub.HubResponseError("offline", hub_status), plan(plan="free", remote_worker_limit=2)])
     monkeypatch.setattr(account_hub, "call", call)
     assert licensing.status()["state"] == "paid"
     now[0] += licensing.PLAN_TTL - 1
@@ -86,6 +88,13 @@ def test_cache_ttl_and_error_keeps_last_good(monkeypatch):
     assert licensing.status()["seats"] == 100 and call.call_count == 2
     now[0] += licensing.RETRY_INTERVAL
     assert licensing.status()["state"] == "free" and call.call_count == 3
+
+
+def test_downgrade_usage_can_exceed_limit_and_seat_cap(monkeypatch):
+    monkeypatch.setattr(account_hub, "call", Mock(return_value=plan(plan="free", remote_worker_limit=2, used=101)))
+    result = licensing.status()
+    assert result["state"] == "free" and result["remote_worker_limit"] == 2
+    assert result["seats_used"] == 101
 
 
 def test_initial_hub_error_is_free_and_allowed(monkeypatch):
