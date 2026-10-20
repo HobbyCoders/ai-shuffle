@@ -264,6 +264,123 @@ class FactStore:
         elif "durable" in e and not isinstance(e["durable"], bool):
             e["durable"] = bool(e["durable"])
 
+    def _repair_supersession_links(self, doc):
+        """Repair invalid links without resurrecting expired replacement values.
+
+        Keep direct edges: flattening loses learner-proposed intermediate
+        replacements, which cannot be recovered from wording after withdrawal.
+        Forget/curation restores only the nearest eligible predecessor.
+        Expiry, overflow and archive pruning are not evidence of retraction:
+        their predecessors keep links and age out on their own. Read paths
+        repair legacy links too. Text and lifetime are never renewed here.
+        """
+        from fluid.codemode.skills import MAX_MEMORIES
+        from fluid.codemode.supersession import replacement_evidence
+        from fluid.context.screening import screen_findings
+        records = doc["entries"] + doc["archived"]
+        by_id = {global_id(e): e for e in records}
+        forgotten_links = {global_id(e): e.get("superseded_by") for e in doc["tombstones"]}
+        forgotten_cache = {}  # one 16-KiB barrier decode per distinct pointer
+
+        def is_forgotten(pointer):
+            if pointer not in forgotten_cache:
+                forgotten_cache[pointer] = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
+            return forgotten_cache[pointer]
+
+        def deletion_successor(pointer, origin):
+            # Deletion bodies form their own graph, including concurrent
+            # cross-worker cycles. Resolve it before planning a metadata bump.
+            initial, seen = pointer, {origin}
+            while pointer:
+                if pointer in seen:
+                    return None
+                seen.add(pointer)
+                if not is_forgotten(pointer):
+                    return pointer
+                if pointer not in forgotten_links:
+                    # The barrier outlives compacted bodies. Missing lineage
+                    # is not evidence that the newer value was withdrawn.
+                    return initial
+                pointer = forgotten_links[pointer]
+            return None
+
+        now = time.time()
+        for _ in range(len(records) + 1):
+            plans = []
+            restored = []
+            for old in records:
+                if not old.get("superseded_by"):
+                    continue
+                node, seen = old, {global_id(old)}
+                confirmed = bool(old.get("supersession_confirmed"))
+                while pointer := node.get("superseded_by"):
+                    if pointer in seen:
+                        plans.append((old, None, False))  # void every cycle edge
+                        break
+                    seen.add(pointer)
+                    target = by_id.get(pointer)
+                    forgotten = is_forgotten(pointer)
+                    retired = (target is not None and target.get("retired_at")
+                               and target.get("retired_reason") != "superseded"
+                               and not target.get("superseded_by"))
+                    if forgotten or retired:
+                        if node is old:
+                            # A forgotten intermediate may still bridge to a
+                            # newer value, including a concurrent replica link.
+                            onward = deletion_successor(pointer, global_id(old)) if forgotten else None
+                            if onward != old.get("superseded_by"):
+                                plans.append((old, onward, confirmed if onward else False))
+                        break  # an intermediate retracted leaf is repaired first
+                    if target is None:
+                        break  # archive pruning is not a retraction
+                    old_scope, target_scope = old.get("scope", "global"), target.get("scope", "global")
+                    compatible_scope = old_scope == target_scope or (target_scope == "global" and old_scope.startswith("project:"))
+                    if (not compatible_scope or old.get("worker") != target.get("worker")
+                            or target.get("provenance") == "tool"
+                            or (old.get("protected") and not target.get("protected"))
+                            or screen_findings(target["text"])):
+                        plans.append((old, None, False))
+                        break
+                    if not target.get("superseded_by"):
+                        if (old.get("protected") and target.get("protected")
+                                and replacement_evidence(dict(old, superseded_by=None), target)):
+                            confirmed = True
+                        if (confirmed != bool(old.get("supersession_confirmed"))
+                                or (confirmed and old.get("conflicted"))):
+                            plans.append((old, old["superseded_by"], confirmed))
+                        break
+                    confirmed = confirmed and bool(target.get("supersession_confirmed"))
+                    node = target
+            if not plans:
+                break
+            for old, pointer, confirmed in plans:
+                if pointer:
+                    old.update(superseded_by=pointer, supersession_confirmed=confirmed)
+                    if confirmed:
+                        old.pop("conflicted", None)
+                else:
+                    old.pop("superseded_by", None)
+                    old.pop("supersession_confirmed", None)
+                    # A metadata-only race is not a conflict between values.
+                    if len(set(old.get("alternatives", []) + [old["text"]])) == 1:
+                        old.pop("conflicted", None)
+                        old.pop("alternatives", None)
+                    category = tier(old)
+                    limit = MAX_DURABLE if category == "durable" else MAX_MEMORIES
+                    room = old.get("protected") or sum(tier(e) == category for e in doc["entries"]) < limit
+                    if (old.get("retired_reason") == "superseded" and room
+                            and (old.get("protected") or old.get("expires_at", now + 1) > now)):
+                        doc["archived"] = [e for e in doc["archived"] if e is not old]
+                        if not any(e is old for e in doc["entries"]):
+                            doc["entries"].append(old)
+                        old.pop("retired_at", None)
+                        old.pop("retired_reason", None)
+                    if any(e is old for e in doc["entries"]):
+                        restored.append(old)
+                self._bump_metadata(doc, old)
+            if restored:
+                self._apply_supersessions(doc, restored)
+
     def _maintain(self, doc, keep=None):
         """Expire, classify and bound the store. Never refuses for room.
 
@@ -283,22 +400,27 @@ class FactStore:
         # live fact moves to the archive, where Recall still finds it and a
         # save brings it back; ARCHIVE_RETENTION after its expiry it is
         # removed for good. User-saved facts never expire.
-        expired = [e for e in doc["entries"] if not e.get("protected") and e.get("expires_at", now + 1) <= now]
+        # Lineage does not exempt inferred facts from TTL or storage caps.
+        self._repair_supersession_links(doc)
+        def retained(e):
+            return bool(e.get("protected"))
+        expired = [e for e in doc["entries"] if not retained(e) and e.get("expires_at", now + 1) <= now]
         if expired:
             gone = {id(e) for e in expired}
             doc["entries"] = [e for e in doc["entries"] if id(e) not in gone]
             doc["archived"] += expired
-        ended = [e for e in doc["archived"] if not e.get("protected")
+        ended = [e for e in doc["archived"] if not retained(e)
                  and e.get("expires_at", now + 1) + ARCHIVE_RETENTION <= now]
         if ended:
             gone = {id(e) for e in ended}
             doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
             self._note_loss(doc, "expired_archived", len(ended), now)
+        self._repair_supersession_links(doc)
         live = doc["entries"]
-        inferred = [e for e in live if tier(e) == "inferred"]
+        inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
         ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
         overflow = ranked[:max(0, len(inferred) - MAX_MEMORIES)]
-        durable = [e for e in live if tier(e) == "durable"]
+        durable = [e for e in live if tier(e) == "durable" and not retained(e)]
         ranked = sorted(durable, key=lambda e: (e.get("id") == keep, usefulness(e), str(e.get("id"))))
         overflow += ranked[:max(0, len(durable) - MAX_DURABLE)]
         gone = {id(e) for e in overflow}
@@ -309,12 +431,13 @@ class FactStore:
         # older versions, which archived past 256) stay until a Forget. The
         # shared archive gives up inferred facts before durable ones, least
         # useful first.
-        explicit = [e for e in archived if e.get("protected")]
-        rest = sorted((e for e in archived if not e.get("protected")),
+        explicit = [e for e in archived if retained(e)]
+        rest = sorted((e for e in archived if not retained(e)),
                       key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
         doc["archived"] = rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):] + explicit
         if len(rest) > MAX_ARCHIVED_MEMORIES:
             self._note_loss(doc, "archive_dropped", len(rest) - MAX_ARCHIVED_MEMORIES, now)
+        self._repair_supersession_links(doc)
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
@@ -445,9 +568,14 @@ class FactStore:
             # optional field in anyway, and refusing made every such save fail.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
+            # An owner correction of either endpoint resolves the displayed pair.
+            resolves = bool(old and memory_id and protected and expected_revision is not None
+                            and (old.get("superseded_by") or any(
+                                e.get("superseded_by") == global_id(old)
+                                and not e.get("supersession_confirmed") for e in all_entries)))
             # The learner and harvests never downgrade an agent's durable fact.
             is_durable = not protected and bool(durable or (old and old.get("durable")))
-            if (old and not old.get("conflicted") and old["text"] == text
+            if (old and not resolves and not old.get("conflicted") and old["text"] == text
                     and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
                     if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
@@ -459,6 +587,8 @@ class FactStore:
                         self._maintain(doc, keep=old["id"])
                         self._write(doc)
                     return self._entry(old)
+                if old.get("superseded_by"):
+                    return self._entry(old)  # an observation cannot revive a known stale value
                 # Saving the same fact again is a use: renew a durable fact's
                 # lifetime and bring an archived one back. No new revision.
                 if durable:
@@ -523,6 +653,9 @@ class FactStore:
             # retired the old one.
             entry.pop("retired_at", None)
             entry.pop("retired_reason", None)
+            if resolves:
+                entry.pop("superseded_by", None)
+                entry.pop("supersession_confirmed", None)
             if per_worker and not protected:
                 entry["worker"] = local
             elif protected:
@@ -553,6 +686,13 @@ class FactStore:
                                and e.get("provenance") == "tool"
                                and not e.get("protected") and not e.get("durable")]:
                     self._retire_entry(doc, shared, "per-worker")
+            if resolves:
+                for previous in doc["entries"] + doc["archived"]:
+                    if previous.get("superseded_by") == global_id(entry):
+                        previous["supersession_confirmed"] = True
+                        previous.pop("conflicted", None)
+                        self._bump_metadata(doc, previous)
+            self._apply_supersessions(doc, [entry])
             self._maintain(doc, keep=entry["id"])
             self._write(doc)
             return self._entry(entry)
@@ -562,6 +702,78 @@ class FactStore:
         from fluid.codemode.skills import MemoryEntry
         allowed = {f.name for f in fields(MemoryEntry)}
         return MemoryEntry(**{k: v for k, v in entry.items() if k in allowed})
+
+    @staticmethod
+    def _bump_metadata(doc, entry):
+        clock = dict(entry.get("clock") or {entry["origin"]: entry.get("revision", 1)})
+        clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
+        if len(clock) > 64:
+            raise ValueError("Memory has too many concurrent writers; no supersession was saved")
+        entry.update(clock=clock, revision=entry.get("revision", 1) + 1)
+
+    def _apply_supersessions(self, doc, candidates=None):
+        """Link clear replacements without changing/deleting predecessor text."""
+        from fluid.codemode.supersession import replacement_evidence, has_replacement_signal
+        from fluid.context.screening import screen_findings
+        changed = []
+        # Older linked records are bridges for partially repaired legacy
+        # chains; direct edges keep proposal history recoverable on withdrawal.
+        current = sorted(candidates if candidates is not None else doc["entries"] + [
+            e for e in doc["archived"] if e.get("superseded_by")],
+                         key=lambda e: (e.get("updated_at", 0), e["id"]))
+        for new in current:
+            if (not has_replacement_signal(new["text"]) or new.get("conflicted")
+                    or (candidates is not None and new.get("superseded_by")) or screen_findings(new["text"])):
+                continue
+            for old in list(doc["entries"]):
+                if (old.get("conflicted") or (old.get("protected") and not new.get("protected"))
+                        or not replacement_evidence(old, new)):
+                    continue
+                old["superseded_by"] = global_id(new)
+                # Both are owner-saved and the successor explicitly replaces
+                # the old value: no need to ask the owner the same question.
+                old["supersession_confirmed"] = bool(new.get("protected"))
+                if old.get("protected"):
+                    self._bump_metadata(doc, old)
+                else:
+                    self._retire_entry(doc, old, "superseded")
+                changed.append(old["id"])
+        return changed
+
+    def propose_supersession(self, old_id, new_id, *, old_revision, new_revision):
+        """Apply a learner/curator proposal only against its exact fact snapshot."""
+        from fluid.codemode.supersession import replacement_evidence
+        from fluid.context.screening import screen_findings
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            entries = {e["id"]: e for e in doc["entries"]}
+            old, new = entries.get(old_id), entries.get(new_id)
+            if old is None or new is None:
+                return False
+            if old.get("revision", 1) != old_revision or new.get("revision", 1) != new_revision:
+                raise ValueError("Memory changed since the supersession proposal was read")
+            if (old.get("protected") or old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
+                    or screen_findings(new["text"]) or not replacement_evidence(old, new, proposed=True)):
+                return False
+            old["superseded_by"] = global_id(new)
+            old["supersession_confirmed"] = False
+            if old.get("protected"):
+                self._bump_metadata(doc, old)
+            else:
+                self._retire_entry(doc, old, "superseded")
+            self._maintain(doc)
+            self._write(doc)
+            return True
+
+    def reconcile_supersessions(self):
+        """Deterministic curation over existing facts; no inference call."""
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            changed = self._apply_supersessions(doc)
+            if changed:
+                self._maintain(doc)
+                self._write(doc)
+            return changed
 
     def forget(self, memory_id, *, explicit=False, expected_revision=None):
         with file_transaction(self.lock):
@@ -578,6 +790,9 @@ class FactStore:
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
                          "fingerprints": [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])],
                          "source_session": old.get("source_session")}
+            if old.get("superseded_by"):
+                # ID-only bridge: no forgotten text is retained here.
+                tombstone["superseded_by"] = old["superseded_by"]
             doc["tombstones"].append(tombstone)
             barrier = barrier_add(doc.get("forgotten", ""), "id:" + global_id(tombstone))
             for fp in tombstone["fingerprints"]:
@@ -594,6 +809,7 @@ class FactStore:
                 # learner delete setting it would let the next maintenance
                 # sweep wipe the journal anyway.
                 doc["forgotten_before"] = time.time()
+            self._maintain(doc)
             self._write(doc)
             return True
 
@@ -619,8 +835,7 @@ class FactStore:
             self._write(doc)
             return True
 
-    @staticmethod
-    def _retire_entry(doc, old, reason):
+    def _retire_entry(self, doc, old, reason):
         clock = dict(old.get("clock") or {old.get("origin", doc["store_id"]): old.get("revision", 1)})
         clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
         if len(clock) > 64:
@@ -630,6 +845,7 @@ class FactStore:
         doc["entries"] = [e for e in doc["entries"] if e is not old]
         if not any(e is old for e in doc["archived"]):
             doc["archived"].append(old)
+        self._repair_supersession_links(doc)
 
     def note_recalled(self, ids):
         if not ids:
@@ -677,10 +893,14 @@ class FactStore:
             tombstones = {t["id"]: t for t in doc["tombstones"]}
             for raw in snapshot.get("tombstones", []):
                 t = dict(raw, id=ident(raw))
+                if t.get("superseded_by") is not None and not (
+                        isinstance(t["superseded_by"], str)
+                        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,160}", t["superseded_by"])):
+                    raise ValueError("Invalid forgotten memory supersession link")
                 old = tombstones.get(t["id"])
                 if not old or t.get("revision", 0) > old.get("revision", 0):
                     # Never retain supplied plaintext in deletion metadata.
-                    tombstones[t["id"]] = {k: t.get(k) for k in ("id", "origin", "revision", "key", "scope", "deleted_at", "fingerprints", "source_session")}
+                    tombstones[t["id"]] = {k: t.get(k) for k in ("id", "origin", "revision", "key", "scope", "deleted_at", "fingerprints", "source_session", "superseded_by")}
             entries = {e["id"]: e for e in doc["entries"] + doc["archived"]}
             for raw in snapshot.get("entries", []):
                 entry = dict(raw, id=ident(raw))
@@ -691,6 +911,12 @@ class FactStore:
                     raise ValueError("Invalid memory key")
                 if entry.get("provenance") not in ("user", "session", "manual", "tool"):
                     raise ValueError("Invalid memory provenance")
+                if entry.get("superseded_by") is not None and not (
+                        isinstance(entry["superseded_by"], str)
+                        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,160}", entry["superseded_by"])):
+                    raise ValueError("Invalid memory supersession link")
+                if type(entry.get("supersession_confirmed", False)) is not bool:
+                    raise ValueError("Invalid memory supersession confirmation")
                 if entry.get("worker") is not None and not (
                         isinstance(entry["worker"], str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", entry["worker"])):
                     raise ValueError("Invalid memory worker")
@@ -709,6 +935,18 @@ class FactStore:
                 if newer and not older:
                     entries[entry["id"]] = entry
                 elif (not newer and not older) or (newer and older and entry["text"] != old["text"]):
+                    # Independent deterministic reconciliation is the same
+                    # claim, not a concurrent edit to the fact's value.
+                    claim = ("text", "scope", "key", "worker", "provenance", "protected", "durable", "superseded_by", "retired_reason")
+                    same_claim = (all(old.get(k) == entry.get(k) for k in claim)
+                                  and bool(old.get("retired_at")) == bool(entry.get("retired_at")))
+                    if same_claim:
+                        old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
+                        old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
+                        old["supersession_confirmed"] = bool(old.get("supersession_confirmed") or entry.get("supersession_confirmed"))
+                        old["conflicted"] = bool(old.get("conflicted") or entry.get("conflicted")) and not old["supersession_confirmed"]
+                        old["alternatives"] = sorted(set(old.get("alternatives", []) + entry.get("alternatives", [])))[:2]
+                        continue
                     old["conflicted"] = True
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                     old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
@@ -724,9 +962,10 @@ class FactStore:
             # facts compete for live room again and _maintain re-bounds them.
             doc["entries"] = [e for e in kept if not e.get("retired_at")]
             doc["archived"] = [e for e in kept if e.get("retired_at")]
+            self._repair_supersession_links(doc)
             slots = {}
             for e in doc["entries"]:
-                if e.get("key"):
+                if e.get("key") and not e.get("superseded_by"):
                     # Each worker's copy of an environment fact is its own slot.
                     slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
             for group in slots.values():

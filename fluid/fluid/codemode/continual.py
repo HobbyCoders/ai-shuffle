@@ -172,6 +172,7 @@ Output format — nothing else:
   (project-scoped: <memory scope="project">the fact</memory>)
 - to rewrite a memory: <memory id="m3">the corrected fact</memory>
 - to remove a memory: <delete-memory id="m3"/>
+- newer listed fact replaces older non-explicit (same subject, not temporary): <supersede-memory old="m3" new="m4"/>
 - a memory listed as "explicit" was saved on the user's request: never
   rewrite or delete it, and do not add a new memory that repeats it
 - to propose a model-guidance edit (queued for the replay gate, not applied):
@@ -223,6 +224,7 @@ Output format — nothing else:
 - to rewrite a memory: <memory id="m3">the merged/corrected fact</memory>
   (add scope="project" when the fact is project-specific)
 - to remove a memory: <delete-memory id="m3"/>
+- newer listed fact replaces older non-explicit (same subject, not temporary): <supersede-memory old="m3" new="m4"/>
 - to remove a skill: <delete-skill name="snake_case_name"/>
 - if the store is already in good shape: NO_CHANGES
 """
@@ -236,6 +238,7 @@ _MEMORY_RE = re.compile(r'<memory((?:\s+[a-z_]+="[^"]*")*)\s*>\n?(.*?)</memory>'
 _ATTR_RE = re.compile(r'([a-z_]+)="([^"]*)"')
 _MEMORY_ID_RE = re.compile(r"[A-Za-z0-9_:.\-]{1,160}")
 _DELETE_MEMORY_RE = re.compile(r'<delete-memory id="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
+_SUPERSEDE_RE = re.compile(r'<supersede-memory old="([A-Za-z0-9_:.\-]{1,160})" new="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
 _GUIDANCE_RE = re.compile(
     r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
 )
@@ -1298,6 +1301,8 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
+        changed.extend(self._apply_supersession_proposals(
+            text, {m.id: m.revision for _, m, _ in listed}, errors))
         self._log_pass(
             "consolidation", changed, usage=usage,
             error="; ".join(errors) or None, consumed=len(memories),
@@ -1379,6 +1384,7 @@ class Synthesizer:
         every fact in every scope ahead of the journal and pushed the journal
         past the request's character cut."""
         lines = ["## Current memory (id, recalls, scope, text)"]
+        self._supersession_revisions = {}
         project = self._project
         memories = [
             m for m in self._store.memories()
@@ -1396,6 +1402,7 @@ class Synthesizer:
             if len(line) + 1 > budget:
                 omitted += 1
                 continue
+            self._supersession_revisions[m.id] = m.revision
             lines.append(line)
             budget -= len(line) + 1
         if omitted:
@@ -1591,6 +1598,20 @@ class Synthesizer:
             raise SynthesisIncomplete(stop_reason, usage, len(text))
         return text, usage
 
+    def _apply_supersession_proposals(self, text, revisions, errors):
+        changed = []
+        for match in _SUPERSEDE_RE.finditer(text or ""):
+            old_id, new_id = match.groups()
+            if old_id not in revisions or new_id not in revisions:
+                continue  # not shown, not editable through a fabricated proposal
+            try:
+                if self._store.propose_memory_supersession(
+                        old_id, new_id, old_revision=revisions[old_id], new_revision=revisions[new_id]):
+                    changed.append(f"superseded-memory:{old_id}")
+            except ValueError as exc:
+                errors.append(f"supersession: {exc}")
+        return changed
+
     async def _apply(self, text: str, entries: list[dict] | None = None) -> list[str]:
         """Parse the model's output, verify candidates, apply what passes.
 
@@ -1666,6 +1687,8 @@ class Synthesizer:
                     changed.append(f"-memory:{match.group(1)}")
             except ValueError as exc:
                 errors.append(f"memory {match.group(1)}: {exc}")
+        changed.extend(self._apply_supersession_proposals(
+            text, getattr(self, "_supersession_revisions", {}), errors))
         for match in _GUIDANCE_RE.finditer(text or ""):
             # Guidance edits are PROPOSED, never applied here.
             # Queue-time validation is cheap; the commit gate (validity →
