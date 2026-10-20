@@ -87,6 +87,10 @@ async def _collect_metrics() -> dict:
     adapters = tuple(HarnessAdapter._instances)
     metrics["harness_adapters"] = len(adapters)
     metrics["harness_adapters_with_store"] = sum(a._store is not None for a in adapters)
+    metrics["harness_retained_nodes"] = sum(
+        len(nodes) for a in adapters
+        for nodes in getattr(a._store, "_nodes", {}).values()
+    )
     del adapters
 
     # --- Session Pool ---

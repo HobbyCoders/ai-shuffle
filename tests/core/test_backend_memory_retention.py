@@ -1,7 +1,7 @@
-"""Deterministic retention lab; no live app, provider, or database access.
+"""Real turn/store/adapter/pool-eviction lab; no live app or provider access.
 
-Run with pytest -s to print tracemalloc deltas and gc ownership evidence.
-Only the provider transport is scripted; turns, persistence and eviction are real.
+Run with pytest -s for tracemalloc and gc ownership evidence. Store/engine
+handles are weak: only the adapter and actual lifecycle code may retain them.
 """
 import asyncio
 import gc
@@ -26,7 +26,6 @@ class LabProvider:
     caps = ProviderCaps()
 
     async def stream(self, request):
-        # Fresh text per call, not a shared constant that hides retention.
         text = "reply:" + request.messages[-1].text()
         yield StreamChunk("message_start", {})
         yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
@@ -35,11 +34,20 @@ class LabProvider:
         yield StreamChunk("usage", {"stop_reason": "end_turn"})
 
 
-def retained(stores):
-    nodes = [n for s in stores for tree in getattr(s, "_nodes", {}).values()
-             for n in tree.values()]
-    return {"cached_nodes": len(nodes),
-            "cached_text_bytes": sum(len(n.message.text().encode()) for n in nodes)}
+def retained(weak_stores):
+    stats = {"live_stores": 0, "cached_nodes": 0, "cached_text_bytes": 0}
+    owners = set()
+    for ref in weak_stores:
+        store = ref()
+        if store is None:
+            continue
+        stats["live_stores"] += 1
+        for tree in store._nodes.values():
+            stats["cached_nodes"] += len(tree)
+            stats["cached_text_bytes"] += sum(len(n.message.text().encode()) for n in tree.values())
+        owners.update(type(r).__name__ for r in gc.get_referrers(store))
+    stats["store_referrers"] = sorted(owners)
+    return stats
 
 
 @pytest.mark.asyncio
@@ -53,7 +61,10 @@ async def test_turn_store_adapter_eviction_retention_lab(mock_db, monkeypatch, t
     monkeypatch.setattr(ha.HarnessAdapter, "_build_store", staticmethod(lambda _: PgFluidStore()))
     monkeypatch.setattr(plugins, "discover_plugins", lambda *a, **kw: [])
     pool = SessionPool()
-    adapters, stores, weak_adapters = [], [], []
+    # Adapters may have real external owners (e.g. readers) after eviction;
+    # stores and engines must NOT be artificially owned by the lab.
+    adapters, weak_stores, weak_engines, weak_adapters = [], [], [], []
+    cached_nodes_before_eviction = 0
     gc.collect()
     tracemalloc.start(10)
     baseline = tracemalloc.take_snapshot()
@@ -64,11 +75,11 @@ async def test_turn_store_adapter_eviction_retention_lab(mock_db, monkeypatch, t
                 model="gpt-4o", cwd=str(tmp_path), session_id=f"lab-{i}",
                 setting_sources=[], extra={"fluid_provider": "openai_responses"},
             ))
-            adapters.append(adapter)  # Deliberate external owner surviving eviction.
+            adapters.append(adapter)
             weak_adapters.append(weakref.ref(adapter))
-            store = adapter._store
-            stores.append(store)
+            weak_stores.append(weakref.ref(adapter._store))
             engine = adapter._engine
+            weak_engines.append(weakref.ref(engine))
             sid = engine.session_id
             for turn in range(8):
                 since = engine.bus.last_seq(sid)
@@ -80,26 +91,23 @@ async def test_turn_store_adapter_eviction_retention_lab(mock_db, monkeypatch, t
                             break
                 await engine._turn_task
             del event
+            cached_nodes_before_eviction += sum(len(tree) for tree in adapter._store._nodes.values())
             state = SessionState(adapter=adapter, is_connected=True, sdk_session_id=sid)
-            pool._pool[sid] = state
+            pool.put(sid, state)
             await pool._do_evict(sid, state, "retention-lab")
             assert adapter._engine is None
-            del engine, state, adapter, store
+            del engine, state, adapter
         gc.collect()
         snapshot = tracemalloc.take_snapshot()
-        stats = retained(stores)
+        stats = retained(weak_stores)
+        stats["cached_nodes_before_eviction"] = cached_nodes_before_eviction
         stats["adapters_holding_store_after_eviction"] = sum(a._store is not None for a in adapters)
+        stats["live_engines_after_eviction"] = sum(r() is not None for r in weak_engines)
         stats["traced_growth_bytes"] = sum(s.size_diff for s in snapshot.compare_to(baseline, "lineno"))
         stats["top_allocations"] = [str(s) for s in snapshot.compare_to(baseline, "lineno")[:5]]
-        # Identify owners without keeping gc's referrer result alive across measurement.
-        if getattr(stores[0], "_nodes", {}):
-            tree = next(iter(stores[0]._nodes.values()))
-            node = next(iter(tree.values()))
-            stats["node_referrers"] = sorted({type(r).__name__ for r in gc.get_referrers(node)})
-            stats["store_referrers"] = sorted({type(r).__name__ for r in gc.get_referrers(stores[0])})
-            del tree, node
         print("RETENTION_LAB " + json.dumps(stats, sort_keys=True))
-        # Replay/rewind survive eviction and a fresh store. Real engine wrote 16 nodes.
+        assert len(pool) == 0
+        # Durable history survives collection of the entire original store.
         cold = PgFluidStore()
         path = await cold.load_path("lab-0")
         assert len(path) == 16
@@ -107,12 +115,13 @@ async def test_turn_store_adapter_eviction_retention_lab(mock_db, monkeypatch, t
         assert (await cold.events_since("lab-0", 0))
         assert (await cold.get_node("lab-0", path[0].node_id)).node_id == path[0].node_id
         del path, cold
-        stores.clear()
         adapters.clear()
         gc.collect()
         print("RETENTION_LAB live_adapters_after_release=" + str(sum(r() is not None for r in weak_adapters)))
-        assert stats["cached_text_bytes"] < 65536
+        assert stats["live_stores"] == 0
+        assert stats["live_engines_after_eviction"] == 0
         assert stats["adapters_holding_store_after_eviction"] == 0
+        assert not any(r() is not None for r in weak_stores)
         assert not any(r() is not None for r in weak_adapters)
     finally:
         tracemalloc.stop()
@@ -121,44 +130,36 @@ async def test_turn_store_adapter_eviction_retention_lab(mock_db, monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_store_reads_only_requested_branch_without_retaining_nodes(mock_db, monkeypatch):
+async def test_warm_store_reads_and_rewinds_without_database_round_trips(mock_db, monkeypatch):
     from app.core.provider import fluid_pg_store as pg
     from fluid.messages import Message, Text
 
     store = PgFluidStore()
     await store.create_session("branches")
-    root = SessionNode(node_id="root", parent_id=None,
-                       message=Message(role="user", content=[Text("root")]))
-    await store.append("branches", root)
-    root_ref = weakref.ref(root)
-    del root
+    await store.append("branches", SessionNode(node_id="root", parent_id=None,
+                       message=Message(role="user", content=[Text("root")])))
     for i in range(40):
         await store.append("branches", SessionNode(
             node_id=f"branch-{i}", parent_id="root",
             message=Message(role="assistant", content=[Text("x" * 8192)]),
         ))
-    gc.collect()
-    assert root_ref() is None  # The still-live store must not own old nodes.
-    decoded = []
-    original = pg._decode_node
-
-    def decode(row):
-        decoded.append(row["node_id"])
-        return original(row)
-
-    monkeypatch.setattr(pg, "_decode_node", decode)
     resumed = PgFluidStore()
     assert await resumed.get_session("branches")
-    assert decoded == []
-    assert [n.node_id for n in await resumed.load_path("branches")] == ["root", "branch-39"]
-    assert decoded == ["root", "branch-39"]
-    decoded.clear()
-    assert (await resumed.get_node("branches", "branch-0")).node_id == "branch-0"
-    assert decoded == ["branch-0"]
-    assert await resumed.get_node("branches", "absent") is None
+
+    async def no_read(*args):
+        pytest.fail("warm transcript read attempted database I/O")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pg, "run_sync", no_read)
+        for _ in range(30):
+            assert [n.node_id for n in await resumed.load_path("branches")] == ["root", "branch-39"]
+        assert (await resumed.get_node("branches", "branch-0")).node_id == "branch-0"
+        assert await resumed.get_node("branches", "absent") is None
+        assert [n.node_id for n in await resumed.load_path("branches", "branch-0")] == ["root", "branch-0"]
     await resumed.set_head("branches", "branch-2")
-    assert [n.node_id for n in await resumed.load_path("branches")] == ["root", "branch-2"]
-    assert [n.node_id for n in await resumed.load_path("branches", "branch-0")] == ["root", "branch-0"]
+    with monkeypatch.context() as patch:
+        patch.setattr(pg, "run_sync", no_read)
+        assert [n.node_id for n in await resumed.load_path("branches")] == ["root", "branch-2"]
 
 
 @pytest.mark.asyncio
@@ -199,13 +200,21 @@ async def test_resource_monitor_counts_adapters_without_owning_them(monkeypatch)
     monkeypatch.setattr(ha.HarnessAdapter, "_instances", weakref.WeakSet())
     adapter = ha.HarnessAdapter()
     adapter._store = PgFluidStore()
+    from fluid.messages import Message, Text
+    await adapter._store.create_session("metrics")
+    await adapter._store.append("metrics", SessionNode(
+        node_id="root", parent_id=None,
+        message=Message(role="user", content=[Text("retained node")]),
+    ))
     snapshot = await resource_monitor._collect_metrics()
     assert snapshot["harness_adapters"] == 1
     assert snapshot["harness_adapters_with_store"] == 1
+    assert snapshot["harness_retained_nodes"] == 1
     await adapter.disconnect_transport()
     snapshot = await resource_monitor._collect_metrics()
     assert snapshot["harness_adapters"] == 1
     assert snapshot["harness_adapters_with_store"] == 0
+    assert snapshot["harness_retained_nodes"] == 0
     ref = weakref.ref(adapter)
     del adapter
     gc.collect()
