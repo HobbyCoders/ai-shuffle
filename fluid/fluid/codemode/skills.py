@@ -1407,9 +1407,11 @@ class SkillStore:
 
     def search_memories(self, query: str, *, limit: int = 3,
                         project: str | None = None) -> list[tuple[MemoryEntry, bool]]:
-        tokens = [t for t in (query or "").lower().split() if t]
+        from fluid.codemode.relevance import recall_terms, recall_scorer
+        tokens = recall_terms(query or "")
         if not tokens:
             return []
+        score_text = recall_scorer(tokens)
         scored = []
         for archived, entries in ((False, self.memories()), (True, self.archived_memories())):
             for entry in entries:
@@ -1417,7 +1419,7 @@ class SkillStore:
                     continue
                 if entry.conflicted:
                     continue
-                score = sum(t in entry.text.lower() or t in (entry.key or "") for t in tokens)
+                score = score_text(entry.text + " " + (entry.key or ""))
                 if score:
                     scored.append((score, entry.protected, entry.updated_at, entry, archived))
         scored.sort(key=lambda row: (-row[0], -row[1], -row[2]))

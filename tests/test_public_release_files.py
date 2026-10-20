@@ -127,7 +127,29 @@ def test_owner_machine_names_stay_out_of_tracked_files():
     import subprocess
     _tracked_files()
     hits = subprocess.run(
-        ["git", "-C", str(ROOT), "grep", "-lE", r"\b(HomeLab|GamingPC)\b", "--", "."],
+        ["git", "-C", str(ROOT), "grep", "-lE", r"\b(HomeLab|GamingPC|10\.0\.0\.251)\b", "--", "."],
         capture_output=True, text=True,
     ).stdout.split()
     assert [h for h in hits if h != "tests/test_public_release_files.py"] == []
+
+@pytest.mark.parametrize("detail, blocked", [
+    pytest.param("HomeLab", True, id="machine-one"),
+    pytest.param("GamingPC", True, id="machine-two"),
+    pytest.param("10.0.0.251", True, id="private-address"),
+    pytest.param("192.0.2.10", False, id="documentation-address"),
+    pytest.param("ExampleWorker", False, id="generic-worker"),
+])
+def test_owner_detail_guard_checks_actual_tracked_content(tmp_path, monkeypatch, detail, blocked):
+    import shutil
+    import subprocess
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "fixture.txt").write_text(detail, encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "fixture.txt"], check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    if blocked:
+        with pytest.raises(AssertionError):
+            test_owner_machine_names_stay_out_of_tracked_files()
+    else:
+        test_owner_machine_names_stay_out_of_tracked_files()

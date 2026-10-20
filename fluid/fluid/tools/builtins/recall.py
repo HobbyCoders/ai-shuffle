@@ -16,6 +16,7 @@ engine drops the tool from the schema surface entirely.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -85,17 +86,22 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             is_error=True,
         )
 
-    from fluid.context.screening import screen_findings
+    return await asyncio.to_thread(_lookup, query, limit, store, ctx.extra.get("memory_project"))
 
+
+def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutcome:
+    from fluid.context.screening import screen_findings
+    from fluid.codemode.relevance import recall_terms, recall_scorer
+
+    score = recall_scorer(recall_terms(query))
     lines: list[str] = []
-    project = ctx.extra.get("memory_project")
     try:
         memory_hits = store.search_memories(query, limit=limit, project=project)
     except Exception as exc:
         return ToolOutcome(text=f"recall failed: {exc}", is_error=True)
     conflicts = [e for e in store.memories() if e.conflicted and e.provenance != "tool"
                  and (project is None or e.scope in ("global", project))
-                 and any(t in (e.text + " " + (e.key or "")).lower() for t in query.lower().split())]
+                 and score(e.text + " " + (e.key or ""))]
     for entry in conflicts[:limit]:
         lines.append(f"- [{entry.id}] Unresolved conflict; revision: {entry.revision}; key: {entry.key or 'unspecified'}. "
                      "Ask the user for the current fact, then correct this ID and revision with Remember. Do not guess a value.")
@@ -128,8 +134,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             suffix = f"  ({', '.join(tags)})" if tags else ""
             lines.append(f"- [{entry.id}] {entry.text}{suffix}")
 
-    tokens = [t for t in query.lower().split() if t]
-    skill_hits: list[tuple[Any, bool]] = []
+    skill_hits: list[tuple[int, Any, bool]] = []
     try:
         # Live skills first, then the ones curation archived — archiving is
         # bounded storage, not deletion, so an archived skill stays findable.
@@ -137,14 +142,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             *((s, False) for s in store.list()),
             *((s, True) for s in store.archived_skills()),
         ):
-            hay = f"{s.name} {s.description}".lower()
-            if any(t in hay for t in tokens):
-                skill_hits.append((s, archived))
+            weight = score(f"{s.name} {s.description}")
+            if weight:
+                skill_hits.append((weight, s, archived))
     except Exception:
         skill_hits = []
     if skill_hits:
         lines.append("Saved skills (usable in code mode via `from skills import <name>`):")
-        for s, archived in skill_hits[:limit]:
+        for _, s, archived in sorted(skill_hits, key=lambda hit: (-hit[0], hit[2], hit[1].name))[:limit]:
             tag = "  (archived — restore by moving the file back)" if archived else ""
             lines.append(f"- {s.name}: {s.description} [used {s.uses}x]{tag}")
 
