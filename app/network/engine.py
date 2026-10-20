@@ -1730,6 +1730,22 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into._pending_drains.update(part._pending_drains)
 
 
+def _append_pending(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext) -> Optional[ApplyResult]:
+    """Use the existing validated append path, or retry under per-op savepoints."""
+    part = ApplyResult()
+    _savepoint(cursor, "SAVEPOINT pending_append")
+    try:
+        appended = _apply_event_append(cursor, chunk, ctx, part, _from_pending=True)
+    except Exception as exc:  # noqa: BLE001 - a failed batch must not poison good predecessors
+        logger.debug("Buffered bulk append failed; falling back to per-op apply", exc_info=True)
+        if not type(cursor).__module__.startswith("psycopg2"):
+            # The shim has no savepoints: roll back the whole attempt first.
+            raise _ChunkAbandoned() from exc
+        _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_append")
+        _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
+        return None
+    _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
+    return part if appended else None
 PENDING_RETRY_BASE = 30.0
 PENDING_RETRY_MAX = 600.0
 
@@ -1747,23 +1763,6 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
     if not isinstance(error, ApplyError):
         logger.warning("Applying buffered operations failed; retry backoff %.0fs", delay,
                        exc_info=(type(error), error, error.__traceback__))
-
-
-def _append_pending(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext) -> Optional[ApplyResult]:
-    """Use the existing validated append path, or retry under per-op savepoints."""
-    part = ApplyResult()
-    _savepoint(cursor, "SAVEPOINT pending_append")
-    try:
-        appended = _apply_event_append(cursor, chunk, ctx, part, _from_pending=True)
-    except Exception:  # noqa: BLE001 - a failed batch must not poison good predecessors
-        if not type(cursor).__module__.startswith("psycopg2"):
-            # The shim has no savepoints: roll back the whole attempt first.
-            raise _ChunkAbandoned()
-        _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_append")
-        _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
-        return None
-    _savepoint(cursor, "RELEASE SAVEPOINT pending_append")
-    return part if appended else None
 
 
 def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
@@ -1788,17 +1787,25 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                 return
             store.lock_state(cursor)
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
-            pending = (store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
-                       if _try_append else [])
-            appended = _append_pending(cursor, pending, ctx) if pending else None
+            window = (store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
+                      if _try_append else [])
+            # Alternate event runs with general per-op runs, leaving the rest
+            # buffered for the next transaction. One metadata update must not
+            # send all the neighboring transcript events down the slow path.
+            events, run = next(groupby(window, key=lambda data: isinstance(data, Mapping)
+                                      and data.get("collection") == "session_events"
+                                      and data.get("op") == "upsert"), (False, ()))
+            pending = list(run)
+            more = len(window) == APPLY_CHUNK or len(pending) < len(window)
+            appended = _append_pending(cursor, pending, ctx) if events else None
             if appended is not None:
                 part = appended
                 store.delete_pending_prefix(cursor, origin, incarnation, next_seq, len(pending))
                 box[0] = max(int(data["clock"]) for data in pending)
-                if len(pending) == APPLY_CHUNK:
+                if more:
                     part._pending_drains.add((origin, incarnation))
             else:
-                for _ in range(APPLY_CHUNK):
+                for _ in range(len(pending) or APPLY_CHUNK):
                     buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
                     if buffered is None:
                         break
@@ -1823,8 +1830,10 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                     part._pending_drains.discard((origin, incarnation))
                     next_seq += 1
                 else:
-                    # A full chunk may have more successors; yield the lock first.
-                    part._pending_drains.add((origin, incarnation))
+                    # A full window or a following run needs another turn;
+                    # the shim's no-peek fallback also yields after 64 ops.
+                    if more or not pending:
+                        part._pending_drains.add((origin, incarnation))
             if box[0]:
                 store.observe_clock(cursor, box[0])
     except _ChunkAbandoned:
