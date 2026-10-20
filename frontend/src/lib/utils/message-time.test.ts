@@ -1,45 +1,61 @@
 import { describe, it, expect } from 'vitest';
-import { formatMessageTime } from './message-time';
+import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from './message-time';
 
-// Regression guard for "timestamps don't persist": a stored ISO timestamp
-// must format to ITS time, not the current time.
-describe('formatMessageTime', () => {
-	const expected = (d: Date) =>
-		d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+// Local-time constructors keep these independent of the runner's time zone.
+const NOW = new Date(2026, 9, 19, 16, 0); // Mon 19 Oct 2026, 4:00 PM local
+const en = { now: NOW, locale: 'en-US' };
 
-	it('formats a persisted ISO-8601 string (with UTC offset) to its own time', () => {
-		const iso = '2026-01-15T14:30:00+00:00';
-		expect(formatMessageTime(iso)).toBe(expected(new Date(iso)));
+describe('formatMessageTime: the date with the time', () => {
+	it('says "Today" with the time for a message from today', () => {
+		expect(formatMessageTime(new Date(2026, 9, 19, 14, 30), en)).toBe('Today 2:30 PM');
 	});
 
-	it('formats a Z-suffixed ISO string (JSONL timestamps)', () => {
-		const iso = '2026-01-15T09:05:00Z';
-		expect(formatMessageTime(iso)).toBe(expected(new Date(iso)));
+	it('says "Yesterday" for the previous calendar day, even under 24 hours ago', () => {
+		expect(formatMessageTime(new Date(2026, 9, 18, 23, 55), en)).toBe('Yesterday 11:55 PM');
 	});
 
-	it('does NOT show the current time for an old persisted timestamp', () => {
-		const iso = '2020-03-01T03:04:00Z';
-		const past = new Date(iso);
-		const now = new Date();
-		expect(formatMessageTime(iso)).toBe(expected(past));
-		// Only meaningful when past and now differ at minute granularity
-		// (avoids a 1-in-1440 flake if the wall clock matches hh:mm).
-		if (expected(past) !== expected(now)) {
-			expect(formatMessageTime(iso)).not.toBe(expected(now));
+	it('shows month and day (no year) for an older message this year', () => {
+		expect(formatMessageTime(new Date(2026, 9, 14, 9, 5), en)).toBe('Oct 14, 9:05 AM');
+	});
+
+	it('adds the year for a message from another year', () => {
+		expect(formatMessageTime(new Date(2025, 11, 31, 22, 45), en)).toBe('Dec 31, 2025, 10:45 PM');
+	});
+
+	it('follows the locale (24-hour clock and day-first order in en-GB)', () => {
+		const gb = { now: NOW, locale: 'en-GB' };
+		expect(formatMessageTime(new Date(2026, 9, 19, 14, 30), gb)).toBe('Today 14:30');
+		expect(formatMessageTime(new Date(2026, 9, 14, 9, 5), gb)).toMatch(/^14 Oct, 0?9:05$/);
+	});
+
+	it('uses the locale’s own word for today, capitalised', () => {
+		const label = formatMessageTime(new Date(2026, 9, 19, 14, 30), { now: NOW, locale: 'fr-FR' });
+		expect(label.startsWith('Aujourd’hui')).toBe(true);
+		expect(label).toContain('14:30');
+	});
+
+	// Regression guard for "timestamps don't persist": a stored ISO timestamp
+	// must format to ITS date and time, not the current one.
+	it('formats a persisted ISO-8601 string (with UTC offset) to its own date', () => {
+		const iso = '2020-03-01T03:04:00+00:00';
+		const expected = new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+		expect(formatMessageTime(iso, en)).toBe(expected);
+		expect(formatMessageTime(iso, en)).toContain('2020');
+	});
+
+	it('falls back to the current time when the timestamp is missing or unparseable', () => {
+		for (const missing of [undefined, '', 'not-a-date']) {
+			expect(formatMessageTime(missing, { locale: 'en-US' })).toMatch(/^Today \d{1,2}:\d{2}\s?[AP]M$/);
 		}
 	});
+});
 
-	it('accepts a Date object', () => {
-		const d = new Date('2026-01-15T22:45:00Z');
-		expect(formatMessageTime(d)).toBe(expected(d));
+describe('formatMessageTimeFull and messageTimeISO', () => {
+	it('gives the long date and time for a hover title', () => {
+		expect(formatMessageTimeFull(new Date(2026, 9, 14, 14, 30), { locale: 'en-US' })).toBe('Wednesday, October 14, 2026 at 2:30 PM');
 	});
 
-	it('falls back to the current time when the timestamp is missing', () => {
-		expect(formatMessageTime(undefined)).toBe(expected(new Date()));
-		expect(formatMessageTime('')).toBe(expected(new Date()));
-	});
-
-	it('falls back to the current time for an unparseable string', () => {
-		expect(formatMessageTime('not-a-date')).toBe(expected(new Date()));
+	it('gives an ISO value for <time datetime>', () => {
+		expect(messageTimeISO('2026-01-15T09:05:00Z')).toBe('2026-01-15T09:05:00.000Z');
 	});
 });
