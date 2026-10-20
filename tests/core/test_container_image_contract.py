@@ -17,6 +17,11 @@ def test_docker_defaults_glibc_arenas_without_overriding_runtime_environment():
         if line.startswith("ENV "):
             defaults.update(token.split("=", 1) for token in shlex.split(line[4:]))
     assert defaults["MALLOC_ARENA_MAX"] == "2"
+    # Allocator tuning must not invalidate apt/PostgreSQL/Node/gh/pip layers.
+    arena_env = "ENV MALLOC_ARENA_MAX=2"
+    assert image.count(arena_env) == 1
+    assert image.index("RUN chown appuser:appuser /app") < image.index(arena_env)
+    assert image.index(arena_env) < image.index("ARG GIT_SHA=unknown")
     # Docker ENV is a default (-e/Compose overrides it); startup must not reset it.
     entrypoint = (ROOT / "entrypoint.sh").read_text()
     assert not re.search(r"(?m)^\s*(?:export\s+)?MALLOC_ARENA_MAX\s*=", entrypoint)
