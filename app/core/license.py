@@ -21,7 +21,7 @@ _generation = 0
 
 
 def _identity(binding):
-    if not binding or not binding.get("active"):
+    if not binding:
         return None
     return tuple(binding.get(k) for k in (
         "hub_url", "server_id", "linked_by", "encrypted_secret", "instance_id"))
@@ -111,8 +111,10 @@ def status() -> dict:
     linked = key is not None
     plan = _account_plan(binding) if linked else None
     # An in-flight response must never reveal the previous account after relink.
-    if _identity(mobile_hub.get_binding()) != key:
-        return status()
+    current_key = _identity(mobile_hub.get_binding())
+    if current_key != key:
+        linked = current_key is not None
+        plan = _free_plan() if linked else None
     result = {
         "source": "account", "mode": "cloud", "state": "not_linked",
         "linked": linked, "allowed": True, "reason": None, "banner": None,

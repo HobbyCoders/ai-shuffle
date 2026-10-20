@@ -1048,16 +1048,10 @@ def run(settings, action, filename=None):
                     raise RuntimeFailure("Invalid update channel configuration") from exc
                 # The API compares the saved choice with this running supervisor.
                 env["SHUFFLE_UPDATE_CHANNEL"] = channel
-                def lease():
-                    # D8: the app's license lease for the hub's gated feed. The
-                    # updater sends it to the hub's update endpoints only.
-                    value = lifecycle("source-lease").get("lease")
-                    return value if isinstance(value, str) and value else None
-
                 try:
                     updates = ContainerUpdates(root, image, (image_dir() / "application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
-                                               channel=channel, lease=lease, database=db)
+                                               channel=channel, database=db)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         chrome_selection = None
