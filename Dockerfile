@@ -68,6 +68,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Limit glibc arena retention after threaded JSON decoding. Docker -e overrides it.
+ENV MALLOC_ARENA_MAX=2
+
 # ── System deps (git, curl for health check, gh CLI) ──
 # ripgrep is not optional comfort: the agent's Grep tool falls back to a pure
 # Python scan without it, which is slow enough to dominate a session (one

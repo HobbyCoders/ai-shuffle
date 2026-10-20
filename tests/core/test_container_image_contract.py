@@ -1,11 +1,25 @@
 """Cheap packaging guards; real container acceptance runs separately in CI."""
 import importlib.util
 import json
+import re
+import shlex
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_docker_defaults_glibc_arenas_without_overriding_runtime_environment():
+    image = (ROOT / "Dockerfile").read_text().split("FROM python:3.12-slim-trixie", 1)[1]
+    defaults = {}
+    for line in image.replace("\\\n", " ").splitlines():
+        if line.startswith("ENV "):
+            defaults.update(token.split("=", 1) for token in shlex.split(line[4:]))
+    assert defaults["MALLOC_ARENA_MAX"] == "2"
+    # Docker ENV is a default (-e/Compose overrides it); startup must not reset it.
+    entrypoint = (ROOT / "entrypoint.sh").read_text()
+    assert not re.search(r"(?m)^\s*(?:export\s+)?MALLOC_ARENA_MAX\s*=", entrypoint)
 
 
 def test_docker_bundles_one_supported_postgres_major():
