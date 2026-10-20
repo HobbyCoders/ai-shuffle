@@ -973,6 +973,21 @@ def pop_pending(cursor, origin: str, incarnation: int, seq: int) -> Optional[dic
     return _load(row["envelope"], {})
 
 
+def ready_pending_streams(cursor, *, limit: int = 4) -> List[Tuple[str, int]]:
+    """Streams whose next op is already buffered, oldest frontier first.
+
+    Probe the pending primary key once per watermark instead of scanning or
+    aggregating every buffered payload. No row locks or writes at idle.
+    """
+    cursor.execute(
+        """SELECT w.origin_device_id, w.incarnation FROM sync_watermarks w
+           WHERE EXISTS (SELECT 1 FROM sync_pending p
+               WHERE p.origin_device_id=w.origin_device_id AND p.incarnation=w.incarnation
+                 AND p.seq=w.last_seq+1)
+           ORDER BY w.updated_at, w.origin_device_id, w.incarnation LIMIT %s""", (limit,))
+    return [(row["origin_device_id"], int(row["incarnation"])) for row in cursor.fetchall()]
+
+
 def pending_holes(_conn=None) -> List[dict]:
     """Streams with buffered out-of-order ops: what we hold and what is missing."""
     def _query(cursor):

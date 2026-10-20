@@ -1707,12 +1707,12 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
     part = ApplyResult()
     box = [0]
     _deferred_clock.box = box
-    next_seq = 0
+    first_seq = next_seq = 0
     try:
         with get_db() as conn:
             cursor = conn.cursor()
             store.lock_state(cursor)
-            next_seq = store.get_watermark(cursor, origin, incarnation) + 1
+            first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             for _ in range(APPLY_CHUNK):
                 buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
                 if buffered is None:
@@ -1720,12 +1720,15 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                 _savepoint(cursor, "SAVEPOINT pending_envelope")
                 try:
                     outcome = apply_envelope(cursor, buffered, ctx=ctx, result=part)
-                except ApplyError as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate a bad buffered op
                     _savepoint(cursor, "ROLLBACK TO SAVEPOINT pending_envelope")
                     _savepoint(cursor, "RELEASE SAVEPOINT pending_envelope")
-                    if isinstance(exc, TransientApplyError):
+                    if not isinstance(exc, ApplyError) or isinstance(exc, TransientApplyError):
+                        if not isinstance(exc, ApplyError):
+                            logger.warning("Applying a buffered operation failed", exc_info=True)
                         store.stash_pending(cursor, buffered)
-                        part.retry_operation(buffered, str(exc))
+                        reason = str(exc) if isinstance(exc, TransientApplyError) else "buffered apply failed"
+                        part.retry_operation(buffered, reason)
                         break
                     part.rejected += 1
                     part.reasons.append(str(exc))
@@ -1744,7 +1747,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
         logger.warning("Applying buffered operations failed", exc_info=True)
         result.retry_operation({"origin_device_id": origin,
                                 "origin_incarnation": incarnation,
-                                "origin_seq": next_seq}, "buffered apply failed")
+                                "origin_seq": first_seq}, "buffered apply failed")
         return
     finally:
         _deferred_clock.box = None
@@ -1927,13 +1930,14 @@ def applying_batch() -> bool:
 
 
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
-                ctx: NetworkContext | None = None) -> ApplyResult:
+                ctx: NetworkContext | None = None,
+                _pending_streams: Sequence[Tuple[str, int]] = ()) -> ApplyResult:
     """Expose inbound catch-up work too, including pushes without a local peer link."""
     ctx = ctx or require_context()
     with _lock:
         _applying[ctx.device_id] = _applying.get(ctx.device_id, 0) + 1
     try:
-        return _apply_batch(envelopes, ctx=ctx)
+        return _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams)
     finally:
         with _lock:
             remaining = _applying[ctx.device_id] - 1
@@ -1943,8 +1947,25 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 _applying.pop(ctx.device_id, None)
 
 
+def resume_pending() -> ApplyResult:
+    """One bounded background pass, including leftovers from a previous process.
+
+    No peer replay is required. The indexed readiness probe takes no state
+    lock; each selected stream is rechecked under its own chunk transaction.
+    """
+    ctx = cached_context()
+    if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY:
+        return ApplyResult()
+    with get_db() as conn:
+        streams = store.ready_pending_streams(conn.cursor(), limit=4)
+    if not streams:
+        return ApplyResult()
+    return apply_batch((), ctx=ctx, _pending_streams=streams)
+
+
 def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
-                 ctx: NetworkContext | None = None) -> ApplyResult:
+                 ctx: NetworkContext | None = None,
+                 _pending_streams: Sequence[Tuple[str, int]] = ()) -> ApplyResult:
     """Apply a batch in chunks of ``APPLY_CHUNK`` envelopes per transaction.
 
     One bad op cannot poison the rest: each envelope applies under its own
@@ -1975,6 +1996,11 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
             result._pending_drains.clear()
             for origin, incarnation in streams:
                 _apply_pending_chunk(origin, incarnation, ctx, result)
+        # The background pass deliberately stops after one chunk per selected
+        # stream. Full chunks become ready again on its next pass.
+        for origin, incarnation in _pending_streams:
+            _apply_pending_chunk(origin, incarnation, ctx, result)
+        result._pending_drains.clear()
     finally:
         _batch_agent_deletions.ids = None
     if result.own_ahead:

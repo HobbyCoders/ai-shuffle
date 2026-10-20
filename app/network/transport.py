@@ -1400,6 +1400,22 @@ async def sync_loop() -> None:
             _wake.clear()
 
 
+async def pending_loop() -> None:
+    """Resume committed pending heads at startup, even with every peer offline."""
+    while True:
+        progressed = False
+        try:
+            result = await asyncio.to_thread(engine.resume_pending)
+            progressed = bool(result.applied or result.lost or result.rejected)
+            if progressed:
+                engine.kick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - local catch-up must survive transient DB errors
+            logger.warning("Buffered sync catch-up will retry", exc_info=True)
+        await asyncio.sleep(1.0 if progressed else 30.0)
+
+
 def _kick_from_thread() -> None:
     loop = _loop
     if loop is None or _wake is None:
@@ -1623,6 +1639,7 @@ def start() -> List[asyncio.Task]:
     _tasks[:] = [
         asyncio.create_task(sync_loop(), name="network-sync"),
         asyncio.create_task(scan_loop(), name="network-scan"),
+        asyncio.create_task(pending_loop(), name="network-pending"),
         asyncio.create_task(presence_loop(), name="network-presence"),
         asyncio.create_task(prune_loop(), name="network-prune"),
         asyncio.create_task(liveness_loop(), name="network-liveness"),

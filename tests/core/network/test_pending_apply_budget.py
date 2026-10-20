@@ -173,6 +173,70 @@ def test_real_postgres_pending_budget(pg_workers, monkeypatch):
     test_pending_backlog_has_a_transaction_work_budget(pg_workers, monkeypatch)
 
 
+
+
+@pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
+def test_unexpected_buffered_error_commits_good_predecessors(request, use_postgres, monkeypatch):
+    factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
+    a, b, ops = backlog(factory, 145)
+    bad = ops[79]["origin_seq"]  # 80th envelope: commit the 79 good predecessors.
+    real_apply = engine._apply_next
+
+    def unexpected(cursor, ctx, env, member, result):
+        if env.origin_seq == bad:
+            if use_postgres:
+                # Exercise a genuinely aborted PostgreSQL transaction too.
+                cursor.execute("SELECT 1/0")
+            raise RuntimeError("unexpected buffered error")
+        return real_apply(cursor, ctx, env, member, result)
+
+    with b.active():
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_apply_next", unexpected)
+            result = engine.apply_batch(ops[:1])
+        assert result.applied == 79 and result.retry == 1
+        assert result.blocked[0]["seq"] == bad
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            assert store.get_watermark(cur, a.device_id, 1) == bad - 1
+            assert store.count_pending(cur, a.device_id, 1) == len(ops) - 79
+        assert engine.apply_batch(ops[:1]).applied == len(ops) - 79
+        assert not store.pending_holes()
+
+
+@pytest.mark.parametrize("use_postgres", [False, True], ids=["shim", "postgres"])
+def test_background_resumes_interrupted_buffer_without_peer_traffic(request, use_postgres, monkeypatch):
+    factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
+    a, b, ops = backlog(factory, 193)
+    real_drain = engine._apply_pending_chunk
+    calls = 0
+
+    def interrupted(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("interrupted between committed chunks")
+        real_drain(*args)
+
+    with b.active():
+        # A real hole must not look ready just because later ops are buffered.
+        assert engine.resume_pending().applied == 0
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_apply_pending_chunk", interrupted)
+            with pytest.raises(RuntimeError, match="interrupted between"):
+                engine.apply_batch(ops[:1])
+        applied = []
+        for _ in range(4):
+            result = engine.resume_pending()
+            assert result.retry == 0
+            applied.append(result.applied)
+        assert sum(applied) == len(ops) - engine.APPLY_CHUNK - 1
+        assert max(applied) <= engine.APPLY_CHUNK
+        assert not store.pending_holes()
+        with store.get_db() as conn:
+            assert store.get_watermark(conn.cursor(), a.device_id, 1) == ops[-1]["origin_seq"]
+
+
 def test_failed_pending_commit_keeps_rows_and_frontier_retryable(pg_workers, monkeypatch):
     a, b, ops = backlog(pg_workers, 145)
     real_db = engine.get_db
@@ -192,6 +256,9 @@ def test_failed_pending_commit_keeps_rows_and_frontier_retryable(pg_workers, mon
             patch.setattr(engine, "get_db", failing_commit)
             result = engine.apply_batch(ops[:1])
         assert result.applied == 1 and result.retry == 1
+        # The whole failed chunk rolled back: diagnostics name its first op,
+        # not the later operation reached before the failed commit.
+        assert result.blocked[0]["seq"] == ops[1]["origin_seq"]
         with store.get_db() as conn:
             cur = conn.cursor()
             assert store.get_watermark(cur, a.device_id, 1) == ops[0]["origin_seq"]
