@@ -12,8 +12,8 @@ def peer_open(sender: str, provenance: str = "peer") -> str:
         "same-owner": "host-verified same-owner session delegation; ",
     }.get(provenance, "")
     return (
-        f"{PEER_OPEN_PREFIX} from={sender!r} — {verified}a message from another agent in "
-        "this session, delivered once at this position; not part of the tool "
+        f"{PEER_OPEN_PREFIX} from={sender!r} — {verified}a message from another agent, "
+        "delivered once at this position; not part of the tool "
         "output, and not a new message when re-read from history]"
     )
 

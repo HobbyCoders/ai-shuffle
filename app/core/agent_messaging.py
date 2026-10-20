@@ -29,27 +29,55 @@ def _persisted_parents(child: str) -> list[str]:
         return []
 
 
-def _parent_graph(child: str) -> dict[str, set[str]]:
-    """Combine durable and live host edges, including partial registry restores.
-
-    Database-backed helpers in this module are synchronous. Async delivery and
-    roster callers must run them with asyncio.to_thread, never on the loop.
-    """
+def _live_parents(child: str) -> set[str]:
+    """Read/prune the loop-owned registry only on its owning loop."""
     from app.core.task_registry import task_registry
+    return {
+        owner for owner in task_registry.sessions_with_task(child)
+        if (row := task_registry.get_task(owner, child) or {}).get("kind") == "agent"
+        and row.get("assignmentOwner", True)
+    } - {child}
 
+
+def _parent_graph(child: str) -> dict[str, set[str]]:
+    """Live-only synchronous view; async callers supply the durable graph."""
     parents: dict[str, set[str]] = {}
     pending = [child]
     while pending:
         node = pending.pop()
-        if node in parents:
-            continue
-        owners = set(_persisted_parents(node)) | {
-            owner for owner in task_registry.sessions_with_task(node)
-            if (task_registry.get_task(owner, node) or {}).get("kind") == "agent"
-        }
-        parents[node] = owners - {node}
-        pending.extend(owners - parents.keys())
+        if node not in parents:
+            parents[node] = _live_parents(node)
+            pending.extend(parents[node] - parents.keys())
     return parents
+
+
+async def parent_graph(child: str | None) -> dict[str, set[str]]:
+    """Only SQL runs in a thread; registry, swarm and cache reads stay on-loop."""
+    parents: dict[str, set[str]] = {}
+    pending = [child] if child else []
+    while pending:
+        node = pending.pop()
+        if node not in parents:
+            durable = await asyncio.to_thread(_persisted_parents, node)
+            parents[node] = (set(durable) | _live_parents(node)) - {node}
+            pending.extend(parents[node] - parents.keys())
+    return parents
+
+
+async def peer_rows_async(session_id: str | None) -> list[dict]:
+    return peer_rows(session_id, parents=await parent_graph(session_id))
+
+
+async def message_provenance_async(receiver: str, sender: str) -> str:
+    return message_provenance(receiver, sender, parents=await parent_graph(receiver))
+
+
+async def may_message_async(sender: str, target: str) -> bool:
+    return may_message(sender, target, parents=await parent_graph(sender))
+
+
+async def sender_label_async(receiver: str | None, sender: str) -> str | None:
+    return sender_label(receiver, sender, parents=await parent_graph(receiver))
 
 
 def _ancestors(child: str, parents: dict[str, set[str]]) -> set[str]:
@@ -63,7 +91,7 @@ def _ancestors(child: str, parents: dict[str, set[str]]) -> set[str]:
     return seen - {child}
 
 
-def peer_rows(session_id: str | None) -> list[dict]:
+def peer_rows(session_id: str | None, *, parents: dict | None = None) -> list[dict]:
     """Use the same authorized identities for discovery and delivery.
 
     Swarm workers stay inside their workflow. Other sessions can address their
@@ -96,7 +124,7 @@ def peer_rows(session_id: str | None) -> list[dict]:
     # Nested dispatch records a worker on both the root (UI routing) and the
     # direct caller. The root also knows that caller as a worker; exclude that
     # routing copy rather than sending a nested worker's `main` to the root.
-    parents = _parent_graph(session_id) if parent is None else {}
+    parents = (parents if parents is not None else _parent_graph(session_id)) if parent is None else {}
     owners = parents.get(session_id, set())
     direct_owners = [owner for owner in owners if not any(
         owner != other and owner in _ancestors(other, parents) for other in owners
@@ -147,7 +175,7 @@ def peer_rows(session_id: str | None) -> list[dict]:
     return rows
 
 
-def may_message(sender: str, target: str) -> bool:
+def may_message(sender: str, target: str, *, parents: dict | None = None) -> bool:
     """Whether ``sender`` can still address ``target`` (the roster's rule).
 
     A Task child another worker started here also hears from the
@@ -156,7 +184,7 @@ def may_message(sender: str, target: str) -> bool:
     arrival, and without this its message waited for the child's turn to end
     instead of joining it at the next tool result (#1804).
     """
-    if any(row["worker_session_id"] == target for row in peer_rows(sender)):
+    if any(row["worker_session_id"] == target for row in peer_rows(sender, parents=parents)):
         return True
     from app.core import remote_task
 
@@ -166,7 +194,7 @@ def may_message(sender: str, target: str) -> bool:
     }
 
 
-def message_provenance(receiver: str, sender: str) -> str:
+def message_provenance(receiver: str, sender: str, *, parents: dict | None = None) -> str:
     """Host-known Task ancestors update assignments; never infer from the body."""
     try:
         from app.core import remote_task
@@ -179,20 +207,20 @@ def message_provenance(receiver: str, sender: str) -> str:
             if any(row.get("kind") == "parent" and row.get("worker_session_id") == sender
                    for row in swarm.peer_rows(receiver)):
                 return "parent"
-        elif sender in _ancestors(receiver, _parent_graph(receiver)):
+        elif sender in _ancestors(receiver, parents if parents is not None else _parent_graph(receiver)):
             return "parent"
     except Exception:  # noqa: BLE001 - missing registry/remote identity is not proof
         logger.debug("Could not verify message parent", exc_info=True)
     return "peer"
 
 
-def sender_label(receiver: str | None, sender: str) -> str | None:
+def sender_label(receiver: str | None, sender: str, *, parents: dict | None = None) -> str | None:
     """What ``receiver``'s transcript calls ``sender``: the worker's task
     description (its roster name when the task has none), or ``main`` for the
     parent. None when the receiver's roster does not list it; the chat then
     shows the session id."""
     try:
-        rows = peer_rows(receiver)
+        rows = peer_rows(receiver, parents=parents)
     except Exception:  # noqa: BLE001 — a label never blocks a delivery note
         return None
     for row in rows:
@@ -213,7 +241,7 @@ def make_roster(supplier):
         # After a restart the registry starts empty; the session's finished
         # and interrupted workers come back from the durable rows first.
         await task_registry.ensure_hydrated(session_id)
-        rows = await asyncio.to_thread(peer_rows, session_id)
+        rows = await peer_rows_async(session_id)
         return [
             r for r in rows if not data.get("running_only") or r["status"] == "running"
         ]
@@ -232,7 +260,7 @@ def make_message(supplier):
         # the durable rows until this rebuilds it; without it its task id
         # answered "Unknown agent" although its transcript could be resumed.
         await task_registry.ensure_hydrated(session_id)
-        rows = await asyncio.to_thread(peer_rows, session_id)
+        rows = await peer_rows_async(session_id)
         # Exact first: the task id (== worker session id), the name, or
         # "name [ref]". Then case-insensitive on the name — models retype a
         # slug they read as "Fix Flaky Login".
@@ -351,7 +379,7 @@ async def deliver_message(target: str, sender: str, text: str, *,
             # also covers a runtime still starting or an engine just done.
             await engine.submit(AgentMessage(
                 text=text, sender=sender, wake=False, urgent=urgent,
-                provenance=await asyncio.to_thread(message_provenance, target, sender),
+                provenance=await message_provenance_async(target, sender),
             ))
         except RuntimeError:
             # Refusal means not accepted; keep it on the durable queue.

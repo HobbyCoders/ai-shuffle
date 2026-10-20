@@ -1408,10 +1408,9 @@ async def _on_agent_message_locked(
     owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
     if reply_to and task_registry.is_user_stopped(reply_to):
         return None
-    from app.core.agent_messaging import message_provenance
-    prompt = format_peer_message(
-        sender, defang_harness_markers(text), await asyncio.to_thread(message_provenance, session_id, sender),
-    ).strip()
+    from app.core.agent_messaging import message_provenance_async
+    provenance = await message_provenance_async(session_id, sender)
+    prompt = format_peer_message(sender, defang_harness_markers(text), provenance).strip()
     extra_payload = (
         {**(continuation_payload or {}), "agent_message_reply_to": reply_to}
         if reply_to else None
@@ -1457,7 +1456,12 @@ async def _on_agent_message_locked(
             if task_registry.stop_invalidated(reply_to, owner_generation):
                 await asyncio.to_thread(turns_db.remove_queued_turn, turn["id"])
                 return None
-            task_registry.resume_task(reply_to, session_id)
+            # A continuation's reply recipient is not necessarily its dispatcher.
+            # Keep peer continuations reportable without creating parent edges.
+            owner_provenance = (provenance if reply_to == sender else
+                                await message_provenance_async(session_id, reply_to))
+            task_registry.resume_task(reply_to, session_id,
+                                      assignment_owner=owner_provenance == "parent")
             task_registry.mark_background_launch(reply_to, session_id)
             record = supervisor.get_worker(reply_to, session_id)
             # The worker's Stop generation at this admission: a turn that later

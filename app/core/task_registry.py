@@ -202,6 +202,8 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
         # store-loaded card can be reconciled back to "running" on a fresh load.
         "toolUseId": record.get("tool_use_id"),
     }
+    if record.get("assignment_owner") is False:
+        wire["assignmentOwner"] = False
     # Kill attribution (e.g. "server_shutdown"): additive — only present when a
     # reap stamped one, so the pinned wire contract is unchanged otherwise.
     if record.get("reason"):
@@ -1008,6 +1010,7 @@ class TaskRegistry:
         remote_device_id: Optional[str] = None,
         worker_name: Optional[str] = None,
         receipt_only: bool = False,
+        assignment_owner: bool = True,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
@@ -1100,6 +1103,7 @@ class TaskRegistry:
         bucket[task_id] = {
             "task_id": task_id,
             "kind": kind,
+            "assignment_owner": assignment_owner,
             "title": title,
             "status": "running",
             "summary": summary,
@@ -1246,7 +1250,9 @@ class TaskRegistry:
         """
         try:
             record = self._tasks.get(session_id, {}).get(task_id)
-            if record is None:
+            if record is None or record.get("assignment_owner") is False:
+                # A peer continuation is tracked for reports, not as a durable
+                # parent edge. Only dispatch owners are persisted as owners.
                 return
             from app.core.task_persistence import enqueue_task_snapshot
 
@@ -1676,8 +1682,12 @@ class TaskRegistry:
                 owners.append(session_id)
         return owners
 
-    def resume_task(self, session_id: str, task_id: str) -> None:
-        """Explicit host resume, unlike a possibly stale SDK start frame."""
+    def resume_task(self, session_id: str, task_id: str, *, assignment_owner: bool = True) -> None:
+        """Resume reporting; a peer resumer is not a dispatch/assignment owner.
+
+        Non-owner continuations stay in memory for their report lifecycle but
+        never become durable parent edges or authoritative retained snapshots.
+        """
         row = self.get_task(session_id, task_id, durable=True) or {}
         # start_task intentionally ignores error/killed replays. Only this
         # admitted resume may replace a terminal task and re-arm its wake.
@@ -1692,7 +1702,8 @@ class TaskRegistry:
         self._terminal_notified.get(session_id, set()).discard(task_id)
         self.start_task(session_id, task_id, "agent", row.get("subject") or "Worker continuation",
                         tool_use_id=task_id, agent=row.get("agent"), name=row.get("name"),
-                        model=row.get("model"))
+                        model=row.get("model"),
+                        assignment_owner=assignment_owner and row.get("assignmentOwner", True))
 
     def get_task(
         self, session_id: str, task_id: str, *, durable: bool = False

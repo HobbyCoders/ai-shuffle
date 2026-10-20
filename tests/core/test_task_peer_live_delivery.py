@@ -148,7 +148,7 @@ async def test_worker_message_joins_a_running_delegated_parent_at_its_next_tool_
         content = delivered[0]["payload"]["content"]
         # One complete peer envelope, the shape the chat renders as an
         # attributed "Agent message" (frontend agent-delivery.ts).
-        assert content.startswith("[agent message from='worker' — a message from another agent in this session")
+        assert content.startswith("[agent message from='worker' — a message from another agent,")
         assert content.endswith("\nFound the bug\n[/agent message]")
         assert "<system-reminder>" not in content
     finally:
@@ -174,7 +174,7 @@ async def test_revoked_worker_message_is_not_steered(parent, monkeypatch):
     real = messaging.may_message
     checks = []
 
-    def may_message(sender, target):
+    def may_message(sender, target, **kwargs):
         checks.append((sender, target))
         return False
 

@@ -46,10 +46,10 @@ async def test_parent_provenance_survives_restart(peers, runtime, monkeypatch, r
             for task in runtime[0].get_all("root", limit=None)
         ])
     monkeypatch.setattr(registries, "task_registry", restored)
-    assert agent_messaging.message_provenance("child", "parent") == "parent"
-    assert agent_messaging.message_provenance("child", "root") == "parent"
-    assert agent_messaging.message_provenance("child", "unknown") == "peer"
-    [main] = agent_messaging.peer_rows("child")
+    assert await agent_messaging.message_provenance_async("child", "parent") == "parent"
+    assert await agent_messaging.message_provenance_async("child", "root") == "parent"
+    assert await agent_messaging.message_provenance_async("child", "unknown") == "peer"
+    [main] = await agent_messaging.peer_rows_async("child")
     assert main["worker_session_id"] == "parent"
 
 
@@ -89,23 +89,38 @@ async def test_persisted_parent_rows_are_instance_scoped(peers, runtime, monkeyp
     assert agent_messaging.message_provenance("child", "foreign-parent") == "peer"
 
 
-async def test_async_roster_and_delivery_read_lineage_off_loop(peers, runtime, monkeypatch):
-    import asyncio
-    from fluid.tools.registry import ToolCtx
+@pytest.fixture
+async def lineage_threads(monkeypatch):
+    """Fail deterministically if SQL or mutable host state crosses its thread."""
+    import threading
+    from app.core import remote_task, task_registry as registries
+    loop_thread = threading.get_ident()
     original = agent_messaging._persisted_parents
     reads = []
 
     def off_loop(child):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            pytest.fail("persisted Task parents read on the event loop")
+        assert threading.get_ident() != loop_thread, "SQL ran on the event loop"
         reads.append(child)
         return original(child)
 
+    def on_loop(function):
+        def guarded(*args, **kwargs):
+            assert threading.get_ident() == loop_thread, "loop-owned state read in a thread"
+            return function(*args, **kwargs)
+        return guarded
+
     monkeypatch.setattr(agent_messaging, "_persisted_parents", off_loop)
+    for name in ("get_all", "get_task", "sessions_with_task"):
+        monkeypatch.setattr(registries.task_registry, name,
+                            on_loop(getattr(registries.task_registry, name)))
+    monkeypatch.setattr(agent_messaging.swarm, "peer_rows", on_loop(agent_messaging.swarm.peer_rows))
+    monkeypatch.setattr(remote_task, "remote_parent", on_loop(remote_task.remote_parent))
+    return reads
+
+
+async def test_async_roster_and_delivery_thread_boundaries(peers, runtime, lineage_threads):
+    from fluid.tools.registry import ToolCtx
+    reads = lineage_threads
     engine = worker(runtime, "parent", "child")
     await agent_messaging.make_roster(lambda: "parent")({}, ToolCtx())
     assert reads
