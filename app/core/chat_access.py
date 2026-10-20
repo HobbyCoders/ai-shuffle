@@ -1,25 +1,27 @@
 """Chat resource grants and one-shot approvals, owned by this worker process.
 
-Restart revokes everything, including credentials. No grants are replicated or
-inherited by forks. Only the authenticated access API can grant access. Writes,
-commands and state-changing API requests require one-shot approval unless the
+Restart revokes everything, including credentials. Grants are never replicated.
+Task descendants on this worker may use an ancestor's grant, not a fork's.
+Only the authenticated access API can grant access. Writes, commands and state-changing API requests require one-shot approval unless the
 session is in Bypass; model tools cannot grant access or change the session's
 permission mode.
 
-A subagent (a Task/Swarm child) asks for and uses access on its own session,
-under the same rules, but its chat shows no private-access UI. Its requests,
+A subagent (a Task/Swarm child) asks for any additional access on its own
+session, under the same rules, but its chat shows no private-access UI. Its requests,
 one-shot approvals and grants surface in its MAIN chat instead: the top-level
 chat at the root of its delegation chain on this worker (``main_session_of``).
 The main chat's snapshot lists them labelled with the subagent, and every
-answer is still addressed to the subagent's own session. Grants never move
-between sessions: the main chat cannot use a subagent's grant, nor the reverse.
-A subagent running for another worker has no main chat here; it runs in Away
-mode, so its requests are refused at once and listed in its report.
+answer is still addressed to the subagent's own session. Grants stay with their
+approving session: descendants use the same handle, expiry and revocation, but
+their own confirmation mode. Parents and siblings cannot use a child's grant.
+A delegation edge to another worker never carries access; requests there still
+follow Away handling and are listed in the subagent's report.
 """
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 import hmac
 import ipaddress
 import logging
@@ -437,6 +439,46 @@ def main_session_of(session_id: str) -> str | None:
     return None
 
 
+def delegation_ancestors(session_id: str, parents: dict[str, tuple[str, str]]) -> list[tuple[str, tuple]]:
+    """Revalidate local Task edges and principals, never trust a cached UI link.
+
+    A StartSession/fork has a parent id but is not a worker, so the walk stops
+    there. Missing, remote, cross-principal and cyclic chains fail closed.
+    """
+    from app.core.provider_agent import is_subagent_row
+    from app.db import database
+
+    current, seen, ancestors, principal = session_id, set(), [], None
+    for _ in range(MAIN_CHAIN_LIMIT):
+        if current in seen:
+            return []
+        seen.add(current)
+        row = database.get_session(current)
+        try:
+            owner = owner_from_row(row)
+        except AccessDenied:
+            return []
+        if current == session_id:
+            principal = owner[2]
+        elif owner[2] != principal:
+            return []
+        if current != session_id:
+            ancestors.append((current, owner))
+        if not is_subagent_row(row):
+            return ancestors
+        registered = parents.get(current)
+        if registered is not None:
+            caller, routing_parent = registered
+            if row.get("parent_session_id") != routing_parent:
+                return []  # the persisted delegation was changed since dispatch
+            current = caller
+        else:
+            current = row.get("parent_session_id")
+        if not current:
+            return []
+    return []
+
+
 async def session_bypasses_confirmation(session_id: str) -> bool:
     """Use the running adapter's effective mode, never a tool's build-time mode."""
     from app.core.session_modes import permission_mode_for_session_mode
@@ -517,6 +559,26 @@ class Broker:
         self._notifications: set[asyncio.Task] = set()
         # Subagent session -> the main chat that shows its access (main_session_of).
         self._main: OrderedDict[str, str] = OrderedDict()
+        # Task rows use the ROOT as their routing parent. Remember the actual
+        # local caller before its child starts. Like grants, these links are
+        # process-local; restart drops both. No tool can register a link.
+        self._parents: OrderedDict[str, tuple[str, str]] = OrderedDict()
+
+    def register_delegation(self, child: str, caller: str, *, routing_parent: str | None = None) -> None:
+        self._parents[child] = (caller, routing_parent or caller)
+        while len(self._parents) > MAIN_LINK_LIMIT:
+            self._parents.popitem(last=False)
+
+    async def _ancestors(self, session_id: str, *, executor=None) -> list[tuple[str, tuple]]:
+        if not any(g.session_id != session_id for g in self.grants.values()):
+            return []
+        from app.db.async_database import run_sync
+        # Copy before offloading: dispatch can add links on the event loop.
+        parents = dict(self._parents)
+        if executor is None:
+            return await run_sync(delegation_ancestors, session_id, parents)
+        return await asyncio.get_running_loop().run_in_executor(
+            executor, contextvars.copy_context().run, delegation_ancestors, session_id, parents)
 
     async def _show_in_main(self, session_id: str, owner: tuple) -> None:
         """Link a subagent to its main chat once, then refresh that chat's panel.
@@ -1051,15 +1113,23 @@ class Broker:
 
     async def get(self, session_id: str, grant_id: str, *, preparing: bool = False) -> Grant:
         grant = self.grants.get(grant_id)
-        if not grant or grant.session_id != session_id or (not grant.ready and not preparing):
+        if not grant or (not grant.ready and not preparing):
             raise AccessDenied("No such handle in this session. Use RequestChatAccess to ask privately.")
-        try:
-            owner = await session_owner(session_id)
-        except AccessDenied:
-            self.revoke(session_id, grant_id)
-            raise
+        # A child cannot use a grant still being prepared, even if it knows the
+        # id. Invalid child lookups must never revoke an ancestor's valid grant.
+        if grant.session_id != session_id:
+            ancestors = dict(await self._ancestors(session_id))
+            if preparing or grant.session_id not in ancestors:
+                raise AccessDenied("No such handle in this session. Grants cannot cross workers or unrelated chats.")
+            owner = ancestors[grant.session_id]
+        else:
+            try:
+                owner = await session_owner(session_id)
+            except AccessDenied:
+                self.revoke(grant.session_id, grant_id)
+                raise
         if grant.revoked or grant.expires_at <= time.time() or grant.owner != owner:
-            self.revoke(session_id, grant_id)
+            self.revoke(grant.session_id, grant_id)
             raise AccessDenied("Access expired or ownership changed. Request a new grant.")
         return grant
 
@@ -1101,6 +1171,7 @@ class Broker:
             async with asyncio.timeout(LISTING_TIMEOUT_SECONDS):
                 owner = await session_owner(session_id, executor=_listing_executor)
                 saved = await self._saved_metadata(owner)
+                ancestors = await self._ancestors(session_id, executor=_listing_executor)
                 if await session_owner(session_id, executor=_listing_executor) != owner:
                     raise AccessDenied("Session ownership changed.")
         except TimeoutError:
@@ -1122,7 +1193,8 @@ class Broker:
                 "No access was requested or changed."
             ) from None
         looked_up = time.monotonic()
-        grants = [grant.model_public() for grant in self._live_grants(session_id, owner)]
+        grants = [grant.model_public() for sid, principal in [(session_id, owner), *ancestors]
+                  for grant in self._live_grants(sid, principal)]
         folder_available = chat_files.available()
         finished = time.monotonic()
         total = finished - started
@@ -1243,24 +1315,27 @@ class Broker:
                 # Expired/revoked/answered actions must never be revived.
                 continue
 
-    async def approve(self, grant: Grant, operation: str, arguments: dict):
-        if await session_bypasses_confirmation(grant.session_id):
+    async def approve(self, grant: Grant, operation: str, arguments: dict, *, session_id: str | None = None):
+        # The consumer owns this one-shot decision, not the session that granted
+        # access. Inheriting a bypass parent's handle never inherits its bypass.
+        session_id = session_id or grant.session_id
+        if await session_bypasses_confirmation(session_id):
             return
-        if sum(a.session_id == grant.session_id for a in self.actions.values()) >= 8:
+        if sum(a.session_id == session_id for a in self.actions.values()) >= 8:
             raise AccessDenied("Too many pending actions; resolve them in Chat access.")
-        action = Action(uuid.uuid4().hex, grant.id, grant.session_id, operation,
+        action = Action(uuid.uuid4().hex, grant.id, session_id, operation,
                         dict(arguments), min(grant.expires_at, time.time() + 240),
                         asyncio.get_running_loop().create_future())
         with self._pending_lock:
             self.actions[action.id] = action
-        self._notify(grant.session_id, grant.owner)
+        self._notify(session_id, grant.owner)
         try:
-            await self._show_in_main(grant.session_id, grant.owner)
-            await _defer_if_away(grant.session_id, f"private access action: {operation}")
+            await self._show_in_main(session_id, grant.owner)
+            await _defer_if_away(session_id, f"private access action: {operation}")
             # A persisted-mode lookup can complete with an old snapshot after
             # a mode-change sweep already ran. Recheck with the action visible
             # so switching to Bypass cannot strand a newly queued confirmation.
-            await self.resolve_mode_actions(grant.session_id)
+            await self.resolve_mode_actions(session_id)
             allowed = await asyncio.wait_for(action.decision, max(0, action.expires_at - time.time()))
             if not allowed:
                 raise AccessDenied("The action was denied or access was revoked.")
@@ -1268,8 +1343,8 @@ class Broker:
             raise AccessDenied("Approval expired. Ask the user before requesting it again.") from None
         finally:
             self.actions.pop(action.id, None)
-            self._notify(grant.session_id, grant.owner)
-        await self.get(grant.session_id, grant.id)
+            self._notify(session_id, grant.owner)
+        await self.get(session_id, grant.id)
 
     async def run(self, session_id: str, grant_id: str, operation: str, arguments: dict):
         grant = await self.get(session_id, grant_id)
@@ -1328,7 +1403,7 @@ class Broker:
             raise AccessDenied("Unknown operation.")
         if operation in ("command", "write") or (
                 operation == "http" and arguments["method"] in chat_services.WRITE_METHODS):
-            await self.approve(grant, operation, arguments)
+            await self.approve(grant, operation, arguments, session_id=session_id)
         await self.get(session_id, grant_id)
         if operation in ("command", "http"):
             root = None

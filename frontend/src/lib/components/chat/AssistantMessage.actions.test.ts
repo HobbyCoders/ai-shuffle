@@ -135,6 +135,16 @@ describe('AssistantMessage copy', () => {
 		// With stats the time is already in the row and is not repeated.
 		const full = render(AssistantMessage, { content: 'Reply', streaming: false, timestamp: when, metadata: { duration_ms: 1200 } });
 		expect(full.container.querySelector('.assistant-time')).toBeNull();
+		expect(full.container.querySelector('.ameta time')?.getAttribute('datetime')).toBe(when.toISOString());
+	});
+
+	it('dates the time on an older reply, in the stats row and the hover title', () => {
+		const when = new Date('2025-03-04T15:10:00');
+		const view = render(AssistantMessage, { content: 'Reply', streaming: false, timestamp: when, metadata: { duration_ms: 1200 } });
+		const stamp = view.container.querySelector('.ameta time');
+		expect(stamp?.textContent).toContain('2025');
+		expect(stamp?.textContent).not.toMatch(/^Today/);
+		expect(view.container.querySelector('.aname')?.getAttribute('title')).toContain('2025');
 	});
 
 	it('keeps the actions at the left, next to the reply', () => {

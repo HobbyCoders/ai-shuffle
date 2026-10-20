@@ -550,9 +550,14 @@ def _dispatch_bg(**overrides):
 
 class TestDispatchWorker:
 
-    def test_happy_path(self, dispatch_env):
-        outcome = _dispatch(label="reviewer")
+    @pytest.mark.parametrize("caller", [None, "direct-caller"])
+    def test_happy_path(self, dispatch_env, monkeypatch, caller):
+        from app.core import chat_access
+        broker = chat_access.Broker()
+        monkeypatch.setattr(chat_access, "broker", broker)
+        outcome = _dispatch(label="reviewer", context_session_id=caller)
 
+        assert broker._parents[outcome.session_id] == (caller or "parent-1", "parent-1")
         assert outcome.ok
         assert outcome.report == "the worker's report"
         assert outcome.truncated is False
