@@ -32,8 +32,10 @@ export interface LicenseStatus {
 	seats: number | null;
 	/** Remote workers in use on the account; null when unknown. */
 	seats_used: number | null;
-	/** Paid renewal date (ISO), null otherwise. */
+	/** Paid renewal (ISO) when the account reports it, null otherwise. */
 	expires_at: string | null;
+	/** The same renewal in epoch milliseconds. Absent on older workers. */
+	renews_at?: number | null;
 	/* Kept by the backend for older callers, always empty now. */
 	key_hint: null;
 	install_id: null;

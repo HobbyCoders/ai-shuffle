@@ -25,9 +25,9 @@ Prices are in US dollars. There is no trial: the free account lets you try remot
 
 There is no license key to enter. A plan belongs to your AI Shuffle Cloud account, and every worker signed in with that account gets it. Signing in on another worker gives that worker the same plan.
 
-Open **Settings → Cloud** to see whether this worker is linked, how many remote workers your account includes and how many are in use, and the renewal date of a paid plan. To link a worker, choose **Link account** there and sign in with your account.
+Open **Settings → Cloud** to see whether this worker is linked, how many remote workers your account includes, and, when the account reports them, how many are in use and when a paid plan renews. To link a worker, choose **Link account** there and sign in with your account.
 
-If you bought a plan before signing in, sign in with the email address you used for the purchase and the plan attaches to your account. You can also enter the key from your purchase email once on your account page at hobbycoders.com. You never enter it in the app.
+A plan you buy is on the account you bought it with. A key issued without billing, such as a founder key, can be added once on your account page at hobbycoders.com, never in the app.
 
 Signing in never sends prompts, files or AI provider credentials.
 

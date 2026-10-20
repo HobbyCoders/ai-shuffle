@@ -92,21 +92,19 @@ export const NO_CREDENTIAL_REASON = 'Connect a provider in Settings first';
 export interface ComposerGate {
 	ready: boolean;
 	reason?: string | null;
-	license_allows_runs?: boolean;
 	/** Newer servers: whether any agent provider can run. */
 	any_provider_ready?: boolean;
 }
 
 /**
  * Whether the composer shows the gate's reason as a warning. Only for a
- * whole-app block: no license, or no provider ready at all. One provider
+ * whole-app block: no provider ready at all. One provider
  * missing its credential (say Claude, when another provider works) is not a
  * reason to warn here. Servers that predate `any_provider_ready` fall back to
  * the "any credential" flag.
  */
 export function gateBlocksComposer(gate: ComposerGate | null | undefined, anyCredential: boolean): boolean {
 	if (!gate || gate.ready || !gate.reason) return false;
-	if (gate.license_allows_runs === false) return true;
 	return typeof gate.any_provider_ready === 'boolean' ? !gate.any_provider_ready : !anyCredential;
 }
 

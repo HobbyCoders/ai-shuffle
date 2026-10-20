@@ -202,6 +202,22 @@ describe('paid', () => {
 		expect(screen.queryByText(/in use/)).toBeNull();
 	});
 
+	it('shows a midnight-UTC renewal on its own date west of UTC', async () => {
+		const tz = process.env.TZ;
+		process.env.TZ = 'America/New_York';
+		try {
+			// Guard: in this zone the local date of the instant is the day before.
+			expect(new Date('2026-11-20T00:00:00Z').getDate()).toBe(19);
+			status = { ...paid, expires_at: '2026-11-20T00:00:00+00:00', renews_at: 1795132800000 };
+			render(CloudPage);
+			await waitFor(() => expect(state()).toContain('Paid'));
+			expect(screen.getByTestId('cloud-renewal').textContent).toContain('Nov 20, 2026');
+		} finally {
+			if (tz === undefined) delete process.env.TZ;
+			else process.env.TZ = tz;
+		}
+	});
+
 	it('leaves out the renewal row when the account has no date', async () => {
 		status = { ...paid, expires_at: null };
 		render(CloudPage);

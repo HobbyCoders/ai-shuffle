@@ -30,7 +30,7 @@ If you use remote access from your phone or another browser, that traffic travel
 
 ## What does AI Shuffle's own server see?
 
-Your install checks for free updates. Linking a paid Cloud plan sends your key, an install ID, hashed machine identifiers, the machine name and the app version. Lease renewals send the install token, install ID, hashed fingerprint and app version, never prompts or AI provider credentials. If you use Cloud remote access, the service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists the services it contacts.
+Your install checks for free updates. A worker signed in to a Cloud account asks the hub for that account's plan about every 10 minutes, using the connection credential it already has. It sends no key, install ID or machine fingerprint, and never prompts or AI provider credentials. If you use Cloud remote access, the service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists the services it contacts.
 
 ## What do I need to run it?
 

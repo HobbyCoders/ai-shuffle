@@ -1106,8 +1106,9 @@ Cloud account, paid lease and remote-worker capacity for Settings. The historica
   "seats": 4,
   "seats_used": 1,
   "remote_worker_limit": 4,
+  "renews_at": 1795132800000,
   "expires_at": "2026-11-20T00:00:00+00:00",
-  "message": "Paid Cloud plan. Local use does not depend on this plan.",
+  "message": "Paid plan: 4 remote workers.",
   "allowed": true,
   "reason": null,
   "banner": null,
@@ -1118,7 +1119,7 @@ Cloud account, paid lease and remote-worker capacity for Settings. The historica
 }
 ```
 
-There is no license key: the plan comes from the Cloud account this worker is signed in with (`source` is always `account`), so every worker signed in with the same account gets the same plan. `state` is `not_linked`, `free` or `paid`, and `plan` is `free`, `paid` or `null`. `remote_worker_limit` is 0 without an account, 2 for a free account, and 4 for a paid plan unless the plan has a larger seat count (`seats`, up to 100). `seats` and `seats_used` are `null` when the account does not report them. `expires_at` is the paid plan's renewal date, otherwise `null`. The hub enforces actual capacity. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, `reason` and `banner` are always `null`, `key_hint` and `install_id` are always `null`, `lease_state` is always `none` and `server_configured` is always `false`. No Cloud state blocks local runs or updates.
+There is no license key: the plan comes from the Cloud account this worker is signed in with (`source` is always `account`), so every worker signed in with the same account gets the same plan. `state` is `not_linked`, `free` or `paid`, and `plan` is `free`, `paid` or `null`. `remote_worker_limit` is 0 without an account, 2 for a free account, and 4 for a paid plan unless the plan has a larger seat count (`seats`, up to 100). `seats` is the plan's seat count: 0 without an account, 2 on a free account, and on a paid plan the account's count, or `null` when the account does not report one. `seats_used` is the number of remote workers in use, or `null` when the account does not report it. `renews_at` is the paid plan's renewal time in epoch milliseconds when the account reports it, and `expires_at` is the same time in ISO 8601; both are `null` otherwise. `message` describes the state, such as `Free account: 2 remote workers.` or `Paid plan: 4 remote workers.` The hub enforces actual capacity. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, `reason` and `banner` are always `null`, `key_hint` and `install_id` are always `null`, `lease_state` is always `none` and `server_configured` is always `false`. No Cloud state blocks local runs or updates.
 
 ## Notifications
 

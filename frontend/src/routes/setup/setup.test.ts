@@ -76,7 +76,7 @@ const NOT_SIGNED_IN = 'Agents cannot start: Claude Code is set to subscription m
 function creds(over: Partial<AgentCredentials> = {}): AgentCredentials {
 	return {
 		mode: workerMode, modeLabel: workerMode === 'api_key' ? 'Anthropic API key' : 'Claude subscription', explicit: true,
-		ready: false, credentialReady: false, licenseAllowsRuns: true, reason: NOT_SIGNED_IN,
+		ready: false, credentialReady: false, reason: NOT_SIGNED_IN,
 		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
 		apiKey: { set: false, last4: null },
 		...over,

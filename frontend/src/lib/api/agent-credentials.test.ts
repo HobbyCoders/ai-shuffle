@@ -22,8 +22,7 @@ function summary(over: Partial<ClaudeAuthSummary> = {}): ClaudeAuthSummary {
 		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
 		api_key: { set: false, last4: null },
 		gate: {
-			ready: false, reason: NOT_SIGNED_IN, mode: 'subscription', claude_credential_ready: false,
-			license_allows_runs: true, startup_state: 'setup_required',
+			ready: false, reason: NOT_SIGNED_IN, mode: 'subscription', claude_credential_ready: false, startup_state: 'setup_required',
 		},
 		...over,
 	};
@@ -36,7 +35,7 @@ describe('agent credentials', () => {
 		mocks.get.mockResolvedValue(summary());
 		expect(await getAgentCredentials()).toEqual({
 			mode: 'subscription', modeLabel: 'Claude subscription', explicit: true,
-			ready: false, credentialReady: false, licenseAllowsRuns: true, reason: NOT_SIGNED_IN,
+			ready: false, credentialReady: false, reason: NOT_SIGNED_IN,
 			cli: summary().cli, apiKey: { set: false, last4: null },
 		});
 		expect(mocks.get).toHaveBeenCalledOnce();
@@ -59,39 +58,29 @@ describe('agent credentials', () => {
 	it('reports a signed-in CLI account as ready', async () => {
 		mocks.get.mockResolvedValue(summary({
 			cli: { installed: true, signed_in: true, email: 'owner@example.com', org_name: null, plan: 'max', auth_method_label: null, error: null },
-			gate: { ready: true, reason: null, mode: 'subscription', claude_credential_ready: true, license_allows_runs: true, startup_state: 'ready' },
+			gate: { ready: true, reason: null, mode: 'subscription', claude_credential_ready: true, startup_state: 'ready' },
 		}));
 		expect(await getAgentCredentials()).toMatchObject({ ready: true, credentialReady: true, reason: null, cli: { email: 'owner@example.com' } });
-	});
-
-	it('keeps the credential and the license apart', () => {
-		const creds = credentialsFromSummary(summary({
-			gate: { ready: false, reason: 'New agent runs are paused on this worker.', mode: 'subscription',
-				claude_credential_ready: true, license_allows_runs: false, startup_state: 'setup_required' },
-		}));
-		expect(creds).toMatchObject({ ready: false, credentialReady: true, licenseAllowsRuns: false, reason: 'New agent runs are paused on this worker.' });
 	});
 
 	it('uses the Claude reason, not the worker-wide one, when the worker sends it', () => {
 		const claudeReason = 'Claude cannot run: the Claude Code CLI is not signed in on this worker.';
 		// Only OpenAI is connected: the worker can run, Claude cannot.
 		const openaiOnly = credentialsFromSummary(summary({
-			gate: { ready: true, reason: null, mode: 'subscription', claude_credential_ready: false, license_allows_runs: true,
+			gate: { ready: true, reason: null, mode: 'subscription', claude_credential_ready: false,
 				startup_state: 'ready', any_provider_ready: true, ready_providers: ['openai'] },
 			claude_reason: claudeReason,
 		}));
 		expect(openaiOnly).toMatchObject({ ready: true, credentialReady: false, reason: claudeReason });
 		// Nothing connected: the worker-wide reason is not shown as Claude's.
 		const none = credentialsFromSummary(summary({
-			gate: { ready: false, reason: 'Connect an AI provider to start agents.', mode: 'subscription', claude_credential_ready: false,
-				license_allows_runs: true, startup_state: 'setup_required', any_provider_ready: false, ready_providers: [] },
+			gate: { ready: false, reason: 'Connect an AI provider to start agents.', mode: 'subscription', claude_credential_ready: false, startup_state: 'setup_required', any_provider_ready: false, ready_providers: [] },
 			claude_reason: claudeReason,
 		}));
 		expect(none.reason).toBe(claudeReason);
 		// Claude ready while the worker-wide reason names something else.
 		const claudeOk = credentialsFromSummary(summary({
-			gate: { ready: true, reason: 'Something about another provider.', mode: 'subscription', claude_credential_ready: true,
-				license_allows_runs: true, startup_state: 'ready' },
+			gate: { ready: true, reason: 'Something about another provider.', mode: 'subscription', claude_credential_ready: true, startup_state: 'ready' },
 			claude_reason: null,
 		}));
 		expect(claudeOk.reason).toBeNull();
@@ -100,7 +89,7 @@ describe('agent credentials', () => {
 	it('falls back to the gate reason on an older worker only while Claude is not ready', () => {
 		expect(credentialsFromSummary(summary()).reason).toBe(NOT_SIGNED_IN);
 		expect(credentialsFromSummary(summary({
-			gate: { ready: true, reason: 'Worker-wide note.', mode: 'subscription', claude_credential_ready: true, license_allows_runs: true },
+			gate: { ready: true, reason: 'Worker-wide note.', mode: 'subscription', claude_credential_ready: true },
 		})).reason).toBeNull();
 	});
 

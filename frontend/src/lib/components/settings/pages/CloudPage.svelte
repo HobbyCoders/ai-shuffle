@@ -77,7 +77,10 @@
 	function shortDate(iso: string | null): string {
 		if (!iso) return '';
 		const date = new Date(iso);
-		return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+		// A renewal is a calendar date: read it in UTC so it is not a day early west of UTC.
+		return Number.isNaN(date.getTime())
+			? iso
+			: date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 	}
 
 	/* ---------- the three tiers, top of the page ---------- */

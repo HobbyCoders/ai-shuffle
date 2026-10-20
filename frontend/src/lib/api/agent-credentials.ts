@@ -9,7 +9,7 @@
  * - `cli`: what `claude auth status` reports, with the account only when signed in.
  * - `api_key`: whether a key is stored, and its last four characters.
  * - `gate`: the worker's credential gate, the same answer that refuses turns
- *   (`ready`, `reason`, `claude_credential_ready`, `license_allows_runs`). Its
+ *   (`ready`, `reason`, `claude_credential_ready`). Its
  *   `ready` and `reason` cover the whole worker (any provider).
  * - `claude_reason`: why Claude itself cannot run, null when it can.
  *
@@ -33,12 +33,10 @@ export interface AgentCredentials {
 	modeLabel: string;
 	/** False only before the worker has recorded its default mode. */
 	explicit: boolean;
-	/** The server gate's `ready`: the license allows runs and some agent provider is ready. */
+	/** The server gate's `ready`: some agent provider is ready. */
 	ready: boolean;
 	/** The active mode's credential exists (CLI signed in, or a key stored). */
 	credentialReady: boolean;
-	/** The license allows new agent runs. */
-	licenseAllowsRuns: boolean;
 	/** Why Claude cannot run, fit to show the user; null when it can. */
 	reason: string | null;
 	cli: ClaudeAuthSummary['cli'];
@@ -63,14 +61,12 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 				: mode === 'cloud'
 					? !!summary.cloud?.ready
 					: false;
-	const licenseAllowsRuns = gate?.license_allows_runs !== false;
 	return {
 		mode,
 		modeLabel: summary.mode_label,
 		explicit: summary.explicit,
 		ready: gate ? gate.ready === true : credentialReady,
 		credentialReady,
-		licenseAllowsRuns,
 		reason: claudeReason(summary, credentialReady),
 		cli: summary.cli,
 		apiKey: summary.api_key,
@@ -78,14 +74,11 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 }
 
 /**
- * The Claude-specific reason. A license block stops Claude too, so its
- * message comes first. Otherwise a worker that sends `claude_reason` decides
+ * The Claude-specific reason. A worker that sends `claude_reason` decides
  * it; an older one only has the worker-wide `gate.reason`, used when Claude's
  * own credential is not ready.
  */
 function claudeReason(summary: ClaudeAuthSummary, credentialReady: boolean): string | null {
-	const gate = summary.gate;
-	if (gate?.license_allows_runs === false && gate.reason) return gate.reason;
 	if ('claude_reason' in summary) return summary.claude_reason || null;
 	return credentialReady ? null : summary.gate?.reason || null;
 }
