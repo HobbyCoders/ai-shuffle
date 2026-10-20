@@ -155,7 +155,7 @@ async def test_delegated_compaction_resends_same_ranked_base(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["automation", "peer", "unpark"])
+@pytest.mark.parametrize("source", ["automation", "agent_message", "unpark"])
 async def test_restore_task_without_any_full_snapshot(tmp_path, monkeypatch, source):
     from app.core import fluid_memory
     seed(tmp_path)
