@@ -79,7 +79,7 @@ def _row_value(row: Any, key: str, idx: int) -> Any:
     return row[key] if isinstance(row, dict) else row[idx]
 
 
-def _clear_stale_parked_markers() -> int:
+def _clear_stale_parked_markers(*, stop=None) -> int:
     """Clear ``parked_task_kind`` on this install's sessions (all are stale).
 
     The marker means "parent turn ended with background work still running";
@@ -88,28 +88,16 @@ def _clear_stale_parked_markers() -> int:
     Task child running on another worker: the restart did not stop that child,
     and its report wakes the session as before. Returns the number cleared.
     """
-    _ph = ph()
     instance_id = settings.effective_instance_id
     remote_work = (
         "EXISTS (SELECT 1 FROM background_tasks b WHERE b.session_id = sessions.id "
         "AND b.status = 'running' AND b.remote_device_id IS NOT NULL)"
     )
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""SELECT id, parked_task_kind FROM sessions
-                 WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL
-                   AND NOT {remote_work}""",
-            (instance_id,),
-        )
-        rows = cursor.fetchall()
-        if rows:
-            cursor.execute(
-                f"""UPDATE sessions SET parked_task_kind = NULL
-                     WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL
-                       AND NOT {remote_work}""",
-                (instance_id,),
-            )
+    from app.db.retention import mutate_batches
+    rows = []
+    mutate_batches("sessions", f"instance_id = %s AND parked_task_kind IS NOT NULL AND NOT {remote_work}",
+                   (instance_id,), update="parked_task_kind = NULL", stop=stop,
+                   columns=("parked_task_kind",), consume=rows.extend)
 
     for row in rows:
         session_id = _row_value(row, "id", 0)
@@ -150,9 +138,8 @@ async def _mark_stale_background_task_rows() -> int:
     from app.db.background_tasks import mark_stale_background_tasks_killed
     from app.core.turn_recorder import record_task_settle_frame
 
-    rows = await asyncio.to_thread(
-        mark_stale_background_tasks_killed, RESTART_INTERRUPTED_SUMMARY,
-    )
+    from app.db.async_database import run_maintenance
+    rows = await run_maintenance(mark_stale_background_tasks_killed, RESTART_INTERRUPTED_SUMMARY)
     if not rows:
         return 0
 
@@ -767,7 +754,7 @@ async def _repair_orphaned_engine_pending() -> int:
     return repaired
 
 
-def _reset_orphaned_session_statuses() -> int:
+def _reset_orphaned_session_statuses(*, stop=None) -> int:
     """Reset own-instance sessions stuck in a live-looking ``status``.
 
     Defensive: the app only writes "active"/"archived" today, so streaming/
@@ -778,20 +765,11 @@ def _reset_orphaned_session_statuses() -> int:
     _ph = ph()
     instance_id = settings.effective_instance_id
     placeholders = ", ".join([_ph] * len(_LIVE_LOOKING_STATUSES))
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""SELECT id, status FROM sessions
-                 WHERE instance_id = {_ph} AND status IN ({placeholders})""",
-            (instance_id, *_LIVE_LOOKING_STATUSES),
-        )
-        rows = cursor.fetchall()
-        if rows:
-            cursor.execute(
-                f"""UPDATE sessions SET status = 'active'
-                     WHERE instance_id = {_ph} AND status IN ({placeholders})""",
-                (instance_id, *_LIVE_LOOKING_STATUSES),
-            )
+    from app.db.retention import mutate_batches
+    rows = []
+    mutate_batches("sessions", f"instance_id = %s AND status IN ({placeholders})",
+                   (instance_id, *_LIVE_LOOKING_STATUSES), update="status = 'active'", stop=stop,
+                   columns=("status",), consume=rows.extend)
 
     for row in rows:
         session_id = _row_value(row, "id", 0)
@@ -957,9 +935,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         )
 
     try:
-        counts["parked_markers_cleared"] = await asyncio.to_thread(
-            _clear_stale_parked_markers
-        )
+        from app.db.async_database import run_maintenance
+        counts["parked_markers_cleared"] = await run_maintenance(_clear_stale_parked_markers)
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: clearing stale parked markers failed")
         await run_sync(
@@ -1000,9 +977,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         )
 
     try:
-        counts["statuses_reset"] = await asyncio.to_thread(
-            _reset_orphaned_session_statuses
-        )
+        from app.db.async_database import run_maintenance
+        counts["statuses_reset"] = await run_maintenance(_reset_orphaned_session_statuses)
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: resetting orphaned session statuses failed")
         await run_sync(

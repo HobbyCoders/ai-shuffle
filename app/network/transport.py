@@ -1554,15 +1554,31 @@ async def prune_loop() -> None:
         stop.set()
 
 
+async def expiry_loop() -> None:
+    """Small, frequent retention is independent of heartbeats and daily op pruning."""
+    from app.db.async_database import run_maintenance
+    from app.network import peer_snapshot
+
+    await asyncio.sleep(PRUNE_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            await run_maintenance(store.expire_conflicts)
+            await run_maintenance(store.expire_joins)
+            from app.network import session_runtime
+            await run_maintenance(session_runtime.prune_owned)
+            await asyncio.to_thread(peer_snapshot.cleanup)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("Network expiry failed", exc_info=True)
+        await asyncio.sleep(PRESENCE_INTERVAL_SECONDS)
+
+
 async def presence_loop() -> None:
     while True:
         try:
             capabilities = await asyncio.to_thread(_capabilities)
             await asyncio.to_thread(engine.publish_presence, capabilities=capabilities, version=settings.version)
-            await asyncio.to_thread(store.expire_conflicts)
-            await asyncio.to_thread(store.expire_joins)
-            from app.network import peer_snapshot
-            await asyncio.to_thread(peer_snapshot.cleanup)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -1625,6 +1641,7 @@ def start() -> List[asyncio.Task]:
         asyncio.create_task(scan_loop(), name="network-scan"),
         asyncio.create_task(presence_loop(), name="network-presence"),
         asyncio.create_task(prune_loop(), name="network-prune"),
+        asyncio.create_task(expiry_loop(), name="network-expiry"),
         asyncio.create_task(liveness_loop(), name="network-liveness"),
         asyncio.create_task(transcripts.loop(), name="network-transcripts"),
     ]

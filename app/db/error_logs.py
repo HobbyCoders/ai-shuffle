@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
@@ -37,6 +38,7 @@ _DEDUPE_WINDOW_SECONDS = 300
 # Opportunistic pruning: every Nth fresh insert, trim the table back down.
 _PRUNE_EVERY = 200
 _insert_count = 0
+_prune_requested = threading.Event()
 
 VALID_SOURCES = {"frontend", "backend", "ws", "api"}
 
@@ -118,7 +120,7 @@ def record_error(
 
         _insert_count += 1
         if _insert_count % _PRUNE_EVERY == 0:
-            prune_errors()
+            _prune_requested.set()
         return error_id
     except Exception:
         # Last resort: never let error logging raise. Use logger.debug (not
@@ -204,7 +206,15 @@ def _max_warning_rows() -> int:
         return 1000
 
 
-def prune_errors(keep_days: int = 7, max_rows: int = 5000) -> int:
+def prune_requested_errors(*, stop=None):
+    """Drain coalesced insert-triggered work outside the logging/request path."""
+    if _prune_requested.is_set():
+        _prune_requested.clear()
+        return prune_errors(stop=stop)
+    return 0
+
+
+def prune_errors(keep_days: int = 7, max_rows: int = 5000, *, stop=None) -> int:
     """Bound table growth.
 
     Deletes rows older than ``keep_days``, trims WARNING rows to their own
@@ -218,27 +228,16 @@ def prune_errors(keep_days: int = 7, max_rows: int = 5000) -> int:
     deleted = 0
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
-        from app.db.retention import BATCH_SIZE, delete_batches
-
-        deleted += delete_batches(
-            "DELETE FROM error_log WHERE id IN ("
-            "SELECT id FROM error_log WHERE updated_at < %s LIMIT %s)",
-            (cutoff, BATCH_SIZE),
-        )
+        from app.db.retention import mutate_batches
+        deleted += mutate_batches("error_log", "updated_at < %s", (cutoff,), stop=stop)
         warning_cap = _max_warning_rows()
         if warning_cap:
-            deleted += delete_batches(
-                """DELETE FROM error_log WHERE id IN (
-                       SELECT id FROM error_log WHERE level = 'WARNING'
-                       ORDER BY updated_at DESC, id DESC LIMIT %s OFFSET %s)""",
-                (BATCH_SIZE, warning_cap),
-            )
-        deleted += delete_batches(
-            """DELETE FROM error_log WHERE id IN (
-                   SELECT id FROM error_log ORDER BY updated_at DESC, id DESC
-                   LIMIT %s OFFSET %s)""",
-            (BATCH_SIZE, max_rows),
-        )
+            deleted += mutate_batches("error_log", """level = 'WARNING' AND id NOT IN (
+                SELECT id FROM error_log WHERE level = 'WARNING'
+                ORDER BY updated_at DESC, id DESC LIMIT %s)""", (warning_cap,), stop=stop)
+        deleted += mutate_batches("error_log", """id NOT IN (
+            SELECT id FROM error_log ORDER BY updated_at DESC, id DESC LIMIT %s)""",
+            (max_rows,), stop=stop)
     except Exception:
         logger.debug("prune_errors failed", exc_info=True)
     return deleted

@@ -44,7 +44,12 @@ def _make_automation(automation_id: str, **overrides):
 def _capture_tracker(manager: AutomationManager, coros: list):
     """Replace the task factory so fires are captured instead of scheduled."""
     def fake_track(coro, *, name):
-        coros.append((name, coro))
+        if name == "auto-fire-retention":
+            # These tests count executions, not independently scheduled hygiene.
+            # Its real off-loop/coalescing/shutdown path is tested below.
+            coro.close()
+        else:
+            coros.append((name, coro))
         return MagicMock()
     manager._create_tracked_task = fake_track
 
@@ -141,6 +146,49 @@ class TestClaimPrimitive:
 # =============================================================================
 # Fire-bucket derivation (must be identical across installs for one tick)
 # =============================================================================
+
+
+
+
+@pytest.mark.asyncio
+async def test_slow_retention_never_delays_fire_and_coalesces_until_shutdown(mock_db, monkeypatch):
+    import threading
+    from app.core import automation_service
+    from app.core import startup
+    manager = AutomationManager()
+    _make_automation("auto-slow-retention")
+    monkeypatch.setattr(startup, "is_shutting_down", False)
+    monkeypatch.setattr(automation_service, "should_run_scheduled_here", lambda _: (True, "elected"))
+    entered, finished, executed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    calls = []
+
+    def prune(*, stop):
+        calls.append(threading.get_ident())
+        loop.call_soon_threadsafe(entered.set)
+        assert stop.wait(3), "shutdown must signal the retention thread"
+        loop.call_soon_threadsafe(finished.set)
+
+    async def execute(*args):
+        executed.set()
+
+    monkeypatch.setattr(database, "prune_automation_fires", prune)
+    monkeypatch.setattr(manager, "_execute", execute)
+    buckets = iter(["first", "second"])
+    monkeypatch.setattr(manager, "_fire_bucket", lambda *a: next(buckets))
+    try:
+        await manager._on_schedule_trigger("auto-slow-retention")
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(executed.wait(), 2)
+        task = manager._retention_task
+        executed.clear()
+        await manager._on_schedule_trigger("auto-slow-retention")
+        await asyncio.wait_for(executed.wait(), 2)
+        assert manager._retention_task is task and not task.done()
+        assert len(calls) == 1 and calls[0] != threading.get_ident()
+    finally:
+        await manager.shutdown()
+    await asyncio.wait_for(finished.wait(), 2)
 
 
 class TestFireBucketDerivation:

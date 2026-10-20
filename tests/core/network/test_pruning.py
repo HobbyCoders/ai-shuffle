@@ -126,7 +126,7 @@ async def test_slow_or_raising_prune_does_not_block_presence(monkeypatch, raises
     try:
         await asyncio.wait_for(published.wait(), 3)
         assert not release.is_set()  # repeated heartbeats while prune is blocked
-        assert cleanup.call_count >= 3
+        cleanup.assert_not_called()  # expiry no longer shares the heartbeat loop
         release.set()
         published.clear()
         await asyncio.wait_for(published.wait(), 3)
@@ -199,4 +199,54 @@ async def test_cancelling_prune_signals_running_thread(monkeypatch):
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+    await asyncio.wait_for(finished.wait(), 2)
+
+
+@pytest.mark.asyncio
+async def test_expiry_is_delayed_independent_and_stops_its_thread(monkeypatch):
+    entered, finished, published = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def expire(*, stop):
+        loop.call_soon_threadsafe(entered.set)
+        assert stop.wait(3)
+        loop.call_soon_threadsafe(finished.set)
+
+    def publish(**kwargs):
+        if entered.is_set():
+            loop.call_soon_threadsafe(published.set)
+
+    monkeypatch.setattr(transport, "PRUNE_STARTUP_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(transport, "PRESENCE_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(transport, "_capabilities", lambda: {})
+    monkeypatch.setattr(store, "expire_conflicts", expire)
+    monkeypatch.setattr(engine, "publish_presence", publish)
+    expiry = asyncio.create_task(transport.expiry_loop())
+    presence = asyncio.create_task(transport.presence_loop())
+    assert not entered.is_set()
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(published.wait(), 2)
+    finally:
+        expiry.cancel()
+        presence.cancel()
+        await asyncio.gather(expiry, presence, return_exceptions=True)
+    await asyncio.wait_for(finished.wait(), 2)
+
+
+@pytest.mark.asyncio
+async def test_common_maintenance_runner_signals_cancelled_worker():
+    entered, finished = asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def work(*, stop):
+        loop.call_soon_threadsafe(entered.set)
+        assert stop.wait(3)
+        loop.call_soon_threadsafe(finished.set)
+
+    from app.db.async_database import run_maintenance
+    task = asyncio.create_task(run_maintenance(work))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     await asyncio.wait_for(finished.wait(), 2)

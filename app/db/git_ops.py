@@ -303,7 +303,7 @@ def list_recent_for_project(
         return _rows(cursor.fetchall())
 
 
-def purge_terminal(older_than_days: int = 7) -> int:
+def purge_terminal(older_than_days: int = 7, *, stop=None) -> int:
     """Delete ``done``/``error`` rows older than ``older_than_days``.
 
     Ops are transport, not history: once settled and read, the row is dead
@@ -313,10 +313,5 @@ def purge_terminal(older_than_days: int = 7) -> int:
     from datetime import datetime, timedelta, timezone
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM git_ops WHERE status IN ('done', 'error') AND updated_at < %s",
-            (cutoff,),
-        )
-        return cursor.rowcount or 0
+    from app.db.retention import mutate_batches
+    return mutate_batches("git_ops", "status IN ('done', 'error') AND updated_at < %s", (cutoff,), stop=stop)

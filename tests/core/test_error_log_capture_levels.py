@@ -186,6 +186,9 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
     class _Cursor:
         rowcount = 0
 
+        def fetchall(self):
+            return []
+
         def execute(self, query, params=None):
             statements.append((" ".join(query.split()), params))
 
@@ -206,7 +209,7 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
         (q, p) for q, p in statements if "level = 'WARNING'" in q
     ]
     assert len(warning_trims) == 1
-    assert warning_trims[0][1] == (5000, 250)
+    assert warning_trims[0][1] == (250, 5000)  # retained head, selection batch
     # And it runs BEFORE the table-wide trim, so the surviving errors are the
     # ones that fill the general budget.
     warning_idx = next(
@@ -215,7 +218,7 @@ def test_prune_trims_warnings_to_their_own_ceiling(monkeypatch):
     global_idx = next(
         i
         for i, (q, _) in enumerate(statements)
-        if "ORDER BY updated_at DESC, id DESC LIMIT %s OFFSET %s" in q and "WARNING" not in q
+        if "ORDER BY updated_at DESC, id DESC LIMIT %s" in q and "WARNING" not in q
     )
     assert warning_idx < global_idx
 
@@ -228,6 +231,9 @@ def test_warning_ceiling_of_zero_disables_the_trim(monkeypatch):
 
     class _Cursor:
         rowcount = 0
+
+        def fetchall(self):
+            return []
 
         def execute(self, query, params=None):
             statements.append(" ".join(query.split()))

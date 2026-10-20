@@ -43,6 +43,35 @@ def _load(value: Any, default=None):
 # Schema
 # ---------------------------------------------------------------------------
 
+def drop_legacy_sync_ops_index(cursor) -> bool:
+    """Best-effort index retirement; busy shared databases retry on next boot."""
+    import psycopg2
+
+    if not isinstance(cursor, psycopg2.extensions.cursor):
+        cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+        return True
+    cursor.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
+    if cursor.fetchone()["name"] is None:
+        return True
+    cursor.execute("SAVEPOINT sp_sync_ops_record_index")
+    try:
+        cursor.execute("SHOW lock_timeout")
+        previous = cursor.fetchone()["lock_timeout"]
+        cursor.execute("SET LOCAL lock_timeout = '1s'")
+        cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
+    except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected):
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        logger.warning("Deferring legacy sync-op index removal until next boot: table busy")
+        return False
+    except Exception:
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        raise
+    finally:
+        cursor.execute("RELEASE SAVEPOINT sp_sync_ops_record_index")
+    return True
+
+
 def create_schema(cursor) -> None:
     # Owner-produced display state only: never runner leases or executable work.
     cursor.execute("""
@@ -125,8 +154,10 @@ def create_schema(cursor) -> None:
             UNIQUE (origin_device_id, incarnation, seq)
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record ON sync_ops(collection, record_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record_ingest ON sync_ops(collection, record_id, ingest_id)")
+    # The covering index also serves its leading (collection, record_id) prefix.
+    # This migration is transactional; do not wait indefinitely for its lock.
+    drop_legacy_sync_ops_index(cursor)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_records (
             collection TEXT NOT NULL,
@@ -1062,11 +1093,9 @@ def delete_conflict(conflict_id: int) -> bool:
         return bool(cursor.rowcount)
 
 
-def expire_conflicts() -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sync_conflicts WHERE expires_at <= %s", (_now(),))
-        return cursor.rowcount or 0
+def expire_conflicts(*, stop=None) -> int:
+    from app.db.retention import mutate_batches
+    return mutate_batches("sync_conflicts", "expires_at <= %s", (_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------
@@ -1175,12 +1204,12 @@ def delete_join(join_id: str) -> bool:
         return bool(cursor.rowcount)
 
 
-def expire_joins() -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE network_joins SET status = 'expired', updated_at = %s WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < %s",
-                       (_now(), _now()))
-        return cursor.rowcount or 0
+def expire_joins(*, stop=None) -> int:
+    from app.db.retention import mutate_batches
+    return mutate_batches("network_joins",
+                          "status = 'pending' AND expires_at IS NOT NULL AND expires_at < %s",
+                          (_now(),), update="status = 'expired', updated_at = %s",
+                          update_params=(_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------

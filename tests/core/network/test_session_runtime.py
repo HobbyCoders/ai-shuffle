@@ -84,6 +84,7 @@ def test_owner_runtime_transitions_and_project_label_on_mirror(workers):
         assert rows[0]["remote_runtime_state"] == "unknown"
     with a.active():
         database.delete_session("remote-runtime")
+        session_runtime.prune_owned()  # the separate expiry task retracts orphans
         catalog.publish_owned()
         assert not session_runtime.for_sessions(["remote-runtime"])
     converge([a, b])

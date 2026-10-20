@@ -127,12 +127,10 @@ def clear_data(blob_id: str) -> None:
         )
 
 
-def purge_old(older_than_days: int = 7) -> int:
+def purge_old(older_than_days: int = 7, *, stop=None) -> int:
     """Delete blob rows older than ``older_than_days`` (the required sweeper —
     the bytes column means this table must never grow unboundedly). Returns the
     number of rows removed."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM upload_blobs WHERE created_at < %s", (cutoff,))
-        return cursor.rowcount or 0
+    from app.db.retention import mutate_batches
+    return mutate_batches("upload_blobs", "created_at < %s", (cutoff,), stop=stop)

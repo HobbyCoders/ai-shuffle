@@ -312,14 +312,14 @@ async def claim_once() -> int:
     return executed
 
 
-def sweep_once() -> Dict[str, int]:
+def sweep_once(*, stop=None) -> Dict[str, int]:
     """Purge terminal git_ops rows and stale upload blobs (sync)."""
     from app.db import git_ops as git_ops_db
     from app.db import upload_blobs as upload_blobs_db
 
     return {
-        "git_ops": git_ops_db.purge_terminal(RETENTION_DAYS),
-        "upload_blobs": upload_blobs_db.purge_old(RETENTION_DAYS),
+        "git_ops": git_ops_db.purge_terminal(RETENTION_DAYS, stop=stop),
+        "upload_blobs": upload_blobs_db.purge_old(RETENTION_DAYS, stop=stop),
     }
 
 
@@ -374,7 +374,8 @@ async def _sweep_pass() -> None:
     work exists, re-check the install registry", and deleting our own expired
     rows is not evidence of a peer.
     """
-    purged = await asyncio.to_thread(sweep_once)
+    from app.db.async_database import run_maintenance
+    purged = await run_maintenance(sweep_once)
     if any(purged.values()):
         logger.info("git_ops: swept %s", purged)
 
