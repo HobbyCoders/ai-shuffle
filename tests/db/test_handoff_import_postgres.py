@@ -133,6 +133,35 @@ def test_legacy_message_reconciliation_is_batched_and_retains_unchanged_versions
 
 
 
+def test_marked_staging_survives_lease_then_requires_explicit_receipt(chat, monkeypatch):
+    from types import SimpleNamespace
+    from psycopg2.extras import Json
+
+    ctx = SimpleNamespace(device_id="target")
+    monkeypatch.setattr(handoff.engine, "context", lambda: ctx)
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: ctx)
+    data = snapshot()
+    data["_prepare_history"] = True
+    sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
+    handoff._mark_commit_sent(chat, data["token"], "source")
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE handoff_history_chunks SET created_at=%s WHERE session_id=%s",
+                              ("2000-01-01T00:00:00+00:00", chat))
+    assert handoff.recover_history_staging() == 0
+    assert handoff.admission_held(chat)
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET owner_device_id='target',placement=%s WHERE id=%s",
+                              (Json({"where": "runner:target"}), chat))
+    assert handoff.recover_history_staging() == 0  # Missing token is not a receipt.
+    assert database.get_session(chat)["sdk_session_id"] is None
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET placement=%s WHERE id=%s",
+                              (Json({"where": "runner:target", "handoff": {"token": data["token"]}}), chat))
+    assert handoff.recover_history_staging() == 1
+    assert database.get_session(chat)["sdk_session_id"] == sdk
+    assert not handoff.admission_held(chat)
+
+
 def test_receipt_rewind_removes_only_portable_rows(chat):
     with base.get_db() as conn:
         cur = conn.cursor()

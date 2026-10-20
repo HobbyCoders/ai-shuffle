@@ -50,6 +50,7 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -238,6 +239,28 @@ def holds(session_id: str) -> bool:
     """
     pending = pending_for(session_id)
     return bool(pending and pending.holding)
+
+
+@contextmanager
+def commit_holding(session_id: str, target_id: str):
+    """Close an exported agent-resume queue with the ownership transaction.
+
+    A human either enters its counted held list before commit, or observes
+    holding=False and the committed new owner. A failed commit leaves holding
+    unchanged. Owner moves/legacy resumes retain their finalize-based barrier.
+    """
+    from app.db import session_moves
+
+    with _hold_lock:
+        pending = pending_for(session_id)
+        exported = False
+        if pending and pending.by == "agent" and pending.target_id == target_id:
+            row = session_moves.get(session_id) or {}
+            exported = (row.get("resume_exported") and row.get("target_id") == target_id
+                        and row.get("handoff_id") == pending.handoff_id)
+        yield  # The caller's database transaction commits before we continue.
+        if exported:
+            pending.holding = False
 
 
 def moving(session_id: str) -> bool:
@@ -1162,7 +1185,8 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     label = pending.label if owner == pending.target_id else _label(owner)
     from app.db import session_moves
 
-    exported = (await asyncio.to_thread(session_moves.get, session_id) or {}).get("resume_exported")
+    row = await asyncio.to_thread(session_moves.get, session_id) or {}
+    exported = row.get("resume_exported") and owner == row.get("target_id")
     plan = await asyncio.to_thread(resume_plan, session_id, pending, owner)
     if exported and plan in ("unknown", "unsupported"):
         plan = "send"  # begin, not a later capability report, chose the protocol.
@@ -1498,7 +1522,8 @@ async def resume_queued() -> int:
                 pending.holding = False
                 label = pending.label if owner == pending.target_id else _label(owner)
                 resume = None
-                if not row.get("resume_exported") and await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
+                exported = row.get("resume_exported") and owner == row.get("target_id")
+                if not exported and await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
                     resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
                 _spawn(deliver_held(session_id, owner, label, resume))
                 continue

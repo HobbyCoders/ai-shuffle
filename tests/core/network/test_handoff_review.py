@@ -397,7 +397,10 @@ def test_boot_sweep_publishes_owned_or_collects_expired_private_staging(pair, ow
                 cur.execute("UPDATE handoff_history_chunks SET created_at=%s WHERE token=%s",
                             ("2000-01-01T00:00:00+00:00", data["token"]))
             if owned:
-                cur.execute("UPDATE sessions SET owner_device_id=%s WHERE id=%s", (b.device_id, sid))
+                import json
+                cur.execute("UPDATE sessions SET owner_device_id=%s,placement=%s WHERE id=%s",
+                            (b.device_id, json.dumps({"where": "runner:" + b.device_id,
+                                                     "handoff": {"token": data["token"]}}), sid))
         handoff.recover_history_staging()
         with get_db() as conn:
             cur = conn.cursor()

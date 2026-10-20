@@ -662,8 +662,14 @@ def admission_held(sid):
     writes its reservation before scanning for checkout users, so either the
     scan sees that claim or this read sees the reservation.
     """
+    from app.db.base import parse_jsonb
+
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT rows FROM handoff_history_chunks WHERE session_id=%s "
+                       "AND table_name='' AND batch_no=0", (sid,))
+        if any((parse_jsonb(row["rows"]) or {}).get("commit_sent") for row in cursor.fetchall()):
+            return True  # An uncertain commit outlives its ordinary run lease.
         cursor.execute("SELECT session_id, runner_id FROM runs WHERE state='active' "
                        "AND lease_expires_at >= NOW() AND session_id <> %s", (sid,))
         reserved = {row["session_id"] for row in cursor.fetchall()
@@ -878,7 +884,9 @@ def _commit(sid, target, payload, token):
     session_branch = payload.get("session_branch", payload.get("branch"))
     if session_branch not in (None, payload.get("branch")):
         raise ValueError("The receiving worker selected a different session branch.")
-    with get_db() as conn:
+    from app.core import session_handoff
+
+    with session_handoff.commit_holding(sid, target), get_db() as conn:
         cur = conn.cursor()
         _lease(cur, sid, target, token)
         _idle(cur, sid)
@@ -1247,25 +1255,44 @@ def _publish_history(cur, sid, token):
     cur.execute("DELETE FROM handoff_history_chunks WHERE token=%s AND session_id=%s", (token, sid))
 
 
+def _mark_commit_sent(sid, token, source):
+    """Persist uncertainty before sending a commit that may lose its reply."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE handoff_history_chunks SET rows=%s WHERE token=%s AND session_id=%s "
+                    "AND table_name='' AND batch_no=0",
+                    (json.dumps({"commit_sent": True, "source_id": source}), token, sid))
+        if not cur.rowcount:
+            raise ValueError("The staged hand-off expired before commit; ownership was not moved.")
+
+
 def _discard_history(sid, token, *, expired_only=False):
     from app.db.base import parse_jsonb
 
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT sdk_session_id,created_at FROM handoff_history_chunks "
-                    "WHERE token=%s AND session_id=%s ORDER BY table_name,batch_no LIMIT 1 FOR UPDATE", (token, sid))
+        # Publication takes the session lock before the staging header too.
+        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        session = cur.fetchone()
+        cur.execute("SELECT sdk_session_id,created_at,rows FROM handoff_history_chunks "
+                    "WHERE token=%s AND session_id=%s AND table_name='' AND batch_no=0 FOR UPDATE", (token, sid))
         row = cur.fetchone()
         if not row:
             return
         if expired_only:
-            if _staging_age(row["created_at"]) < TTL:
-                return
-            cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
-            session = cur.fetchone()
             receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {} if session else {}
-            if (session and session["owner_device_id"] == engine.require_context().device_id
-                    and receipt.get("token", token) == token):
+            owner = session["owner_device_id"] if session else None
+            device = engine.require_context().device_id
+            metadata = parse_jsonb(row["rows"]) or {}
+            if owner == device and receipt.get("token") == token:
                 return  # An ownership sync won the race; recover, never discard.
+            if metadata.get("commit_sent"):
+                if owner in (None, "", metadata.get("source_id")) or (owner == device and not receipt.get("token")):
+                    # Absence of a reply/sync is not evidence of cancellation,
+                    # even days later. Keep the context and its admission fence.
+                    return
+            elif _staging_age(row["created_at"]) < TTL:
+                return
         sdk = row["sdk_session_id"]
         cur.execute("SELECT 1 FROM sessions WHERE sdk_session_id=%s", (sdk,))
         if not cur.fetchone():
@@ -1305,10 +1332,10 @@ def recover_history_staging():
     for row in staged:
         receipt = (parse_jsonb(row["placement"]) or {}).get("handoff") or {}
         try:
-            if row["owner_device_id"] == ctx.device_id and receipt.get("token", row["token"]) == row["token"]:
+            if row["owner_device_id"] == ctx.device_id and receipt.get("token") == row["token"]:
                 _accept_owner(row["session_id"], ctx.device_id, row["branch"], row["token"], recovering=True)
                 published += 1
-            elif _staging_age(row["created_at"]) >= TTL:
+            else:
                 _discard_history(row["session_id"], row["token"], expired_only=True)
         except Exception:  # noqa: BLE001 — retry one token without stopping boot
             logger.warning("Could not recover hand-off history for session %s", row["session_id"], exc_info=True)
@@ -1444,8 +1471,7 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
         session = cur.fetchone()
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
-        if recovering and (session["owner_device_id"] != device_id
-                           or (receipt.get("token") and receipt["token"] != token)):
+        if recovering and (session["owner_device_id"] != device_id or receipt.get("token") != token):
             return []  # A newer move won while the sweep was acquiring locks.
         if held_messages is None:
             held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
@@ -1622,14 +1648,21 @@ async def _owner_commit(owner, payload):
             result = await control.call(owner, "handoff", payload, timeout=180)
             break
         except (control.ControlRefused, ValueError) as exc:
-            logger.warning("Owner refused hand-off commit for session %s: %s", payload["session_id"], exc)
-            raise
+            reason = str(exc).lower()
+            if not attempt or not ("reservation expired" in reason or "already transferred" in reason):
+                logger.warning("Owner refused hand-off commit for session %s: %s", payload["session_id"], exc)
+                raise
+            # A retry may have waited behind the first commit's lease lock.
+            # Its refusal does not establish that the first commit failed.
+            if attempt == 2:
+                raise control.MaybeApplied(str(exc)) from exc
         except (control.RunnerUnreachable, TimeoutError):
             # Commit is idempotent. Never turn an uncertain applied commit into
             # a cancellation; obtain its receipt again, or leave durable staging
             # for recovery after the ownership sync arrives.
             if attempt == 2:
                 raise
+        await asyncio.sleep(1.5)
     if not result.get("committed"):
         reason = result.get("error") or result.get("reason") or "The owning worker did not confirm the transfer."
         logger.warning("Owner refused hand-off commit for session %s: %s", payload["session_id"], reason)
@@ -1678,6 +1711,7 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
                 await run_sync(_stage_wakes, sid, owner, data, None)
             timing.step("install_history", tables=json.dumps(data.get("_history_metrics", {}), separators=(",", ":")))
             timing.waiting("owner_commit")
+            await run_sync(_mark_commit_sent, sid, token, owner)
             result = await _owner_commit(owner, {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
@@ -1721,6 +1755,7 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         if data.get("wake_barrier"):
             await run_sync(_stage_wakes, sid, owner, data, session_branch)
         timing.waiting("owner_commit")
+        await run_sync(_mark_commit_sent, sid, token, owner)
         result = await _owner_commit(owner, {"session_id": sid,
             "phase": "commit", "token": token,
             "fingerprint": state["fingerprint"],
@@ -1754,8 +1789,8 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
             except (control.RunnerUnreachable, control.ControlRefused, ValueError):
                 pass
             if not cancelled.get("cancelled"):
-                # Leave the durable import lease until publication/recovery or
-                # expiry. Releasing it here could start a turn on the old SDK.
+                # The commit marker fences admission beyond lease expiry until
+                # publication or proven cancellation/supersession, never age alone.
                 held.pop(sid, None)
         elif not published:
             held.pop(sid, None)  # A committed import still needs its recovery guard.
