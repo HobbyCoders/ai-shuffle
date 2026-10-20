@@ -45,8 +45,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     store = ctx.extra.get("memory_store")
     if store is None:
         return ToolOutcome(text="Memory storage is unavailable; nothing was saved.", is_error=True)
-    scope = input.get("scope", "global")
-    if scope not in ("global", "project"):
+    # An ID-addressed correction inherits its existing scope unless the caller
+    # explicitly moves it. Passing the new-fact default here would silently
+    # promote a project fact into every project's snapshot.
+    scope = input.get("scope", None if input.get("memory_id") else "global")
+    if ("scope" in input or scope is not None) and scope not in ("global", "project"):
         return ToolOutcome(text="scope must be global or project", is_error=True)
     if scope == "project":
         from fluid.codemode.skills import project_key_for
