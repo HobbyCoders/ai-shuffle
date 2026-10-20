@@ -6,7 +6,7 @@ Only aggregate counts/sizes are printed. Real input is copied to a temporary
 store; no source contents, identities, project IDs or facts are printed.
 """
 from __future__ import annotations
-import argparse, ast, hashlib, json, math, shutil, subprocess, sys, tempfile, types
+import argparse, ast, hashlib, json, math, shutil, statistics, subprocess, sys, tempfile, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fluid"))
 from fluid.codemode.skills import SkillStore
@@ -62,6 +62,55 @@ def proposal_withdrawal(root, fact_type=None):
     return results
 
 
+def bridge_cycle(root, fact_type=None):
+    """Two normal Forget producers can create a deletion-only bridge cycle."""
+    from fluid.codemode.facts import global_id
+    stores = [SkillStore(root / name) for name in ("a", "b")]
+    if fact_type is not None:
+        for store in stores:
+            store._facts = fact_type(store.root)
+    a, b = stores
+    texts = [f"Deploy reviews for the backend service run on worker {name} nightly."
+             for name in ("Orion", "Lyra", "Vega")]
+    facts = [a.save_memory(text) for text in texts]
+    gids = [global_id(vars(fact)) for fact in facts]
+    def find(store, gid):
+        return next(fact for fact in store.memories() + store.archived_memories()
+                    if global_id(vars(fact)) == gid)
+    b._facts.merge(a._facts.export())
+    for first, second in zip(gids, gids[1:]):
+        old, new = find(a, first), find(a, second)
+        assert a.propose_memory_supersession(old.id, new.id,
+                                            old_revision=old.revision, new_revision=new.revision)
+    assert a.delete_memory(facts[1].id, explicit=True)
+    middle = find(b, gids[1])
+    b.save_memory(texts[1] + " At 02:00.", memory_id=middle.id, expected_revision=middle.revision)
+    middle, final = find(b, gids[1]), find(b, gids[2])
+    assert b.propose_memory_supersession(final.id, middle.id,
+                                        old_revision=final.revision, new_revision=middle.revision)
+    assert b.delete_memory(final.id, explicit=True)
+    for _ in range(3):
+        a._facts.merge(b._facts.export())
+        b._facts.merge(a._facts.export())
+    def revision():
+        doc = json.loads(a._facts.path.read_text())
+        return next(fact["revision"] for fact in doc["entries"] + doc["archived"]
+                    if global_id(fact) == gids[0])
+    initial_revision = revision()
+    writes, durations = 0, []
+    for _ in range(5):
+        before = a._facts.path.read_bytes()
+        start = time.perf_counter()
+        section = a.render_memory_section() or ""
+        durations.append((time.perf_counter() - start) * 1000)
+        writes += before != a._facts.path.read_bytes()
+    return {"nearest_retained_value_injected": texts[0] in section,
+            "revision_growth_over_five_reads": revision() - initial_revision,
+            "writes_over_five_reads": writes,
+            "median_render_ms": statistics.median(durations),
+            "snapshot_chars": len(section), "snapshot_tokens_est": math.ceil(len(section) / 4)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-file", type=Path)
@@ -91,12 +140,14 @@ def main():
                 store._facts._apply_supersessions = apply
                 result["explicit" if protected else "inferred"] = scenario(store, old.id, new.id, "project:fixture")
         result["proposal_withdrawal"] = {"after": proposal_withdrawal(root / "proposal-after")}
+        result["deletion_bridge_cycle"] = {"after": bridge_cycle(root / "cycle-after")}
         if args.baseline_ref:
             # A trusted repository revision, isolated to disposable stores.
             source = subprocess.check_output(["git", "show", args.baseline_ref + ":fluid/fluid/codemode/facts.py"], text=True)
             module = types.ModuleType("fluid.codemode._supersession_baseline")
             exec(compile(source, "baseline_facts.py", "exec"), module.__dict__)
             result["proposal_withdrawal"]["before"] = proposal_withdrawal(root / "proposal-before", module.FactStore)
+            result["deletion_bridge_cycle"]["before"] = bridge_cycle(root / "cycle-before", module.FactStore)
     current = {"_SYNTH_SYSTEM": _SYNTH_SYSTEM, "_CONSOLIDATE_SYSTEM": _CONSOLIDATE_SYSTEM}
     sections = {key: {"chars": len(text), "tokens_est": math.ceil(len(text)/4)} for key,text in current.items()}
     if args.baseline_ref:

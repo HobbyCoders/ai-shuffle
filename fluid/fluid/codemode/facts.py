@@ -281,6 +281,29 @@ class FactStore:
         by_id = {global_id(e): e for e in records}
         forgotten_links = {global_id(e): e.get("superseded_by") for e in doc["tombstones"]}
         forgotten_cache = {}  # one 16-KiB barrier decode per distinct pointer
+
+        def is_forgotten(pointer):
+            if pointer not in forgotten_cache:
+                forgotten_cache[pointer] = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
+            return forgotten_cache[pointer]
+
+        def deletion_successor(pointer, origin):
+            # Deletion bodies form their own graph, including concurrent
+            # cross-worker cycles. Resolve it before planning a metadata bump.
+            initial, seen = pointer, {origin}
+            while pointer:
+                if pointer in seen:
+                    return None
+                seen.add(pointer)
+                if not is_forgotten(pointer):
+                    return pointer
+                if pointer not in forgotten_links:
+                    # The barrier outlives compacted bodies. Missing lineage
+                    # is not evidence that the newer value was withdrawn.
+                    return initial
+                pointer = forgotten_links[pointer]
+            return None
+
         now = time.time()
         for _ in range(len(records) + 1):
             plans = []
@@ -296,9 +319,7 @@ class FactStore:
                         break
                     seen.add(pointer)
                     target = by_id.get(pointer)
-                    if pointer not in forgotten_cache:
-                        forgotten_cache[pointer] = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
-                    forgotten = forgotten_cache[pointer]
+                    forgotten = is_forgotten(pointer)
                     retired = (target is not None and target.get("retired_at")
                                and target.get("retired_reason") != "superseded"
                                and not target.get("superseded_by"))
@@ -306,8 +327,9 @@ class FactStore:
                         if node is old:
                             # A forgotten intermediate may still bridge to a
                             # newer value, including a concurrent replica link.
-                            onward = forgotten_links.get(pointer) if forgotten else None
-                            plans.append((old, onward, confirmed if onward else False))
+                            onward = deletion_successor(pointer, global_id(old)) if forgotten else None
+                            if onward != old.get("superseded_by"):
+                                plans.append((old, onward, confirmed if onward else False))
                         break  # an intermediate retracted leaf is repaired first
                     if target is None:
                         break  # archive pruning is not a retraction

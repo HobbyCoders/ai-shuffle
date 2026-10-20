@@ -346,6 +346,99 @@ def test_forgotten_link_rejects_invalid_replica_metadata(tmp_path, bad_link):
 
 
 
+def test_two_worker_forgets_break_deletion_bridge_cycle_without_read_churn(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    texts = [f"Deploy reviews for the backend service run on worker {name} nightly."
+             for name in ("Orion", "Lyra", "Vega")]
+    old, middle, final = [a.save_memory(text) for text in texts]
+    gids = [global_id(vars(fact)) for fact in (old, middle, final)]
+    b._facts.merge(a._facts.export())
+    for before, after in ((old, middle), (middle, final)):
+        before, after = find(a, global_id(vars(before))), find(a, global_id(vars(after)))
+        assert a.propose_memory_supersession(before.id, after.id,
+                                            old_revision=before.revision, new_revision=after.revision)
+    assert a.delete_memory(middle.id, explicit=True)
+    bm = find(b, gids[1])
+    b.save_memory(texts[1] + " At 02:00.", memory_id=bm.id, expected_revision=bm.revision)
+    bm, bf = find(b, gids[1]), find(b, gids[2])
+    assert b.propose_memory_supersession(bf.id, bm.id,
+                                        old_revision=bf.revision, new_revision=bm.revision)
+    assert b.delete_memory(bf.id, explicit=True)
+    for _ in range(3):
+        a._facts.merge(b._facts.export())
+        b._facts.merge(a._facts.export())
+    revisions = [find(store, gids[0]).revision for store in (a, b)]
+    assert revisions[0] == revisions[1]
+    for store in (a, b):
+        section = store.render_memory_section()
+        assert len(section) <= 550
+        paragraphs = [part.strip() for part in section.split("\n\n") if part.strip()]
+        assert len(paragraphs) == len(set(paragraphs))
+        assert section.count(texts[0]) == 1
+        assert all(text not in store.render_memory_section() for text in texts[1:])
+        assert not find(store, gids[0]).superseded_by
+        stable = store._facts.path.read_bytes()
+        for _ in range(3):
+            store.render_memory_section()
+            store.memories()
+            store._facts.export()
+            assert store._facts.path.read_bytes() == stable
+    for _ in range(3):
+        a._facts.merge(b._facts.export())
+        b._facts.merge(a._facts.export())
+    assert [find(store, gids[0]).revision for store in (a, b)] == revisions
+
+
+@pytest.mark.parametrize("cycle", ["self", "pair"])
+def test_peer_deletion_bridge_cycle_restores_once(tmp_path, cycle):
+    from fluid.codemode.facts import barrier_add
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    old = a.save_memory(OLD)
+    middle = a.save_memory(NEW)
+    final = a.save_memory(FINAL)
+    b._facts.merge(a._facts.export())
+    assert a.delete_memory(middle.id, explicit=True)
+    packet = a._facts.export()
+    mgid, fgid = global_id(vars(middle)), global_id(vars(final))
+    tomb = next(t for t in packet["tombstones"] if global_id(t) == mgid)
+    tomb["superseded_by"] = mgid if cycle == "self" else fgid
+    tomb["revision"] += 5
+    if cycle == "pair":
+        packet["tombstones"].append(dict(tomb, id=final.id, superseded_by=mgid))
+        packet["forgotten"] = barrier_add(packet["forgotten"], "id:" + fgid)
+    b._facts.merge(packet)
+    # A surviving final fact may re-supersede the restored predecessor.
+    expected = FINAL if cycle == "self" else OLD
+    assert expected in b.render_memory_section()
+    stable = b._facts.path.read_bytes()
+    for _ in range(3):
+        b.render_memory_section()
+        b.memories()
+        b._facts.merge(packet)
+        assert b._facts.path.read_bytes() == stable
+
+
+def test_trimmed_deletion_bridge_does_not_revive_old_value(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    old = a.save_memory(OLD)
+    middle = a.save_memory(NEW)
+    a.save_memory(FINAL)
+    b._facts.merge(a._facts.export())
+    assert a.delete_memory(middle.id, explicit=True)
+    packet = a._facts.export()
+    packet["tombstones"] = []  # compacted bodies; monotonic barrier remains
+    # This replica still has the pre-Forget predecessor link; no newer copy
+    # of that entry is available to replace it in the incoming packet.
+    packet["entries"] = [fact for fact in packet["entries"] if global_id(fact) != global_id(vars(old))]
+    b._facts.merge(packet)
+    assert OLD not in b.render_memory_section()
+    assert old.text in [fact.text for fact in b.archived_memories()]
+    stable = b._facts.path.read_bytes()
+    for _ in range(3):
+        b.render_memory_section()
+        assert b._facts.path.read_bytes() == stable
+
+
 def test_direct_chain_checks_deletion_barrier_once_per_pointer(tmp_path, monkeypatch):
     import fluid.codemode.facts as facts
     store = SkillStore(tmp_path)
