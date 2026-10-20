@@ -160,8 +160,11 @@ describe('AI content helpers', () => {
 			app({ platform: 'android', bridge: 1, capabilities: [] });
 			expect(canSendSupportReport()).toBe(false);
 			expect(canReportAiContent()).toBe(true);
+			// A worker from before can_report_ai_content: the owner's gate, as before.
 			supportCaps.current = { basic_report: true } as any;
-			expect(canReportAiContent()).toBe(false); // missing flag fails closed
+			expect(canReportAiContent()).toBe(true);
+			supportCaps.current = { basic_report: false } as any;
+			expect(canReportAiContent()).toBe(false);
 			supportCaps.current = { basic_report: true, can_report_ai_content: false } as any;
 			expect(canReportAiContent()).toBe(false);
 			supportCaps.current = { basic_report: false, can_report_ai_content: true } as any;

@@ -93,9 +93,15 @@ export function canSendSupportReport(): boolean {
  * Android app's bridge names its platform; an app from before the bridge sent
  * no platform, and only Android apps are that old. The report endpoint itself
  * stays for every client.
+ *
+ * Any signed-in user may report AI content (`can_report_ai_content`). The app
+ * bundles its own UI, so it can meet an older worker that does not send that
+ * field; there only the owner could report (`basic_report`), as before.
  */
 export function canReportAiContent(): boolean {
-	if (!isBundledMobile() || supportCaps.status !== 'ready' || supportCaps.current?.can_report_ai_content !== true) return false;
+	const caps = supportCaps.current;
+	if (!isBundledMobile() || supportCaps.status !== 'ready' || !caps) return false;
+	if (!(caps.can_report_ai_content ?? caps.basic_report === true)) return false;
 	return (nativeBridge()?.platform ?? 'android') === 'android';
 }
 

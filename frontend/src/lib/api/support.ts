@@ -48,7 +48,11 @@ export interface AiContentInput {
 
 /** Where a local-only worker kept a report it could not send. */
 export interface LocalRecord {
-	/** Relative to the worker's data directory: `support-reports/<id>.json`. */
+	/**
+	 * Relative to the worker's data directory: `support-reports/<id>.json` for
+	 * the owner, `support-reports/users/<sha256 of reporter>/<id>.json` for
+	 * another user's AI content report.
+	 */
 	file: string;
 	saved_at: string;
 }

@@ -2,13 +2,17 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
 
-const mocks = vi.hoisted(() => ({ pushState: vi.fn() }));
+const mocks = vi.hoisted(() => ({ pushState: vi.fn(), supportCaps: vi.fn() }));
 
 vi.mock('$app/navigation', () => ({ pushState: mocks.pushState, goto: vi.fn() }));
 vi.mock('$lib/stores/auth.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return { auth: { checkAuth: vi.fn() }, isAdmin: writable(true) };
 });
+vi.mock('$lib/api/support', async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	getSupportCapabilities: mocks.supportCaps
+}));
 vi.mock('$lib/stores/theme.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return {
@@ -30,6 +34,7 @@ import { platform } from '$lib/stores/platform.svelte';
 import { registerShortcut } from '$lib/services/keyboard';
 import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-context';
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
+import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
 import SettingsShell from './SettingsShell.svelte';
 
 const admin = isAdmin as unknown as { set: (v: boolean) => void };
@@ -40,6 +45,9 @@ beforeEach(() => {
 	mocks.pushState.mockReset();
 	admin.set(true);
 	page.state = {};
+	supportCaps.reset();
+	mocks.supportCaps.mockReset();
+	mocks.supportCaps.mockRejectedValue(new Error('offline'));
 });
 afterEach(() => {
 	cleanup();
@@ -217,6 +225,53 @@ describe('SettingsShell read-only', () => {
 		expect((screen.getByRole('combobox', { name: 'Time zone' }) as HTMLSelectElement).disabled).toBe(true);
 		await fireEvent.click(screen.getByRole('button', { name: 'Open Devices' }));
 		await screen.findByRole('heading', { level: 1, name: 'Devices' });
+	});
+});
+
+describe('SettingsShell read-only AI content report', () => {
+	beforeEach(() => {
+		window.__SHUFFLE_MOBILE__ = {
+			apiOrigin: 'https://worker.example',
+			token: 'shc_test',
+			native: { platform: 'android', bridge: 1, capabilities: [] }
+		};
+	});
+	afterEach(() => {
+		delete window.__SHUFFLE_MOBILE__;
+		aiContentPrefill.value = null;
+		supportReportDialog.close();
+	});
+
+	it('lets a non-owner fill in and continue an AI content report while the rest stays read-only', async () => {
+		admin.set(false);
+		mocks.supportCaps.mockResolvedValue({ basic_report: false, can_report_ai_content: true, ai_diagnosis: false, signed_in: true });
+		aiContentPrefill.value = { excerpt: 'Reported reply', sessionId: 'sess-42' };
+		const { container } = render(SettingsShell, {
+			initialItemId: encodeTarget({ category: 'system', anchor: 'system.reportProblem' })
+		});
+		expect(screen.getByText('This device needs approval')).toBeTruthy();
+		const excerpt = (await screen.findByLabelText('The AI output')) as HTMLTextAreaElement;
+		expect(excerpt.value).toBe('Reported reply');
+		expect(excerpt.matches(':disabled')).toBe(false);
+
+		// Everything outside the report keeps read-only mode.
+		const workspace = container.querySelector('[data-setting-anchor="system.workspace"]')!;
+		const controls = [...workspace.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')];
+		expect(controls.length).toBeGreaterThan(0);
+		for (const control of controls) expect(control.matches(':disabled')).toBe(true);
+
+		const reason = screen.getByLabelText('Why are you reporting it?') as HTMLTextAreaElement;
+		expect(reason.matches(':disabled')).toBe(false);
+		await fireEvent.input(reason, { target: { value: 'Harmful' } });
+		const go = screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement;
+		expect(go.matches(':disabled')).toBe(false);
+		await fireEvent.click(go);
+		expect(supportReportDialog.request?.source).toEqual({ kind: 'ai_content', excerpt: 'Reported reply', session_id: 'sess-42' });
+		expect(supportReportDialog.request?.note).toBe('Harmful');
+
+		// Closed, the report row goes: a non-owner has no problem reports.
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		await waitFor(() => expect(container.querySelector('[data-setting-anchor="system.reportProblem"]')).toBeNull());
 	});
 });
 
