@@ -1,0 +1,14 @@
+{
+  "entries": 160,
+  "signal_every": 8,
+  "gold_positions": [
+    0,
+    40,
+    80,
+    120
+  ],
+  "interval_seconds": 30,
+  "project": "project:fixture",
+  "replay_allowances": {"model_calls": 8, "input_tokens": 18000},
+  "prompt_allowances": {"synthesis": 8256, "consolidation": 2374}
+}

@@ -679,7 +679,7 @@ class Synthesizer:
         except Exception:  # noqa: BLE001 — unknown: the next pass clears it
             pass
 
-    def due(self) -> bool:
+    def due(self, *, closing: bool = False) -> bool:
         if self._budget_spent_day is not None:
             if int(time.time() // 86400) == self._budget_spent_day:
                 return False
@@ -691,9 +691,41 @@ class Synthesizer:
         if backoff and time.time() < float(backoff.get("until", 0.0)):
             return False
         new = self._store.journal_count() - self._store.synth_cursor()
-        if self._urgent and new >= 1:
+        if new < 1:
+            return False
+        # Urgency bypasses pacing, not the shared daily cap. A fresh engine
+        # must not repeatedly select a pass that every other engine knows
+        # cannot claim a call. The atomic claim remains authoritative.
+        if self._urgent:
+            left = self._calls_left()
+            return left is None or left > 0
+        # Non-urgent pacing already reads and enforces the shared cap.
+        # Session end is a batch boundary, not a pacing/budget bypass.
+        return self._paced() and (new >= self._min_new if closing else self._batch_ready())
+
+    def _batch_ready(self) -> bool:
+        """Batch substantive evidence, never discard it or alter force-run."""
+        indexed, _ = self._store.journal_slice_indexed(self._store.synth_cursor(), self._max_entries)
+        if not indexed:
+            return False
+        shown = [entry for _, entry in indexed if not low_value_entry(entry)]
+        if not shown:
+            return len(indexed) >= self._min_new  # drain read-only slices free
+        now = time.time()
+        # Missing legacy timestamps are uncertain: consume rather than starve.
+        oldest = min(entry.get("ts") if type(entry.get("ts")) in (int, float) else 0 for entry in shown)
+        signal = any(entry.get("kind") in {"user", "remember", "friction"} or entry.get("error")
+                     or any(isinstance(call, dict) and call.get("ok") is False
+                            for call in (entry["calls"] if isinstance(entry.get("calls"), list) else []))
+                     for entry in shown)
+        if now - oldest >= 3600 and (len(shown) >= 3 or signal):
             return True
-        return new >= self._min_new and self._paced()
+        if len(indexed) < self._min_new:
+            return False
+        if (len(shown) >= self._min_new or len(indexed) >= self._max_entries
+                or self._store._journal_size() > JOURNAL_MAX_BYTES * PACE_PRESSURE_FRACTION):
+            return True
+        return signal
 
     def _paced(self, now: float | None = None) -> bool:
         """True when the day's spread of calls leaves room for a pass now
@@ -742,8 +774,8 @@ class Synthesizer:
     async def drain(self) -> None:
         """Await any in-flight pass, then run a final one if entries remain.
 
-        Called from session close; only synthesizes when the remaining slice
-        meets the normal threshold, so short sessions don't pay a model call.
+        Session end bypasses signal batching, not the base entry threshold,
+        pacing, shared budget or failure backoff. Short slices remain on disk.
         """
         try:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
@@ -766,7 +798,7 @@ class Synthesizer:
             except Exception:
                 pass
             self._task = None
-        if self.due():
+        if self.due(closing=True):
             await self._run_safe()
 
     async def _run_safe(self) -> list[str]:
