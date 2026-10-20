@@ -151,7 +151,7 @@ async def main():
         root = Path(temporary)
         result = {"baseline_ref": args.baseline_ref,
                   "before": await replay(before, root / "before", old["skills"].SkillStore, old["continual"].Synthesizer, old["continual"], args.memory_file, bool(args.before_journal)),
-                  "after": await replay(after, root / "after", SkillStore, continual.Synthesizer, continual, args.memory_file, bool(args.before_journal))}
+                  "after": await replay(after, root / "after", SkillStore, continual.Synthesizer, continual, args.memory_file, bool(args.after_journal))}
         result["exhausted_shared_budget"] = {
             "before": exhausted_triggers(root / "budget-before", old["continual"].Synthesizer),
             "after": exhausted_triggers(root / "budget-after", continual.Synthesizer)}

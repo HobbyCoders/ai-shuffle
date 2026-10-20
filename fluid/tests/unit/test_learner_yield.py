@@ -14,6 +14,79 @@ from fluid.tools.builtins import register_builtins
 from fluid.tools.registry import ToolCtx, ToolRegistry
 from tests.unit.test_learner_coverage import NoChanges, read_cell, set_budget
 
+@pytest.mark.parametrize("kind", ["user", "assistant"])
+async def test_close_drains_base_threshold_without_batching_gate(tmp_path, kind):
+    store = SkillStore(tmp_path)
+    store.journal_append({"kind": kind, "text": "Correction: use the new fixture convention."})
+    for i in range(18):
+        store.journal_append(read_cell(i))
+    store.journal_append({"kind": "assistant", "text": "Noted the fixture correction."})
+    provider = NoChanges()
+    learner = Synthesizer(provider, "fake", store)
+    await learner.drain()
+    assert store.synth_cursor() == 20
+    assert len(provider.prompts) == 1
+
+
+
+
+@pytest.mark.parametrize("reason", ["short", "paced", "spent"])
+async def test_close_boundary_preserves_base_threshold_and_shared_limits(tmp_path, reason):
+    store = SkillStore(tmp_path)
+    count = 19 if reason == "short" else 20
+    store.journal_append({"kind": "user", "text": "Useful fixture correction."})
+    for i in range(count - 1):
+        store.journal_append(read_cell(i))
+    if reason != "short":
+        limit = continual.MAX_INFERENCE_CALLS_PER_DAY - continual.CONSOLIDATE_RESERVED_CALLS
+        set_budget(store, day=int(time.time() // 86400),
+                   calls=limit if reason == "spent" else 1, last_at=time.time())
+    provider = NoChanges()
+    await Synthesizer(provider, "fake", store).drain()
+    assert store.synth_cursor() == 0
+    assert provider.prompts == []
+
+
+def test_owner_entries_fast_track_at_base_threshold(tmp_path):
+    store = SkillStore(tmp_path)
+    store.journal_append({"kind": "user", "text": "Correction: use the new fixture convention."})
+    for i in range(19):
+        store.journal_append(read_cell(i))
+    assert Synthesizer(NoChanges(), "fake", store).due()
+
+
+@pytest.mark.parametrize("count,kind,expected", [
+    (1, "assistant", False), (2, "assistant", False), (3, "assistant", True),
+    (1, "user", True), (1, "friction", True),
+])
+def test_age_bound_requires_three_substantive_entries_or_signal(tmp_path, monkeypatch, count, kind, expected):
+    clock = [time.time()]
+    monkeypatch.setattr(continual, "time", SimpleNamespace(time=lambda: clock[0]))
+    store = SkillStore(tmp_path)
+    for _ in range(count):
+        store.journal_append({"kind": kind, "text": "Useful fixture evidence."})
+    clock[0] += 3601
+    assert Synthesizer(NoChanges(), "fake", store).due() is expected
+
+
+def test_outside_classifier_caps_scanned_text_and_retains_uncertainty(tmp_path, monkeypatch):
+    from fluid.codemode import skills
+    store = SkillStore(tmp_path)
+    seen = []
+    monkeypatch.setattr(skills, "names_path_outside", lambda text, cwd: seen.append(text) or False)
+    assert store.journal_call_outside({"body": "x" * 100_000}) is True
+    assert not seen, "an oversized argument is uncertain, not an internal-path classification"
+    assert store.journal_call_outside({"file_path": "fixture.py"}) is False
+    assert len(seen[0]) <= 8192
+    recursive = {}
+    recursive["self"] = recursive
+    assert store.journal_call_outside(recursive) is True
+    def broken(*args):
+        raise RecursionError("fixture recursion")
+    monkeypatch.setattr(skills, "names_path_outside", broken)
+    assert store.journal_call_outside({"file_path": "fixture.py"}) is True
+
+
 
 @pytest.mark.parametrize("urgent", [False, True])
 def test_new_instances_observe_shared_spent_budget_and_rollover(tmp_path, monkeypatch, urgent):
@@ -46,7 +119,7 @@ def test_unknown_shared_budget_falls_back_to_atomic_claim(tmp_path, monkeypatch)
 
 def test_read_noise_does_not_trigger_tiny_substantive_batch(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
-    store.journal_append({"kind": "user", "text": "Inspect the fixture."})
+    store.journal_append({"kind": "assistant", "text": "Inspect the fixture."})
     for i in range(11):
         store.journal_append(read_cell(i))
     learner = Synthesizer(NoChanges(), "fake", store, min_new_entries=12)
@@ -182,8 +255,9 @@ async def test_controlled_replay_retention_cost_and_prompt_allowance(tmp_path):
     result = await namespace["replay"](namespace["generated"](), tmp_path / "replay",
                                         SkillStore, Synthesizer, continual)
     assert result["controlled_gold_facts_retained"] == 4
-    assert result["model_calls"] <= 3
-    assert result["estimated_input_tokens"] <= 5000  # measured 4603 + 397 allowance
+    config = json.loads((Path(__file__).parents[1] / "fixtures/learner_yield.json").read_text())
+    assert result["model_calls"] <= config["replay_allowances"]["model_calls"]
+    assert result["estimated_input_tokens"] <= config["replay_allowances"]["input_tokens"]
     config = json.loads((Path(__file__).parents[1] / "fixtures/learner_yield.json").read_text())
     for key, prompt in (("synthesis", continual._SYNTH_SYSTEM),
                         ("consolidation", continual._CONSOLIDATE_SYSTEM)):

@@ -803,8 +803,14 @@ class SkillStore:
     def journal_call_outside(self, arguments: dict) -> bool:
         """Classify resolved host-call arguments; persist only the boolean."""
         try:
-            return names_path_outside(json.dumps(arguments, ensure_ascii=False, default=str), self._journal_cwd)
-        except (TypeError, ValueError, OSError):
+            chunks, size = [], 0
+            for chunk in json.JSONEncoder(ensure_ascii=False, default=str).iterencode(arguments):
+                size += len(chunk)
+                if size > 8192:
+                    return True  # truncated evidence cannot establish an internal read
+                chunks.append(chunk)
+            return names_path_outside("".join(chunks), self._journal_cwd)
+        except Exception:  # noqa: BLE001 — classification must never break a tool
             return True  # uncertain evidence is retained; journaling cannot break a tool
 
     # ─── meta ────────────────────────────────────────────────────────────
