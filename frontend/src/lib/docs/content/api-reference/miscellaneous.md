@@ -234,7 +234,7 @@ Delete a branch. Add `?force=true` to delete a branch that is not fully merged. 
 | Method | Path | Body or query | Notes |
 |--------|------|---------------|-------|
 | `POST` | `/git/checkout` | Body: `{"ref": "main", "auto_stash": false}` | Switch branch or commit in the project folder. Returns `409` for uncommitted changes unless `auto_stash` is `true`. Not allowed with `worktree_id` |
-| `POST` | `/git/fetch` | Query: `remote` (default `origin`) | Returns `502` if the remote cannot be reached |
+| `POST` | `/git/fetch` | Query: `remote` (default `origin`) | `409` for a missing checkout or active worktree/branch; `503` for a failed checkout probe, unknown activity, or unreachable worker (the detail identifies the cause); `502` if the Git remote cannot be reached. Background fetch skips checkouts whose status reports `mutations_blocked` |
 | `POST` | `/git/pull` | Body: `{"remote": "origin", "strategy": "merge", "auto_stash": false}` | `strategy` is `merge` or `rebase`. On a conflict the pull is aborted and the response has `success: false`, `has_conflicts: true` and `conflicts` |
 | `POST` | `/git/push` | Body: `{"remote": "origin", "branch": null, "set_upstream": false, "force": false}` | `branch` defaults to the current branch and must be a plain branch name: a refspec (`:main`, `+main`, `a:b`) or a name starting with `-` returns `400`. `remote` is letters, digits, `.`, `_` and `-`, and must not start with `-` |
 | `POST` | `/git/stage` | Body: `{"files": ["src/app.py"]}` | |

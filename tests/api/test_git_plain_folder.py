@@ -241,7 +241,11 @@ def test_invalid_or_ambiguous_checkout_stays_409(plain_project, state):
         checkouts.upsert_checkout(project["id"], "worker-b", str(other))
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == "Selected checkout is missing or ambiguous on this worker"
+    assert response.json()["detail"] == (
+        "No matching Git checkout exists on the selected worker. Restore the checkout or select another worker or branch."
+        if state == "missing" else
+        "Multiple Git checkouts match on the selected worker. Select a specific checkout branch."
+    )
 
 
 @pytest.mark.parametrize("diagnostic,is_plain", [
@@ -259,7 +263,7 @@ def test_git_diagnostics_distinguish_mount_boundary_from_failure(plain_project, 
     if is_plain:
         assert response.json()["is_git_repo"] is False
     else:
-        assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+        assert response.json()["detail"] == f"Git checkout probe failed (exit code 128). {diagnostic.strip()}"
 
 
 def test_non_english_environment_uses_c_locale_for_confirmation(plain_project, monkeypatch):
@@ -316,7 +320,8 @@ def test_probe_failure_is_never_a_positive_non_repo(plain_project, monkeypatch, 
     monkeypatch.setattr(git.git_service, "_run_git", fail)
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?worker_id=local")
     assert response.status_code == 503
-    assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+    from app.api.git_owner import checkout_probe_error
+    assert response.json()["detail"] == checkout_probe_error(failure).detail
 
 
 @pytest.mark.parametrize("action,body", [("commit", {"message": "no"}),
@@ -410,11 +415,13 @@ def test_existing_session_status_only_confirms_readable_plain_folder(plain_proje
         assert warm.json()["is_git_repo"] is True
         deny_read_access(monkeypatch, folder / ".git")
     response = client.get(f"/api/v1/projects/{project['id']}/git/status?session_id={session_id}")
-    assert response.status_code == (200 if state == "plain" else 503), response.text
+    assert response.status_code == {"plain": 200, "missing": 409, "unreadable-git": 503}[state], response.text
     if state == "plain":
         assert response.json()["is_git_repo"] is False
+    elif state == "missing":
+        assert "checkout is not available" in response.json()["detail"]
     else:
-        assert "unavailable" in response.json()["detail"].lower()
+        assert response.json()["detail"] == "Permission denied while probing the Git checkout."
 
 
 @pytest.mark.parametrize("scope", ["project", "session", "worker"])
@@ -438,7 +445,7 @@ def test_real_repo_with_failed_status_never_becomes_plain(plain_project, monkeyp
         query = "?worker_id=local"
     response = client.get(f"/api/v1/projects/{target_id}/git/status{query}")
     assert response.status_code == 503, response.text
-    assert response.json()["detail"] == "Git checkout is unavailable. Check again."
+    assert response.json()["detail"] == "Git could not read the checkout's repository status. Check its Git metadata and access permissions."
     failed_status.assert_called_once_with(str(folder))
 
 
@@ -454,7 +461,7 @@ async def test_branch_bound_plain_checkout_never_uses_plain_fallback(plain_proje
         "params": {"project_id": project["id"]},
     }, from_device="viewer")
     assert result["status"] == 409
-    assert result["detail"] == "Selected checkout is missing or ambiguous on this worker"
+    assert result["detail"] == "No matching Git checkout exists on the selected worker. Restore the checkout or select another worker or branch."
     # A named checkout must be refused before any non-repository fallback,
     # even if later branch-identity guards would also reject the folder.
     classify.assert_not_called()

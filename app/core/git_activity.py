@@ -109,7 +109,7 @@ def require_idle_git_target(project_id, working_dir, branches=(), *, include_rem
     try:
         busy = busy_git_target_sessions(project_id, working_dir, branches, include_remote=include_remote)
     except GitActivityUnavailable as exc:
-        raise HTTPException(503, 'Cannot verify worktree/branch activity. Git changes are blocked until activity can be verified.') from exc
+        raise HTTPException(503, f'Cannot verify worktree/branch activity: {exc}. Git changes are blocked until activity can be verified.') from exc
     if busy:
         raise HTTPException(409, 'A session using this worktree or branch is active. Stop it or wait before changing Git state.')
 
