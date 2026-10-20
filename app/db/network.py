@@ -754,6 +754,9 @@ def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
     """Everything this worker holds, as ``{origin: {incarnation: last_seq}}``.
 
     Includes our own outbox (from sync_ops) so a peer knows what to skip.
+    For received streams the applied watermark is authoritative, even when a
+    legacy writer left a larger forwarding-log head. Advertising that head
+    would skip the prefix the receiver still needs and stall all later rows.
     """
     def _query(cursor):
         out: Dict[str, Dict[str, int]] = {}
@@ -763,7 +766,7 @@ def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
         for row in cursor.fetchall():
             bucket = out.setdefault(row["origin_device_id"], {})
             key = str(int(row["incarnation"]))
-            bucket[key] = max(bucket.get(key, 0), int(row["last_seq"]))
+            bucket[key] = int(row["last_seq"])
         return out
     if _conn is not None:
         return _query(_conn.cursor())
@@ -934,11 +937,14 @@ def get_watermark(cursor, origin: str, incarnation: int) -> int:
 
 
 def set_watermark(cursor, origin: str, incarnation: int, last_seq: int) -> None:
+    """Advance a received stream; a concurrent older apply/copy cannot rewind it."""
     cursor.execute(
         """INSERT INTO sync_watermarks (origin_device_id, incarnation, last_seq, updated_at)
            VALUES (%s, %s, %s, %s)
            ON CONFLICT (origin_device_id, incarnation) DO UPDATE SET
-               last_seq = EXCLUDED.last_seq, updated_at = EXCLUDED.updated_at""",
+               last_seq = CASE WHEN sync_watermarks.last_seq > EXCLUDED.last_seq
+                   THEN sync_watermarks.last_seq ELSE EXCLUDED.last_seq END,
+               updated_at = EXCLUDED.updated_at""",
         (origin, incarnation, last_seq, _now()))
 
 
