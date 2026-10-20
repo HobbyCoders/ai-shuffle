@@ -3,7 +3,11 @@
 A Bash command or a delegated CLI child runs model-chosen commands, so it must
 not inherit the host's own secrets: an app admin password, a lifecycle token,
 database connection settings or stray ``*_TOKEN`` / ``*_SECRET`` values. Those
-are dropped from the inherited environment. Everything a caller layers on top
+are dropped from the inherited environment. Worker interpreter settings
+(``PYTHONPATH``, ``PYTHONHOME``, ``VIRTUAL_ENV``) are also dropped: they describe
+the worker runtime, not the project a shell or Git hook is about to run.
+App-internal Python children may explicitly use ``preserve_python_env=True``;
+never use that exception for agent commands or Git. Everything a caller layers on top
 afterwards (settings ``env``, the provider keys a session injects on purpose)
 is left alone, because that is a deliberate hand-over, not inheritance.
 
@@ -17,6 +21,8 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
+
+PYTHON_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 
 PASSTHROUGH_ENV = "FLUID_CHILD_ENV_PASSTHROUGH"
 # Set by a caller in the environment it hands over (never in the host's own):
@@ -117,12 +123,20 @@ def is_app_secret(name: str) -> bool:
     return upper in _DENY_NAMES or upper.endswith("_DSN") or bool(_DENY_PREFIX_RE.match(upper))
 
 
-def scrub_child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """A copy of ``environ`` (default ``os.environ``) without host secrets."""
+def scrub_child_env(environ: Mapping[str, str] | None = None, *,
+                    preserve_python_env: bool = False) -> dict[str, str]:
+    """Copy inherited env without host secrets or worker Python settings.
+
+    ``preserve_python_env`` is only for app-internal Python children. Neither
+    passthrough nor this exception bypasses secret filtering. Settings overlays
+    are applied afterwards and may deliberately supply their own Python env.
+    """
     source = os.environ if environ is None else environ
     keep = _passthrough(source)
     return {k: v for k, v in scrub_claude_auth_env(source).items()
-            if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV} and not is_host_secret(k, keep)}
+            if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV}
+            and (preserve_python_env or k.upper() not in PYTHON_ENV_NAMES)
+            and not is_host_secret(k, keep)}
 
 
 def _names(raw: str | None) -> list[str]:

@@ -298,7 +298,7 @@ class GitService(
         # private/credential-requiring remote fails fast instead of blocking on a
         # username/password prompt until the timeout. Merged onto (never replacing)
         # the inherited environment so existing git config/PATH survive.
-        clone_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        clone_env = {**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"}
 
         try:
             # `--` terminates option parsing so the url is always treated as a

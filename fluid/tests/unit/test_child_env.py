@@ -53,6 +53,67 @@ def test_database_and_auth_secrets_cannot_use_passthrough() -> None:
     assert source["DSN"] == "private-sentinel"
 
 
+@pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "PythonPath"])
+def test_worker_python_env_is_not_inherited_but_explicit_overlays_survive(name):
+    source = {name: "worker-runtime", PASSTHROUGH_ENV: name, "PATH": "/bin", "ADMIN_PASSWORD": "secret"}
+    assert name not in scrub_child_env(source)
+    assert child_env_with_overlay({name: "project-runtime"}, source)[name] == "project-runtime"
+    internal = scrub_child_env(source, preserve_python_env=True)
+    assert internal[name] == "worker-runtime"
+    assert "ADMIN_PASSWORD" not in internal
+    assert source[name] == "worker-runtime"
+
+
+@pytest.mark.parametrize("overlay", [False, True])
+async def test_real_bash_worker_python_env_only_with_settings_overlay(monkeypatch, tmp_path, overlay):
+    names = ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")
+    for name in names:
+        monkeypatch.setenv(name, "worker-runtime-must-not-leak")
+    deliberate = {"PYTHONPATH": str(tmp_path), "PYTHONHOME": sys.base_prefix, "VIRTUAL_ENV": "project-venv"}
+    script = tmp_path / "python_env_probe.py"
+    script.write_text("import os, json\nprint(json.dumps({k: os.environ.get(k) for k in " + repr(names) + "}))\n")
+    ctx = ToolCtx(cwd=str(tmp_path), extra={"settings_env": deliberate if overlay else {}})
+    out = await bash_handler({"command": f'"{sys.executable}" "{script}"'}, ctx)
+    assert not out.is_error, out.text
+    import json
+    assert json.loads(out.text) == (deliberate if overlay else dict.fromkeys(names))
+
+
+@pytest.mark.parametrize("overlay", [False, True])
+async def test_real_cli_monitor_worker_python_env_only_with_settings_overlay(monkeypatch, tmp_path, overlay):
+    import asyncio
+    import json
+    from fluid.cli.host import CliHost
+
+    names = ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")
+    for name in names:
+        monkeypatch.setenv(name, "worker-runtime-must-not-leak")
+    deliberate = {"PYTHONPATH": str(tmp_path), "PYTHONHOME": sys.base_prefix, "VIRTUAL_ENV": "project-venv"}
+    script = tmp_path / "monitor_python_env_probe.py"
+    script.write_text("import os, json\nprint(json.dumps({k: os.environ.get(k) for k in " + repr(names) + "}))\n")
+    host = CliHost(None, None)
+    ctx = ToolCtx(cwd=str(tmp_path), extra={"settings_env": deliberate if overlay else {}})
+    receipt = await host.monitor_spawn({"command": f'"{sys.executable}" "{script}"'}, ctx)
+    worker = host.workers[receipt.task_id]
+    await asyncio.wait_for(worker.task, timeout=10)
+    assert worker.process.returncode == 0, worker.output()
+    assert json.loads(worker.output()) == (deliberate if overlay else dict.fromkeys(names))
+
+
+def test_delegated_and_kernel_children_drop_worker_python_env(monkeypatch):
+    from fluid.codemode.subprocess_kernel import scrub_env
+
+    names = {"PYTHONPATH": "worker", "PYTHONHOME": "worker", "VIRTUAL_ENV": "worker"}
+    for name, value in names.items():
+        monkeypatch.setenv(name, value)
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {}
+    assert not names.keys() & loop._child_env().keys()
+    assert not names.keys() & scrub_env(names).keys()
+    loop.env = names
+    assert names.items() <= loop._child_env().items()
+
+
 def test_extra_secret_shapes_are_scrubbed() -> None:
     names = ("APP_COOKIE", "APP_SIGNING_KEY", "APP_ENCRYPTION_KEY", "APP_JWT_KEY")
     assert scrub_child_env({name: "private-sentinel" for name in names}) == {}
@@ -160,7 +221,7 @@ async def test_real_cli_mcp_trampoline_masks_before_launch_and_unsets_for_server
     original = {"type": "stdio", "command": sys.executable, "args": [str(script)],
                 "env": {**CLOUD_ENV, "MCP_SERVICE_TOKEN": "fake-mcp-token"}}
     config = isolated_cli_server_entry(original, CLOUD_ENV)
-    inherited = {**os.environ, **CLOUD_ENV, **config["env"]}
+    inherited = {**scrub_child_env(), **CLOUD_ENV, **config["env"]}
     # The trampoline itself never sees a cloud credential value.
     assert all(inherited[name] == "" for name in CLOUD_ENV)
     assert original["env"]["ANTHROPIC_AUTH_TOKEN"] == "fake-gateway-token"
@@ -343,7 +404,8 @@ def test_cli_spawned_mcp_server_has_the_oauth_token_masked() -> None:
 
     entry = isolated_cli_server_entry({"type": "stdio", "command": "srv", "args": []}, {OAUTH: OAUTH_VALUE})
     assert entry["env"][OAUTH] == ""
-    assert entry["args"][:2] == ["-m", "fluid.tools.child_env"]
+    from fluid.tools import child_env
+    assert entry["args"][:2] == [child_env.__file__, "srv"]
 
 
 def test_delegated_claude_keeps_the_hosts_oauth_token(monkeypatch) -> None:

@@ -43,6 +43,7 @@ def forget_stale_worktree_metadata(main_dir: str, worktree_path: str) -> None:
     import subprocess
     from pathlib import Path
 
+    from fluid.tools.child_env import scrub_child_env
     from app.core.worktree_report import _git, _is_checkout_root, parse_worktree_list
 
     def key(path):
@@ -154,7 +155,7 @@ def forget_stale_worktree_metadata(main_dir: str, worktree_path: str) -> None:
             stopped = subprocess.run(
                 ["git", "-C", str(main), f"--git-dir={admin}", f"--work-tree={main}", "fsmonitor--daemon", "stop"],
                 capture_output=True, text=True, timeout=30,
-                env={**os.environ, "LC_ALL": "C"},
+                env={**scrub_child_env(), "LC_ALL": "C"},
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ValueError("Git fsmonitor daemon could not be stopped") from exc

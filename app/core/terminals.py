@@ -320,8 +320,10 @@ def is_terminal_secret(name: str, value: str = "") -> bool:
 def shell_environment(shell_name: str, shell_path: str,
                       source: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     """The environment a terminal's shell starts with: this worker's own
-    environment without any secret, plus terminal settings."""
-    base = os.environ if source is None else source
+    environment without secrets or worker Python settings, plus terminal settings."""
+    from fluid.tools.child_env import scrub_child_env
+
+    base = scrub_child_env(os.environ if source is None else source)
     env = {k: v for k, v in base.items() if not is_terminal_secret(k, v)}
     env["TERM"] = "xterm-256color"
     env["COLORTERM"] = "truecolor"

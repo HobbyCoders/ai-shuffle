@@ -35,6 +35,8 @@ from enum import Enum
 
 # Shared subprocess environment policy
 
+PYTHON_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
+
 PASSTHROUGH_ENV = "FLUID_CHILD_ENV_PASSTHROUGH"
 # Set by a caller in the environment it hands over (never in the host's own):
 # comma-separated names to drop from what the child INHERITS, for a variable
@@ -134,12 +136,20 @@ def is_app_secret(name: str) -> bool:
     return upper in _DENY_NAMES or upper.endswith("_DSN") or bool(_DENY_PREFIX_RE.match(upper))
 
 
-def scrub_child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """A copy of ``environ`` (default ``os.environ``) without host secrets."""
+def scrub_child_env(environ: Mapping[str, str] | None = None, *,
+                    preserve_python_env: bool = False) -> dict[str, str]:
+    """Copy inherited env without host secrets or worker Python settings.
+
+    ``preserve_python_env`` is only for app-internal Python children. Neither
+    passthrough nor this exception bypasses secret filtering. Settings overlays
+    are applied afterwards and may deliberately supply their own Python env.
+    """
     source = os.environ if environ is None else environ
     keep = _passthrough(source)
     return {k: v for k, v in scrub_claude_auth_env(source).items()
-            if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV} and not is_host_secret(k, keep)}
+            if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV}
+            and (preserve_python_env or k.upper() not in PYTHON_ENV_NAMES)
+            and not is_host_secret(k, keep)}
 
 
 def _names(raw: str | None) -> list[str]:

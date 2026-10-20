@@ -1352,7 +1352,7 @@ async def test_socket_rpc_round_trip(transport, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
-async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
+async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path, monkeypatch) -> None:
     """The real child process, driven by the mcp SDK's own stdio client.
 
     Deliberately bypasses fluid's ``tools.mcp.client`` wrapper: this test is
@@ -1362,12 +1362,20 @@ async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path) -> None:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
+    from fluid.tools.child_env import child_env_with_overlay
+    from fluid.tools.mcp.bundled_server import bundled_server_config
+
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "worker-server"))
+    monkeypatch.setenv("VIRTUAL_ENV", "worker-venv")
+    monkeypatch.setenv("PYTHONHOME", sys.base_prefix)
     reg = _weather_registry()
     async with _bridge(reg, transport, tmp_path) as address:
+        config = bundled_server_config(address)
+        assert config["env"]["VIRTUAL_ENV"] == "worker-venv"
+        assert config["env"]["PYTHONHOME"] == sys.base_prefix
         params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "fluid.tools.mcp.bundled_server", "--socket", address],
-            env=_child_env(),
+            command=config["command"], args=config["args"],
+            cwd=str(tmp_path), env=child_env_with_overlay(config["env"]),
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -1619,7 +1627,10 @@ def test_bundled_config_carries_token_in_env_not_args(tmp_path) -> None:
         reg, str(tmp_path / "mcp.json"), socket_path="tcp:127.0.0.1:1", token="tok",
     )
     entry = config["mcpServers"]["fluid_bundled"]
-    assert entry["env"] == {"FLUID_BUNDLED_TOKEN": "tok"}
+    from fluid.tools.child_env import PYTHON_ENV_NAMES
+    assert entry["env"]["FLUID_BUNDLED_TOKEN"] == "tok"
+    assert set(entry["env"]) <= PYTHON_ENV_NAMES | {"FLUID_BUNDLED_TOKEN"}
+    assert entry["env"]["PYTHONPATH"]
     assert "tok" not in " ".join(entry["args"])
 
 

@@ -1347,7 +1347,7 @@ def _moving(gaming, call, move=None):
     return stack
 
 
-RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker at the owner's request. Your hand-off note: "
+RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker, as you requested with HandOffSession. Your hand-off note: "
                  "tests pass; next: wire the UI Continue the work from where you left off. If it was already "
                  "complete, stop after a brief acknowledgement; do not invent new work.")
 

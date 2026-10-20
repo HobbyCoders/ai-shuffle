@@ -308,7 +308,9 @@ def export_checkout(cwd, branch, expected_remote=None):
     _branch(cwd, branch)
     remote = remote_identity(cwd)
     if expected_remote is not None and remote != expected_remote:
-        raise ValueError("The workers' origin remotes refer to different repositories.")
+        raise ValueError("The workers' origin remotes refer to different repositories. "
+                         "Both workers' checkouts must use the same repository as origin. "
+                         "Fix the checkout's remote with `git remote rename` or `git remote set-url`, then retry.")
     _preflight(cwd)
     default = _default_branch(cwd)
     cached_default = _run(cwd, "symbolic-ref", "refs/remotes/origin/HEAD")
@@ -396,7 +398,9 @@ def import_checkout(base, destination, state):
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
         raise ValueError("Invalid resume commit.")
     if remote_identity(base) != state["remote"]:
-        raise ValueError("The workers' origin remotes refer to different repositories.")
+        raise ValueError("The workers' origin remotes refer to different repositories. "
+                         "Both workers' checkouts must use the same repository as origin. "
+                         "Fix the checkout's remote with `git remote rename` or `git remote set-url`, then retry.")
     # Forced: a remote-tracking ref is only a cache of origin, and a rebased
     # branch must not fail the fetch.
     git(base, "fetch", "--no-tags", "origin", "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
@@ -494,6 +498,11 @@ def _push_refused(stderr, branch):
                 "accepts (for example fix/…, feat/… or chore/…) and retry.")
     if any(mark in text for mark in ("[rejected]", "non-fast-forward", "fetch first", "stale info")):
         return f"Origin's {branch} changed meanwhile; nothing was forced."
+    # Server-side hooks retain the origin-refusal meaning below. Local hooks
+    # may print arbitrary failures (including credential-shaped words).
+    if "hook declined" not in text and any(mark in text for mark in ("pre-push", "hook")):
+        return (f"This worker's pre-push hook stopped the push of {branch}. "
+                "Run `git push` in that checkout to see why; ownership has not moved.")
     if any(mark in text for mark in ("authentication", "permission", "could not read username", "403",
                                      "access denied", "not allowed", "protected", "hook declined")):
         return f"Origin refused {branch}. Check this worker's Git credentials and push rights for origin."

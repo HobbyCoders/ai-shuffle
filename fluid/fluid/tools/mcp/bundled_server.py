@@ -607,14 +607,25 @@ def bundled_server_config(socket_path: str, token: str | None = None) -> dict[st
     ``serve_registry_socket``), which 2.1.285+ honours per tool, so a CLI too
     old for the per-tool key still loads everything rather than nothing.
     """
+    from fluid.tools.child_env import PYTHON_ENV_NAMES, scrub_child_env
+
+    # The bridge is our own Python module, unlike user-configured MCP servers.
+    # The delegated CLI no longer inherits the worker's interpreter settings.
+    runtime_env = {k.upper(): v for k, v in scrub_child_env(preserve_python_env=True).items()
+                   if k.upper() in PYTHON_ENV_NAMES}
+    # Also work from a project cwd when the host imported Fluid via sys.path
+    # rather than an absolute PYTHONPATH (e.g. an editable source checkout).
+    root = str(Path(__file__).resolve().parents[3])
+    runtime_env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, runtime_env.get("PYTHONPATH"))))
     config: dict[str, Any] = {
         "type": "stdio",
+        "env": runtime_env,
         "command": sys.executable,
         "args": ["-m", "fluid.tools.mcp.bundled_server", "--socket", socket_path],
         "alwaysLoad": True,
     }
     if token is not None:
-        config["env"] = {TOKEN_ENV: token}
+        config["env"][TOKEN_ENV] = token
     return config
 
 
@@ -659,6 +670,7 @@ def isolated_cli_server_entry(server: dict[str, Any], cli_env: dict[str, str]) -
     Mask the auth values before the trampoline starts, then remove the empty
     names in the trampoline. No secret is written into the MCP config.
     """
+    from fluid.tools import child_env
     from fluid.tools.child_env import is_claude_auth, scrub_claude_auth_env
 
     entry = dict(server)
@@ -669,7 +681,9 @@ def isolated_cli_server_entry(server: dict[str, Any], cli_env: dict[str, str]) -
     if entry.get("type", "stdio") != "stdio" or not names:
         return entry
     entry["env"] = {**scrub_claude_auth_env(overlay), **dict.fromkeys(names, "")}
-    entry["args"] = ["-m", "fluid.tools.child_env", entry["command"], *entry.get("args", [])]
+    # A stdlib-only script: it must start without the worker's PYTHONPATH,
+    # and must not hand that path to a user-configured server just to import us.
+    entry["args"] = [child_env.__file__, entry["command"], *entry.get("args", [])]
     entry["command"] = sys.executable
     return entry
 
