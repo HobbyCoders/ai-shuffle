@@ -40,3 +40,18 @@ describe('UserMessage steer marker', () => {
 		expect(plain.container.querySelector('.user-time')?.textContent).not.toContain('mid-turn');
 	});
 });
+
+describe('UserMessage time line', () => {
+	it('carries the date: "Today" for today, a real date for an older message', () => {
+		const today = new Date();
+		const { container } = render(UserMessage, { props: { content: 'Now', timestamp: today } });
+		expect(container.querySelector('.user-time time')?.textContent).toMatch(/^Today /);
+		cleanup();
+		const old = '2024-02-03T12:00:00.000Z';
+		const older = render(UserMessage, { props: { content: 'Then', timestamp: old } });
+		const stamp = older.container.querySelector('.user-time time');
+		expect(stamp?.textContent).toContain('2024');
+		expect(stamp?.getAttribute('datetime')).toBe(old);
+		expect(older.container.querySelector('.bubble')?.getAttribute('title')).toContain('2024');
+	});
+});
