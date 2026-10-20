@@ -1143,8 +1143,9 @@ def find_test_python(explicit: str | None = None) -> str:
 
 def cmd_install(args) -> int:
     python = find_test_python(args.python)
+    message = install_hook(hooks_dir(), force=getattr(args, "force", False))
     git("config", PYTHON_CONFIG, python)
-    print(install_hook(hooks_dir(), force=getattr(args, "force", False)))
+    print(message)
     print(f"Tests run with {python} (git config {PYTHON_CONFIG}).")
     return 0
 
