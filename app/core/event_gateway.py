@@ -18,6 +18,7 @@ best effort and have no replay after a listener disconnect.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import select
@@ -33,12 +34,36 @@ logger = logging.getLogger(__name__)
 LISTEN_CHANNEL = "session_events"
 
 
+class _TickQueue(asyncio.Queue):
+    """One wake hint, not an event log; SSE replays authoritative DB rows.
+
+    Non-integer items are the tail reader's force-refresh sentinel. Keep that
+    sentinel over a seq hint in either order so coalescing cannot lose a kick.
+    """
+
+    def __init__(self):
+        super().__init__(maxsize=1)
+
+    def put_nowait(self, item):
+        if self.full():
+            previous = super().get_nowait()
+            self.task_done()
+            if isinstance(previous, int) and isinstance(item, int):
+                item = max(previous, item)
+            elif not isinstance(previous, int):
+                item = previous
+        super().put_nowait(item)
+
+
 class EventGateway:
     """Fan-out from a dedicated PG LISTEN connection to asyncio queues."""
 
     def __init__(self) -> None:
         # session_id -> set of (loop, queue) pairs.
         self._subscribers: Dict[str, Set[Tuple[object, object]]] = {}
+        # At most ONE scheduled callback per subscriber, even if the asyncio
+        # loop is stalled while the LISTEN thread receives a burst of notifies.
+        self._pending_ticks: dict[object, int] = {}
         # All-sessions listeners: fn(session_id) invoked on every notify tick.
         self._global_listeners: List[Callable[[str], None]] = []
         self._message_listeners: dict[str, list[Callable[[dict], None]]] = {}
@@ -68,7 +93,7 @@ class EventGateway:
         import asyncio
 
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        queue = _TickQueue()
         with self._lock:
             self._subscribers.setdefault(session_id, set()).add((loop, queue))
         self._ensure_listener()
@@ -120,6 +145,7 @@ class EventGateway:
     def unsubscribe(self, session_id: str, queue) -> None:
         """Remove a subscriber; drop the session key once empty."""
         with self._lock:
+            self._pending_ticks.pop(queue, None)
             pairs = self._subscribers.get(session_id)
             if not pairs:
                 return
@@ -140,11 +166,36 @@ class EventGateway:
         with self._lock:
             pairs = list(self._subscribers.get(session_id, ()))
         for loop, queue in pairs:
+            with self._lock:
+                if (loop, queue) not in self._subscribers.get(session_id, ()):
+                    continue
+                if queue in self._pending_ticks:
+                    self._pending_ticks[queue] = max(self._pending_ticks[queue], max_seq)
+                    continue
+                self._pending_ticks[queue] = max_seq
             try:
-                loop.call_soon_threadsafe(queue.put_nowait, max_seq)
+                loop.call_soon_threadsafe(self._flush_tick, session_id, queue)
             except RuntimeError:
                 # Loop is closed — drop this subscriber.
                 self.unsubscribe(session_id, queue)
+
+    def _flush_tick(self, session_id, queue) -> None:
+        with self._lock:
+            seq = self._pending_ticks.pop(queue, None)
+        if seq is not None:
+            queue.put_nowait(seq)
+
+    def memory_stats(self) -> dict:
+        """Content-free counts, under the same lock as listener mutations."""
+        with self._lock:
+            return {
+                "event_gateway_sessions": len(self._subscribers),
+                "event_gateway_subscribers": sum(map(len, self._subscribers.values())),
+                "event_gateway_pending_ticks": len(self._pending_ticks),
+                "event_gateway_queued_ticks": sum(
+                    queue.qsize() for pairs in self._subscribers.values() for _, queue in pairs
+                ),
+            }
 
     # ------------------------------------------------------------------
     # Listener thread

@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import time
+from weakref import WeakValueDictionary
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
@@ -100,7 +101,10 @@ _SETTLE_POLL_SECONDS = 0.05
 # The turn pump AND the idle reader both acquire the SAME per-session lock, so
 # the single-reader invariant (only one coroutine reads the pooled adapter at
 # a time) is structural rather than enforced by call discipline.
-_reader_locks: Dict[str, asyncio.Lock] = {}
+# Holders and acquire() waiters keep the token alive. Once nobody uses it, the
+# registry must not retain every session ever visited. Do not manually pop a
+# lock on release: a queued waiter would then race a newly created token.
+_reader_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 # Running idle-reader task per session, so a starting turn can stop it first.
 _idle_readers: Dict[str, asyncio.Task] = {}
 
