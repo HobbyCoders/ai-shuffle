@@ -74,8 +74,12 @@ browser or paste a session key in Settings > Providers > the key > Usage.
 The `xai_management` source resolves the team using the inference key and reads
 prepaid balance and invoice preview using a separate management key (official).
 Billing keys and OpenAI Admin organization settings sync encrypted across the
-network, like inference keys. Every trusted worker can poll independently while
-keeping readings/errors local. Clearing access propagates; an old peer's missing
+network, like inference keys. Any trusted worker can fetch credit while the
+network founder's usage budget is reachable, keeping readings/errors local.
+Other workers defer new requests when the founder is offline; the network-wide
+budget allows roughly one request per credential/endpoint every 300–330 seconds.
+Inference rotation or disable invalidates readings but preserves billing keys.
+Explicitly disconnecting billing access propagates its removal; an old peer's missing
 billing fields do not clear newer peers' keys. Backup-only install bindings are
 not published or used until authenticated sync establishes local trust.
 See [setup and endpoint details](content/api-reference/model-providers.md#provider-reported-api-balances).

@@ -26,6 +26,7 @@ FRESHNESS_SECONDS = SOURCES["openai_platform_balance"].public()["freshness_secon
 def credential_fingerprint(row):
     """Pure identity check, including inference credentials after network sync."""
     identity = [row.get(k) for k in ("provider_type", "base_url", "auth_mode")]
+    identity.append(row.get("enabled", True))
     identity.extend(encryption.decrypt_value(row.get(k) or "") for k in ("auth_token", "balance_key"))
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 

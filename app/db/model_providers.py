@@ -464,9 +464,9 @@ def update_model_provider(
     if not updates:
         return get_model_provider(provider_id)
     if changed or kwargs.get("enabled") is False:
-        from app.core.config import settings
-        updates.extend(["balance_key = NULL", "balance_instance_id = %s", "balance_snapshot = NULL"])
-        values.append(settings.effective_instance_id)
+        # Billing access is independent of the inference credential. Invalidate
+        # the reading, not the shared management/session key or its trust.
+        updates.append("balance_snapshot = NULL")
     if changed:
         updates.append("credential_status = NULL")
     updates.append("updated_at = %s")
@@ -569,11 +569,8 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
-        from app.core.config import settings
-        clear_balance = ", balance_key = NULL, balance_instance_id = %s, balance_snapshot = NULL" if not enabled else ""
+        clear_balance = ", balance_snapshot = NULL" if not enabled else ""
         values = [enabled, now, str(uuid4())]
-        if not enabled:
-            values.append(settings.effective_instance_id)
         cursor.execute(
             f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
             (*values, provider_id),

@@ -509,7 +509,10 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
         elif name in coll.encrypted and isinstance(value, str) and encryption.is_encrypted(value):
             if not encryption.is_encryption_ready():
                 raise TransientApplyError("Credential storage is locked; cannot share " + coll.name)
-            value = encryption.decrypt_value(value)
+            try:
+                value = encryption.decrypt_value(value)
+            except (RuntimeError, ValueError):
+                raise TransientApplyError("Cannot read credential storage for " + coll.name) from None
             encrypted_columns.append(name)
         record[name] = _normalize_value(value)
     if encrypted_columns:
@@ -551,6 +554,18 @@ def _column_value(coll: policy.Collection, name: str, value: Any, encrypted_colu
             raise TransientApplyError("Credential storage is locked; cannot store " + coll.name)
         return encryption.encrypt_value(value)
     return value
+
+
+def _provider_value_changed(coll: policy.Collection, previous: Mapping[str, Any],
+                            name: str, incoming: Any) -> bool:
+    """An unreadable old credential cannot validate a cached observation."""
+    value = previous.get(name)
+    if name in coll.encrypted and encryption.is_encrypted(value):
+        try:
+            value = encryption.decrypt_value(value)
+        except (RuntimeError, ValueError):
+            return True
+    return value != incoming
 
 
 def _local_keys(coll: policy.Collection, record_id: str) -> Tuple[Any, ...]:
@@ -656,13 +671,20 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     if coll.materialize_hook is not None:
         record = coll.materialize_hook(record)
     encrypted_columns = list(record.get("_enc") or [])
+    previous = _read_row(cursor, coll, record_id) if coll.name == "model_providers" else None
     columns: List[str] = []
     values: List[Any] = []
     for name in coll.fields:
         if name in coll.local_fields or name not in record:
             continue
         columns.append(name)
-        values.append(_column_value(coll, name, record.get(name), encrypted_columns))
+        if (previous and name in ("openai_admin_key", "balance_key")
+                and not _provider_value_changed(coll, previous, name, record.get(name))):
+            # Stable ciphertext preserves Admin refusal fingerprints and the
+            # captured key guard of an in-flight Admin poll on unrelated edits.
+            values.append(previous.get(name))
+        else:
+            values.append(_column_value(coll, name, record.get(name), encrypted_columns))
     if coll.name == "model_providers":
         # Presence, not truthiness: explicit NULL clears propagate. Old peers
         # omit these fields entirely; their edits must preserve local access.
@@ -671,12 +693,12 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             if secret in columns:
                 columns.append(binding)
                 values.append(_my_instance_id())
-        previous = _read_row(cursor, coll, record_id)
-        if previous and any(
-                name in columns and (encryption.decrypt_value(previous[name])
-                                     if name in coll.encrypted and encryption.is_encrypted(previous.get(name))
-                                     else previous.get(name)) != record.get(name)
-                for name in ("auth_token", "openai_admin_key", "openai_billing_org_id")):
+        if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
+                            for name in ("auth_token", "provider_type", "base_url", "auth_mode", "enabled", "balance_key")):
+            columns.append("balance_snapshot")
+            values.append(None)
+        if previous and any(name in columns and _provider_value_changed(coll, previous, name, record.get(name))
+                            for name in ("auth_token", "openai_admin_key", "openai_billing_org_id")):
             # Admin usage is worker-local too. A late poll is guarded by its
             # captured key/binding; never display a pre-rotation reading.
             cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", keys)
@@ -1375,13 +1397,23 @@ def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, resu
 
 def _provider_credentials_kept(coll: policy.Collection, incoming: Mapping[str, Any],
                                row: Mapping[str, Any]) -> bool:
-    """The guarded UPSERT kept a local generation, not just a timezone spelling.
+    """Republish credentials retained from an omitted field or newer generation.
 
     Compare the returned timestamp as an instant. A naive incoming timestamp
     was interpreted in the database session's zone; the returned offset gives
     its interpretation when it represents the same local wall time.
     """
-    if coll.name != "model_providers" or row.get("codex_last_refresh") is None:
+    if coll.name != "model_providers":
+        return False
+    # A winning old/just-upgraded peer can omit billing fields that this
+    # installation already trusts. Publish the merged row rather than marking
+    # its key-bearing local hash as acknowledged by a peer that never saw it.
+    if any(secret in coll.fields and secret not in coll.local_fields
+           and secret not in incoming and row.get(binding) == _my_instance_id()
+           for secret, binding in (("balance_key", "balance_instance_id"),
+                                   ("openai_admin_key", "openai_billing_instance_id"))):
+        return True
+    if row.get("codex_last_refresh") is None:
         return False
     if incoming.get("codex_last_refresh") is None:
         return True

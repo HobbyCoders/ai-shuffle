@@ -307,9 +307,11 @@ access separately from the inference key. Keys are write-only, encrypted at rest
 and under the network key during sync, and included in secret re-encryption.
 Balance keys (including Platform session keys), OpenAI Admin keys and organization
 IDs sync across network workers. This gives every trusted worker the same billing
-access, including higher-privilege Admin access. Each worker polls independently
-and keeps its own readings and errors, even when the worker that saved the key is
-offline. Keys become usable after the next sync; readings arrive on the next poll.
+access, including higher-privilege Admin access. Each worker keeps its own readings
+and errors and can fetch credit while the network's shared usage budget is
+reachable. Keys become usable after the next sync; readings arrive on the next
+poll. The network founder coordinates that budget: other workers defer new
+requests while it is offline, even if they already have the synced key.
 Disconnecting access syncs the removal. Older versions keep their local billing
 configuration until upgraded. Restoring another installation's database alone
 does not authorize using or publishing its billing keys; authenticated sync does.
@@ -344,8 +346,9 @@ does not authorize using or publishing its billing keys; authenticated sync does
   This undocumented endpoint can change and sessions expire. An inference key
   or ChatGPT/Codex OAuth token cannot replace a Platform session key.
 
-Polling is demand-driven, at most once per five minutes per credential/endpoint,
-under the existing shared usage budget. Opening balance status or choosing
+Polling is demand-driven, with roughly one request per credential/endpoint every
+300–330 seconds network-wide under the shared usage budget. With demand and the
+budget reachable, readings refresh about every five minutes, not once per worker. Opening balance status or choosing
 **Refresh balance status** requests a poll (30-second forced-refresh cooldown;
 per-endpoint budgets still apply). The UI re-reads while that poll runs. Readings
 remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
@@ -354,9 +357,10 @@ successful fetched time. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
 inference/Admin credentials. Changes of inference or billing key invalidate old
-readings and reject in-flight snapshots. Local changes of inference key, origin,
-auth type, or disabling the provider (including the enable toggle) also clear
-balance access; a synced key can be polled with the current inference key. Fresh, error-free Admin organization-spend fields
+readings and reject in-flight snapshots. Inference-key rotation, provider changes,
+and disabling the provider (including the enable toggle) invalidate readings but
+retain billing access. Only explicitly disconnecting billing access removes its
+key across the network. Fresh, error-free Admin organization-spend fields
 from the current UTC month remain alongside real remaining credit in the usage
 popover. Stale, failed or prior-month Admin totals are withheld when a balance
 is bound, rather than borrowing its newer timestamp. Balance freshness/error
