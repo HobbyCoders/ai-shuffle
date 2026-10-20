@@ -26,13 +26,14 @@ def test_checkout_prompt_scopes_isolation_to_its_repository(monkeypatch):
     for text in (role, receipt):
         assert text.count("repository the host does not provision") == 1
         assert text.count("parent's prepared isolated checkout named in the brief under the same rules") == 1
+        assert text.count("over any path the brief names") == 1
         assert "parent's bound checkout" in text
         assert "Do not merge into the parent" in text
         assert "copy credential files or dependencies" in text or "dependencies are not copied" in text
     assert "Use that assigned checkout for its repository" in role
     assert "Use it for this repository" in receipt
     sizes = measure_worker_sections()
-    for section, baseline in {"subagent_role": 2681, "checkout_receipt": 1209}.items():
+    for section, baseline in {"subagent_role": 2712, "checkout_receipt": 1240}.items():
         assert sizes[section] <= baseline * 101 // 100
 
 

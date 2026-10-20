@@ -581,10 +581,31 @@ def _migrate_task_assignment_owner(cursor, migrations_applied):
     if not column_exists(cursor, "background_tasks", "assignment_owner"):
         cursor.execute("ALTER TABLE background_tasks ADD COLUMN assignment_owner "
                        "BOOLEAN NOT NULL DEFAULT TRUE")
-        # Pre-flag resume_task used the worker id as its synthetic tool_use_id.
-        # Persist the classification: later lifecycle snapshots replace that id.
-        cursor.execute("UPDATE background_tasks SET assignment_owner=FALSE "
+        # Every pre-flag resume used the worker id as its synthetic tool id,
+        # including a real parent's resume. Preserve its durable ancestry; only
+        # non-ancestor resumes are reporting relationships, not assignments.
+        cursor.execute("SELECT task_id, session_id FROM background_tasks "
                        "WHERE kind='agent' AND tool_use_id=task_id")
+        candidates = cursor.fetchall()
+        parents = {}
+        for row in candidates:
+            current = row["task_id"]
+            seen = {current}
+            ancestors = set()
+            while current:
+                if current not in parents:
+                    cursor.execute("SELECT parent_session_id FROM sessions WHERE id=%s", (current,))
+                    session = cursor.fetchone()
+                    parents[current] = session["parent_session_id"] if session else None
+                current = parents[current]
+                if not current or current in seen:
+                    break
+                seen.add(current)
+                ancestors.add(current)
+            if row["session_id"] not in ancestors:
+                cursor.execute("UPDATE background_tasks SET assignment_owner=FALSE "
+                               "WHERE task_id=%s AND session_id=%s",
+                               (row["task_id"], row["session_id"]))
         migrations_applied.append("background_tasks_assignment_owner")
 
 
