@@ -18,6 +18,7 @@
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { FORBIDDEN_TEXT, loadState } from '$lib/settings/access.svelte';
 	import PreferencePage from '../shell/PreferencePage.svelte';
+	import AccessScope from '../shell/AccessScope.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import Switch from '../rows/Switch.svelte';
@@ -39,6 +40,7 @@
 	import type { ReportKind } from '$lib/api/support';
 	import {
 		aiContentPrefill,
+		canReportAiContent,
 		canSendSupportReport,
 		openSupportReport,
 		supportCaps
@@ -224,12 +226,23 @@
 	let excerpt = $state('');
 	let reason = $state('');
 	let reportSession = $state<string | null>(null);
+	/** An AI content report is open: usable even where Settings is read-only. */
+	const aiReportOpen = $derived(reportOpen && reportKind === 'ai_content' && canReportAiContent());
 
-	// A chat message's "Report AI content" lands here with the message filled in.
+	// Opened from the row, the form is always a problem report; an AI content
+	// report lasts only until the form closes.
 	$effect(() => {
-		if (!aiContentPrefill.value) return;
+		if (reportOpen) return;
+		reportKind = 'problem';
+		reportSession = null;
+	});
+
+	// The Android app's "Report message" (a chat reply's ⋯ menu) lands here with
+	// the message filled in. Nowhere else offers AI content reports.
+	$effect(() => {
+		if (!aiContentPrefill.value || supportCaps.status === 'idle' || supportCaps.status === 'loading') return;
 		const prefill = aiContentPrefill.take();
-		if (!prefill) return;
+		if (!prefill || !canReportAiContent()) return;
 		reportKind = 'ai_content';
 		excerpt = prefill.excerpt;
 		reason = '';
@@ -434,18 +447,21 @@
 	</RowGroup>
 	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
 
-	{#if canSendSupportReport()}
-		<RowGroup title="Help">
-			<SettingRow id="system.reportProblem" expanded={reportOpen ? reportForm : undefined}>
-				<ExpandToggle value="Describe it" bind:open={reportOpen} />
-			</SettingRow>
-		</RowGroup>
+	{#if canSendSupportReport() || aiReportOpen}
+		<!-- Every user may report AI content; the rest of Settings stays read-only for non-owners. -->
+		<AccessScope writable={aiReportOpen}>
+			<RowGroup title="Help">
+				<SettingRow id="system.reportProblem" expanded={reportOpen ? reportForm : undefined}>
+					<ExpandToggle value="Describe it" bind:open={reportOpen} />
+				</SettingRow>
+			</RowGroup>
+		</AccessScope>
 	{/if}
 </PreferencePage>
 
 {#snippet reportForm()}
 	<ReportProblemForm
-		bind:kind={reportKind}
+		kind={reportKind}
 		bind:description={problem}
 		bind:excerpt
 		bind:reason

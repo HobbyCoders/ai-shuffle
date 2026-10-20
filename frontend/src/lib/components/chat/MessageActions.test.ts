@@ -5,7 +5,7 @@ const rewind = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/client', async (importOriginal) => ({ ...(await importOriginal<object>()), executeRewind: rewind }));
 const nav = vi.hoisted(() => ({ openSettings: vi.fn() }));
 vi.mock('$lib/settings/navigation.svelte', () => nav);
-import { aiContentPrefill } from '$lib/stores/support-report.svelte';
+import { aiContentPrefill, supportCaps } from '$lib/stores/support-report.svelte';
 import MessageActions from './MessageActions.svelte';
 
 beforeEach(() => { rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
@@ -116,19 +116,88 @@ describe('MessageActions rewind', () => {
 	});
 });
 
-describe('MessageActions: Report AI content', () => {
-	it('offers Report on a settled assistant reply and opens the report form with it filled in', async () => {
-		const view = render(MessageActions, { ...base, messageRole: 'assistant', messageContent: 'A **hateful** reply' });
-		const button = screen.getByRole('button', { name: 'Report AI content' });
-		await fireEvent.click(button);
+describe('MessageActions: Report message', () => {
+	const assistant = { ...base, messageRole: 'assistant' as const, messageContent: 'A **hateful** reply' };
+	const overflow = () => screen.queryByRole('button', { name: 'More actions' });
+	const reportItem = () => screen.queryByRole('menuitem', { name: 'Report message' });
+	const nativeApp = (platform?: string) => {
+		window.__SHUFFLE_MOBILE__ = {
+			apiOrigin: 'https://worker.example',
+			token: 'shc_test',
+			...(platform ? { native: { platform, bridge: 1, capabilities: [] } } : {})
+		};
+	};
+	beforeEach(() => {
+		nav.openSettings.mockClear();
+		supportCaps.status = 'ready';
+		supportCaps.current = { basic_report: false, can_report_ai_content: true } as any;
+	});
+	afterEach(() => { delete window.__SHUFFLE_MOBILE__; aiContentPrefill.take(); supportCaps.reset(); });
+
+	it('offers no report entry and no overflow menu on the web UI and desktop app', () => {
+		render(MessageActions, assistant);
+		expect(overflow()).toBeNull();
+		expect(reportItem()).toBeNull();
+		expect(screen.queryByRole('button', { name: /report/i })).toBeNull();
+		expect(screen.queryByTitle(/report/i)).toBeNull();
+	});
+
+	it('offers none in the iOS app either', () => {
+		nativeApp('ios');
+		render(MessageActions, assistant);
+		expect(overflow()).toBeNull();
+	});
+
+	it('tucks Report message into the overflow menu of a settled reply in the Android app', async () => {
+		nativeApp('android');
+		const view = render(MessageActions, assistant);
+		expect(screen.queryByRole('button', { name: /report/i })).toBeNull();
+		const trigger = overflow()!;
+		expect(trigger.getAttribute('aria-haspopup')).toBe('menu');
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(reportItem()).toBeNull();
+
+		await fireEvent.click(trigger);
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+		const menu = screen.getByRole('menu', { name: 'Message actions' });
+		expect(menu.parentElement).toBe(document.body);
+		await waitFor(() => expect(document.activeElement).toBe(reportItem()));
+
+		await fireEvent.click(reportItem()!);
+		expect(reportItem()).toBeNull();
 		expect(aiContentPrefill.take()).toEqual({ excerpt: 'A **hateful** reply', sessionId: 's1' });
 		expect(nav.openSettings).toHaveBeenCalledWith({ category: 'system', anchor: 'system.reportProblem' });
+
 		await view.rerender({ isStreaming: true });
-		expect(screen.queryByRole('button', { name: 'Report AI content' })).toBeNull();
+		expect(overflow()).toBeNull();
+	});
+
+	it('closes on Escape (focus back on the trigger) and on a press outside', async () => {
+		nativeApp('android');
+		render(MessageActions, assistant);
+		const trigger = overflow()!;
+		await fireEvent.click(trigger);
+		await waitFor(() => expect(document.activeElement).toBe(reportItem()));
+		await fireEvent.keyDown(reportItem()!, { key: 'Escape' });
+		expect(reportItem()).toBeNull();
+		expect(document.activeElement).toBe(trigger);
+
+		await fireEvent.click(trigger);
+		expect(reportItem()).toBeTruthy();
+		await fireEvent.pointerDown(document.body);
+		expect(reportItem()).toBeNull();
+		expect(nav.openSettings).not.toHaveBeenCalled();
+	});
+
+	it('also serves an Android app from before the bridge named its platform', () => {
+		nativeApp();
+		render(MessageActions, assistant);
+		expect(overflow()).toBeTruthy();
 	});
 
 	it('is not offered on the user\'s own messages', () => {
+		nativeApp('android');
 		render(MessageActions, base);
-		expect(screen.queryByRole('button', { name: 'Report AI content' })).toBeNull();
+		expect(overflow()).toBeNull();
 	});
 });

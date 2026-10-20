@@ -175,7 +175,7 @@ async def test_scope_probe_failure_stays_unavailable(monkeypatch, action, failur
     with pytest.raises(HTTPException) as error:
         await git_owner._guard_mutation(action, {'request': object(), 'project_id': 'p'})
     assert error.value.status_code == 503
-    assert error.value.detail == 'Git checkout is unavailable. Check again.'
+    assert error.value.detail == ('Permission denied while probing the Git checkout.' if isinstance(failure, PermissionError) else 'Git checkout probe timed out after 5 seconds.')
     check.assert_not_called()
 
 

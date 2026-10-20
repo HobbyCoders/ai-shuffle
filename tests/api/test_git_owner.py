@@ -1,4 +1,5 @@
 """Session Git actions execute on their owner, never a viewer's checkout."""
+from collections import OrderedDict
 from unittest.mock import AsyncMock
 
 import pytest
@@ -338,7 +339,7 @@ async def test_two_distinct_unbound_checkouts_stay_ambiguous(worker_repositories
         "params": {"project_id": project["id"]},
     }, from_device="worker-a")
     assert status["status"] == 409
-    assert "ambiguous" in status["detail"]
+    assert "Multiple Git checkouts" in status["detail"]
 
 
 def test_local_canonical_scope_does_not_call_a_peer(worker_repositories, monkeypatch):
@@ -512,3 +513,160 @@ async def test_commit_on_new_branch_refuses_branch_bound_checkout(worker_reposit
     assert result["status"] == 400, result
     assert "bound to its branch" in result["detail"]
     assert git_at(feature, "branch", "--show-current") == "feature/a"
+
+@pytest.fixture
+def forwarded_fetch(remote, worker_repositories, monkeypatch):
+    """Public HTTP route -> session-git control dispatcher -> real owner endpoint."""
+    import httpx
+    from app.api import git_helpers, network
+    from app.network import tokens
+    owner_app = FastAPI()
+    owner_app.include_router(network.router)
+    owner_app.dependency_overrides[tokens.require_worker_device] = lambda: "worker-a"
+    monkeypatch.setattr(network.transport, "note_contact", lambda _: None)
+    row, client = remote
+    project, viewer, owner, git_at = worker_repositories
+    row.update(project_id=None, project_v2_id=project["id"], worktree_id=None)
+    git_helpers.invalidate_working_dir_cache()
+    inner = []
+
+    async def forward(target, kind, body, **kwargs):
+        assert (target, kind) == ("worker-b", "session-git")
+        # The same row is a mirror at the caller and owned at the receiver.
+        with monkeypatch.context() as receiver:
+            receiver.setattr(control, "owner_of", lambda session: None)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=owner_app), base_url="http://owner") as peer:
+                response = await peer.post(f"/api/v1/network/peer/control/{kind}", json=body)
+            assert response.status_code == 200, response.text
+            result = response.json()
+        inner.append(result)
+        return result
+
+    monkeypatch.setattr(control, "call", forward)
+    yield client, f"/api/v1/projects/{project['id']}/git/fetch?session_id=session-b", row, owner, git_at, inner
+    git_helpers.invalidate_working_dir_cache()
+
+
+def test_forwarded_fetch_real_success(forwarded_fetch):
+    client, url, row, owner, git_at, inner = forwarded_fetch
+    response = client.post(url)
+    assert response.status_code == 200, response.text
+    assert inner[-1]["status"] == 200
+    assert response.json()["success"] is True
+
+
+def test_forwarded_fetch_missing_checkout(forwarded_fetch, monkeypatch):
+    from app.db import checkouts
+    from app.core.config import settings
+    client, url, row, owner, git_at, inner = forwarded_fetch
+    checkouts.upsert_checkout(row["project_v2_id"], settings.effective_instance_id,
+                              str(owner / "not-created"), branch="feature/missing")
+    row["branch"] = "feature/missing"
+    response = client.post(url)
+    assert response.status_code == inner[-1]["status"] == 409
+    assert "checkout is not available" in response.json()["detail"]
+    assert not (owner / "not-created").exists()  # A read/guard never materializes.
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_forwarded_fetch_activity_refusal(forwarded_fetch, monkeypatch, caplog, unknown):
+    from app.core import git_activity as activity
+    client, url, row, owner, git_at, inner = forwarded_fetch
+    active = {**row, "id": "active-chat", "branch": "missing-active" if unknown else "main"}
+    monkeypatch.setattr(activity, "_project_candidates", lambda *args: [active])
+    # Real resolver sees no registered checkout for the active branch.
+    with caplog.at_level("DEBUG", logger=activity.__name__):
+        response = client.post(url)
+    assert response.status_code == inner[-1]["status"] == (503 if unknown else 409)
+    assert ("an active session's checkout location is unknown" if unknown else "is active") in response.json()["detail"]
+    assert active["id"] not in response.text
+    assert all(active["id"] not in r.message for r in caplog.records if r.levelname == "WARNING")
+    if unknown:
+        assert any(active["id"] in r.message for r in caplog.records if r.name == activity.__name__ and r.levelname == "DEBUG")
+
+
+@pytest.mark.parametrize("failure,reason", [
+    ("timeout", "timed out after 5 seconds"),
+    ("permission", "Permission denied"),
+    ("missing-git", "Git executable"),
+    ("subprocess", "exit code 128"),
+    ("dubious", "Dubious ownership."),
+    ("stderr-permission", "Permission denied."),
+    ("not-repo", "Not a Git repository."),
+])
+def test_forwarded_fetch_probe_failure(forwarded_fetch, monkeypatch, caplog, failure, reason):
+    import subprocess
+    client, url, row, owner, git_at, inner = forwarded_fetch
+    failures = {
+        "timeout": subprocess.TimeoutExpired("git", 5),
+        "permission": PermissionError("denied"),
+        "missing-git": FileNotFoundError("git missing"),
+        "subprocess": subprocess.CalledProcessError(128, "git", stderr="invalid Git metadata at /private/checkout"),
+        "dubious": subprocess.CalledProcessError(128, "git", stderr="fatal: detected dubious ownership in repository at '/private/checkout'"),
+        "stderr-permission": subprocess.CalledProcessError(128, "git", stderr="fatal: cannot open /private/checkout: Permission denied"),
+        "not-repo": subprocess.CalledProcessError(128, "git", stderr="fatal: not a git repository: /private/checkout"),
+    }
+    original = git.git_service._run_git
+
+    def probe(path, args, **kwargs):
+        if args == ["rev-parse", "--show-toplevel"]:
+            raise failures[failure]
+        return original(path, args, **kwargs)
+
+    monkeypatch.setattr(git.git_service, "_run_git", probe)
+    with caplog.at_level("DEBUG", logger=git_owner.__name__):
+        response = client.post(url)
+    assert response.status_code == inner[-1]["status"] == 503
+    assert reason in response.json()["detail"]
+    assert "Check again" not in response.text
+    assert "/private/checkout" not in response.text
+    assert all("/private/checkout" not in r.message for r in caplog.records if r.levelname == "WARNING")
+    if isinstance(failures[failure], subprocess.CalledProcessError):
+        assert "exit code 128" in response.json()["detail"]
+        assert any(failures[failure].stderr in r.message for r in caplog.records
+                   if r.name == git_owner.__name__ and r.levelname == "DEBUG")
+
+
+def test_forwarded_fetch_warns_once_per_distinct_inner_reason(forwarded_fetch, monkeypatch, caplog):
+    import subprocess
+    client, url, row, owner, git_at, inner = forwarded_fetch
+    monkeypatch.setattr(git_owner, "_forward_failures", OrderedDict())
+    for failure in [PermissionError("denied"), subprocess.TimeoutExpired("git", 5)]:
+        with monkeypatch.context() as probe:
+            probe.setattr(git_owner, "_enclosing_repository", lambda *a, _failure=failure, **kw: (_ for _ in ()).throw(_failure))
+            for _ in range(2):
+                assert client.post(url).status_code == 503
+    warnings = [r.message for r in caplog.records if r.name == git_owner.__name__ and r.levelname == "WARNING"]
+    assert len(warnings) == 2
+    assert all("inner status=503" in message for message in warnings)
+    assert any("Permission denied" in message for message in warnings)
+    assert any("timed out" in message for message in warnings)
+
+
+def test_forwarded_fetch_unreachable_is_not_an_inner_probe_failure(remote, monkeypatch, caplog):
+    _, client = remote
+    monkeypatch.setattr(git_owner, "_forward_failures", OrderedDict())
+    call = AsyncMock(side_effect=control.RunnerUnreachable("offline"))
+    monkeypatch.setattr(control, "call", call)
+    for _ in range(2):
+        response = client.post("/api/v1/projects/pv2-shared/git/fetch?session_id=session-b")
+        assert response.status_code == 503
+        assert "worker is unreachable" in response.json()["detail"]
+    assert sum(r.name == git_owner.__name__ and r.levelname == "WARNING" for r in caplog.records) == 1
+
+
+def test_forward_failure_lru_keeps_logging_new_causes_at_capacity(monkeypatch, caplog):
+    failures = OrderedDict()
+    monkeypatch.setattr(git_owner, "_forward_failures", failures)
+    monkeypatch.setattr(git_owner, "_FORWARD_FAILURE_LIMIT", 2)
+    values = {"project_id": "project", "session_id": "chat"}
+    for reason in ["first", "second", "first", "third"]:
+        git_owner._warn_forward_failure("worker-b", "fetch_from_remote", values, 503, reason)
+    assert [key[-1] for key in failures] == ["first", "third"]
+    # A recently used cause stays suppressed, but an evicted cause warns again.
+    for reason in ["first", "second", "fourth"]:
+        git_owner._warn_forward_failure("worker-b", "fetch_from_remote", values, 503, reason)
+    warnings = [r.message for r in caplog.records if r.name == git_owner.__name__ and r.levelname == "WARNING"]
+    assert len(warnings) == 5
+    assert "reason=fourth" in warnings[-1]
+    assert len(failures) == 2

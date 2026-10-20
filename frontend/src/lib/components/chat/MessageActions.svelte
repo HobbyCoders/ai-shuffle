@@ -3,15 +3,19 @@
 	/**
 	 * MessageActions - Hover-only action buttons for chat messages
 	 *
-	 * Provides Copy, Read and Report AI content (for assistant messages), and
-	 * Rewind functionality. Report opens System > Help's report form as an AI
-	 * content report with this message and its session filled in.
+	 * Provides Copy and Read (for assistant messages), and Rewind (for user
+	 * messages). In the Android app only, an assistant reply also gets a ⋯
+	 * overflow menu holding "Report message" (Google Play generative-AI policy),
+	 * which opens System > Help's report form as an AI content report with this
+	 * message and its session filled in. Everywhere else there is no ⋯ and no
+	 * report entry at all.
 	 * The parent decides when the row is shown (hover/focus on desktop, always
 	 * on mobile) and reserves its space so revealing it never reflows the chat.
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
+	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
-	import { canSendSupportReport, reportAiContent } from '$lib/stores/support-report.svelte';
+	import { canReportAiContent, reportAiContent } from '$lib/stores/support-report.svelte';
 
 	interface Props {
 		sessionId?: string | null;
@@ -205,6 +209,104 @@
 		if (cleaned.length <= maxLength) return cleaned;
 		return cleaned.substring(0, maxLength) + '...';
 	}
+
+	/* ---------- ⋯ overflow menu (Android app only: Report message) ---------- */
+
+	const showOverflow = $derived(messageRole === 'assistant' && !isStreaming && canReportAiContent());
+
+	let menuOpen = $state(false);
+	let menuTrigger = $state<HTMLButtonElement | null>(null);
+	let menuEl = $state<HTMLDivElement | null>(null);
+	let menuPos = $state<{ top: number; left: number; above: boolean }>({ top: 0, left: 0, above: false });
+	const MENU_GAP = 6;
+	const VIEWPORT_MARGIN = 8;
+
+	/** Anchor the menu to the ⋯: right edges aligned, below unless there is no room. */
+	function placeMenu() {
+		if (!menuTrigger || !menuEl) return;
+		const anchor = menuTrigger.getBoundingClientRect();
+		const width = menuEl.offsetWidth;
+		const height = menuEl.offsetHeight;
+		const viewH = window.visualViewport?.height ?? window.innerHeight;
+		const viewW = window.innerWidth;
+		const above = anchor.bottom + MENU_GAP + height > viewH - VIEWPORT_MARGIN && anchor.top - MENU_GAP - height >= VIEWPORT_MARGIN;
+		const top = above ? anchor.top - MENU_GAP - height : anchor.bottom + MENU_GAP;
+		const left = Math.min(Math.max(anchor.right - width, VIEWPORT_MARGIN), viewW - width - VIEWPORT_MARGIN);
+		menuPos = { top, left, above };
+	}
+
+	function menuItems(): HTMLElement[] {
+		return Array.from(menuEl?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+	}
+
+	async function openMenu() {
+		menuOpen = true;
+		await tick();
+		placeMenu();
+		menuItems()[0]?.focus({ preventScroll: true });
+	}
+
+	function closeMenu(restoreFocus = false) {
+		if (!menuOpen) return;
+		menuOpen = false;
+		if (restoreFocus) menuTrigger?.focus({ preventScroll: true });
+	}
+
+	function toggleMenu() {
+		if (menuOpen) closeMenu();
+		else void openMenu();
+	}
+
+	function onMenuKeydown(event: KeyboardEvent) {
+		const items = menuItems();
+		const at = items.indexOf(document.activeElement as HTMLElement);
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			closeMenu(true);
+		} else if (event.key === 'Tab') {
+			closeMenu();
+		} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			const step = event.key === 'ArrowDown' ? 1 : -1;
+			items[(at + step + items.length) % items.length]?.focus();
+		} else if (event.key === 'Home' || event.key === 'End') {
+			event.preventDefault();
+			items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+		}
+	}
+
+	function handleReport() {
+		closeMenu();
+		reportAiContent(messageContent, sessionId);
+	}
+
+	// While open: a press outside, a scroll or a resize closes the menu (it is
+	// fixed to where the ⋯ was, so it must not float away from it).
+	$effect(() => {
+		if (!menuOpen) return;
+		const onPointer = (event: PointerEvent) => {
+			const target = event.target as Node | null;
+			if (target && (menuEl?.contains(target) || menuTrigger?.contains(target))) return;
+			closeMenu();
+		};
+		const onMove = (event: Event) => {
+			if (event.type === 'scroll' && menuEl?.contains(event.target as Node)) return;
+			closeMenu();
+		};
+		document.addEventListener('pointerdown', onPointer, true);
+		window.addEventListener('scroll', onMove, true);
+		window.addEventListener('resize', onMove);
+		return () => {
+			document.removeEventListener('pointerdown', onPointer, true);
+			window.removeEventListener('scroll', onMove, true);
+			window.removeEventListener('resize', onMove);
+		};
+	});
+
+	// The entry can disappear under an open menu (a new turn starts streaming).
+	$effect(() => {
+		if (!showOverflow || !visible) menuOpen = false;
+	});
 </script>
 
 <!-- Action buttons - visibility controlled by prop, component stays mounted for dialog -->
@@ -251,19 +353,22 @@
 		</button>
 	{/if}
 
-	<!-- Report AI content (assistant only): Google Play generative-AI policy -->
-	{#if messageRole === 'assistant' && !isStreaming && canSendSupportReport()}
+	<!-- ⋯ overflow (assistant, Android app only): holds Report message for
+	     Google Play's generative-AI policy. Absent on web, desktop and Docker. -->
+	{#if showOverflow}
 		<button
 			type="button"
-			class="action-btn report-btn"
-			onclick={() => reportAiContent(messageContent, sessionId)}
-			title="Report AI content"
-			aria-label="Report AI content"
-			data-testid="report-ai-content"
+			class="action-btn"
+			class:menu-open={menuOpen}
+			bind:this={menuTrigger}
+			onclick={toggleMenu}
+			title="More actions"
+			aria-label="More actions"
+			aria-haspopup="menu"
+			aria-expanded={menuOpen}
+			data-testid="message-overflow"
 		>
-			<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3v1.5M3 21v-6m0 0 2.77-.693a9 9 0 0 1 6.208.682l.108.054a9 9 0 0 0 6.086.71l3.114-.732a48.524 48.524 0 0 1-.005-10.499l-3.11.732a9 9 0 0 1-6.085-.711l-.108-.054a9 9 0 0 0-6.208-.682L3 4.5M3 15V4.5" />
-			</svg>
+			<Ellipsis class="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
 		</button>
 	{/if}
 
@@ -281,6 +386,27 @@
 		</button>
 	{/if}
 </div>
+{/if}
+
+<!-- ⋯ menu - portaled to body: the message container clips overflow -->
+{#if menuOpen && showOverflow}
+	<!-- svelte-ignore a11y_interactive_supports_focus -->
+	<div
+		use:portal
+		bind:this={menuEl}
+		class="msg-menu"
+		class:above={menuPos.above}
+		style:top="{menuPos.top}px"
+		style:left="{menuPos.left}px"
+		role="menu"
+		aria-label="Message actions"
+		onkeydown={onMenuKeydown}
+	>
+		<button type="button" class="msg-menu-item" role="menuitem" tabindex="-1" onclick={handleReport}>
+			<Flag class="msg-menu-icon" size={15} strokeWidth={1.8} aria-hidden="true" />
+			<span>Report message</span>
+		</button>
+	</div>
 {/if}
 
 <!-- Rewind Confirmation Dialog - portaled to body to escape content-visibility containment -->
@@ -398,9 +524,77 @@
 		transform: scale(0.94);
 	}
 
-	.report-btn:hover,
-	.report-btn:focus-visible {
+	/* The ⋯ reads as pressed while its menu is open. */
+	.action-btn.menu-open {
+		background-color: var(--muted);
+		color: var(--foreground);
+	}
+
+	/* ⋯ menu: the same card, border, radius and shadow as the session title
+	   menu, fixed to the ⋯ so it escapes the message's clipping. */
+	.msg-menu {
+		position: fixed;
+		z-index: 60;
+		min-width: 176px;
+		max-width: calc(100vw - 16px);
+		padding: 4px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.83);
+		box-shadow: var(--shadow-l);
+		transform-origin: top right;
+		animation: msg-menu-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	.msg-menu.above {
+		transform-origin: bottom right;
+		animation-name: msg-menu-in-above;
+	}
+
+	@keyframes msg-menu-in {
+		from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+		to { opacity: 1; transform: none; }
+	}
+	@keyframes msg-menu-in-above {
+		from { opacity: 0; transform: translateY(4px) scale(0.97); }
+		to { opacity: 1; transform: none; }
+	}
+
+	.msg-menu-item {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		width: 100%;
+		min-height: 36px;
+		padding: 7px 12px 7px 10px;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 0.8125rem;
+		text-align: left;
+		cursor: pointer;
+		transition: background-color 120ms ease, color 120ms ease;
+	}
+	.msg-menu-item :global(.msg-menu-icon) {
+		flex-shrink: 0;
+		color: var(--muted-foreground);
+		transition: color 120ms ease;
+	}
+	.msg-menu-item:hover,
+	.msg-menu-item:focus-visible {
+		background: var(--hover-overlay);
+	}
+	.msg-menu-item:hover :global(.msg-menu-icon),
+	.msg-menu-item:focus-visible :global(.msg-menu-icon) {
 		color: var(--destructive);
+	}
+	.msg-menu-item:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+	.msg-menu-item:active {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
 	}
 
 	.msg-action-btn:hover {
@@ -439,5 +633,8 @@
 	@media (prefers-reduced-motion: reduce) {
 		.action-btn { transition: none; }
 		.action-btn:active { transform: none; }
+		.msg-menu { animation: none; }
+		.msg-menu-item,
+		.msg-menu-item :global(.msg-menu-icon) { transition: none; }
 	}
 </style>
