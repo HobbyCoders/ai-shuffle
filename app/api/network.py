@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -38,6 +39,7 @@ from app.db import network as store
 from app.db.async_database import run_sync
 from app.network import catalog, engine, enrollment, identity as identity_mod, lan, policy, recovery, runners, tokens, transport
 from app.network import endpoints as endpoints_mod
+from app.network import request_metrics
 from app.api.network_usage import router as usage_budget_router
 
 logger = logging.getLogger(__name__)
@@ -664,21 +666,36 @@ async def peer_control(action: str, request: Request,
     # the private-access UI; a forwarded-proto header on the LAN does not.
     secure = control.inbound_https.set(
         request.url.scheme == "https" or request.scope.get("shuffle.forwarded_https") is True)
+    # Controls use device tokens, not the encrypted LAN sync wrapper. Keep
+    # them a separate transport so sync apply time cannot be blamed on Git.
+    started = time.monotonic()
+    metric_status = 500
     try:
-        return await control.handle(action, body, from_device=device_id)
+        result = await control.handle(action, body, from_device=device_id)
+        returned = result.get("status") if isinstance(result, dict) else None
+        metric_status = returned if type(returned) is int and 100 <= returned <= 599 else 200
+        return result
     except control.UnknownControlAction:
+        metric_status = 404
         raise HTTPException(404, "Unknown control action") from None
     except KeyError as exc:
         # A missing field inside a handler is a bad request, not an unknown action.
         logger.exception("Control action %s from %s failed on a missing field", action, device_id)
+        metric_status = 400
         raise HTTPException(400, f"Missing field: {exc.args[0] if exc.args else exc}") from exc
     except (LookupError, PermissionError, ValueError) as exc:
         if action in ("handoff", "session-move"):
             logger.warning("Refused %s control for session %s: %s", action, body.get("session_id"), exc)
         code = 404 if isinstance(exc, LookupError) else 409 if isinstance(exc, PermissionError) else 400
+        metric_status = code
         raise HTTPException(code, str(exc)) from exc
+    except HTTPException as exc:
+        metric_status = exc.status_code
+        raise
     finally:
         control.inbound_https.reset(secure)
+        endpoint = action if re.fullmatch(r"[a-z0-9-]{1,64}", action) else "unknown"
+        request_metrics.metrics.record("control", endpoint, metric_status, time.monotonic() - started)
 
 
 @router.post("/sessions/{session_id}/fork-here", status_code=status.HTTP_201_CREATED)
@@ -872,6 +889,17 @@ _LAN_ROUTES = (
 )
 
 
+def _lan_metric_endpoint(call: dict) -> str:
+    """Only registered route shapes, never raw peer-selected paths/IDs."""
+    method, path = call["m"], call["p"]
+    if path.startswith(_LAN_PREFIX):
+        for verb, pattern, _ in _LAN_ROUTES:
+            if verb == method and pattern.fullmatch(path[len(_LAN_PREFIX):]):
+                template = re.sub(r"\([^)]*\)", "{param}", pattern.pattern)
+                return f"{verb} /peer{template}"
+    return "unmatched"
+
+
 async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
     method, path = call["m"], call["p"]
     query = call.get("q") if isinstance(call.get("q"), dict) else {}
@@ -902,6 +930,7 @@ async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
 @router.post(lan.CALL_PATH.removeprefix("/api/v1/network"))
 async def peer_lan_call(request: Request) -> Response:
     """One sealed request; the answer is sealed to the same session and sequence number."""
+    started = time.monotonic()
     ctx = await _require_lan()
     session_id = request.headers.get(lan.SESSION_HEADER, "")
     try:
@@ -923,8 +952,13 @@ async def peer_lan_call(request: Request) -> Response:
         # Unsealed and generic: the caller opens a new session or uses the tunnel.
         logger.debug("LAN call refused: %s", exc)
         raise HTTPException(401, "LAN session refused") from exc
-    status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
-    return Response(lan.seal_reply(session, seq, status_code, media_type, raw), media_type="application/octet-stream")
+    status_code = 500
+    try:
+        status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
+        return Response(lan.seal_reply(session, seq, status_code, media_type, raw), media_type="application/octet-stream")
+    finally:
+        request_metrics.metrics.record("lan", _lan_metric_endpoint(call), status_code,
+                                       time.monotonic() - started)
 
 
 def _advertised_addresses() -> dict:
