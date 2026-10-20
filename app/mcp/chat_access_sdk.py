@@ -21,7 +21,10 @@ approves them in the private input card. Never reveal private inputs or put
 secrets in tool arguments. Only SSH machines, Linux/macOS folders and HTTPS
 services are supported: check ChatResources; if no handle fits, explain why and
 use RequestChatAccess, then follow the resource's card instructions.
-Initial access requires card approval. Grants expire and are lost on restart.
+Initial access requires card approval. Local Task descendants can use their
+ancestor's handles with the same scope and expiry; unrelated chats and remote
+workers cannot. Grants expire and are lost on restart. Check ChatResources
+before asking again; inheritance does not waive your own action confirmations.
 Never use a machine grant to authorize new access, bypass a denial or reach
 ungranted resources.
 """
