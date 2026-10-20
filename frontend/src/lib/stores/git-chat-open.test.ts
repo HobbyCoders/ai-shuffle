@@ -92,6 +92,28 @@ afterEach(() => {
 });
 
 describe('opening an existing chat', () => {
+	it('does not auto-fetch when the owner reports blocked or unknown checkout activity', async () => {
+		mocks.getGitStatus.mockResolvedValue(transformGitStatus({
+			is_git_repo: true, current_branch: 'feat/x', mutations_blocked: true
+		}));
+		await git.loadRepository('p', false, 's1');
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		// Retry/reopen must not keep issuing a mutation the backend will refuse.
+		await git.loadRepository('p', true, 's1');
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+	});
+
+	it.each([409, 503])('does not auto-fetch an unavailable checkout (%s)', async (status) => {
+		mocks.getGitStatus.mockRejectedValue({ status, detail: 'Checkout unavailable' });
+		vi.spyOn(console, 'error').mockImplementation(() => {});
+		await git.loadRepository('p', false, 's1');
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		expect(git.current.error).toBe('Checkout unavailable');
+	});
+
 	it('issues only the header requests before the transcript is on screen', async () => {
 		const transcript = deferred();
 		const load = git.loadRepository('p', false, 's1', { afterCriticalPath: transcript.promise });

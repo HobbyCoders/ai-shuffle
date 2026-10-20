@@ -165,7 +165,7 @@ A git or GitHub route given a subagent's `session_id` (a Task or Swarm child's c
 
 ### GET /api/v1/projects/{project_id}/git/status
 
-Get git status for a project.
+Get git status for a project. A missing project or session checkout returns `409` (previously `503`), with a detail explaining how to restore or select a checkout. A failed Git probe or unreadable repository metadata still returns `503`, with a cause-specific detail.
 
 For an unbound project subfolder inside an enclosing repository, status returns `200` with `is_git_repo: true`, `enclosing_repository_root` naming that root, and `mutations_blocked: true`. Its file lists are empty: parent-wide changes are not exposed through the subfolder. Open the named repository root as a project to use Git controls. Other checkout-scoped Git actions on that subfolder return `409`. A project with its own nested repository behaves like any repository root (`enclosing_repository_root: null`). Plain folders return `is_git_repo: false`; unavailable checkouts still return an error.
 
@@ -234,7 +234,7 @@ Delete a branch. Add `?force=true` to delete a branch that is not fully merged. 
 | Method | Path | Body or query | Notes |
 |--------|------|---------------|-------|
 | `POST` | `/git/checkout` | Body: `{"ref": "main", "auto_stash": false}` | Switch branch or commit in the project folder. Returns `409` for uncommitted changes unless `auto_stash` is `true`. Not allowed with `worktree_id` |
-| `POST` | `/git/fetch` | Query: `remote` (default `origin`) | Returns `502` if the remote cannot be reached |
+| `POST` | `/git/fetch` | Query: `remote` (default `origin`) | `409` for a missing checkout or active worktree/branch; `503` for a failed checkout probe, unknown activity, or unreachable worker (the detail identifies the cause); `502` if the Git remote cannot be reached. Background fetch skips checkouts whose status reports `mutations_blocked` |
 | `POST` | `/git/pull` | Body: `{"remote": "origin", "strategy": "merge", "auto_stash": false}` | `strategy` is `merge` or `rebase`. On a conflict the pull is aborted and the response has `success: false`, `has_conflicts: true` and `conflicts` |
 | `POST` | `/git/push` | Body: `{"remote": "origin", "branch": null, "set_upstream": false, "force": false}` | `branch` defaults to the current branch and must be a plain branch name: a refspec (`:main`, `+main`, `a:b`) or a name starting with `-` returns `400`. `remote` is letters, digits, `.`, `_` and `-`, and must not start with `-` |
 | `POST` | `/git/stage` | Body: `{"files": ["src/app.py"]}` | |

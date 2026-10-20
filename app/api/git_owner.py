@@ -5,9 +5,11 @@ the session/project binding; the owner supplies its own checkout identifiers.
 The regular endpoint remains the implementation for local and remote actions.
 """
 import inspect
+import logging
 import os
 import stat
 import subprocess
+from collections import OrderedDict
 from functools import wraps
 from typing import get_type_hints
 
@@ -20,6 +22,52 @@ from app.db.async_database import run_sync
 from app.network import control
 
 _actions = {}
+logger = logging.getLogger(__name__)
+# Suppress repeated polling failures without silencing new causes at capacity.
+_forward_failures = OrderedDict()
+_FORWARD_FAILURE_LIMIT = 2048
+
+
+def _warn_forward_failure(target, action, values, status, detail):
+    reason = str(detail)
+    key = (target, action, values.get("project_id"), values.get("session_id"), status, reason)
+    repeat = key in _forward_failures
+    _forward_failures[key] = None
+    _forward_failures.move_to_end(key)
+    if len(_forward_failures) > _FORWARD_FAILURE_LIMIT:
+        _forward_failures.popitem(last=False)
+    log = logger.debug if repeat else logger.warning
+    log("Forwarded Git action %s to %s: inner status=%s reason=%s", action, target, status, reason)
+
+
+def checkout_probe_error(exc):
+    """Keep filesystem and Git probe failures distinct from an absent checkout."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        reason = f"Git checkout probe timed out after {exc.timeout:g} seconds."
+    elif isinstance(exc, PermissionError):
+        reason = "Permission denied while probing the Git checkout."
+    elif isinstance(exc, FileNotFoundError):
+        if exc.filename and os.path.basename(exc.filename).lower() not in {"git", "git.exe"}:
+            return HTTPException(409, "Git checkout path no longer exists. Restore the checkout before using Git actions.")
+        reason = "Git executable was not found while probing the checkout."
+    elif isinstance(exc, subprocess.CalledProcessError):
+        reason = f"Git checkout probe failed (exit code {exc.returncode})."
+        # Raw Git diagnostics can contain private paths and safe.directory
+        # hints. Retain them only on the worker that actually ran the probe.
+        logger.debug("Git checkout probe failed (exit code %s), stderr: %s", exc.returncode, exc.stderr)
+        diagnostic = str(exc.stderr or "").strip().lower()
+        if diagnostic.startswith("fatal: detected dubious ownership"):
+            reason += " Dubious ownership."
+        elif diagnostic.startswith(("fatal:", "error:", "permission denied")) and "permission denied" in diagnostic:
+            reason += " Permission denied."
+        elif diagnostic.startswith("fatal: not a git repository"):
+            reason += " Not a Git repository."
+    elif isinstance(exc, OSError):
+        reason = f"Git checkout probe failed: {exc.strerror or type(exc).__name__}."
+    else:
+        reason = "Git checkout subprocess failed."
+    return HTTPException(503, reason)
+
 
 #: Refusal for any owner-driven Git action addressed to a subagent's chat. A
 #: Task/Swarm child's chat is for reading its transcript and messaging it; its
@@ -62,6 +110,8 @@ async def _guard_mutation(action_name, values, endpoint=None):
         raise HTTPException(400, 'Cannot checkout branches in a worktree. Worktrees are bound to their branch.')
     try:
         cwd = await resolve(project_id, wid, sid)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise checkout_probe_error(exc) from exc
     except HTTPException as exc:
         # GitHub-only projects need not have a local clone. Branch activity is
         # still checked against the authenticated project's canonical aliases.
@@ -75,11 +125,11 @@ async def _guard_mutation(action_name, values, endpoint=None):
         # must use Git's actual discovery, including reads of parent-wide data.
         root = await run_sync(_enclosing_repository, cwd, allow_fast_path=False) if cwd else None
     except (OSError, subprocess.SubprocessError) as exc:
-        raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
+        raise checkout_probe_error(exc) from exc
     if root:
         session = await run_sync(database.get_session, sid) if sid else None
         if wid or (session and (session.get("branch") or session.get("worktree_branch"))):
-            raise HTTPException(503, "Git checkout is unavailable. Check again.")
+            raise HTTPException(503, "The bound checkout no longer has its own Git repository. Restore it before using Git actions.")
         raise HTTPException(409, f"Inside repository {root}. Open that repository root as a project to use Git controls.")
     if action_name not in _MUTATING_ACTIONS:
         return
@@ -140,10 +190,14 @@ def session_git_action(endpoint):
                 "action": endpoint.__name__, "session_id": session_id, "params": params,
             }, timeout=20.0 if request.method == "GET" else 300.0)
         except control.RunnerUnreachable as exc:
-            raise HTTPException(503, "Owning worker is unreachable. Reconnect it to use Git actions.") from exc
+            detail = "Owning worker is unreachable. Reconnect it to use Git actions."
+            _warn_forward_failure(owner, endpoint.__name__, values, 503, detail)
+            raise HTTPException(503, detail) from exc
         except control.ControlRefused as exc:
+            _warn_forward_failure(owner, endpoint.__name__, values, 409, str(exc))
             raise HTTPException(409, str(exc)) from exc
         if result["status"] >= 400:
+            _warn_forward_failure(owner, endpoint.__name__, values, result["status"], result["detail"])
             raise HTTPException(result["status"], result["detail"])
         return result["result"]
 
@@ -255,10 +309,14 @@ async def _route_project_git(endpoint, values, worker_id, branch):
                   await control.call(target, "project-git", payload,
                                      timeout=20.0 if values["request"].method == "GET" else 300.0))
     except control.RunnerUnreachable as exc:
-        raise HTTPException(503, "Selected worker is unreachable. No local Git action was run.") from exc
+        detail = "Selected worker is unreachable. No local Git action was run."
+        _warn_forward_failure(target, endpoint.__name__, values, 503, detail)
+        raise HTTPException(503, detail) from exc
     except control.ControlRefused as exc:
+        _warn_forward_failure(target, endpoint.__name__, values, 409, str(exc))
         raise HTTPException(409, str(exc)) from exc
     if result["status"] >= 400:
+        _warn_forward_failure(target, endpoint.__name__, values, result["status"], result["detail"])
         raise HTTPException(result["status"], result["detail"])
     return result["result"]
 
@@ -407,16 +465,19 @@ async def handle_project_git(body, from_device):
                 plain_folder = await run_sync(_is_plain_project_folder, path)
                 if not plain_folder and not await run_sync(_enclosing_repository, path):
                     continue
-            except (OSError, subprocess.SubprocessError):
-                return {"status": 503, "detail": "Git checkout is unavailable. Check again."}
+            except (OSError, subprocess.SubprocessError) as exc:
+                error = checkout_probe_error(exc)
+                return {"status": error.status_code, "detail": error.detail}
         actual = None if plain_folder else await run_sync(git_service.get_current_branch, path)
         if branch is None and row.get("branch"):
             continue
         if branch is not None and actual != branch:
             continue
         found.setdefault(os.path.normcase(os.path.realpath(path)), (path, row, plain_folder))
-    if len(found) != 1:
-        return {"status": 409, "detail": "Selected checkout is missing or ambiguous on this worker"}
+    if not found:
+        return {"status": 409, "detail": "No matching Git checkout exists on the selected worker. Restore the checkout or select another worker or branch."}
+    if len(found) > 1:
+        return {"status": 409, "detail": "Multiple Git checkouts match on the selected worker. Select a specific checkout branch."}
     path, checkout, plain_folder = next(iter(found.values()))
     if name == "checkout_branch" and checkout.get("branch"):
         return {"status": 400, "detail": "Cannot checkout branches in a worktree. Worktrees are bound to their branch."}

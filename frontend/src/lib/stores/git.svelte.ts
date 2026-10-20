@@ -595,7 +595,9 @@ async function _loadCore(
 
 			_saveToCache(key, newState);
 
-			_backgroundFetch(key, projectId, worktreeId, requestScope);
+			// Fetch updates refs, so the same safety guard as an explicit mutation
+			// applies. Do not knowingly send a background request that must fail.
+			if (!status.mutations_blocked) _backgroundFetch(key, projectId, worktreeId, requestScope);
 		} else {
 			// Not a git repo — a POSITIVE answer, so clear ALL git state (stale
 			// cached diffStats/prState/branches from a previous load must not
