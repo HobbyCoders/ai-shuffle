@@ -1365,6 +1365,10 @@ async def test_bundled_child_subprocess_speaks_mcp(transport, tmp_path, monkeypa
     from fluid.tools.child_env import child_env_with_overlay
     from fluid.tools.mcp.bundled_server import bundled_server_config
 
+    # The real generated bridge command must not import a project's fluid/.
+    project_fluid = tmp_path / "fluid"
+    project_fluid.mkdir()
+    (project_fluid / "__init__.py").write_text("raise RuntimeError('project fluid shadowed the bridge')\n")
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "worker-server"))
     monkeypatch.setenv("VIRTUAL_ENV", "worker-venv")
     monkeypatch.setenv("PYTHONHOME", sys.base_prefix)

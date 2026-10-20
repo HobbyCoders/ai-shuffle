@@ -621,7 +621,9 @@ def bundled_server_config(socket_path: str, token: str | None = None) -> dict[st
         "type": "stdio",
         "env": runtime_env,
         "command": sys.executable,
-        "args": ["-m", "fluid.tools.mcp.bundled_server", "--socket", socket_path],
+        # All supported runtimes are Python 3.12+: do not put the project cwd
+        # before our explicit import root (a project may have its own fluid/).
+        "args": ["-P", "-m", "fluid.tools.mcp.bundled_server", "--socket", socket_path],
         "alwaysLoad": True,
     }
     if token is not None:

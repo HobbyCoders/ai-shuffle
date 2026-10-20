@@ -191,10 +191,16 @@ def test_git_service_commit_hook_drops_worker_python_env(repositories, monkeypat
     assert result.returncode != 0
 
 
-def test_export_local_pre_push_failure_has_actionable_private_message(repositories):
+@pytest.mark.parametrize("diagnostic", [
+    "pre-push: local checks failed secret-sentinel",
+    "FAILED: Inherited PYTHONPATH points outside this checkout. secret-sentinel",
+    "FAILED: tests/core/test_example.py exited 1; secret-sentinel",
+    "",  # Even a silent executable hook produces Git's final error line.
+])
+def test_export_local_pre_push_failure_has_actionable_private_message(repositories, diagnostic):
     source, _ = repositories
     hook = source / ".git" / "hooks" / "pre-push"
-    hook.write_text('#!/bin/sh\necho "pre-push: local checks failed secret-sentinel" >&2\nexit 1\n')
+    hook.write_text('#!/bin/sh\necho "' + diagnostic + '" >&2\nexit 1\n')
     hook.chmod(0o755)
     with pytest.raises(ValueError) as raised:
         export_checkout(source, "feature/only-on-worker")
@@ -205,11 +211,46 @@ def test_export_local_pre_push_failure_has_actionable_private_message(repositori
     assert "credentials" not in message and "secret-sentinel" not in message
 
 
-@pytest.mark.parametrize("stderr", [b"pre-push: permission failure", b"local hook failed"])
-def test_push_refused_classifies_local_hook_without_echoing(stderr):
+@pytest.mark.parametrize("hooks_path", ["default", "relative", "absolute"])
+def test_push_refused_uses_effective_executable_hook_path(repositories, tmp_path, hooks_path):
     from app.core.checkout_transfer import _push_refused
 
-    assert "This worker's pre-push hook" in _push_refused(stderr, "fix/test")
+    source, _ = repositories
+    directory = source / ".git" / ("hooks" if hooks_path == "default" else "custom-hooks")
+    directory.mkdir(exist_ok=True)
+    if hooks_path != "default":
+        git(source, "config", "core.hooksPath", str(directory) if hooks_path == "absolute" else ".git/custom-hooks")
+    hook = directory / "pre-push"
+    stderr = b"FAILED: tests/core/test_example.py exited 1\nerror: failed to push some refs to 'private-url'\n"
+    assert "pre-push hook" not in _push_refused(stderr, "fix/test", source)
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    if os.name != "nt":  # Windows does not enforce POSIX executable bits.
+        hook.chmod(0o644)
+        assert "pre-push hook" not in _push_refused(stderr, "fix/test", source)
+    hook.chmod(0o755)
+    assert "This worker's pre-push hook" in _push_refused(stderr, "fix/test", source)
+
+
+@pytest.mark.parametrize("stderr, expected", [
+    (b"remote: Permission to acme/webhook-relay.git denied 403\n", "Origin refused"),
+    (b"fatal: Authentication failed for 'https://example.com/git-hooks.git/'\n", "Origin refused"),
+    (b"remote: pre-receive hook declined\n ! [remote rejected] fix/test -> fix/test (hook declined)\n", "Origin refused"),
+    (b" ! [rejected] fix/test -> fix/test (non-fast-forward)\n", "changed meanwhile"),
+    (b"remote: server temporarily unavailable\n", "Could not update"),
+    (b"fatal: unable to access 'https://example.com/git-hooks.git/'\n", "Could not update"),
+    (b" ! [remote rejected] fix/test -> fix/test (server unavailable)\n", "Could not update"),
+])
+def test_push_refused_does_not_confuse_server_or_credentials_with_local_hook(repositories, stderr, expected):
+    from app.core.checkout_transfer import _push_refused
+
+    source, _ = repositories
+    hook = source / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    message = _push_refused(stderr + b"error: failed to push some refs to 'private-url'\n", "fix/test", source)
+    assert expected in message
+    assert "pre-push hook" not in message
+    assert "private-url" not in message and "example.com" not in message
 
 
 def test_push_refused_keeps_server_hook_declined_meaning():

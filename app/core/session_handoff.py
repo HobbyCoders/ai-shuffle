@@ -535,7 +535,8 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
 
 
 def _handoff_context(pending: PendingHandoff, label: str) -> str:
-    prompt = f"[hand-off] Moved from {_self_label()} to {label}, as you requested with HandOffSession."
+    reason = ", as you requested with HandOffSession." if pending.by == "agent" else " at the owner's request."
+    prompt = f"[hand-off] Moved from {_self_label()} to {label}{reason}"
     if pending.note:
         prompt += f" Your hand-off note: {pending.note}"
     return prompt
