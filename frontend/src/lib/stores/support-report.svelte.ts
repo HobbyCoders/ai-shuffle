@@ -38,6 +38,7 @@ import {
 	type SupportReportPreview
 } from '$lib/api/support';
 import type { ApiError } from '$lib/api/client';
+import { isBundledMobile, nativeBridge } from '$lib/api/runtime';
 
 // ---------------------------------------------------------------------------
 // Capabilities
@@ -85,6 +86,19 @@ export function canSendSupportReport(): boolean {
 	return supportCaps.status !== 'forbidden' && (supportCaps.current?.basic_report ?? true);
 }
 
+/**
+ * Offer "Report message" (offensive or harmful AI output) only in the Android
+ * app, where Google Play's generative-AI policy asks for it; the web UI,
+ * desktop app, Docker and the iOS app do not show it (owner decision). The
+ * Android app's bridge names its platform; an app from before the bridge sent
+ * no platform, and only Android apps are that old. The report endpoint itself
+ * stays for every client.
+ */
+export function canReportAiContent(): boolean {
+	if (!isBundledMobile() || !canSendSupportReport()) return false;
+	return (nativeBridge()?.platform ?? 'android') === 'android';
+}
+
 /** "Fix with AI" is for source checkouts only; unknown means no. */
 export function canFixWithAi(): boolean {
 	return supportCaps.current?.fix_with_ai === true;
@@ -130,7 +144,7 @@ export function openSupportReport(source: ReportSource, note?: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// "Report AI content" from a chat message
+// "Report message" from a chat reply (Android app only)
 // ---------------------------------------------------------------------------
 
 export interface AiContentPrefill {
@@ -157,6 +171,7 @@ export const aiContentPrefill = new AiContentPrefillStore();
  * user continues and then presses Send.
  */
 export function reportAiContent(excerpt: string, sessionId?: string | null): void {
+	if (!canReportAiContent()) return;
 	aiContentPrefill.value = { excerpt: clipCodePoints(excerpt.trim(), EXCERPT_MAX), sessionId: sessionId ?? null };
 	openSettings({ category: 'system', anchor: 'system.reportProblem' });
 }

@@ -1616,24 +1616,8 @@ class ChatWebSocketHandler:
 
         if not is_new_session:
             existing_session = await run_sync(database.get_session, session_id)
-            # Sending a message re-activates a settled session: the user is
-            # clearly working in it again, so it moves back into the sidebar's
-            # Active group. Two fan-outs: session-scoped reaches THIS device
-            # (it just registered on the session) plus any watcher, and the
-            # user-wide one covers devices that never opened the session.
-            if existing_session and not existing_session.get("is_active", True):
-                await run_sync(database.set_session_active, session_id, True)
-                await sync_engine.broadcast_session_updated(
-                    session_id=session_id,
-                    updates={"is_active": True},
-                    source_device_id=None,
-                )
-                await sync_engine.broadcast_user_session_updated(
-                    user_id=self.user_id,
-                    session_id=session_id,
-                    updates={"is_active": True},
-                    source_device_id=self.device_id,
-                )
+            # Reactivation belongs to turn_manager admission, shared with
+            # compact, Retry and direct/forwarded sends.
             # Backfill title from first user message for sessions created without
             # one (e.g. via the auto-worktree REST endpoint, which creates the
             # session before any user prompt exists). Harmless if this query is
@@ -1784,6 +1768,7 @@ class ChatWebSocketHandler:
             # submit_turn exports this send's lifted blobs; the owner imports
             # them before enqueuing so the prompt never names unavailable bytes.
             try:
+                await turn_manager.reactivate_for_send(session_id, "user", payload)
                 submitted = await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
@@ -2634,6 +2619,7 @@ class ChatWebSocketHandler:
         if owner_device:
             from app.network import control
             try:
+                await turn_manager.reactivate_for_send(session_id, "queue", payload)
                 await control.submit_turn(
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
                     project_id=project_id, payload=payload or None, owner_send=True,

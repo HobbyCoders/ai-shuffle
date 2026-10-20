@@ -88,7 +88,7 @@ const STATUS = {
 const OWNER = { password_set: true, setup_allowed: false, required: false, trusted_lan: false, login_available: true, desktop_handoff: false, min_length: 8 };
 const PREFERENCE_KEYS = ['composer.profile', 'composer.project', 'composer.checkout', 'composer.model', 'composer.effort',
 	'composer.permissionMode', 'composer.contextWindowChoice', 'composer.fastMode', 'composer.worktreeIntent',
-	'context_breakdown_open', 'context_usage_sections', 'sidebar_collapsed_groups', 'context_usage_hidden_providers', 'install_prompt'];
+	'context_breakdown_open', 'context_usage_sections', 'sidebar_collapsed_groups', 'context_usage_hidden_providers', 'ui:running_tasks_open', 'install_prompt'];
 function body(path: string): unknown {
 	if (path === '/owner/status') return OWNER;
 	if (path === '/auth/status') return STATUS;

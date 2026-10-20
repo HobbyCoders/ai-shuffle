@@ -39,6 +39,7 @@
 	import type { ReportKind } from '$lib/api/support';
 	import {
 		aiContentPrefill,
+		canReportAiContent,
 		canSendSupportReport,
 		openSupportReport,
 		supportCaps
@@ -225,11 +226,20 @@
 	let reason = $state('');
 	let reportSession = $state<string | null>(null);
 
-	// A chat message's "Report AI content" lands here with the message filled in.
+	// Opened from the row, the form is always a problem report; an AI content
+	// report lasts only until the form closes.
+	$effect(() => {
+		if (reportOpen) return;
+		reportKind = 'problem';
+		reportSession = null;
+	});
+
+	// The Android app's "Report message" (a chat reply's ⋯ menu) lands here with
+	// the message filled in. Nowhere else offers AI content reports.
 	$effect(() => {
 		if (!aiContentPrefill.value) return;
 		const prefill = aiContentPrefill.take();
-		if (!prefill) return;
+		if (!prefill || !canReportAiContent()) return;
 		reportKind = 'ai_content';
 		excerpt = prefill.excerpt;
 		reason = '';
@@ -445,7 +455,7 @@
 
 {#snippet reportForm()}
 	<ReportProblemForm
-		bind:kind={reportKind}
+		kind={reportKind}
 		bind:description={problem}
 		bind:excerpt
 		bind:reason

@@ -96,9 +96,9 @@ export const entries: SettingEntry[] = [
 		id: 'system.reportProblem',
 		category: 'system',
 		section: 'Help',
-		label: 'Report a problem or AI content',
+		label: 'Report a problem',
 		hint: 'Send to HobbyCoders support',
-		help: 'Describe what went wrong, or report offensive or harmful AI output for review by a person. You then see exactly what will be sent, with secrets hidden, and nothing leaves this worker until you press Send. Without a Shuffle account the report is saved on this worker and you can email it to support@hobbycoders.com.',
-		keywords: ['support', 'bug', 'send report', 'send logs', 'feedback', 'contact', 'issue', 'help', 'hobbycoders', 'report ai content', 'offensive', 'harmful', 'abuse', 'inappropriate', 'flag']
+		help: 'Describe what went wrong. You then see exactly what will be sent, with secrets hidden, and nothing leaves this worker until you press Send. Without a Shuffle account the report is saved on this worker and you can email it to support@hobbycoders.com.',
+		keywords: ['support', 'bug', 'send report', 'send logs', 'feedback', 'contact', 'issue', 'help', 'hobbycoders']
 	}
 ];
