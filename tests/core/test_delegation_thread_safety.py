@@ -3,11 +3,19 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from fluid.swarm import Launch
 from fluid.tools.registry import ToolCtx
 
 from app.core import agent_messaging as messaging, session_runtime, turn_scheduler, swarm
 from tests.core.test_owner_delegation import peers, runtime, worker, lineage_threads
+
+
+@pytest.fixture(autouse=True)
+def isolated_supervisor(monkeypatch):
+    from app.core import provider_agent_supervisor as supervisor
+    monkeypatch.setattr(supervisor, "_LIVE", {})
 
 
 async def test_scheduler_keeps_host_state_on_loop(peers, runtime, lineage_threads, monkeypatch):
@@ -31,11 +39,20 @@ async def test_steer_keeps_host_state_on_loop(peers, runtime, lineage_threads, m
     monkeypatch.setitem(session_runtime._live_runtimes, "peer", current)
     adapter = SimpleNamespace(steer=AsyncMock(), steer_peer=AsyncMock(), provider_kind="delegated")
     runtime[1]["peer"].adapter = adapter
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(
+        get=runtime[1].get, peek=runtime[1].get,
+    ))
     monkeypatch.setattr(turn_scheduler, "kick", lambda _: None)
     queued = await turn_scheduler.on_agent_message("peer", "caller", "Revised scope")
     assert queued
-    lineage_threads.clear()
+    row = turns.get_turn(queued)
+    assert current._live_adapter() is adapter
+    assert not await current._turn_is_dying()
+    assert current._steer_refusal(row) is None, current._steer_refusal(row)
     assert await current.steer_pending() == 1
+    adapter.steer_peer.assert_awaited_once()
+    assert queued in current._steer_attempted
+    assert await current.steer_pending() == 0  # cannot admit the same row twice
     assert adapter.steer_peer.await_args.kwargs["provenance"] == "parent"
     assert "peer" in lineage_threads and "caller" in lineage_threads
     # Receipt attribution must use the same loop/thread split as steering.
