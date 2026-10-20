@@ -267,8 +267,9 @@ class FactStore:
     def _repair_supersession_links(self, doc):
         """Repair invalid links without resurrecting expired replacement values.
 
-        Forget/curation restores eligible predecessors, then re-links them in
-        the same transaction so only the nearest replacement becomes current.
+        Keep direct edges: flattening loses learner-proposed intermediate
+        replacements, which cannot be recovered from wording after withdrawal.
+        Forget/curation restores only the nearest eligible predecessor.
         Expiry, overflow and archive pruning are not evidence of retraction:
         their predecessors keep links and age out on their own. Read paths
         repair legacy links too. Text and lifetime are never renewed here.
@@ -278,6 +279,8 @@ class FactStore:
         from fluid.context.screening import screen_findings
         records = doc["entries"] + doc["archived"]
         by_id = {global_id(e): e for e in records}
+        forgotten_links = {global_id(e): e.get("superseded_by") for e in doc["tombstones"]}
+        forgotten_cache = {}  # one 16-KiB barrier decode per distinct pointer
         now = time.time()
         for _ in range(len(records) + 1):
             plans = []
@@ -293,13 +296,18 @@ class FactStore:
                         break
                     seen.add(pointer)
                     target = by_id.get(pointer)
-                    forgotten = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
+                    if pointer not in forgotten_cache:
+                        forgotten_cache[pointer] = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
+                    forgotten = forgotten_cache[pointer]
                     retired = (target is not None and target.get("retired_at")
                                and target.get("retired_reason") != "superseded"
                                and not target.get("superseded_by"))
                     if forgotten or retired:
                         if node is old:
-                            plans.append((old, None, False))
+                            # A forgotten intermediate may still bridge to a
+                            # newer value, including a concurrent replica link.
+                            onward = forgotten_links.get(pointer) if forgotten else None
+                            plans.append((old, onward, confirmed if onward else False))
                         break  # an intermediate retracted leaf is repaired first
                     if target is None:
                         break  # archive pruning is not a retraction
@@ -315,9 +323,9 @@ class FactStore:
                         if (old.get("protected") and target.get("protected")
                                 and replacement_evidence(dict(old, superseded_by=None), target)):
                             confirmed = True
-                        if (pointer != old["superseded_by"] or confirmed != bool(old.get("supersession_confirmed"))
+                        if (confirmed != bool(old.get("supersession_confirmed"))
                                 or (confirmed and old.get("conflicted"))):
-                            plans.append((old, pointer, confirmed))
+                            plans.append((old, old["superseded_by"], confirmed))
                         break
                     confirmed = confirmed and bool(target.get("supersession_confirmed"))
                     node = target
@@ -683,7 +691,7 @@ class FactStore:
         from fluid.context.screening import screen_findings
         changed = []
         # Older linked records are bridges for partially repaired legacy
-        # chains; _maintain flattens them to the live successor afterwards.
+        # chains; direct edges keep proposal history recoverable on withdrawal.
         current = sorted(candidates if candidates is not None else doc["entries"] + [
             e for e in doc["archived"] if e.get("superseded_by")],
                          key=lambda e: (e.get("updated_at", 0), e["id"]))
@@ -756,6 +764,9 @@ class FactStore:
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
                          "fingerprints": [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])],
                          "source_session": old.get("source_session")}
+            if old.get("superseded_by"):
+                # ID-only bridge: no forgotten text is retained here.
+                tombstone["superseded_by"] = old["superseded_by"]
             doc["tombstones"].append(tombstone)
             barrier = barrier_add(doc.get("forgotten", ""), "id:" + global_id(tombstone))
             for fp in tombstone["fingerprints"]:
@@ -856,10 +867,14 @@ class FactStore:
             tombstones = {t["id"]: t for t in doc["tombstones"]}
             for raw in snapshot.get("tombstones", []):
                 t = dict(raw, id=ident(raw))
+                if t.get("superseded_by") is not None and not (
+                        isinstance(t["superseded_by"], str)
+                        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,160}", t["superseded_by"])):
+                    raise ValueError("Invalid forgotten memory supersession link")
                 old = tombstones.get(t["id"])
                 if not old or t.get("revision", 0) > old.get("revision", 0):
                     # Never retain supplied plaintext in deletion metadata.
-                    tombstones[t["id"]] = {k: t.get(k) for k in ("id", "origin", "revision", "key", "scope", "deleted_at", "fingerprints", "source_session")}
+                    tombstones[t["id"]] = {k: t.get(k) for k in ("id", "origin", "revision", "key", "scope", "deleted_at", "fingerprints", "source_session", "superseded_by")}
             entries = {e["id"]: e for e in doc["entries"] + doc["archived"]}
             for raw in snapshot.get("entries", []):
                 entry = dict(raw, id=ident(raw))

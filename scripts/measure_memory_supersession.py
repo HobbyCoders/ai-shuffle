@@ -6,7 +6,7 @@ Only aggregate counts/sizes are printed. Real input is copied to a temporary
 store; no source contents, identities, project IDs or facts are printed.
 """
 from __future__ import annotations
-import argparse, ast, hashlib, json, math, shutil, subprocess, sys, tempfile
+import argparse, ast, hashlib, json, math, shutil, subprocess, sys, tempfile, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fluid"))
 from fluid.codemode.skills import SkillStore
@@ -37,6 +37,31 @@ def scenario(store, old_id, new_id, project):
     return {"before": before, "after": describe()}
 
 
+def proposal_withdrawal(root, fact_type=None):
+    """Real save/proposal/Forget/retire producers, never a model call."""
+    results = {}
+    for action in ("forget", "retire"):
+        store = SkillStore(root / action)
+        if fact_type is not None:
+            store._facts = fact_type(store.root)
+        old, middle, final = [store.save_memory(f"Backend workflow jobs run on worker {worker} nightly.")
+                              for worker in ("Orion", "Lyra", "Vega")]
+        store.propose_memory_supersession(old.id, middle.id,
+                                          old_revision=old.revision, new_revision=middle.revision)
+        store.propose_memory_supersession(middle.id, final.id,
+                                          old_revision=middle.revision, new_revision=final.revision)
+        if action == "forget":
+            store.delete_memory(final.id, explicit=True)
+        else:
+            store.retire_memory(final.id, reason="consolidation")
+        section = store.render_memory_section() or ""
+        results[action] = {"obsolete_value_injected": old.text in section,
+                           "nearest_predecessor_injected": middle.text in section,
+                           "snapshot_chars": len(section),
+                           "snapshot_tokens_est": math.ceil(len(section) / 4)}
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-file", type=Path)
@@ -65,6 +90,13 @@ def main():
                 new = store.save_memory(NEW, key="delegation.model", protected=True)
                 store._facts._apply_supersessions = apply
                 result["explicit" if protected else "inferred"] = scenario(store, old.id, new.id, "project:fixture")
+        result["proposal_withdrawal"] = {"after": proposal_withdrawal(root / "proposal-after")}
+        if args.baseline_ref:
+            # A trusted repository revision, isolated to disposable stores.
+            source = subprocess.check_output(["git", "show", args.baseline_ref + ":fluid/fluid/codemode/facts.py"], text=True)
+            module = types.ModuleType("fluid.codemode._supersession_baseline")
+            exec(compile(source, "baseline_facts.py", "exec"), module.__dict__)
+            result["proposal_withdrawal"]["before"] = proposal_withdrawal(root / "proposal-before", module.FactStore)
     current = {"_SYNTH_SYSTEM": _SYNTH_SYSTEM, "_CONSOLIDATE_SYSTEM": _CONSOLIDATE_SYSTEM}
     sections = {key: {"chars": len(text), "tokens_est": math.ceil(len(text)/4)} for key,text in current.items()}
     if args.baseline_ref:
