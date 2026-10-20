@@ -7,6 +7,7 @@ substrings in unrelated prose. Explicit Recall also preserves short acronyms.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _STOP = frozenset("""
 a an and are as at be been but by can could did do does for from get gets give
@@ -30,6 +31,41 @@ _NO_SPACES = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af\u0e00-\u0eff\
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
+_RECALL_WORDS = re.compile(r"c\+\+|c#|[^\W_]+")
+_RECALL_PARTS = re.compile(r"c\+\+|c#|[^\W_]+|[^\w\s]")
+
+
+def _recall_words(text: str) -> tuple[str, ...]:
+    """Shared Unicode words: marks extend a word in every script, never split it."""
+    text = unicodedata.normalize("NFC", text.casefold())
+    if text.isascii():
+        return tuple(_RECALL_WORDS.findall(text))
+    words: list[str] = []
+    current = ""
+    end = -1
+    for match in _RECALL_PARTS.finditer(text):
+        if match.start() != end and current:
+            words.append(current)
+            current = ""
+        part = match.group()
+        if part in {"c++", "c#"}:
+            if current:
+                words.append(current)
+                current = ""
+            words.append(part)
+        elif part[0].isalnum():
+            current += part
+        elif unicodedata.category(part[0]).startswith("M") and current:
+            current += part
+        elif current:
+            words.append(current)
+            current = ""
+        end = match.end()
+    if current:
+        words.append(current)
+    return tuple(words)
+
+
 def _recall_text(text: str) -> str:
     # Keep negation intact: don't -> dont, never don (Donation).
     text = re.sub(r"(\w+)n['’]t\b", r"\1nt", text, flags=re.I)
@@ -41,8 +77,7 @@ def recall_terms(text: str) -> frozenset[str]:
     text = _recall_text(text[:4000]).casefold()
     addresses = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text)
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", " ", text)
-    words = list(dict.fromkeys(addresses + re.findall(
-        r"c\+\+|c#|[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff]+|[^\W_]+", text)))
+    words = list(dict.fromkeys(addresses + list(_recall_words(text))))
     # Drop lone fragments in sentences, but retain a one-keyword name.
     words = [w for w in words if len(w) > 1 or len(words) == 1]
     filtered = [w for w in words if w not in (_STOP - {"go", "make"})]
@@ -57,9 +92,8 @@ def recall_relevance(text: str, terms: frozenset[str]) -> int:
     is limited to words with non-space scripts, including mixed Latin text.
     """
     text = _recall_text(text)
-    folded = text.casefold()
-    parts = _CAMEL_BOUNDARY.sub(" ", text).casefold()
-    words = set(re.findall(r"[^\W_]+", folded + " " + parts))
+    folded = unicodedata.normalize("NFC", text.casefold())
+    words = set(_recall_words(text)) | set(_recall_words(_CAMEL_BOUNDARY.sub(" ", text)))
     unsegmented = [word for word in words if _NO_SPACES.search(word)]
     score = 0
     for term in terms:

@@ -29,6 +29,17 @@ from fluid.codemode.skills import SkillStore
     ("រាល់", "សាកល្បងរាល់ថ្ងៃ"),
     ("တိုင်း", "စမ်းသပ်မှုနေ့တိုင်း"),
     ("pytest ทุก", "pytest ทำงานทุกวัน"),
+    ("तैयार", "यह सर्वर तैयार है।"),
+    ("तैनाती", "इस शाखा की तैनाती तैयार है।"),
+    ("शाखा", "इस शाखा की तैनाती तैयार है।"),
+    ("किताब", "किताब मेज़ पर रखी है।"),
+    ("मेज़", "किताब मेज़ पर रखी है।"),
+    ("সার্ভার", "এই সার্ভার প্রস্তুত আছে।"),
+    ("টেবিলের", "বই টেবিলের উপর আছে।"),
+    ("বই", "বই টেবিলের উপর আছে।"),
+    ("மேசையில்", "புத்தகம் மேசையில் உள்ளது."),
+    ("cafe\u0301", "The café serves lunch."),
+    ("café", "The cafe\u0301 serves lunch."),
 ])
 def test_keyword_forms_and_cjk_remain_findable(tmp_path, query, text):
     store = SkillStore(tmp_path)
@@ -70,9 +81,27 @@ def test_ipv4_is_one_exact_keyword_not_shared_components(tmp_path):
     ("don't", "Donation settings are separate."),
     ("C++", "The C helper uses a compiler."),
     ("C#", "The C helper uses a compiler."),
+    ("परीक्षण", "किताब मेज़ पर रखी है।"),
+    ("pytest परीक्षण", "किताब मेज़ पर रखी है।"),
 ])
 def test_short_and_contraction_literals_avoid_new_neighbors(tmp_path, query, text):
     store = SkillStore(tmp_path)
     store.save_memory(text)
     assert not store.search_memories(query)
     assert recall_terms("don't") == frozenset({"dont"})
+
+
+
+def test_every_unicode_mark_category_stays_in_the_word():
+    # Exhaust the runtime Unicode database, not a growing hand-picked script list.
+    import sys
+    import unicodedata
+    from fluid.codemode.relevance import recall_relevance
+    for codepoint in range(sys.maxunicode + 1):
+        mark = chr(codepoint)
+        if not unicodedata.category(mark).startswith("M"):
+            continue
+        text = "x" + mark + "y"
+        expected = unicodedata.normalize("NFC", text.casefold())
+        assert recall_terms(text) == frozenset({expected}), hex(codepoint)
+        assert recall_relevance(text, frozenset({expected})) == 1, hex(codepoint)
