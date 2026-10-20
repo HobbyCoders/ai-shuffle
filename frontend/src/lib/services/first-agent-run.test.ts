@@ -107,9 +107,9 @@ describe('first agent run', () => {
 		const { handle } = start();
 		socket.onopen?.();
 		socket.receive({ type: 'session_created', session_id: 's1', request_id: socket.sent[0].request_id });
-		feedEvents!({ type: 'turn.aborted', message: 'New agent runs are paused until you add a license key.' });
+		feedEvents!({ type: 'turn.aborted', message: 'New agent runs are paused on this worker.' });
 		vi.advanceTimersByTime(ABORT_GRACE_MS);
-		expect(await handle.done).toMatchObject({ phase: 'failed', error: 'New agent runs are paused until you add a license key.', code: null });
+		expect(await handle.done).toMatchObject({ phase: 'failed', error: 'New agent runs are paused on this worker.', code: null });
 	});
 
 	it('stops and says so when the agent asks for a decision', async () => {

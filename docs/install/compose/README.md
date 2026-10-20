@@ -59,9 +59,9 @@ Local use and updates are free, with or without a Cloud account. You can
 always download the pinned version or update to a new release anonymously.
 
 An optional free Cloud account serves two remote workers. A paid plan serves
-four; you can link its key in Settings → Cloud or supply `LICENSE_KEY` at
-install time. If a plan ends, nothing local stops working and updates stay
-free. See [AI Shuffle Cloud](../../content/getting-started/cloud.md).
+four. There is no license key: the plan follows the account you sign in with
+in Settings → Cloud. If a plan ends, nothing local stops working and updates
+stay free. See [AI Shuffle Cloud](../../content/getting-started/cloud.md).
 
 ## Back up
 

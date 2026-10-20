@@ -21,23 +21,23 @@ The paid plan includes **4 remote workers**, worker-to-worker sync across differ
 
 Prices are in US dollars. There is no trial: the free account lets you try remote access on two workers without a card.
 
-## Link a paid plan
+## Your plan follows your account
 
-Open **Settings → Cloud** to see your account, plan, seats and lease renewal. If you have a license key (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`), enter it there to link your paid plan. Keep the key private.
+There is no license key to enter. A plan belongs to your AI Shuffle Cloud account, and every worker signed in with that account gets it. Signing in on another worker gives that worker the same plan.
 
-You can also supply the key at install time, in the desktop app's first-run window or as `LICENSE_KEY` with Docker. It is optional. If it is not accepted, Settings explains why; local use still works.
+Open **Settings → Cloud** to see whether this worker is linked, how many remote workers your account includes and how many are in use, and the renewal date of a paid plan. To link a worker, choose **Link account** there and sign in with your account.
 
-Activation sends your key, an install ID, hashed machine identifiers, the machine name and the app version. It never sends prompts, files or AI provider credentials. The worker renews its signed Cloud lease about once a day; **Check now** requests a renewal immediately.
+If you bought a plan before signing in, sign in with the email address you used for the purchase and the plan attaches to your account. You can also enter the key from your purchase email once on your account page at hobbycoders.com. You never enter it in the app.
 
-### All 4 seats are taken
+Signing in never sends prompts, files or AI provider credentials.
 
-Free a seat on the old worker or from your account on hobbycoders.com, then link the new worker. A worker that has not checked in for 21 days frees its seat by itself. Seats of other workers can be freed 3 times a day; deactivating a worker on itself is not counted.
+### All remote workers are in use
 
-Reinstalling the desktop app on the same computer reuses its seat. Recreating a Docker container with the same data folder keeps its seat. Copying a worker's data folder does not grant another paid seat. None of these seat checks stops local agent runs.
+Settings → Cloud shows how many of your account's remote workers are in use. To give a new worker remote access, sign an old worker out of your account or remove it from your account on hobbycoders.com, then sign in on the new worker. Upgrading raises the limit to 4 remote workers. The limit never stops local agent runs.
 
 ## Offline use and failed payments
 
-Local use has no lease deadline. Your AI provider may still need internet access. A paid Cloud lease lasts 14 days, and failed payments have 14 days of grace. Settings shows renewal or payment problems without an app-wide banner. If the lease expires or a seat is freed, the hub no longer grants that paid remote capacity; your app and data keep working.
+Local use has no license checks and no deadline. Your AI provider may still need internet access. Failed payments have 14 days of grace, and no Cloud state shows an app-wide banner. If a paid plan ends, the hub no longer serves the extra remote workers; your app and data keep working.
 
 ## When a plan ends
 

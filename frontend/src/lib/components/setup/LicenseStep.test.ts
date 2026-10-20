@@ -1,33 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 
-const mocks = vi.hoisted(() => ({ getLicense: vi.fn(), activate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getLicense: vi.fn() }));
 vi.mock('$lib/api/license', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/api/license')>()),
 	getLicense: mocks.getLicense,
-	activateLicense: mocks.activate,
 }));
 import LicenseStep from './LicenseStep.svelte';
 
 const base = {
-	mode: 'cloud', state: 'not_linked', linked: false, remote_worker_limit: 0, lease_state: 'none',
+	mode: 'cloud', source: 'account', state: 'not_linked', linked: false, remote_worker_limit: 0,
 	message: 'Not linked to AI Shuffle Cloud. Local use is free.', allowed: true, reason: null, banner: null, plan: null,
-	seats: 0, seats_used: null, account_id: null, license_id: null, key_hint: null, install_id: null,
-	issued_at: null, expires_at: null, grace: false, grace_until: null, last_refresh_at: null,
-	next_refresh_at: null, last_error: null, server_status: null, server_configured: true,
+	seats: null, seats_used: null, expires_at: null, key_hint: null, install_id: null, lease_state: 'none',
+	server_configured: false,
 };
 
 beforeEach(() => { vi.resetAllMocks(); });
 afterEach(() => cleanup());
 
+function expectNoKeyEntry() {
+	expect(screen.queryByRole('textbox')).toBeNull();
+	expect(screen.queryByLabelText(/key/i)).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Activate' })).toBeNull();
+	expect(document.body.textContent).not.toMatch(/ASH-|unlicensed|agents do not start/i);
+}
+
 describe('setup Cloud step', () => {
-	it('says local use is free and continues without a key', async () => {
-		mocks.getLicense.mockResolvedValue({ ...base, server_configured: false });
+	it.each([
+		['not linked', base],
+		['on a free account', { ...base, state: 'free', linked: true, plan: 'free', remote_worker_limit: 2 }],
+	])('says local use is free, with no key to enter, %s', async (_name, status) => {
+		mocks.getLicense.mockResolvedValue(status);
 		const onContinue = vi.fn();
 		render(LicenseStep, { onContinue });
 		expect(await screen.findByText('Local use is free')).toBeTruthy();
-		expect(screen.queryByLabelText(/plan key/i)).toBeNull();
-		expect(document.body.textContent).not.toMatch(/unlicensed|agents do not start/i);
+		expect(document.body.textContent).toContain('adds two remote workers');
+		expect(document.body.textContent).toContain('follows the account you sign in with');
+		expectNoKeyEntry();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 		expect(onContinue).toHaveBeenCalledOnce();
 	});
@@ -43,33 +52,27 @@ describe('setup Cloud step', () => {
 		expect(onContinue).toHaveBeenCalledOnce();
 	});
 
-	it('activates an optional paid plan key and then continues', async () => {
-		mocks.getLicense.mockResolvedValue(base);
-		mocks.activate.mockResolvedValue({
-			activated: true, ...base, state: 'paid', lease_state: 'active', plan: 'monthly', seats: 3, seats_used: 1,
-			remote_worker_limit: 3, key_hint: 'WXYZ'
-		});
+	it.each([
+		[{ seats: null, remote_worker_limit: 4 }, '4 remote workers'],
+		[{ seats: 12, remote_worker_limit: 12 }, '12 remote workers'],
+		[{ seats: 100, seats_used: 2, remote_worker_limit: 100 }, 'unlimited remote workers'],
+	])('shows a paid plan that came with the signed-in account (%o)', async (extra, shows) => {
+		mocks.getLicense.mockResolvedValue({ ...base, state: 'paid', linked: true, plan: 'paid', ...extra });
 		const onContinue = vi.fn();
 		render(LicenseStep, { onContinue });
-		await fireEvent.input(await screen.findByLabelText(/plan key/i), { target: { value: ' ASH-AAAAA-BBBBB-CCCCC-DDDDD ' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Activate' }));
-		expect(mocks.activate).toHaveBeenCalledWith('ASH-AAAAA-BBBBB-CCCCC-DDDDD');
 		expect(await screen.findByText('Paid Cloud plan active')).toBeTruthy();
-		expect(screen.getByText(/Monthly, key ending WXYZ/)).toBeTruthy();
+		expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain(`From your signed-in Cloud account: ${shows} and sync.`);
+		expectNoKeyEntry();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 		expect(onContinue).toHaveBeenCalledOnce();
 	});
 
-	it('explains a full seat count and still continues', async () => {
-		mocks.getLicense.mockResolvedValue(base);
-		const detail = 'All seats are in use.';
-		mocks.activate.mockResolvedValue({ activated: false, code: 'seats_full', detail, seats: 3, installs: [] });
+	it('explains a status error and still continues', async () => {
+		mocks.getLicense.mockRejectedValue(new Error('offline'));
 		const onContinue = vi.fn();
 		render(LicenseStep, { onContinue });
-		await fireEvent.input(await screen.findByLabelText(/plan key/i), { target: { value: 'ASH-1' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Activate' }));
-		// The server's message is shown as it is, once.
-		await waitFor(() => expect(screen.getByRole('alert').textContent?.trim()).toBe(detail));
+		expect((await screen.findByRole('alert')).textContent).toBeTruthy();
+		expect(screen.getByText(/Local use does not need it/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 		expect(onContinue).toHaveBeenCalledOnce();
 	});

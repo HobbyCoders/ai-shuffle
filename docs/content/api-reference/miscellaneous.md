@@ -1099,59 +1099,26 @@ Cloud account, paid lease and remote-worker capacity for Settings. The historica
 ```json
 {
   "mode": "cloud",
+  "source": "account",
   "state": "paid",
   "linked": true,
+  "plan": "paid",
+  "seats": 4,
+  "seats_used": 1,
   "remote_worker_limit": 4,
-  "lease_state": "active",
+  "expires_at": "2026-11-20T00:00:00+00:00",
   "message": "Paid Cloud plan. Local use does not depend on this plan.",
   "allowed": true,
   "reason": null,
   "banner": null,
-  "seats": 4,
-  "seats_used": 1,
-  "install_id": "...",
-  "expires_at": "2026-10-02T00:00:00+00:00",
-  "grace": false,
-  "last_refresh_at": "2026-09-25T08:00:00+00:00",
-  "next_refresh_at": "2026-09-26T08:00:00+00:00",
-  "last_error": null
+  "key_hint": null,
+  "install_id": null,
+  "lease_state": "none",
+  "server_configured": false
 }
 ```
 
-The response also has `plan`, `account_id`, `license_id`, `key_hint`, `issued_at`, `grace_until`, `server_status` and `server_configured`. `state` is `not_linked`, `free` or `paid`; `linked` reports the local account binding independently of paid-key activation. `remote_worker_limit` is 0 without an account, 2 for a free account, or the valid signed lease's seat count (4 on the paid plan by default). The hub enforces actual capacity. `lease_state` is `none`, `active`, `grace`, `expiring`, `ending`, `expired`, `invalid` or `seat_lost`. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, and `reason` and `banner` are always `null`. No Cloud state blocks local runs or updates. An expired lease falls back to `free` if linked, otherwise `not_linked`; renewal timestamps and errors remain available.
-
-### POST /api/v1/license/activate
-
-Link a paid Cloud plan to this worker with a license key. Local use never needs one.
-
-**Auth:** Owner only. Refused (`403`) for requests from an agent preview.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/license/activate \
-  -H "Authorization: Bearer $OWNER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"key": "ASH-XXXXX-XXXXX-XXXXX-XXXXX"}'
-```
-
-`key` is 1 to 64 characters; no other fields are accepted. On success returns `activated: true` with the status fields. When every seat is taken it returns `200` with `activated: false`, `detail`, `code: "seats_full"`, `seats` and `installs` (the workers holding seats), so you can free one with `release`.
-
-### POST /api/v1/license/release
-
-Free the seat another worker holds. Body: `{"key": "ASH-...", "install_id": "..."}` (`install_id` from the `installs` list, 8 to 128 characters). Returns `{"ok": true, "seats_used": 1}`.
-
-**Auth:** Owner only. Refused for agent previews.
-
-### POST /api/v1/license/deactivate
-
-Deactivate this worker and free its seat. No body. Returns the status fields plus `seat_released`.
-
-**Auth:** Owner only. Refused for agent previews.
-
-### POST /api/v1/license/refresh
-
-Renew the lease with the license server now. No body. Returns the status fields.
-
-**Auth:** Owner only. Refused for agent previews.
+There is no license key: the plan comes from the Cloud account this worker is signed in with (`source` is always `account`), so every worker signed in with the same account gets the same plan. `state` is `not_linked`, `free` or `paid`, and `plan` is `free`, `paid` or `null`. `remote_worker_limit` is 0 without an account, 2 for a free account, and 4 for a paid plan unless the plan has a larger seat count (`seats`, up to 100). `seats` and `seats_used` are `null` when the account does not report them. `expires_at` is the paid plan's renewal date, otherwise `null`. The hub enforces actual capacity. `message` is quiet Settings information, not a global banner. For older clients, `allowed` is always `true`, `reason` and `banner` are always `null`, `key_hint` and `install_id` are always `null`, `lease_state` is always `none` and `server_configured` is always `false`. No Cloud state blocks local runs or updates.
 
 ## Notifications
 

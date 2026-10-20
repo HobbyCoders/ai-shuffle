@@ -86,12 +86,12 @@ If you use Claude, the Claude Code CLI keeps itself up to date, as on any comput
 
 ## What the update check sends
 
-- **What:** a plain request for the latest release information. No account, license key, device ID or anything about your projects, chats or settings. Like any web request, it reveals your IP address.
+- **What:** a plain request for the latest release information. No account, device ID or anything about your projects, chats or settings. Like any web request, it reveals your IP address.
 - **When:** shortly after the app starts, then once a day.
 - **What comes back:** a small signed file naming the newest release and its notes. Nothing is downloaded until you choose to.
 - **Turning it off:** **Settings → System → Updates → Allow updates**.
 
-Updates are free with or without a Cloud account. A linked worker may send its signed Cloud lease to the hub; that lease controls remote capacity, not access to updates. See [AI Shuffle Cloud](/docs/getting-started/cloud).
+Updates are free with or without a Cloud account. A linked worker's Cloud plan controls remote capacity, not access to updates. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
 ## If your Cloud plan ends
 

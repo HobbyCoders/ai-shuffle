@@ -45,8 +45,12 @@ export const LEGACY_TAB_MAP: Readonly<Record<string, SettingsTarget>> = {
 export const MOVED_ANCHORS: Readonly<Record<string, SettingsTarget>> = {
 	'system.license': { category: 'cloud', anchor: 'cloud.account' },
 	'system.seats': { category: 'cloud', anchor: 'cloud.remoteWorkers' },
-	'system.licenseKey': { category: 'cloud', anchor: 'cloud.key' },
-	'system.deactivate': { category: 'cloud', anchor: 'cloud.deactivate' }
+	// No license key any more: the plan follows the signed-in account.
+	'system.licenseKey': { category: 'cloud', anchor: 'cloud.account' },
+	'system.deactivate': { category: 'cloud', anchor: 'cloud.account' },
+	'cloud.key': { category: 'cloud', anchor: 'cloud.account' },
+	'cloud.deactivate': { category: 'cloud', anchor: 'cloud.account' },
+	'cloud.plan': { category: 'cloud', anchor: 'cloud.account' }
 };
 
 /** A target whose anchor moved, rewritten to where that row lives now. */

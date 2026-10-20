@@ -64,10 +64,9 @@ const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_
 const waiting = { ...disconnected, status: 'waiting', code: 'TESTONLYCODE', authorization_url: 'https://account.example.com/claim?code=TESTONLYCODE', signup_url: 'https://account.example.com/claim?code=TESTONLYCODE&screen=signup' };
 const link = 'shuffle://network/join?endpoint=http%3A%2F%2F10.0.0.5%3A8000&code=ABCD-EFGH-JKLM&fp=' + fingerprint;
 const dockerOwner = { password_set: true, setup_allowed: false, required: true, trusted_lan: false, login_available: true, desktop_handoff: false, min_length: 12 };
-const beta = { mode: 'cloud', state: 'not_linked', linked: false, remote_worker_limit: 0, lease_state: 'none', message: null,
-	allowed: true, reason: null, banner: null, plan: null, seats: 0, seats_used: null,
-	account_id: null, license_id: null, key_hint: null, install_id: null, issued_at: null, expires_at: null, grace: false,
-	grace_until: null, last_refresh_at: null, next_refresh_at: null, last_error: null, server_status: null, server_configured: false };
+const beta = { mode: 'cloud', source: 'account', state: 'not_linked', linked: false, remote_worker_limit: 0, lease_state: 'none',
+	message: null, allowed: true, reason: null, banner: null, plan: null, seats: null, seats_used: null, expires_at: null,
+	key_hint: null, install_id: null, server_configured: false };
 let status: NetworkStatus;
 let connection: Record<string, unknown>;
 let workerMode: ClaudeAuthMode;

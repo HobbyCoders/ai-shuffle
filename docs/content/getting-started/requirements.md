@@ -49,7 +49,7 @@ Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chr
 The worker needs outbound internet access to:
 
 - `ghcr.io`, to download the public AI Shuffle image;
-- `hobbycoders.com`, for free update checks and, only if linked, Cloud lease renewals and remote access;
+- `hobbycoders.com`, for free update checks and, only if linked, your Cloud account's plan and remote access;
 - the AI providers you connect;
 - Anthropic's download servers, if you install the Claude Code CLI;
 - the public Python and npm package registries, while an in-app update or a connector installs.

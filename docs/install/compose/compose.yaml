@@ -52,8 +52,6 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Seeds the owner password on the first start only (see env.example).
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
-      # Optional: links a paid Cloud plan on the first start (see env.example).
-      LICENSE_KEY: ${LICENSE_KEY:-}
       # Optional: each applies only once uncommented here (a line in .env alone
       # does not reach the container). The install guide explains each one.
       # The reverse proxy's address, as AI Shuffle sees it:

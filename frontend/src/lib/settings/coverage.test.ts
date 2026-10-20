@@ -112,11 +112,8 @@ const CONDITIONAL_ROWS: Partial<Record<CategoryId, Record<string, string>>> = {
 	cloud: {
 		'cloud.link': 'only once the status says the account is not linked',
 		'cloud.remoteWorkers': 'only once the Cloud status loaded',
-		'cloud.plan': 'only on a paid plan',
-		'cloud.renewal': 'only on a paid plan or with a saved plan key',
-		'cloud.upgrade': 'only when not on a paid plan',
-		'cloud.key': 'only in builds with a lease server',
-		'cloud.deactivate': 'only with a saved plan key'
+		'cloud.renewal': 'only on a paid plan with a renewal date',
+		'cloud.upgrade': 'only when not on a paid plan'
 	}
 };
 

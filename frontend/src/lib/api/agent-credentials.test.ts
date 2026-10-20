@@ -66,10 +66,10 @@ describe('agent credentials', () => {
 
 	it('keeps the credential and the license apart', () => {
 		const creds = credentialsFromSummary(summary({
-			gate: { ready: false, reason: 'New agent runs are paused until you add a license key.', mode: 'subscription',
+			gate: { ready: false, reason: 'New agent runs are paused on this worker.', mode: 'subscription',
 				claude_credential_ready: true, license_allows_runs: false, startup_state: 'setup_required' },
 		}));
-		expect(creds).toMatchObject({ ready: false, credentialReady: true, licenseAllowsRuns: false, reason: 'New agent runs are paused until you add a license key.' });
+		expect(creds).toMatchObject({ ready: false, credentialReady: true, licenseAllowsRuns: false, reason: 'New agent runs are paused on this worker.' });
 	});
 
 	it('uses the Claude reason, not the worker-wide one, when the worker sends it', () => {

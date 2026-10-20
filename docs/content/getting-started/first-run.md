@@ -33,9 +33,9 @@ To change the password later, open **Settings → Security → Owner password**.
 
 ## 3. Optional Cloud plan
 
-No key is needed to run AI Shuffle. If you have a paid Cloud plan, you can enter its license key to link this worker. A key supplied at install time is activated automatically.
+No account or key is needed to run AI Shuffle, and there is no license key to enter. A Cloud plan follows the account you sign in with: a free account adds 2 remote workers, a paid plan adds 4. If you bought a plan before signing in, sign in with the purchase email and it attaches to your account.
 
-You can skip linking a plan and use every local feature now. Manage remote access and paid seats in **Settings → Cloud**. See [AI Shuffle Cloud](/docs/getting-started/cloud).
+You can skip linking an account and use every local feature now. Link it and manage remote access later in **Settings → Cloud**. See [AI Shuffle Cloud](/docs/getting-started/cloud).
 
 ## 4. AI provider
 

@@ -45,4 +45,4 @@ AI Shuffle is an independent product. It is not affiliated with, built, endorsed
 
 ## Get help
 
-Email support@hobbycoders.com. Never send passwords, API keys, license keys or sign-in codes. The same documentation is on [hobbycoders.com](https://hobbycoders.com/ai-shuffle), together with the [FAQ](https://hobbycoders.com/ai-shuffle/faq), [privacy policy](https://hobbycoders.com/privacy) and [license terms](https://hobbycoders.com/license).
+Email support@hobbycoders.com. Never send passwords, API keys, sign-in codes or the key from a purchase email. The same documentation is on [hobbycoders.com](https://hobbycoders.com/ai-shuffle), together with the [FAQ](https://hobbycoders.com/ai-shuffle/faq), [privacy policy](https://hobbycoders.com/privacy) and [license terms](https://hobbycoders.com/license).
