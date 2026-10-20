@@ -133,7 +133,7 @@ async def test_learner_proposals_use_only_listed_revision_safe_pairs(tmp_path):
     assert await learner._apply('<supersede-memory old="unknown" new="unknown2"/>') == []
 
 
-def test_lineage_expires_and_replacement_does_not_override_profile_priority(tmp_path, monkeypatch):
+def test_lineage_expires_and_replacement_preserves_bounded_identity(tmp_path, monkeypatch):
     import fluid.codemode.facts as facts
     store = SkillStore(tmp_path)
     old, new = pair(store, protected=False)
@@ -146,10 +146,15 @@ def test_lineage_expires_and_replacement_does_not_override_profile_priority(tmp_
         assert NEW in store.render_memory_section("project:fixture")
     explicit = SkillStore(tmp_path / "explicit")
     pair(explicit)
+    identity = explicit.save_memory("The fixture owner's preferred name is Taylor.",
+                                    protected=True, key="profile.name")
     for i in range(4):
         explicit.save_memory(f"Generic unrelated protected fact {i}.", protected=True, key=f"profile.filler{i}")
     section = explicit.render_memory_section("project:fixture")
-    assert section.index("Generic unrelated protected fact") < section.index(NEW)
+    # Budget relevance reserves identity basics, not unlimited profile.*
+    # precedence. Unrelated biography filler must not outrank a correction.
+    assert identity.text in section
+    assert section.index(NEW) < section.index("Generic unrelated protected fact")
     assert "unresolved conflict" not in section and OLD not in section
 
 
