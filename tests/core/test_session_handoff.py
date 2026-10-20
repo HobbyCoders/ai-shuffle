@@ -372,7 +372,7 @@ async def test_owner_move_is_queued_while_running_and_runs_when_the_turn_ends():
         assert sh.pending_for("s1").by == "owner"
         state = await sh.owner_op("s1", "status")
         assert state["pending"] == {"worker": "DesktopWorker", "target_id": "dev-gaming", "by": "owner",
-                                    "moving": False, "handoff_id": result["handoff_id"]}
+                                    "moving": False, "handoff_id": result["handoff_id"], "progress": None}
         assert state["busy"]["running"] is True
         busy.idle = True
         assert await _settle(lambda: move.await_count and sh.pending_for("s1") is None)
@@ -1504,8 +1504,8 @@ async def test_2012_a_resume_whose_reply_was_lost_or_resent_after_a_restart_runs
     # The process died after the resume landed but before the row was cleared:
     # the next boot resends it and the new worker drops the repeat.
     session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="halfway", requested_by="agent",
-                       requested_at=float(sends[0]["command_id"][len(sh.RESUME_COMMAND_PREFIX):]),
-                       expires_at=time.time() + 600)
+                       requested_at=time.time(), expires_at=time.time() + 600,
+                       handoff_id=result["handoff_id"])
     with _moving(GAMING_RESUME, call), patch("app.network.control.owner_of", return_value="dev-gaming"), \
             patch.object(sh, "_record", AsyncMock()) as record:
         assert await sh.resume_queued() == 0

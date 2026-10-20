@@ -635,6 +635,79 @@ def test_a_stranded_task_row_does_not_pin_the_session(pair):
             handoff._idle(conn.cursor(), "handoff-test")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projectless", [False, True])
+async def test_agent_note_is_exported_and_armed_without_source_after_commit(pair, monkeypatch, projectless):
+    import time
+    from app.core import wakeup_service
+    from app.db import session_moves, wakeups
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    if projectless:
+        for worker in (a, b):
+            with worker.active(), get_db() as conn:
+                conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
+    with a.active():
+        session_moves.save(sid, target_id=b.device_id, label="Receiver", note="Finish the release checklist",
+                           requested_by="agent", requested_at=time.time(), expires_at=time.time() + 1800)
+        queued = session_moves.get(sid)
+        move_id = queued["handoff_id"]
+    from app.core import session_handoff as sh
+    monkeypatch.setattr(sh, "_moving", {sid: sh.PendingHandoff(
+        b.device_id, "Receiver", queued["note"], queued["requested_at"], handoff_id=move_id)})
+    monkeypatch.setattr(handoff, "wake_carry", lambda _: True)
+    monkeypatch.setattr(handoff, "resume_carry", lambda _: True)
+    monkeypatch.setattr(handoff, "target_resume", lambda _: True)
+    armed = []
+    monkeypatch.setattr(wakeup_service, "arm_persisted", armed.append)
+    source_offline = False
+
+    async def call(device, action, body, **kwargs):
+        nonlocal source_offline
+        if source_offline:
+            raise ConnectionError("Source powered off immediately after commit")
+        with a.active():
+            result = await control.handle(action, body, from_device=b.device_id)
+            if body.get("phase") == "commit":
+                source_offline = True
+            return result
+
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        await handoff.receive(database.get_session(sid))
+        assert source_offline
+        assert database.get_session(sid)["owner_device_id"] == b.device_id
+        wake = wakeups.get_session_wakeups(sid)[0]
+        assert wake["id"] == "handoff-resume-" + move_id
+        assert "Finish the release checklist" in wake["prompt"]
+        assert [row["id"] for row in armed] == [wake["id"]]
+        # A lost reply/retry after the wake was consumed cannot recreate it.
+        assert wakeups.claim_wakeup(wake["id"])
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT token FROM handoff_wakes WHERE session_id=%s", (sid,))
+            token = cur.fetchone()["token"]
+        await handoff._accept_and_arm(sid, b.device_id, None, token)
+        assert wakeups.get_session_wakeups(sid) == []
+        assert len(armed) == 1
+    with a.active():
+        assert session_moves.get(sid)["resume_exported"]
+        # Simulate source-process loss after its commit. Boot must use the
+        # actual begin receipt, not send a second old-protocol continuation.
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(sh, "_moving", {})
+        monkeypatch.setattr(sh, "_pending", {})
+        spawned = []
+        monkeypatch.setattr(sh, "_spawn", spawned.append)
+        delivery = AsyncMock()
+        monkeypatch.setattr(sh, "deliver_held", delivery)
+        assert await sh.resume_queued() == 0
+        assert len(spawned) == 1
+        await spawned[0]
+        assert delivery.await_args.args[3] is None
+
+
 def _owner_calls(a, b, monkeypatch):
     async def call(device, action, body, **kwargs):
         with a.active():
@@ -1053,7 +1126,7 @@ async def test_moved_wake_waits_for_durable_human_supersession(pair, monkeypatch
         with worker.active():
             if action == "handoff" and body["phase"] == "commit":
                 commits.append(body)
-                if case not in ("no_message", "after_commit", "receiver_restart_after_finalize", "receiver_message"):
+                if len(commits) == 1 and case not in ("no_message", "after_commit", "receiver_restart_after_finalize", "receiver_message"):
                     speak()
                 result = await control.handle(action, body, from_device=sender.device_id)
                 if case == "after_commit":
@@ -1847,7 +1920,13 @@ async def test_move_endpoint_produces_git_and_native_context_handoff(pair, monke
         assert checkout_transfer.fingerprint(cwd) == head
         assert row["owner_device_id"] == b.device_id
         placement = row["placement"]
-        assert (json.loads(placement) if isinstance(placement, str) else placement) == {"where": "runner:" + b.device_id}
+        placement = json.loads(placement) if isinstance(placement, str) else placement
+        assert set(placement) == {"where", "handoff"}
+        assert placement["where"] == "runner:" + b.device_id
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM handoff_history_chunks WHERE token=%s", (placement["handoff"]["token"],))
+            assert cur.fetchone() is None  # Receipt is retained after publication.
         assert row["sdk_session_id"].startswith("ses_") and row["sdk_session_id"] != "ses_source"
         assert database.get_session_messages("handoff-test")[0]["content"] == "Keep this conversation"
         assert session_events.get_events("handoff-test", 0)[-1]["payload"]["content"] == "Final unsynced context"

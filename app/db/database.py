@@ -2555,6 +2555,7 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("session_moves")
     for column, definition in (("handoff_id", "TEXT"), ("wake_token", "TEXT"),
+                               ("resume_exported", "BOOLEAN NOT NULL DEFAULT FALSE"),
                                ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE")):
         if not column_exists(cursor, "session_moves", column):
             cursor.execute(f"ALTER TABLE session_moves ADD COLUMN {column} {definition}")
@@ -2570,6 +2571,7 @@ def _run_column_migrations(cursor):
             branch TEXT,
             wakes JSONB NOT NULL,
             superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            resume_wait BOOLEAN NOT NULL DEFAULT FALSE,
             keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
             finalized BOOLEAN NOT NULL DEFAULT FALSE,
             created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -2579,6 +2581,7 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("handoff_wakes")
     for column, definition in (("created_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+                               ("resume_wait", "BOOLEAN NOT NULL DEFAULT FALSE"),
                                ("offline_since", "DOUBLE PRECISION"), ("recovery_reason", "TEXT")):
         if not column_exists(cursor, "handoff_wakes", column):
             cursor.execute(f"ALTER TABLE handoff_wakes ADD COLUMN {column} {definition}")
@@ -2668,8 +2671,10 @@ def _run_column_migrations(cursor):
     # tables whose rows execute somewhere, plus the local network tables.
     # The startup backfill (app.network.startup.backfill_owner_device_ids) stamps this worker's device
     # id onto rows that still only carry instance_id.
-    from app.db.network import create_schema as _create_network_schema
+    from app.db.network import create_schema as _create_network_schema, create_handoff_history_schema
     _create_network_schema(cursor)
+    if table_exists(cursor, "sessions"):
+        create_handoff_history_schema(cursor)
     for _table in ("sessions", "automations", "connectors", "artifacts"):
         if table_exists(cursor, _table) and not column_exists(cursor, _table, "owner_device_id"):
             cursor.execute(f"ALTER TABLE {_table} ADD COLUMN owner_device_id TEXT")

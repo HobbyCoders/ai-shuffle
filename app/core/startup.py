@@ -695,7 +695,9 @@ def start_background_tasks() -> List[asyncio.Task]:
     # again with their held messages, or expire as usual (#1819). Moves noted
     # by an older version only in a file are announced as cancelled.
     from app.core import session_handoff
+    from app.network import handoff
     tasks.append(asyncio.create_task(session_handoff.on_boot()))
+    tasks.append(asyncio.create_task(handoff.history_recovery_loop()))
 
     # Idle-at-edge watchdog: periodic sweep that nudges sessions sitting
     # idle above the context-window edge so the CLI runs its deferred compaction

@@ -489,7 +489,8 @@ def enqueue_turn(
         # The same compact-first request can be retried after a lost HTTP reply.
         # Check under the admission lock, before either row is inserted (and
         # before clearing Stop), so concurrent retries cannot create two pairs.
-        if command_id and (payload or {}).get("compact_first"):
+        if command_id and ((payload or {}).get("compact_first")
+                           or (source == "wakeup" and str(command_id).startswith("handoff-resume-"))):
             existing = get_turn_by_command(session_id, command_id, _conn=conn)
             if existing is not None:
                 return existing

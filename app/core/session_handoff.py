@@ -50,6 +50,7 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -238,6 +239,28 @@ def holds(session_id: str) -> bool:
     """
     pending = pending_for(session_id)
     return bool(pending and pending.holding)
+
+
+@contextmanager
+def commit_holding(session_id: str, target_id: str):
+    """Close an exported agent-resume queue with the ownership transaction.
+
+    A human either enters its counted held list before commit, or observes
+    holding=False and the committed new owner. A failed commit leaves holding
+    unchanged. Owner moves/legacy resumes retain their finalize-based barrier.
+    """
+    from app.db import session_moves
+
+    with _hold_lock:
+        pending = pending_for(session_id)
+        exported = False
+        if pending and pending.by == "agent" and pending.target_id == target_id:
+            row = session_moves.get(session_id) or {}
+            exported = (row.get("resume_exported") and row.get("target_id") == target_id
+                        and row.get("handoff_id") == pending.handoff_id)
+        yield  # The caller's database transaction commits before we continue.
+        if exported:
+            pending.holding = False
 
 
 def moving(session_id: str) -> bool:
@@ -535,7 +558,7 @@ def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[s
     return {"prompt": prompt, "source": "wakeup", "profile_id": session.get("profile_id"),
             "project_id": session.get("project_id"),
             "payload": {RESUME_PAYLOAD: {"from": source, "note": pending.note, "handoff_id": pending.handoff_id}},
-            "command_id": f"{RESUME_COMMAND_PREFIX}{pending.requested_at:.6f}"}
+            "command_id": RESUME_COMMAND_PREFIX + pending.handoff_id}
 
 
 def is_resume_turn(payload: Any) -> bool:
@@ -1160,7 +1183,13 @@ def _owner_now(session_id: str) -> Optional[str]:
 async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     """The chat now runs on ``owner``: say so there, then send it the held messages."""
     label = pending.label if owner == pending.target_id else _label(owner)
+    from app.db import session_moves
+
+    row = await asyncio.to_thread(session_moves.get, session_id) or {}
+    exported = row.get("resume_exported") and owner == row.get("target_id")
     plan = await asyncio.to_thread(resume_plan, session_id, pending, owner)
+    if exported and plan in ("unknown", "unsupported"):
+        plan = "send"  # begin, not a later capability report, chose the protocol.
     outcome = f"Handed off to {label}. Open this chat there to continue on the same branch."
     if plan == "send":
         outcome = f"Handed off to {label}. This chat continues there on the same branch."
@@ -1184,7 +1213,7 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     with _hold_lock:
         pending.holding = False
     resume = None
-    if plan == "send":
+    if plan == "send" and not exported:
         try:
             resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
         except Exception:  # noqa: BLE001 — the held messages still go
@@ -1268,10 +1297,16 @@ async def run_pending(session_id: str) -> Optional[str]:
 
 
 def _owner_state(session_id: str) -> Dict[str, Any]:
+    """GET /handoff pending.progress is null until the first receiver poll, then
+    {step: str, elapsed_seconds: float, step_elapsed_seconds: float}. Times are
+    receiver-measured seconds, not a percentage or a source wall-clock epoch.
+    """
     pending = _active(session_id)
+    from app.network.handoff import progress
+
     return {"busy": busy_state(session_id),
             "pending": ({"handoff_id": pending.handoff_id, "worker": pending.label, "target_id": pending.target_id, "by": pending.by,
-                         "moving": session_id in _moving}
+                         "moving": session_id in _moving, "progress": progress(session_id)}
                         if pending else None)}
 
 
@@ -1487,7 +1522,8 @@ async def resume_queued() -> int:
                 pending.holding = False
                 label = pending.label if owner == pending.target_id else _label(owner)
                 resume = None
-                if await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
+                exported = row.get("resume_exported") and owner == row.get("target_id")
+                if not exported and await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
                     resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
                 _spawn(deliver_held(session_id, owner, label, resume))
                 continue
@@ -1547,6 +1583,14 @@ async def announce_dropped() -> int:
 
 async def on_boot() -> None:
     """Startup: resume moves kept in the database, then the legacy note."""
+    try:
+        from app.network.handoff import recover_history_staging
+        from app.core import wakeup_service
+
+        if await asyncio.to_thread(recover_history_staging):
+            await wakeup_service.rehydrate_pending()
+    except Exception:  # noqa: BLE001 — keep queued-move recovery independent
+        logger.warning("Could not recover staged hand-off history", exc_info=True)
     try:
         await resume_queued()
     except Exception:  # noqa: BLE001 — boot continues

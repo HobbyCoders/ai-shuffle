@@ -384,6 +384,11 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
+    # Hand-off staging references sessions, unlike the dependency-free network
+    # tables bootstrapped above. Keep the FK on fresh databases and upgrades.
+    from app.db.network import create_handoff_history_schema
+    create_handoff_history_schema(cursor)
+
     # 10. Session messages (with sync support)
     #     Includes content_tsv tsvector column for FTS.
     # ------------------------------------------------------------------
@@ -2128,6 +2133,7 @@ def create_postgres_schema(cursor) -> None:
             held JSONB NOT NULL DEFAULT '[]',
             handoff_id TEXT,
             wake_token TEXT,
+            resume_exported BOOLEAN NOT NULL DEFAULT FALSE,
             wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
         )
     """)
@@ -2140,6 +2146,7 @@ def create_postgres_schema(cursor) -> None:
             branch TEXT,
             wakes JSONB NOT NULL,
             superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            resume_wait BOOLEAN NOT NULL DEFAULT FALSE,
             keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
             finalized BOOLEAN NOT NULL DEFAULT FALSE,
             created_at DOUBLE PRECISION NOT NULL DEFAULT 0,

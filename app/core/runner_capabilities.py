@@ -26,6 +26,8 @@ Shape::
         "move_wakes": int,
         "move_questions": int,  # durable answerable cards, without live callbacks
         "handoff_poll": int,  # short HTTP requests for long Git/history transfers
+        "handoff_target_resume": int,  # receiver arms the agent continuation at commit
+        "handoff_receipt": int,  # source syncs the commit token with ownership
         "terminal": int,
     }
 
@@ -229,6 +231,8 @@ def detect_capabilities() -> Dict[str, Any]:
         "provider_kinds": _detect_provider_kinds(),
         "remote_task": REMOTE_TASK_VERSION,
         "move_wakes": MOVE_WAKES_VERSION,
+        "handoff_target_resume": 1,
+        "handoff_receipt": 1,
         "move_questions": 1,
         "handoff_poll": 1,
         "terminal": _detect_terminal(),
