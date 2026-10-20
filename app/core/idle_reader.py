@@ -97,43 +97,44 @@ async def _drain(session_id: str, *, drain_turn_id: str) -> None:
     """Settle a draining turn once its wedge resolves (reader token held)."""
     from app.core.session_pool import get_session_pool
 
-    state = get_session_pool().peek(session_id)  # peek = no LRU promote
-    # A client may die/disappear after escalation chose to keep it. That is
-    # already safe to evict: still settle the captured turn below, rather than
-    # strand it draining and keep a queued hand-off waiting for the reap sweep.
-    if state is not None and state.adapter.is_alive() and state.is_streaming:
-        logger.info(
-            "idle_reader: no drainable client (state=%s alive=%s streaming=%s) [session=%s]",
-            state is not None,
-            bool(state and state.adapter.is_alive()),
-            bool(state and state.is_streaming),
-            session_id,
-        )
-        return
-    from app.core.session_runtime import _should_evict_after_escalation
+    from app.core.session_runtime import _should_evict_after_escalation, get_live_runtime
 
-    while not _should_evict_after_escalation(session_id):
+    runtime = get_live_runtime(session_id)
+    run_id = runtime._run_id if runtime is not None else None
+    # Keep the reader and run lease while a live stream finishes cleanup.
+    # Returning on its first streaming=True snapshot abandons the draining
+    # row; nobody rechecks it when streaming later flips off.
+    while True:
+        state = get_session_pool().peek(session_id)  # peek = no LRU promote
+        streaming = state is not None and state.adapter.is_alive() and state.is_streaming
+        if not streaming and _should_evict_after_escalation(session_id):
+            break
         await asyncio.sleep(IDLE_READ_POLL_SECONDS)
     logger.info(
         "idle_reader: drain wedge resolved — evicting + settling turn %s aborted "
         "[session=%s]", drain_turn_id, session_id,
     )
     await _evict_broken_client(session_id)
-    await _settle_drained(session_id, drain_turn_id)
+    if runtime is not None:
+        # As in normal finalize, settlement must not be interpreted by the
+        # heartbeat as a lost lease while terminal callbacks finish cleanup.
+        runtime._lease_finalizing = True
+    await _settle_drained(session_id, drain_turn_id, run_id=run_id)
 
 
-async def _settle_drained(session_id: str, turn_id: str) -> None:
+async def _settle_drained(session_id: str, turn_id: str, *, run_id: str | None = None) -> None:
     """Settle a drained turn ``aborted`` and fire the settlement callback.
 
     Idempotent: ``turns.settle_turn`` no-ops (returns ``None``) for an
     already-terminal turn, in which case the callback does NOT fire again.
+    The runtime's captured run id also fences a requeued/reclaimed turn.
     """
     from app.core import session_runtime
     from app.db import turns as turns_db
 
     try:
         settled = await asyncio.to_thread(
-            turns_db.settle_turn, turn_id, "aborted", "drain_stale_result"
+            turns_db.settle_turn, turn_id, "aborted", "drain_stale_result", run_id=run_id
         )
     except Exception:  # noqa: BLE001
         logger.warning("idle_reader: settle_turn(aborted) failed for %s", turn_id, exc_info=True)

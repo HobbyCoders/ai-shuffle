@@ -206,13 +206,22 @@ async def test_refusal_logs_once_even_when_deferred_status_is_replayed(
             assert await asyncio.wait_for(handoff.handle(status, "source"), 2) == {"error": reason}
         assert all(task.done() for task in handoff._operations.values())
     else:
-        with pytest.raises(ValueError, match="queued or active turn"):
-            await handoff.handle(payload, "source")
+        from fastapi import HTTPException
+        from app.api.network import peer_control
+
+        request = SimpleNamespace(json=AsyncMock(return_value=payload),
+                                  url=SimpleNamespace(scheme="https"), scope={})
+        monkeypatch.setattr(transport, "note_contact", lambda peer: None)
+        with pytest.raises(HTTPException) as raised:
+            await peer_control("handoff", request, "source")
+        assert raised.value.status_code == 400
+        assert raised.value.detail == reason
+        assert len([r for r in caplog.records if "Refused" in r.getMessage()]) == 1
     if phase == "receive":
         work.assert_awaited_once()
     messages = [record.getMessage() for record in caplog.records
                 if record.name == handoff.__name__ and "Refused hand-off" in record.getMessage()]
-    assert messages == [f"Refused hand-off {phase} for session s1: {reason}"]
+    assert messages == ([f"Refused hand-off {phase} for session s1: {reason}"] if deferred else [])
 
 
 @pytest.mark.asyncio
@@ -229,6 +238,77 @@ async def test_deferred_client_retries_only_status_and_surfaces_terminal_failure
         await handoff._call("target", {"session_id": "s1", "phase": "receive"}, timeout=900)
     assert [c.args[2]["phase"] for c in call.await_args_list] == ["receive", "status", "status", "status"]
     assert call.await_args_list[0].args[2]["deferred"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["begin", "receive"])
+async def test_unexpected_deferred_error_logs_traceback_once(monkeypatch, caplog, phase):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(engine, "require_context", lambda: SimpleNamespace(member=lambda peer: member))
+    monkeypatch.setattr(handoff, "_operations", {})
+    monkeypatch.setattr(handoff, "_handle_phase", AsyncMock(side_effect=RuntimeError("storage unavailable")))
+    receipt = await handoff.handle({"session_id": "s1", "phase": phase, "deferred": True}, "source")
+    status = {"session_id": "s1", "phase": "status", **receipt}
+    for _ in range(2):
+        assert await asyncio.wait_for(handoff.handle(status, "source"), 2) == {"error": "storage unavailable"}
+    records = [r for r in caplog.records if r.name == handoff.__name__]
+    assert len(records) == 1
+    assert records[0].getMessage() == f"Hand-off {phase} failed for session s1"
+    assert records[0].exc_info and isinstance(records[0].exc_info[1], RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_slow_transfer_logs_current_steps_on_both_workers_before_completion(pair, monkeypatch, caplog):
+    import asyncio
+    import logging
+    import threading
+
+    a, b, _source, _target = pair
+    release = threading.Event()
+    both_logged = asyncio.Event()
+    seen = set()
+    original_export = checkout_transfer.export_checkout
+
+    def slow_export(*args):
+        assert release.wait(5), "test never released export"
+        return original_export(*args)
+
+    class Progress(logging.Handler):
+        def emit(self, record):
+            message = record.getMessage()
+            for role, step in (("import", "owner_export"), ("export", "git_publish")):
+                if f"Hand-off {role} for session handoff-test waiting on {step}" in message:
+                    seen.add(role)
+            if seen == {"import", "export"}:
+                both_logged.set()
+
+    probe = Progress()
+    logger = logging.getLogger(handoff.__name__)
+    logger.addHandler(probe)
+    monkeypatch.setattr(handoff, "_PROGRESS_LOG_S", 0.01)
+    monkeypatch.setattr(handoff, "_operations", {})
+    monkeypatch.setattr(checkout_transfer, "export_checkout", slow_export)
+    monkeypatch.setattr(control, "call", _route_between(a, b, []))
+    try:
+        with caplog.at_level(logging.INFO, logger=handoff.__name__), a.active():
+            move = asyncio.create_task(handoff.move(database.get_session("handoff-test"), b.device_id))
+            try:
+                await asyncio.wait_for(both_logged.wait(), 3)
+                assert not move.done()
+                release.set()
+                assert await asyncio.wait_for(move, 5) is True
+            finally:
+                release.set()
+                await asyncio.gather(move, return_exceptions=True)
+    finally:
+        release.set()
+        logger.removeHandler(probe)
+    messages = [r.getMessage() for r in caplog.records if "waiting on" in r.getMessage()]
+    assert messages and all("total " in message for message in messages)
 
 
 @pytest.mark.asyncio

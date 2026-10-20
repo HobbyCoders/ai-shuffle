@@ -656,6 +656,12 @@ def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
     task.add_done_callback(_forget)
 
 
+def is_armed(wakeup_id: str) -> bool:
+    """Whether this process still owns a live timer for a persisted wake."""
+    task = _timers.get(wakeup_id)
+    return task is not None and not task.done()
+
+
 def arm_persisted(row: Dict[str, Any]) -> None:
     """Arm an immutable persisted row once, at its ``fire_at``.
 

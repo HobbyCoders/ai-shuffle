@@ -1108,17 +1108,24 @@ async def test_the_note_operation_records_the_old_owners_row_here():
                                      "data": {"status": "queued"}}, "dev-unraid")
 
 
-def test_rule3_a_held_message_cancels_the_pending_wakes():
-    """F8: the user's held message supersedes the agent's wakes at once."""
+@pytest.mark.parametrize("moving", [False, True])
+def test_rule3_a_held_message_supersedes_wakes_only_before_transfer(moving):
+    """Held input can unblock a queued wake wait, not an in-flight transfer."""
     from app.core import turn_manager
     from app.db import wakeups
     _chat()
     wakeups.create_wakeup(id="w-soon", session_id="s1", prompt="check CI", fire_at=time.time() + 30)
     sh.request("s1", "DesktopWorker")
+    if moving:
+        pending = sh._pending.pop("s1")
+        sh._waiting["s1"] = pending
+        assert sh._claim("s1", pending)
     held = turn_manager._submit_blocking("s1", "user", prompt="new plan", profile_id="default")
     assert held.startswith(sh.HELD_PREFIX)
-    assert wakeups.get_session_wakeups("s1") == []
-    sh.cancel("s1")
+    wakes = wakeups.get_session_wakeups("s1")
+    assert [row["id"] for row in wakes] == (["w-soon"] if moving else [])
+    if not moving:
+        sh.cancel("s1")
 
 
 class _SendsOnExit:

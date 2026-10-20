@@ -89,12 +89,61 @@ async def test_live_streaming_client_is_not_evicted_or_settled(mock_db):
     scheduler = MagicMock()
     session_runtime.register_scheduler(scheduler)
 
+    import asyncio
+
     with patch("app.core.session_pool.get_session_pool", return_value=pool):
-        await idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"])
+        reader = asyncio.create_task(idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"]))
+        try:
+            await asyncio.sleep(0.03)
+            assert not reader.done()
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
 
     assert turns_db.get_turn(turn["id"])["state"] == "draining"
     pool.remove_broken.assert_not_awaited()
     pool.remove_dead.assert_not_awaited()
+    scheduler.assert_not_called()
+
+
+async def test_drain_settlement_is_fenced_to_the_captured_runtime_run(mock_db):
+    import asyncio
+    from types import SimpleNamespace
+    from app.db import runs
+
+    old = runs.claim_run("s1", "old-runner", 300)
+    turn = turns_db.enqueue_turn("s1", "user", prompt="move when idle")
+    turns_db.start_turn(turn["id"], old["id"], "old-runner")
+    turns_db.interrupt_turn("s1", "stop", turn_id=turn["id"])
+    turns_db.escalate_to_draining(turn["id"])
+    runtime = SimpleNamespace(_run_id=old["id"], _lease_finalizing=False)
+    pool, state = _make_pool()
+    state.is_streaming = True
+    scheduler = MagicMock()
+    session_runtime.register_scheduler(scheduler)
+    with (
+        patch("app.core.session_pool.get_session_pool", return_value=pool),
+        patch.object(session_runtime, "get_live_runtime", return_value=runtime),
+        patch.object(session_runtime, "_should_evict_after_escalation", return_value=True),
+    ):
+        reader = asyncio.create_task(idle_reader.run_idle_reader("s1", drain_turn_id=turn["id"]))
+        try:
+            await asyncio.sleep(0.03)
+            assert not reader.done()
+            # A recovery/reclaim while old cleanup waits must fence its late
+            # settle, just like the normal finalize path from #254/#257.
+            runs.release_run(old["id"], old["fence_token"])
+            mock_db.execute("UPDATE turns SET state='queued',run_id=NULL WHERE id=?", (turn["id"],))
+            replacement = runs.claim_run("s1", "new-runner", 300)
+            turns_db.start_turn(turn["id"], replacement["id"], "new-runner")
+            state.is_streaming = False
+            await asyncio.wait_for(reader, 2)
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+    row = turns_db.get_turn(turn["id"])
+    assert row["state"] == "running" and row["run_id"] == replacement["id"]
+    assert runtime._lease_finalizing
     scheduler.assert_not_called()
 
 

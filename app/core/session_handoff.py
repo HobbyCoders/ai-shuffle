@@ -802,9 +802,10 @@ def busy_state(session_id: str) -> Dict[str, Any]:
     one waiting in the turn queue; ``tasks`` names its running background
     tasks (subagents, Monitors, background shells); ``queued`` counts the
     turns waiting in the queue (they run before the move); ``wake`` is True
-    when a scheduled wake-up is due within WAKE_SOON_S. The handoff's own idle
-    gate refuses a move while any turn runs or is queued, so all of them must
-    hold the move too.
+    when a scheduled wake-up is due within WAKE_SOON_S (overdue wakes must
+    still have a live timer here). Wake diagnostics add ``wake_due_at``,
+    ``wake_overdue`` and ``wake_armed`` when a wake holds the move. The handoff's
+    own idle gate refuses a move while any turn runs or is queued.
     """
     from app.core import streaming_status
     from app.core.task_registry import task_registry
@@ -831,14 +832,29 @@ def busy_state(session_id: str) -> Dict[str, Any]:
     except Exception:
         logger.warning("Could not read the turn queue for %s", session_id, exc_info=True)
         unsettled, queued = False, 0
+    wake_state = {"wake": False}
     try:
-        soon = time.time() + WAKE_SOON_S
-        wake = any(float(row.get("fire_at") or 0) <= soon for row in wakeups.get_session_wakeups(session_id))
+        from app.core import wakeup_service
+
+        now = time.time()
+        due = []
+        for row in wakeups.get_session_wakeups(session_id):
+            fire_at = float(row.get("fire_at") or 0)
+            armed = wakeup_service.is_armed(row["id"])
+            # A durable-first crash can leave an overdue row without a timer.
+            # It is not executing here: carry it through the normal transfer
+            # for the receiver to re-arm instead of waiting until expiry (or
+            # until an owner's message happens to supersede it).
+            if fire_at <= now + WAKE_SOON_S and (fire_at > now or armed):
+                due.append((fire_at, armed))
+        if due:
+            fire_at, armed = min(due)
+            wake_state = {"wake": True, "wake_due_at": fire_at,
+                          "wake_overdue": fire_at <= now, "wake_armed": armed}
     except Exception:
         logger.warning("Could not read the wake-ups of %s", session_id, exc_info=True)
-        wake = False
     running = unsettled or bool(streaming_status.has_active_run(session_id))
-    return {"running": running, "tasks": tasks, "queued": queued, "wake": wake}
+    return {"running": running, "tasks": tasks, "queued": queued, **wake_state}
 
 
 def _is_busy(state: Dict[str, Any]) -> bool:
@@ -1056,13 +1072,24 @@ async def _wait_idle(session_id: str, pending: PendingHandoff) -> bool:
         if pending.cancelled:
             return False
         state = await asyncio.to_thread(busy_state, session_id)
+        if state.get("queued"):
+            # Admission is still owned by the scheduler/run lease. Re-nudge a
+            # missed enqueue kick, rather than needing another owner message
+            # to start the accepted turns that must run before this move.
+            from app.core import turn_manager
+
+            turn_manager._kick(session_id)
         prepared = await _prepare_questions(session_id, state, pending)
         if prepared and not await asyncio.to_thread(_busy, session_id):
             return True
         now = time.monotonic()
         if not last_log or now - last_log >= 60:
-            logger.info("Hand-off waiting for session %s: %s", session_id,
-                        _busy_words(state) or "preparing question cards or target capabilities")
+            wake_detail = ""
+            if "wake_due_at" in state:
+                wake_detail = (f" (wake due_at={state['wake_due_at']:.3f}, "
+                               f"overdue={state['wake_overdue']}, timer={state['wake_armed']})")
+            logger.info("Hand-off waiting for session %s: %s%s", session_id,
+                        _busy_words(state) or "preparing question cards or target capabilities", wake_detail)
             last_log = now
         await asyncio.sleep(POLL_S)
     return False

@@ -860,7 +860,7 @@ async def test_begin_refusal_logs_phase_and_reason(caplog):
         patch.object(handoff, "_wake_queued"),
         pytest.raises(ValueError, match="queued or active turn"),
     ):
-        await handoff._handle({"phase": "begin", "session_id": "s1"}, "test-peer")
+        await handoff._handle({"phase": "begin", "session_id": "s1", "deferred": True}, "test-peer")
     assert "Refused hand-off begin for session s1: " + reason in caplog.text
 
 
@@ -886,6 +886,206 @@ async def test_wait_logs_reason_without_question_contents(caplog):
     ):
         assert not await sh._wait_idle("s1", pending)
     assert "the turn and 1 queued message, Build and a scheduled wake-up" in caplog.text
+
+
+async def test_durable_remote_task_holds_move_until_report_settlement_without_owner_input():
+    from app.core import remote_task, task_persistence
+    from app.core.task_registry import TaskRegistry
+    from app.db import background_tasks
+
+    _chat()
+    dispatch = {"worker_session_id": "remote-child", "root_session_id": "s1",
+                "owner_session_id": "s1", "target_device_id": "dev-gaming", "label": "Build"}
+    with (
+        patch("app.core.task_registry.task_registry", TaskRegistry()),
+        patch.object(task_persistence, "is_enabled", return_value=True),
+        patch.object(task_persistence, "_ensure_consumer"),
+        patch("app.api.sessions.move_session_to", AsyncMock()) as move,
+        patch.object(sh, "_record", AsyncMock()),
+        patch.object(sh, "POLL_S", 0.01),
+    ):
+        remote_task._register(
+            worker_id="remote-child", root_session_id="s1", owner_session_id="s1", label="Build",
+            agent=None, roster_name=None, model_label=None,
+            target_device_id="dev-gaming", worker_name="DesktopWorker",
+        )
+        await task_persistence.flush()
+        # Restart loses the registry, not the remote worker. Its durable row
+        # must still hold the move; a missing local record is not proof of idle.
+        with patch("app.core.task_registry.task_registry", TaskRegistry()):
+            sh.request("s1", "DesktopWorker")
+            sh.schedule("s1")
+            assert await _settle(lambda: "s1" in sh._waiting)
+            assert sh.busy_state("s1")["tasks"] == ["Background work"]
+            move.assert_not_awaited()
+            report = remote_task._Report("remote-child", "completed-1", "completed", "Build passed",
+                                         False, [], dispatch, "DesktopWorker")
+            assert await remote_task._settle_tracked(dispatch, report, None)
+            await task_persistence.flush()
+            assert await _settle(lambda: move.await_count)
+            assert await _settle(lambda: "s1" not in sh._running)
+            move.assert_awaited_once()
+        assert background_tasks.list_session_terminal_background_tasks("s1")[0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("timer", ["active", "done", "absent"])
+async def test_overdue_wake_only_holds_move_with_live_local_timer(timer, caplog):
+    import logging
+    from app.core import wakeup_service
+    from app.db import wakeups
+
+    _chat()
+    due = time.time() - 30
+    row = wakeups.create_wakeup(id="overdue", session_id="s1", prompt="check build", fire_at=due)
+    task = asyncio.create_task(asyncio.Event().wait()) if timer == "active" else None
+    if timer == "done":
+        task = asyncio.create_task(asyncio.sleep(0))
+        await task
+    timers = {row["id"]: task} if task else {}
+    try:
+        with patch.object(wakeup_service, "_timers", timers):
+            state = sh.busy_state("s1")
+            assert state["wake"] is (timer == "active")
+            if timer == "active":
+                assert state["wake_due_at"] == due
+                assert state["wake_overdue"] and state["wake_armed"]
+                pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time(),
+                                            expires_at=time.time() + 0.03)
+                with patch.object(sh, "POLL_S", 0.01), caplog.at_level(logging.INFO, logger=sh.__name__):
+                    assert not await sh._wait_idle("s1", pending)
+                assert f"wake due_at={due:.3f}, overdue=True, timer=True" in caplog.text
+    finally:
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("by", ["agent", "owner"])
+async def test_timerless_overdue_wake_does_not_strand_queued_move(by):
+    from app.core import wakeup_service
+    from app.db import wakeups
+
+    _chat()
+    # Exercise the producer's durable-first window: simulate a process losing
+    # its timer immediately after persistence, rather than seeding a new field.
+    with (
+        patch.object(wakeup_service, "_now_epoch", return_value=time.time() - 30),
+        patch.object(wakeup_service, "_arm"),
+    ):
+        row = await wakeup_service.schedule(
+            session_id="s1", profile_id="default", project_id=None,
+            prompt="check the build", delay_seconds=0,
+        )
+    assert row["id"] not in wakeup_service._timers
+
+    async def moved(*args):
+        # Ignoring a timer-less row for admission must not lose its work: the
+        # canonical transfer still exports it for the destination to re-arm.
+        assert [w["id"] for w in handoff._session_wakes("s1")] == [row["id"]]
+
+    move = AsyncMock(side_effect=moved)
+    with (
+        patch("app.api.sessions.move_session_to", move),
+        patch.object(sh, "_record", AsyncMock()),
+        patch.object(sh, "POLL_S", 0.01),
+    ):
+        if by == "owner":
+            await sh.queue_move("s1", "dev-gaming")
+        else:
+            sh.request("s1", "DesktopWorker")
+            sh.schedule("s1")
+        assert await _settle(lambda: move.await_count)
+        assert await _settle(lambda: "s1" not in sh._running)
+    assert wakeups.get_session_wakeups("s1")[0]["id"] == row["id"]
+    move.assert_awaited_once()
+
+
+async def test_queued_move_nudges_a_stranded_queued_turn_without_owner_input():
+    from app.core import session_runtime
+    from tests.core.test_session_runtime import _runtime_env
+
+    _chat()
+    turn = turns.enqueue_turn("s1", "user", prompt="already accepted work")
+    executions = []
+
+    async def pump(**kwargs):
+        yield {"type": "done"}
+
+    def kick(sid):
+        if not executions:
+            executions.append(asyncio.create_task(session_runtime.SessionRuntime(turn).execute()))
+
+    async def moved(*args):
+        assert turns.get_turn(turn["id"])["state"] == "completed"
+
+    with (
+        _runtime_env(pump=pump),
+        patch("app.core.turn_manager._kick", side_effect=kick) as kicked,
+        patch("app.api.sessions.move_session_to", AsyncMock(side_effect=moved)) as move,
+        patch.object(sh, "_record", AsyncMock()),
+        patch.object(sh, "POLL_S", 0.01),
+    ):
+        try:
+            sh.request("s1", "DesktopWorker")
+            sh.schedule("s1")
+            assert await _settle(lambda: move.await_count)
+            assert await _settle(lambda: "s1" not in sh._running)
+            kicked.assert_called_with("s1")
+            move.assert_awaited_once()
+        finally:
+            for task in executions:
+                task.cancel()
+            await asyncio.gather(*executions, return_exceptions=True)
+            session_runtime.register_scheduler(None)
+            session_runtime.register_broadcaster(None)
+
+
+async def test_live_stream_finishing_after_drain_starts_releases_queued_move():
+    from app.core import idle_reader, session_runtime
+    from app.db import runs
+    from tests.core.test_idle_reader import _make_pool
+    from tests.core.test_session_runtime import _runtime_env
+
+    _chat()
+    turn = turns.enqueue_turn("s1", "user", prompt="move after cleanup")
+    runtime = session_runtime.SessionRuntime(turn)
+    pool, state = _make_pool()
+    state.is_streaming = True
+
+    async def pump(**kwargs):
+        sh.request("s1", "DesktopWorker")
+        turns.interrupt_turn("s1", "stop", turn_id=turn["id"])
+        turns.escalate_to_draining(turn["id"])
+        runtime._drain_after_cancel = True
+        yield {"type": "done"}
+
+    with (
+        _runtime_env(pump=pump, patch_idle=False),
+        patch("app.core.session_pool.get_session_pool", return_value=pool),
+        patch.object(idle_reader, "IDLE_READ_POLL_SECONDS", 0.01),
+        patch("app.api.sessions.move_session_to", AsyncMock()) as move,
+        patch.object(sh, "_record", AsyncMock()),
+        patch.object(sh, "POLL_S", 0.01),
+    ):
+        execution = asyncio.create_task(runtime.execute())
+        try:
+            assert await _settle(lambda: turns.get_turn(turn["id"])["state"] == "draining")
+            await asyncio.sleep(0.03)
+            assert runs.get_active_run("s1") is not None
+            assert not execution.done()
+            pool.remove_broken.assert_not_awaited()
+            move.assert_not_awaited()
+            state.is_streaming = False
+            await asyncio.wait_for(execution, 3)
+            assert turns.get_turn(turn["id"])["state"] == "aborted"
+            assert await _settle(lambda: move.await_count)
+            assert await _settle(lambda: "s1" not in sh._running)
+            move.assert_awaited_once()
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+            session_runtime.register_scheduler(None)
+            session_runtime.register_broadcaster(None)
 
 
 async def test_wait_logs_busy_reason_once_per_minute(caplog):
