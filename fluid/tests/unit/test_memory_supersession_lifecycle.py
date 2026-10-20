@@ -1,4 +1,5 @@
 """Supersession lifecycle and replication use real save/curate/merge paths."""
+import json
 import pytest
 from fluid.codemode.skills import SkillStore, MAX_ARCHIVED_MEMORIES
 from fluid.codemode.facts import global_id
@@ -197,8 +198,74 @@ def test_version_two_repairs_a_previously_half_linked_chain(tmp_path, monkeypatc
     assert not migrated.curate(now=now + 61)
 
 
+
+
+@pytest.mark.parametrize("protected", [True, False])
+@pytest.mark.parametrize("action", ["forget", "retire", "forget-replica"])
+async def test_three_fact_removal_restores_only_nearest_predecessor(tmp_path, protected, action):
+    store = SkillStore(tmp_path / "source")
+    old = store.save_memory(OLD, protected=protected)
+    middle = store.save_memory(NEW, protected=protected)
+    final = store.save_memory(FINAL, protected=protected if action == "retire" else True)
+    if action == "retire" and protected:
+        # Protected successors are not eligible for automatic retirement.
+        assert not store.retire_memory(final.id, reason="consolidation")
+        assert FINAL in store.render_memory_section()
+        return
+    peer = SkillStore(tmp_path / "peer")
+    peer._facts.merge(store._facts.export())
+    if action == "retire":
+        assert store.retire_memory(final.id, reason="consolidation")
+    else:
+        assert store.delete_memory(final.id, explicit=True)
+    if action == "forget-replica":
+        peer._facts.merge(store._facts.export())
+        store = peer
+    reopened = SkillStore(store.root)
+    section = reopened.render_memory_section()
+    assert NEW in section and OLD not in section and FINAL not in section
+    assert find(reopened, global_id(vars(old))).superseded_by == global_id(vars(middle))
+    assert not find(reopened, global_id(vars(middle))).superseded_by
+    ids = [global_id(vars(entry)) for entry in entries(reopened)]
+    assert len(ids) == len(set(ids))
+    result = await recall({"query": "Orion"}, ToolCtx(extra={"recall_store": reopened}))
+    assert "superseded by" in result.text.lower()
+
+
+@pytest.mark.parametrize("archive_reason", ["expiry", "overflow", "pruned"])
+def test_archived_successor_does_not_revive_predecessor(tmp_path, monkeypatch, archive_reason):
+    import time
+    store = SkillStore(tmp_path)
+    old = store.save_memory(OLD)
+    successor = store.save_memory(NEW)
+    if archive_reason == "overflow":
+        monkeypatch.setattr("fluid.codemode.skills.MAX_MEMORIES", 1)
+        store.save_memory("Unrelated fixture fact, kept for overflow.")
+    else:
+        # Advance the real lifecycle producer past only the successor's TTL.
+        packet = store._facts.export()
+        successor_row = next(e for e in packet["entries"] if e["id"] == successor.id)
+        successor_row["expires_at"] = time.time() - 1
+        if archive_reason == "pruned":
+            from fluid.codemode.facts import ARCHIVE_RETENTION
+            successor_row["expires_at"] -= ARCHIVE_RETENTION
+        # Isolate the fixture clock; maintenance itself performs the archive.
+        store.memories_path.write_text(json.dumps(packet))
+    assert successor.id not in {e.id for e in store.memories()}
+    for _ in range(2):
+        assert OLD not in store.render_memory_section()
+        assert find(store, global_id(vars(old))).superseded_by == global_id(vars(successor))
+    if archive_reason != "pruned":
+        # The archive alone was not a retraction; an explicit Forget is.
+        assert store.delete_memory(successor.id, explicit=True)
+        assert not find(store, global_id(vars(old))).superseded_by
+        if archive_reason == "expiry":
+            assert OLD in store.render_memory_section()
+
+
 def test_learner_supersession_instruction_is_one_bounded_line():
     for prompt in (_SYNTH_SYSTEM, _CONSOLIDATE_SYSTEM):
         lines = [line for line in prompt.splitlines() if "<supersede-memory" in line]
         assert len(lines) == 1 and len(lines[0]) <= 120
-        assert "unprotected" in lines[0] and "non-exceptions" in lines[0]
+        assert "non-explicit" in lines[0] and "not temporary" in lines[0]
+        assert "newer listed fact" in lines[0] and "same subject" in lines[0]

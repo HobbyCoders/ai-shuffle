@@ -264,14 +264,14 @@ class FactStore:
         elif "durable" in e and not isinstance(e["durable"], bool):
             e["durable"] = bool(e["durable"])
 
-    @staticmethod
-    def _repair_supersession_links(doc):
-        """Only live, owner-compatible targets may hide a predecessor.
+    def _repair_supersession_links(self, doc):
+        """Repair invalid links without resurrecting expired replacement values.
 
-        Repair dead leaves before their ancestors so forgetting a replacement
-        restores the nearest eligible predecessor, not every historical value.
-        Read paths use _prepare too, so stale/legacy links cannot leak into
-        Recall or the snapshot. Text and lifetime are never renewed here.
+        Forget/curation restores eligible predecessors, then re-links them in
+        the same transaction so only the nearest replacement becomes current.
+        Expiry, overflow and archive pruning are not evidence of retraction:
+        their predecessors keep links and age out on their own. Read paths
+        repair legacy links too. Text and lifetime are never renewed here.
         """
         from fluid.codemode.skills import MAX_MEMORIES
         from fluid.codemode.supersession import replacement_evidence
@@ -280,8 +280,8 @@ class FactStore:
         by_id = {global_id(e): e for e in records}
         now = time.time()
         for _ in range(len(records) + 1):
-            active = {global_id(e) for e in doc["entries"]}
             plans = []
+            restored = []
             for old in records:
                 if not old.get("superseded_by"):
                     continue
@@ -293,10 +293,16 @@ class FactStore:
                         break
                     seen.add(pointer)
                     target = by_id.get(pointer)
-                    if target is None or (pointer not in active and not target.get("superseded_by")):
+                    forgotten = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
+                    retired = (target is not None and target.get("retired_at")
+                               and target.get("retired_reason") != "superseded"
+                               and not target.get("superseded_by"))
+                    if forgotten or retired:
                         if node is old:
                             plans.append((old, None, False))
-                        break  # an intermediate dead leaf is repaired first
+                        break  # an intermediate retracted leaf is repaired first
+                    if target is None:
+                        break  # archive pruning is not a retraction
                     old_scope, target_scope = old.get("scope", "global"), target.get("scope", "global")
                     compatible_scope = old_scope == target_scope or (target_scope == "global" and old_scope.startswith("project:"))
                     if (not compatible_scope or old.get("worker") != target.get("worker")
@@ -335,10 +341,15 @@ class FactStore:
                     if (old.get("retired_reason") == "superseded" and room
                             and (old.get("protected") or old.get("expires_at", now + 1) > now)):
                         doc["archived"] = [e for e in doc["archived"] if e is not old]
-                        doc["entries"].append(old)
+                        if not any(e is old for e in doc["entries"]):
+                            doc["entries"].append(old)
                         old.pop("retired_at", None)
                         old.pop("retired_reason", None)
-                FactStore._bump_metadata(doc, old)
+                    if any(e is old for e in doc["entries"]):
+                        restored.append(old)
+                self._bump_metadata(doc, old)
+            if restored:
+                self._apply_supersessions(doc, restored)
 
     def _maintain(self, doc, keep=None):
         """Expire, classify and bound the store. Never refuses for room.
@@ -787,8 +798,7 @@ class FactStore:
             self._write(doc)
             return True
 
-    @staticmethod
-    def _retire_entry(doc, old, reason):
+    def _retire_entry(self, doc, old, reason):
         clock = dict(old.get("clock") or {old.get("origin", doc["store_id"]): old.get("revision", 1)})
         clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
         if len(clock) > 64:
@@ -798,7 +808,7 @@ class FactStore:
         doc["entries"] = [e for e in doc["entries"] if e is not old]
         if not any(e is old for e in doc["archived"]):
             doc["archived"].append(old)
-        FactStore._repair_supersession_links(doc)
+        self._repair_supersession_links(doc)
 
     def note_recalled(self, ids):
         if not ids:

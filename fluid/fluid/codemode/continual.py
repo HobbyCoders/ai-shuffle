@@ -172,7 +172,7 @@ Output format — nothing else:
   (project-scoped: <memory scope="project">the fact</memory>)
 - to rewrite a memory: <memory id="m3">the corrected fact</memory>
 - to remove a memory: <delete-memory id="m3"/>
-- for clear, listed, unprotected same-subject non-exceptions: <supersede-memory old="m3" new="m4"/> (retains both).
+- newer listed fact replaces older non-explicit (same subject, not temporary): <supersede-memory old="m3" new="m4"/>
 - a memory listed as "explicit" was saved on the user's request: never
   rewrite or delete it, and do not add a new memory that repeats it
 - to propose a model-guidance edit (queued for the replay gate, not applied):
@@ -224,7 +224,7 @@ Output format — nothing else:
 - to rewrite a memory: <memory id="m3">the merged/corrected fact</memory>
   (add scope="project" when the fact is project-specific)
 - to remove a memory: <delete-memory id="m3"/>
-- for clear, listed, unprotected same-subject non-exceptions: <supersede-memory old="m3" new="m4"/> (retains both).
+- newer listed fact replaces older non-explicit (same subject, not temporary): <supersede-memory old="m3" new="m4"/>
 - to remove a skill: <delete-skill name="snake_case_name"/>
 - if the store is already in good shape: NO_CHANGES
 """
