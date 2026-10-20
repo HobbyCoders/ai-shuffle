@@ -525,7 +525,7 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
     assert phases == ["begin","commit"]
     with a.active():
         lifecycle.reset_mock()
-        assert handoff.finish("handoff-test", b.device_id, commits[0]) == {"committed": True, "held_messages": 0}
+        assert handoff.finish("handoff-test", b.device_id, commits[0]) == {"committed": True}
         assert lifecycle.call_args.args[1]["updates"]["owner_device_id"] == b.device_id
     converge([a,b])
     with b.active():

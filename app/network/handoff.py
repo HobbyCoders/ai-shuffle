@@ -857,7 +857,8 @@ def _commit(sid, target, payload, token):
                 _announce_owner(sid, target, session)
                 from app.db.base import parse_jsonb
                 receipt = (parse_jsonb(session.get("placement")) or {}).get("handoff") or {}
-                return {"committed": True, "held_messages": receipt.get("held_messages", 0)}
+                held_messages = receipt.get("held_messages", 0)
+                return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
     if project:
@@ -933,7 +934,7 @@ def _commit(sid, target, payload, token):
     global_events.resources_changed("sessions")
     _announce_owner(sid, target, session)
     engine.kick()
-    return {"committed": True, "held_messages": held_messages}
+    return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
 
 
 # Long Git/history operations must not occupy a single HTTP response: tunnel

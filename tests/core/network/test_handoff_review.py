@@ -253,7 +253,11 @@ async def test_commit_holds_resume_until_source_releases_held_messages(pair, mon
         with a.active():
             if body.get("phase") == "commit":
                 session_moves.append_held(sid, {"id": "held-human", "source": "user", "prompt": "changed instructions"})
-            return await control.handle(action, body, from_device=b.device_id)
+            result = await control.handle(action, body, from_device=b.device_id)
+            if body.get("phase") == "commit":
+                assert result["held_messages"] == 1
+                assert handoff.finish(sid, b.device_id, body) == result
+            return result
 
     monkeypatch.setattr(control, "call", call)
     with b.active():
