@@ -1489,7 +1489,8 @@ class SkillStore:
             _scrub_legacy_previews(self.root / ".synthesis-log.jsonl")
 
 
-    def render_memory_section(self, project: str | None = None, *, checkout: str | None = None) -> str | None:
+    def render_memory_section(self, project: str | None = None, *, checkout: str | None = None,
+                              task_query: str = "") -> str | None:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         An empty store renders a short placeholder (:data:`EMPTY_MEMORY_SECTION`)
@@ -1518,7 +1519,8 @@ class SkillStore:
         archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
         if not entries and not archived:
             return EMPTY_MEMORY_SECTION
-        plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived)
+        plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived,
+                                         task_query=task_query)
         shown = plan["lines"]
         other_checkout, out_of_scope = plan["other_checkout"], plan["out_of_scope"]
         over_budget, held = plan["over_budget"], plan["held"]
@@ -1577,7 +1579,8 @@ class SkillStore:
 
     def memory_snapshot_plan(self, project: str | None = None, *, checkout: str | None = None,
                              entries: list[MemoryEntry] | None = None,
-                             archived: list[MemoryEntry] | None = None) -> dict:
+                             archived: list[MemoryEntry] | None = None,
+                             task_query: str = "") -> dict:
         """Which facts the ``# Memory`` snapshot shows for ``project``, and
         why the rest are left out. :meth:`render_memory_section` renders it;
         the memory health check measures it without building a prompt.
@@ -1604,9 +1607,32 @@ class SkillStore:
         # Within a tier, most useful first (recent activity plus recalls), not
         # merely newest: a recency sort showed whatever was saved last and
         # pushed facts sessions actually look up out of the snapshot.
+        from fluid.codemode.relevance import query_terms, relevance
+        terms = query_terms(task_query)
         rank = {e.id: usefulness(vars(e)) for e in entries}
-        entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")),
-                                   not e.protected, -rank[e.id]))
+        # One coincidental word is not task relevance. Protection still controls
+        # retention; it does not make a biography useful to every coding task.
+        identity_keys = {"profile.name", "profile.preferred_name", "profile.pronouns", "profile.language"}
+        def off_domain(entry: MemoryEntry) -> bool:
+            key = entry.key or ""
+            # A namespace is a hint, not a veto: Remember recommends profile.*
+            # for preferences too. Two task words in the text beat a key miss.
+            domain = set(re.findall(r"[^\W_]+", key.casefold())) - {"profile"}
+            return (key.startswith(("profile.", "business."))
+                    and not domain.intersection(terms)
+                    and relevance(entry.text, terms) < 2)
+
+        def task_match(entry: MemoryEntry) -> bool:
+            return relevance(f"{entry.key or ''} {entry.text}", terms) >= 2
+        # Saturate lexical matches: verbosity/keyword repetition must not beat
+        # useful corrections merely because the fact happens to be longer.
+        topic = {e.id: int(task_match(e)) for e in entries}
+        # Scope and task are bounded boosts, not an absolute project tier:
+        # widely useful global corrections must still compete with local facts.
+        priority = {e.id: rank[e.id] + 7 * 86_400 * topic[e.id]
+                    + (3 * 86_400 if project is not None and e.scope == project else 0)
+                    for e in entries}
+        entries.sort(key=lambda e: (not e.protected, off_domain(e), -priority[e.id], e.id))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
         for entry in entries:
@@ -1660,7 +1686,12 @@ class SkillStore:
                     "with Remember if still true)"
                     if entry.provenance == "tool" else ""
                 )
-                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {entry.text}{hint}"
+                # Bound only the rendered identity, never the stored fact or
+                # Recall result. An ellipsis makes the omitted tail explicit.
+                text = entry.text
+                if entry.key in identity_keys and len(text) > 120:
+                    text = text[:119].rstrip() + "…"
+                line = f"- [{entry.id} r{entry.revision}; {entry.provenance}] {text}{hint}"
                 candidates.append((entry, line, True))
         # Explicit (user-requested) facts rank first, and they alone can fill
         # the budget: on the desktop store 92 protected facts (about 28 KB)
@@ -1675,9 +1706,12 @@ class SkillStore:
         reserve = min(RESERVED_INFERRED_CHARS, MAX_PROMPT_CHARS)
         reserved: set[int] = set()
         for i in sorted(
-            (i for i, (e, _, costs) in enumerate(candidates) if costs and not e.protected),
+            (i for i, (e, _, costs) in enumerate(candidates)
+             if costs and not e.protected and e.key not in identity_keys),
             key=lambda i: (
                 candidates[i][0].provenance != "user",
+                project is None or candidates[i][0].scope != project,
+                -topic[candidates[i][0].id],
                 candidates[i][0].uses <= 0,
                 not (candidates[i][0].key or "").startswith("env."),
                 -rank[candidates[i][0].id],
@@ -1687,21 +1721,31 @@ class SkillStore:
             if cost <= reserve:
                 reserved.add(i)
                 reserve -= cost
+        # A fixed, small identity slice, not an unlimited profile.* tier.
+        # Oversized identities remain eligible for the normal budget and Recall.
+        identity_remaining = min(512, MAX_PROMPT_CHARS - sum(len(candidates[i][1]) + 1 for i in reserved))
+        for i in sorted((i for i, (e, _, costs) in enumerate(candidates)
+                         if costs and e.key in identity_keys),
+                        key=lambda i: (candidates[i][0].key != "profile.name", -rank[candidates[i][0].id])):
+            cost = len(candidates[i][1]) + 1
+            if cost <= identity_remaining:
+                reserved.add(i)
+                identity_remaining -= cost
         remaining = MAX_PROMPT_CHARS - sum(len(candidates[i][1]) + 1 for i in reserved)
-        shown: list[str] = []
-        shown_ids: list[str] = []
-        omitted_ids: list[str] = []
-        for i, (entry, line, costs) in enumerate(candidates):
-            if not costs or i in reserved:
-                shown.append(line)
-                shown_ids.append(entry.id)
-            elif len(line) + 1 <= remaining:
-                shown.append(line)
-                shown_ids.append(entry.id)
+        selected = set(reserved)
+        # Preserve the explicit tier's capacity: a relevant inference flood may
+        # win its reserved slice, never the rest ahead of user-kept facts.
+        for i in sorted(range(len(candidates)), key=lambda i: (not candidates[i][0].protected, i)):
+            _, line, costs = candidates[i]
+            if not costs:
+                selected.add(i)
+            elif i not in selected and len(line) + 1 <= remaining:
+                selected.add(i)
                 remaining -= len(line) + 1
-            else:
-                over_budget += 1
-                omitted_ids.append(entry.id)
+        shown = [line for i, (_, line, _) in enumerate(candidates) if i in selected]
+        shown_ids = [e.id for i, (e, _, _) in enumerate(candidates) if i in selected]
+        omitted_ids = [e.id for i, (e, _, _) in enumerate(candidates) if i not in selected]
+        over_budget = len(omitted_ids)
         return {
             "lines": shown, "shown_ids": shown_ids, "omitted_ids": omitted_ids,
             "in_scope": len(candidates) + held + other_checkout, "over_budget": over_budget,

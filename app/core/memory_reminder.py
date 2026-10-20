@@ -231,6 +231,31 @@ class HeldMemory:
     full_node_id: str
 
 
+def initial_task_query(nodes: Sequence[Any]) -> str:
+    """First substantive owner text, excluding host-pinned context.
+
+    Ranking only, never provenance or permission. Recovering it from the active
+    path keeps a fresh adapter from choosing a new base on a short continuation.
+    Nothing is stored in the memory database or a query log.
+    """
+    from fluid.codemode.relevance import query_terms
+    for node in nodes:
+        message = getattr(node, "message", None)
+        if message is None or getattr(message, "role", None) != "user":
+            continue
+        text = message.text()
+        pin = getattr(message, "context_pin", None)
+        if (isinstance(pin, (tuple, list)) and len(pin) == 2
+                and all(type(x) is int for x in pin) and 0 <= pin[0] < pin[1] <= len(text)):
+            text = text[:pin[0]] + text[pin[1]:]
+        # Quoted reminders are also irrelevant search terms; unlike _node_text,
+        # this does not trust them as evidence that a snapshot was delivered.
+        text = re.sub(r"<system[•-]reminder>.*?</system[•-]reminder>", "", text, flags=re.S)
+        if not text.lstrip().startswith("/") and query_terms(text):
+            return text.strip()[:4000]
+    return ""
+
+
 def _node_text(node: Any) -> str:
     message = getattr(node, "message", None)
     if message is None or getattr(message, "role", None) != "user":
