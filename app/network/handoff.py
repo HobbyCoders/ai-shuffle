@@ -1175,7 +1175,9 @@ def _publish_history(cur, sid, token):
     cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
     ceiling = cur.fetchone()["seq"]
     cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
-                "ON CONFLICT(session_id) DO UPDATE SET next_seq=GREATEST(session_event_counters.next_seq,EXCLUDED.next_seq)",
+                "ON CONFLICT(session_id) DO UPDATE SET next_seq=CASE "
+                "WHEN session_event_counters.next_seq > EXCLUDED.next_seq THEN session_event_counters.next_seq "
+                "ELSE EXCLUDED.next_seq END",
                 (sid, ceiling))
     cur.execute("UPDATE sessions SET sdk_session_id=%s WHERE id=%s", (chunks[0]["sdk_session_id"], sid))
     cur.execute("DELETE FROM handoff_history_chunks WHERE token=%s AND session_id=%s", (token, sid))
