@@ -54,6 +54,9 @@ _CLOSE = object()
 # gap replays the rest from the store.
 LOG_RING_SIZE = 2048
 LOG_RING_MAX_BYTES = 8 * 1024 * 1024
+# Publication precedes persistence. Give in-flight commits time to become
+# replayable, but do not let a refused/non-persisted event stall a turn forever.
+REPLAY_GAP_GRACE_SECONDS = 0.5
 
 
 @lru_cache(maxsize=128)
@@ -211,11 +214,13 @@ class EventBus:
             self._log_bytes[sid] -= self._log_sizes[sid].popleft()
 
     async def _after(
-        self, session_id: str, cursor: int, *, from_store: bool = True
+        self, session_id: str, cursor: int, *, from_store: bool = True,
+        allow_gap: bool = False,
     ) -> list[Event]:
         """Events with ``seq > cursor``, oldest first, from the ring or the store.
 
-        Empty only when nothing after ``cursor`` is reachable anywhere.
+        Normally empty if the next seq is unavailable, even with a newer
+        suffix. ``allow_gap`` exposes that suffix after the replay grace period.
         """
         ring = self._logs.get(session_id)
         floor = self.floor_seq(session_id)
@@ -228,7 +233,7 @@ class EventBus:
             if idx < len(ring) and ring[idx].seq == cursor + 1:
                 return [ring[i] for i in range(idx, len(ring))]
             events = [e for e in ring if e.seq > cursor]
-            return events if events and events[0].seq == cursor + 1 else []
+            return events if allow_gap or (events and events[0].seq == cursor + 1) else []
         # Older than the ring: the store has the gap.
         if from_store and self._replay_source is not None:
             try:
@@ -237,9 +242,14 @@ class EventBus:
                 stored = []
             stored = sorted((e for e in stored if e.seq > cursor), key=lambda e: e.seq)
             if stored:
+                if allow_gap:
+                    available = {e.seq: e for e in stored}
+                    available.update((e.seq, e) for e in ring or () if e.seq > cursor)
+                    return [available[seq] for seq in sorted(available)]
                 return stored if stored[0].seq == cursor + 1 else []
-        # A newer ring suffix must never jump over a still-uncommitted event.
-        return list(ring) if ring and ring[0].seq <= cursor + 1 else []
+        # A newer ring suffix must never jump over a still-uncommitted event
+        # until the subscriber's bounded grace period has expired.
+        return list(ring) if ring and (allow_gap or ring[0].seq <= cursor + 1) else []
 
     async def subscribe(
         self, session_id: str, *, since_seq: int = 0, from_store: bool = True
@@ -252,6 +262,9 @@ class EventBus:
         the persisted history is not part of the turn they are watching.
         Subsequent lag recovery can use the store, but never predates that floor.
         Without a store, active consumers retain the count-bounded ring window.
+        Missing sequences wait briefly for in-flight commits, then skip to the
+        next available event. A queued copy is delivered without waiting; close
+        bypasses the grace period and drains all available events.
         """
         sub = _Subscriber(self._maxsize, self._close_generation)
         sub.replay_history = from_store
@@ -259,6 +272,9 @@ class EventBus:
                       else max(since_seq, self.floor_seq(session_id) - 1))
         subs = self._subs.setdefault(session_id, [])
         subs.append(sub)
+        pending: Event | None = None
+        gap_cursor = -1
+        gap_started = 0.0
         try:
             while True:
                 if self._replay_source is None:
@@ -278,8 +294,35 @@ class EventBus:
                         sub.cursor = event.seq
                         yield event
                 if sub.cursor < self.last_seq(session_id) and self._replay_source is not None:
-                    # Persistence can lag publication. Retry without spinning or
-                    # waiting forever for another publish after the commit.
+                    # The live queue can have the missing event even if it was
+                    # never persisted (or its commit is still in flight).
+                    while pending is None or pending.seq <= sub.cursor:
+                        pending = None
+                        if sub.queue.empty():
+                            break
+                        item = sub.queue.get_nowait()
+                        if item is not _CLOSE:
+                            pending = item
+                    if pending is not None and pending.seq == sub.cursor + 1:
+                        sub.cursor = pending.seq
+                        yield pending
+                        pending = None
+                        continue
+                    if gap_cursor != sub.cursor:
+                        gap_cursor = sub.cursor
+                        gap_started = time.monotonic()
+                    closing = sub.generation < self._close_generation
+                    if closing or time.monotonic() - gap_started >= REPLAY_GAP_GRACE_SECONDS:
+                        # A permanent hole must not hide later durable events or
+                        # a queued terminal. Closing drains without another wait.
+                        available = await self._after(session_id, sub.cursor, allow_gap=True)
+                        next_seq = available[0].seq if available else self.last_seq(session_id) + 1
+                        if pending is not None:
+                            next_seq = min(next_seq, pending.seq)
+                        sub.cursor = next_seq - 1
+                        continue
+                    # Retry even without another publish: a commit can finish
+                    # after its event has already fallen out of the byte ring.
                     await asyncio.sleep(0.05)
                     continue
                 if sub.lagging:
@@ -311,7 +354,8 @@ class EventBus:
                 if event.seq <= sub.cursor:
                     continue  # already delivered via log catch-up
                 if event.seq > sub.cursor + 1:
-                    continue  # gap: loop back to log catch-up
+                    pending = event  # retain it while replay catches up
+                    continue
                 sub.cursor = event.seq
                 yield event
         finally:

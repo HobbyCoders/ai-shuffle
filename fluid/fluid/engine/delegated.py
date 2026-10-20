@@ -146,6 +146,7 @@ from fluid.store.base import (
     flush_events,
     new_id,
     persist_event,
+    replay_source,
 )
 from fluid.tools.mcp.bundled_server import STREAM_LINE_LIMIT
 from fluid.tools.registry import ToolCtx, ToolRegistry
@@ -694,6 +695,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.store = store
         self.model = model
         self.bus = bus or EventBus()
+        if self.bus.replay_source is None:
+            self.bus.set_replay_source(replay_source(self.store))
         self.claude_cmd = claude_cmd or [claude_path]
         self.system = system
         self.append_system_prompt = append_system_prompt
