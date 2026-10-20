@@ -359,6 +359,7 @@ class HarnessAdapter(ProviderAdapter):
         # Whether that node was looked up in the stored log yet (once per
         # adapter: a park/wake builds a fresh adapter over the same history).
         self._memory_rehydrated: bool = False
+        self._memory_initial_task: str = ""  # ephemeral; restored from owner text
         self._memory_identity: Optional[Tuple[str, str]] = None
         # What the model holds for the turn being built, and what the turn's
         # note decided to send (set by send_query around the note render).
@@ -1694,6 +1695,7 @@ class HarnessAdapter(ProviderAdapter):
         # instructions (#1820, #1794). The note rides the next prompt instead,
         # and a compaction puts it back through the SessionStart hook.
         self._memory_plan = None
+        task_before = self._memory_initial_task
         if command and self._is_delegated and not _COMPACT_COMMAND.match(prompt.strip()):
             # Any other Claude Code command (a typed /clear, say) may reset the
             # CLI's context without a compaction boundary: re-send in full.
@@ -1703,6 +1705,7 @@ class HarnessAdapter(ProviderAdapter):
             note = None
         else:
             self._memory_held_for_turn = await self._memory_held()
+            task_before = self._memory_initial_task
             try:
                 if source == "user":
                     note = await asyncio.to_thread(self._turn_context_note, prompt[:4000])
@@ -1720,10 +1723,14 @@ class HarnessAdapter(ProviderAdapter):
         # fluid annotates ``UserTurn.content`` as a list, but its own callers and
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
-        await self._engine.submit(UserTurn(
-            content=cast(Any, content), source=source,
-            context_pin=self._memory_context_pin(content),
-        ))
+        try:
+            await self._engine.submit(UserTurn(
+                content=cast(Any, content), source=source,
+                context_pin=self._memory_context_pin(content),
+            ))
+        except BaseException:
+            self._memory_initial_task = task_before
+            raise
         # Set after acceptance: a concurrent/rejected submit must not replace
         # the running turn's snapshot. The engines reject overlapping turns.
         self._pending_away_note = note
@@ -1948,6 +1955,10 @@ class HarnessAdapter(ProviderAdapter):
         turn. Blocking (the memory store read); never raises.
         """
         self._memory_plan = None
+        # Freeze the base's descriptor, not a per-turn suffix. Later topics use
+        # the existing bounded task slice; a short continuation cannot rerank it.
+        if not getattr(self, "_memory_initial_task", ""):
+            self._memory_initial_task = query.strip()[:4000]
         section = self._memory_section()
         if section is None:
             return None
@@ -2038,7 +2049,7 @@ class HarnessAdapter(ProviderAdapter):
             if not self._memory_rehydrated:
                 self._memory_rehydrated = True
                 node_id = newest_full_node(nodes)
-                if node_id and not await self._memory_folded_since(store, sid, node_id):
+                if node_id and not await self._memory_folded_since(store, sid, node_id, nodes=nodes):
                     self._memory_trusted_node = node_id
             held = held_from_path(nodes, self._memory_trusted_node)
             if held is None and self._memory_trusted_node is None:
@@ -2048,7 +2059,8 @@ class HarnessAdapter(ProviderAdapter):
             logger.warning("[HarnessAdapter] memory held lookup failed", exc_info=True)
             return None
 
-    async def _memory_folded_since(self, store: Any, sid: str, node_id: str) -> bool:
+    async def _memory_folded_since(self, store: Any, sid: str, node_id: str,
+                                   *, nodes: Optional[List[Any]] = None) -> bool:
         """Whether a compaction that can fold user text ran after the turn
         whose user node is ``node_id``. True when that cannot be told."""
         from app.core.memory_reminder import compaction_may_fold_snapshot
@@ -2078,7 +2090,14 @@ class HarnessAdapter(ProviderAdapter):
                         "reason": getattr(event, "reason", None),
                         "model": getattr(event, "model", None),
                         "provider": getattr(event, "provider", None),
+                        "source": getattr(event, "source", None),
                     })
+        if nodes and not self._memory_initial_task:
+            from app.core.memory_reminder import initial_task_query
+            owner_ids = {row.get("node_id") for row in rows
+                         if row.get("_cls") == "TurnStarted" and row.get("source") == "user"}
+            self._memory_initial_task = initial_task_query(
+                [node for node in nodes if getattr(node, "node_id", None) in owner_ids])
         started = False
         for row in rows:
             if row.get("_cls") == "TurnStarted" and row.get("node_id") == node_id:
@@ -2254,7 +2273,8 @@ class HarnessAdapter(ProviderAdapter):
             if not app_session_id:
                 return None
             store, project = session_memory(app_session_id, self._options.cwd)
-            section = store.render_memory_section(project, checkout=self._options.cwd)
+            section = store.render_memory_section(project, checkout=self._options.cwd,
+                                                  task_query=getattr(self, "_memory_initial_task", ""))
             return section or None
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
@@ -2271,7 +2291,8 @@ class HarnessAdapter(ProviderAdapter):
             if not sid:
                 return []
             store, project = session_memory(sid, self._options.cwd)
-            return store.memory_snapshot_plan(project, checkout=self._options.cwd)["eligible_lines"]
+            return store.memory_snapshot_plan(project, checkout=self._options.cwd,
+                                              task_query=getattr(self, "_memory_initial_task", ""))["eligible_lines"]
         except Exception:  # noqa: BLE001 — uncertainty cannot expose extra facts
             logger.warning("[HarnessAdapter] task memory candidates failed", exc_info=True)
             return []
@@ -3606,6 +3627,8 @@ class HarnessAdapter(ProviderAdapter):
 
     @sdk_session_id.setter
     def sdk_session_id(self, value: Optional[str]) -> None:
+        if value != self._sdk_session_id:
+            self._memory_initial_task = ""
         self._sdk_session_id = value
 
     # ─── Options Comparison ───────────────────────────────────────────
