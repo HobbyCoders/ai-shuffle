@@ -41,7 +41,8 @@ def recall_terms(text: str) -> frozenset[str]:
     text = _recall_text(text[:4000]).casefold()
     addresses = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text)
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", " ", text)
-    words = list(dict.fromkeys(addresses + re.findall(r"c\+\+|c#|[^\W_]+", text)))
+    words = list(dict.fromkeys(addresses + re.findall(
+        r"c\+\+|c#|[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff]+|[^\W_]+", text)))
     # Drop lone fragments in sentences, but retain a one-keyword name.
     words = [w for w in words if len(w) > 1 or len(words) == 1]
     filtered = [w for w in words if w not in (_STOP - {"go", "make"})]

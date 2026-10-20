@@ -22,6 +22,13 @@ from fluid.codemode.skills import SkillStore
     ("សាកល្បង", "ការសាកល្បងប្រព័ន្ធ"),
     ("C++", "The native helper is written in C++."),
     ("C#", "The service is written in C#."),
+    ("ทุก", "ทดสอบทุกวัน"),
+    ("วัน", "ทดสอบทุกวัน"),
+    ("ທຸກ", "ທົດສອບທຸກມື້"),
+    ("ថ្ងៃ", "សាកល្បងរាល់ថ្ងៃ"),
+    ("រាល់", "សាកល្បងរាល់ថ្ងៃ"),
+    ("တိုင်း", "စမ်းသပ်မှုနေ့တိုင်း"),
+    ("pytest ทุก", "pytest ทำงานทุกวัน"),
 ])
 def test_keyword_forms_and_cjk_remain_findable(tmp_path, query, text):
     store = SkillStore(tmp_path)
