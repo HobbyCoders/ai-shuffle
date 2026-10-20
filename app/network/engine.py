@@ -673,8 +673,9 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
                 values.append(_my_instance_id())
         previous = _read_row(cursor, coll, record_id)
         if previous and any(
-                name in columns and (encryption.decrypt_value(previous.get(name) or "")
-                                     if name in coll.encrypted else previous.get(name)) != record.get(name)
+                name in columns and (encryption.decrypt_value(previous[name])
+                                     if name in coll.encrypted and encryption.is_encrypted(previous.get(name))
+                                     else previous.get(name)) != record.get(name)
                 for name in ("auth_token", "openai_admin_key", "openai_billing_org_id")):
             # Admin usage is worker-local too. A late poll is guarded by its
             # captured key/binding; never display a pre-rotation reading.
