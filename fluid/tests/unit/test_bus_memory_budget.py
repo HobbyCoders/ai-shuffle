@@ -102,3 +102,11 @@ def test_delegated_preserves_explicit_replay_source():
     bus = EventBus(replay_source=source)
     DelegatedLoop(store=store, model="fake", bus=bus)
     assert bus.replay_source is source
+
+
+def test_delegated_argv_only_without_store():
+    from fluid.engine.delegated import DelegatedLoop
+
+    loop = DelegatedLoop(store=None, model="opus")
+    assert loop.bus.replay_source is None
+    assert "opus" in loop._build_argv()

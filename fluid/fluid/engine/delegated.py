@@ -695,7 +695,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.store = store
         self.model = model
         self.bus = bus or EventBus()
-        if self.bus.replay_source is None:
+        if self.store is not None and self.bus.replay_source is None:
             self.bus.set_replay_source(replay_source(self.store))
         self.claude_cmd = claude_cmd or [claude_path]
         self.system = system
