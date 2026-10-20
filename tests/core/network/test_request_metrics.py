@@ -141,7 +141,127 @@ async def test_real_sealed_lan_exchange_and_direct_controls_are_separate(workers
     measured.flush()
     entries = summary(caplog)
     assert any(e["transport"] == "lan" and e["endpoint"] == "POST /peer/exchange" for e in entries)
-    assert all(e["transport"] == "lan" for e in entries)
+    assert {e["transport"] for e in entries} == {"lan", "lan-setup"}
+    assert sum(e["count"] for e in entries if e["transport"] == "lan-setup") == sum(
+        e["count"] for e in entries if e["transport"] == "lan")
+    assert not request_metrics.in_lan_dispatch.get()
     telemetry = " ".join(r.message for r in caplog.records if r.name == request_metrics.__name__)
     for private in (a.device_id, b.device_id, "private-value", LAN_A, TUNNEL_A):
         assert private not in telemetry
+
+
+@pytest.mark.parametrize("prepare,flag", [(None, 0), ("0", 0), ("1", 1), ("true", 1), ("private-value", 0)])
+def test_state_labels_split_only_on_boolean_prepare(prepare, flag):
+    query = {} if prepare is None else {"prepare": prepare, "transfer": "private-transfer"}
+    assert api._lan_metric_endpoint({"m": "POST", "p": api._LAN_PREFIX + "/state", "q": query}) == (
+        f"POST /peer/state?prepare={flag}")
+
+
+async def test_real_tunnel_fallback_sync_is_measured(workers, addresses, metrics, caplog):
+    from app.network import engine
+    measured, _ = metrics
+    caplog.set_level(logging.INFO, logger=request_metrics.__name__)
+    a, b = _pair(workers, addresses)
+    set_owner_pref(a, "tunnel-telemetry-pref", "private-value")
+    net = Net().serve(a, TUNNEL_A, LAN_A)
+    net.failure[LAN_A] = "timeout"
+    async with net.client_for() as client:
+        with b.active():
+            await transport.PeerLink(a.device_id, [TUNNEL_A, LAN_A]).sync_once(client, engine.require_context())
+    assert owner_pref(b, "tunnel-telemetry-pref") == "private-value"
+    measured.flush()
+    entries = summary(caplog)
+    assert any(e["transport"] == "tunnel" and e["endpoint"] == "POST /peer/exchange" for e in entries)
+    assert all(e["transport"] == "tunnel" for e in entries)
+    assert not request_metrics.in_lan_dispatch.get()
+
+
+async def test_direct_sync_routes_have_fixed_tunnel_labels(workers, addresses, metrics, monkeypatch, caplog):
+    from app.network import peer_files, peer_snapshot, transcripts
+    measured, _ = metrics
+    caplog.set_level(logging.DEBUG, logger=request_metrics.__name__)
+    a, b = _pair(workers, addresses)
+    monkeypatch.setattr(peer_snapshot, "state", lambda *args, **kw: {"prepare": kw["prepare"]})
+    monkeypatch.setattr(peer_snapshot, "page", lambda *args: b"{}")
+    monkeypatch.setattr(peer_files, "part", lambda *args: {})
+    monkeypatch.setattr(transcripts, "serve", lambda *args: {})
+    with a.active():
+        await api.peer_ping(b.device_id)
+        await api.peer_exchange(api.ExchangeRequest(watermarks={}), b.device_id)
+        await api.peer_ops(api.OpsRequest(ops=[]), b.device_id)
+        await api.peer_op(a.device_id, 1, 1, False, b.device_id)
+        await api.peer_snapshot(device_id=b.device_id)
+        await api.peer_state(False, 1, b.device_id)
+        await api.peer_state(True, 1, b.device_id)
+        await api.peer_transcripts(SimpleNamespace(json=AsyncMock(return_value={})), b.device_id)
+        await api.peer_state_page("private-transfer", 0, b.device_id)
+        await api.peer_file_part("a" * 64, 0, b.device_id)
+    measured.flush()
+    entries = summary(caplog)
+    labels = {e["endpoint"] for e in entries if e["transport"] == "tunnel"}
+    assert labels == {"GET /peer/ping", "POST /peer/exchange", "POST /peer/ops",
+                      "GET /peer/ops/{param}/{param}/{param}", "GET /peer/snapshot",
+                      "POST /peer/state?prepare=0", "POST /peer/state?prepare=1",
+                      "POST /peer/transcripts", "GET /peer/state/{param}/{param}",
+                      "GET /peer/blob/{param}/parts/{param}"}
+    assert all(e["count"] == 1 and e["errors"] == 0 for e in entries)
+    telemetry = " ".join(r.message for r in caplog.records if r.name == request_metrics.__name__)
+    for private in (a.device_id, b.device_id, "private-transfer", "a" * 64):
+        assert private not in telemetry
+
+
+@pytest.mark.parametrize("failure,status", [(HTTPException(409, "private transfer"), 409),
+                                            (RuntimeError("private body"), 500)])
+async def test_tunnel_error_statuses_and_context_cleanup(metrics, caplog, failure, status):
+    measured, now = metrics
+    caplog.set_level(logging.INFO, logger=request_metrics.__name__)
+    with pytest.raises(type(failure)):
+        with measured.measure("tunnel", "POST /peer/state?prepare=1"):
+            now[0] = 2
+            raise failure
+    measured.flush()
+    assert summary(caplog) == [{"transport": "tunnel", "endpoint": "POST /peer/state?prepare=1",
+                               "count": 1, "errors": 1, "sample_count": 1,
+                               "p50_ms": 2000, "p95_ms": 2000}]
+    assert not request_metrics.in_lan_dispatch.get()
+    assert "private" not in " ".join(r.message for r in caplog.records)
+
+
+async def test_lan_setup_upload_and_dispatch_are_separate(metrics, monkeypatch, caplog):
+    measured, now = metrics
+    caplog.set_level(logging.INFO, logger=request_metrics.__name__)
+
+    async def require_lan():
+        now[0] += 5
+        return object()
+
+    async def stream():
+        now[0] += 4
+        yield b"encrypted request"
+
+    def open_call(*args):
+        now[0] += 2
+        return SimpleNamespace(device_id="private-device"), {"m": "POST", "p": api._LAN_PREFIX + "/exchange"}
+
+    async def dispatch(*args):
+        now[0] += 3
+        return 200, "application/json", b"{}"
+
+    def seal(*args):
+        now[0] += 10
+        return b"encrypted reply"
+
+    monkeypatch.setattr(api, "_require_lan", require_lan)
+    monkeypatch.setattr(api.lan, "session_known", lambda session: True)
+    monkeypatch.setattr(api.lan, "server_open_call", open_call)
+    monkeypatch.setattr(api.lan, "seal_reply", seal)
+    monkeypatch.setattr(api, "_dispatch_lan", dispatch)
+    monkeypatch.setattr(api, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    request = SimpleNamespace(headers={api.lan.SESSION_HEADER: "private-session", api.lan.SEQ_HEADER: "1"},
+                              stream=stream)
+    assert (await api.peer_lan_call(request)).body == b"encrypted reply"
+    measured.flush()
+    samples = {e["transport"]: e for e in summary(caplog)}
+    assert samples["lan-setup"]["p50_ms"] == 11000
+    assert samples["lan"]["p50_ms"] == 3000
+    assert samples["lan"]["endpoint"] == "POST /peer/exchange"

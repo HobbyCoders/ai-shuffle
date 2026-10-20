@@ -421,6 +421,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Inference journal loss flush failed")
     try:
+        from app.network.request_metrics import metrics as peer_request_metrics
+        peer_request_metrics.flush()
+    except Exception:
+        logger.exception("Peer request metrics flush failed")
+    try:
         from app.core.error_log_handler import uninstall_error_log_handler
         uninstall_error_log_handler()
     except Exception:

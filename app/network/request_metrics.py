@@ -8,6 +8,8 @@ identifiers, bodies or exception messages as endpoint labels.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
 import logging
@@ -20,6 +22,8 @@ logger = logging.getLogger(__name__)
 WINDOW_SECONDS = 60.0
 MAX_ENDPOINTS = 64
 MAX_SAMPLES = 1024
+# LAN dispatch reuses the device-token handlers in-process, not via a tunnel.
+in_lan_dispatch = ContextVar("peer_metric_in_lan_dispatch", default=False)
 
 
 @dataclass
@@ -38,6 +42,22 @@ class RequestMetrics:
         self._started = clock()
         self._timer = None
         self._loop = None
+
+    @contextmanager
+    def measure(self, transport: str, endpoint: str):
+        if transport.startswith("tunnel") and in_lan_dispatch.get():
+            yield
+            return
+        started, status = self._clock(), 500
+        try:
+            yield
+            status = 200
+        except Exception as exc:
+            code = getattr(exc, "status_code", None)
+            status = code if type(code) is int and 100 <= code <= 599 else 500
+            raise
+        finally:
+            self.record(transport, endpoint, status, self._clock() - started)
 
     def record(self, transport: str, endpoint: str, status: int, seconds: float) -> None:
         milliseconds = max(0.0, seconds * 1000)
