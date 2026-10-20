@@ -39,7 +39,9 @@ def save(session_id: str, *, target_id: str, label: str, note: str, requested_by
             f"VALUES ({phs(len(_COLUMNS))}, '[]') "
             "ON CONFLICT (session_id) DO UPDATE SET target_id=EXCLUDED.target_id, "
             "label=EXCLUDED.label, note=EXCLUDED.note, requested_by=EXCLUDED.requested_by, "
-            "requested_at=EXCLUDED.requested_at, expires_at=EXCLUDED.expires_at, handoff_id=EXCLUDED.handoff_id",
+            "requested_at=EXCLUDED.requested_at, expires_at=EXCLUDED.expires_at, "
+            "resume_exported=CASE WHEN session_moves.handoff_id=EXCLUDED.handoff_id "
+            "THEN session_moves.resume_exported ELSE FALSE END, handoff_id=EXCLUDED.handoff_id",
             (session_id, target_id, label, note or "", requested_by,
              float(requested_at), float(expires_at), handoff_id or str(uuid.uuid4())),
         )
@@ -79,6 +81,14 @@ def append_held(session_id: str, message: Dict[str, Any]) -> bool:
         cursor.execute(f"UPDATE session_moves SET held={ph()}, wakes_superseded=TRUE WHERE session_id={ph()}",
                        (json.dumps(held), session_id))
         return cursor.rowcount > 0
+
+
+def set_resume_exported(session_id: str, handoff_id: str, target_id: str, exported: bool = True) -> None:
+    """Persist begin's actual decision, not a later capability lookup."""
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE session_moves SET resume_exported=%s "
+                              "WHERE session_id=%s AND handoff_id=%s AND target_id=%s",
+                              (exported, session_id, handoff_id, target_id))
 
 
 def set_wake_token(session_id: str, token: str) -> None:

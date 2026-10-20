@@ -535,7 +535,7 @@ def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[s
     return {"prompt": prompt, "source": "wakeup", "profile_id": session.get("profile_id"),
             "project_id": session.get("project_id"),
             "payload": {RESUME_PAYLOAD: {"from": source, "note": pending.note, "handoff_id": pending.handoff_id}},
-            "command_id": f"{RESUME_COMMAND_PREFIX}{pending.requested_at:.6f}"}
+            "command_id": RESUME_COMMAND_PREFIX + pending.handoff_id}
 
 
 def is_resume_turn(payload: Any) -> bool:
@@ -1160,7 +1160,12 @@ def _owner_now(session_id: str) -> Optional[str]:
 async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     """The chat now runs on ``owner``: say so there, then send it the held messages."""
     label = pending.label if owner == pending.target_id else _label(owner)
+    from app.db import session_moves
+
+    exported = (await asyncio.to_thread(session_moves.get, session_id) or {}).get("resume_exported")
     plan = await asyncio.to_thread(resume_plan, session_id, pending, owner)
+    if exported and plan in ("unknown", "unsupported"):
+        plan = "send"  # begin, not a later capability report, chose the protocol.
     outcome = f"Handed off to {label}. Open this chat there to continue on the same branch."
     if plan == "send":
         outcome = f"Handed off to {label}. This chat continues there on the same branch."
@@ -1184,9 +1189,7 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     with _hold_lock:
         pending.holding = False
     resume = None
-    from app.network.handoff import target_resume
-
-    if plan == "send" and not await asyncio.to_thread(target_resume, owner):
+    if plan == "send" and not exported:
         try:
             resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
         except Exception:  # noqa: BLE001 — the held messages still go
@@ -1495,7 +1498,7 @@ async def resume_queued() -> int:
                 pending.holding = False
                 label = pending.label if owner == pending.target_id else _label(owner)
                 resume = None
-                if await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
+                if not row.get("resume_exported") and await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
                     resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
                 _spawn(deliver_held(session_id, owner, label, resume))
                 continue
@@ -1555,6 +1558,14 @@ async def announce_dropped() -> int:
 
 async def on_boot() -> None:
     """Startup: resume moves kept in the database, then the legacy note."""
+    try:
+        from app.network.handoff import recover_history_staging
+        from app.core import wakeup_service
+
+        if await asyncio.to_thread(recover_history_staging):
+            await wakeup_service.rehydrate_pending()
+    except Exception:  # noqa: BLE001 — keep queued-move recovery independent
+        logger.warning("Could not recover staged hand-off history", exc_info=True)
     try:
         await resume_queued()
     except Exception:  # noqa: BLE001 — boot continues

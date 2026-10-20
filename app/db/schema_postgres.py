@@ -2132,6 +2132,7 @@ def create_postgres_schema(cursor) -> None:
             held JSONB NOT NULL DEFAULT '[]',
             handoff_id TEXT,
             wake_token TEXT,
+            resume_exported BOOLEAN NOT NULL DEFAULT FALSE,
             wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
         )
     """)
@@ -2144,6 +2145,7 @@ def create_postgres_schema(cursor) -> None:
             branch TEXT,
             wakes JSONB NOT NULL,
             superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            resume_wait BOOLEAN NOT NULL DEFAULT FALSE,
             keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
             finalized BOOLEAN NOT NULL DEFAULT FALSE,
             created_at DOUBLE PRECISION NOT NULL DEFAULT 0,

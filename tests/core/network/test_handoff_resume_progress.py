@@ -14,8 +14,10 @@ from app.network import control, engine, handoff, runners
 
 def test_agent_resume_wake_is_stable_and_manual_moves_never_wake(mock_db, monkeypatch):
     database.create_session("resume-chat", "default")
-    queued = {"requested_by": "agent", "label": "Target", "note": "Do the next step",
+    queued = {"requested_by": "agent", "target_id": "target", "label": "Target", "note": "Do the next step",
               "requested_at": time.time(), "handoff_id": "move-id"}
+    monkeypatch.setattr(sh, "_moving", {"resume-chat": sh.PendingHandoff(
+        "target", "Target", queued["note"], queued["requested_at"], handoff_id="move-id")})
     monkeypatch.setattr(runners, "find", lambda _: {"capabilities": {"move_wakes": 3, "handoff_target_resume": 1}})
     with patch.object(sh, "resume_plan", return_value="send"):
         first = handoff._resume_wake("resume-chat", queued, "target")
@@ -66,9 +68,16 @@ async def test_target_commit_arms_resume_without_source_and_human_cannot_drop_it
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capable", [False, True])
 async def test_moved_sends_legacy_resume_only_for_older_target(mock_db, monkeypatch, capable):
+    from app.db import session_moves
+
     pending = sh.PendingHandoff("target", "Target", "note", time.time())
+    database.create_session("resume-chat", "default")
+    session_moves.save("resume-chat", target_id="target", label="Target", note="note", requested_by="agent",
+                       requested_at=pending.requested_at, expires_at=pending.expires_at, handoff_id=pending.handoff_id)
+    session_moves.set_resume_exported("resume-chat", pending.handoff_id, "target", capable)
     monkeypatch.setattr(sh, "resume_plan", lambda *args: "send")
-    monkeypatch.setattr(handoff, "target_resume", lambda _: capable)
+    # Later capability changes must not alter the persisted export decision.
+    monkeypatch.setattr(handoff, "target_resume", lambda _: not capable)
     monkeypatch.setattr(sh, "_tell", AsyncMock())
     monkeypatch.setattr(sh, "_resume_turn", lambda *args: {"prompt": "legacy"})
     deliver = AsyncMock()

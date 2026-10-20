@@ -2513,6 +2513,7 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("session_moves")
     for column, definition in (("handoff_id", "TEXT"), ("wake_token", "TEXT"),
+                               ("resume_exported", "BOOLEAN NOT NULL DEFAULT FALSE"),
                                ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE")):
         if not column_exists(cursor, "session_moves", column):
             cursor.execute(f"ALTER TABLE session_moves ADD COLUMN {column} {definition}")
@@ -2528,6 +2529,7 @@ def _run_column_migrations(cursor):
             branch TEXT,
             wakes JSONB NOT NULL,
             superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            resume_wait BOOLEAN NOT NULL DEFAULT FALSE,
             keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
             finalized BOOLEAN NOT NULL DEFAULT FALSE,
             created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -2537,6 +2539,7 @@ def _run_column_migrations(cursor):
         """)
         migrations_applied.append("handoff_wakes")
     for column, definition in (("created_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+                               ("resume_wait", "BOOLEAN NOT NULL DEFAULT FALSE"),
                                ("offline_since", "DOUBLE PRECISION"), ("recovery_reason", "TEXT")):
         if not column_exists(cursor, "handoff_wakes", column):
             cursor.execute(f"ALTER TABLE handoff_wakes ADD COLUMN {column} {definition}")

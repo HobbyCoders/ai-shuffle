@@ -262,9 +262,10 @@ def _resume_wake(sid, queued, target):
         return None
     from app.core import session_handoff
 
-    pending = session_handoff.PendingHandoff(
-        target_id=target, label=queued["label"], note=queued["note"],
-        requested_at=queued["requested_at"], handoff_id=queued["handoff_id"])
+    pending = session_handoff._moving.get(sid)
+    if (pending is None or pending.by != "agent" or pending.target_id != target
+            or queued.get("target_id") != target or pending.handoff_id != queued.get("handoff_id")):
+        return None
     if session_handoff.resume_plan(sid, pending, target) != "send":
         return None
     resume = session_handoff._resume_turn(sid, pending, pending.label)
@@ -488,12 +489,14 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             # This authenticated message from the source confirms its commit,
             # even when the earlier commit response never reached this worker.
             _publish_history(cur, sid, token)
-            _accept_owner_row(cur, sid, device, row["branch"])
+            _accept_owner_row(cur, sid, device, row["branch"], token)
             # This authenticated committed transfer also supersedes older
             # abandoned imports whose cancellation reply never arrived.
             cur.execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
                         "WHERE session_id=%s AND token<>%s AND finalized=FALSE", (sid, token))
             superseded = row["superseded"] or payload.get("superseded") is True
+            if superseded:
+                cur.execute("UPDATE handoff_wakes SET superseded=TRUE WHERE token=%s", (token,))
             if payload.get("release") is not True:
                 return []  # Confirm ownership, but keep wakes dormant during delivery.
             from app.core.wakeup_service import HELD_PEER_SOURCE
@@ -791,6 +794,8 @@ def _begin(sid, target, remote, note, wake_barrier, timing):
         ctx = engine.require_context()
         reply = {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
         timing.step("encrypt")
+        if queued and queued.get("target_id") == target:
+            session_moves.set_resume_exported(sid, queued["handoff_id"], target, bool(resume_wake))
         return reply
     except BaseException:
         timing.waiting("release_failed_export")
@@ -850,7 +855,9 @@ def _commit(sid, target, payload, token):
             if cur.fetchone():
                 _release_holds(cur, HOLD + token)
                 _announce_owner(sid, target, session)
-                return {"committed": True}
+                from app.db.base import parse_jsonb
+                receipt = (parse_jsonb(session.get("placement")) or {}).get("handoff") or {}
+                return {"committed": True, "held_messages": receipt.get("held_messages", 0)}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
     if project:
@@ -882,8 +889,17 @@ def _commit(sid, target, payload, token):
             if {row["id"] for row in cur.fetchall()} != set(moving):
                 raise ValueError("A wake-up of this chat changed during the move; ownership was not moved. "
                                  "Try again.")
+        from app.db.base import parse_jsonb
+
+        cur.execute("SELECT held FROM session_moves WHERE session_id=%s AND target_id=%s FOR UPDATE", (sid, target))
+        queued = cur.fetchone()
+        held_messages = len(parse_jsonb(queued["held"]) or []) if queued else 0
+        # Sync this receipt with the ownership flip. A restarted receiver must
+        # know whether a lost commit reply was holding human messages back.
+        placement = {"where": "runner:" + target,
+                     "handoff": {"token": token, "held_messages": held_messages}}
         cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
-                    (target, target, json.dumps({"where": "runner:" + target}), session_branch, sid))
+                    (target, target, json.dumps(placement), session_branch, sid))
         if session_branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
         cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
@@ -917,7 +933,7 @@ def _commit(sid, target, payload, token):
     global_events.resources_changed("sessions")
     _announce_owner(sid, target, session)
     engine.kick()
-    return {"committed": True}
+    return {"committed": True, "held_messages": held_messages}
 
 
 # Long Git/history operations must not occupy a single HTTP response: tunnel
@@ -1133,8 +1149,67 @@ def _history_conflict(table, columns):
             ", ".join(f"EXCLUDED.{c}" for c in changed) + ")")
 
 
+def _message_signature(values):
+    """Portable legacy-message identity; local BIGSERIAL ids are not exported."""
+    from datetime import datetime, timezone
+
+    normalized = []
+    for column, value in zip(TABLES["session_messages"], values):
+        if column in JSON_COLUMNS and isinstance(value, str):
+            value = json.loads(value)
+        if column == "created_at" and value is not None:
+            if isinstance(value, str):
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value = value.replace(tzinfo=value.tzinfo or timezone.utc).astimezone(timezone.utc).isoformat()
+        normalized.append(value)
+    return json.dumps(normalized, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _reconcile_app_rows(cur, sid, table, snapshot):
+    """Prune rewinds/divergent compaction first; retain unchanged local rows.
+
+    One indexed session scan plus bounded deletes/inserts, not one anti-join per
+    message. Matching legacy rows is a multiset so identical messages survive.
+    Only portable receipts/ancestry markers are authoritative in this snapshot.
+    """
+    from collections import Counter
+
+    columns = TABLES[table]
+    selected = ("id", *columns) if table == "session_messages" else (("id", "seq") if table == "session_events" else ("id",))
+    cur.execute(f"SELECT {', '.join(selected)} FROM {table} WHERE session_id=%s" +
+                _TRANSFER_FILTERS.get(table, ""), (sid,))
+    existing = cur.fetchall()
+    stale = []
+    if table == "session_messages":
+        available = Counter(_message_signature(values) for values in snapshot)
+        kept = Counter()
+        for row in existing:
+            signature = _message_signature([row[c] for c in columns])
+            if kept[signature] < available[signature]:
+                kept[signature] += 1
+            else:
+                stale.append(row["id"])
+        missing = []
+        for values in snapshot:
+            signature = _message_signature(values)
+            if kept[signature]:
+                kept[signature] -= 1
+            else:
+                missing.append(values)
+        snapshot = missing
+    else:
+        keys = {(values[0], values[1]) if table == "session_events" else values[0] for values in snapshot}
+        stale = [row["id"] for row in existing
+                 if ((row["id"], row["seq"]) if table == "session_events" else row["id"]) not in keys]
+    for start in range(0, len(stale), 200):
+        part = stale[start:start + 200]
+        cur.execute(f"DELETE FROM {table} WHERE session_id=%s AND id IN (" +
+                    ", ".join(["%s"] * len(part)) + ")", (sid, *part))
+    return snapshot
+
+
 def _publish_history(cur, sid, token):
-    """Atomic delta publication. No ownership or old mirror changes during staging."""
+    """Atomic reconciliation/publication, retryable after an uncertain commit."""
     from psycopg2.extras import Json
     from app.db.base import parse_jsonb
     from app.db.network import _insert_rows
@@ -1145,57 +1220,112 @@ def _publish_history(cur, sid, token):
     if not chunks:
         return
     timing = _import_timing.get()
-    metrics = {}
+    grouped = {table: [] for table in APP_TABLES}
     for chunk in chunks:
+        if chunk["table_name"] in grouped:
+            grouped[chunk["table_name"]].extend(parse_jsonb(chunk["rows"]))
+    for table, snapshot in grouped.items():
         started = monotonic()
-        table = chunk["table_name"]
-        if table not in APP_TABLES:
-            continue
         if timing:
             timing.waiting("publish_history." + table)
+        count = len(snapshot)
+        snapshot = _reconcile_app_rows(cur, sid, table, snapshot)
         columns = ("session_id", *TABLES[table])
         rows = [(sid, *[Json(v) if c in JSON_COLUMNS and v is not None else v
-                        for c, v in zip(TABLES[table], values)])
-                for values in parse_jsonb(chunk["rows"])]
-        if table == "session_messages":
-            # Legacy messages have no portable key (local BIGSERIAL ids differ).
-            # Preserve existing copies using the complete exported natural row.
-            for values in rows:
-                match = " AND ".join(f"{c} IS NOT DISTINCT FROM %s" for c in columns)
-                cur.execute(f"INSERT INTO {table} ({', '.join(columns)}) SELECT " +
-                            ", ".join(["%s"] * len(columns)) +
-                            f" WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE {match})", (*values, *values))
-        else:
-            _insert_rows(cur, table, columns, rows, _history_conflict(table, columns), batch=200)
-        count, seconds = metrics.get(table, (0, 0.0))
-        metrics[table] = (count + len(rows), seconds + monotonic() - started)
-    if timing:
-        for table, (count, seconds) in metrics.items():
-            timing.steps.append(f"publish_history.{table}={seconds:.3f}s rows={count}")
+                        for c, v in zip(TABLES[table], values)]) for values in snapshot]
+        _insert_rows(cur, table, columns, rows, _history_conflict(table, columns), batch=200)
+        if timing:
+            timing.steps.append(f"publish_history.{table}={monotonic() - started:.3f}s rows={count}")
     cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
     ceiling = cur.fetchone()["seq"]
     cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
                 "ON CONFLICT(session_id) DO UPDATE SET next_seq=CASE "
                 "WHEN session_event_counters.next_seq > EXCLUDED.next_seq THEN session_event_counters.next_seq "
-                "ELSE EXCLUDED.next_seq END",
-                (sid, ceiling))
+                "ELSE EXCLUDED.next_seq END", (sid, ceiling))
     cur.execute("UPDATE sessions SET sdk_session_id=%s WHERE id=%s", (chunks[0]["sdk_session_id"], sid))
     cur.execute("DELETE FROM handoff_history_chunks WHERE token=%s AND session_id=%s", (token, sid))
 
 
-def _discard_history(sid, token):
+def _discard_history(sid, token, *, expired_only=False):
+    from app.db.base import parse_jsonb
+
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT sdk_session_id FROM handoff_history_chunks WHERE token=%s AND session_id=%s LIMIT 1", (token, sid))
+        cur.execute("SELECT sdk_session_id,created_at FROM handoff_history_chunks "
+                    "WHERE token=%s AND session_id=%s ORDER BY table_name,batch_no LIMIT 1 FOR UPDATE", (token, sid))
         row = cur.fetchone()
         if not row:
             return
+        if expired_only:
+            if _staging_age(row["created_at"]) < TTL:
+                return
+            cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+            session = cur.fetchone()
+            receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {} if session else {}
+            if (session and session["owner_device_id"] == engine.require_context().device_id
+                    and receipt.get("token", token) == token):
+                return  # An ownership sync won the race; recover, never discard.
         sdk = row["sdk_session_id"]
         cur.execute("SELECT 1 FROM sessions WHERE sdk_session_id=%s", (sdk,))
         if not cur.fetchone():
             for table in TABLES.keys() - APP_TABLES:
                 cur.execute(f"DELETE FROM {table} WHERE session_id=%s", (sdk,))
         cur.execute("DELETE FROM handoff_history_chunks WHERE token=%s AND session_id=%s", (token, sid))
+        _release_holds(cur, HOLD + token)
+
+
+def _staging_age(created_at):
+    from datetime import datetime, timezone
+
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    return time.time() - created_at.replace(tzinfo=created_at.tzinfo or timezone.utc).timestamp()
+
+
+def recover_history_staging():
+    """Boot/maintenance: finish committed imports, collect expired private ones.
+
+    The ownership record carries the commit token, so an older abandoned export
+    cannot overwrite the snapshot of a later successful move. Wakes recovered
+    here remain durable; the async boot/maintenance caller rehydrates them.
+    """
+    from app.db.base import parse_jsonb
+
+    ctx = engine.context()
+    if ctx is None:
+        return 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT h.token,h.session_id,h.created_at,s.owner_device_id,s.placement,s.branch "
+                    "FROM handoff_history_chunks h JOIN sessions s ON s.id=h.session_id "
+                    "WHERE h.table_name='' AND h.batch_no=0 ORDER BY h.created_at")
+        staged = cur.fetchall()
+    published = 0
+    for row in staged:
+        receipt = (parse_jsonb(row["placement"]) or {}).get("handoff") or {}
+        try:
+            if row["owner_device_id"] == ctx.device_id and receipt.get("token", row["token"]) == row["token"]:
+                _accept_owner(row["session_id"], ctx.device_id, row["branch"], row["token"], recovering=True)
+                published += 1
+            elif _staging_age(row["created_at"]) >= TTL:
+                _discard_history(row["session_id"], row["token"], expired_only=True)
+        except Exception:  # noqa: BLE001 — retry one token without stopping boot
+            logger.warning("Could not recover hand-off history for session %s", row["session_id"], exc_info=True)
+    return published
+
+
+async def history_recovery_loop():
+    """Also collect attempts that were still inside their lease during boot."""
+    from app.core import wakeup_service
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if await run_sync(recover_history_staging):
+                await wakeup_service.rehydrate_pending()
+                _wake_queued()
+        except Exception:  # noqa: BLE001 — transient DB outages must not stop maintenance
+            logger.warning("Could not sweep hand-off history staging", exc_info=True)
 
 
 def install_history(sid, data, cwd):
@@ -1284,38 +1414,56 @@ def install_history(sid, data, cwd):
     return sdk
 
 
-def _accept_owner_row(cur, sid, device_id, branch):
+def _accept_owner_row(cur, sid, device_id, branch, token=None):
     # instance_id moves too (as adopt/unpin do): left on the previous
     # worker's id, the session listed as remote with an unknown state here.
+    placement = {"where": "runner:" + device_id}
+    if token:
+        placement["handoff"] = {"token": token}
     cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
-                (device_id, settings.effective_instance_id, json.dumps({"where": "runner:" + device_id}), branch, sid))
+                (device_id, settings.effective_instance_id, json.dumps(placement), branch, sid))
     if branch is None:
         cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
+    if token:
+        _release_holds(cur, HOLD + token)
 
 
-def _accept_owner(sid, device_id, branch=None, token=None):
+def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *, recovering=False):
     from app.db.base import parse_jsonb
 
     rows = []
     with get_db() as conn:
         cur = conn.cursor()
         # Same lock order as finalize-wakes, which may race the commit reply.
-        cur.execute("SELECT token,wakes,superseded,keep_peer FROM handoff_wakes "
+        cur.execute("SELECT token,wakes,superseded,keep_peer,resume_wait FROM handoff_wakes "
                     "WHERE session_id=%s AND token=%s AND finalized=FALSE FOR UPDATE", (sid, token))
         staged_rows = cur.fetchall()
         # Admission and sync ownership updates share this lock. No target turn
         # may run between a mirrored source commit and context publication.
-        cur.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        session = cur.fetchone()
+        receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
+        if recovering and (session["owner_device_id"] != device_id
+                           or (receipt.get("token") and receipt["token"] != token)):
+            return []  # A newer move won while the sweep was acquiring locks.
+        if held_messages is None:
+            held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
         if token:
             _publish_history(cur, sid, token)
-        _accept_owner_row(cur, sid, device_id, branch)
+        _accept_owner_row(cur, sid, device_id, branch, token)
         for staged in staged_rows:
             wakes = parse_jsonb(staged["wakes"]) or []
+            kept = [w for w in wakes if w.get("source") != "handoff_resume"]
+            if held_messages:
+                staged["resume_wait"] = True
+                cur.execute("UPDATE handoff_wakes SET resume_wait=TRUE WHERE token=%s", (staged["token"],))
             for wake in wakes:
                 if wake.get("source") != "handoff_resume":
                     continue
-                if staged["superseded"] and not staged["keep_peer"]:
-                    continue  # An explicit Stop/delete wins even before publication.
+                if staged["superseded"] or staged["resume_wait"]:
+                    if staged["keep_peer"]:
+                        kept.append(wake)  # Release after the held humans, never before.
+                    continue  # An explicit Stop/delete permanently retires it.
                 # Removing it from staging is the durable receipt: a source
                 # finalize/retry cannot recreate this wake after it has fired.
                 cur.execute("INSERT INTO pending_wakeups "
@@ -1328,14 +1476,14 @@ def _accept_owner(sid, device_id, branch=None, token=None):
                 if row:
                     rows.append(dict(row))
             cur.execute("UPDATE handoff_wakes SET wakes=%s WHERE token=%s",
-                        (json.dumps([w for w in wakes if w.get("source") != "handoff_resume"]), staged["token"]))
+                        (json.dumps(kept), staged["token"]))
     return rows
 
 
-async def _accept_and_arm(sid, device_id, branch, token):
+async def _accept_and_arm(sid, device_id, branch, token, held_messages=None):
     from app.core import wakeup_service
 
-    for row in await run_sync(_accept_owner, sid, device_id, branch, token):
+    for row in await run_sync(_accept_owner, sid, device_id, branch, token, held_messages):
         wakeup_service.arm_persisted(row)
 
 
@@ -1438,7 +1586,26 @@ def _reserve_mirror(sid, holder, held):
         held[sid] = run
         return
     active = runs.get_active_run(sid)
-    if not active or not str(active.get("runner_id") or "").startswith(HANDOFF):
+    previous = str((active or {}).get("runner_id") or "")
+    if previous.startswith(HOLD):
+        old_token = previous[len(HOLD):]
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM handoff_history_chunks WHERE token=%s AND session_id=%s LIMIT 1", (old_token, sid))
+            abandoned = cur.fetchone()
+        if abandoned:
+            # This function is reached only after a fresh authenticated begin.
+            # Its new source lease proves the previous attempt did not retain
+            # ownership, even if that attempt's cancellation reply was lost.
+            _discard_history(sid, old_token)
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
+                                      "WHERE token=%s AND session_id=%s", (old_token, sid))
+            run = runs.claim_run(sid, holder, TTL)
+            if run:
+                held[sid] = run
+                return
+    if not active or not previous.startswith(HANDOFF):
         raise ValueError("Stop this session's active run before moving it.")
 
 
@@ -1449,11 +1616,19 @@ def _open_export(ctx, reply, sid):
 
 
 async def _owner_commit(owner, payload):
-    try:
-        result = await control.call(owner, "handoff", payload, timeout=180)
-    except (control.ControlRefused, ValueError) as exc:
-        logger.warning("Owner refused hand-off commit for session %s: %s", payload["session_id"], exc)
-        raise
+    for attempt in range(3):
+        try:
+            result = await control.call(owner, "handoff", payload, timeout=180)
+            break
+        except (control.ControlRefused, ValueError) as exc:
+            logger.warning("Owner refused hand-off commit for session %s: %s", payload["session_id"], exc)
+            raise
+        except (control.RunnerUnreachable, TimeoutError):
+            # Commit is idempotent. Never turn an uncertain applied commit into
+            # a cancellation; obtain its receipt again, or leave durable staging
+            # for recovery after the ownership sync arrives.
+            if attempt == 2:
+                raise
     if not result.get("committed"):
         reason = result.get("error") or result.get("reason") or "The owning worker did not confirm the transfer."
         logger.warning("Owner refused hand-off commit for session %s: %s", payload["session_id"], reason)
@@ -1481,12 +1656,16 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
     data["_prepare_history"] = True
     data["_timing"] = timing
     committed = False
+    published = False
     try:
         if data.get("wakes") and "wake_barrier" not in data:
             raise ValueError("Update both workers before moving a chat with pending wake-ups.")
         state = data["checkout"]
         if data["project_id"] != (project["id"] if project else None):
             raise ValueError("The owning worker's project changed; refresh before resuming.")
+        # Keep run admission closed through atomic context publication, including
+        # plain chats and recovery after a lost commit response.
+        await run_sync(_reserve_mirror, sid, HOLD + token, held)
         if not project:
             # Plain chat: no checkout to move, only the conversation history.
             if state is not None:
@@ -1508,7 +1687,8 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
                 raise ValueError("The owning worker did not confirm the transfer.")
             committed = True
             timing.waiting("accept_owner")
-            await _accept_and_arm(sid, ctx.device_id, None, token)
+            await _accept_and_arm(sid, ctx.device_id, None, token, result.get("held_messages"))
+            published = True
             if not data.get("wake_barrier"):
                 timing.waiting("arm_wakes")
                 await _arm_moved_wakes(sid, data.get("wakes"))
@@ -1518,7 +1698,6 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         timing.waiting("checkout_guard")
         dest, path = await run_sync(_receiving_path, base, state["branch"])
         # Exclude other sessions working in the checkout this import changes.
-        await run_sync(_reserve_mirror, sid, holder, held)
         await run_sync(_hold_checkout, session, project, str(path), state["branch"], holder, held)
         timing.step("checkout_guard", holds=len(held))
         timing.waiting("git_fetch")
@@ -1553,13 +1732,15 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
             raise ValueError("The owning worker did not confirm the transfer.")
         committed = True
         timing.waiting("accept_owner")
-        await _accept_and_arm(sid, ctx.device_id, session_branch, token)
+        await _accept_and_arm(sid, ctx.device_id, session_branch, token, result.get("held_messages"))
+        published = True
         if not data.get("wake_barrier"):
             timing.waiting("arm_wakes")
             await _arm_moved_wakes(sid, data.get("wakes"))
         return cwd
     finally:
         if not committed:
+            cancelled = {}
             # Best effort. A lost response/worker restart leaves a bounded lease,
             # not a permanent block; never force ownership after a timeout.
             try:
@@ -1571,3 +1752,9 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
                         await run_sync(_discard_staged_wakes, sid, owner, token)
             except (control.RunnerUnreachable, control.ControlRefused, ValueError):
                 pass
+            if not cancelled.get("cancelled"):
+                # Leave the durable import lease until publication/recovery or
+                # expiry. Releasing it here could start a turn on the old SDK.
+                held.pop(sid, None)
+        elif not published:
+            held.pop(sid, None)  # A committed import still needs its recovery guard.
