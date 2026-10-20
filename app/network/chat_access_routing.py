@@ -3,10 +3,10 @@
 Grants, pending requests, one-shot approvals and saved connections live only
 in the owning worker's broker (``app.core.chat_access``). A worker showing a
 mirrored session forwards each access-panel call to the owner over the
-authenticated control channel and keeps nothing: no grant, handle or saved
-credential is copied to it. Private inputs typed on the viewing device pass
-through in memory and travel to the owner only over HTTPS; the owner refuses
-them on any other transport.
+authenticated control channel. Only a bounded, short-lived panel snapshot is
+cached on the viewer; no usable grant or credential is copied to it. Private
+inputs typed on the viewing device pass through in memory and travel to the
+owner only over HTTPS; the owner refuses them on any other transport.
 
 The owner remembers which devices asked about a session and tells them when
 its access state changes, so their panels refresh without polling.
@@ -14,8 +14,11 @@ its access state changes, so their panels refresh without polling.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from app.db.async_database import run_sync
@@ -53,11 +56,84 @@ def edit_carries_secret(edit) -> bool:
 # Viewer side
 # ---------------------------------------------------------------------------
 
+SNAPSHOT_MIN_SECONDS = 2.0
+SNAPSHOT_MAX_SECONDS = 30.0
+SNAPSHOT_TTL = 300.0
+SNAPSHOT_LIMIT = 256
+
+
+@dataclass
+class _Snapshot:
+    until: float
+    value: dict | None = None
+    task: asyncio.Task | None = None
+    next_at: float = 0.0
+    delay: float = SNAPSHOT_MIN_SECONDS
+
+
+_snapshots: OrderedDict[tuple[str, str], _Snapshot] = OrderedDict()
+
+
+def invalidate_snapshot(owner: str, session_id: str, *, saved: bool = False) -> None:
+    # Removal also fences an in-flight response: it can finish for its caller,
+    # but cannot repopulate the next request's cache after a change notification.
+    for key in list(_snapshots):
+        if key[0] == owner and (saved or key[1] == session_id):
+            _snapshots.pop(key, None)
+
+
+async def _fetch_snapshot(owner: str, session_id: str, entry: _Snapshot) -> dict:
+    try:
+        value = await control.call(owner, "chat-access", {"op": "snapshot", "session_id": session_id})
+        entry.delay = (min(SNAPSHOT_MAX_SECONDS, entry.delay * 2)
+                       if value == entry.value else SNAPSHOT_MIN_SECONDS)
+        entry.value = copy.deepcopy(value)
+        now = time.monotonic()
+        entry.until = now + SNAPSHOT_TTL
+        entry.next_at = now + entry.delay
+        # Never cache a displayed grant/approval past its advertised expiry.
+        for field in ("grants", "actions", "requests"):
+            for item in value.get(field, []):
+                expiry = item.get("expires_at")
+                if isinstance(expiry, (int, float)):
+                    entry.next_at = min(entry.next_at, now + max(0, expiry - time.time()))
+        return value
+    finally:
+        entry.task = None
+
+
 async def forward(owner: str, session_id: str, operation: str, payload: Optional[Dict[str, Any]] = None, *,
                   secure: bool = False, timeout: float | None = None) -> Dict[str, Any]:
-    """Run one access-panel operation on the owning worker."""
-    return await control.call(owner, "chat-access", {"op": operation, "session_id": session_id, **(payload or {})},
-                              secure=secure, timeout=timeout)
+    """Run an access-panel operation on the owner, coalescing snapshot polling.
+
+    ChatAccess's safety polling can be continually reset by session events and
+    multiple viewers. Identical snapshots back off here too (2 s -> 30 s), so
+    those events cannot produce a cross-worker request every two seconds.
+    Changes push an invalidation; mutations never use cached authorization.
+    """
+    if operation != "snapshot":
+        invalidate_snapshot(owner, session_id, saved=True)
+        try:
+            return await control.call(owner, "chat-access", {"op": operation, "session_id": session_id, **(payload or {})},
+                                      secure=secure, timeout=timeout)
+        finally:
+            invalidate_snapshot(owner, session_id, saved=True)
+    now = time.monotonic()
+    key = (owner, session_id)
+    for stale, entry in list(_snapshots.items()):
+        if entry.until <= now and entry.task is None:
+            _snapshots.pop(stale, None)
+    entry = _snapshots.get(key)
+    if entry is None:
+        entry = _Snapshot(now + SNAPSHOT_TTL)
+        _snapshots[key] = entry
+        while len(_snapshots) > SNAPSHOT_LIMIT:
+            _snapshots.popitem(last=False)
+    if entry.value is not None and now < entry.next_at:
+        return copy.deepcopy(entry.value)
+    if entry.task is None:
+        entry.task = asyncio.create_task(_fetch_snapshot(owner, session_id, entry))
+    return copy.deepcopy(await asyncio.shield(entry.task))
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +273,7 @@ async def handle_changed(body: Dict[str, Any], from_device: str) -> Dict[str, An
     pending = body.get("pending")
     if isinstance(pending, bool) or not isinstance(pending, int) or not 0 <= pending <= 1000:
         pending = None  # an older owner sends none
+    invalidate_snapshot(from_device, session_id, saved=body.get("saved") is True)
     await publish_change(session_id, row.get("api_user_id"), saved=body.get("saved") is True,
                          pending=pending)
     return {"refreshed": True}

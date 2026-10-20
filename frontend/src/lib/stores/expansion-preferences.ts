@@ -48,10 +48,21 @@ export function createExpansionPreferences(sync: PersistedSync, storage?: Storag
 	const hiddenProviders = createPersistedStore<Record<string, boolean>>({
 		key: 'context_usage_hidden_providers', initial: {}, normalize: booleanRecord
 	}, sync, storage);
-	return { breakdown, sections, groups, hiddenProviders };
+	// The running-tasks list under the chat: one choice for the whole account, not per chat,
+	// so switching chats or a task starting or ending never opens a list the owner collapsed.
+	const runningTasks = createPersistedStore<boolean>({
+		key: 'running_tasks_open', ui: true, initial: true,
+		normalize: value => typeof value === 'boolean' ? value : undefined
+	}, sync, storage);
+	return { breakdown, sections, groups, hiddenProviders, runningTasks };
 }
 
 let storage: Storage | undefined;
 try { storage = globalThis.localStorage; } catch { /* SSR or blocked storage. */ }
-export const { breakdown: contextBreakdown, sections: usageSections, groups: sidebarGroups, hiddenProviders: hiddenUsageProviders } =
-	createExpansionPreferences(preferenceSync, storage);
+export const {
+	breakdown: contextBreakdown,
+	sections: usageSections,
+	groups: sidebarGroups,
+	hiddenProviders: hiddenUsageProviders,
+	runningTasks: runningTasksOpen
+} = createExpansionPreferences(preferenceSync, storage);

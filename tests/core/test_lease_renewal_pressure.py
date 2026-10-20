@@ -40,7 +40,7 @@ async def test_pool_failure_retries_promptly_then_resumes_normal_cadence(monkeyp
     monkeypatch.setattr(session_runtime.asyncio, "wait_for", wait_for)
     monkeypatch.setattr(session_runtime.asyncio, "get_running_loop", lambda: SimpleNamespace(time=lambda: clock[0]))
     monkeypatch.setattr(session_runtime, "run_lease", renew)
-    runtime = SimpleNamespace(_lease_finalizing=False, _on_lease_lost=Mock())
+    runtime = SimpleNamespace(_lease_finalizing=False, _interrupt_driving=False, _on_lease_lost=Mock())
     await session_runtime.SessionRuntime._renew_loop(runtime, "run", "runner", 1)
     assert sleeps == [20, 1, 20]
     runtime._on_lease_lost.assert_called_once()
@@ -96,7 +96,7 @@ async def test_heartbeat_fails_closed_at_ttl(monkeypatch, owner, failure):
     monkeypatch.setattr(module, "run_lease", renew)
     lost = Mock()
     if owner == "runtime":
-        runtime = SimpleNamespace(_lease_finalizing=False, _on_lease_lost=lost)
+        runtime = SimpleNamespace(_lease_finalizing=False, _interrupt_driving=False, _on_lease_lost=lost)
         heartbeat = session_runtime.SessionRuntime._renew_loop(runtime, "run", "runner", 1)
     else:
         recorder = turn_recorder.TurnRecorder("session", None, "run", 1, "runner")

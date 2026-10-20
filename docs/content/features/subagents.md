@@ -92,7 +92,7 @@ Chats the personal assistant starts report back to it when they finish. When one
 
 ## A subagent's chat
 
-A subagent's chat is for reading and for messaging the subagent. It has no Git controls of its own. When a subagent on this worker needs private access, the card appears in the main chat, marked **Asked by subagent**.
+A subagent's chat is for reading and for messaging the subagent. It has no Git controls of its own. An approved private-access grant is also usable by that session's Task descendants on the same worker, with the same permissions and expiry. Revocation ends access for all of them. A subagent's own confirmation mode still applies; it does not borrow its parent's Bypass. StartSession chats, ordinary forks and unrelated chats do not inherit grants, and grants never cross to another worker. When a subagent needs separate private access, the card appears in the main chat on its worker, marked **Asked by subagent**; a remote child without a local main chat follows Away handling instead.
 
 ## Organizing chats
 

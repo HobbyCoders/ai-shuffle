@@ -238,6 +238,7 @@ reachable history. The v4 hook marks its remote argument; ambient remote values
 without that marker are ignored. The scanner checks the name against `git remote`;
 unknown names, bare URLs and repository paths scan all reachable history rather
 than using a tracking ref. A hook installed before v4 keeps using `origin/main`.
+When `remote.X.pushurl` differs from its fetch URL, the boundary comes from the fetch side.
 Tags are scanned; deletions need no scan.
 The hook uses local Git objects only: it never downloads a scanner or contacts a
 provider. Fetch the push remote's `main` before starting a branch so that baseline

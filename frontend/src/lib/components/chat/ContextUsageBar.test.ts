@@ -733,7 +733,10 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34 left');
-		expect(container.textContent).toContain(source);
+		// The unofficial OpenAI reading stays labelled; the xAI row drops its
+		// "xAI Management API" source line and keeps the figures.
+		if (type === 'openai') expect(container.textContent).toContain(source);
+		else expect(container.textContent).not.toContain(source);
 		if (type === 'openai') expect(container.textContent).toContain('$5.00 organization spend this month');
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'real-balance', provider_type: type, provider_name: 'Real balance', status: 'stale',
@@ -1770,6 +1773,33 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(rows[1].querySelector('.row-label')?.textContent).toBe('API');
 		expect(rows[1].querySelector('.row-pct')?.textContent).toBe('80% left');
 		expect(container.textContent).not.toContain('Grok Build');
+	});
+
+	it('keeps SuperGrok subscription usage beside an xAI API row with no Management API label', async () => {
+		const source_info = { id: 'xai_management', label: 'xAI Management API', scope: 'organization',
+			scope_label: 'Team prepaid credit and current billing cycle', measure: 'monetary_credit' as const,
+			measure_label: 'Provider-reported credit balance', collection: 'polled' as const, support: 'documented' as const,
+			support_label: 'Documented API', dashboard_url: 'https://console.x.ai/', min_interval_seconds: 300, freshness_seconds: 600 };
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{ provider_id: 'grok-sub', provider_name: 'Grok', provider_type: 'grok', plan_type: 'SuperGrok',
+					windows: [{ type: 'seven_day', utilization: 34, resets_at: future() }], credits: null },
+				{ provider_id: 'xai-key', provider_name: 'Grok API key', provider_type: 'xai', status: 'fresh',
+					credits: { balance_remaining: 8.5 }, fetched_at: Date.now(), source: 'xAI Management API', source_info },
+			],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const labels = Array.from(container.querySelectorAll('.section-device')).map((e) => e.textContent);
+		// Both rows stay: the SuperGrok subscription and the xAI API account.
+		expect(labels.filter((l) => l === 'Grok').length).toBe(2);
+		// SuperGrok's allowance is untouched; the API row keeps its balance only.
+		expect(container.textContent).toContain('66% left');
+		expect(container.textContent).toContain('$8.50 left');
+		expect(container.textContent).not.toContain('xAI Management API');
 	});
 
 	it('summarizes a collapsed Grok section with the least quota remaining', async () => {

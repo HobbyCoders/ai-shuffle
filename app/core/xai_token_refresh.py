@@ -64,11 +64,12 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+def _parse_iso(value: str | datetime | None) -> Optional[datetime]:
     if not value:
         return None
     try:
-        dt = datetime.fromisoformat(value)
+        # psycopg2 returns TIMESTAMPTZ as datetime; sync/shim rows may be strings.
+        dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
@@ -92,16 +93,21 @@ def _access_token_exp(access_token: Optional[str]) -> Optional[datetime]:
 
 def _needs_refresh(bundle: dict, access_token_plaintext: Optional[str]) -> bool:
     """True when the 8-day interval has elapsed or JWT exp is within 15 min."""
+    return _refresh_reason(bundle, access_token_plaintext) is not None
+
+
+def _refresh_reason(bundle: dict, access_token_plaintext: Optional[str]) -> Optional[str]:
+    """Token-free policy reason, or None when the stored bundle is not due."""
     now = _now()
     last_refresh = _parse_iso(bundle.get("codex_last_refresh"))
     if last_refresh is None:
-        return True
+        return "last_refresh_missing"
     if (now - last_refresh).total_seconds() >= PROACTIVE_REFRESH_AFTER_SECONDS:
-        return True
+        return "8_day"
     exp = _access_token_exp(access_token_plaintext)
     if exp is not None and (exp - now).total_seconds() <= EXP_SKEW_SECONDS:
-        return True
-    return False
+        return "exp_within_skew"
+    return None
 
 
 def _is_grok_subscription_row(row: dict) -> bool:
@@ -366,8 +372,10 @@ async def refresh_provider(
                     )
                 except Exception:  # noqa: BLE001
                     access_plain = None
-                if not _needs_refresh(stored, access_plain):
+                reason = _refresh_reason(stored, access_plain)
+                if reason is None:
                     return False
+                logger.info("grok refresh: provider %s reason=%s", provider_id, reason)
 
             return await _do_refresh_locked(provider_id, stored, client)
         finally:

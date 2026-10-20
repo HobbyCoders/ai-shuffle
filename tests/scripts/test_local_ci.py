@@ -430,7 +430,18 @@ def test_install_refuses_to_downgrade_shared_hook(tmp_path, monkeypatch, source_
         local_ci.install_hook(hooks)
     assert target.read_text() == installed
     assert not (hooks / "pre-push.user").exists()
-    local_ci.install_hook(hooks, force=True)
+    configured = []
+    monkeypatch.setattr(local_ci, "find_test_python", lambda explicit: "new-python")
+    monkeypatch.setattr(local_ci, "hooks_dir", lambda: hooks)
+    monkeypatch.setattr(local_ci, "git", lambda *args: configured.append(args))
+    args = local_ci.argparse.Namespace(python=None, force=False)
+    with pytest.raises(local_ci.Failure, match="newer.*--force"):
+        local_ci.cmd_install(args)
+    assert configured == []
+    assert target.read_text() == installed
+    args.force = True
+    assert local_ci.cmd_install(args) == 0
+    assert configured == [("config", local_ci.PYTHON_CONFIG, "new-python")]
     assert target.read_bytes() == source.read_bytes().replace(b"\r\n", b"\n")
 
 

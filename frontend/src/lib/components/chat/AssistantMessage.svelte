@@ -15,7 +15,7 @@
 	import MessageActions from './MessageActions.svelte';
 	import HtmlPreviews from './HtmlPreviews.svelte';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
-	import { formatMessageTime } from '$lib/utils/message-time';
+	import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from '$lib/utils/message-time';
 	import { taskChecks, taskMessageKey, type TaskChecks } from '$lib/stores/task-checks';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { lookupCommandBlock } from '$lib/terminal/commands';
@@ -646,7 +646,7 @@
 	role="article"
 >
 	<div class="min-w-0 max-w-full">
-		<div class="aname" title={formatMessageTime(timestamp)}>
+		<div class="aname" title={formatMessageTimeFull(timestamp)}>
 			{#if streaming}
 				<span class="live" aria-label="Streaming"></span>
 			{/if}
@@ -681,7 +681,7 @@
 		<HtmlPreviews content={_twBestContent} {streaming} {sessionId} />
 		{#if showFooter}
 			<div class="ameta" class:is-actions-only={!metadata}>
-				{#if metadata && timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}
+				{#if metadata && timestamp}<time class="ameta-time" datetime={messageTimeISO(timestamp)} title={formatMessageTimeFull(timestamp)}>{formatMessageTime(timestamp)}</time>{/if}
 				{#if metadata?.usage_estimated}
 					<!-- The turn's token counts (and so its cost) were estimated by
 					     the harness: the provider reported no usage, or the reply
@@ -704,7 +704,7 @@
 						<!-- A block with no stats row (mid-turn, or a reply without
 						     metadata) has no visible time; show it with the actions on
 						     hover, as the user bubble does. -->
-						{#if timestamp && !metadata}<span class="assistant-time">{formatMessageTime(timestamp)}</span>{/if}
+						{#if timestamp && !metadata}<time class="assistant-time" datetime={messageTimeISO(timestamp)} title={formatMessageTimeFull(timestamp)}>{formatMessageTime(timestamp)}</time>{/if}
 						<MessageActions
 							{sessionId}
 							messageContent={content}
@@ -814,6 +814,11 @@
 		font-family: var(--font-mono);
 		font-size: 10.5px;
 		color: var(--subtle-foreground);
+		white-space: nowrap;
+	}
+
+	.ameta-time {
+		white-space: nowrap;
 	}
 
 	.assistant-actions.is-visible,

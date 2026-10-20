@@ -2529,6 +2529,10 @@ async def dispatch_worker(
     # Mark BEFORE the turn starts, so the worker's first turn is already
     # recognized as a worker's (depth walk, AskUserQuestion withheld).
     register_worker_session(worker_session_id)
+    # Private grants follow the actual local caller, not the root used for UI
+    # routing on nested Tasks. Register before the child's first turn can run.
+    from app.core.chat_access import broker as access_broker
+    access_broker.register_delegation(worker_session_id, owner_session_id, routing_parent=parent_session_id)
 
     # --- approval routing (ONE contiguous region) --------------------------
     # The worker's tool-approval prompts surface on the PARENT's UI, tagged with

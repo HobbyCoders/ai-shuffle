@@ -6,6 +6,7 @@
  * copy.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { tick } from 'svelte';
 import { render, screen, fireEvent, cleanup, within, waitFor } from '@testing-library/svelte';
 import type { Task } from '$lib/stores/types';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
@@ -38,9 +39,16 @@ const mocks = vi.hoisted(() => {
 		cancel: vi.fn(),
 		hydrate: vi.fn(async () => {}),
 		openSession: vi.fn(),
-		notifyError: vi.fn()
+		notifyError: vi.fn(),
+		savePreference: vi.fn()
 	};
 });
+
+// The collapse is an account preference: the real persisted store, with the
+// sync engine replaced so a save is observable and nothing hits the network.
+vi.mock('$lib/services/preferences', () => ({
+	preferenceSync: { register: vi.fn(), registerPrefix: vi.fn(), save: mocks.savePreference }
+}));
 
 vi.mock('$lib/stores/active-session', () => ({ activeSession: mocks.active }));
 vi.mock('$lib/stores/swarms', () => ({
@@ -59,6 +67,7 @@ vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSess
 vi.mock('$lib/utils/platform', () => ({ buildShell: () => (mocks.mobile ? 'mobile' : 'desktop') }));
 
 import RunningTasksList from './RunningTasksList.svelte';
+import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 
 function task(id: string, over: Partial<Task> = {}): Task {
 	return {
@@ -100,6 +109,8 @@ const rowOf = (name: string) => screen.getByText(name).closest('li.row') as HTML
 
 beforeEach(() => {
 	mocks.mobile = false;
+	runningTasksOpen.set(true);
+	mocks.savePreference.mockReset();
 	setTasks([]);
 	setSwarms([]);
 	mocks.stopSessionTask.mockReset().mockResolvedValue({ ok: true });
@@ -152,6 +163,56 @@ describe('RunningTasksList grouping and counts', () => {
 		expect(screen.getByRole('button', { name: 'Show all' })).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
 		expect(sheet()).toBeTruthy();
+	});
+
+	it('remembers a collapsed list across a chat switch, a remount and tasks coming and going', async () => {
+		setTasks([task('a'), task('b', { kind: 'shell' })]);
+		const view = render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		const toggle = () => screen.getByTestId('tasks-toggle');
+		expect(toggle().getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.click(toggle());
+		expect(toggle().getAttribute('aria-expanded')).toBe('false');
+		expect(mocks.savePreference).toHaveBeenLastCalledWith('ui:running_tasks_open', false);
+
+		// A task starts, another ends: still collapsed, and the count follows.
+		setTasks([task('a'), task('b', { kind: 'shell' }), task('c')]);
+		await tick();
+		expect(toggle().getAttribute('aria-expanded')).toBe('false');
+		expect(toggle().textContent).toContain('3 running tasks');
+		setTasks([task('c')]);
+		await tick();
+		expect(toggle().getAttribute('aria-expanded')).toBe('false');
+		expect(view.container.querySelector('.inline-body')).toBeNull();
+
+		// Nothing runs, then a new task: the list comes back collapsed.
+		setTasks([]);
+		await tick();
+		expect(screen.queryByTestId('tasks-toggle')).toBeNull();
+		setTasks([task('d')]);
+		await tick();
+		expect(toggle().getAttribute('aria-expanded')).toBe('false');
+
+		// Another chat (same component) and a fresh mount keep the choice.
+		mocks.active.set({ sessionId: 's2', activeTasks: [task('e')], messages: [] });
+		await view.rerender({ sessionId: 's2', variant: 'inline' });
+		expect(toggle().getAttribute('aria-expanded')).toBe('false');
+		view.unmount();
+		render(RunningTasksList, { sessionId: 's2', variant: 'inline' });
+		expect(toggle().getAttribute('aria-expanded')).toBe('false');
+
+		// Opening it again is remembered the same way.
+		await fireEvent.click(toggle());
+		expect(toggle().getAttribute('aria-expanded')).toBe('true');
+		expect(runningTasksOpen.current).toBe(true);
+		expect(mocks.savePreference).toHaveBeenLastCalledWith('ui:running_tasks_open', true);
+	});
+
+	it('follows the choice when another device changes it', async () => {
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		runningTasksOpen.set(false);
+		await tick();
+		expect(screen.getByTestId('tasks-toggle').getAttribute('aria-expanded')).toBe('false');
 	});
 
 	it('inline on a phone is one summary row that opens the sheet', async () => {
