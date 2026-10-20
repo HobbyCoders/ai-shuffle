@@ -283,22 +283,27 @@ class FactStore:
         # live fact moves to the archive, where Recall still finds it and a
         # save brings it back; ARCHIVE_RETENTION after its expiry it is
         # removed for good. User-saved facts never expire.
-        expired = [e for e in doc["entries"] if not e.get("protected") and e.get("expires_at", now + 1) <= now]
+        # A supersession chain is retained evidence, not TTL deletion. Keep
+        # current replacements live and predecessors Recall-able until Forget.
+        targets = {e["superseded_by"] for e in doc["entries"] + doc["archived"] if e.get("superseded_by")}
+        def retained(e):
+            return bool(e.get("protected") or e.get("superseded_by") or global_id(e) in targets)
+        expired = [e for e in doc["entries"] if not retained(e) and e.get("expires_at", now + 1) <= now]
         if expired:
             gone = {id(e) for e in expired}
             doc["entries"] = [e for e in doc["entries"] if id(e) not in gone]
             doc["archived"] += expired
-        ended = [e for e in doc["archived"] if not e.get("protected")
+        ended = [e for e in doc["archived"] if not retained(e)
                  and e.get("expires_at", now + 1) + ARCHIVE_RETENTION <= now]
         if ended:
             gone = {id(e) for e in ended}
             doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
             self._note_loss(doc, "expired_archived", len(ended), now)
         live = doc["entries"]
-        inferred = [e for e in live if tier(e) == "inferred"]
+        inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
         ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
         overflow = ranked[:max(0, len(inferred) - MAX_MEMORIES)]
-        durable = [e for e in live if tier(e) == "durable"]
+        durable = [e for e in live if tier(e) == "durable" and not retained(e)]
         ranked = sorted(durable, key=lambda e: (e.get("id") == keep, usefulness(e), str(e.get("id"))))
         overflow += ranked[:max(0, len(durable) - MAX_DURABLE)]
         gone = {id(e) for e in overflow}
@@ -309,8 +314,8 @@ class FactStore:
         # older versions, which archived past 256) stay until a Forget. The
         # shared archive gives up inferred facts before durable ones, least
         # useful first.
-        explicit = [e for e in archived if e.get("protected")]
-        rest = sorted((e for e in archived if not e.get("protected")),
+        explicit = [e for e in archived if retained(e)]
+        rest = sorted((e for e in archived if not retained(e)),
                       key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
         doc["archived"] = rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):] + explicit
         if len(rest) > MAX_ARCHIVED_MEMORIES:
@@ -585,13 +590,14 @@ class FactStore:
 
     def _apply_supersessions(self, doc, candidates=None):
         """Link clear replacements without changing/deleting predecessor text."""
-        from fluid.codemode.supersession import replacement_evidence
+        from fluid.codemode.supersession import replacement_evidence, has_replacement_signal
         from fluid.context.screening import screen_findings
         changed = []
         current = sorted(candidates if candidates is not None else doc["entries"],
                          key=lambda e: (-e.get("updated_at", 0), e["id"]))
         for new in current:
-            if new.get("conflicted") or new.get("superseded_by") or screen_findings(new["text"]):
+            if (not has_replacement_signal(new["text"]) or new.get("conflicted")
+                    or new.get("superseded_by") or screen_findings(new["text"])):
                 continue
             for old in list(doc["entries"]):
                 if old.get("conflicted") or not replacement_evidence(old, new):

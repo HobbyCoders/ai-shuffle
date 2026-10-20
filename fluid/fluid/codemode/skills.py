@@ -1605,7 +1605,9 @@ class SkillStore:
         from fluid.codemode.facts import global_id
         successors = {e.superseded_by for e in entries if e.superseded_by}
         rank = {e.id: usefulness(vars(e)) for e in entries}
-        entries.sort(key=lambda e: (global_id(vars(e)) not in successors,
+        entries.sort(key=lambda e: (not (global_id(vars(e)) in successors or (
+                                       e.protected and e.superseded_by and not e.supersession_confirmed)),
+                                   global_id(vars(e)) not in successors,
                                    not bool(e.key and e.key.startswith("profile.")), not e.protected, -rank[e.id]))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []

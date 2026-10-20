@@ -107,3 +107,56 @@ def test_owner_can_correct_predecessor_and_invalid_links_are_rejected(tmp_path):
     snapshot["entries"][0]["superseded_by"] = "invalid injection pointer"
     with pytest.raises(ValueError, match="supersession link"):
         replica._facts.merge(snapshot)
+
+
+@pytest.mark.parametrize("text", [
+    "Code work by subagents may use Sol, replacing gpt-6-astra.",
+    "Code work by subagents is not replacing gpt-6-astra.",
+    "For this session, code work by subagents uses Sol, replacing gpt-6-astra.",
+])
+def test_uncertain_negated_or_temporary_replacement_is_not_applied(tmp_path, text):
+    store = SkillStore(tmp_path)
+    old = store.save_memory(OLD, protected=True)
+    store.save_memory(text, protected=True)
+    assert not next(e for e in store.memories() if e.id == old.id).superseded_by
+
+
+async def test_learner_proposals_use_only_listed_revision_safe_pairs(tmp_path):
+    store = SkillStore(tmp_path)
+    old = store.save_memory("Backend subagent code tasks use model Orion.", protected=True)
+    new = store.save_memory("Backend subagent code tasks now use model Lyra.", protected=True)
+    learner = Synthesizer(provider=None, model="fixture", store=store)
+    learner._memory_lines()
+    output = f'<supersede-memory old="{old.id}" new="{new.id}"/>'
+    assert await learner._apply(output) == [f"superseded-memory:{old.id}"]
+    assert next(e for e in store.memories() if e.id == old.id).superseded_by
+    with pytest.raises(ValueError, match="changed"):
+        store.propose_memory_supersession(old.id, new.id, old_revision=old.revision, new_revision=new.revision)
+    assert await learner._apply('<supersede-memory old="unknown" new="unknown2"/>') == []
+
+
+def test_lineage_survives_expiry_and_replacement_has_budget_priority(tmp_path, monkeypatch):
+    import fluid.codemode.facts as facts
+    store = SkillStore(tmp_path)
+    old, new = pair(store, protected=False)
+    for i in range(20):
+        store.save_memory(f"Generic unrelated protected fact {i}. " * 12, protected=True, key=f"profile.filler{i}")
+    monkeypatch.setattr(facts.time, "time", lambda: new.updated_at + facts.ARCHIVE_RETENTION * 3)
+    store.reap()
+    assert next(e for e in store.archived_memories() if e.id == old.id).superseded_by
+    assert NEW in store.render_memory_section("project:fixture")
+    explicit = SkillStore(tmp_path / "explicit")
+    pair(explicit)
+    for i in range(20):
+        explicit.save_memory(f"Generic unrelated protected fact {i}. " * 12, protected=True, key=f"profile.filler{i}")
+    section = explicit.render_memory_section("project:fixture")
+    assert NEW in section and "unresolved conflict" in section and OLD not in section
+
+
+def test_supersession_fixture_has_bounded_unique_paragraphs(tmp_path):
+    store = SkillStore(tmp_path)
+    pair(store)
+    section = store.render_memory_section("project:fixture")
+    assert len(section) <= 1100
+    facts = [line for line in section.splitlines() if line.startswith("- [")]
+    assert len(facts) == len(set(facts)) == 2

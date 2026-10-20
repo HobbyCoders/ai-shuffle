@@ -5,6 +5,11 @@ from fluid.codemode.relevance import query_terms
 
 _REPLACEMENT = re.compile(r"\b(?:replac(?:es|ing)|supersedes)\s+([^;,.()\n]+)", re.I)
 _EXCEPTION = re.compile(r"\b(?:for this (?:task|session)|one[- ]off|temporar\w*|today only)\b", re.I)
+_UNCERTAIN = re.compile(r"\b(?:might|may|could|possibly|proposed|proposal|hypothetical)\b|\b(?:not|never|without)\s+(?:\w+\s+){0,2}(?:replac|supersed)", re.I)
+
+
+def has_replacement_signal(text: str) -> bool:
+    return bool(_REPLACEMENT.search(text)) and not (_EXCEPTION.search(text) or _UNCERTAIN.search(text))
 _GENERIC = frozenset("owner user rule latest prefers preference replacing replaces supersedes fact current new old use uses says model".split())
 
 
@@ -30,7 +35,8 @@ def replacement_evidence(old: dict, new: dict, *, proposed: bool = False) -> boo
         return False
     if new.get("updated_at", 0) <= old.get("updated_at", 0):
         return False
-    if _EXCEPTION.search(new["text"]):
+    if (_EXCEPTION.search(old["text"]) or _EXCEPTION.search(new["text"])
+            or _UNCERTAIN.search(new["text"]) or (not proposed and not has_replacement_signal(new["text"]))):
         return False
     # Do not use keys alone: alias keys are common, while similar keys can
     # describe different subjects. At least two content terms must agree.
