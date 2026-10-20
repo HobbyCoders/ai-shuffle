@@ -30,7 +30,7 @@ from app.core.git_service import classify_clone_url, git_service
 from app.core.scrub import redact_url_credentials, strip_url_userinfo
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.git_owner import session_git_action
+from app.api.git_owner import checkout_probe_error, session_git_action
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access, is_path_served
 
@@ -40,7 +40,6 @@ from app.api.git_helpers import (
     _coalescer,
     get_project_path,
     get_working_dir_async,
-    SessionCheckoutUnavailable,
     stage_and_commit,
     ensure_git_repository_record,
     peek_repo_record_cache,
@@ -126,14 +125,12 @@ async def get_git_status(
     # An unavailable checkout is an error, never a confirmed plain folder.
     # Never fall back to another checkout or recreate it from this read.
     if worktree_id or session_id:
-        try:
-            working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
-        except SessionCheckoutUnavailable as exc:
-            raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
+        # Preserve the resolver's missing-checkout reason and 409.
+        working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
     else:
         working_dir = get_project_path(project_id, allow_missing=True)
         if working_dir is None:
-            raise HTTPException(503, "Git checkout is unavailable. Check again.")
+            raise HTTPException(409, "This project has no local checkout. Restore it or select a worker with a checkout.")
 
     # Check the filesystem before native status: an already-open native repo
     # handle can outlive a permission change to .git. Never hide that failure
@@ -143,7 +140,7 @@ async def get_git_status(
         plain_folder = await run_git(_is_plain_project_folder, working_dir)
         enclosing = None if plain_folder else await run_git(_enclosing_repository, working_dir)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise HTTPException(503, "Git checkout is unavailable. Check again.") from exc
+        raise checkout_probe_error(exc) from exc
     if plain_folder:
         return GitStatusResponse(is_git_repo=False)
     if enclosing:
@@ -151,7 +148,7 @@ async def get_git_status(
         # enclosing-project notice after its own .git marker disappears.
         session = await run_sync(database.get_session, session_id) if session_id else None
         if worktree_id or (session and (session.get("branch") or session.get("worktree_branch"))):
-            raise HTTPException(503, "Git checkout is unavailable. Check again.")
+            raise HTTPException(503, "The bound checkout no longer has its own Git repository. Restore it before using Git actions.")
         return GitStatusResponse(is_git_repo=True, enclosing_repository_root=enclosing,
                                  mutations_blocked=True)
 
@@ -160,7 +157,7 @@ async def get_git_status(
         f"status:{working_dir}", git_service.get_status, working_dir
     )
     if not status_data.get("is_git_repo", False):
-        raise HTTPException(503, "Git checkout is unavailable. Check again.")
+        raise HTTPException(503, "Git could not read the checkout's repository status. Check its Git metadata and access permissions.")
 
     # Convert staged files to proper format
     staged_files = [

@@ -13,6 +13,7 @@ vi.mock('$lib/settings/navigation.svelte', () => nav);
 import {
 	SupportReportFlow,
 	canFixWithAi,
+	canReportAiContent,
 	canSendSupportReport,
 	hubNotice,
 	knownIssueNotice,
@@ -128,11 +129,40 @@ describe('AI content helpers', () => {
 		expect(sent.startsWith('x'.repeat(1499) + '😀')).toBe(true);
 		expect(clipCodePoints('ab😀cd', 3)).toBe('ab😀');
 		expect(clipCodePoints('short', 10)).toBe('short');
-		reportAiContent('x'.repeat(7999) + '😀😀', 's1');
+		window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.example', token: 'shc_test', native: { platform: 'android', bridge: 1, capabilities: [] } };
+		try {
+			reportAiContent('x'.repeat(7999) + '😀😀', 's1');
+		} finally {
+			delete window.__SHUFFLE_MOBILE__;
+		}
 		const prefill = aiContentPrefill.take()!;
 		expect(Array.from(prefill.excerpt)).toHaveLength(8000);
 		expect(prefill.excerpt.endsWith('😀')).toBe(true);
 		expect(() => encodeURIComponent(prefill.excerpt)).not.toThrow();
+	});
+
+	it('offers AI content reports only in the Android app', () => {
+		const app = (native?: { platform?: string; bridge: number; capabilities: string[] }) => {
+			window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.example', token: 'shc_test', ...(native ? { native } : {}) };
+		};
+		try {
+			expect(canReportAiContent()).toBe(false); // web UI, desktop app, Docker
+			reportAiContent('A hateful reply', 's1');
+			expect(aiContentPrefill.value).toBeNull();
+			expect(nav.openSettings).not.toHaveBeenCalled();
+
+			app({ platform: 'ios', bridge: 1, capabilities: [] });
+			expect(canReportAiContent()).toBe(false);
+			app({ platform: 'android', bridge: 1, capabilities: [] });
+			expect(canReportAiContent()).toBe(true);
+			app(); // an Android app from before the bridge
+			expect(canReportAiContent()).toBe(true);
+
+			supportCaps.status = 'forbidden';
+			expect(canReportAiContent()).toBe(false);
+		} finally {
+			delete window.__SHUFFLE_MOBILE__;
+		}
 	});
 
 	it('tells the kind of a report source', () => {
