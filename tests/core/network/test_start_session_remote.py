@@ -187,7 +187,7 @@ async def test_starts_on_the_chosen_worker_once(workers, monkeypatch, kicks):
         assert payload["peer_message_content"] == ARGS["prompt"]
         assert payload["peer_sender_label"] == "Windows chat (on Windows)"
         assert "orchestration_root" not in payload
-        assert "another top-level session" in turn["prompt"]
+        assert "host-verified same-owner session delegation" in turn["prompt"]
     assert kicks == [result["session_id"]]
     assert ("POST", "/api/v1/network/peer/control/orchestration-start") in served.requests
 

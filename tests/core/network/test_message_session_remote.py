@@ -391,7 +391,7 @@ async def test_message_is_relayed_to_the_owning_worker_once(workers, monkeypatch
         assert payload["orchestration_sender"] == "caller"
         assert payload["orchestration_remote_origin"] == b.device_id
         assert payload["orchestration_depth"] == 1 and "orchestration_root" not in payload
-        assert "another top-level session" in turn["prompt"] and MESSAGE["message"] in turn["prompt"]
+        assert "host-verified same-owner session delegation" in turn["prompt"] and MESSAGE["message"] in turn["prompt"]
     assert kicks == ["target"]
     assert ("POST", "/api/v1/network/peer/control/orchestration-message") in served.requests
 

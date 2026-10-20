@@ -50,6 +50,7 @@ async def test_task_roster_and_delivery(runtime, address):
     assert isinstance(op, AgentMessage)
     assert op.sender == "parent" and op.text == "Check the failure"
     assert op.wake is False
+    assert op.provenance == "parent"
 
 
 async def test_duplicate_names_require_exact_ref_even_beyond_list_limit(runtime):

@@ -202,6 +202,8 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
         # store-loaded card can be reconciled back to "running" on a fresh load.
         "toolUseId": record.get("tool_use_id"),
     }
+    if record.get("assignment_owner") is False:
+        wire["assignmentOwner"] = False
     # Kill attribution (e.g. "server_shutdown"): additive — only present when a
     # reap stamped one, so the pinned wire contract is unchanged otherwise.
     if record.get("reason"):
@@ -1008,6 +1010,7 @@ class TaskRegistry:
         remote_device_id: Optional[str] = None,
         worker_name: Optional[str] = None,
         receipt_only: bool = False,
+        assignment_owner: bool = True,
     ) -> None:
         """Register a new task (idempotent — if it already exists, update it).
 
@@ -1100,6 +1103,7 @@ class TaskRegistry:
         bucket[task_id] = {
             "task_id": task_id,
             "kind": kind,
+            "assignment_owner": assignment_owner,
             "title": title,
             "status": "running",
             "summary": summary,
@@ -1257,6 +1261,7 @@ class TaskRegistry:
                     "task_id": task_id,
                     "session_id": session_id,
                     "kind": record.get("kind"),
+                    "assignment_owner": record.get("assignment_owner", True),
                     "is_sdk_background": task_id
                     in self._sdk_background_tasks.get(session_id, set()),
                     "tool_use_id": record.get("tool_use_id"),
@@ -1339,6 +1344,7 @@ class TaskRegistry:
             bucket[task_id] = {
                 "task_id": task_id,
                 "kind": row.get("kind"),
+                "assignment_owner": bool(row.get("assignment_owner", True)),
                 "title": row.get("title"),
                 "status": status,
                 "summary": row.get("summary"),
@@ -1353,6 +1359,8 @@ class TaskRegistry:
                 "updated_at": _iso(row.get("updated_at")),
                 "restored": True,
             }
+            if row.get("terminal_notified"):
+                self._terminal_notified.setdefault(session_id, set()).add(task_id)
             if remote:
                 bucket[task_id]["remote_device_id"] = remote
                 bucket[task_id]["worker_name"] = row.get("worker_name")
@@ -1676,8 +1684,12 @@ class TaskRegistry:
                 owners.append(session_id)
         return owners
 
-    def resume_task(self, session_id: str, task_id: str) -> None:
-        """Explicit host resume, unlike a possibly stale SDK start frame."""
+    def resume_task(self, session_id: str, task_id: str, *, assignment_owner: bool = True) -> None:
+        """Resume reporting; a peer resumer is not a dispatch/assignment owner.
+
+        Non-owner continuations persist for their report lifecycle but never
+        become assignment-authority edges, including after hydration.
+        """
         row = self.get_task(session_id, task_id, durable=True) or {}
         # start_task intentionally ignores error/killed replays. Only this
         # admitted resume may replace a terminal task and re-arm its wake.
@@ -1692,7 +1704,8 @@ class TaskRegistry:
         self._terminal_notified.get(session_id, set()).discard(task_id)
         self.start_task(session_id, task_id, "agent", row.get("subject") or "Worker continuation",
                         tool_use_id=task_id, agent=row.get("agent"), name=row.get("name"),
-                        model=row.get("model"))
+                        model=row.get("model"),
+                        assignment_owner=assignment_owner and row.get("assignmentOwner", True))
 
     def get_task(
         self, session_id: str, task_id: str, *, durable: bool = False
@@ -1758,6 +1771,7 @@ class TaskRegistry:
             "title": row.get("title"),
             "status": restored_status(row.get("status"), row.get("reason")),
             "kind": row.get("kind"),
+            "assignment_owner": bool(row.get("assignment_owner", True)),
             "tool_use_id": row.get("tool_use_id"),
             "started_at": _iso(row.get("started_at")),
             "updated_at": _iso(row.get("updated_at")),

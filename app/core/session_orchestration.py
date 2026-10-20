@@ -782,9 +782,11 @@ def accept_remote_start(body, from_device):
         raise ValueError("Invalid StartSession request identity")
     fingerprint = _remote_text(body, "fingerprint", 64)
     title = _remote_text(body, "title", 160).strip()
-    prompt = _remote_text(body, "prompt", 20000)
-    content = _remote_text(body, "peer_message_content", 8000)
+    _remote_text(body, "prompt", 20000)  # validate legacy wire field; never trust its frame
+    from fluid.tools.hardening import defang_harness_markers
+    content = defang_harness_markers(_remote_text(body, "peer_message_content", 8000))
     sender_session = _remote_text(body, "sender_session_id", 200)
+    prompt = _peer_prompt(sender_session, content)
     sender_label = _remote_text(body, "sender_label", 400)
     depth = body.get("depth")
     if type(depth) is not int or depth < 1:
@@ -940,7 +942,7 @@ def _recheck(cursor, snapshots, principals):
 
 
 def _peer_prompt(sender_id, text):
-    prompt = format_peer_message(sender_id, text).strip()
+    prompt = format_peer_message(sender_id, text, "same-owner").strip()
     return prompt.replace("another agent in this session", "another top-level session", 1)
 
 
@@ -1329,8 +1331,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         payload["orchestration_remote_origin"] = remote_origin
     if target.get("api_user_id"):
         payload["api_user_id"] = target["api_user_id"]
-    prompt = format_peer_message(sender_id, defang_harness_markers(text)).strip()
-    prompt = prompt.replace("another agent in this session", "another top-level session", 1)
+    prompt = _peer_prompt(sender_id, defang_harness_markers(text))
     overrides = target_context.get("overrides") or {}
     # Read before the chain lock below: it may look up the sender's agent.
     started_mode = _started_permission_mode(sender, overrides) if action == "start" else None

@@ -1818,15 +1818,18 @@ class SessionRuntime:
                         from app.core import session_orchestration
                         sender = await asyncio.to_thread(session_orchestration._caller, sender_id)
                         await asyncio.to_thread(session_orchestration._target, sender, self.session_id)
+                        provenance = "same-owner"
                     else:
                         from app.core import agent_messaging
                         sender_id = payload["task_peer_sender"]
-                        if not agent_messaging.may_message(sender_id, self.session_id):
+                        if not await agent_messaging.may_message_async(sender_id, self.session_id):
                             raise PermissionError(
                                 f"{sender_id} can no longer message {self.session_id}"
                             )
+                        provenance = await agent_messaging.message_provenance_async(self.session_id, sender_id)
                     await adapter.steer_peer(
                         payload["peer_message_content"], sender=sender_id, id=row_id,
+                        provenance=provenance,
                     )
                 else:
                     command_id = row.get("command_id")
@@ -2210,7 +2213,7 @@ class SessionRuntime:
                 # rather than silently dropping it or asking the user to interrupt.
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": self._peer_note_data(str(steer["from"]), str(steer["text"])),
+                    "data": await self._peer_note_data(str(steer["from"]), str(steer["text"])),
                 })
                 continue
             if not row_id:
@@ -2368,14 +2371,14 @@ class SessionRuntime:
             )
         return True
 
-    def _peer_note_data(self, sender: str, content: str) -> Dict[str, Any]:
+    async def _peer_note_data(self, sender: str, content: str) -> Dict[str, Any]:
         """An ``agent_message`` note: the sender's session id, plus the name
         this session knows it by (its task description) when there is one."""
         data: Dict[str, Any] = {"sender": sender, "content": content, "delivery": "delivered"}
         try:
             from app.core import agent_messaging
 
-            label = agent_messaging.sender_label(self.session_id, sender)
+            label = await agent_messaging.sender_label_async(self.session_id, sender)
         except Exception:  # noqa: BLE001 — the label is cosmetic
             label = None
         if label:
@@ -2396,7 +2399,7 @@ class SessionRuntime:
             for item in turn_scheduler.held_peer_deliveries(held):
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": self._peer_note_data(item["sender"], item["content"]),
+                    "data": await self._peer_note_data(item["sender"], item["content"]),
                 })
         except Exception:  # noqa: BLE001
             logger.warning(

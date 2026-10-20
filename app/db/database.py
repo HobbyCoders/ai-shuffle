@@ -576,6 +576,46 @@ def _migrate_provider_revisions(cursor):
                            (str(uuid4()), row[key]))
 
 
+def _migrate_task_assignment_owner(cursor, migrations_applied):
+    """Classify legacy resume edges once, before upserts replace their tool id."""
+    if not column_exists(cursor, "background_tasks", "assignment_owner"):
+        cursor.execute("ALTER TABLE background_tasks ADD COLUMN assignment_owner "
+                       "BOOLEAN NOT NULL DEFAULT TRUE")
+        # Every pre-flag resume used the worker id as its synthetic tool id,
+        # including a real parent's resume. Preserve its durable ancestry; only
+        # non-ancestor resumes are reporting relationships, not assignments.
+        # context_session_id is a dispatch argument, NOT a durable sessions
+        # column. Legacy nested callers whose dispatch tool id was overwritten
+        # cannot be distinguished from siblings: demote them, never infer trust.
+        # Remote dispatches use synthetic ids too; their worker's remote_parent
+        # transport, not this local ancestry, establishes assignment authority.
+        cursor.execute("SELECT task_id, session_id FROM background_tasks "
+                       "WHERE kind='agent' AND tool_use_id=task_id AND remote_device_id IS NULL")
+        candidates = cursor.fetchall()
+        parents = {}
+        demoted = []
+        for row in candidates:
+            current = row["task_id"]
+            seen = {current}
+            ancestors = set()
+            while current:
+                if current not in parents:
+                    cursor.execute("SELECT parent_session_id FROM sessions WHERE id=%s", (current,))
+                    session = cursor.fetchone()
+                    parents[current] = session["parent_session_id"] if session else None
+                current = parents[current]
+                if not current or current in seen:
+                    break
+                seen.add(current)
+                ancestors.add(current)
+            if row["session_id"] not in ancestors:
+                demoted.append((row["task_id"], row["session_id"]))
+        if demoted:
+            cursor.executemany("UPDATE background_tasks SET assignment_owner=FALSE "
+                               "WHERE task_id=%s AND session_id=%s", demoted)
+        migrations_applied.append("background_tasks_assignment_owner")
+
+
 def _run_column_migrations(cursor):
     """Run idempotent column migrations.
 
@@ -1626,6 +1666,8 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "background_tasks", name):
             cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {name} {sql_type}")
             migrations_applied.append(f"background_tasks_{name}")
+
+    _migrate_task_assignment_owner(cursor, migrations_applied)
 
     # Retire background_tasks.unparked. No SCHEMA_VERSION bump: editing this
     # file changes migrations_fingerprint(), which re-runs the column pass once

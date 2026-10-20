@@ -178,11 +178,13 @@ async def test_real_task_worker_is_listed_and_messageable_while_running(
         "displayed_ref": f"{row['name']} [{row['ref']}]",
     }[address_kind]
     await _send(_ctx("root"), address, receiver, sender="root")
+    assert receiver.submit.await_args.args[0].provenance == "parent"
     child_rows = await _rows("ordinary-worker", running_only=True)
     assert [(r["name"], r["worker_session_id"]) for r in child_rows] == [
         ("main", "root")
     ]
     await _send(_ctx("ordinary-worker"), "main", parent, sender="ordinary-worker")
+    assert parent.submit.await_args.args[0].provenance == "peer"
     assert not workers.jobs["ordinary-worker"].done()
 
 
