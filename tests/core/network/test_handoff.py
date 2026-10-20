@@ -693,6 +693,19 @@ async def test_agent_note_is_exported_and_armed_without_source_after_commit(pair
         assert len(armed) == 1
     with a.active():
         assert session_moves.get(sid)["resume_exported"]
+        # Simulate source-process loss after its commit. Boot must use the
+        # actual begin receipt, not send a second old-protocol continuation.
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(sh, "_moving", {})
+        monkeypatch.setattr(sh, "_pending", {})
+        spawned = []
+        monkeypatch.setattr(sh, "_spawn", spawned.append)
+        delivery = AsyncMock()
+        monkeypatch.setattr(sh, "deliver_held", delivery)
+        assert await sh.resume_queued() == 0
+        assert len(spawned) == 1
+        await spawned[0]
+        assert delivery.await_args.args[3] is None
 
 
 def _owner_calls(a, b, monkeypatch):
