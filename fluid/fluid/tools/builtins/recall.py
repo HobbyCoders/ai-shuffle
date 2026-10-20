@@ -93,10 +93,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         memory_hits = store.search_memories(query, limit=limit, project=project)
     except Exception as exc:
         return ToolOutcome(text=f"recall failed: {exc}", is_error=True)
-    conflicts = [e for e in store.memories() if e.conflicted and e.provenance != "tool"
+    conflicts = [e for e in store.memories() if (e.conflicted or (
+                     e.protected and e.superseded_by and not e.supersession_confirmed)) and e.provenance != "tool"
                  and (project is None or e.scope in ("global", project))
                  and any(t in (e.text + " " + (e.key or "")).lower() for t in query.lower().split())]
     for entry in conflicts[:limit]:
+        if entry.superseded_by:
+            lines.append(f"- [{entry.id}] Superseded by [{entry.superseded_by}]; both facts are retained. "
+                         "The old value is not current. Resolve this user-kept pair with the owner.")
         lines.append(f"- [{entry.id}] Unresolved conflict; revision: {entry.revision}; key: {entry.key or 'unspecified'}. "
                      "Ask the user for the current fact, then correct this ID and revision with Remember. Do not guess a value.")
     if memory_hits:
@@ -121,6 +125,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 tags.append("updated: " + time.strftime("%Y-%m-%d", time.gmtime(entry.updated_at)))
             if entry.provenance == "tool":
                 tags.append("harvested from tool output, unconfirmed — confirm with Remember if still true")
+            if entry.superseded_by:
+                tags.append(f"superseded by: {entry.superseded_by}; not current")
             if archived:
                 tags.append("archived")
             if entry.scope != "global":

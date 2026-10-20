@@ -658,6 +658,10 @@ class MemoryEntry:
     key: str | None = None
     expires_at: float = 0.0
     conflicted: bool = False
+    # Replica-stable global ID, not a worker-local mN. Explicit facts retain
+    # their body and await owner resolution; inferred predecessors archive.
+    superseded_by: str | None = None
+    supersession_confirmed: bool = False
     source_session: str | None = None
     origin: str = ""
     # Store ID of the worker an environment fact describes; None when the
@@ -1444,6 +1448,9 @@ class SkillStore:
         finds the fact and a later save can bring it back."""
         return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision)
 
+    def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int) -> bool:
+        return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision)
+
     def purge_forgotten_evidence(self) -> None:
         cutoff = self._facts.snapshot().get("forgotten_before", 0)
         if not cutoff:
@@ -1595,8 +1602,11 @@ class SkillStore:
         # Within a tier, most useful first (recent activity plus recalls), not
         # merely newest: a recency sort showed whatever was saved last and
         # pushed facts sessions actually look up out of the snapshot.
+        from fluid.codemode.facts import global_id
+        successors = {e.superseded_by for e in entries if e.superseded_by}
         rank = {e.id: usefulness(vars(e)) for e in entries}
-        entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")), not e.protected, -rank[e.id]))
+        entries.sort(key=lambda e: (global_id(vars(e)) not in successors,
+                                   not bool(e.key and e.key.startswith("profile.")), not e.protected, -rank[e.id]))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
         for entry in entries:
@@ -1606,6 +1616,17 @@ class SkillStore:
                 and entry.scope != project
             ):
                 out_of_scope += 1
+                continue
+            if entry.superseded_by:
+                # Never inject an old value beside its replacement. An explicit
+                # fact is retained verbatim in storage; its unresolved pair uses
+                # the existing Recall conflict-resolution path, not deletion.
+                if entry.protected and not entry.supersession_confirmed:
+                    candidates.append((entry, (
+                        f"- [{entry.id} r{entry.revision}; conflict] User-kept fact has a newer "
+                        f"replacement [{entry.superseded_by}]; unresolved conflict. "
+                        "Recall the pair and ask the owner to resolve it; do not use the old value."
+                    ), True))
                 continue
             if entry.conflicted:
                 held += 1
@@ -1688,7 +1709,7 @@ class SkillStore:
             "archived": in_archive,
             # Screened live facts only: callers may retrieve omitted facts,
             # never withheld/conflicted/foreign-checkout text via this field.
-            "eligible_lines": [line for _, line, costs in candidates if costs],
+            "eligible_lines": [line for entry, line, costs in candidates if costs and not entry.superseded_by],
         }
 
     # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────
@@ -1741,7 +1762,7 @@ class SkillStore:
         if not force and now - last < self.CURATE_INTERVAL_DAYS * 86_400:
             return []
         meta["last_curated_at"] = now
-        actions: list[str] = []
+        actions: list[str] = [f"superseded memory:{mid}" for mid in self._facts.reconcile_supersessions()]
         archive_dir = self.archive_dir
         for name, info in sorted((meta.get("skills") or {}).items()):
             if not isinstance(info, dict) or info.get("pinned"):

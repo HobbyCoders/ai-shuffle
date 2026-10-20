@@ -441,9 +441,14 @@ class FactStore:
             # optional field in anyway, and refusing made every such save fail.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retrying")
+            # An owner correction of either endpoint resolves the displayed pair.
+            resolves = bool(old and memory_id and protected and expected_revision is not None
+                            and (old.get("superseded_by") or any(
+                                e.get("superseded_by") == global_id(old)
+                                and not e.get("supersession_confirmed") for e in all_entries)))
             # The learner and harvests never downgrade an agent's durable fact.
             is_durable = not protected and bool(durable or (old and old.get("durable")))
-            if (old and not old.get("conflicted") and old["text"] == text
+            if (old and not resolves and not old.get("conflicted") and old["text"] == text
                     and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
                     if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
@@ -455,6 +460,8 @@ class FactStore:
                         self._maintain(doc, keep=old["id"])
                         self._write(doc)
                     return self._entry(old)
+                if old.get("superseded_by"):
+                    return self._entry(old)  # an observation cannot revive a known stale value
                 # Saving the same fact again is a use: renew a durable fact's
                 # lifetime and bring an archived one back. No new revision.
                 if durable:
@@ -519,6 +526,9 @@ class FactStore:
             # retired the old one.
             entry.pop("retired_at", None)
             entry.pop("retired_reason", None)
+            if resolves:
+                entry.pop("superseded_by", None)
+                entry.pop("supersession_confirmed", None)
             if per_worker and not protected:
                 entry["worker"] = local
             elif protected:
@@ -549,6 +559,12 @@ class FactStore:
                                and e.get("provenance") == "tool"
                                and not e.get("protected") and not e.get("durable")]:
                     self._retire_entry(doc, shared, "per-worker")
+            if resolves:
+                for previous in doc["entries"] + doc["archived"]:
+                    if previous.get("superseded_by") == global_id(entry):
+                        previous["supersession_confirmed"] = True
+                        self._bump_metadata(doc, previous)
+            self._apply_supersessions(doc, [entry])
             self._maintain(doc, keep=entry["id"])
             self._write(doc)
             return self._entry(entry)
@@ -558,6 +574,72 @@ class FactStore:
         from fluid.codemode.skills import MemoryEntry
         allowed = {f.name for f in fields(MemoryEntry)}
         return MemoryEntry(**{k: v for k, v in entry.items() if k in allowed})
+
+    @staticmethod
+    def _bump_metadata(doc, entry):
+        clock = dict(entry.get("clock") or {entry["origin"]: entry.get("revision", 1)})
+        clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
+        if len(clock) > 64:
+            raise ValueError("Memory has too many concurrent writers; no supersession was saved")
+        entry.update(clock=clock, revision=entry.get("revision", 1) + 1)
+
+    def _apply_supersessions(self, doc, candidates=None):
+        """Link clear replacements without changing/deleting predecessor text."""
+        from fluid.codemode.supersession import replacement_evidence
+        from fluid.context.screening import screen_findings
+        changed = []
+        current = sorted(candidates if candidates is not None else doc["entries"],
+                         key=lambda e: (-e.get("updated_at", 0), e["id"]))
+        for new in current:
+            if new.get("conflicted") or new.get("superseded_by") or screen_findings(new["text"]):
+                continue
+            for old in list(doc["entries"]):
+                if old.get("conflicted") or not replacement_evidence(old, new):
+                    continue
+                old["superseded_by"] = global_id(new)
+                old["supersession_confirmed"] = False
+                if old.get("protected"):
+                    # Keep the explicit fact and surface its unresolved pair.
+                    self._bump_metadata(doc, old)
+                else:
+                    self._retire_entry(doc, old, "superseded")
+                changed.append(old["id"])
+        return changed
+
+    def propose_supersession(self, old_id, new_id, *, old_revision, new_revision):
+        """Apply a learner/curator proposal only against its exact fact snapshot."""
+        from fluid.codemode.supersession import replacement_evidence
+        from fluid.context.screening import screen_findings
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            entries = {e["id"]: e for e in doc["entries"]}
+            old, new = entries.get(old_id), entries.get(new_id)
+            if old is None or new is None:
+                return False
+            if old.get("revision", 1) != old_revision or new.get("revision", 1) != new_revision:
+                raise ValueError("Memory changed since the supersession proposal was read")
+            if (old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
+                    or screen_findings(new["text"]) or not replacement_evidence(old, new, proposed=True)):
+                return False
+            old["superseded_by"] = global_id(new)
+            old["supersession_confirmed"] = False
+            if old.get("protected"):
+                self._bump_metadata(doc, old)
+            else:
+                self._retire_entry(doc, old, "superseded")
+            self._maintain(doc)
+            self._write(doc)
+            return True
+
+    def reconcile_supersessions(self):
+        """Deterministic curation over existing facts; no inference call."""
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            changed = self._apply_supersessions(doc)
+            if changed:
+                self._maintain(doc)
+                self._write(doc)
+            return changed
 
     def forget(self, memory_id, *, explicit=False, expected_revision=None):
         with file_transaction(self.lock):
@@ -687,6 +769,12 @@ class FactStore:
                     raise ValueError("Invalid memory key")
                 if entry.get("provenance") not in ("user", "session", "manual", "tool"):
                     raise ValueError("Invalid memory provenance")
+                if entry.get("superseded_by") is not None and not (
+                        isinstance(entry["superseded_by"], str)
+                        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,160}", entry["superseded_by"])):
+                    raise ValueError("Invalid memory supersession link")
+                if type(entry.get("supersession_confirmed", False)) is not bool:
+                    raise ValueError("Invalid memory supersession confirmation")
                 if entry.get("worker") is not None and not (
                         isinstance(entry["worker"], str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", entry["worker"])):
                     raise ValueError("Invalid memory worker")
