@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from contextlib import contextmanager
 import json
 import logging
 import time
@@ -1223,6 +1224,54 @@ def _reconcile_app_rows(cur, sid, table, snapshot):
     return snapshot
 
 
+# A bounded per-index pending list, not a memory allocation or an index option.
+# The 78 MB cold-import lab took 109/101/79s at 16/64/256 MiB, including drains.
+# Cap at 256 MiB rather than accumulating a gigabyte per index on shared workers.
+_HISTORY_GIN_LIMIT_KB = 256 * 1024
+
+
+@contextmanager
+def _history_gin(cur, tables):
+    """Batch GIN work locally, then drain it BEFORE this transaction can commit.
+
+    Native staging chunks and application publication retain their existing
+    transaction boundaries. Include the trigger-maintained recall projection;
+    discover indexes so optional stored-cache indexes are covered too.
+    """
+    import psycopg2.extensions
+
+    if not isinstance(cur, psycopg2.extensions.cursor):
+        yield  # The SQLite test shim cannot SET or inspect PostgreSQL catalogs.
+        return
+    tables = set(tables)
+    if tables.intersection({"fluid_session_nodes", "session_store_entries", "session_events"}):
+        tables.add("session_recall_text")
+    cur.execute("SELECT current_setting('gin_pending_list_limit') AS pending_limit")
+    previous = cur.fetchone()["pending_limit"]
+    cur.execute("SELECT set_config('gin_pending_list_limit', %s, true)",
+                (str(_HISTORY_GIN_LIMIT_KB),))
+    yield
+    # Writes now hold their relation locks; discover the current index OIDs only
+    # after those writes, including indexes on the trigger's destination table.
+    cur.execute("SELECT i.indexrelid FROM pg_index i "
+                "JOIN pg_class c ON c.oid=i.indexrelid "
+                "JOIN pg_am am ON am.oid=c.relam "
+                "WHERE am.amname='gin' AND i.indrelid IN "
+                "(SELECT to_regclass(t) FROM unnest(%s::text[]) t) ORDER BY i.indexrelid",
+                (sorted(tables),))
+    indexes = [row["indexrelid"] for row in cur.fetchall()]
+    # A large drain can exceed the pool's 30s statement deadline. Only cleanup
+    # is exempt; restore the caller's deadline before any publication/owner SQL.
+    # On an error the caller rolls back, including all transaction-local GUCs.
+    cur.execute("SELECT current_setting('statement_timeout') AS timeout")
+    timeout = cur.fetchone()["timeout"]
+    cur.execute("SET LOCAL statement_timeout = 0")
+    for index in indexes:
+        cur.execute("SELECT gin_clean_pending_list(%s::oid::regclass)", (index,))
+    cur.execute("SELECT set_config('statement_timeout', %s, true)", (timeout,))
+    cur.execute("SELECT set_config('gin_pending_list_limit', %s, true)", (previous,))
+
+
 def _publish_history(cur, sid, token):
     """Atomic reconciliation/publication, retryable after an uncertain commit."""
     from psycopg2.extras import Json
@@ -1239,18 +1288,19 @@ def _publish_history(cur, sid, token):
     for chunk in chunks:
         if chunk["table_name"] in grouped:
             grouped[chunk["table_name"]].extend(parse_jsonb(chunk["rows"]))
-    for table, snapshot in grouped.items():
-        started = monotonic()
-        if timing:
-            timing.waiting("publish_history." + table)
-        count = len(snapshot)
-        snapshot = _reconcile_app_rows(cur, sid, table, snapshot)
-        columns = ("session_id", *TABLES[table])
-        rows = [(sid, *[Json(v) if c in JSON_COLUMNS and v is not None else v
-                        for c, v in zip(TABLES[table], values)]) for values in snapshot]
-        _insert_rows(cur, table, columns, rows, _history_conflict(table, columns), batch=200)
-        if timing:
-            timing.steps.append(f"publish_history.{table}={monotonic() - started:.3f}s rows={count}")
+    with _history_gin(cur, APP_TABLES):
+        for table, snapshot in grouped.items():
+            started = monotonic()
+            if timing:
+                timing.waiting("publish_history." + table)
+            count = len(snapshot)
+            snapshot = _reconcile_app_rows(cur, sid, table, snapshot)
+            columns = ("session_id", *TABLES[table])
+            rows = [(sid, *[Json(v) if c in JSON_COLUMNS and v is not None else v
+                            for c, v in zip(TABLES[table], values)]) for values in snapshot]
+            _insert_rows(cur, table, columns, rows, _history_conflict(table, columns), batch=200)
+            if timing:
+                timing.steps.append(f"publish_history.{table}={monotonic() - started:.3f}s rows={count}")
     cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
     ceiling = cur.fetchone()["seq"]
     cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
@@ -1498,8 +1548,9 @@ def install_history(sid, data, cwd):
                     else:
                         adapted = [(r[0], *[Json(v) if c in JSON_COLUMNS and v is not None else v
                                              for c, v in zip(columns, r[1:])]) for r in part]
-                        _insert_rows(cur, table, ("session_id", *columns), adapted,
-                                     _history_conflict(table, ("session_id", *columns)), batch=200)
+                        with _history_gin(cur, (table,)):
+                            _insert_rows(cur, table, ("session_id", *columns), adapted,
+                                         _history_conflict(table, ("session_id", *columns)), batch=200)
             facts[table] = {"rows": len(rows), "seconds": round(monotonic() - started, 3)}
         if not data.get("_prepare_history"):
             with get_db() as conn:

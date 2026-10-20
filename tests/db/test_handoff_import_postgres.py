@@ -315,6 +315,186 @@ def chat():
             cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s,%s)", (sdk, "ses_lab-source"))
 
 
+@pytest.fixture
+def recall_projection():
+    from app.db import session_recall
+
+    with base.get_db() as conn:
+        session_recall.install_objects(conn.cursor())
+    assert session_recall.install_triggers()
+    # Establish readiness BEFORE producing the import, not by backfilling its
+    # rows afterwards. Both legacy and projection-based SessionSearch are tested.
+    for source in session_recall.SOURCES:
+        while True:
+            with base.get_db() as conn:
+                if session_recall.backfill_step(conn.cursor(), source):
+                    break
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_import_drains_every_gin_and_searches_immediately_after_accept(chat, cached, monkeypatch, recall_projection):
+    from fluid.messages import Message, Text
+    from app.core.provider import fluid_pg_store
+    from app.db import network, session_recall, sessions
+    from app.db.schema_postgres import create_session_recall_text
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        if cached:
+            create_session_recall_text(cur)
+        cur.execute("SELECT gin_clean_pending_list(c.oid) FROM pg_class c "
+                    "JOIN pg_am am ON am.oid=c.relam WHERE am.amname='gin'")
+        cur.execute("SELECT current_setting('gin_pending_list_limit') AS value")
+        default = cur.fetchone()["value"]
+    observed = set()
+    original = network._insert_rows
+
+    def insert(cur, table, *args, **kwargs):
+        if table in handoff.TABLES:
+            cur.execute("SELECT pg_size_bytes(current_setting('gin_pending_list_limit')) AS bytes")
+            # Tables without GIN indexes need no tuning.
+            if table in {"fluid_session_nodes", "session_store_entries", "session_events", "session_messages"}:
+                assert cur.fetchone()["bytes"] == handoff._HISTORY_GIN_LIMIT_KB * 1024
+                observed.add(table)
+        return original(cur, table, *args, **kwargs)
+
+    monkeypatch.setattr(network, "_insert_rows", insert)
+    data = snapshot(nodes=201, messages=3)
+    needles = ("nativehandoffneedle", "delegatedhandoffneedle", "eventhandoffneedle", "legacyhandoffneedle")
+    data["history"]["fluid_session_nodes"][0]["message"] = Message("user", [Text(needles[0])]).to_dict()
+    data["history"]["session_store_entries"] = [{"project_key": "lab", "subpath": None,
+        "entry": {"type": "user", "message": {"content": needles[1]}},
+        "created_at": "2026-10-19T00:00:00Z"}]
+    data["history"]["session_events"][0]["payload"] = {"content": needles[2], "kind": "text"}
+    data["history"]["session_messages"][0]["content"] = needles[3]
+    data["_prepare_history"] = True
+    sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
+    with base.get_db() as conn:
+        # Native chunks already committed, while their SDK is still private.
+        assert not any(gin_pending_pages(conn.cursor()).values())
+        assert database.get_session(chat)["sdk_session_id"] is None
+    handoff._accept_owner(chat, "target", token=data["token"])
+    with base.get_db() as conn:
+        assert not any(gin_pending_pages(conn.cursor()).values())
+    assert observed == {"fluid_session_nodes", "session_store_entries", "session_events", "session_messages"}
+    # A NEW connection (not just another lease from the pool) sees the default.
+    import psycopg2
+    with psycopg2.connect(os.environ["TEST_POSTGRES_DSN"]) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SHOW gin_pending_list_limit")
+            assert cur.fetchone()[0] == default
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SHOW gin_pending_list_limit")
+        assert cur.fetchone()["gin_pending_list_limit"] == default
+    # UI search reads native/delegated/legacy text; mirrored application events
+    # are instead searched by SessionSearch's remote-session arm.
+    for needle in (needles[0], needles[1], needles[3]):
+        assert chat in {row["id"] for row in sessions.search_sessions(needle)}, needle
+        rows, total = sessions.search_sessions_paginated(needle)
+        assert total >= 1 and chat in {row["id"] for row in rows}
+    monkeypatch.setattr(fluid_pg_store, "_my_device_id", lambda: "search-reader")
+    with base.get_db() as conn:
+        assert session_recall.ready(conn.cursor())
+    for indexed in (False, True):
+        with patch.object(session_recall, "ready", return_value=indexed):
+            # A locally accepted SDK is searched through its native/delegated
+            # transcript, not through the remote-only mirrored event arm.
+            for needle in needles[:2]:
+                hits = fluid_pg_store._search_sync([needle], 5, None)
+                assert any(hit.session_id in {chat, sdk} for hit in hits), (needle, indexed, hits)
+
+
+def test_event_only_import_is_immediately_searchable_by_session_search(chat, monkeypatch, recall_projection):
+    from app.core.provider import fluid_pg_store
+    from app.db import session_recall
+
+    monkeypatch.setattr(fluid_pg_store, "_my_device_id", lambda: "search-reader")
+    needle = "mirroredhandoffneedle"
+    data = {"token": "event-only", "sdk_session_id": None, "_prepare_history": True,
+            "history": {"session_events": [{"id": "event-only", "seq": 1,
+                "event_type": "message.user", "payload": {"content": needle},
+                "created_at": "2026-10-19T00:00:00Z"}]}}
+    handoff.install_history(chat, data, "/tmp/handoff-lab")
+    handoff._accept_owner(chat, "target", token=data["token"])
+    with base.get_db() as conn:
+        assert session_recall.ready(conn.cursor())
+        assert not any(gin_pending_pages(conn.cursor()).values())
+    for indexed in (False, True):
+        with patch.object(session_recall, "ready", return_value=indexed):
+            assert chat in {hit.session_id for hit in fluid_pg_store._search_sync([needle], 5, None)}
+
+
+def test_cleanup_failure_rolls_back_publication_and_can_retry(chat, monkeypatch):
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    old_sdk = handoff.install_history(chat, snapshot(), "/tmp/handoff-lab")
+    data = snapshot(events=15)
+    data.update(token="cleanup-retry", _prepare_history=True)
+    new_sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
+    original = handoff._history_gin
+
+    class FailedCleanupCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            if sql.startswith("SELECT gin_clean_pending_list("):
+                return super().execute("SELECT 1/0")
+            return super().execute(sql, params)
+
+    def failed_cleanup(cur, tables):
+        return original(cur.connection.cursor(cursor_factory=FailedCleanupCursor), tables)
+
+    with monkeypatch.context() as injected:
+        injected.setattr(handoff, "_history_gin", failed_cleanup)
+        with pytest.raises(psycopg2.errors.DivisionByZero):
+            handoff._accept_owner(chat, "target", token=data["token"])
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT sdk_session_id,owner_device_id FROM sessions WHERE id=%s", (chat,))
+        assert dict(cur.fetchone()) == {"sdk_session_id": old_sdk, "owner_device_id": "source"}
+        cur.execute("SELECT count(*) AS n FROM session_events WHERE session_id=%s", (chat,))
+        assert cur.fetchone()["n"] == 10
+    handoff._accept_owner(chat, "target", token=data["token"])
+    assert database.get_session(chat)["sdk_session_id"] == new_sdk
+    with base.get_db() as conn:
+        assert not any(gin_pending_pages(conn.cursor()).values())
+
+
+def test_gin_cleanup_exempts_only_the_drain_from_statement_timeout():
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    class SlowCleanupCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            if sql.startswith("SELECT gin_clean_pending_list("):
+                super().execute("SELECT pg_sleep(0.05)")
+            return super().execute(sql, params)
+
+    with base.get_db() as conn:
+        cur = conn.cursor(cursor_factory=SlowCleanupCursor)
+        cur.execute("SET LOCAL statement_timeout = '20ms'")
+        cur.execute("SHOW gin_pending_list_limit")
+        default = cur.fetchone()["gin_pending_list_limit"]
+        with handoff._history_gin(cur, ("session_messages",)):
+            cur.execute("SHOW statement_timeout")
+            assert cur.fetchone()["statement_timeout"] == "20ms"
+        cur.execute("SHOW statement_timeout")
+        assert cur.fetchone()["statement_timeout"] == "20ms"
+        cur.execute("SHOW gin_pending_list_limit")
+        assert cur.fetchone()["gin_pending_list_limit"] == default
+        with pytest.raises(psycopg2.errors.QueryCanceled):
+            cur.execute("SELECT pg_sleep(0.05)")
+        conn.rollback()
+
+
+def gin_pending_pages(cur):
+    cur.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+    cur.execute("SELECT c.relname, (pgstatginindex(c.oid)).pending_pages AS pages "
+                "FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                "JOIN pg_am am ON am.oid=c.relam WHERE am.amname='gin' ORDER BY c.relname")
+    return {row["relname"]: row["pages"] for row in cur.fetchall()}
+
+
 @pytest.mark.skipif(os.environ.get("HANDOFF_LAB") != "1", reason="opt-in 20k-row measurement")
 def test_import_lab(chat, capsys):
     from app.db import network, session_recall
@@ -355,16 +535,19 @@ def test_import_lab(chat, capsys):
         cur.execute("SELECT pg_current_wal_insert_lsn() AS lsn")
         lsn = cur.fetchone()["lsn"]
     start = time.monotonic()
-    with patch.object(network, "_insert_rows", insert):
+    limit = int(os.environ.get("HANDOFF_LAB_GIN_KB", handoff._HISTORY_GIN_LIMIT_KB))
+    with patch.object(network, "_insert_rows", insert), patch.object(handoff, "_HISTORY_GIN_LIMIT_KB", limit):
         handoff.install_history(chat, data, "/tmp/handoff-lab")
     elapsed = time.monotonic() - start
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), %s) AS bytes", (lsn,))
         wal = int(cur.fetchone()["bytes"])
+        pending = gin_pending_pages(cur)
     with capsys.disabled():
         print("HANDOFF_LAB " + json.dumps({"rows": sum(len(v) for v in data["history"].values()),
             "bytes": payload_bytes, "seconds": elapsed, "wal_bytes": wal,
+            "pending_pages": pending, "gin_pending_list_limit_kb": limit,
             "cold_receiver": os.environ.get("HANDOFF_LAB_COLD") == "1",
             "tables_seconds": measured, "publish_metrics": timing.steps,
             "import_metrics": data.get("_history_metrics"),
