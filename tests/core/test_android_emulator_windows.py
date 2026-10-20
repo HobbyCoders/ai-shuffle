@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import threading
+from pathlib import PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -24,6 +26,7 @@ def windows(monkeypatch):
     monkeypatch.setattr(host.platform, "system", lambda: "Windows")
     monkeypatch.setattr(host.platform, "machine", lambda: "AMD64")
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(host, "_accel_cache", {})
 
 
 @pytest.fixture
@@ -45,13 +48,20 @@ def test_sdk_discovery_precedence(windows, settings, monkeypatch, tmp_path):
     assert layout_mod.sdk_root() == settings.data_dir / "android-sdk"
     studio = local / "Android" / "Sdk"
     studio.mkdir(parents=True)
-    assert layout_mod.sdk_root() == studio
-    monkeypatch.setenv("ANDROID_SDK_ROOT", str(tmp_path / "sdk root"))
-    assert layout_mod.sdk_root() == tmp_path / "sdk root"
-    monkeypatch.setenv("ANDROID_HOME", str(tmp_path / "android home"))
-    assert layout_mod.sdk_root() == tmp_path / "android home"
+    assert layout_mod.discover_sdk() == studio
+    root_env = tmp_path / "sdk root"
+    root_env.mkdir()
+    monkeypatch.setenv("ANDROID_SDK_ROOT", str(root_env))
+    assert layout_mod.discover_sdk() == root_env
+    home_env = tmp_path / "android home"
+    home_env.mkdir()
+    monkeypatch.setenv("ANDROID_HOME", str(home_env))
+    assert layout_mod.discover_sdk() == home_env
+    # Discovery is informational and never adopts a developer-owned SDK.
+    assert layout_mod.sdk_root() == settings.data_dir / "android-sdk"
     monkeypatch.setattr(settings, "android_sdk_dir", tmp_path / "explicit")
     assert layout_mod.sdk_root() == tmp_path / "explicit"
+    assert not SdkLayout().owns_root
 
 
 def test_linux_sdk_discovery_unchanged(settings, monkeypatch, tmp_path):
@@ -73,6 +83,7 @@ def test_windows_binaries_env_and_discovery(windows, monkeypatch, tmp_path):
     assert env["SystemRoot"] == str(tmp_path / "SystemRoot")
     assert env["TEMP"] == str(tmp_path / "TEMP")
     assert env["ANDROID_HOME"] == str(layout.root)
+    assert env["ANDROID_ADB_SERVER_PORT"] == "5038"
     assert "ANTHROPIC_API_KEY" not in env
     assert adb.Adb(layout, "emulator-5554").argv("emu", "kill")[0] == str(layout.adb)
     discovery = tmp_path / "LOCALAPPDATA" / "Temp" / "avd" / "running"
@@ -103,6 +114,8 @@ def test_windows_acceleration_uses_sdk_probe(windows, monkeypatch, tmp_path, ret
     assert args[0] == [str(layout.emulator_bin), "-accel-check"]
     assert kwargs["timeout"] == 10 and kwargs["env"] == layout.env()
     assert not kwargs.get("shell")
+    assert kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+    assert "capture_output" not in kwargs
 
 
 @pytest.mark.parametrize("error", [OSError("driver"), subprocess.TimeoutExpired("probe", 10)])
@@ -131,6 +144,9 @@ async def test_no_acceleration_refuses_start_before_spawn(windows, monkeypatch, 
     layout = SdkLayout(tmp_path)
     layout.emulator_bin.parent.mkdir(parents=True)
     layout.emulator_bin.touch()
+    from tests.core.test_android_emulator import _installed
+
+    _installed(layout)
     monkeypatch.setattr(host.subprocess, "run", Mock(return_value=SimpleNamespace(returncode=1)))
     spawn = AsyncMock()
     monkeypatch.setattr(manager_mod.asyncio, "create_subprocess_exec", spawn)
@@ -191,8 +207,11 @@ async def test_windows_spawn_and_stop(windows, monkeypatch, tmp_path, force_stop
     if force_stop:
         monkeypatch.setattr(manager_mod, "STOP_TIMEOUT_SECONDS", 0.001)
         monkeypatch.setattr(process_tree, "descendant_pids", lambda pid: [])
-        # Exercise the real Windows taskkill escalation without signalling a host PID.
-        monkeypatch.setattr(process_tree.os, "kill", Mock(side_effect=OSError("no console")))
+        # Exercise a successful CTRL_BREAK delivery, then taskkill escalation.
+        # Linux's signal module has no CTRL_BREAK_EVENT, so provide it explicitly.
+        monkeypatch.setattr(process_tree.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+        group_signal = Mock()
+        monkeypatch.setattr(process_tree.os, "kill", group_signal)
         proc.terminate = Mock()
 
         def taskkill(argv, **kwargs):
@@ -210,14 +229,24 @@ async def test_windows_spawn_and_stop(windows, monkeypatch, tmp_path, force_stop
     await manager.stop("pixel")
     assert dev.proc is None and dev.state == "stopped"
     if force_stop:
+        group_signal.assert_called_once_with(proc.pid, process_tree.signal.CTRL_BREAK_EVENT)
+        proc.terminate.assert_not_called()
         assert calls == [["taskkill", "/F", "/T", "/PID", str(proc.pid)]]
 
 
-def test_windows_install_selects_archives_and_writes_layout(windows, monkeypatch, tmp_path):
+def test_windows_install_selects_archives_and_writes_layout(windows, settings, monkeypatch, tmp_path):
     from app.core.android_emulator import sdk_repo
     from tests.core.test_android_emulator import FILE, _archive, _manifest, _package, _zip
 
-    layout = SdkLayout(tmp_path / "sdk")
+    studio = tmp_path / "Android Studio SDK"
+    studio.mkdir()
+    sentinel = studio / "emulator" / "package.xml"
+    sentinel.parent.mkdir()
+    sentinel.write_bytes(b"developer-package")
+    monkeypatch.setenv("ANDROID_HOME", str(studio))
+    before = {str(path.relative_to(studio)): path.read_bytes() for path in studio.rglob("*") if path.is_file()}
+    layout = SdkLayout()
+    assert layout.root == settings.data_dir / "android-sdk"
     archives = {
         "emulator-windows.zip": _zip([("emulator/emulator.exe", b"MZ", FILE)]),
         "tools-windows.zip": _zip([("platform-tools/adb.exe", b"MZ", FILE)]),
@@ -258,6 +287,8 @@ def test_windows_install_selects_archives_and_writes_layout(windows, monkeypatch
     assert layout.installed(IMAGE)
     assert layout.emulator_bin.read_bytes() == b"MZ" and layout.adb.read_bytes() == b"MZ"
     assert (layout.licenses / "android-sdk-license").is_file()
+    assert {str(path.relative_to(studio)): path.read_bytes() for path in studio.rglob("*") if path.is_file()} == before
+    assert not (studio / layout_mod.RECORD_NAME).exists()
 
 
 def test_windows_tool_registration_does_not_probe_acceleration(windows, monkeypatch):
@@ -282,3 +313,127 @@ async def test_stop_reports_surviving_processes(windows, monkeypatch, tmp_path):
         await manager.stop("pixel")
     assert exc.value.code == "stop_failed"
     assert dev.proc is proc and dev.state == "error"
+
+
+
+def test_windows_native_path_layout(windows, monkeypatch):
+    monkeypatch.setattr(layout_mod, "Path", PureWindowsPath)
+    layout = SdkLayout(r"C:\Users\Developer\App Data\AI Shuffle\android-sdk")
+    assert layout.emulator_bin == PureWindowsPath(r"C:\Users\Developer\App Data\AI Shuffle\android-sdk\emulator\emulator.exe")
+    assert layout.adb == PureWindowsPath(r"C:\Users\Developer\App Data\AI Shuffle\android-sdk\platform-tools\adb.exe")
+    assert layout.env()["ANDROID_HOME"] == str(layout.root)
+
+
+@pytest.mark.parametrize("executable,expected", [
+    (r"c:\sdk\emulator\emulator.exe", True),
+    (r"C:/SDK/PLATFORM-TOOLS/adb.exe", True),
+    (r"C:\Sdk-old\emulator.exe", False),
+    (r"D:\Sdk\emulator.exe", False),
+    (r"C:\Sdk\..\Other\adb.exe", False),
+])
+def test_windows_cleanup_path_comparison(windows, executable, expected):
+    assert manager_mod._path_in_sdk(executable, r"C:\Sdk") is expected
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_external_sdk_processes_and_locks_are_not_cleaned(windows, settings, monkeypatch, tmp_path, explicit):
+    import psutil
+
+    studio = tmp_path / "Android Studio SDK"
+    lock = studio / "avd" / "pixel.avd" / "hardware-qemu.ini.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("developer-lock")
+    monkeypatch.setenv("ANDROID_HOME", str(studio))
+    if explicit:
+        monkeypatch.setattr(settings, "android_sdk_dir", studio)
+    layout = SdkLayout()
+    layout.root.mkdir(parents=True, exist_ok=True)
+    developer_proc = Mock(info={"pid": 987654322, "exe": str(studio / "emulator" / "emulator.exe"), "uids": None})
+    processes = Mock(return_value=[developer_proc])
+    monkeypatch.setattr(psutil, "process_iter", processes)
+    monkeypatch.setattr(psutil, "wait_procs", lambda victims, timeout: (victims, []))
+    assert manager_mod.cleanup_orphans() == 0
+    developer_proc.terminate.assert_not_called()
+    developer_proc.kill.assert_not_called()
+    assert lock.read_text() == "developer-lock"
+    if explicit:
+        processes.assert_not_called()
+
+
+def test_acceleration_success_is_cached_until_binary_changes(windows, monkeypatch, tmp_path):
+    binary = tmp_path / "emulator.exe"
+    binary.write_bytes(b"one")
+    probe = Mock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(host.subprocess, "run", probe)
+    assert host.check_host(emulator_bin=binary, env={}).ok
+    assert host.check_host(emulator_bin=binary, env={}).ok
+    assert probe.call_count == 1
+    revision = binary.stat()
+    os.utime(binary, ns=(revision.st_atime_ns, revision.st_mtime_ns + 1))
+    assert host.check_host(emulator_bin=binary, env={}).ok
+    assert probe.call_count == 2
+    other = tmp_path / "other-emulator.exe"
+    other.write_bytes(b"one")
+    assert host.check_host(emulator_bin=other, env={}).ok
+    assert probe.call_count == 3
+
+
+def test_acceleration_failure_is_retried(windows, monkeypatch, tmp_path):
+    binary = tmp_path / "emulator.exe"
+    binary.touch()
+    probe = Mock(side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)])
+    monkeypatch.setattr(host.subprocess, "run", probe)
+    assert not host.check_host(emulator_bin=binary, env={}).ok
+    assert host.check_host(emulator_bin=binary, env={}).ok
+    assert probe.call_count == 2
+
+
+@pytest.mark.parametrize("state", ["booting", "running"])
+async def test_status_does_not_probe_an_active_emulator(windows, monkeypatch, tmp_path, state):
+    from tests.core.test_android_emulator import _installed
+
+    layout = SdkLayout(tmp_path)
+    _installed(layout)
+    manager = EmulatorManager(layout)
+    manager.device("pixel").state = state
+    probe = Mock(side_effect=AssertionError("active emulator must not probe"))
+    monkeypatch.setattr(host.subprocess, "run", probe)
+    assert (await manager.status())["available"]
+    probe.assert_not_called()
+
+
+async def test_partial_sdk_with_no_acceleration_still_offers_setup(windows, monkeypatch, tmp_path):
+    layout = SdkLayout(tmp_path)
+    layout.emulator_bin.parent.mkdir(parents=True)
+    layout.emulator_bin.touch()
+    monkeypatch.setattr(host.subprocess, "run", Mock(return_value=SimpleNamespace(returncode=1)))
+    status = await EmulatorManager(layout).status()
+    assert status["reason"] == "sdk_missing" and not status["available"]
+    assert "Windows Hypervisor Platform" in status["message"]
+
+
+async def test_adb_start_and_shutdown_use_private_port(windows, monkeypatch, tmp_path):
+    layout = SdkLayout(tmp_path)
+    layout.adb.parent.mkdir(parents=True)
+    layout.adb.touch()
+    monkeypatch.setenv("ANDROID_ADB_SERVER_PORT", "5037")
+    run = AsyncMock(return_value=adb.Result(0, b"", b""))
+    monkeypatch.setattr(adb, "run", run)
+    await adb.start_server(layout)
+    manager = EmulatorManager(layout)
+    manager._adb_started = True
+    await manager.shutdown()
+    assert [call.args[0][-1] for call in run.call_args_list] == ["start-server", "kill-server"]
+    assert all(call.kwargs["env"]["ANDROID_ADB_SERVER_PORT"] == "5038" for call in run.call_args_list)
+
+
+async def test_status_does_not_probe_during_setup(windows, monkeypatch, tmp_path):
+    layout = SdkLayout(tmp_path)
+    layout.emulator_bin.parent.mkdir(parents=True)
+    layout.emulator_bin.touch()
+    manager = EmulatorManager(layout)
+    manager._install_task = SimpleNamespace(done=lambda: False)
+    probe = Mock(side_effect=AssertionError("installation must not probe"))
+    monkeypatch.setattr(host.subprocess, "run", probe)
+    assert (await manager.status())["reason"] == "installing"
+    probe.assert_not_called()

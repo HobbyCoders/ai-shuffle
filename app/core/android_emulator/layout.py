@@ -1,9 +1,9 @@
 """Where the emulator's SDK, devices and logs live on this worker.
 
-Everything sits under one root in sdkmanager's own layout. ``ANDROID_SDK_DIR``
-overrides discovery; Windows also checks the standard Android SDK environment
-and Android Studio path. Otherwise use ``<data dir>/android-sdk``. Builds
-pointed at it with ``ANDROID_HOME`` find the same packages.
+Everything sits under ``<data dir>/android-sdk`` in sdkmanager's own layout.
+``ANDROID_SDK_DIR`` explicitly opts into managing another root. Discovery of an
+Android Studio SDK is informational only: it never grants write or process
+ownership. Builds pointed at our SDK with ``ANDROID_HOME`` find its packages.
 """
 
 from __future__ import annotations
@@ -26,21 +26,34 @@ def sdk_root() -> Path:
     configured = getattr(settings, "android_sdk_dir", None)
     if configured:
         return Path(configured)
-    if sys.platform == "win32":
-        for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
-            if os.environ.get(name):
-                return Path(os.environ[name])
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            candidate = Path(local) / "Android" / "Sdk"
-            if candidate.is_dir():
-                return candidate
     return Path(settings.data_dir) / "android-sdk"
+
+
+def discover_sdk() -> Optional[Path]:
+    """Find an existing Windows SDK for guidance only; never adopt or modify it."""
+    if sys.platform == "win32":
+        candidates = [Path(os.environ[name]) for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT")
+                      if os.environ.get(name)]
+        if os.environ.get("LOCALAPPDATA"):
+            candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Android" / "Sdk")
+        return next((path for path in candidates if path.is_dir()), None)
+    return None
 
 
 class SdkLayout:
     def __init__(self, root: Optional[Path] = None) -> None:
         self.root = Path(root) if root is not None else sdk_root()
+
+    @property
+    def owns_root(self) -> bool:
+        """Only the private data-directory SDK permits path-based orphan cleanup.
+
+        An explicit external SDK may share executables with Android Studio;
+        its processes are handled only by the verified process ledger.
+        """
+        from app.core.config import settings
+
+        return self.root.resolve() == (Path(settings.data_dir) / "android-sdk").resolve()
 
     # Packages, in sdkmanager's layout.
     def package_dir(self, path: str) -> Path:
@@ -184,6 +197,8 @@ class SdkLayout:
             "ANDROID_AVD_HOME": str(self.avd_home),
             "ANDROID_USER_HOME": str(self.user_home),
             "ANDROID_EMULATOR_HOME": str(self.user_home),
+            # Never share/kill Android Studio's default adb server on 5037.
+            "ANDROID_ADB_SERVER_PORT": "5038",
             # The emulator's discovery file (with its gRPC token) goes here,
             # not into the app user's own runtime folder.
             "XDG_RUNTIME_DIR": str(self.runtime_dir),

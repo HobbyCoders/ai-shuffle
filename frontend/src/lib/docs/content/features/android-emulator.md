@@ -54,7 +54,11 @@ Then recreate the container. When the container starts, it gives AI Shuffle acce
 2. Enable **Windows Hypervisor Platform** in Windows Features, then reboot. Alternatively, use Android Studio's SDK Manager to install **Android Emulator Hypervisor Driver (AEHD)** on a system with Hyper-V disabled. AI Shuffle does not install drivers or change Windows features for you.
 3. Set up the SDK from the Phone panel. Before starting a phone, AI Shuffle runs `emulator.exe -accel-check` with a deadline. If acceleration is unavailable, it reports how to fix it instead of attempting a slow software boot.
 
-The Windows desktop installer does not bundle the Android SDK. AI Shuffle uses `ANDROID_SDK_DIR` when configured; otherwise it checks `ANDROID_HOME`, then `ANDROID_SDK_ROOT`, then an existing `%LOCALAPPDATA%\Android\Sdk`, before falling back to `android-sdk` in its data folder. Setup still requires license acceptance and manages the emulator, platform-tools and selected image in that SDK, even if Android Studio already uses it. Set `ANDROID_SDK_DIR` to a separate folder if you do not want to share packages.
+The Windows desktop installer does not bundle the Android SDK. By default, setup installs and manages a private SDK under `android-sdk` in AI Shuffle's data folder. Windows SDK discovery checks `ANDROID_HOME`, `ANDROID_SDK_ROOT` and `%LOCALAPPDATA%\Android\Sdk` for guidance only: it never adopts, writes to or stops processes from an Android Studio SDK.
+
+`ANDROID_SDK_DIR` is an explicit opt-in to managing another SDK folder. Setup may replace that folder's emulator, platform-tools and selected system-image packages after license acceptance; choose a dedicated folder rather than your Android Studio SDK. Path-based startup cleanup is limited to the private data-folder SDK. In an explicit external SDK, only processes recorded and identity-verified by AI Shuffle's process ledger may be reaped. AI Shuffle uses adb server port **5038**, separate from Android Studio's default **5037**.
+
+Passing acceleration checks are cached until the emulator binary changes; status does not probe again while a phone is booting/running or SDK setup is in progress.
 
 Live Windows verification of this backend is still pending; its Windows paths and process lifecycle are covered by simulated tests.
 

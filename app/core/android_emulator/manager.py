@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ntpath
 import os
 import re
 import shlex
@@ -31,7 +32,7 @@ from app.core.android_emulator import avd, frames, sdk_repo
 from app.core.android_emulator.grpc_control import KEY_VALUES, RGB888, GrpcControl
 from app.core.android_emulator.host import LICENSE_URL, check_host
 from app.core.android_emulator.installer import InstallProgress, run_install
-from app.core.android_emulator.layout import SdkLayout
+from app.core.android_emulator.layout import SdkLayout, discover_sdk
 from app.core.process_tree import kill_process_tree, spawn_kwargs
 
 logger = logging.getLogger(__name__)
@@ -225,7 +226,8 @@ class EmulatorManager:
         return self._install_task is not None and not self._install_task.done()
 
     def _status_sync(self) -> Dict[str, Any]:
-        host = check_host(emulator_bin=self.layout.emulator_bin, env=self.layout.env())
+        active = self._installing() or any(dev.state in ("booting", "running") for dev in self._devices.values())
+        host = check_host(emulator_bin=self.layout.emulator_bin, env=self.layout.env(), skip_acceleration=active)
         image = self.system_image
         installed = host.host_os is not None and self.layout.installed(image)
         install = self.progress.snapshot()
@@ -233,6 +235,16 @@ class EmulatorManager:
             reason, message = host.reason, host.message
         elif self._installing():
             reason, message = "installing", install["message"] or "Installing the Android emulator"
+        elif host.host_os == "windows" and not installed:
+            # A partial/explicit external SDK must still have a setup route,
+            # even when its existing emulator cannot accelerate yet.
+            reason = "error" if install["state"] == "error" else "sdk_missing"
+            message = (install["message"] if reason == "error" else
+                       "Set up AI Shuffle's Android SDK after accepting the Android SDK License.")
+            if not host.ok and host.reason != "sdk_missing":
+                message += " " + host.message
+            if discover_sdk() is not None and self.layout.owns_root:
+                message += " An existing SDK was detected; automatic setup uses AI Shuffle's own SDK, not Android Studio's."
         elif not host.ok and host.reason != "sdk_missing":
             reason, message = host.reason, host.message
             if not installed:
@@ -878,21 +890,33 @@ class EmulatorManager:
                 pass
 
 
+def _path_in_sdk(executable: str, root: str) -> bool:
+    """Compare canonical paths by components, including Windows drive/case rules."""
+    paths = ntpath if sys.platform == "win32" else os.path
+    executable, root = paths.normcase(paths.normpath(executable)), paths.normcase(paths.normpath(root))
+    try:
+        return executable != root and paths.commonpath((executable, root)) == root
+    except ValueError:  # Different drives, or relative vs absolute paths.
+        return False
+
+
 def cleanup_orphans(layout: Optional[SdkLayout] = None) -> int:
-    """Stop emulator and adb processes run from this install's SDK that no
-    running app owns (a crashed or killed previous run), and clear the AVD
-    locks they left. Called once at startup, before anything is started.
-    Matched by executable path inside the SDK root and by this user only.
+    """Clean only the SDK root private to this install, never a discovered SDK.
+
+    Explicit external SDKs may share executables with Android Studio. Only the
+    process ledger's verified identities may reap our processes from those SDKs;
+    startup reconciliation handles that separately. Do not even clear locks in
+    an external SDK here.
     """
     layout = layout or SdkLayout()
     root = layout.root
-    if not root.is_dir():
+    if not layout.owns_root or not root.is_dir():
         return 0
     try:
         import psutil
     except ImportError:  # pragma: no cover
         return 0
-    root_s = os.path.realpath(str(root)) + os.sep
+    root_s = os.path.realpath(str(root))
     me, uid = os.getpid(), os.getuid() if hasattr(os, "getuid") else None
     victims = []
     for proc in psutil.process_iter(["pid", "exe", "uids"]):
@@ -902,7 +926,7 @@ def cleanup_orphans(layout: Optional[SdkLayout] = None) -> int:
                 continue
             if uid is not None and info.get("uids") and info["uids"].real != uid:
                 continue
-            if os.path.realpath(info["exe"]).startswith(root_s):
+            if _path_in_sdk(os.path.realpath(info["exe"]), root_s):
                 victims.append(proc)
         except (psutil.Error, OSError):
             continue

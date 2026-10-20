@@ -11,6 +11,7 @@ import errno
 import os
 import platform
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -76,26 +77,42 @@ WINDOWS_ACCEL_HELP = (
 )
 
 
-def _windows_x86_64(emulator_bin: Optional[Path], env: Optional[dict]) -> HostSupport:
+# Cache successes only. Replacing/updating the binary invalidates its entry;
+# failures are retried after a driver/feature fix without restarting the app.
+_accel_cache: dict[str, tuple[int, int]] = {}
+_accel_lock = threading.Lock()
+
+
+def _windows_x86_64(emulator_bin: Optional[Path], env: Optional[dict],
+                    skip_acceleration: bool = False) -> HostSupport:
     host = {"host_os": "windows", "host_arch": "x64"}
     if emulator_bin is None:
         from app.core.android_emulator.layout import SdkLayout
 
         layout = SdkLayout()
         emulator_bin, env = layout.emulator_bin, layout.env()
+    if skip_acceleration:
+        return HostSupport("ready", "", **host)
     if not emulator_bin.is_file():
         return HostSupport("sdk_missing", "Install the Android SDK from the Phone panel first.", **host)
     try:
-        # The emulator checks usable WHPX/AEHD, not just a registry feature or
-        # CPU flag. A driver can be installed but unusable until after reboot.
-        result = subprocess.run(
-            [str(emulator_bin), "-accel-check"], capture_output=True,
-            timeout=10, env=env,
-        )
+        stat = emulator_bin.stat()
+        key, revision = str(emulator_bin.resolve()), (stat.st_mtime_ns, stat.st_size)
+        with _accel_lock:
+            if _accel_cache.get(key) == revision:
+                return HostSupport("ready", "", **host)
+            # DEVNULL avoids a grandchild inheriting captured pipes and keeping
+            # subprocess.run's post-timeout communicate() blocked indefinitely.
+            result = subprocess.run(
+                [str(emulator_bin), "-accel-check"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, env=env,
+            )
+            if result.returncode != 0:
+                _accel_cache.pop(key, None)
+                return HostSupport("error", WINDOWS_ACCEL_HELP, **host)
+            _accel_cache[key] = revision
     except (OSError, subprocess.SubprocessError) as exc:
         return HostSupport("error", f"{WINDOWS_ACCEL_HELP} Acceleration check failed: {type(exc).__name__}.", **host)
-    if result.returncode != 0:
-        return HostSupport("error", WINDOWS_ACCEL_HELP, **host)
     return HostSupport("ready", "", **host)
 
 
@@ -105,14 +122,14 @@ def supports_platform() -> bool:
 
 
 def check_host(kvm_path: str = KVM_PATH, *, emulator_bin: Optional[Path] = None,
-               env: Optional[dict] = None) -> HostSupport:
+               env: Optional[dict] = None, skip_acceleration: bool = False) -> HostSupport:
     """Worker support; Windows runs a bounded acceleration probe (call off-loop)."""
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Linux" and machine in ("x86_64", "amd64"):
         return _linux_x86_64(kvm_path)
     if system == "Windows" and machine in ("x86_64", "amd64"):
-        return _windows_x86_64(emulator_bin, env)
+        return _windows_x86_64(emulator_bin, env, skip_acceleration)
     return HostSupport(
         "unsupported_arch",
         f"The Android emulator needs Linux x86_64 with KVM or Windows x86_64 with WHPX/AEHD; "

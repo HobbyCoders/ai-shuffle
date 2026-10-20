@@ -227,7 +227,7 @@ class Settings(BaseSettings):
 
     # Android emulator (app/core/android_emulator; docs/internal/phone-panel-api.md).
     #   - android_sdk_dir: where the owner-started SDK install lands. None =
-    #     <data_dir>/android-sdk (Windows also discovers Android SDK installs).
+    #     <data_dir>/android-sdk. External SDKs require explicit opt-in.
     #     Env: ANDROID_SDK_DIR.
     #   - emulator_max_devices: emulators that may run at once on this worker,
     #     shared by every session. Env: EMULATOR_MAX_DEVICES.

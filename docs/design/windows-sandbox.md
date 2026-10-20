@@ -47,10 +47,11 @@ These guarantees depend on a trusted Linux kernel and permitted user namespaces.
 They do not confine the server, permission-granted host calls, ordinary native
 shell tools or delegated provider CLIs.
 
-Code mode has `auto`, `required` and `off` modes. Today `auto` logs a warning and
-falls back to in-process guards if the bwrap self-test fails (also for explicitly
-granted direct filesystem access); `required` refuses execution. `off` is
-explicitly unsandboxed. Private folder shell execution has **no fallback**:
+Code mode has `auto`, `required` and `off` modes. On Linux, `auto` logs a warning
+and falls back to in-process guards if the bwrap self-test fails. On Windows,
+`auto` returns an unsandboxed plan **without logging a warning**. The
+`auto` + `allow_fs` path also falls back without a warning. `required` refuses
+execution when the sandbox is unavailable. `off` is explicitly unsandboxed. Private folder shell execution has **no fallback**:
 non-Linux hosts or failed preconditions refuse commands. These differences must
 remain visible; neither a Python audit hook nor a process group is an OS sandbox.
 
@@ -60,7 +61,7 @@ remain visible; neither a Python audit hook nor a process group is an OS sandbox
 | --- | --- | --- | --- | --- |
 | AppContainer / LPAC | Kernel-enforced lowbox token, capability/ACL checks and network isolation when no network capability is granted. LPAC removes broad ALL APPLICATION PACKAGES access. Not a private filesystem or VM: anything accessible to its token/capabilities remains visible. Registry, named pipes, COM, inherited handles and broker requests need explicit review. Pair with a Job object and a hardened runtime tree. | No optional VM feature or reboot for supported Windows versions. Requires a native launcher, private package/profile lifecycle and tightly scoped runtime ACLs; LPAC support must be probed, never silently downgraded. | Near-native CPU and fast process startup; per-session profile/ACL provisioning adds small costs. | Good fit for the stdlib-only Python child and stdio RPC. PowerShell, Git Bash and build chains may depend on profile/COM/services denied by LPAC. Arbitrary folder grants need brokered handle-based tools, not broad user-directory ACL edits. |
 | Job objects + restricted tokens | Jobs bound descendants and resource use; restricted tokens can remove privileges and deny identities. Alone these do not create network or filesystem isolation: same-user/public ACLs and host IPC can remain accessible. A Job is lifecycle containment, not an adequate confidentiality boundary. | Native helper, token policy and careful suspended creation/assignment; generally no reboot. Elevation must not be required for normal sessions. | Near-native; least overhead. | Broad native executable compatibility, but cannot honestly provide bwrap-equivalent file/network guarantees without an additional access-control boundary. Useful as a component, not the default sandbox. |
-| Windows Sandbox | Disposable Hyper-V VM with a separate kernel and ephemeral state. Disable network/clipboard and map only explicitly allowed folders, read-only by default. Writable mappings deliberately expose host data; configuration mistakes weaken isolation. | Supported Windows editions, virtualization/feature enablement, often admin approval/reboot; not universally available on Home. Automation needs a guest runner and a secure results protocol. | VM boot, memory and image overhead; unsuitable for every short Python cell unless pooled, which introduces state-lifetime risks. | Native Windows tools work inside the guest after provisioning. Host paths are not guest paths; no transparent existing folder descriptor semantics. Good optional high-isolation task runner, poor transparent kernel replacement. |
+| Windows Sandbox | Disposable Hyper-V VM with a separate kernel and ephemeral state. Disable network/clipboard and map only explicitly allowed folders, read-only by default. Writable mappings deliberately expose host data; configuration mistakes weaken isolation. | Supported Windows editions, virtualization/feature enablement, often admin approval/reboot; not available on Home editions. Automation needs a guest runner and a secure results protocol. | VM boot, memory and image overhead; unsuitable for every short Python cell unless pooled, which introduces state-lifetime risks. | Native Windows tools work inside the guest after provisioning. Host paths are not guest paths; no transparent existing folder descriptor semantics. Good optional high-isolation task runner, poor transparent kernel replacement. |
 | WSL2 + bubblewrap | VM boundary plus Linux namespace isolation if the actual distro/kernel permits user namespaces. WSL interoperability, automounts, Windows executable launch, sockets and shared paths must be disabled or excluded from the workload. WSL by itself is not a sandbox for the logged-in user. | Enable/install WSL2, a maintained distro, Linux runtime and bwrap; virtualization, downloads and possibly admin/reboot. Verify policies with adversarial self-tests. | Linux process startup is fast in a warm VM. Cold boot and cross-filesystem I/O cost more; keep execution on the Linux filesystem. | Best Linux shell compatibility, but Windows drive letters, symlinks, permissions and handles require an explicit adapter/copy protocol. Use a Linux worker inside WSL, not an unreviewed `wsl.exe bash -c` wrapper for Windows grants. |
 | Docker / Hyper-V isolation | Linux containers share the VM kernel; process-isolated Windows containers share the host kernel. Hyper-V-isolated containers/VMs add a separate-kernel boundary. Never expose the Docker socket, host credentials or broad mounts to the workload. | Docker Desktop/runtime or a managed Hyper-V VM, virtualization, large images, admin/feature setup and possible commercial licensing. Windows image/host-version constraints complicate support. | Warm containers are reasonably fast; VM/image pulls and disk/memory footprint are substantial. | Linux images support Linux shell tools, Windows images need their own runtime. File mounts still require grant enforcement and host/guest path translation. Good opt-in infrastructure backend, not a zero-setup desktop default. |
 
@@ -149,9 +150,10 @@ show its reason directly: **"Isolated folder commands are unavailable on this
 Windows worker. No command was run. Use a Linux worker with bubblewrap."**
 Do not retry it through ordinary Bash or a less restrictive grant.
 
-Code-mode `required` already refuses when bwrap is unavailable. For `auto`, the
-current warning in worker logs is not sufficient owner-facing disclosure. The
-first implementation phase should show a persistent session/settings status:
+Code-mode `required` already refuses when bwrap is unavailable. On Windows,
+`auto` currently falls back without even a log warning; `auto` + `allow_fs`
+also has no warning. This silent fallback is a disclosure gap, not a sandbox
+guarantee. The first implementation phase should show a persistent session/settings status:
 **"OS sandbox unavailable on Windows. Code mode uses in-process guards only;
 permission-granted host tools still run on the worker."** Display the reason,
 mode and scope, and offer a supported Linux worker or `required` (refuse unsafe

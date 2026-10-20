@@ -857,7 +857,11 @@ def test_cleanup_orphans_only_touches_processes_from_the_sdk(layout, monkeypatch
 
     from app.core.android_emulator import manager as manager_mod
 
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", layout.root.parent)
     layout.root.mkdir(parents=True)
+    assert layout.owns_root
     terminated = []
 
     class P:
