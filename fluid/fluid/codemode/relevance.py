@@ -6,6 +6,7 @@ substrings in unrelated prose. Explicit Recall also preserves short acronyms.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import re
 import unicodedata
 
@@ -55,7 +56,7 @@ def _recall_words(text: str) -> tuple[str, ...]:
             words.append(part)
         elif part[0].isalnum():
             current += part
-        elif unicodedata.category(part[0]).startswith("M") and current:
+        elif (unicodedata.category(part[0]).startswith("M") or part in "\u200c\u200d") and current:
             current += part
         elif current:
             words.append(current)
@@ -84,6 +85,15 @@ def recall_terms(text: str) -> frozenset[str]:
     return frozenset((filtered or words)[:64])
 
 
+@lru_cache(maxsize=4096)
+def _recall_index(text: str) -> tuple[str, frozenset[str], tuple[str, ...]]:
+    """Bounded immutable index; a rewrite's full text is a different key."""
+    text = _recall_text(text)
+    words = frozenset(_recall_words(text)) | frozenset(_recall_words(_CAMEL_BOUNDARY.sub(" ", text)))
+    return (unicodedata.normalize("NFC", text.casefold()), words,
+            tuple(word for word in words if _NO_SPACES.search(word)))
+
+
 def recall_relevance(text: str, terms: frozenset[str]) -> int:
     """Exact short names, long prefixes, CamelCase parts and non-space scripts.
 
@@ -91,10 +101,7 @@ def recall_relevance(text: str, terms: frozenset[str]) -> int:
     and GamingPC/PC work without matching UI inside build. Substring search
     is limited to words with non-space scripts, including mixed Latin text.
     """
-    text = _recall_text(text)
-    folded = unicodedata.normalize("NFC", text.casefold())
-    words = set(_recall_words(text)) | set(_recall_words(_CAMEL_BOUNDARY.sub(" ", text)))
-    unsegmented = [word for word in words if _NO_SPACES.search(word)]
+    folded, words, unsegmented = _recall_index(text)
     score = 0
     for term in terms:
         if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", term):
