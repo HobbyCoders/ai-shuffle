@@ -3,6 +3,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from fluid.context import runtime_facts as runtime
 from fluid.context.environment import environment_note
 
@@ -58,6 +60,70 @@ def test_receipt_rejects_payload_text_and_oversize(tmp_path):
     assert runtime._provisioning_fact(tmp_path) is None
     path.write_text("x" * 4097)
     assert runtime._provisioning_fact(tmp_path) is None
+
+
+@pytest.mark.parametrize("template", [
+    "/opt/app/application-updates/versions/{revision}/venv/bin/{name}",
+    r"C:\App\application-updates\versions\{revision}\venv\Scripts\{name}.exe",
+])
+@pytest.mark.parametrize("pytest_found, cli_found", [(True, False), (False, True), (False, False)])
+def test_harvested_pytest_fact_is_stable_across_updates(
+    tmp_path, monkeypatch, template, pytest_found, cli_found,
+):
+    from fluid.codemode.skills import SkillStore
+
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda _: object() if pytest_found else None)
+    store = SkillStore(tmp_path / "store")
+    texts = []
+    for revision in ("a" * 40, "B" * 40):
+        executable = template.format(revision=revision, name="python")
+        cli = template.format(revision=revision, name="pytest") if cli_found else None
+        monkeypatch.setattr(runtime.sys, "executable", executable)
+        monkeypatch.setattr(runtime.shutil, "which", lambda _: cli)
+        harvested = runtime.harvest_environment_facts(str(tmp_path))
+        text = dict(harvested)["env.pytest"]
+        texts.append(text)
+        expected_exe = template.format(revision="<current>", name="python")
+        if pytest_found:
+            assert text == f"pytest is importable from the worker Python {expected_exe}."
+        elif cli_found:
+            expected_cli = template.format(revision="<current>", name="pytest")
+            assert text == (
+                f"pytest is not importable from the worker Python {expected_exe}"
+                f"; a pytest executable is on PATH at {expected_cli}."
+            )
+        else:
+            assert text == (
+                f"pytest is not importable from the worker Python {expected_exe}"
+                "; run tests with a project venv or install pytest there first."
+            )
+        runtime.write_harvested_facts(store, "project:x", harvested)
+    assert texts[0] == texts[1]
+    fact = next(m for m in store.memories() if m.key == "env.pytest")
+    assert fact.revision == 1
+    assert fact.provenance == "tool" and not fact.protected
+
+
+@pytest.mark.parametrize("executable, cli", [
+    ("/usr/local/bin/python3", "/usr/local/bin/pytest"),
+    (r"C:\App\venv\Scripts\python.exe", r"C:\Tools\pytest.exe"),
+    ("/opt/versions/not-a-revision/bin/python", "/opt/versions/abc/bin/pytest"),
+])
+@pytest.mark.parametrize("pytest_found", [True, False])
+def test_harvested_pytest_fact_keeps_non_versioned_paths(
+    tmp_path, monkeypatch, executable, cli, pytest_found,
+):
+    monkeypatch.setattr(runtime.sys, "executable", executable)
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda _: object() if pytest_found else None)
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: cli)
+    text = dict(runtime.harvest_environment_facts(str(tmp_path)))["env.pytest"]
+    if pytest_found:
+        assert text == f"pytest is importable from the worker Python {executable}."
+    else:
+        assert text == (
+            f"pytest is not importable from the worker Python {executable}"
+            f"; a pytest executable is on PATH at {cli}."
+        )
 
 
 def test_not_a_repo_never_writes_receipt(tmp_path):
