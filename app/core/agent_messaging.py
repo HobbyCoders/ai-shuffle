@@ -14,17 +14,53 @@ logger = logging.getLogger(__name__)
 
 
 def _persisted_parents(child: str) -> list[str]:
-    """Host-written Task relationships survive an empty registry on restart."""
+    """Host-written, install-scoped Task edges; read off the event loop."""
     try:
         from app.db.base import get_db
         with get_db() as conn:
             cursor = conn.cursor()
+            from app.core.config import settings
             cursor.execute("SELECT DISTINCT session_id FROM background_tasks "
-                           "WHERE task_id=%s AND kind='agent'", (child,))
+                           "WHERE task_id=%s AND kind='agent' AND instance_id=%s",
+                           (child, settings.effective_instance_id))
             return [row["session_id"] for row in cursor.fetchall()]
     except Exception:  # noqa: BLE001 - missing/old store never establishes trust
         logger.debug("Could not read persisted Task parents", exc_info=True)
         return []
+
+
+def _parent_graph(child: str) -> dict[str, set[str]]:
+    """Combine durable and live host edges, including partial registry restores.
+
+    Database-backed helpers in this module are synchronous. Async delivery and
+    roster callers must run them with asyncio.to_thread, never on the loop.
+    """
+    from app.core.task_registry import task_registry
+
+    parents: dict[str, set[str]] = {}
+    pending = [child]
+    while pending:
+        node = pending.pop()
+        if node in parents:
+            continue
+        owners = set(_persisted_parents(node)) | {
+            owner for owner in task_registry.sessions_with_task(node)
+            if (task_registry.get_task(owner, node) or {}).get("kind") == "agent"
+        }
+        parents[node] = owners - {node}
+        pending.extend(owners - parents.keys())
+    return parents
+
+
+def _ancestors(child: str, parents: dict[str, set[str]]) -> set[str]:
+    seen = {child}
+    pending = list(parents.get(child, ()))
+    while pending:
+        node = pending.pop()
+        if node not in seen:
+            seen.add(node)
+            pending.extend(parents.get(node, ()))
+    return seen - {child}
 
 
 def peer_rows(session_id: str | None) -> list[dict]:
@@ -56,34 +92,15 @@ def peer_rows(session_id: str | None) -> list[dict]:
             "description": f"The conversation that started you, on {parent['worker_name']}",
             "remote_parent": parent["device_id"],
         })
-        # Both host-recorded parents may send assignment updates. `owner` is
-        # the direct caller; `parent` is the root used for routing on nesting.
-        routing_parent = parent.get("parent_session_id")
-        if routing_parent and routing_parent != parent["owner_session_id"]:
-            rows.append({**rows[0], "name": "coordinator",
-                         "worker_session_id": routing_parent})
 
     # Nested dispatch records a worker on both the root (UI routing) and the
     # direct caller. The root also knows that caller as a worker; exclude that
     # routing copy rather than sending a nested worker's `main` to the root.
-    owners = [
-        owner
-        for owner in task_registry.sessions_with_task(session_id)
-        if (task_registry.get_task(owner, session_id) or {}).get("kind") == "agent"
-    ] if parent is None else []
-    persisted = parent is None and not owners
-    if persisted:
-        owners = _persisted_parents(session_id)
-    direct_owners = [
-        owner
-        for owner in owners
-        if not any(
-            owner != other
-            and ((task_registry.get_task(owner, other) or {}).get("kind") == "agent"
-                 or (persisted and owner in _persisted_parents(other)))
-            for other in owners
-        )
-    ]
+    parents = _parent_graph(session_id) if parent is None else {}
+    owners = parents.get(session_id, set())
+    direct_owners = [owner for owner in owners if not any(
+        owner != other and owner in _ancestors(other, parents) for other in owners
+    )]
     if len(direct_owners) == 1:
         rows.insert(
             0,
@@ -150,10 +167,19 @@ def may_message(sender: str, target: str) -> bool:
 
 
 def message_provenance(receiver: str, sender: str) -> str:
-    """Fail closed: only the receiver's host-owned direct-parent row qualifies."""
+    """Host-known Task ancestors update assignments; never infer from the body."""
     try:
-        if any(row.get("worker_session_id") == sender and row.get("kind") == "parent"
-               for row in peer_rows(receiver)):
+        from app.core import remote_task
+        parent = remote_task.remote_parent(receiver)
+        if parent is not None and sender in {
+            parent.get("owner_session_id"), parent.get("parent_session_id"),
+        }:
+            return "parent"
+        if receiver in swarm.workers:
+            if any(row.get("kind") == "parent" and row.get("worker_session_id") == sender
+                   for row in swarm.peer_rows(receiver)):
+                return "parent"
+        elif sender in _ancestors(receiver, _parent_graph(receiver)):
             return "parent"
     except Exception:  # noqa: BLE001 - missing registry/remote identity is not proof
         logger.debug("Could not verify message parent", exc_info=True)
@@ -187,7 +213,7 @@ def make_roster(supplier):
         # After a restart the registry starts empty; the session's finished
         # and interrupted workers come back from the durable rows first.
         await task_registry.ensure_hydrated(session_id)
-        rows = peer_rows(session_id)
+        rows = await asyncio.to_thread(peer_rows, session_id)
         return [
             r for r in rows if not data.get("running_only") or r["status"] == "running"
         ]
@@ -206,7 +232,7 @@ def make_message(supplier):
         # the durable rows until this rebuilds it; without it its task id
         # answered "Unknown agent" although its transcript could be resumed.
         await task_registry.ensure_hydrated(session_id)
-        rows = peer_rows(session_id)
+        rows = await asyncio.to_thread(peer_rows, session_id)
         # Exact first: the task id (== worker session id), the name, or
         # "name [ref]". Then case-insensitive on the name — models retype a
         # slug they read as "Fix Flaky Login".
@@ -325,7 +351,7 @@ async def deliver_message(target: str, sender: str, text: str, *,
             # also covers a runtime still starting or an engine just done.
             await engine.submit(AgentMessage(
                 text=text, sender=sender, wake=False, urgent=urgent,
-                provenance=message_provenance(target, sender),
+                provenance=await asyncio.to_thread(message_provenance, target, sender),
             ))
         except RuntimeError:
             # Refusal means not accepted; keep it on the durable queue.

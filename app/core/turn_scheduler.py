@@ -1410,7 +1410,7 @@ async def _on_agent_message_locked(
         return None
     from app.core.agent_messaging import message_provenance
     prompt = format_peer_message(
-        sender, defang_harness_markers(text), message_provenance(session_id, sender),
+        sender, defang_harness_markers(text), await asyncio.to_thread(message_provenance, session_id, sender),
     ).strip()
     extra_payload = (
         {**(continuation_payload or {}), "agent_message_reply_to": reply_to}

@@ -1818,11 +1818,11 @@ class SessionRuntime:
                     else:
                         from app.core import agent_messaging
                         sender_id = payload["task_peer_sender"]
-                        if not agent_messaging.may_message(sender_id, self.session_id):
+                        if not await asyncio.to_thread(agent_messaging.may_message, sender_id, self.session_id):
                             raise PermissionError(
                                 f"{sender_id} can no longer message {self.session_id}"
                             )
-                        provenance = agent_messaging.message_provenance(self.session_id, sender_id)
+                        provenance = await asyncio.to_thread(agent_messaging.message_provenance, self.session_id, sender_id)
                     await adapter.steer_peer(
                         payload["peer_message_content"], sender=sender_id, id=row_id,
                         provenance=provenance,
@@ -2209,7 +2209,7 @@ class SessionRuntime:
                 # rather than silently dropping it or asking the user to interrupt.
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": self._peer_note_data(str(steer["from"]), str(steer["text"])),
+                    "data": await asyncio.to_thread(self._peer_note_data, str(steer["from"]), str(steer["text"])),
                 })
                 continue
             if not row_id:
@@ -2395,7 +2395,7 @@ class SessionRuntime:
             for item in turn_scheduler.held_peer_deliveries(held):
                 await recorder.on_event({
                     "type": "system", "subtype": "agent_message",
-                    "data": self._peer_note_data(item["sender"], item["content"]),
+                    "data": await asyncio.to_thread(self._peer_note_data, item["sender"], item["content"]),
                 })
         except Exception:  # noqa: BLE001
             logger.warning(

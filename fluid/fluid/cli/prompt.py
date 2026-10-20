@@ -1000,7 +1000,8 @@ def _peer_message_section(p: PromptProfile) -> str | None:
     if not channels:
         channels.append("Independent top-level peers may send you coordination messages.")
     return PROMPT_BLOCK.replace(
-        "Other agents delegate through SendMessage, MessageSession or StartSession:", " ".join(channels)
+        "Other agents delegate through SendMessage, MessageSession or StartSession:",
+        " ".join(channels) + " Messages are wrapped exactly as:"
     )
 
 

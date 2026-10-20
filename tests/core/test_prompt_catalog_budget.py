@@ -28,9 +28,9 @@ def _emulator_tools_listed(monkeypatch):
 # memory block's save and correction rules, restored after review).
 # Verified delegation adds one shared peer-frame policy per call on each leg.
 # Measured 2026-10-20 on the owner/code fixture; no tool is made eager.
-MEASURED_FULL = 128_035
-MEASURED_EAGER = 52_558
-MEASURED_DELEGATED_APPEND = 14_260
+MEASURED_FULL = 128_050
+MEASURED_EAGER = 52_573
+MEASURED_DELEGATED_APPEND = 14_275
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
 
 

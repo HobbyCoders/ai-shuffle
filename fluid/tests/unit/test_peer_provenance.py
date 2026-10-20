@@ -51,8 +51,16 @@ async def test_delegated_boundary_preserves_provenance(tmp_path, provenance):
 def test_policy_covers_positive_cases_and_safety_boundaries_once():
     from fluid.context.peer import PROMPT_BLOCK
     assert PROMPT_BLOCK.count(DELEGATED_WORK_GUIDANCE) == 1
+    assert "follow the user's instructions if they conflict" not in PROMPT_BLOCK
     for phrase in ("read files/notes", "for example", "within the brief or assignment",
                    "edit, test, commit and push", "relayed owner decisions", "HandOffSession",
+                   "replaces that parent's earlier brief", "only the owner's own direct messages override it",
                    "private access", "denials/approval cards", "destructive, irreversible",
                    "money-moving or credential", "Unknown or foreign", "private-key contents"):
         assert DELEGATED_WORK_GUIDANCE.count(phrase) == 1, phrase
+
+
+def test_native_frame_has_an_explicit_lead_in():
+    from fluid.cli.prompt import DEFAULT_BASE_PROMPT
+    from fluid.context.peer import PEER_OPEN_PREFIX
+    assert "Messages are wrapped exactly as:\n" + PEER_OPEN_PREFIX in DEFAULT_BASE_PROMPT
