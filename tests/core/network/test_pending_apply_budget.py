@@ -11,7 +11,7 @@ from app.network import catalog, engine
 from tests.core.network.harness import converge, join
 
 
-def backlog(workers, count):
+def backlog(workers, count, *, withhold=()):
     a, b = workers("publisher"), workers("receiver")
     with a.active():
         engine.create_network("Pending budget")
@@ -31,8 +31,9 @@ def backlog(workers, count):
     assert len(ops) >= count
     with b.active():
         # Real producer envelopes and real out-of-order receive, not seeded mirrors.
-        result = engine.apply_batch(ops[1:])
-        assert result.pending == len(ops) - 1
+        delivered = [op for index, op in enumerate(ops) if index > 0 and index not in withhold]
+        result = engine.apply_batch(delivered)
+        assert result.pending == len(delivered)
     return a, b, ops
 
 
@@ -41,6 +42,7 @@ def measured_apply(monkeypatch, worker):
     transactions = []
     active = []
     real_db, real_apply = engine.get_db, engine._apply_next
+    real_append = engine._apply_event_append
     real_lock, real_observe = store.lock_state, store.observe_clock
 
     def lock_call(fn, *args, **kwargs):
@@ -68,6 +70,12 @@ def measured_apply(monkeypatch, worker):
         active[-1]["ops"] += 1
         return real_apply(*args, **kwargs)
 
+    def append(cursor, chunk, *args, **kwargs):
+        appended = real_append(cursor, chunk, *args, **kwargs)
+        if appended:
+            active[-1]["ops"] += len(chunk)
+        return appended
+
     statements = []
     trace = getattr(worker.raw, "set_trace_callback", None)
     previous_wait = None
@@ -88,6 +96,7 @@ def measured_apply(monkeypatch, worker):
     with monkeypatch.context() as patch:
         patch.setattr(engine, "get_db", transaction)
         patch.setattr(engine, "_apply_next", apply)
+        patch.setattr(engine, "_apply_event_append", append)
         patch.setattr(store, "lock_state", lambda *a, **kw: lock_call(real_lock, *a, **kw))
         patch.setattr(store, "observe_clock", lambda *a, **kw: lock_call(real_observe, *a, **kw))
         start = perf_counter()
@@ -193,6 +202,9 @@ def test_unexpected_buffered_error_commits_good_predecessors(request, use_postgr
     with b.active():
         with monkeypatch.context() as patch:
             patch.setattr(engine, "_apply_next", unexpected)
+            # Exercise the general per-op failure handler explicitly. Bulk
+            # failure rollback/fallback has separate integration coverage.
+            patch.setattr(engine, "_apply_event_append", lambda *a, **kw: False)
             result = engine.apply_batch(ops[:1])
         assert result.applied == 79 and result.retry == 1
         assert result.blocked[0]["seq"] == bad
@@ -346,6 +358,8 @@ def test_pending_transient_preserves_frontier_and_resumes(request, use_postgres,
     with b.active():
         with monkeypatch.context() as patch:
             patch.setattr(engine, "_apply_next", temporarily_unavailable)
+            # This test isolates the general fallback's per-op retry boundary.
+            patch.setattr(engine, "_apply_event_append", lambda *a, **kw: False)
             result = engine.apply_batch(ops[:1])
         assert result.applied == 80 and result.retry == 1
         with store.get_db() as conn:
