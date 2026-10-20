@@ -168,7 +168,8 @@ export function readHandoffClock(clock: HandoffClock, nowMs: number): { elapsed:
  * the clock running from when it was first seen instead of snapping back. A
  * fresh report never moves the elapsed time backwards either (the clock may
  * have counted a little past it), and within the same step neither does the
- * step time. Null progress clears the clock.
+ * step time. A between-steps report keeps the previous step's label and time
+ * until the next named step arrives. Null progress clears the clock.
  */
 export function advanceHandoffClock(prev: HandoffClock | null, next: HandoffProgress | null, nowMs: number): HandoffClock | null {
 	if (!next) return null;
@@ -177,10 +178,17 @@ export function advanceHandoffClock(prev: HandoffClock | null, next: HandoffProg
 	const between = next.step === BETWEEN_STEPS && !!prev;
 	const step = between ? prev!.step : next.step;
 	const sameStep = !!prev && !!shown && prev.step === step && !between;
+	// Between steps the previous step is still the one shown, so its time
+	// carries on too: the "still working" line must not blink off and back.
+	const stepElapsed = between
+		? shown!.stepElapsed
+		: sameStep
+			? Math.max(next.step_elapsed_seconds, shown!.stepElapsed)
+			: next.step_elapsed_seconds;
 	return {
 		step,
 		elapsed: Math.max(next.elapsed_seconds, shown?.elapsed ?? 0),
-		stepElapsed: sameStep ? Math.max(next.step_elapsed_seconds, shown!.stepElapsed) : next.step_elapsed_seconds,
+		stepElapsed,
 		at: nowMs,
 		report: next
 	};

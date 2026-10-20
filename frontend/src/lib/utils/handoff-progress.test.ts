@@ -144,11 +144,13 @@ describe('advanceHandoffClock', () => {
 		expect(readHandoffClock(later, 12_000)).toEqual({ elapsed: 40, stepElapsed: 25 });
 	});
 
-	it('restarts the step time on a new step, and keeps the label between steps', () => {
+	it('restarts the step time on a new step, and keeps the label and step time between steps', () => {
 		const first = advanceHandoffClock(null, at('install_history.session_events', 80, 70), 0)!;
 		const between = advanceHandoffClock(first, at('next step', 81, 0), 1_000)!;
 		expect(between.step).toBe('install_history.session_events');
-		expect(readHandoffClock(between, 1_000)).toEqual({ elapsed: 81, stepElapsed: 0 });
+		// The previous step's time carries on, so a slow step stays slow.
+		expect(readHandoffClock(between, 1_000)).toEqual({ elapsed: 81, stepElapsed: 71 });
+		expect(isSlowHandoffStep(readHandoffClock(between, 1_000).stepElapsed)).toBe(true);
 		const nextStep = advanceHandoffClock(between, at('install_history.fluid_session_nodes', 82, 1), 2_000)!;
 		expect(nextStep.step).toBe('install_history.fluid_session_nodes');
 		expect(readHandoffClock(nextStep, 2_000)).toEqual({ elapsed: 82, stepElapsed: 1 });

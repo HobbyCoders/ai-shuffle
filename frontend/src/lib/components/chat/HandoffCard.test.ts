@@ -82,8 +82,18 @@ describe('HandoffCard', () => {
 			expect(card.clock).toBe('0:23');
 			expect(card.slow).toBeUndefined();
 			expect(card.card.textContent).not.toContain('%');
-			expect(card.card.querySelector('[data-testid="handoff-progress"] .step')?.getAttribute('title')).toBe('install_history.fluid_session_nodes');
+			// The tooltip is the plain label, never the raw id, and names the full target.
+			expect(card.card.querySelector('[data-testid="handoff-progress"] .step')?.getAttribute('title')).toBe('Copying transcript (to DesktopWorker)');
 			expect(card.card.getAttribute('data-tone')).toBe('live');
+		});
+
+		it('keeps the whole label, with a long worker name, in the tooltip', () => {
+			const { container } = render(HandoffCard, {
+				props: { episode: episode({ phase: 'sending', sent: true, worker: 'Workshop-Build-Server-02' }), progress: at('accept_owner', 80, 1) }
+			});
+			const step = container.querySelector('[data-testid="handoff-progress"] .step');
+			expect(step?.textContent?.trim()).toBe('Starting on Workshop-Build-Server-02');
+			expect(step?.getAttribute('title')).toBe('Starting on Workshop-Build-Server-02');
 		});
 
 		it('names the target on the last step and falls back for unknown steps', () => {

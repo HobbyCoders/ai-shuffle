@@ -62,6 +62,9 @@
 	});
 	const reading = $derived(report ? readHandoffClock(report, Math.max(now, report.at)) : null);
 	const stepLabel = $derived(report ? handoffStepLabel(report.step, target) : '');
+	// The step line truncates on narrow screens: its tooltip is the whole label,
+	// naming the full target worker even when the label itself does not.
+	const stepTitle = $derived(stepLabel && !stepLabel.includes(target) ? `${stepLabel} (to ${target})` : stepLabel);
 	const elapsed = $derived(reading?.elapsed ?? 0);
 	const slow = $derived(reading ? isSlowHandoffStep(reading.stepElapsed) : false);
 
@@ -191,7 +194,7 @@
 			<div class="progress" data-slow={slow} data-testid="handoff-progress">
 				<span class="pulse" aria-hidden="true"></span>
 				<!-- Polite: a new step is announced once; the ticking clock is not. -->
-				<span class="step" aria-live="polite" title={report.report.step}>{stepLabel}</span>
+				<span class="step" aria-live="polite" title={stepTitle}>{stepLabel}</span>
 				<span class="clock">
 					<time datetime="PT{Math.floor(elapsed)}S">{formatHandoffElapsed(elapsed)}</time><span class="clock-unit">elapsed</span>
 				</span>
