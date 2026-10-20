@@ -164,8 +164,8 @@ class NetworkContext:
     key_candidates: Dict[int, Dict[str, bytes]] = field(default_factory=dict)
     key_recipients: Dict[str, set] = field(default_factory=dict)
     key_generations: Dict[str, int] = field(default_factory=dict)
-    # Context/key/membership reloads invalidate cooldowns; never retain errors
-    # or tracebacks here. Inactive entries are pruned by the background pass.
+    # Shared across equivalent context reloads; only real key/member changes
+    # invalidate cooldowns. Never retain exceptions or tracebacks here.
     _pending_retries: Dict[Tuple[str, int], _PendingRetry] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -245,6 +245,19 @@ def load_context(_conn=None, *, publish: bool = True) -> Optional[NetworkContext
         logger.error("Network key version %d is not available on this device", ctx.key_version)
     if publish:
         with _lock:
+            previous = _context
+            if (previous is not None and previous.network_id == ctx.network_id
+                    and previous.device_id == ctx.device_id
+                    and previous.identity.incarnation == ctx.identity.incarnation):
+                # Usage polls and remote claims routinely refresh the context.
+                # Share the map so in-flight readers of the old context agree.
+                ctx._pending_retries = previous._pending_retries
+                if previous.keyring != ctx.keyring:
+                    ctx._pending_retries.clear()
+                else:
+                    for stream in list(ctx._pending_retries):
+                        if previous.member(stream[0]) != ctx.member(stream[0]):
+                            ctx._pending_retries.pop(stream, None)
             _context = ctx
     return ctx
 
@@ -299,6 +312,15 @@ def on_applied(listener: Callable[[List[Tuple[str, str, str]]], None]) -> Callab
                 return
 
     return unsubscribe
+
+
+_pending_kick: Optional[Callable[[], None]] = None
+
+
+def set_pending_kick(callback: Optional[Callable[[], None]]) -> None:
+    """Wake only local catch-up, without triggering a new network exchange."""
+    global _pending_kick
+    _pending_kick = callback
 
 
 def set_kick(callback: Optional[Callable[[], None]]) -> None:
@@ -1023,6 +1045,7 @@ class ApplyResult:
     touched: List[Tuple[str, str, str]] = field(default_factory=list)
     # Private, post-commit continuations; never advertised as applied frontiers.
     _pending_drains: set[Tuple[str, int]] = field(default_factory=set, repr=False)
+    _pending_more: bool = field(default=False, repr=False)
 
     def retry_operation(self, data: Mapping[str, Any], reason: str) -> None:
         self.retry += 1
@@ -1742,6 +1765,10 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
     try:
         with get_db() as conn:
             cursor = conn.cursor()
+            if not store.pending_ready(cursor, origin, incarnation):
+                with _lock:
+                    ctx._pending_retries.pop((origin, incarnation), None)
+                return
             store.lock_state(cursor)
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             for _ in range(APPLY_CHUNK):
@@ -1964,15 +1991,26 @@ def applying_batch() -> bool:
         return bool(ctx is not None and _applying.get(ctx.device_id))
 
 
+INBOUND_PENDING_CHUNKS = 4
+
+
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 ctx: NetworkContext | None = None,
-                _pending_streams: Sequence[Tuple[str, int]] = ()) -> ApplyResult:
+                _pending_streams: Sequence[Tuple[str, int]] = (),
+                _pending_chunk_limit: int = INBOUND_PENDING_CHUNKS) -> ApplyResult:
     """Expose inbound catch-up work too, including pushes without a local peer link."""
     ctx = ctx or require_context()
     with _lock:
         _applying[ctx.device_id] = _applying.get(ctx.device_id, 0) + 1
     try:
-        return _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams)
+        result = _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams,
+                              _pending_chunk_limit=_pending_chunk_limit)
+        if result._pending_more and _pending_kick is not None:
+            try:
+                _pending_kick()
+            except Exception:  # noqa: BLE001 - durable work is still found at the next pass
+                logger.debug("Pending catch-up wake failed", exc_info=True)
+        return result
     finally:
         with _lock:
             remaining = _applying[ctx.device_id] - 1
@@ -1993,25 +2031,30 @@ def resume_pending() -> ApplyResult:
         return ApplyResult()
     now = time.monotonic()
     with _lock:
-        ctx._pending_retries = {stream: retry for stream, retry in ctx._pending_retries.items()
-                                if now < retry.until + PENDING_RETRY_MAX}
+        for stream, retry in list(ctx._pending_retries.items()):
+            if now >= retry.until + PENDING_RETRY_MAX:
+                ctx._pending_retries.pop(stream, None)
         retrying = dict(ctx._pending_retries)
     # Every skipped/deprioritized stream gets an extra probe slot. A fixed
     # overscan cap would merely move starvation to the stream after that cap.
     with get_db() as conn:
-        candidates = store.ready_pending_streams(conn.cursor(), limit=4 + len(retrying))
+        # One sentinel beyond the four slots detects unattempted ready work.
+        candidates = store.ready_pending_streams(conn.cursor(), limit=5 + len(retrying))
     with _lock:
         streams = [stream for stream in candidates
                    if stream not in ctx._pending_retries or now >= ctx._pending_retries[stream].until]
     streams.sort(key=lambda stream: stream in retrying)
     if not streams:
         return ApplyResult()  # Do not flash applying_batch() for skipped heads.
-    return apply_batch((), ctx=ctx, _pending_streams=streams[:4])
+    result = apply_batch((), ctx=ctx, _pending_streams=streams[:4])
+    result._pending_more |= len(streams) > 4
+    return result
 
 
 def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                  ctx: NetworkContext | None = None,
-                 _pending_streams: Sequence[Tuple[str, int]] = ()) -> ApplyResult:
+                 _pending_streams: Sequence[Tuple[str, int]] = (),
+                 _pending_chunk_limit: int = INBOUND_PENDING_CHUNKS) -> ApplyResult:
     """Apply a batch in chunks of ``APPLY_CHUNK`` envelopes per transaction.
 
     One bad op cannot poison the rest: each envelope applies under its own
@@ -2037,15 +2080,23 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                     continue
                 for data in chunk:
                     _apply_one(data, ctx, result)
-        while result._pending_drains:
+        chunks = 0
+        while result._pending_drains and chunks < _pending_chunk_limit:
             streams = sorted(result._pending_drains)
             result._pending_drains.clear()
-            for origin, incarnation in streams:
+            for index, (origin, incarnation) in enumerate(streams):
+                if chunks >= _pending_chunk_limit:
+                    result._pending_drains.update(streams[index:])
+                    break
                 _apply_pending_chunk(origin, incarnation, ctx, result)
-        # The background pass deliberately stops after one chunk per selected
-        # stream. Full chunks become ready again on its next pass.
+                chunks += 1
+        # One background chunk per selected stream preserves fairness. The
+        # loop yields without a timed sleep while a continuation is ready.
         for origin, incarnation in _pending_streams:
             _apply_pending_chunk(origin, incarnation, ctx, result)
+        # Durable pending rows are the continuation; do not hold HTTP requests
+        # open for the whole offline backlog or retain an in-memory work queue.
+        result._pending_more = bool(result._pending_drains)
         result._pending_drains.clear()
     finally:
         _batch_agent_deletions.ids = None
