@@ -4,7 +4,7 @@ import { get } from 'svelte/store';
 vi.mock('$lib/api/sessions', () => ({ getQueuedMove: vi.fn() }));
 
 import { getQueuedMove } from '$lib/api/sessions';
-import { HANDOFF_PENDING_READ_TIMEOUT_MS, HANDOFF_PENDING_RETRY_MS, beginHandoffPendingRead, handoffPending, recordHandoffPending, refreshHandoffPending, resetHandoffPending } from './handoff-pending';
+import { HANDOFF_PENDING_READ_TIMEOUT_MS, HANDOFF_PENDING_RETRY_MS, beginHandoffPendingRead, handoffPending, pollHandoffPending, recordHandoffPending, refreshHandoffPending, resetHandoffPending } from './handoff-pending';
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -107,5 +107,35 @@ describe('handoff-pending', () => {
 		await vi.advanceTimersByTimeAsync(HANDOFF_PENDING_READ_TIMEOUT_MS + HANDOFF_PENDING_RETRY_MS + 20);
 		expect(getQueuedMove).toHaveBeenCalledTimes(2);
 		expect(get(handoffPending).s8).toMatchObject({ known: true, pending: null });
+	});
+
+	it('polls while a move sends and stops when told, carrying progress through', async () => {
+		vi.useFakeTimers();
+		const progress = { step: 'install_history.session_events', elapsed_seconds: 12.5, step_elapsed_seconds: 3 };
+		vi.mocked(getQueuedMove).mockResolvedValue({
+			busy: { running: false, tasks: [] },
+			pending: { handoff_id: 'X', worker: 'DesktopWorker', target_id: 'dev_gaming', by: 'owner', moving: true, progress }
+		});
+		const stop = pollHandoffPending('sp', 'X', 3_000);
+		expect(getQueuedMove).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(3_000);
+		expect(getQueuedMove).toHaveBeenCalledTimes(1);
+		expect(get(handoffPending).sp?.pending?.progress).toEqual(progress);
+		await vi.advanceTimersByTimeAsync(6_000);
+		expect(getQueuedMove).toHaveBeenCalledTimes(3);
+		stop();
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(getQueuedMove).toHaveBeenCalledTimes(3);
+	});
+
+	it('a failed poll is just read again on the next tick, with no extra retry', async () => {
+		vi.useFakeTimers();
+		vi.mocked(getQueuedMove).mockRejectedValue(new Error('offline'));
+		const stop = pollHandoffPending('sq', 'X', 3_000);
+		await vi.advanceTimersByTimeAsync(3_000);
+		expect(getQueuedMove).toHaveBeenCalledTimes(1);
+		stop();
+		await vi.advanceTimersByTimeAsync(HANDOFF_PENDING_RETRY_MS + 1_000);
+		expect(getQueuedMove).toHaveBeenCalledTimes(1);
 	});
 });

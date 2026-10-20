@@ -1,21 +1,28 @@
 import { render } from '@testing-library/svelte';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import HandoffCard from './HandoffCard.svelte';
 import type { HandoffEpisode } from '$lib/utils/handoff-episodes';
+import type { HandoffProgress } from '$lib/utils/handoff-progress';
 
 const episode = (over: Partial<HandoffEpisode>): HandoffEpisode => ({
 	key: 'k', worker: 'DesktopWorker', by: 'agent', phase: 'starting', followUps: [], records: 1, ...over
 });
-const read = (over: Partial<HandoffEpisode>) => {
-	const { container } = render(HandoffCard, { props: { episode: episode(over) } });
+const read = (over: Partial<HandoffEpisode>, progress: HandoffProgress | null = null) => {
+	const { container } = render(HandoffCard, { props: { episode: episode(over), progress } });
 	const card = container.querySelector('[data-testid="handoff-card"]')!;
 	return {
 		card,
 		title: card.querySelector('.title')?.textContent?.trim(),
 		detail: card.querySelector('.detail')?.textContent?.trim(),
-		current: card.querySelector('[aria-current="step"]')?.textContent?.trim()
+		current: card.querySelector('[aria-current="step"]')?.textContent?.trim(),
+		step: card.querySelector('[data-testid="handoff-progress"] .step')?.textContent?.trim(),
+		clock: card.querySelector('[data-testid="handoff-progress"] time')?.textContent?.trim(),
+		slow: card.querySelector('.slow')?.textContent?.trim()
 	};
 };
+const at = (step: string, elapsed: number, stepElapsed: number): HandoffProgress => ({
+	step, elapsed_seconds: elapsed, step_elapsed_seconds: stepElapsed
+});
 
 describe('HandoffCard', () => {
 	it('says what it is doing in each phase', () => {
@@ -55,5 +62,65 @@ describe('HandoffCard', () => {
 		expect(cancelling.title).toBe('Sending to DesktopWorker');
 		expect(cancelling.detail).toContain('Cancelling');
 		expect(cancelling.card.querySelector('.badge')?.textContent).toBe('cancelling');
+	});
+
+	describe('receiver progress', () => {
+		afterEach(() => vi.useRealTimers());
+
+		it('keeps the sending detail while progress is null (before the first receiver poll)', () => {
+			const card = read({ phase: 'sending', sent: true, id: 'X' }, null);
+			expect(card.detail).toBe('Committing, pushing and moving this chat.');
+			expect(card.card.querySelector('[data-testid="handoff-progress"]')).toBeNull();
+			expect(card.current).toBe('Sending');
+		});
+
+		it('shows the step in plain words and the elapsed time, never a percentage', () => {
+			const card = read({ phase: 'sending', sent: true, id: 'X' }, at('install_history.fluid_session_nodes', 23.4, 5.6));
+			expect(card.title).toBe('Sending to DesktopWorker');
+			expect(card.detail).toBeUndefined();
+			expect(card.step).toBe('Copying transcript');
+			expect(card.clock).toBe('0:23');
+			expect(card.slow).toBeUndefined();
+			expect(card.card.textContent).not.toContain('%');
+			expect(card.card.querySelector('[data-testid="handoff-progress"] .step')?.getAttribute('title')).toBe('install_history.fluid_session_nodes');
+			expect(card.card.getAttribute('data-tone')).toBe('live');
+		});
+
+		it('names the target on the last step and falls back for unknown steps', () => {
+			expect(read({ phase: 'sending', sent: true }, at('accept_owner', 80, 1)).step).toBe('Starting on DesktopWorker');
+			expect(read({ phase: 'sending', sent: true }, at('warp.drive', 3, 1)).step).toBe('Moving the chat');
+		});
+
+		it('says it is still working after a long step, without turning into an error', () => {
+			const card = read({ phase: 'sending', sent: true }, at('install_history.session_events', 95, 72));
+			expect(card.slow).toBe('Still working. Long chats can take a few minutes here.');
+			expect(card.clock).toBe('1:35');
+			expect(card.card.getAttribute('data-tone')).toBe('live');
+			expect(card.card.querySelector('.badge')?.textContent).toBe('sending');
+		});
+
+		it('ticks the clock between reads', async () => {
+			vi.useFakeTimers();
+			const { container } = render(HandoffCard, { props: { episode: episode({ phase: 'sending', sent: true }), progress: at('decode', 10, 2) } });
+			const clock = () => container.querySelector('[data-testid="handoff-progress"] time')?.textContent;
+			expect(clock()).toBe('0:10');
+			await vi.advanceTimersByTimeAsync(3_000);
+			expect(clock()).toBe('0:13');
+			// …but not forever when no new report comes.
+			await vi.advanceTimersByTimeAsync(10 * 60_000);
+			expect(clock()).toBe('0:25');
+		});
+
+		it('leaves settled, queued and cancelling states as they were', () => {
+			const p = at('install_history', 40, 30);
+			expect(read({ phase: 'starting' }, p).step).toBeUndefined();
+			const done = read({ phase: 'done', sent: true, outcome: 'Handed off to DesktopWorker. Continues there.' }, p);
+			expect(done.step).toBeUndefined();
+			expect(done.detail).toBe('Continues there.');
+			expect(read({ phase: 'failed', sent: true, outcome: 'Hand-off to DesktopWorker failed: boom' }, p).step).toBeUndefined();
+			const cancelling = read({ phase: 'sending', sent: true, cancelling: true }, p);
+			expect(cancelling.detail).toContain('Cancelling');
+			expect(cancelling.card.querySelector('.badge')?.textContent).toBe('cancelling');
+		});
 	});
 });

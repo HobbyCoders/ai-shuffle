@@ -66,7 +66,8 @@
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import HandoffCard from './HandoffCard.svelte';
 	import { EMPTY_HANDOFFS, settleByOwner } from '$lib/utils/handoff-episodes';
-	import { handoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
+	import { handoffPending, pollHandoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
+	import { HANDOFF_PROGRESS_POLL_MS, progressForEpisode } from '$lib/utils/handoff-progress';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
@@ -640,6 +641,14 @@
 		const sid = openSessionId;
 		const key = handoffWatchKey;
 		if (sid && key) untrack(() => void refreshHandoffPending(sid, key));
+	});
+	// While it sends, keep reading it: the answer carries the receiver's step
+	// and elapsed time for the card (pending.progress).
+	$effect(() => {
+		const sid = openSessionId;
+		const key = handoffWatchKey;
+		if (!sid || !key) return;
+		return pollHandoffPending(sid, key, HANDOFF_PROGRESS_POLL_MS);
 	});
 	const openIsRemote = $derived(!!$activeSession.isRemote);
 	const openNeeds = $derived(openSessionNeeds(
@@ -2128,7 +2137,7 @@
 	{@const handoff = handoffAnchors.get(message)}
 	{#if handoff}
 		<!-- One hand-off, one row: starting → sending → settled (the later records update it). -->
-		<HandoffCard episode={handoff} />
+		<HandoffCard episode={handoff} progress={progressForEpisode(handoff, handoffPendingView)} />
 	{:else if delivery}
 		{@const sender = agentSender(delivery, agentNames)}
 		<ToolUseMessage

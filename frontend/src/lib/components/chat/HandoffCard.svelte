@@ -11,19 +11,49 @@
 	 * Signature: a three-stop route line (Queued · Sending · Arrived). The leg
 	 * being travelled carries a moving dash; a settled line fills in the
 	 * outcome's colour, and a failed one breaks at the stop where it ended.
+	 *
+	 * While it sends, the receiver's progress (handoff-progress.ts) replaces
+	 * the generic detail with the step it is on and the time so far, aligned
+	 * with the route. There is no percentage: the backend reports none.
 	 */
 	import type { HandoffEpisode } from '$lib/utils/handoff-episodes';
+	import {
+		extrapolatedSeconds,
+		formatHandoffElapsed,
+		handoffStepLabel,
+		isSlowHandoffStep,
+		type HandoffProgress
+	} from '$lib/utils/handoff-progress';
 
 	interface Props {
 		episode: HandoffEpisode;
+		/** The receiver's progress while this move sends; null until known. */
+		progress?: HandoffProgress | null;
 	}
 
-	let { episode }: Props = $props();
+	let { episode, progress = null }: Props = $props();
 
 	const owner = $derived(episode.by === 'owner');
 	const noun = $derived(owner ? 'Move' : 'Hand-off');
 	const target = $derived(episode.worker || 'another worker');
 	const timedOut = $derived(episode.reason === 'timeout');
+
+	// ── Receiver progress ───────────────────────────────────────────────
+	// Between reads the clock counts on from the last report (capped, see
+	// extrapolatedSeconds), so it ticks each second instead of jumping.
+	const live = $derived(episode.phase === 'sending' && progress ? progress : null);
+	const report = $derived(live ? { progress: live, at: Date.now() } : null);
+	let now = $state(Date.now());
+	$effect(() => {
+		if (!report) return;
+		now = Date.now();
+		const ticker = setInterval(() => (now = Date.now()), 1000);
+		return () => clearInterval(ticker);
+	});
+	const extra = $derived(report ? extrapolatedSeconds(now - report.at) : 0);
+	const stepLabel = $derived(report ? handoffStepLabel(report.progress.step, target) : '');
+	const elapsed = $derived(report ? report.progress.elapsed_seconds + extra : 0);
+	const slow = $derived(report ? isSlowHandoffStep(report.progress.step_elapsed_seconds + extra) : false);
 
 	const title = $derived.by(() => {
 		switch (episode.phase) {
@@ -65,7 +95,8 @@
 					: 'Waits for this turn and its background work to finish.';
 			case 'sending':
 				if (episode.cancelling) return 'Cancelling… (a move already under way finishes)';
-				return 'Committing, pushing and moving this chat.';
+				// The step readout says it more precisely once the receiver reports.
+				return live ? '' : 'Committing, pushing and moving this chat.';
 			case 'cancelled':
 				if (episode.reason === 'agent') return 'The agent cancelled it before it started.';
 				if (episode.reason === 'restart') return 'The worker restarted before it could start.';
@@ -144,6 +175,20 @@
 
 		{#if detail}
 			<p class="detail">{detail}</p>
+		{/if}
+
+		{#if report}
+			<div class="progress" data-slow={slow} data-testid="handoff-progress">
+				<span class="pulse" aria-hidden="true"></span>
+				<!-- Polite: a new step is announced once; the ticking clock is not. -->
+				<span class="step" aria-live="polite" title={report.progress.step}>{stepLabel}</span>
+				<span class="clock">
+					<time datetime="PT{Math.floor(elapsed)}S">{formatHandoffElapsed(elapsed)}</time><span class="clock-unit">elapsed</span>
+				</span>
+			</div>
+			{#if slow}
+				<p class="slow" aria-live="polite">Still working. Long chats can take a few minutes here.</p>
+			{/if}
 		{/if}
 
 		{#if episode.note}
@@ -336,6 +381,57 @@
 		margin-top: 4px;
 	}
 
+	/* ── Receiver progress: the step, then the clock, as wide as the route ── */
+	.progress {
+		max-width: 380px;
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+		animation: hc-arrive 260ms ease-out both;
+	}
+	.pulse {
+		flex: none;
+		align-self: center;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--hc-accent);
+		animation: hc-breathe 1.6s ease-in-out infinite;
+	}
+	.step {
+		flex: 1;
+		min-width: 0;
+		font-size: 12.5px;
+		line-height: 1.5;
+		color: var(--foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.clock {
+		flex: none;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-variant-numeric: tabular-nums;
+		letter-spacing: 0.02em;
+		color: var(--hc-accent);
+	}
+	.clock-unit {
+		margin-left: 5px;
+		font-size: 10px;
+		letter-spacing: 0.04em;
+		color: var(--subtle-foreground, var(--muted-foreground));
+	}
+	.slow {
+		margin: 0;
+		max-width: 380px;
+		font-size: 12px;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+		animation: hc-arrive 320ms ease-out both;
+	}
+
 	/* ── The route line ──────────────────────────────────────────────── */
 	.route {
 		margin-top: 8px;
@@ -433,6 +529,10 @@
 		0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--hc-accent) 45%, transparent); }
 		70%, 100% { box-shadow: 0 0 0 6px transparent; }
 	}
+	@keyframes hc-arrive {
+		from { opacity: 0; transform: translateY(-2px); }
+		to { opacity: 1; transform: none; }
+	}
 	@keyframes hc-breathe {
 		0%, 100% { opacity: 0.35; }
 		50% { opacity: 1; }
@@ -448,13 +548,18 @@
 		.badge {
 			margin-left: 0;
 		}
-		.route {
+		.route,
+		.progress,
+		.slow {
 			max-width: none;
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.ellipsis::after,
+		.pulse,
+		.progress,
+		.slow,
 		.dot[data-state='here'],
 		.leg[data-state='travelling']::after {
 			animation: none;
