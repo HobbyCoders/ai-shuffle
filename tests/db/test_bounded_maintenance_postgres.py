@@ -294,7 +294,7 @@ def test_index_retirement_defers_busy_table_and_restores_lock_timeout(pg):
 
 
 @pytest.mark.parametrize("attempt", range(3))
-def test_schema_upgrade_defers_deadlocked_index_drop(pg, attempt):
+def test_schema_upgrade_defers_deadlocked_index_drop(pg, monkeypatch, attempt):
     from concurrent.futures import ThreadPoolExecutor
     from time import monotonic, sleep
 
@@ -302,48 +302,53 @@ def test_schema_upgrade_defers_deadlocked_index_drop(pg, attempt):
     with connect(False) as conn:
         network.create_schema(conn.cursor())
     sql("CREATE INDEX idx_sync_ops_record ON sync_ops(collection, record_id)")
-    index_sql = ("CREATE INDEX IF NOT EXISTS idx_sync_ops_record_ingest "
-                 "ON sync_ops(collection, record_id, ingest_id)")
+    original_drop = network.drop_legacy_sync_ops_index
     deadlocks = []
     peer_write = None
+
+    class DeadlockCursor(RealDictCursor):
+        def execute(self, query, params=None):
+            try:
+                return super().execute(query, params)
+            except psycopg2.errors.DeadlockDetected as exc:
+                deadlocks.append(exc.pgcode)  # actual server error, not a mock
+                raise
+
     with connect(False) as peer, ThreadPoolExecutor(max_workers=1) as workers:
         peer_cur = peer.cursor()
         peer_cur.execute("SET LOCAL statement_timeout = '5s'")
         peer_cur.execute("SELECT count(*) FROM sync_ops")  # retain AccessShare
         peer_pid = peer.get_backend_pid()
 
-        class UpgradeCursor(RealDictCursor):
-            def execute(self, query, params=None):
-                nonlocal peer_write
-                try:
-                    result = super().execute(query, params)
-                except psycopg2.errors.DeadlockDetected as exc:
-                    deadlocks.append(exc.pgcode)  # actual server error, not a mock
-                    raise
-                if query == index_sql:
-                    # The production CREATE IF NOT EXISTS retains ShareLock.
-                    with self.connection.cursor() as locks:
-                        locks.execute("""SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid()
-                            AND relation='sync_ops'::regclass AND mode='ShareLock' AND granted""")
-                        assert locks.fetchone()
-                    peer_write = workers.submit(peer_cur.execute,
-                        "LOCK TABLE sync_ops IN ROW EXCLUSIVE MODE")
-                    # Wait for the peer's write to queue behind that ShareLock
-                    # before production DROP INDEX requests AccessExclusive.
-                    with connect(False) as observer:
-                        check = observer.cursor()
-                        deadline = monotonic() + 3
-                        while True:
-                            check.execute("""SELECT 1 FROM pg_locks WHERE pid=%s
-                                AND mode='RowExclusiveLock' AND NOT granted""", (peer_pid,))
-                            if check.fetchone():
-                                break
-                            assert monotonic() < deadline, "peer write did not block on CREATE INDEX"
-                            sleep(0.01)
-                return result
+        def drop_after_index(cursor):
+            nonlocal peer_write
+            # Called by production create_schema after CREATE IF NOT EXISTS.
+            cursor.execute("""SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid()
+                AND relation='sync_ops'::regclass AND mode='ShareLock' AND granted""")
+            assert cursor.fetchone()
+            peer_write = workers.submit(peer_cur.execute,
+                "LOCK TABLE sync_ops IN ROW EXCLUSIVE MODE")
+            # Queue the peer write behind ShareLock before requesting the DROP.
+            with connect(False) as observer:
+                check = observer.cursor()
+                deadline = monotonic() + 3
+                while True:
+                    check.execute("""SELECT 1 FROM pg_locks WHERE pid=%s
+                        AND mode='RowExclusiveLock' AND NOT granted""", (peer_pid,))
+                    if check.fetchone():
+                        break
+                    assert monotonic() < deadline, "peer write did not block on CREATE INDEX"
+                    sleep(0.01)
+            # Instrument only the DROP on the same real transaction; leave the
+            # schema's cursor type unchanged for its PostgreSQL column probes.
+            with cursor.connection.cursor(cursor_factory=DeadlockCursor) as drop_cursor:
+                result = original_drop(drop_cursor)
+            assert result is False
+            return result
 
-        with connect(False) as boot:
-            cur = boot.cursor(cursor_factory=UpgradeCursor)
+        with connect(False) as boot, monkeypatch.context() as scoped:
+            scoped.setattr(network, "drop_legacy_sync_ops_index", drop_after_index)
+            cur = boot.cursor()
             cur.execute("SET LOCAL lock_timeout = '5s'")
             network.create_schema(cur)  # real producing path, including CREATE and DROP
             assert deadlocks == ['40P01']
@@ -354,7 +359,7 @@ def test_schema_upgrade_defers_deadlocked_index_drop(pg, attempt):
         assert peer_write is not None
         peer_write.result(timeout=5)  # boot commit releases ShareLock for the writer
     with connect(False) as retry:
-        assert network.drop_legacy_sync_ops_index(retry.cursor())
+        assert original_drop(retry.cursor())
     assert not sql("SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_sync_ops_record'")
 
 
