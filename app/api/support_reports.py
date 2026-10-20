@@ -25,14 +25,14 @@ router = APIRouter(prefix="/api/v1/support", tags=["Support reports"])
 # Bound both draft creation and delivery attempts, including hub failures.
 _build_limiter = _ExchangeRateLimiter(limit=5, window_seconds=3600)
 _send_limiter = _ExchangeRateLimiter(limit=5, window_seconds=3600)
-REPORT_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
 def _reporter(request: Request, _=Depends(require_auth)) -> str:
     if preview_access.grant(request) is not None:
         raise HTTPException(403, "Agent previews cannot submit support reports.")
-    if (not getattr(request.state, "paired_client", None) and not getattr(request.state, "api_user", None)
-            and getattr(request.state, "is_admin", False)):
+    if getattr(request.state, "api_user", None):
+        raise HTTPException(403, "API keys and connectors cannot submit support reports.")
+    if not getattr(request.state, "paired_client", None) and getattr(request.state, "is_admin", False):
         return "install-admin"
     kind, user_id = request_preference_identity(request)
     return f"{kind}:{user_id}"
@@ -115,7 +115,8 @@ def _raise(exc: reports.ReportError) -> NoReturn:
 async def get_capabilities(request: Request, _=Depends(require_auth)) -> dict[str, Any]:
     caps = await asyncio.to_thread(reports.capabilities)
     admin = getattr(request.state, "is_admin", False)
-    caps["can_report_ai_content"] = preview_access.grant(request) is None
+    caps["can_report_ai_content"] = (preview_access.grant(request) is None
+                                     and not getattr(request.state, "api_user", None))
     if not admin:
         caps.update(basic_report=False, ai_diagnosis=False, default_model=None,
                     fix_with_ai=False, fix_with_ai_reason=None, report_kinds=["ai_content"])
@@ -125,8 +126,6 @@ async def get_capabilities(request: Request, _=Depends(require_auth)) -> dict[st
 @router.post("/reports")
 async def build_report(body: ReportIn, request: Request, user_id=Depends(_reporter)) -> dict[str, Any]:
     """Build a basic report preview (no AI, nothing sent)."""
-    if len(await request.body()) > REPORT_PAYLOAD_MAX_BYTES:
-        raise HTTPException(413, "Support report payload is too large.")
     if body.kind != "ai_content" and not getattr(request.state, "is_admin", False):
         raise HTTPException(403, "Owner access required")
     if body.kind == "ai_content":
@@ -136,7 +135,8 @@ async def build_report(body: ReportIn, request: Request, user_id=Depends(_report
         try:
             return await asyncio.to_thread(reports.build_ai_content, excerpt=body.excerpt,
                                            user_note=body.user_note, session_id=body.session_id,
-                                           reporter_user_id=user_id)
+                                           reporter_user_id=user_id,
+                                           retention_user_id=None if getattr(request.state, "is_admin", False) else user_id)
         except reports.ReportError as exc:
             _raise(exc)
     if body.excerpt or body.session_id:

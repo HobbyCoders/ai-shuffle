@@ -15,9 +15,9 @@ There are two kinds of report:
 
 Each of those can be a report of a **problem** with the app (`kind: "problem"`, the default) or of **offensive or harmful AI content** (`kind: "ai_content"`). An AI content report carries the AI output being reported (`excerpt`), the user's reason (`user_note`) and optionally the session it came from; it has no error, logs, known-issue check or AI diagnosis. HobbyCoders support reviews AI content reports by hand for its content policy. In the app, **Settings → System → Help → Report a problem** opens a problem report; an AI content report is offered only in the Android app, from **⋯ → Report message** on an assistant reply.
 
-Any authenticated client, including a non-owner paired phone, can fetch capabilities and build, update the reason on, and send its own **AI content** reports. All other report kinds, reading reports, known-issue checks and AI diagnoses remain **Owner only**. There is no report-list endpoint. Agent previews (a preview cookie) can read drafts, but cannot build, edit or send reports or start a diagnosis.
+Signed-in owners and paired clients, including non-owner paired phones, can build, update the reason on, and send their own **AI content** reports. API keys and connector principals cannot submit reports and receive `can_report_ai_content: false` from capabilities. All other report kinds, reading reports, known-issue checks and AI diagnoses remain **Owner only**. There is no report-list endpoint. Agent previews (a preview cookie) can read drafts, but cannot build, edit or send reports or start a diagnosis.
 
-AI content draft creation and send attempts are each limited to **5 per hour per user** on this worker (shared across phones belonging to the same account). These in-memory limits reset when the worker restarts; the hub's worker/account limits also apply. Draft payloads are capped at **64 KiB**, in addition to the field limits below. The worker derives `reporter_user_id` from the authenticated identity, never from the payload; it is kept on the draft and local saved record and included in the previewed body sent to support.
+AI content draft creation and send attempts are each limited to **5 per hour per user** on this worker (shared across phones belonging to the same account). These in-memory limits reset when the worker restarts; the hub's worker/account limits also apply. Payload fields are bounded by the limits below; the app's global request-body middleware limits incoming bytes before parsing. Non-owner drafts have a separate **5-draft cap per user**, so they never evict the owner's drafts or another user's drafts. The worker derives `reporter_user_id` from the authenticated identity, never from the payload; it is kept on the draft and local saved record and included in the previewed body sent to support.
 
 ## Flow
 
@@ -87,7 +87,7 @@ What this worker can offer.
 
 Build a basic report draft. No AI is used and nothing leaves the worker.
 
-**Auth:** Any authenticated client for `ai_content`; owner only for `problem`.
+**Auth:** Signed-in owner or paired client for `ai_content`; owner only for `problem`. API keys and connectors are refused.
 
 For a problem, send exactly one of `error_id` or `error`. For AI content, send `kind: "ai_content"` and `excerpt`, and neither `error_id` nor `error`.
 
@@ -259,6 +259,6 @@ When the worker has no Shuffle account (`state: "not_signed_in"`), the report is
 }
 ```
 
-The file holds the report's body, title, kind, fingerprint, version and platform. The worker keeps the newest 200 such files. The draft stays a draft, so it can still be sent after signing in. The app then shows the report text to copy and a `mailto:` link (subject `AI content report` or `AI Shuffle problem report`).
+The file holds the report's body, title, kind, fingerprint, version and platform. The worker keeps the newest 200 owner files. Non-owner AI content reports are saved separately under `support-reports/users/<reporter-hash>/<report_id>.json`, with a cap of 20 files per user; their saves never prune owner files or another user's files. The draft stays a draft, so it can still be sent after signing in. The app then shows the report text to copy and a `mailto:` link (subject `AI content report` or `AI Shuffle problem report`).
 
 **Errors:** `400` without `confirm: true`; `404` for an expired draft; `409` when the report was already sent (or is being sent); `403` from an agent preview.

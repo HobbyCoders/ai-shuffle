@@ -71,6 +71,8 @@ DIAGNOSIS_PROMPT_MAX_CHARS = 60000
 DIAGNOSIS_TEXT_MAX_CHARS = 12000
 PREVIEW_TTL_SECONDS = 3600
 MAX_PREVIEWS = 20
+# Non-owner AI reports have their own per-user quota, never the owner's quota.
+MAX_USER_PREVIEWS = 5
 # Offensive-AI-content reports.
 EXCERPT_MAX = 8000
 SESSION_REF_MAX = 128
@@ -81,6 +83,7 @@ AI_CONTENT_FINGERPRINT = hashlib.sha256(f"{FINGERPRINT_VERSION}\x1fai_content".e
 # Reports kept on a worker with no hub binding: <data dir>/support-reports/.
 LOCAL_DIR_NAME = "support-reports"
 MAX_LOCAL_REPORTS = 200
+MAX_USER_LOCAL_REPORTS = 20
 SUPPORT_EMAIL = "support@hobbycoders.com"
 REPORT_KINDS = ("problem", "ai_content")
 # First body line of an AI content report: the hub classifies a "basic"
@@ -393,9 +396,13 @@ def _prune() -> None:
         del _drafts[key]
     for key in [k for k, v in _runs.items() if v.get("finished") and v["finished"] + PREVIEW_TTL_SECONDS < cutoff]:
         del _runs[key]
-    while len(_drafts) > MAX_PREVIEWS:
-        oldest = min(_drafts, key=lambda k: _drafts[k]["created"])
-        del _drafts[oldest]
+    by_user: dict[Optional[str], list[str]] = {}
+    for key, report in _drafts.items():
+        by_user.setdefault(report.get("_retention_user_id"), []).append(key)
+    for user_id, keys in by_user.items():
+        limit = MAX_USER_PREVIEWS if user_id else MAX_PREVIEWS
+        for key in sorted(keys, key=lambda k: _drafts[k]["created"])[:-limit]:
+            del _drafts[key]
 
 
 def _store(report: dict[str, Any]) -> dict[str, Any]:
@@ -482,7 +489,8 @@ def _session_ref(value: Optional[str]) -> Optional[str]:
 
 
 def build_ai_content(*, excerpt: Optional[str], user_note: Optional[str] = None,
-                     session_id: Optional[str] = None, reporter_user_id: Optional[str] = None) -> dict[str, Any]:
+                     session_id: Optional[str] = None, reporter_user_id: Optional[str] = None,
+                     retention_user_id: Optional[str] = None) -> dict[str, Any]:
     """Build and keep a report of offensive or harmful AI output. No AI and no network."""
     if not str(excerpt or "").strip():
         raise ReportError(400, "Paste the AI output you are reporting.")
@@ -495,6 +503,7 @@ def build_ai_content(*, excerpt: Optional[str], user_note: Optional[str] = None,
         "kind": "basic",
         "report_kind": "ai_content",
         "reporter_user_id": reporter_user_id,
+        "_retention_user_id": retention_user_id,
         "fingerprint": AI_CONTENT_FINGERPRINT,
         "fingerprint_parts": {"type": "ai_content", "message": "Offensive or harmful AI content", "frames": []},
         "title": AI_CONTENT_TITLE,
@@ -804,9 +813,18 @@ def _local_dir() -> Path:
 
 
 def save_local(report: dict[str, Any], body: str) -> dict[str, Any]:
-    """Write the report to ``support-reports/<report_id>.json``; keep the newest MAX_LOCAL_REPORTS."""
+    """Save a report, pruning only its owner's or non-owner reporter's quota."""
     import json
     folder = _local_dir()
+    relative = Path(LOCAL_DIR_NAME)
+    limit = MAX_LOCAL_REPORTS
+    if user_id := report.get("_retention_user_id"):
+        # A separate directory makes pruning incapable of touching owner files.
+        # Hash a server-derived identity rather than putting it in a path.
+        user_folder = Path("users") / hashlib.sha256(user_id.encode()).hexdigest()
+        folder = folder / user_folder
+        relative = relative / user_folder
+        limit = MAX_USER_LOCAL_REPORTS
     folder.mkdir(parents=True, exist_ok=True)
     name = f"{report['report_id']}.json"
     saved_at = _iso(_now())
@@ -829,12 +847,12 @@ def save_local(report: dict[str, Any], body: str) -> dict[str, Any]:
             except OSError:  # removed meanwhile (another process)
                 continue
         dated.sort()
-        for _, _, old in dated[:-MAX_LOCAL_REPORTS]:
+        for _, _, old in dated[:-limit]:
             try:
                 old.unlink()
             except OSError:
                 pass
-    info = {"file": f"{LOCAL_DIR_NAME}/{name}", "saved_at": saved_at}
+    info = {"file": (relative / name).as_posix(), "saved_at": saved_at}
     report["local_record"] = info
     return info
 
