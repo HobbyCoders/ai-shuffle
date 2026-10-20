@@ -512,6 +512,7 @@ async def _create_remote_branch_session(
                 payload["upload_blob_ids"] = upload_blob_ids
             portable_profile = None if profile_id == "claude-code" else profile_id
             if remote_device:
+                await turn_manager.reactivate_for_send(session_id, "worktree", payload)
                 await control.submit_turn(
                     remote_device, session_id=session_id, source="worktree", prompt=prompt,
                     profile_id=portable_profile, project_id=None,
