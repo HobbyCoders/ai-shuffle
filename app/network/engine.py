@@ -2051,6 +2051,7 @@ def applying_batch() -> bool:
 
 
 INBOUND_PENDING_CHUNKS = 4
+INBOUND_PENDING_SECONDS = 0.250
 
 
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
@@ -2137,11 +2138,15 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 for data in chunk:
                     _apply_one(data, ctx, result)
         chunks = 0
-        while result._pending_drains and chunks < _pending_chunk_limit:
+        # Budget only request-side continuation, not the incoming wire batch.
+        # Finish any started transaction; never cancel it while holding the lock.
+        drain_deadline = time.monotonic() + INBOUND_PENDING_SECONDS
+        while (result._pending_drains and chunks < _pending_chunk_limit
+               and time.monotonic() < drain_deadline):
             streams = sorted(result._pending_drains)
             result._pending_drains.clear()
             for index, (origin, incarnation) in enumerate(streams):
-                if chunks >= _pending_chunk_limit:
+                if chunks >= _pending_chunk_limit or time.monotonic() >= drain_deadline:
                     result._pending_drains.update(streams[index:])
                     break
                 if _apply_pending_chunk(origin, incarnation, ctx, result):

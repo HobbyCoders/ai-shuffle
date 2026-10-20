@@ -89,7 +89,15 @@ def test_failed_bulk_insert_rolls_back_before_per_op_fallback(request, use_postg
     with b.active():
         with monkeypatch.context() as patch:
             patch.setattr(store, "insert_event_batch", failing_insert)
-            result = engine.apply_batch(ops[:1])
+            result = part = engine.apply_batch(ops[:1])
+            # Per-op fallback can exhaust the request's elapsed-time budget.
+            # Keep the injected failure active during background continuation.
+            for _ in range(len(ops)):
+                if not part._pending_more:
+                    break
+                part = engine.resume_pending()
+                engine._merge_result(result, part)
+            assert not part._pending_more
         assert attempts == [engine.APPLY_CHUNK] * 3
         assert result.applied == len(ops) and result.retry == result.rejected == 0
         assert len(result.touched) == len(ops)
