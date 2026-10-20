@@ -469,7 +469,11 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             raise ValueError("Unknown moved wake reservation")
         wakes = parse_jsonb(row["wakes"])
         device = engine.require_context().device_id
-        cur.execute("SELECT owner_device_id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        _lock_history_headers(cur, sid)
+        # Already-published wake release is short and still shares the owner
+        # lock with admission. Only cold publication needs an optimistic read.
+        owner_lock = " FOR UPDATE" if row["finalized"] else ""
+        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s" + owner_lock, (sid,))
         session = cur.fetchone()
         owner = session["owner_device_id"] if session else None
         if row["finalized"] and owner != device:
@@ -489,7 +493,8 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
                     raise ValueError("Wait until the source has been offline for five minutes before abandoning this transfer.")
             # This authenticated message from the source confirms its commit,
             # even when the earlier commit response never reached this worker.
-            _publish_history(cur, sid, token)
+            metadata = _publish_history(cur, sid, token)
+            _lock_published_owner(cur, sid, device, token, session, metadata)
             _accept_owner_row(cur, sid, device, row["branch"], token)
             # This authenticated committed transfer also supersedes older
             # abandoned imports whose cancellation reply never arrived.
@@ -1254,6 +1259,8 @@ def _publish_history(cur, sid, token):
                 "ELSE EXCLUDED.next_seq END", (sid, ceiling))
     cur.execute("UPDATE sessions SET sdk_session_id=%s WHERE id=%s", (chunks[0]["sdk_session_id"], sid))
     cur.execute("DELETE FROM handoff_history_chunks WHERE token=%s AND session_id=%s", (token, sid))
+    header = chunks[0] if chunks[0]["table_name"] == "" else None
+    return (parse_jsonb(header["rows"]) or {}) if header else {}
 
 
 def _mark_commit_sent(sid, token, source, receipt_required=True):
@@ -1308,6 +1315,14 @@ def _delete_history(cur, sid, token, sdk):
     _release_holds(cur, HOLD + token)
 
 
+def _lock_history_headers(cur, sid):
+    # Supersession cleans older headers at the final flip. Lock them before
+    # the session row too, so a concurrent expiry sweep cannot invert the order.
+    cur.execute("SELECT token FROM handoff_history_chunks WHERE session_id=%s "
+                "AND table_name='' AND batch_no=0 ORDER BY token FOR UPDATE", (sid,))
+    cur.fetchall()
+
+
 def _discard_superseded_history(cur, sid, token):
     from app.db.base import parse_jsonb
 
@@ -1325,14 +1340,16 @@ def _discard_history(sid, token, *, expired_only=False):
 
     with get_db() as conn:
         cur = conn.cursor()
-        # Publication takes the session lock before the staging header too.
-        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
-        session = cur.fetchone()
+        # Publication locks private staging before taking the session row at
+        # its final pointer flip. Use that order here too, never block sync
+        # while waiting for a slow publisher to release its private header.
         cur.execute("SELECT sdk_session_id,created_at,rows FROM handoff_history_chunks "
                     "WHERE token=%s AND session_id=%s AND table_name='' AND batch_no=0 FOR UPDATE", (token, sid))
         row = cur.fetchone()
         if not row:
             return
+        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        session = cur.fetchone()
         if expired_only:
             receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {} if session else {}
             owner = session["owner_device_id"] if session else None
@@ -1510,6 +1527,25 @@ def _accept_owner_row(cur, sid, device_id, branch, token=None):
         _discard_superseded_history(cur, sid, token)
 
 
+def _lock_published_owner(cur, sid, device_id, token, previous, metadata):
+    """Revalidate after the expensive delta, with only a short session lock.
+
+    A matching commit sync is allowed during publication; a later move is not.
+    Raising rolls the delta and SDK pointer back with the caller's transaction.
+    """
+    from app.db.base import parse_jsonb
+
+    cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+    current = cur.fetchone()
+    def identity(row):
+        receipt = (parse_jsonb(row["placement"]) or {}).get("handoff") or {}
+        return row["owner_device_id"], receipt.get("token")
+    if not current or (identity(current) != identity(previous)
+                       and not _history_receipt_matches(current, token, metadata or {}, device_id)):
+        raise ValueError("Session ownership changed during hand-off publication; context was not replaced.")
+    return current
+
+
 def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *, recovering=False):
     from app.db.base import parse_jsonb
 
@@ -1520,9 +1556,11 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         cur.execute("SELECT token,wakes,superseded,keep_peer,resume_wait,finalized FROM handoff_wakes "
                     "WHERE session_id=%s ORDER BY token FOR UPDATE", (sid,))
         staged_rows = [row for row in cur.fetchall() if row["token"] == token and not row["finalized"]]
-        # Admission and sync ownership updates share this lock. No target turn
-        # may run between a mirrored source commit and context publication.
-        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        _lock_history_headers(cur, sid)
+        # The durable import admission fence prevents target turns throughout
+        # publication. Let ownership sync/session metadata writes proceed; lock
+        # and revalidate the owner only at the final context/ownership flip.
+        cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s", (sid,))
         session = cur.fetchone()
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if recovering:
@@ -1532,10 +1570,11 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
             metadata = parse_jsonb(header["rows"]) or {} if header else {}
             if not _history_receipt_matches(session, token, metadata, device_id):
                 return []  # A newer move won while the sweep was acquiring locks.
+        metadata = _publish_history(cur, sid, token) if token else {}
+        session = _lock_published_owner(cur, sid, device_id, token, session, metadata)
+        receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if held_messages is None:
             held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
-        if token:
-            _publish_history(cur, sid, token)
         _accept_owner_row(cur, sid, device_id, branch, token)
         for staged in staged_rows:
             wakes = parse_jsonb(staged["wakes"]) or []

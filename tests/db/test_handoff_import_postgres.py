@@ -209,17 +209,77 @@ def test_receipt_rewind_removes_only_portable_rows(chat):
         cur.execute("DELETE FROM pending_interactions WHERE session_id=%s", (chat,))
 
 
+@pytest.mark.parametrize("publisher", ["accept", "finalize"])
+@pytest.mark.parametrize("legacy_source", [False, True])
+@pytest.mark.parametrize("next_owner", ["target", "newer-owner"])
+def test_slow_publish_does_not_hold_session_row_and_revalidates_owner(chat, monkeypatch, next_owner, publisher, legacy_source):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from app.db import network
+
+    previous_sdk = handoff.install_history(chat, snapshot(), "/tmp/handoff-lab")
+    data = snapshot(events=15)
+    data.update(token="slow-publication", _prepare_history=True)
+    new_sdk = handoff.install_history(chat, data, "/tmp/handoff-lab")
+    handoff._mark_commit_sent(chat, data["token"], "source", receipt_required=not legacy_source)
+    started, release = Event(), Event()
+    insert = network._insert_rows
+
+    def pause(cur, table, *args, **kwargs):
+        if table == "session_events":
+            started.set()
+            assert release.wait(10), "publication was not released"
+        return insert(cur, table, *args, **kwargs)
+
+    monkeypatch.setattr(network, "_insert_rows", pause)
+    if publisher == "finalize":
+        from types import SimpleNamespace
+        monkeypatch.setattr(handoff.engine, "require_context", lambda: SimpleNamespace(device_id="target"))
+        handoff._stage_wakes(chat, "source", data, None)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        if publisher == "accept":
+            future = executor.submit(handoff._accept_owner, chat, "target", token=data["token"])
+        else:
+            future = executor.submit(handoff._finalize_wakes, chat, "source", {"token": data["token"]})
+        try:
+            assert started.wait(10), "publication did not start"
+            with base.get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SET LOCAL lock_timeout = '250ms'")
+                # A real ownership sync can arrive while the cold delta is written.
+                cur.execute("UPDATE sessions SET owner_device_id=%s,placement=%s,title='Concurrent write' WHERE id=%s",
+                            (next_owner, json.dumps({} if legacy_source else {"handoff": {"token": data["token"]}}), chat))
+        finally:
+            release.set()
+        if next_owner == "target":
+            future.result(timeout=10)
+        else:
+            with pytest.raises(ValueError, match="ownership changed"):
+                future.result(timeout=10)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT sdk_session_id,owner_device_id,title FROM sessions WHERE id=%s", (chat,))
+        row = cur.fetchone()
+        assert row["owner_device_id"] == next_owner
+        assert row["title"] == "Concurrent write"
+        assert row["sdk_session_id"] == (new_sdk if next_owner == "target" else previous_sdk)
+        cur.execute("SELECT count(*) AS n FROM session_events WHERE session_id=%s", (chat,))
+        assert cur.fetchone()["n"] == (15 if next_owner == "target" else 10)
+
+
 def snapshot(events=10, nodes=3, transcript=12, messages=0, width=100):
+    from fluid.messages import Message, Text
+
     rng = random.Random(295)
     alphabet = "abcdefghijklmnopqrstuvwxyz0123456789 "
     text = lambda: "".join(rng.choices(alphabet, k=width))
     return {"token": "lab-token", "sdk_session_id": "ses_lab-source", "history": {
         "session_events": [{"id": f"lab-event-{i}", "seq": i + 1,
-            "event_type": "message.assistant", "payload": {"text": text()},
+            "event_type": "message.assistant", "payload": {"content": text(), "kind": "text"},
             "created_at": "2026-10-19T00:00:00Z"} for i in range(events)],
         "fluid_sessions": [{"head_node_id": f"n{nodes-1}", "created_at": 1.0}],
         "fluid_session_nodes": [{"node_id": f"n{i}", "parent_id": f"n{i-1}" if i else None,
-            "ts": float(i), "message": {"role": "assistant", "content": text()}} for i in range(nodes)],
+            "ts": float(i), "message": Message("assistant", [Text(text())]).to_dict()} for i in range(nodes)],
         "fluid_session_events": [{"seq": i, "event": {"type": "text", "text": text()}}
                                  for i in range(transcript)],
         "session_messages": [{"role": "user" if i % 2 == 0 else "assistant", "content": text(),
