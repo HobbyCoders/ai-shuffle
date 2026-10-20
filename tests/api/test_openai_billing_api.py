@@ -178,11 +178,13 @@ def test_manual_balance_sync_policy_and_provider_validation(authenticated_client
     assert authenticated_client.put(f"{ROOT}/{provider}/openai-usage/balance", json={"balance_usd": 20}).status_code == 400
 
 
-def test_admin_key_is_local_only():
+def test_admin_key_syncs_encrypted_but_instance_trust_stays_local():
     from app.network.policy import COLLECTIONS
     policy = COLLECTIONS["model_providers"]
-    assert "openai_admin_key" in policy.local_fields
-    assert "openai_admin_key" not in policy.fields
+    assert "openai_admin_key" not in policy.local_fields
+    assert {"openai_admin_key", "openai_billing_org_id"} <= set(policy.fields)
+    assert "openai_admin_key" in policy.encrypted
+    assert "openai_billing_instance_id" in policy.local_fields
 
 
 def test_resaving_admin_key_resumes_both_official_auth_pauses(authenticated_client, provider):

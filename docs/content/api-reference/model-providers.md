@@ -303,8 +303,16 @@ Optional admin keys that let the app read account spend for a provider. Each key
 ### Provider-reported API balances
 
 In **Settings > Providers > the OpenAI or xAI API key > Usage**, configure balance
-access separately from the inference key. Keys are write-only, encrypted on this
-worker, excluded from network sync, and included in secret re-encryption.
+access separately from the inference key. Keys are write-only, encrypted at rest
+and under the network key during sync, and included in secret re-encryption.
+Balance keys (including Platform session keys), OpenAI Admin keys and organization
+IDs sync across network workers. This gives every trusted worker the same billing
+access, including higher-privilege Admin access. Each worker polls independently
+and keeps its own readings and errors, even when the worker that saved the key is
+offline. Keys become usable after the next sync; readings arrive on the next poll.
+Disconnecting access syncs the removal. Older versions keep their local billing
+configuration until upgraded. Restoring another installation's database alone
+does not authorize using or publishing its billing keys; authenticated sync does.
 
 - **xAI (official):** create a management key in console.x.ai → Settings →
   Management Keys, with billing read permission. The normal API key resolves
@@ -345,9 +353,10 @@ remain fresh for ten minutes, twice the poll interval, to cover budget jitter;
 successful fetched time. Failed/expired readings never expose old credit as
 current; 401/403 asks for renewed access and pauses requests until the credential
 changes or is deliberately re-saved. Disconnecting balance access does not remove
-inference/Admin credentials. Changes of inference key, origin, auth type, or
-disabling the provider (including the enable toggle) invalidate its binding and
-reject in-flight snapshots. Fresh, error-free Admin organization-spend fields
+inference/Admin credentials. Changes of inference or billing key invalidate old
+readings and reject in-flight snapshots. Local changes of inference key, origin,
+auth type, or disabling the provider (including the enable toggle) also clear
+balance access; a synced key can be polled with the current inference key. Fresh, error-free Admin organization-spend fields
 from the current UTC month remain alongside real remaining credit in the usage
 popover. Stale, failed or prior-month Admin totals are withheld when a balance
 is bound, rather than borrowing its newer timestamp. Balance freshness/error

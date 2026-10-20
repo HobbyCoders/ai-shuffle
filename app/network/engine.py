@@ -514,6 +514,22 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any]) -> Optional[D
         record[name] = _normalize_value(value)
     if encrypted_columns:
         record["_enc"] = sorted(encrypted_columns)
+    if coll.name == "model_providers":
+        # A restored database must not publish credentials trusted only by a
+        # different installation. Authenticated sync rebinds them on receipt.
+        # Keep the local marker on explicit clears, too: an upgraded old peer
+        # with no key/marker must not turn its missing fields into a deletion.
+        for secret, binding, companions in (
+                ("balance_key", "balance_instance_id", ()),
+                ("openai_admin_key", "openai_billing_instance_id", ("openai_billing_org_id",))):
+            if row.get(binding) != _my_instance_id():
+                for name in (secret, *companions):
+                    record.pop(name, None)
+                encrypted_columns = [name for name in encrypted_columns if name != secret]
+        if encrypted_columns:
+            record["_enc"] = sorted(encrypted_columns)
+        else:
+            record.pop("_enc", None)
     if coll.serialize_hook is not None:
         record = coll.serialize_hook(record)
     return record
@@ -647,6 +663,22 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             continue
         columns.append(name)
         values.append(_column_value(coll, name, record.get(name), encrypted_columns))
+    if coll.name == "model_providers":
+        # Presence, not truthiness: explicit NULL clears propagate. Old peers
+        # omit these fields entirely; their edits must preserve local access.
+        for secret, binding in (("balance_key", "balance_instance_id"),
+                                ("openai_admin_key", "openai_billing_instance_id")):
+            if secret in columns:
+                columns.append(binding)
+                values.append(_my_instance_id())
+        previous = _read_row(cursor, coll, record_id)
+        if previous and any(
+                name in columns and (encryption.decrypt_value(previous.get(name) or "")
+                                     if name in coll.encrypted else previous.get(name)) != record.get(name)
+                for name in ("auth_token", "openai_admin_key", "openai_billing_org_id")):
+            # Admin usage is worker-local too. A late poll is guarded by its
+            # captured key/binding; never display a pre-rotation reading.
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", keys)
     # Key columns always come from the record id so a hook cannot move a row.
     for name, value in zip(coll.keys, keys):
         if name in columns:

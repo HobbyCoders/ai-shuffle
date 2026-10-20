@@ -148,7 +148,7 @@ def test_status_detects_sync_replacing_inference_secret(authenticated_client, pr
     assert balances.status(row)["credits"]["balance_remaining"] == 99
     # Network sync can replace the credential without calling the update helper.
     row["auth_token"] = encryption.encrypt_value("synced-other-account")
-    assert balances.status(row)["configured"] is False
+    assert balances.status(row)["configured"] is True
     assert balances.status(row)["credits"] is None
 
 
@@ -173,7 +173,8 @@ def test_toggle_disable_clears_binding(authenticated_client, provider):
     old = db.get_model_provider(provider, include_token=True)
     db.set_model_provider_enabled(provider, False)
     row = db.get_model_provider(provider, include_token=True)
-    assert all(row[k] is None for k in ("balance_key", "balance_instance_id", "balance_snapshot"))
+    assert all(row[k] is None for k in ("balance_key", "balance_snapshot"))
+    assert row["balance_instance_id"] == settings.effective_instance_id  # publish the explicit clear
     assert not provider_balances.snapshot(old, {"credits": {"balance_remaining": 999}})
 
 

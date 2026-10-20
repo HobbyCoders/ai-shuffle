@@ -26,7 +26,7 @@ FRESHNESS_SECONDS = SOURCES["openai_platform_balance"].public()["freshness_secon
 def credential_fingerprint(row):
     """Pure identity check, including inference credentials after network sync."""
     identity = [row.get(k) for k in ("provider_type", "base_url", "auth_mode")]
-    identity.append(encryption.decrypt_value(row.get("auth_token") or ""))
+    identity.extend(encryption.decrypt_value(row.get(k) or "") for k in ("auth_token", "balance_key"))
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
@@ -94,7 +94,7 @@ def status(row):
     except (ValueError, TypeError):
         snap = {}
     if configured and snap.get("credential") != credential_fingerprint(row):
-        configured, snap = False, {}
+        snap = {}
     fetched = snap.get("fetched_at")
     error = snap.get("last_error_kind")
     fresh = bool(fetched and not error and time.time() * 1000 - fetched <= FRESHNESS_SECONDS * 1000)
@@ -130,7 +130,7 @@ async def poll(row):
     try:
         cached = json.loads(row.get("balance_snapshot") or "{}")
         if cached.get("credential") != credential_fingerprint(row):
-            return
+            cached = {}
         team = cached.get("team_id")
         key = encryption.decrypt_value(row["balance_key"])
         if row["provider_type"] == "openai":

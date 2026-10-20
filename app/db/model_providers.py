@@ -464,7 +464,9 @@ def update_model_provider(
     if not updates:
         return get_model_provider(provider_id)
     if changed or kwargs.get("enabled") is False:
-        updates.extend(["balance_key = NULL", "balance_instance_id = NULL", "balance_snapshot = NULL"])
+        from app.core.config import settings
+        updates.extend(["balance_key = NULL", "balance_instance_id = %s", "balance_snapshot = NULL"])
+        values.append(settings.effective_instance_id)
     if changed:
         updates.append("credential_status = NULL")
     updates.append("updated_at = %s")
@@ -523,7 +525,8 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
 def clear_openai_billing_binding(
     provider_id: str, expected_instance_id: Optional[str] = None,
 ) -> Optional[ModelProviderRow]:
-    """Remove local Admin API access and its usage snapshot, not the model key."""
+    """Remove shared Admin API access and its local snapshot, not the model key."""
+    from app.core.config import settings
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -533,8 +536,8 @@ def clear_openai_billing_binding(
         if not row or (expected_instance_id and row.get("openai_billing_instance_id") not in (None, expected_instance_id)):
             return None
         cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
-            (datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
+            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = %s, openai_admin_key = NULL, updated_at = %s, revision = %s WHERE id = %s",
+            (settings.effective_instance_id, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
         snapshot = cursor.fetchone()
@@ -566,10 +569,14 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
-        clear_balance = ", balance_key = NULL, balance_instance_id = NULL, balance_snapshot = NULL" if not enabled else ""
+        from app.core.config import settings
+        clear_balance = ", balance_key = NULL, balance_instance_id = %s, balance_snapshot = NULL" if not enabled else ""
+        values = [enabled, now, str(uuid4())]
+        if not enabled:
+            values.append(settings.effective_instance_id)
         cursor.execute(
             f"UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s{clear_balance} WHERE id = %s",
-            (enabled, now, str(uuid4()), provider_id),
+            (*values, provider_id),
         )
         if cursor.rowcount == 0:
             return None
