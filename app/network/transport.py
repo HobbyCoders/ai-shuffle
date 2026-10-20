@@ -1423,6 +1423,11 @@ async def pending_loop() -> None:
             raise
         except Exception:  # noqa: BLE001 - local catch-up must survive transient DB errors
             logger.warning("Buffered sync catch-up will retry", exc_info=True)
+            if dirty:
+                # Publish already-committed work even if the next DB pass fails.
+                engine.kick()
+                dirty = False
+                next_exchange = time.monotonic() + 1.0
         if more or _pending_wake is None:
             await asyncio.sleep(0.0 if more else 1.0 if progressed else 30.0)
         else:

@@ -114,7 +114,8 @@ def test_bulk_matches_per_op(request, monkeypatch, scenario, use_postgres):
                                    rejected=r.rejected, retry=r.retry, touched=sorted(map(list, r.touched)))
             with store.get_db() as conn:
                 results[w.name]["clock_after"] = store.bump_clock(conn.cursor()) > max(int(o["clock"]) for o in ops)
-    print("APPEND_ATTEMPTS", scenario, appended)
+    if scenario in ("pure", "mixed"):
+        assert any(ok for _count, ok in appended), "buffered bulk append was never used"
     assert results["bulk"] == results["perop"], (results["bulk"], results["perop"])
     base = min(int(o['origin_seq']) for o in ops) - 1
     sb, sp = state(bulk, a.device_id, base), state(perop, a.device_id, base)

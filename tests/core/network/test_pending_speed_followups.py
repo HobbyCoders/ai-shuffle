@@ -61,6 +61,37 @@ async def test_catchup_exchanges_throttled_and_final_empty_pass_flushes(monkeypa
     assert delays == [0.0] * 5 + [30.0]
 
 
+async def test_catchup_error_flushes_throttled_dirty_progress(monkeypatch):
+    clock = [0.0]
+    kicks, delays = [], []
+    outcomes = iter([engine.ApplyResult(applied=64, _pending_more=True),
+                     engine.ApplyResult(applied=64, _pending_more=True), RuntimeError("db offline")])
+
+    async def to_thread(fn):
+        outcome = next(outcomes)
+        clock[0] += 0.1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 3:
+            # Check before another resume can succeed and hide the delay.
+            assert len(kicks) == 2
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(transport, "_pending_wake", None)
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(transport, "asyncio", SimpleNamespace(
+        to_thread=to_thread, sleep=sleep, CancelledError=asyncio.CancelledError))
+    monkeypatch.setattr(engine, "kick", lambda: kicks.append(clock[0]))
+    with pytest.raises(asyncio.CancelledError):
+        await transport.pending_loop()
+    assert len(kicks) == 2 and kicks[1] < 1.0
+    assert delays[:2] == [0.0, 0.0]
+
+
 @pytest.mark.parametrize("reason", ["Referenced record has not arrived yet",
                                     "Credential storage is locked; cannot store credentials"])
 def test_recoverable_dependency_backoff_capped_and_resumes(workers, monkeypatch, reason):

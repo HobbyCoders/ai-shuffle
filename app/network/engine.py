@@ -1810,22 +1810,20 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = (store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
                       if _try_append else [])
-            # Alternate event runs with general per-op runs, leaving the rest
-            # buffered for the next transaction. One metadata update must not
-            # send all the neighboring transcript events down the slow path.
-            events, run = next(groupby(window, key=lambda data: isinstance(data, Mapping)
-                                      and data.get("collection") == "session_events"
-                                      and data.get("op") == "upsert"), (False, ()))
-            pending = list(run)
-            more = len(window) == APPLY_CHUNK or len(pending) < len(window)
-            appended = _append_pending(cursor, pending, ctx) if events else None
-            if appended is not None:
-                part = appended
-                store.delete_pending_prefix(cursor, origin, incarnation, next_seq, len(pending))
-                box[0] = max(int(data["clock"]) for data in pending)
-                if more:
-                    part._pending_drains.add((origin, incarnation))
-            else:
+            # Keep event and metadata runs inside the same bounded lock hold.
+            # The no-peek path is the shim's rollback-and-retry fallback.
+            runs = (groupby(window, key=lambda data: isinstance(data, Mapping)
+                            and data.get("collection") == "session_events"
+                            and data.get("op") == OP_UPSERT) if window else [(False, ())])
+            for events, run in runs:
+                pending = list(run)
+                appended = _append_pending(cursor, pending, ctx) if events else None
+                if appended is not None:
+                    _merge_result(part, appended)
+                    store.delete_pending_prefix(cursor, origin, incarnation, next_seq, len(pending))
+                    box[0] = max(box[0], max(int(data["clock"]) for data in pending))
+                    next_seq += len(pending)
+                    continue
                 for _ in range(len(pending) or APPLY_CHUNK):
                     buffered = store.pop_pending(cursor, origin, incarnation, next_seq)
                     if buffered is None:
@@ -1850,11 +1848,10 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                         _count_outcome(part, outcome)
                     part._pending_drains.discard((origin, incarnation))
                     next_seq += 1
-                else:
-                    # A full window or a following run needs another turn;
-                    # the shim's no-peek fallback also yields after 64 ops.
-                    if more or not pending:
-                        part._pending_drains.add((origin, incarnation))
+                if failure is not None:
+                    break
+            if failure is None and next_seq - first_seq == APPLY_CHUNK:
+                part._pending_drains.add((origin, incarnation))
             if box[0]:
                 store.observe_clock(cursor, box[0])
     except _ChunkAbandoned:

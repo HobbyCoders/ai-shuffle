@@ -172,7 +172,7 @@ def test_mixed_buffered_transcript_uses_bulk_for_event_runs(pg_workers, monkeypa
     monkeypatch.setattr(store, "insert_event_batch", insert)
     with b.active(), measured_apply(monkeypatch, b) as (transactions, statements):
         result = engine.apply_batch(ops[:1])
-        assert result._pending_more
+        assert result.applied == min(len(ops), 1 + engine.INBOUND_PENDING_CHUNKS * engine.APPLY_CHUNK)
         part = result
         for _ in range(len(ops)):
             if not part._pending_more:
