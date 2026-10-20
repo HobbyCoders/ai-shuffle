@@ -17,12 +17,12 @@ const progress = { step: 'install_history.session_events', elapsed_seconds: 23.4
 
 describe('handoffStepLabel', () => {
 	it('maps the receiver steps to short plain labels', () => {
-		expect(handoffStepLabel('owner_export', 'GamingPC')).toBe('Packing up the chat');
-		expect(handoffStepLabel('decode', 'GamingPC')).toBe('Unpacking the chat');
-		expect(handoffStepLabel('install_history', 'GamingPC')).toBe('Copying history');
-		expect(handoffStepLabel('git_fetch', 'GamingPC')).toBe('Fetching the branch');
-		expect(handoffStepLabel('owner_commit', 'GamingPC')).toBe('Handing the chat over');
-		expect(handoffStepLabel('cancel', 'GamingPC')).toBe('Cancelling');
+		expect(handoffStepLabel('owner_export', 'BuildPC')).toBe('Packing up the chat');
+		expect(handoffStepLabel('decode', 'BuildPC')).toBe('Unpacking the chat');
+		expect(handoffStepLabel('install_history', 'BuildPC')).toBe('Copying history');
+		expect(handoffStepLabel('git_fetch', 'BuildPC')).toBe('Fetching the branch');
+		expect(handoffStepLabel('owner_commit', 'BuildPC')).toBe('Handing the chat over');
+		expect(handoffStepLabel('cancel', 'BuildPC')).toBe('Cancelling');
 	});
 
 	it('tells history from transcript by the table', () => {
@@ -36,9 +36,9 @@ describe('handoffStepLabel', () => {
 	});
 
 	it('names the target worker where the step is about it', () => {
-		expect(handoffStepLabel('accept_owner', 'GamingPC')).toBe('Starting on GamingPC');
-		expect(handoffStepLabel('arm_wakes', 'GamingPC')).toBe('Starting on GamingPC');
-		expect(handoffStepLabel('admission', 'GamingPC')).toBe('Getting GamingPC ready');
+		expect(handoffStepLabel('accept_owner', 'BuildPC')).toBe('Starting on BuildPC');
+		expect(handoffStepLabel('arm_wakes', 'BuildPC')).toBe('Starting on BuildPC');
+		expect(handoffStepLabel('admission', 'BuildPC')).toBe('Getting BuildPC ready');
 		expect(handoffStepLabel('accept_owner', '')).toBe('Starting on the other worker');
 		expect(handoffStepLabel('accept_owner')).toBe('Starting on the other worker');
 	});
