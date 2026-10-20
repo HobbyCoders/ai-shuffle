@@ -498,7 +498,7 @@ async def test_peer_without_cli_binding_is_refused_at_active_permission_boundary
         await asyncio.wait_for(watcher, 10)
         assert len(_user_frames(frames)) == 2
         assert len([e for e in loop.bus.log(sid) if isinstance(e, TurnStarted)]) == 2
-        assert "another agent in this session" in _user_frames(frames)[1]["message"]["content"][0]["text"]
+        assert format_peer_message("reviewer", "Coordinate edits") in _user_frames(frames)[1]["message"]["content"][0]["text"]
         assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sid))
     finally:
         await loop.aclose()
