@@ -1602,13 +1602,9 @@ class SkillStore:
         # Within a tier, most useful first (recent activity plus recalls), not
         # merely newest: a recency sort showed whatever was saved last and
         # pushed facts sessions actually look up out of the snapshot.
-        from fluid.codemode.facts import global_id
-        successors = {e.superseded_by for e in entries if e.superseded_by}
         rank = {e.id: usefulness(vars(e)) for e in entries}
-        entries.sort(key=lambda e: (not (global_id(vars(e)) in successors or (
-                                       e.protected and e.superseded_by and not e.supersession_confirmed)),
-                                   global_id(vars(e)) not in successors,
-                                   not bool(e.key and e.key.startswith("profile.")), not e.protected, -rank[e.id]))
+        entries.sort(key=lambda e: (not bool(e.key and e.key.startswith("profile.")),
+                                   not e.protected, -rank[e.id]))
         # (entry, line, counts against the budget) for each renderable entry.
         candidates: list[tuple[MemoryEntry, str, bool]] = []
         for entry in entries:
@@ -1764,10 +1760,10 @@ class SkillStore:
         interval_due = force or now - last >= self.CURATE_INTERVAL_DAYS * 86_400
         # Repair pre-feature stores once at startup, without waiting a week or
         # running unrelated skill lifecycle transitions early.
-        if not interval_due and meta.get("supersession_repair_version") == 1:
+        if not interval_due and meta.get("supersession_repair_version") == 2:
             return []
         actions: list[str] = [f"superseded memory:{mid}" for mid in self._facts.reconcile_supersessions()]
-        meta["supersession_repair_version"] = 1
+        meta["supersession_repair_version"] = 2
         if not interval_due:
             self._save_meta(meta)
             return actions

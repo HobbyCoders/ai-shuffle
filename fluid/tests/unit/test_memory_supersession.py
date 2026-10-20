@@ -30,11 +30,11 @@ async def test_different_keys_scopes_keep_only_current_value_and_recall_pair(tmp
     assert (old_now in archive) != protected
     section = reopened.render_memory_section("project:fixture")
     assert OLD not in section and NEW in section
-    assert ("unresolved conflict" in section) == protected
+    assert "unresolved conflict" not in section
     assert old.id not in {line.split()[1].strip("[") for line in reopened.memory_snapshot_plan("project:fixture")["eligible_lines"]}
     result = await recall({"query": "subagent", "limit": 10}, ToolCtx(extra={"recall_store": reopened, "memory_project": "project:fixture"}))
     assert OLD in result.text and "superseded by" in result.text.lower()
-    assert ("Unresolved conflict" in result.text) == protected
+    assert "Unresolved conflict" not in result.text
     assert not json.loads(reopened.memories_path.read_text())["tombstones"]
 
 
@@ -43,8 +43,8 @@ async def test_learner_save_detects_replacement_and_curation_repairs_legacy_pair
     old = store.save_memory(OLD, key="subagents.model-routing", scope="project:fixture", protected=True)
     learner = Synthesizer(provider=None, model="fixture", store=store)
     await learner._apply(f"<memory>{NEW}</memory>", [{"kind": "user", "text": NEW}])
-    assert OLD not in store.render_memory_section("project:fixture")
-    assert store.memories()[0].superseded_by
+    assert OLD in store.render_memory_section("project:fixture")
+    assert not next(e for e in store.memories() if e.id == old.id).superseded_by
     # Build a pre-feature store, then run the actual interval-gated curation.
     legacy = SkillStore(tmp_path / "legacy")
     with monkeypatch.context() as patch:
@@ -83,7 +83,7 @@ def test_replication_keeps_link_archive_and_conflict_across_stale_replay(tmp_pat
     b._facts.merge(stale)
     assert OLD not in b.render_memory_section("project:fixture")
     assert NEW in b.render_memory_section("project:fixture")
-    assert "unresolved conflict" in b.render_memory_section("project:fixture")
+    assert "unresolved conflict" not in b.render_memory_section("project:fixture")
     # Explicit revision-safe confirmation of the replacement resolves marker,
     # while retaining the predecessor text/link on every replica.
     now = next(e for e in a.memories() if e.id == new.id)
@@ -123,19 +123,17 @@ def test_uncertain_negated_or_temporary_replacement_is_not_applied(tmp_path, tex
 
 async def test_learner_proposals_use_only_listed_revision_safe_pairs(tmp_path):
     store = SkillStore(tmp_path)
-    old = store.save_memory("Backend subagent code tasks use model Orion.", protected=True)
-    new = store.save_memory("Backend subagent code tasks now use model Lyra.", protected=True)
+    old = store.save_memory("Backend subagent code tasks use model Orion.")
+    new = store.save_memory("Backend subagent code tasks now use model Lyra.")
     learner = Synthesizer(provider=None, model="fixture", store=store)
     learner._memory_lines()
     output = f'<supersede-memory old="{old.id}" new="{new.id}"/>'
     assert await learner._apply(output) == [f"superseded-memory:{old.id}"]
-    assert next(e for e in store.memories() if e.id == old.id).superseded_by
-    with pytest.raises(ValueError, match="changed"):
-        store.propose_memory_supersession(old.id, new.id, old_revision=old.revision, new_revision=new.revision)
+    assert next(e for e in store.archived_memories() if e.id == old.id).superseded_by
     assert await learner._apply('<supersede-memory old="unknown" new="unknown2"/>') == []
 
 
-def test_lineage_survives_expiry_and_replacement_has_budget_priority(tmp_path, monkeypatch):
+def test_lineage_expires_and_replacement_does_not_override_profile_priority(tmp_path, monkeypatch):
     import fluid.codemode.facts as facts
     store = SkillStore(tmp_path)
     old, new = pair(store, protected=False)
@@ -144,23 +142,26 @@ def test_lineage_survives_expiry_and_replacement_has_budget_priority(tmp_path, m
     with monkeypatch.context() as patch:
         patch.setattr(facts.time, "time", lambda: new.updated_at + facts.ARCHIVE_RETENTION * 3)
         store.reap()
-        assert next(e for e in store.archived_memories() if e.id == old.id).superseded_by
+        assert old.id not in {e.id for e in store.archived_memories()}
         assert NEW in store.render_memory_section("project:fixture")
     explicit = SkillStore(tmp_path / "explicit")
     pair(explicit)
-    for i in range(20):
-        explicit.save_memory(f"Generic unrelated protected fact {i}. " * 12, protected=True, key=f"profile.filler{i}")
+    for i in range(4):
+        explicit.save_memory(f"Generic unrelated protected fact {i}.", protected=True, key=f"profile.filler{i}")
     section = explicit.render_memory_section("project:fixture")
-    assert NEW in section and "unresolved conflict" in section and OLD not in section
+    assert section.index("Generic unrelated protected fact") < section.index(NEW)
+    assert "unresolved conflict" not in section and OLD not in section
 
 
 def test_supersession_fixture_has_bounded_unique_paragraphs(tmp_path):
     store = SkillStore(tmp_path)
     pair(store)
     section = store.render_memory_section("project:fixture")
-    assert len(section) <= 1100
+    assert len(section) <= 500
     facts = [line for line in section.splitlines() if line.startswith("- [")]
-    assert len(facts) == len(set(facts)) == 2
+    assert len(facts) == len(set(facts)) == 1
+    paragraphs = section.split("\n\n")
+    assert len(paragraphs) == len(set(paragraphs))
 
 
 @pytest.mark.parametrize("old_version,replaced,expected", [
@@ -193,5 +194,5 @@ def test_recently_curated_legacy_store_repairs_once_without_shifting_lifecycle(t
     assert store.curate(now=now + 60)
     assert OLD not in store.render_memory_section("project:fixture")
     assert store._load_meta()["last_curated_at"] == now
-    assert store._load_meta()["supersession_repair_version"] == 1
+    assert store._load_meta()["supersession_repair_version"] == 2
     assert not store.curate(now=now + 61)
