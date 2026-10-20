@@ -7,7 +7,9 @@ Semantics:
   ``seed(session_id, last_seq)`` first so numbering continues after the rows
   already on disk instead of restarting at 1 and colliding with them.
 - The in-process log is a ring of the newest ``log_ring_size`` events per
-  session. Everything older is the store's job: ``subscribe(since_seq=N)``
+  session, also bounded by ``log_ring_max_bytes`` estimated bytes (8 MiB by
+  default). A single oversized event is delivered live but not kept in the ring.
+  Everything older is the store's job: ``subscribe(since_seq=N)``
   with N below the ring's floor asks the replay source (the store's
   ``events_since``, attached by the engine) for the gap before streaming from
   the ring. Without a replay source it starts at the floor. A live renderer
@@ -35,10 +37,11 @@ another subscriber (with an unbounded queue — it must never drop).
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
 
 from fluid.events.model import Event
 
@@ -47,6 +50,23 @@ _CLOSE = object()
 # Newest events kept in memory per session. A TUI reconnecting after a longer
 # gap replays the rest from the store.
 LOG_RING_SIZE = 2048
+LOG_RING_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _retained_size(value, depth=0) -> int:
+    """Conservative estimate for JSON-shaped event fields, without copying them."""
+    size = sys.getsizeof(value)
+    if depth >= 12:
+        return size
+    if is_dataclass(value) and not isinstance(value, type):
+        size += sum(_retained_size(getattr(value, f.name), depth + 1) for f in fields(value))
+    elif isinstance(value, dict):
+        size += sum(_retained_size(k, depth + 1) + _retained_size(v, depth + 1)
+                    for k, v in value.items())
+    elif isinstance(value, (list, tuple)):
+        size += sum(_retained_size(v, depth + 1) for v in value)
+    return size
+
 
 ReplaySource = Callable[[str, int], Awaitable[list[Event]]]
 
@@ -68,9 +88,13 @@ class EventBus:
         *,
         subscriber_queue_size: int = 1024,
         log_ring_size: int = LOG_RING_SIZE,
+        log_ring_max_bytes: int = LOG_RING_MAX_BYTES,
         replay_source: ReplaySource | None = None,
     ) -> None:
         self._logs: dict[str, deque[Event]] = {}
+        self._log_sizes: dict[str, deque[int]] = {}
+        self._log_bytes: dict[str, int] = {}
+        self._ring_max_bytes = max(1, int(log_ring_max_bytes))
         self._last_seq: dict[str, int] = {}
         self._subs: dict[str, list[_Subscriber]] = {}
         self._maxsize = subscriber_queue_size
@@ -98,6 +122,16 @@ class EventBus:
 
     def subscriber_count(self, session_id: str) -> int:
         return len(self._subs.get(session_id, ()))
+
+    def memory_stats(self) -> dict[str, int]:
+        """Cheap counts only; estimates were computed once at publication."""
+        return {
+            "event_bus_ring_events": sum(map(len, self._logs.values())),
+            "event_bus_ring_estimated_bytes": sum(self._log_bytes.values()),
+            "event_bus_subscribers": sum(map(len, self._subs.values())),
+            "event_bus_queued_events": sum(sub.queue.qsize()
+                                           for subs in self._subs.values() for sub in subs),
+        }
 
     # ─── configuration ───────────────────────────────────────────────────
     def seed(self, session_id: str, last_seq: int) -> None:
@@ -131,8 +165,21 @@ class EventBus:
         self._last_seq[sid] = seq
         ring = self._logs.get(sid)
         if ring is None:
-            ring = self._logs[sid] = deque(maxlen=self._ring_size)
+            ring = self._logs[sid] = deque()
+            self._log_sizes[sid] = deque()
+            self._log_bytes[sid] = 0
+        size = _retained_size(sequenced)
+        sizes = self._log_sizes[sid]
         ring.append(sequenced)
+        sizes.append(size)
+        self._log_bytes[sid] += size
+        while ring and (len(ring) > self._ring_size
+                        or self._log_bytes[sid] > self._ring_max_bytes):
+            ring.popleft()
+            self._log_bytes[sid] -= sizes.popleft()
+        # Even an event larger than the entire ring budget is delivered live
+        # below and persisted by the engine. The ring remains a contiguous
+        # suffix (possibly empty), so durable gap replay still works.
         for sub in self._subs.get(sid, ()):
             if sub.lagging:
                 continue  # will re-sync from the log when it catches up

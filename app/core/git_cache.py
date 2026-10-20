@@ -9,9 +9,10 @@ circular-import issues.
 """
 
 import logging
-import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Optional
+
+from app.core.bounded_cache import ByteBoundedLRU
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +38,18 @@ class _GitResultCache:
     """Thread-safe per-key TTL cache for git results."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        # key -> (result, monotonic_timestamp)
-        self._data: Dict[str, tuple] = {}
+        # Share the transcript cache's proven eviction/accounting primitive.
+        # A status result can contain thousands of long untracked paths; a count
+        # bound alone is not a memory budget. Never depend on the 5-minute sweep.
+        self._data = ByteBoundedLRU(256, 8 * 1024 * 1024, 2 * 1024 * 1024)
+        self._lock = self._data.lock
 
     def get(self, key: str, ttl: float) -> Optional[Any]:
         with self._lock:
             entry = self._data.get(key)
             if entry and (time.monotonic() - entry[1]) < ttl:
                 return entry[0]
+            self._data.pop(key, None)
             return None
 
     def put(self, key: str, value: Any) -> None:
@@ -59,7 +63,7 @@ class _GitResultCache:
     def invalidate_prefix(self, prefix: str) -> None:
         """Invalidate all keys starting with *prefix*."""
         with self._lock:
-            to_remove = [k for k in self._data if k.startswith(prefix)]
+            to_remove = [k for k in self._data.keys() if k.startswith(prefix)]
             for k in to_remove:
                 del self._data[k]
 
@@ -67,7 +71,7 @@ class _GitResultCache:
         """Remove all entries older than max_ttl seconds. Returns count removed."""
         now = time.monotonic()
         with self._lock:
-            expired = [k for k, (_, ts) in self._data.items() if (now - ts) > max_ttl]
+            expired = [k for k in self._data.keys() if (now - self._data[k][1]) > max_ttl]
             for k in expired:
                 del self._data[k]
             return len(expired)
