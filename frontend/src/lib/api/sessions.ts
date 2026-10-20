@@ -6,6 +6,7 @@ import { api, fetchAndDownload, type RequestOptions } from './client';
 // Type-only: erased at build, so this cannot pull the store's runtime (and its
 // localStorage access) into the API layer.
 import type { SessionMode } from '$lib/stores/sessionMode.svelte';
+import type { HandoffProgress } from '$lib/utils/handoff-progress';
 
 // ============================================================================
 // Session Types
@@ -368,6 +369,11 @@ export interface QueuedMoveState {
 		by: 'owner' | 'agent' | (string & {});
 		/** Commit, push and move are running. */
 		moving?: boolean;
+		/**
+		 * The receiver's step and elapsed seconds while the move sends; null
+		 * until the owning worker's first poll of it. Older owners omit it.
+		 */
+		progress?: HandoffProgress | null;
 	} | null;
 }
 

@@ -24,6 +24,7 @@
  * worker the move settles when the chat's owner becomes the target
  * (`settleByOwner`): no source-side transcript record exists for success.
  */
+import type { HandoffProgress } from './handoff-progress';
 import type { ChatMessage } from '$lib/stores/types';
 
 export type HandoffPhase =
@@ -403,7 +404,13 @@ function ownerChanged(before: Seen, now: Seen): boolean {
  */
 export interface HandoffPendingView {
 	known: boolean;
-	pending: { handoff_id?: string | null; target_id?: string | null; moving?: boolean } | null;
+	pending: {
+		handoff_id?: string | null;
+		target_id?: string | null;
+		moving?: boolean;
+		/** The receiver's progress while the move sends (handoff-progress.ts); null until known. */
+		progress?: HandoffProgress | null;
+	} | null;
 	/**
 	 * When the read was sent (`beginHandoffPendingRead`). It counts for a move
 	 * only if it was sent after the page first saw that move: an answer from

@@ -87,6 +87,21 @@ export function refreshHandoffPending(sessionId: string, reason = '', retry = tr
 	return read;
 }
 
+/**
+ * Keep reading the pending move of `sessionId` every `intervalMs` while a move
+ * sends, so the card can show the receiver's step and elapsed time
+ * (`pending.progress`). A read still in flight is not doubled (same `reason`),
+ * a failed one is simply read again on the next tick, and a hidden tab skips
+ * ticks. Returns the stop function.
+ */
+export function pollHandoffPending(sessionId: string, reason: string, intervalMs: number): () => void {
+	const timer = setInterval(() => {
+		if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+		void refreshHandoffPending(sessionId, reason, false);
+	}, intervalMs);
+	return () => clearInterval(timer);
+}
+
 /** Test hook. */
 export function resetHandoffPending(): void {
 	store.set({});

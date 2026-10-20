@@ -54,7 +54,9 @@ describe('MessageArea hand-off row', () => {
 	it('renders a hand-off as one card on its anchor, read through a derived that keeps identity', () => {
 		const rowBody = between('{#snippet messageBody(', '{/snippet}');
 		expect(rowBody).toContain('{@const handoff = handoffAnchors.get(message)}');
-		expect(rowBody).toContain('<HandoffCard episode={handoff} />');
+		expect(rowBody).toContain('<HandoffCard episode={handoff} progress={progressForEpisode(handoff, handoffPendingView)} />');
+		// While it sends, the pending move is read on a timer for the receiver's progress, and the timer stops with the move.
+		expect(source).toMatch(/if \(!sid \|\| !key\) return;\s*return pollHandoffPending\(sid, key, HANDOFF_PROGRESS_POLL_MS\);/);
 		expect(source).toMatch(/const handoffAnchors = \$derived\(\s*settleByOwner\(transcript\.handoffs, \{ deviceId: handoffOwnerId, deviceName: handoffOwnerName \}, openSessionId, handoffPendingView\)\.byAnchor\s*\);/);
 	});
 });
