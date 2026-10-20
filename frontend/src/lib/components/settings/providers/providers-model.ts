@@ -712,12 +712,11 @@ export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: 
  * The warning on the Claude provider page, or null. Keys off Claude's own
  * credential (`claude_credential_ready`), not the gate's `ready`: that one
  * says whether any provider can run, so it stays true while Claude alone is
- * not ready. A license block shows the server's reason.
+ * not ready.
  */
 export function claudeGateNotice(claude: ClaudeAuthSummary | null): string | null {
 	const gate = claude?.gate;
 	if (!claude || !gate || claude.mode === 'off') return null;
-	if (gate.license_allows_runs === false) return gate.reason || 'The license does not allow new agent runs.';
 	if (gate.claude_credential_ready !== false) return null;
 	if (claude.mode === 'cloud') {
 		const missing = claude.cloud?.missing ?? [];

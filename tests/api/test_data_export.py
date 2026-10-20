@@ -24,7 +24,6 @@ SECRETS = {
     "provider_token": "sk-provider-0123456789abcdefghijklmnop",
     "provider_extra_env": "sk-providerenv-0123456789abcdefghijk",
     "system_setting": "sk-setting-0123456789abcdefghijklmnop",
-    "install_key": "SHUF-INSTALL-KEY-SECRET-0123",
     "dotenv": "sk-dotenv-0123456789abcdefghijklmnop",
     "oauth_file": "sk-ant-oat01-oauthfile0123456789abcdef",
     "process_env": "sk-processenv-0123456789abcdefghijklm",
@@ -34,7 +33,7 @@ SECRETS = {
 @pytest.fixture
 def world(client, tmp_path, monkeypatch):
     from app.api import auth
-    from app.core import config, license
+    from app.core import config
 
     monkeypatch.setattr(auth.owner_auth, "local_access",
                         lambda request: "authorization" not in request.headers)
@@ -57,7 +56,6 @@ def world(client, tmp_path, monkeypatch):
         extra_env={"GATEWAY_KEY": SECRETS["provider_extra_env"]},
     )
     database.set_system_setting("openai_api_key", SECRETS["system_setting"])
-    monkeypatch.setattr(license, "_env_key", SECRETS["install_key"])
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     (data_dir / ".env").write_text(f"OPENAI_API_KEY={SECRETS['dotenv']}\n")

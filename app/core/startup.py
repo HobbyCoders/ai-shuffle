@@ -718,11 +718,6 @@ def start_background_tasks() -> List[asyncio.Task]:
     # their workers checked, so a quiet worker shows as unreachable.
     tasks.append(asyncio.create_task(remote_task.tracking_loop(), name="remote-task-tracking"))
 
-    # License lease renewal (daily, jittered backoff). Idle in beta mode.
-    from app.core import license as licensing
-    tasks.append(asyncio.create_task(licensing.refresh_loop(), name="license-refresh"))
-    logger.info("License mode: %s", "beta" if licensing.beta_mode() else "licensed")
-
     return tasks
 
 

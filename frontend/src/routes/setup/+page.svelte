@@ -8,7 +8,7 @@
 	 * 2. Owner password. Before a password exists a browser cannot reach this
 	 *    page, so the owner gate (OwnerAccessGate) shows steps 1 and 2 itself;
 	 *    here the step only appears as done. The desktop app has no such step.
-	 * 3. Cloud: optional; local use is free, a paid plan key can be added.
+	 * 3. Cloud: optional; local use is free, and a plan follows the signed-in account.
 	 * 4. AI provider: connect at least one of the agent providers (Claude,
 	 *    OpenAI, xAI Grok, OpenRouter, a custom gateway), all equal choices.
 	 *    Blocking: there is no way to finish setup without one ready.

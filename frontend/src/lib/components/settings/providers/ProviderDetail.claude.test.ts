@@ -102,8 +102,7 @@ it('warns when the active mode has no credential', async () => {
 			ready: false,
 			mode: 'api_key',
 			claude_credential_ready: false,
-			reason: 'No Anthropic API key is stored on this worker.',
-			license_allows_runs: true
+			reason: 'No Anthropic API key is stored on this worker.'
 		}
 	});
 	worker.state.integrations.anthropic_api_key_set = false;

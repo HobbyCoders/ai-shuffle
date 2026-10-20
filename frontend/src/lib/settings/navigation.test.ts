@@ -60,9 +60,11 @@ describe('settings targets', () => {
 		expect(decodeTarget('category=system&anchor=system.license')).toEqual({ category: 'cloud', anchor: 'cloud.account' });
 		expect(decodeTarget('category=system&anchor=system.licenseKey&open=system.licenseKey')).toEqual({
 			category: 'cloud',
-			anchor: 'cloud.key',
-			open: 'cloud.key'
+			anchor: 'cloud.account',
+			open: 'cloud.account'
 		});
+		// The Plan key and Deactivate rows are gone: the plan follows the signed-in account.
+		expect(redirectTarget({ category: 'cloud', anchor: 'cloud.key' })).toEqual({ category: 'cloud', anchor: 'cloud.account' });
 		expect(redirectTarget({ category: 'system', anchor: 'system.seats' })).toEqual({ category: 'cloud', anchor: 'cloud.remoteWorkers' });
 		expect(redirectTarget({ category: 'system', anchor: 'system.checkUpdates' })).toEqual({ category: 'system', anchor: 'system.checkUpdates' });
 	});
@@ -71,7 +73,7 @@ describe('settings targets', () => {
 		const nav = new SettingsNavigation(false);
 		nav.go({ category: 'system', anchor: 'system.deactivate' });
 		expect(nav.category).toBe('cloud');
-		expect(nav.pendingAnchor).toBe('cloud.deactivate');
+		expect(nav.pendingAnchor).toBe('cloud.account');
 	});
 });
 

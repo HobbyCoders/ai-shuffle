@@ -310,8 +310,7 @@ describe('Claude', () => {
 				ready: false,
 				mode: 'subscription',
 				claude_credential_ready: false,
-				reason: 'Sign in',
-				license_allows_runs: true
+				reason: 'Sign in'
 			}
 		});
 		const views = buildProviders(input({ claude: summary }));
@@ -390,7 +389,7 @@ describe('plan label', () => {
 });
 
 describe('claudeGateNotice', () => {
-	const gate = { ready: true, mode: 'subscription' as const, claude_credential_ready: true, reason: null, license_allows_runs: true };
+	const gate = { ready: true, mode: 'subscription' as const, claude_credential_ready: true, reason: null };
 
 	it('is quiet when Claude is ready or off', () => {
 		expect(claudeGateNotice(claudeSummary({ gate }))).toBeNull();
@@ -407,10 +406,6 @@ describe('claudeGateNotice', () => {
 		expect(claudeGateNotice(summary)).toBe('Claude cannot run: no Anthropic API key is stored on this worker.');
 	});
 
-	it('shows the license reason', () => {
-		const summary = claudeSummary({ gate: { ...gate, ready: false, license_allows_runs: false, reason: 'License expired.' } });
-		expect(claudeGateNotice(summary)).toBe('License expired.');
-	});
 });
 
 describe('Claude before its summary answers', () => {

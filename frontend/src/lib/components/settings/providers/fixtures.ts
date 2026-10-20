@@ -95,8 +95,7 @@ export function claudeSummary(partial: Partial<ClaudeAuthSummary> = {}): ClaudeA
 			ready: mode !== 'off',
 			mode: mode === 'off' ? null : mode,
 			claude_credential_ready: mode !== 'off',
-			reason: mode === 'off' ? 'Claude is off on this worker.' : null,
-			license_allows_runs: true
+			reason: mode === 'off' ? 'Claude is off on this worker.' : null
 		},
 		...partial
 	};

@@ -1,8 +1,9 @@
 /**
- * Cloud: the AI Shuffle Cloud account and plan. Local use is free; the account
- * only sets how many remote workers the hub serves. Replaces System > License;
- * old `license` links and `system.license*` anchors land here
- * (navigation.svelte.ts). CloudPage.svelte renders one `<SettingRow id>` per entry.
+ * Cloud: the AI Shuffle Cloud account and plan. Local use is free and there is
+ * no license key: the plan follows the signed-in account, and it only sets how
+ * many remote workers the hub serves. Replaces System > License; old `license`
+ * links and `system.license*` anchors land here (navigation.svelte.ts).
+ * CloudPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
 
@@ -12,8 +13,23 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Account',
 		label: 'Cloud account',
-		help: 'Everything on your own machines and network is free and needs no account. A free Cloud account adds two remote workers with no card; a paid plan adds four, plus sync across networks.',
-		keywords: ['license', 'licence', 'plan', 'status', 'subscription', 'account', 'hobbycoders', 'free', 'paid', 'beta', 'lease']
+		help: 'Everything on your own machines and network is free and needs no account. A free Cloud account adds two remote workers with no card; a paid plan adds four, plus sync across networks. The plan follows the account: sign in with it on another worker and that worker gets the same plan.',
+		keywords: [
+			'license',
+			'licence',
+			'license key',
+			'plan key',
+			'plan',
+			'status',
+			'subscription',
+			'account',
+			'hobbycoders',
+			'free',
+			'paid',
+			'founder',
+			'monthly',
+			'yearly'
+		]
 	},
 	{
 		id: 'cloud.link',
@@ -21,28 +37,21 @@ export const entries: SettingEntry[] = [
 		section: 'Account',
 		label: 'Link an account',
 		hint: 'Two remote workers, no card',
-		keywords: ['sign in', 'link account', 'shuffle account', 'connect', 'free account']
+		keywords: ['sign in', 'link account', 'shuffle account', 'connect', 'free account', 'activate']
 	},
 	{
 		id: 'cloud.remoteWorkers',
 		category: 'cloud',
 		section: 'Plan',
 		label: 'Remote workers',
-		keywords: ['seats', 'remote access', 'tunnel', 'connections', 'limit', 'free a seat']
-	},
-	{
-		id: 'cloud.plan',
-		category: 'cloud',
-		section: 'Plan',
-		label: 'Plan',
-		keywords: ['founder', 'monthly', 'yearly', 'subscription', 'paid plan']
+		keywords: ['seats', 'remote access', 'tunnel', 'connections', 'limit', 'in use']
 	},
 	{
 		id: 'cloud.renewal',
 		category: 'cloud',
 		section: 'Plan',
-		label: 'Paid access until',
-		keywords: ['lease renewal', 'renew', 'expires', 'expired', 'grace', 'payment', 'check now', 'refresh', 'seat lost']
+		label: 'Renews',
+		keywords: ['renewal', 'renew', 'expires', 'paid until', 'billing date']
 	},
 	{
 		id: 'cloud.upgrade',
@@ -51,20 +60,5 @@ export const entries: SettingEntry[] = [
 		label: 'Upgrade',
 		hint: 'Four remote workers, sync',
 		keywords: ['pricing', 'buy', 'paid plan', 'price', 'upgrade']
-	},
-	{
-		id: 'cloud.key',
-		category: 'cloud',
-		section: 'Plan',
-		label: 'Plan key',
-		keywords: ['license key', 'activate', 'ASH key', 'use a different key']
-	},
-	{
-		id: 'cloud.deactivate',
-		category: 'cloud',
-		section: 'Plan',
-		label: 'Deactivate on this worker',
-		hint: 'Frees its paid seat',
-		keywords: ['license deactivate', 'free seat', 'release']
 	}
 ];

@@ -1,146 +1,98 @@
 <script lang="ts">
 	/**
 	 * Cloud: what the AI Shuffle Cloud account gives this worker. Local use is
-	 * free and never depends on it; the account only sets how many remote
-	 * workers the hub serves (none, two on a free account, the plan's seats on
-	 * a paid one). Three states, from `GET /api/v1/license`:
+	 * free and never depends on it, and there is no license key: the plan comes
+	 * from the account this worker is signed in with, so signing in on another
+	 * worker gives it the same plan. The account only sets how many remote
+	 * workers the hub serves. Three states, from `GET /api/v1/license`:
 	 *
 	 * - not_linked: what a free account adds, Link an account (the Devices
-	 *   sign-in), pricing, and the paid key entry.
-	 * - free: 2 remote workers, Upgrade, the key entry.
-	 * - paid: plan, seats, paid access date with Check now, the key and Deactivate.
+	 *   sign-in) and pricing.
+	 * - free: 2 remote workers (or "N of 2 in use"), Upgrade.
+	 * - paid: 4 remote workers by default or the account's seat count, how many
+	 *   are in use when the hub says, and the renewal date.
 	 *
-	 * A saved activation can outlive paid access: after expiry, an invalid key
-	 * or a seat freed elsewhere the state falls back to free or not_linked while
-	 * the key stays on this worker. Check now and Deactivate stay offered then,
-	 * so the owner can renew or forget it.
-	 *
-	 * Replaces System > License; the endpoints keep their `/license` names.
-	 * A plan key, like every secret, needs an explicit Activate.
+	 * Replaces System > License; the endpoint keeps its `/license` name.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { BookOpen, ExternalLink, RefreshCw } from 'lucide-svelte';
-	import { getErrorMessage } from '$lib/api/client';
+	import { BookOpen, ExternalLink } from 'lucide-svelte';
 	import {
-		activateLicense,
 		CLOUD_DOCS,
 		CLOUD_PRICING_URL,
-		deactivateLicense,
+		FREE_WORKERS,
 		getLicense,
-		planName,
-		refreshLicense,
-		releaseSeat,
-		type LicenseStatus,
-		type SeatHolder
+		PAID_WORKERS,
+		UNLIMITED_SEATS,
+		type LicenseStatus
 	} from '$lib/api/license';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
-	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { FORBIDDEN_TEXT, loadState } from '$lib/settings/access.svelte';
 	import type { StatusTone } from '$lib/settings/types';
 	import PreferencePage from '../shell/PreferencePage.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ValueText from '../rows/ValueText.svelte';
-	import ExpandToggle from '../rows/ExpandToggle.svelte';
-	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import Meter from '../rows/Meter.svelte';
-	import PlanKeyForm from './editors/PlanKeyForm.svelte';
-	import SeatHolders from './editors/SeatHolders.svelte';
 	import './editors/editors.css';
-
-	/** Remote workers on the paid plan when the status does not say. */
-	const PAID_WORKERS = 4;
 
 	let status = $state<LicenseStatus | null>(null);
 	let load = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
-	let key = $state('');
-	let busy = $state(false);
 	let error = $state('');
-	let notice = $state('');
-	let seatHolders = $state<SeatHolder[] | null>(null);
-	let keyOpen = $state(false);
-	let seatsOpen = $state(false);
 	let alive = true;
 
 	const tier = $derived(status?.state ?? null);
 	const paid = $derived(tier === 'paid');
-	/** A paid lease this worker holds and that still grants paid access. */
-	const hasLease = $derived(paid && !!status && ['active', 'grace', 'expiring', 'ending'].includes(status.lease_state));
-	/** A key is saved on this worker, paid or not: Check now and Deactivate apply. */
-	const hasActivation = $derived(!!status && (!!status.key_hint || status.lease_state !== 'none'));
-	/** The saved key no longer grants paid access (expired, invalid, seat lost). */
-	const lapsed = $derived(hasActivation && !paid);
-	const leaseTrouble = $derived(!!status && ['grace', 'expiring', 'ending'].includes(status.lease_state));
-	const keyEntry = $derived(!!status && (status.server_configured || !!status.key_hint));
-	const limit = $derived(status?.remote_worker_limit ?? 0);
+
+	/** Remote workers the account allows: the paid seat count, else the limit, else the plan default. */
+	const cap = $derived.by(() => {
+		if (!status || tier === 'not_linked') return 0;
+		if (paid) return status.seats || status.remote_worker_limit || PAID_WORKERS;
+		return status.remote_worker_limit || FREE_WORKERS;
+	});
+	const unlimited = $derived(paid && cap >= UNLIMITED_SEATS);
+	const used = $derived(status?.seats_used ?? null);
 
 	const accountView = $derived.by((): { text: string; tone?: StatusTone } => {
 		if (!status) {
 			if (load === 'forbidden') return { text: FORBIDDEN_TEXT };
 			return { text: load === 'error' ? 'Unavailable' : 'Loading…' };
 		}
-		if (tier === 'paid') return { text: 'Paid', tone: leaseTrouble ? 'warn' : 'ok' };
+		if (tier === 'paid') return { text: 'Paid', tone: 'ok' };
 		if (tier === 'free') return { text: 'Free', tone: 'ok' };
 		return { text: 'Not linked', tone: 'off' };
 	});
 
 	const accountHint = $derived.by(() => {
 		if (!status) return undefined;
-		if (!status.linked) return paid ? 'Plan key, account not linked' : 'Local use stays free';
-		return 'Linked to AI Shuffle Cloud';
+		return status.linked ? 'Linked to AI Shuffle Cloud' : 'Local use stays free';
+	});
+
+	const workersHint = $derived.by(() => {
+		if (tier === 'not_linked') return 'A free account adds two';
+		if (unlimited && used !== null) return `${used} in use`;
+		return undefined;
 	});
 
 	function shortDate(iso: string | null): string {
 		if (!iso) return '';
 		const date = new Date(iso);
-		return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+		// A renewal is a calendar date: read it in UTC so it is not a day early west of UTC.
+		return Number.isNaN(date.getTime())
+			? iso
+			: date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 	}
-
-	function ago(iso: string | null): string {
-		if (!iso) return 'Never checked';
-		const t = new Date(iso).getTime();
-		if (Number.isNaN(t)) return 'Checked';
-		const minutes = Math.max(0, Math.round((Date.now() - t) / 60_000));
-		if (minutes < 1) return 'Checked just now';
-		if (minutes < 60) return `Checked ${minutes} min ago`;
-		const hours = Math.round(minutes / 60);
-		if (hours < 48) return `Checked ${hours} h ago`;
-		return `Checked ${shortDate(iso)}`;
-	}
-
-	const planHint = $derived.by(() => {
-		if (!status) return undefined;
-		if (status.lease_state === 'grace') return status.grace_until ? `Payment grace until ${shortDate(status.grace_until)}` : 'Payment grace period';
-		if (status.lease_state === 'expiring') return 'Renewal overdue';
-		if (status.lease_state === 'ending') return 'Ends at period end';
-		return undefined;
-	});
-
-	const LAPSED_TEXT: Record<string, string> = {
-		invalid: 'Key not accepted',
-		seat_lost: 'Seat freed elsewhere'
-	};
-	const renewalValue = $derived.by(() => {
-		if (!status) return '';
-		if (lapsed) {
-			if (status.lease_state === 'expired') return status.expires_at ? `Ended ${shortDate(status.expires_at)}` : 'Ended';
-			return LAPSED_TEXT[status.lease_state] ?? 'Not active';
-		}
-		return status.expires_at ? shortDate(status.expires_at) : 'Not set';
-	});
-	const renewalHint = $derived(status?.last_error ? 'Last check failed' : ago(status?.last_refresh_at ?? null));
 
 	/* ---------- the three tiers, top of the page ---------- */
 
 	const tiers = $derived([
 		{ id: 'local', name: 'This worker', figure: 'Free', unit: 'Local use, no account' },
-		{ id: 'free', name: 'Free account', figure: '2', unit: 'remote workers, no card' },
+		{ id: 'free', name: 'Free account', figure: String(FREE_WORKERS), unit: 'remote workers, no card' },
 		{
 			id: 'paid',
 			name: 'Paid plan',
-			figure: paid && (status?.seats ?? 0) >= 100 ? 'Unlimited' : String(paid && status?.seats ? status.seats : PAID_WORKERS),
-			unit: paid && (status?.seats ?? 0) >= 100 ? 'remote workers' : 'remote workers and sync'
+			figure: unlimited ? 'Unlimited' : String(paid ? cap : PAID_WORKERS),
+			unit: unlimited ? 'remote workers' : 'remote workers and sync'
 		}
 	]);
 	const currentTier = $derived(tier === 'paid' ? 'paid' : tier === 'free' ? 'free' : tier ? 'local' : null);
@@ -160,69 +112,8 @@
 		}
 	}
 
-	async function run(action: () => Promise<void>) {
-		if (busy) return;
-		busy = true;
-		error = '';
-		notice = '';
-		try {
-			await action();
-		} catch (cause) {
-			error = getErrorMessage(cause, 'AI Shuffle Cloud could not be reached. Local use is unaffected.');
-		} finally {
-			busy = false;
-		}
-	}
-
-	const activate = () =>
-		run(async () => {
-			const result = await activateLicense(key.trim());
-			if (!result.activated) {
-				seatHolders = result.installs;
-				seatsOpen = true;
-				error = result.detail;
-				return;
-			}
-			const { activated: _activated, ...next } = result;
-			seatHolders = null;
-			key = '';
-			keyOpen = false;
-			notice = 'Paid plan active on this worker.';
-			flashSaved();
-			status = next;
-		});
-
-	const freeSeat = (holder: SeatHolder) =>
-		run(async () => {
-			await releaseSeat(key.trim(), holder.install_id);
-			seatHolders = seatHolders?.filter((h) => h.install_id !== holder.install_id) ?? null;
-			notice = `Freed the seat of ${holder.name || 'that worker'}. Activate again to use it here.`;
-		});
-
-	const checkNow = () =>
-		run(async () => {
-			status = await refreshLicense();
-			notice = status.last_error ? '' : 'Checked with AI Shuffle Cloud.';
-		});
-
-	const deactivate = () =>
-		run(async () => {
-			const result = await deactivateLicense();
-			const { seat_released: released, ...next } = result;
-			notice = released
-				? 'Paid plan removed from this worker and its seat freed. Local use is unaffected.'
-				: 'Paid plan removed from this worker. Cloud could not be reached, so the seat frees itself after 21 days.';
-			status = next;
-		});
-
 	const linkAccount = () => settingsNav.go({ category: 'devices', item: 'account' });
 	const openDocs = () => layout.openFeaturePage('docs', CLOUD_DOCS);
-
-	const seatsValue = $derived(
-		seatHolders?.length && !hasLease
-			? `${seatHolders.length} in use`
-			: (status?.seats ?? 0) >= 100 ? 'Unlimited remote workers' : `${status?.seats_used ?? '?'} of ${status?.seats ?? PAID_WORKERS}`
-	);
 
 	onMount(() => void loadStatus());
 	onDestroy(() => {
@@ -264,44 +155,28 @@
 			</SettingRow>
 		{/if}
 	</RowGroup>
+	<p class="st-msg" data-testid="cloud-follows">
+		Your plan follows the Cloud account you sign in with. Sign in with the same account on another worker and it gets the same plan.
+	</p>
 
 	{#if status}
 		<RowGroup title="Plan">
-			<SettingRow
-				id="cloud.remoteWorkers"
-				hint={tier === 'not_linked' && !seatHolders?.length ? 'A free account adds two' : undefined}
-				expanded={seatsOpen && seatHolders?.length ? seatList : undefined}
-			>
-				{#if seatHolders?.length}
-					<ExpandToggle value={seatsValue} bind:open={seatsOpen} />
-				{:else if paid && (status.seats ?? 0) >= 100}
-					<span data-testid="cloud-seats"><ValueText value="Unlimited remote workers" tone="fg" /></span>
-				{:else if paid && status.seats_used !== null && status.seats}
-					<span data-testid="cloud-seats"><Meter used={status.seats_used} cap={status.seats} label="Remote workers in use" warnAt={1} /></span>
-				{:else if paid}
-					<span data-testid="cloud-seats"><ValueText value={seatsValue} tone="fg" /></span>
-				{:else}
-					<span data-testid="cloud-seats">
-						<ValueText
-							value={limit > 0 ? `${limit} remote ${limit === 1 ? 'worker' : 'workers'} included` : 'None'}
-							tone={limit > 0 ? 'fg' : 'muted'}
-						/>
-					</span>
-				{/if}
-			</SettingRow>
-			{#if paid}
-				<SettingRow id="cloud.plan" hint={planHint}>
-					<ValueText value={planName(status.plan)} tone="fg" status={leaseTrouble ? 'warn' : undefined} />
-				</SettingRow>
-			{/if}
-			{#if paid || hasActivation}
-				<SettingRow id="cloud.renewal" hint={renewalHint}>
-					<span data-testid="cloud-renewal"><ValueText value={renewalValue} status={lapsed ? 'warn' : undefined} /></span>
-					{#if hasActivation}
-						<button type="button" class="st-btn sm" aria-label="Check the plan now" disabled={busy} onclick={checkNow}>
-							<RefreshCw />Check now
-						</button>
+			<SettingRow id="cloud.remoteWorkers" hint={workersHint}>
+				<span data-testid="cloud-seats">
+					{#if tier === 'not_linked'}
+						<ValueText value="None" />
+					{:else if unlimited}
+						<ValueText value="Unlimited remote workers" tone="fg" />
+					{:else if used !== null}
+						<Meter {used} {cap} unit=" in use" label="Remote workers in use" warnAt={1} />
+					{:else}
+						<ValueText value={`${cap} remote ${cap === 1 ? 'worker' : 'workers'} included`} tone="fg" />
 					{/if}
+				</span>
+			</SettingRow>
+			{#if paid && status.expires_at}
+				<SettingRow id="cloud.renewal">
+					<span data-testid="cloud-renewal"><ValueText value={shortDate(status.expires_at)} tone="fg" /></span>
 				</SettingRow>
 			{/if}
 			{#if !paid}
@@ -311,44 +186,10 @@
 					</a>
 				</SettingRow>
 			{/if}
-			{#if keyEntry}
-				<SettingRow
-					id="cloud.key"
-					hint={hasActivation ? undefined : 'For a paid plan'}
-					expanded={keyOpen ? keyForm : undefined}
-				>
-					<ExpandToggle
-						value={status.key_hint ? `ASH-…${status.key_hint}` : 'Add key'}
-						mono={!!status.key_hint}
-						bind:open={keyOpen}
-					/>
-				</SettingRow>
-			{/if}
-			{#if hasActivation}
-				<SettingRow id="cloud.deactivate" hint={lapsed ? 'Forgets the saved key' : undefined}>
-					<InlineConfirm
-						label="Deactivate"
-						question={lapsed ? 'Forget the saved plan key?' : "Free this worker's paid seat?"}
-						confirmLabel="Deactivate"
-						disabled={busy}
-						onConfirm={deactivate}
-					/>
-				</SettingRow>
-			{/if}
 		</RowGroup>
-		{#if status.last_error}<p class="st-msg" role="status">Last check failed: {status.last_error}</p>{/if}
 	{/if}
-	{#if notice}<p class="st-msg" role="status">{notice}</p>{/if}
 	{#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
 </PreferencePage>
-
-{#snippet keyForm()}
-	<PlanKeyForm replacing={hasActivation} {busy} bind:key onActivate={activate} />
-{/snippet}
-
-{#snippet seatList()}
-	<SeatHolders holders={seatHolders ?? []} {busy} onFree={freeSeat} />
-{/snippet}
 
 <style>
 	/* The tier ladder: three steps, the current one lifted out of the row. */
@@ -414,8 +255,9 @@
 	}
 	.cl-fig {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: baseline;
-		gap: 7px;
+		gap: 2px 7px;
 		min-width: 0;
 	}
 	.cl-fig b {

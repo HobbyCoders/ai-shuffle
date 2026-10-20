@@ -1,11 +1,4 @@
-"""The worker's lease on hub tunnel calls, and the hub's tunnel_limit refusal.
-
-The account hub caps managed tunnels per account (android/hub
-src/tunnel-capacity.ts): one for an unpaid account, three for a licensed one.
-A worker proves its license by sending its lease in X-Shuffle-Lease on the
-activate and connector calls; a refused worker gets 409 tunnel_limit and keeps
-running locally, with the reason shown in the remote-access UI.
-"""
+"""Account-based capacity refusals preserve local use and remote-access diagnostics."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -15,8 +8,6 @@ import pytest
 
 from app.core import account_hub, license as licensing, managed_connection as managed
 
-LEASE = 'eyJmb3JtYXQiOiJzaHVmZmxlLWxlYXNlLXYxIn0'
-REAL_LEASE_HEADER = licensing.lease_header
 BINDING = {'hub_url': 'https://hub.example', 'server_id': 'worker', 'encrypted_secret': 'a', 'linked_by': 'x', 'active': 0}
 
 
@@ -52,7 +43,6 @@ def hub(monkeypatch):
     monkeypatch.setattr(account_hub, 'identifier', lambda value: value)
     monkeypatch.setattr(account_hub, 'secret_for', lambda _: 'test-secret')
     monkeypatch.setattr(account_hub, '_paused_until', {})
-    monkeypatch.setattr(licensing, 'lease_header', lambda: LEASE)
     return _Connection
 
 
@@ -62,48 +52,36 @@ def refusal(limit=1, used=1, licensed=False):
         'limit': limit, 'used': used, 'licensed': licensed})
 
 
-@pytest.mark.parametrize('suffix', ['activate', 'connector'])
-def test_tunnel_calls_carry_the_lease(hub, suffix):
+@pytest.mark.parametrize('suffix', ['activate', 'connector', 'plan', 'status', 'account', 'network/pending'])
+def test_hub_calls_use_server_credential_without_a_lease(hub, suffix):
     hub.replies = [(200, {}, {'ok': True})]
-    account_hub.call(BINDING, 'POST', suffix, {'remote_port': 8001})
+    account_hub.call(BINDING, 'GET', suffix)
     sent = hub.sent[0]
-    assert sent['headers'][licensing.LEASE_HEADER] == LEASE
+    assert sent['headers']['Authorization'] == 'Bearer test-secret'
+    assert 'X-Shuffle-Lease' not in sent['headers']
     assert sent['path'] == f'/v1/servers/worker/{suffix}'
     assert sent['host'] == 'hub.example'
 
 
-@pytest.mark.parametrize('suffix', ['status', 'account', 'network/pending', 'devices/x', 'connection'])
-def test_other_hub_calls_do_not_carry_the_lease(hub, suffix):
-    hub.replies = [(200, {}, {'active': True})]
-    account_hub.call(BINDING, 'GET', suffix)
-    assert licensing.LEASE_HEADER not in hub.sent[0]['headers']
+def test_plan_status_uses_the_real_server_credential_transport(hub, monkeypatch):
+    monkeypatch.setattr(licensing, '_entry', None)
+    monkeypatch.setattr(licensing.mobile_hub, 'get_binding', lambda: BINDING)
+    hub.replies = [(200, {}, {'plan': 'paid', 'status': 'active', 'remote_worker_limit': 100,
+                             'seats': 100, 'used': 3, 'renews_at': None})]
+    assert licensing.status()['remote_worker_limit'] == 100
+    sent = hub.sent[0]
+    assert sent['path'] == '/v1/servers/worker/plan'
+    assert sent['headers']['Authorization'] == 'Bearer test-secret'
+    assert 'X-Shuffle-Lease' not in sent['headers']
 
 
-@pytest.mark.parametrize('lease', [None, '', 'has space', 'a\r\nX-Other: 1', 'x' * 4097])
-def test_no_or_malformed_lease_sends_no_header(hub, monkeypatch, lease):
-    monkeypatch.setattr(licensing, 'lease_header', lambda: lease)
-    hub.replies = [(200, {}, {'ok': True})]
-    account_hub.call(BINDING, 'POST', 'activate', {'remote_port': 8001})
-    assert licensing.LEASE_HEADER not in hub.sent[0]['headers']
-
-
-def test_a_broken_license_store_never_blocks_the_hub_call(hub, monkeypatch):
-    def broken():
-        raise RuntimeError('database unavailable')
-    monkeypatch.setattr(licensing, 'lease_header', broken)
-    hub.replies = [(200, {}, {'ok': True})]
-    assert account_hub.call(BINDING, 'POST', 'connector', {'remote_port': 8001}) == {'ok': True}
-
-
-def test_real_lease_header_reaches_the_hub_call(hub, monkeypatch):
-    """Not stubbed: whatever license.lease_header() returns is what the hub gets."""
-    monkeypatch.setattr(licensing, 'lease_header', REAL_LEASE_HEADER)
-    monkeypatch.setattr(licensing, 'beta_mode', lambda: False)
-    monkeypatch.setattr(licensing, '_load_state', lambda cached=False: {'lease': {'format': 'shuffle-lease-v1', 'payload': 'e30='}})
-    hub.replies = [(200, {}, {'ok': True})]
-    account_hub.call(BINDING, 'POST', 'activate', {'remote_port': 8001})
-    header = hub.sent[0]['headers'][licensing.LEASE_HEADER]
-    assert header and header == REAL_LEASE_HEADER()
+def test_tunnel_limit_invalidates_cached_plan(hub, monkeypatch):
+    invalidate = Mock()
+    monkeypatch.setattr(licensing, 'invalidate_plan_cache', invalidate)
+    hub.replies = [refusal()]
+    with pytest.raises(account_hub.TunnelLimitError):
+        account_hub.call(BINDING, 'POST', 'activate')
+    invalidate.assert_called_once_with()
 
 
 def test_tunnel_limit_refusal_is_parsed(hub):
@@ -197,7 +175,7 @@ async def test_refused_worker_backs_off_an_hour_and_shows_why(supervisor, monkey
     assert 'Remote access is off' in seen[0]['error']
 
 
-async def test_a_license_activation_cuts_the_backoff_short(supervisor, monkeypatch):
+async def test_retry_cuts_the_backoff_short(supervisor, monkeypatch):
     clock = supervisor
     process = SimpleNamespace(returncode=None, terminate=Mock(), wait=AsyncMock(), kill=Mock())
     answers = [account_hub.TunnelLimitError(1, 1, False, 3600), ('token-' * 8, 'https://worker.example.com')]
@@ -215,19 +193,12 @@ async def test_a_license_activation_cuts_the_backoff_short(supervisor, monkeypat
         ticks.append(delay)
         clock[0] += delay
         if len(ticks) == 2:
-            managed.retry_soon()  # Settings > Cloud: a key was just activated.
+            managed.retry_soon()  # A manual retry was requested.
         if len(ticks) >= 6:
             raise asyncio.CancelledError()
     monkeypatch.setattr(managed.asyncio, 'sleep', tick)
     with pytest.raises(asyncio.CancelledError):
         await managed.supervise()
-    assert not answers, 'the worker asked the hub again right after the activation'
+    assert not answers, 'the worker asked the hub again right after the retry'
     assert clock[0] < 3600
     assert managed._refusal is None
-
-
-async def test_license_activation_nudges_remote_access(monkeypatch):
-    nudged = Mock()
-    monkeypatch.setattr(managed, 'retry_soon', nudged)
-    licensing._nudge_remote_access()
-    nudged.assert_called_once()

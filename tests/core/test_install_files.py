@@ -51,15 +51,14 @@ def test_compose_carries_the_runtime_settings_the_image_needs():
 
 def test_env_example_lists_only_what_a_buyer_sets():
     assert set(env_example()) == {"AI_SHUFFLE_VERSION", "BIND_HOST", "PORT",
-                                  "COOKIE_SECURE", "OWNER_PASSWORD", "LICENSE_KEY", "WORKSPACE_DIR", "PUID", "PGID"}
+                                  "COOKIE_SECURE", "OWNER_PASSWORD", "WORKSPACE_DIR", "PUID", "PGID"}
     # The owner password is optional and seeds the first start only.
     assert env_example()["OWNER_PASSWORD"] == ""
     assert service()["environment"]["OWNER_PASSWORD"] == "${OWNER_PASSWORD:-}"
-    # So is the license key (app.core.license.LICENSE_KEY_ENV), activated once.
-    from app.core.license import LICENSE_KEY_ENV
-    assert env_example()[LICENSE_KEY_ENV] == ""
-    assert service()["environment"][LICENSE_KEY_ENV] == "${LICENSE_KEY:-}"
-    assert "first start" in (COMPOSE / "env.example").read_text().split("LICENSE_KEY=")[0].rsplit("---", 1)[1]
+    # There is no license key: a Cloud plan follows the signed-in account.
+    assert "LICENSE_KEY" not in env_example()
+    assert "LICENSE_KEY" not in service()["environment"]
+    assert "LICENSE_KEY" not in (COMPOSE / "compose.yaml").read_text()
     assert env_example()["BIND_HOST"] == "127.0.0.1"
     compose = (COMPOSE / "compose.yaml").read_text()
     for key in env_example():

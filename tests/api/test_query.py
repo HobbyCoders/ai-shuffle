@@ -55,10 +55,8 @@ class TestRequireClaudeAuth:
         """Credentials are checked per turn, not by this compatibility dependency."""
         from app.api.query import require_claude_auth
         from app.core import credential_gate
-        from app.core import license as license_mod
 
-        with patch.object(license_mod, "license_allows_agent_runs", return_value=(True, None)), \
-                patch.object(credential_gate, "claude_credential_ready",
+        with patch.object(credential_gate, "claude_credential_ready",
                              return_value=(False, credential_gate.NOT_SIGNED_IN_MESSAGE)):
             assert await require_claude_auth() is None
 
@@ -66,7 +64,7 @@ class TestRequireClaudeAuth:
         from app.api.query import require_claude_auth
         from app.core import license as license_mod
 
-        with patch.object(license_mod, "license_allows_agent_runs",
+        with patch.object(license_mod, "status",
                           side_effect=AssertionError("Cloud state must not gate queries")):
             assert await require_claude_auth() is None
 
@@ -98,7 +96,8 @@ class TestPerLegCredentialGate:
         database.create_profile("claude-agent", "Claude Agent", None, {"model": "opus"})
         not_signed_in = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=False)
         with patch.object(claude_cli_status, "get_status", return_value=not_signed_in), \
-                patch.object(license_mod, "license_allows_agent_runs", return_value=(True, None)) as lic, \
+                patch.object(license_mod, "status",
+                             side_effect=AssertionError("Cloud state must not gate runs")) as lic, \
                 patch("app.api.query.start_background_query",
                       new=AsyncMock(return_value={"session_id": "s", "status": "started"})) as start:
             yield lic, start
@@ -150,7 +149,6 @@ class TestPerLegCredentialGate:
 
     async def test_a_missing_cloud_plan_still_starts(self, signed_out):
         lic, start = signed_out
-        lic.return_value = (False, "This worker has no license.")
         result = await self._start("gpt-agent")
         assert result["status"] == "started"
         start.assert_awaited_once()

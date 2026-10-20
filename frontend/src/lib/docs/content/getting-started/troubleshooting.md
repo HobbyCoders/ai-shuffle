@@ -120,4 +120,4 @@ When the app does not start, save the container log and email it instead:
 docker logs --tail 500 ai-shuffle > ai-shuffle.log
 ```
 
-Read the file and remove anything private first. Email it to support@hobbycoders.com with your AI Shuffle version and what you were doing. Never send passwords, API keys, license keys or sign-in codes.
+Read the file and remove anything private first. Email it to support@hobbycoders.com with your AI Shuffle version and what you were doing. Never send passwords, API keys, sign-in codes or plan keys.

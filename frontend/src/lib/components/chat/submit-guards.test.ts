@@ -168,7 +168,7 @@ describe('projectRulesLane', () => {
 });
 
 describe('gateBlocksComposer', () => {
-	const gate = { ready: false, reason: 'Connect a provider', license_allows_runs: true };
+	const gate = { ready: false, reason: 'Connect a provider' };
 
 	it('stays quiet when the gate is ready or absent', () => {
 		expect(gateBlocksComposer(null, false)).toBe(false);
@@ -185,8 +185,9 @@ describe('gateBlocksComposer', () => {
 		expect(gateBlocksComposer({ ...gate, any_provider_ready: true }, false)).toBe(false);
 	});
 
-	it('always warns when the license blocks runs', () => {
-		expect(gateBlocksComposer({ ...gate, license_allows_runs: false, any_provider_ready: true }, true)).toBe(true);
+	it('ignores a license flag from an older worker: Cloud plans never block runs', () => {
+		const legacy = { ...gate, license_allows_runs: false, any_provider_ready: true } as Parameters<typeof gateBlocksComposer>[0];
+		expect(gateBlocksComposer(legacy, true)).toBe(false);
 	});
 
 	it('falls back to the any-credential flag on older servers', () => {

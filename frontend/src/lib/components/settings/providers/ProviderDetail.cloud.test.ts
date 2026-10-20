@@ -88,7 +88,7 @@ beforeEach(() => {
 					mode,
 					mode_label: mode === 'cloud' ? 'Cloud provider or gateway' : worker.state.claude.mode_label,
 					cloud: cloud.status,
-					gate: { ready: true, mode, claude_credential_ready: true, reason: null, license_allows_runs: true }
+					gate: { ready: true, mode, claude_credential_ready: true, reason: null }
 				});
 				return { ...cloud, auth: worker.state.claude };
 			},
@@ -188,7 +188,7 @@ it('keeps the warning on the page while the method is on, and Remove deletes it'
 		mode: 'cloud',
 		mode_label: 'Cloud provider or gateway',
 		cloud: cloud.status,
-		gate: { ready: true, mode: 'cloud', claude_credential_ready: true, reason: null, license_allows_runs: true }
+		gate: { ready: true, mode: 'cloud', claude_credential_ready: true, reason: null }
 	});
 	await show();
 	expect(screen.getByText('Runs on LLM gateway')).toBeTruthy();
@@ -235,7 +235,7 @@ it('warns when cloud is on but its values are missing', async () => {
 			missing: ['AWS access keys or Bedrock API key'],
 			storage_locked: false
 		},
-		gate: { ready: false, mode: 'cloud', claude_credential_ready: false, reason: 'x', license_allows_runs: true }
+		gate: { ready: false, mode: 'cloud', claude_credential_ready: false, reason: 'x' }
 	});
 	await show();
 	expect(screen.getByText('Not ready')).toBeTruthy();

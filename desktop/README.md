@@ -11,10 +11,8 @@ Download the Windows installer at <https://hobbycoders.com/desktop> and run it.
 For an existing installation, keep the same installation location. Continue using
 your normal AI Shuffle shortcut. The installer includes a ready-to-run app,
 Python, Node and PostgreSQL; startup does not need to build or download code.
-Downloading the installer needs no account. In-app updates need an active AI
-Shuffle license while the hub's license gate is on: the app sends its worker's
-license lease, or on a first install asks once for the license key
-(`src/main/source-updates.ts`).
+Downloading the installer and in-app updates need no account or license key.
+Cloud plans follow the signed-in account and only affect remote-worker capacity.
 
 Stable milestones include an NSIS installer, built by `desktop-installer.yml`.
 Between installers, the installed app downloads and builds signed release code

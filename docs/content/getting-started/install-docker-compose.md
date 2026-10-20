@@ -81,8 +81,6 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Seeds the owner password on the first start only (see env.example).
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
-      # Optional: links a paid Cloud plan on the first start (see env.example).
-      LICENSE_KEY: ${LICENSE_KEY:-}
       # Optional: each applies only once uncommented here (a line in .env alone
       # does not reach the container). The install guide explains each one.
       # The reverse proxy's address, as AI Shuffle sees it:
@@ -185,15 +183,6 @@ COOKIE_SECURE=false
 # browser on first visit instead. At least 12 characters.
 OWNER_PASSWORD=
 
-# --- Optional Cloud plan -------------------------------------------------------
-
-# Optional. Your paid Cloud plan's license key (ASH-XXXXX-XXXXX-XXXXX-XXXXX).
-# On the first start AI Shuffle links it for this install. After a definitive
-# answer it will not retry the same key; Settings > Cloud shows the result.
-# You can clear this line after linking, or leave it empty and link in Settings.
-# Local use and updates are free and never need a key.
-LICENSE_KEY=
-
 # --- Files and permissions ---------------------------------------------------
 
 # The folder on this host where your projects live. Created on first start.
@@ -235,7 +224,6 @@ PGID=1000
 ### 2. Fill in your settings
 
 
-- **`LICENSE_KEY`** (optional): links a paid Cloud plan on the first start. You can enter it in Settings later instead. Local use and updates never need a key.
 - **`OWNER_PASSWORD`** (optional): set the owner password now, or leave it empty and create it in your browser on the first visit.
 - **`WORKSPACE_DIR`**: the folder where your projects live. The default is `./workspace` next to `compose.yaml`.
 - **`PUID` and `PGID`**: the user and group that should own your project files. On Linux, `id -u` and `id -g` show yours. Keep 1000 on a single-user machine.
@@ -296,7 +284,7 @@ docker run -d \
 ```
 
 - Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).
-- Add `-e LICENSE_KEY=...` or `-e OWNER_PASSWORD=...` to set them on the first start.
+- Add `-e OWNER_PASSWORD=...` to set the owner password on the first start.
 - Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
 - Set `PUID` and `PGID` to the owner of your workspace folder.
 - Keep `--restart unless-stopped`. When AI Shuffle stops answering, the container restarts it on its own. If that keeps failing, the container exits so that Docker can start it again. Without a restart policy it stays stopped until you start it.

@@ -666,21 +666,6 @@ export class WorkerSupervisor extends EventEmitter {
 		return reply.allow_updates === true;
 	}
 
-	/**
-	 * The worker's license lease for the hub's gated source feed, as the
-	 * X-Shuffle-Lease header value, or null: not our worker, not ready, no
-	 * lease, beta mode, or a worker too old to have the endpoint (feature check).
-	 */
-	async sourceLease(): Promise<string | null> {
-		if (this._state.external || this._state.phase !== 'ready') return null;
-		try {
-			const reply = await this.lifecycleRequest('source-lease');
-			return typeof reply.lease === 'string' && reply.lease ? reply.lease : null;
-		} catch {
-			return null;
-		}
-	}
-
 	async activeSessionCount(): Promise<number> {
 		this._remoteWorkers = [];
 		if (this._state.external || this._state.phase !== 'ready') return 0;

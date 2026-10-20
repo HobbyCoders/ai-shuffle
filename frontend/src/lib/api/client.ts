@@ -448,7 +448,7 @@ export interface AuthStatus {
 	 *  at least one enabled model provider with a stored credential (PA10).
 	 *  May be undefined on older backends — fall back to claude_authenticated. */
 	has_any_credential?: boolean;
-	/** The server's one credential gate (license plus the active Claude Code
+	/** The server's one credential gate (the active Claude Code
 	 *  mode's credential). When `ready` is false, new Claude agent runs are
 	 *  refused with `reason` (reason only for callers signed in to the worker). */
 	agent_gate?: AgentGateStatus;
@@ -462,7 +462,6 @@ export interface AgentGateStatus {
 	mode: 'subscription' | 'api_key' | 'cloud' | 'off' | null;
 	claude_credential_ready: boolean;
 	reason?: string | null;
-	license_allows_runs?: boolean;
 	startup_state?: 'ready' | 'setup_required' | null;
 	/** At least one agent provider (any brand) has a usable credential. Absent on older workers. */
 	any_provider_ready?: boolean;

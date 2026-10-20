@@ -15,7 +15,7 @@ import ClaudeConnect from './ClaudeConnect.svelte';
 function creds(over: Partial<AgentCredentials> = {}): AgentCredentials {
 	return {
 		mode: 'subscription', modeLabel: 'Claude subscription', explicit: true,
-		ready: false, credentialReady: false, licenseAllowsRuns: true, reason: 'Not signed in.',
+		ready: false, credentialReady: false, reason: 'Not signed in.',
 		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
 		apiKey: { set: false, last4: null },
 		...over,
