@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from app.core import codex_token_refresh, encryption
+from app.core import codex_token_refresh, encryption, xai_token_refresh
 from app.core.config import settings
 from app.db import database as db
 from tests.fakes.http import mock_transport_client
@@ -63,6 +63,26 @@ def _reset_locks():
 # ---------------------------------------------------------------------------
 # _needs_refresh policy
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("worker", [codex_token_refresh, xai_token_refresh])
+@pytest.mark.parametrize("stamp,reason", [
+    (None, "last_refresh_missing"),
+    ("not-an-iso-stamp", "last_refresh_missing"),
+    (datetime(2026, 10, 12, 12, tzinfo=timezone.utc), "8_day"),
+    (datetime(2026, 10, 20, 11, tzinfo=timezone.utc), None),
+    (datetime(2026, 10, 20, 11), None),
+    ("2026-10-20T07:00:00-04:00", None),
+])
+def test_refresh_reason_for_database_and_wire_stamps(monkeypatch, worker, stamp, reason):
+    now = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(worker, "_now", lambda: now)
+    bundle = {"codex_last_refresh": stamp}
+    access = _jwt_with_exp(now + timedelta(hours=1))
+    assert worker._refresh_reason(bundle, access) == reason
+    assert worker._needs_refresh(bundle, access) == (reason is not None)
+    if reason is None:
+        assert worker._refresh_reason(bundle, _jwt_with_exp(now + timedelta(minutes=15))) == "exp_within_skew"
+
 
 class TestNeedsRefreshPolicy:
     def test_no_last_refresh_is_due(self):
