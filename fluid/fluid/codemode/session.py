@@ -576,6 +576,7 @@ class CodeModeSession:
             record = {
                 "name": name,
                 "target": _call_target(kwargs),
+                "outside_cwd": self._skills.journal_call_outside(kwargs) if self._skills is not None else False,
                 "ok": False,
                 "mutates": bool(
                     spec is not None
@@ -736,7 +737,8 @@ class CodeModeSession:
                 # with their outcome — a workflow is a sequence, and the
                 # unordered ``tools`` set cannot express one.
                 "calls": [
-                    {"name": c["name"], "ok": c["ok"]} for c in called_tools
+                    {"name": c["name"], "ok": c["ok"], "outside_cwd": c["outside_cwd"]}
+                    for c in called_tools
                 ],
             })
             self._skills.note_uses(referenced_skills(code))

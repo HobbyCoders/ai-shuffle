@@ -800,6 +800,13 @@ class SkillStore:
         if project:
             self._journal_tag["project"] = project
 
+    def journal_call_outside(self, arguments: dict) -> bool:
+        """Classify resolved host-call arguments; persist only the boolean."""
+        try:
+            return names_path_outside(json.dumps(arguments, ensure_ascii=False, default=str), self._journal_cwd)
+        except (TypeError, ValueError, OSError):
+            return True  # uncertain evidence is retained; journaling cannot break a tool
+
     # ─── meta ────────────────────────────────────────────────────────────
     def _load_meta(self) -> dict:
         return load_json_document(self._meta_path, {})
@@ -1027,8 +1034,20 @@ class SkillStore:
         entry.setdefault("ts", time.time())
         for key, value in self._journal_tag.items():
             entry.setdefault(key, value)
-        if entry.get("kind", "cell") in ("cell", "tool") and names_path_outside(
-            str(entry.get("code") or entry.get("input") or ""), self._journal_cwd,
+        kind = entry.get("kind", "cell")
+        calls = entry.get("calls")
+        resolved_outside = None
+        if (kind == "cell" and isinstance(calls, list) and calls
+                and entry.get("host_calls") == len(calls)
+                and all(isinstance(c, dict) and type(c.get("outside_cwd")) is bool for c in calls)):
+            resolved_outside = any(c["outside_cwd"] for c in calls)
+        # Expressions such as root + '/module.py' contain misleading raw
+        # literals. Complete host-produced metadata wins; legacy or partial
+        # records keep the conservative raw-code fallback.
+        if kind in ("cell", "tool") and (
+            resolved_outside if resolved_outside is not None else names_path_outside(
+                str(entry.get("code") or entry.get("input") or ""), self._journal_cwd,
+            )
         ):
             entry["outside_cwd"] = True
         line = json.dumps(entry, ensure_ascii=False) + "\n"
