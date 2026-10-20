@@ -164,6 +164,11 @@ def _safe_key(suffix: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.:-]", "-", suffix)[:96]
 
 
+def _stable_install_path(path: str) -> str:
+    """Hide packaged revision directories in memories, keeping path separators."""
+    return re.sub(r"([\\/]versions[\\/])[0-9a-fA-F]{40}(?=[\\/]|$)", r"\1<current>", path)
+
+
 def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
     """``(key, text)`` facts a worker can establish without the model.
 
@@ -171,7 +176,8 @@ def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
     since that is the thing sessions get wrong), and, when any package
     directory's node_modules are missing or empty, the package directories a
     fresh worktree must install. Text is deliberately free of dates, counts
-    and per-worktree install state so a re-harvest is a no-op save.
+    and per-worktree install state so a re-harvest is a no-op save. Packaged
+    version directories use <current>; the live runtime note has exact paths.
     """
     root = Path(cwd)
     facts: list[tuple[str, str]] = []
@@ -179,10 +185,10 @@ def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
         pytest_found = importlib.util.find_spec("pytest") is not None
     except (ImportError, ValueError, AttributeError):
         pytest_found = False
-    exe = sys.executable
+    exe = _stable_install_path(sys.executable)
     if not pytest_found:
         cli = shutil.which("pytest")
-        hint = f"; a pytest executable is on PATH at {cli}" if cli else (
+        hint = f"; a pytest executable is on PATH at {_stable_install_path(cli)}" if cli else (
             "; run tests with a project venv or install pytest there first"
         )
         facts.append((_KEY_PYTEST, f"pytest is not importable from the worker Python {exe}{hint}."))
