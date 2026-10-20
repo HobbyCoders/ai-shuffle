@@ -1768,6 +1768,7 @@ class ChatWebSocketHandler:
             # submit_turn exports this send's lifted blobs; the owner imports
             # them before enqueuing so the prompt never names unavailable bytes.
             try:
+                await turn_manager.reactivate_for_send(session_id, "user", payload)
                 submitted = await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
@@ -2618,6 +2619,7 @@ class ChatWebSocketHandler:
         if owner_device:
             from app.network import control
             try:
+                await turn_manager.reactivate_for_send(session_id, "queue", payload)
                 await control.submit_turn(
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
                     project_id=project_id, payload=payload or None, owner_send=True,
