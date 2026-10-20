@@ -1,8 +1,9 @@
 """Where the emulator's SDK, devices and logs live on this worker.
 
-Everything sits under one root (``<data dir>/android-sdk`` unless
-``ANDROID_SDK_DIR`` says otherwise) in sdkmanager's own layout, so a build
-pointed at it with ``ANDROID_HOME`` finds the same packages.
+Everything sits under ``<data dir>/android-sdk`` in sdkmanager's own layout.
+``ANDROID_SDK_DIR`` explicitly opts into managing another root. Discovery of an
+Android Studio SDK is informational only: it never grants write or process
+ownership. Builds pointed at our SDK with ``ANDROID_HOME`` find its packages.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,9 +29,31 @@ def sdk_root() -> Path:
     return Path(settings.data_dir) / "android-sdk"
 
 
+def discover_sdk() -> Optional[Path]:
+    """Find an existing Windows SDK for guidance only; never adopt or modify it."""
+    if sys.platform == "win32":
+        candidates = [Path(os.environ[name]) for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT")
+                      if os.environ.get(name)]
+        if os.environ.get("LOCALAPPDATA"):
+            candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Android" / "Sdk")
+        return next((path for path in candidates if path.is_dir()), None)
+    return None
+
+
 class SdkLayout:
     def __init__(self, root: Optional[Path] = None) -> None:
         self.root = Path(root) if root is not None else sdk_root()
+
+    @property
+    def owns_root(self) -> bool:
+        """Only the private data-directory SDK permits path-based orphan cleanup.
+
+        An explicit external SDK may share executables with Android Studio;
+        its processes are handled only by the verified process ledger.
+        """
+        from app.core.config import settings
+
+        return self.root.resolve() == (Path(settings.data_dir) / "android-sdk").resolve()
 
     # Packages, in sdkmanager's layout.
     def package_dir(self, path: str) -> Path:
@@ -37,11 +61,11 @@ class SdkLayout:
 
     @property
     def emulator_bin(self) -> Path:
-        return self.root / "emulator" / "emulator"
+        return self.root / "emulator" / ("emulator.exe" if sys.platform == "win32" else "emulator")
 
     @property
     def adb(self) -> Path:
-        return self.root / "platform-tools" / "adb"
+        return self.root / "platform-tools" / ("adb.exe" if sys.platform == "win32" else "adb")
 
     # State the app owns.
     @property
@@ -126,8 +150,14 @@ class SdkLayout:
 
     def discovery_dirs(self) -> List[Path]:
         """Where a running emulator may write ``pid_<pid>.ini`` (by version)."""
-        return [self.runtime_dir / "avd" / "running", self.user_home / "avd" / "running",
-                self.user_home / ".android" / "avd" / "running"]
+        folders = [self.runtime_dir / "avd" / "running", self.user_home / "avd" / "running",
+                   self.user_home / ".android" / "avd" / "running"]
+        if sys.platform == "win32":
+            if os.environ.get("TEMP"):
+                folders.append(Path(os.environ["TEMP"]) / "avd" / "running")
+            if os.environ.get("LOCALAPPDATA"):
+                folders.append(Path(os.environ["LOCALAPPDATA"]) / "Temp" / "avd" / "running")
+        return folders
 
     def discovery(self, pid: int) -> Dict[str, str]:
         """A running emulator's discovery file (``grpc.port``, ``grpc.token``...), or {}."""
@@ -155,6 +185,8 @@ class SdkLayout:
 
         keep = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR",
                 "XDG_RUNTIME_DIR", RUN_MARKER)
+        if sys.platform == "win32":
+            keep += ("SystemRoot", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE")
         env = {key: os.environ[key] for key in keep if key in os.environ}
         env.update({
             # The emulator keeps its console/gRPC token in ~ and adb reads it
@@ -165,6 +197,8 @@ class SdkLayout:
             "ANDROID_AVD_HOME": str(self.avd_home),
             "ANDROID_USER_HOME": str(self.user_home),
             "ANDROID_EMULATOR_HOME": str(self.user_home),
+            # Never share/kill Android Studio's default adb server on 5037.
+            "ANDROID_ADB_SERVER_PORT": "5038",
             # The emulator's discovery file (with its gRPC token) goes here,
             # not into the app user's own runtime folder.
             "XDG_RUNTIME_DIR": str(self.runtime_dir),

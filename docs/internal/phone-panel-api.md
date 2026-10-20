@@ -40,7 +40,17 @@ Refusals return a JSON error body, shown to the owner as is:
 
 - When more than one reason applies, `reason` is the first match in this order:
   `unsupported_arch`, `installing`, `no_kvm` / `kvm_permission`, `error` (the last
-  install failed), `sdk_missing`, `ready`.
+  install failed), `sdk_missing`, `ready`. On Windows x86_64 a bounded
+  `emulator.exe -accel-check` replaces the KVM check; unusable acceleration
+  returns `error` with WHPX/AEHD setup instructions. A missing emulator binary
+  returns `sdk_missing`, so the owner can install before configuring acceleration.
+  A partial Windows SDK without an install record also offers `sdk_missing`,
+  with acceleration guidance if needed, instead of dead-ending at `error`.
+  Successful probes are cached by binary path/revision; booting, running and
+  installing status skips the probe. SDK discovery is informational only;
+  `ANDROID_SDK_DIR` explicitly opts into managing an external folder. Startup
+  path-based process/lock cleanup is restricted to the private data-folder SDK.
+  All adb calls use `ANDROID_ADB_SERVER_PORT=5038`, not Android Studio's 5037.
 - `install` is `null` until this process starts an install. After that it holds
   the last install's state until the app restarts.
 - `devices` is empty until the SDK is installed. After that it always lists

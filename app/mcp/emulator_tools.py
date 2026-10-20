@@ -187,9 +187,9 @@ async def run_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def emulator_tools_supported() -> bool:
     """Only workers whose platform has an emulator backend list the tools."""
-    from app.core.android_emulator.host import check_host
+    from app.core.android_emulator.host import supports_platform
 
-    return check_host().reason != "unsupported_arch"
+    return supports_platform()
 
 
 def build_emulator_tools(tool: Callable, *, cwd: Optional[str] = None) -> list:
