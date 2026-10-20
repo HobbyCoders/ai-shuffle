@@ -71,9 +71,14 @@ def test_prompt_is_identical_across_compilations(tmp_path, monkeypatch) -> None:
     assert first == second
 
 
+# Verified delegation adds relationship-specific action rules and retains the
+# permission boundary. Measured after the deliberate golden snapshot update.
+MEASURED_BASE_PROMPT = 14_296
+
+
 def test_base_prompt_is_static_and_bounded() -> None:
-    # Sprawl tripwire for the cached prefix, not a provider limit.
-    assert len(DEFAULT_BASE_PROMPT) < 14_000
+    # Sprawl tripwire: measured fixture + 1%, not a provider limit.
+    assert len(DEFAULT_BASE_PROMPT) <= MEASURED_BASE_PROMPT * 101 // 100
     # No volatile facts: those belong in the environment block.
     for volatile in ("202", "C:\\", "/home/", "{", "}"):
         assert volatile not in DEFAULT_BASE_PROMPT
