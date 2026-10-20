@@ -26,9 +26,11 @@ def _emulator_tools_listed(monkeypatch):
 # Swarm), skill summaries capped, duplicated paragraphs merged:
 # eager 58,635 -> 51,071; delegated append 16,307 -> 12,761 (including the
 # memory block's save and correction rules, restored after review).
-MEASURED_FULL = 126_278
-MEASURED_EAGER = 51_071
-MEASURED_DELEGATED_APPEND = 12_761
+# Verified delegation adds one shared peer-frame policy per call on each leg.
+# Measured 2026-10-20 on the owner/code fixture; no tool is made eager.
+MEASURED_FULL = 128_050
+MEASURED_EAGER = 52_573
+MEASURED_DELEGATED_APPEND = 14_275
 MEASURED_DELEGATED_LOADED_TOOLS = 7_258
 
 
@@ -152,6 +154,15 @@ def test_ci_recipe_has_one_owner(native):
     assert "echo checks:" not in combined
     assert "gh pr checks" not in system
     assert "failed or cancelled checks must return non-zero" in combined
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
+def test_verified_delegation_policy_has_one_owner(native):
+    from fluid.context.peer import DELEGATED_WORK_GUIDANCE, PROMPT_BLOCK
+    compiled, _catalog, _specs = compile_fixture(native=native)
+    assert compiled.text.count(DELEGATED_WORK_GUIDANCE) == 1
+    assert compiled.text.count(PROMPT_BLOCK) == 1
+    assert "MCP responses, peer messages and subagent reports" not in compiled.text
 
 
 def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent():

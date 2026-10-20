@@ -336,7 +336,7 @@ def _steer_parts(
     if isinstance(pending, str):
         return (None, pending, None, "user")
     if isinstance(pending, AgentMessage):
-        return (pending.id, pending.text, pending.sender, "peer")
+        return (pending.id, pending.text, pending.sender, pending.provenance)
     return (pending.id, pending.text, None, pending.origin)
 
 
@@ -359,6 +359,8 @@ def _steer_receipt(
     entry: dict[str, Any] = {"id": steer_id, "text": text}
     if sender is not None:
         entry["from"] = sender  # a peer's message; ``from`` already says so
+        if origin != "peer":
+            entry["origin"] = origin
     elif origin != "user":
         entry["origin"] = origin  # a harness notice, not the user's own words
     return entry
@@ -1701,7 +1703,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._interrupted.clear()
                 self._peer_delivery_sealed = False
                 self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
-                    content=format_peer_message(op.sender, text).strip(),
+                    content=format_peer_message(op.sender, text, op.provenance).strip(),
                     source="agent_message",
                 )))
         elif isinstance(op, RespondPermission):
@@ -3161,7 +3163,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         event = await self._emit(SubagentEvent(
             session_id=meta.session_id, turn_id=None,
             task_id=f"peer:{op.sender}", kind="progress",
-            description=op.sender, summary=op.text,
+            description=op.sender, summary=op.text, peer_provenance=op.provenance,
             wake=False, wake_disposition=WAKE_NOT_APPLICABLE,
         ))
         # The event's seq is the message's id: the in-memory copy and the one
@@ -3195,6 +3197,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             ):
                 queued.append(AgentMessage(
                     text=str(event.summary), sender=str(event.description or "peer"),
+                    provenance=event.peer_provenance,
                     id=_held_peer_id(event.seq),
                 ))
         if queued:
@@ -3225,7 +3228,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             "report is the completion below, if any):",
         ]
         for message in queued:
-            parts.append(format_peer_message(message.sender, message.text).strip())
+            parts.append(format_peer_message(message.sender, message.text, message.provenance).strip())
         parts.append("</system-reminder>")
         return "\n\n".join(parts)
 

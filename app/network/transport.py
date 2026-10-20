@@ -74,6 +74,7 @@ connect_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVa
 
 _wake: Optional[asyncio.Event] = None
 _scan_wake: Optional[asyncio.Event] = None
+_pending_wake: Optional[asyncio.Event] = None
 _scan_requests_lock = threading.Lock()
 _dirty_collections: set[str] = set()
 # Catalog wakes name their sessions when the hook knows them. ``None`` means
@@ -1400,6 +1401,51 @@ async def sync_loop() -> None:
             _wake.clear()
 
 
+async def pending_loop() -> None:
+    """Resume committed pending heads at startup, even with every peer offline."""
+    dirty = False
+    next_exchange = 0.0
+    while True:
+        if _pending_wake is not None:
+            _pending_wake.clear()
+        progressed = more = False
+        try:
+            result = await asyncio.to_thread(engine.resume_pending)
+            progressed = bool(result.applied or result.lost or result.rejected)
+            more = result._pending_more
+            dirty = dirty or progressed
+            now = time.monotonic()
+            if dirty and (not more or now >= next_exchange):
+                engine.kick()
+                dirty = False
+                next_exchange = now + 1.0
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - local catch-up must survive transient DB errors
+            logger.warning("Buffered sync catch-up will retry", exc_info=True)
+            if dirty:
+                # Publish already-committed work even if the next DB pass fails.
+                engine.kick()
+                dirty = False
+                next_exchange = time.monotonic() + 1.0
+        if more or _pending_wake is None:
+            await asyncio.sleep(0.0 if more else 1.0 if progressed else 30.0)
+        else:
+            try:
+                await asyncio.wait_for(_pending_wake.wait(), timeout=1.0 if progressed else 30.0)
+            except asyncio.TimeoutError:
+                pass
+
+
+def _pending_kick_from_thread() -> None:
+    loop, wake = _loop, _pending_wake
+    if loop is not None and wake is not None:
+        try:
+            loop.call_soon_threadsafe(wake.set)
+        except RuntimeError:
+            pass
+
+
 def _kick_from_thread() -> None:
     loop = _loop
     if loop is None or _wake is None:
@@ -1554,15 +1600,31 @@ async def prune_loop() -> None:
         stop.set()
 
 
+async def expiry_loop() -> None:
+    """Small, frequent retention is independent of heartbeats and daily op pruning."""
+    from app.db.async_database import run_maintenance
+    from app.network import peer_snapshot
+
+    await asyncio.sleep(PRUNE_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            await run_maintenance(store.expire_conflicts)
+            await run_maintenance(store.expire_joins)
+            from app.network import session_runtime
+            await run_maintenance(session_runtime.prune_owned)
+            await asyncio.to_thread(peer_snapshot.cleanup)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("Network expiry failed", exc_info=True)
+        await asyncio.sleep(PRESENCE_INTERVAL_SECONDS)
+
+
 async def presence_loop() -> None:
     while True:
         try:
             capabilities = await asyncio.to_thread(_capabilities)
             await asyncio.to_thread(engine.publish_presence, capabilities=capabilities, version=settings.version)
-            await asyncio.to_thread(store.expire_conflicts)
-            await asyncio.to_thread(store.expire_joins)
-            from app.network import peer_snapshot
-            await asyncio.to_thread(peer_snapshot.cleanup)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -1612,8 +1674,10 @@ def request_scan(collections: Optional[List[str]] = None, *,
 
 
 def start() -> List[asyncio.Task]:
-    global _loop
+    global _loop, _pending_wake
     _loop = asyncio.get_running_loop()
+    _pending_wake = asyncio.Event()
+    engine.set_pending_kick(_pending_kick_from_thread)
     # Publish nothing until this device's stream has been compared with a
     # peer or the account feed (or there is nobody to compare with): a
     # worker restored from a backup must move to a new incarnation before it
@@ -1623,8 +1687,10 @@ def start() -> List[asyncio.Task]:
     _tasks[:] = [
         asyncio.create_task(sync_loop(), name="network-sync"),
         asyncio.create_task(scan_loop(), name="network-scan"),
+        asyncio.create_task(pending_loop(), name="network-pending"),
         asyncio.create_task(presence_loop(), name="network-presence"),
         asyncio.create_task(prune_loop(), name="network-prune"),
+        asyncio.create_task(expiry_loop(), name="network-expiry"),
         asyncio.create_task(liveness_loop(), name="network-liveness"),
         asyncio.create_task(transcripts.loop(), name="network-transcripts"),
     ]
@@ -1632,7 +1698,7 @@ def start() -> List[asyncio.Task]:
 
 
 async def stop() -> None:
-    global _loop
+    global _loop, _pending_wake
     for task in _tasks:
         task.cancel()
     for task in _tasks:
@@ -1642,6 +1708,8 @@ async def stop() -> None:
             pass
     _tasks.clear()
     _loop = None
+    _pending_wake = None
+    engine.set_pending_kick(None)
     engine.set_kick(None)
     engine.hold_outbox(False)
 
@@ -1664,7 +1732,9 @@ def forget_peers() -> None:
 
 
 def reset_for_tests() -> None:
-    global _full_scan_requested, _dirty_sessions, _advertised, _owner_candidates
+    global _full_scan_requested, _dirty_sessions, _advertised, _owner_candidates, _pending_wake
+    _pending_wake = None
+    engine.set_pending_kick(None)
     forget_peers()
     lan.reset_for_tests()
     _advertised = None

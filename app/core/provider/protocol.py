@@ -118,7 +118,8 @@ class ProviderAdapter(ABC):
         """
         raise NotImplementedError("steering is only supported on fluid sessions")
 
-    async def steer_peer(self, text: str, *, sender: str, id: Optional[str] = None) -> None:
+    async def steer_peer(self, text: str, *, sender: str, id: Optional[str] = None,
+                         provenance: str = "peer") -> None:
         """Deliver peer text without borrowing the user's steering authority."""
         raise NotImplementedError("peer steering is only supported on fluid sessions")
 

@@ -488,7 +488,8 @@ def start_background_tasks() -> List[asyncio.Task]:
             try:
                 await asyncio.sleep(3600)  # 1 hour
                 _cleanup_start = time.monotonic()
-                await asyncio.to_thread(database.cleanup_expired_sessions)
+                from app.db.async_database import run_maintenance
+                await run_maintenance(database.cleanup_expired_sessions)
                 _cleanup_elapsed = time.monotonic() - _cleanup_start
                 logger.info(f"Periodic session cleanup completed in {_cleanup_elapsed:.2f}s")
             except asyncio.CancelledError:
@@ -498,6 +499,23 @@ def start_background_tasks() -> List[asyncio.Task]:
 
     tasks.append(asyncio.create_task(_periodic_session_cleanup()))
     logger.info("Periodic session cleanup task started (every 1 hour)")
+
+    async def _periodic_requested_retention():
+        from app.db.error_logs import prune_requested_errors
+        from app.db.mobile_tools import purge_requested_commands, _PURGE_INTERVAL_S
+        from app.db.async_database import run_maintenance
+        await asyncio.sleep(300)
+        while True:
+            try:
+                await run_maintenance(prune_requested_errors)
+                await run_maintenance(purge_requested_commands)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Requested retention failed", exc_info=True)
+            await asyncio.sleep(_PURGE_INTERVAL_S)
+
+    tasks.append(asyncio.create_task(_periodic_requested_retention()))
 
     async def _periodic_db_maintenance():
         """Background task: database maintenance every 4 hours."""
@@ -515,7 +533,8 @@ def start_background_tasks() -> List[asyncio.Task]:
                     streaming_status.has_any_active_run
                 )
                 _maint_start = time.monotonic()
-                result = await asyncio.to_thread(
+                from app.db.async_database import run_maintenance
+                result = await run_maintenance(
                     database.run_database_maintenance,
                     skip_vacuum=has_streaming,
                 )

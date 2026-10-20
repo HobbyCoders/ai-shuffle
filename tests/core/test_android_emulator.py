@@ -28,10 +28,9 @@ IMAGE = "system-images;android-35;google_apis;x86_64"
 BASE = sdk_repo.REPOSITORY_BASE
 SYS_BASE = BASE + "sys-img/google_apis/"
 
-# The emulator runs only on Linux x86_64 with KVM (host.check_host refuses
-# every other host). These tests pin Linux behaviour: symlinks inside the SDK
-# archive, POSIX file modes and process groups, which Windows lacks.
-linux_only = pytest.mark.skipif(os.name == "nt", reason="the Android emulator is Linux-only")
+# These cases pin POSIX-specific SDK symlinks, file modes and process groups.
+# Windows behaviour is exercised in test_android_emulator_windows.py.
+linux_only = pytest.mark.skipif(os.name == "nt", reason="POSIX SDK modes and process groups")
 LICENSE_TEXT = "\nTerms and Conditions\n\nThis is the Android Software Development Kit License Agreement\n"
 
 
@@ -316,7 +315,7 @@ def test_host_reasons(monkeypatch, tmp_path):
     monkeypatch.setattr(host.platform, "machine", lambda: "aarch64")
     assert host.check_host(str(device)).reason == "unsupported_arch"
     monkeypatch.setattr(host.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(host.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(host.platform, "machine", lambda: "ARM64")
     assert host.check_host(str(device)).reason == "unsupported_arch"
 
 
@@ -478,7 +477,7 @@ def _installed(layout):
 def manager(layout, monkeypatch):
     from app.core.android_emulator import manager as manager_mod
 
-    monkeypatch.setattr(manager_mod, "check_host", lambda: LINUX)
+    monkeypatch.setattr(manager_mod, "check_host", lambda **kwargs: LINUX)
     _installed(layout)
     return EmulatorManager(layout)
 
@@ -501,18 +500,18 @@ async def test_status_contract(manager, layout, monkeypatch):
                      "width": 1080, "height": 2400, "frame_source": ""}],
     }
     monkeypatch.setattr(manager_mod, "check_host",
-                        lambda: host.HostSupport("no_kvm", host.NO_KVM, "linux", "x64"))
+                        lambda **kwargs: host.HostSupport("no_kvm", host.NO_KVM, "linux", "x64"))
     status = await manager.status()
     assert (status["available"], status["reason"]) == (False, "no_kvm")
     layout.record_path.unlink()
     status = await manager.status()
     assert status["reason"] == "no_kvm" and status["devices"] == []
-    monkeypatch.setattr(manager_mod, "check_host", lambda: LINUX)
+    monkeypatch.setattr(manager_mod, "check_host", lambda **kwargs: LINUX)
     assert (await manager.status())["reason"] == "sdk_missing"
     manager.progress.set("error", 0.4, "Not enough free disk space")
     status = await manager.status()
     assert status["reason"] == "error" and status["install"]["state"] == "error"
-    monkeypatch.setattr(manager_mod, "check_host", lambda: host.HostSupport("unsupported_arch", "no"))
+    monkeypatch.setattr(manager_mod, "check_host", lambda **kwargs: host.HostSupport("unsupported_arch", "no"))
     assert (await manager.status())["reason"] == "unsupported_arch"
 
 
@@ -679,11 +678,11 @@ async def test_start_is_refused_when_unavailable_or_full(manager, monkeypatch):
         await manager.start("nexus")
     assert exc.value.status == 404
     monkeypatch.setattr(manager_mod, "check_host",
-                        lambda: host.HostSupport("kvm_permission", host.KVM_PERMISSION, "linux", "x64"))
+                        lambda **kwargs: host.HostSupport("kvm_permission", host.KVM_PERMISSION, "linux", "x64"))
     with pytest.raises(EmulatorError) as exc:
         await manager.start("pixel")
     assert exc.value.code == "kvm_permission"
-    monkeypatch.setattr(manager_mod, "check_host", lambda: LINUX)
+    monkeypatch.setattr(manager_mod, "check_host", lambda **kwargs: LINUX)
     other = avd.DeviceProfile(id="tablet", name="Tablet", width=1600, height=2560, density=320)
     monkeypatch.setitem(avd.PROFILES, "tablet", other)
     manager.device("tablet").state = "running"
@@ -858,7 +857,11 @@ def test_cleanup_orphans_only_touches_processes_from_the_sdk(layout, monkeypatch
 
     from app.core.android_emulator import manager as manager_mod
 
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", layout.root.parent)
     layout.root.mkdir(parents=True)
+    assert layout.owns_root
     terminated = []
 
     class P:

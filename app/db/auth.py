@@ -226,7 +226,7 @@ def clear_all_sessions():
 # API Key Session Operations
 # ============================================================================
 
-def cleanup_expired_sessions() -> dict:
+def cleanup_expired_sessions(*, stop=None) -> dict:
     """Remove expired auth sessions, API key sessions, login attempts, and lockouts.
 
     This should be called periodically (e.g. every hour) to prevent unbounded
@@ -239,26 +239,16 @@ def cleanup_expired_sessions() -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
     results = {}
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # Expired admin sessions
-        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= %s", (now_iso,))
-        results["auth_sessions"] = cursor.rowcount
-
-        # Expired API key sessions
-        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= %s", (now_iso,))
-        results["api_key_sessions"] = cursor.rowcount
-
-        # Expired account lockouts (locked_until has passed)
-        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= %s", (now_iso,))
-        results["account_lockouts"] = cursor.rowcount
-
-        # Old login attempts (older than 24 hours — well past the 15-minute window)
-        from datetime import timedelta
-        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        cursor.execute("DELETE FROM login_attempts WHERE created_at < %s", (cutoff_24h,))
-        results["login_attempts"] = cursor.rowcount
+    from datetime import timedelta
+    from app.db.retention import mutate_batches
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    for table, key, predicate, cutoff in (
+        ("auth_sessions", "token", "expires_at <= %s", now_iso),
+        ("api_key_sessions", "token", "expires_at <= %s", now_iso),
+        ("account_lockouts", "id", "locked_until <= %s", now_iso),
+        ("login_attempts", "id", "created_at < %s", cutoff_24h),
+    ):
+        results[table] = mutate_batches(table, predicate, (cutoff,), keys=(key,), stop=stop)
 
     total = sum(results.values())
     if total > 0:

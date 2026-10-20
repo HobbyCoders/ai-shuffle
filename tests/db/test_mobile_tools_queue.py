@@ -160,22 +160,20 @@ def test_purge_sweeps_and_is_throttled(clock):
     _online()
     old = _enqueue(ttl=1)["id"]
     clock["now"] = T0 + timedelta(seconds=2)
-    with get_db() as conn:
-        cur = conn.cursor()
-        queue._purge(cur, clock["now"], force=True)
+    # Real enqueue/claim calls request work, but never sweep inline.
+    assert _row(old)["status"] == "pending"
+    assert queue.purge_requested_commands() == 1
     assert _row(old)["status"] == "expired"
 
     # A second expiry within the interval is left for the next sweep...
     fresh = _enqueue(ttl=1)["id"]
     clock["now"] = T0 + timedelta(seconds=10)
-    with get_db() as conn:
-        queue._purge(conn.cursor(), clock["now"])
+    queue.claim("a")  # another request only; periodic task has not run again
     assert _row(fresh)["status"] == "pending"
     # ...though reads still never report it live.
     assert queue.outcome(fresh, "sess")["status"] == "expired"
 
     # Rows a day past expiry are deleted outright.
     clock["now"] = T0 + timedelta(days=2)
-    with get_db() as conn:
-        queue._purge(conn.cursor(), clock["now"], force=True)
+    assert queue.purge_requested_commands() == 3  # scrub fresh, then delete both
     assert _row(old) is None and _row(fresh) is None

@@ -880,7 +880,7 @@ class TestScheduledElectionGate:
         ):
             db.get_automation.return_value = {"id": "auto-1", "is_enabled": True}
             await manager._on_schedule_trigger("auto-1")
-        assert created == ["auto-schedule-auto-1"]
+        assert created == ["auto-fire-retention", "auto-schedule-auto-1"]
 
     @pytest.mark.asyncio
     async def test_election_error_fails_open(self, manager):
@@ -891,7 +891,7 @@ class TestScheduledElectionGate:
         ):
             db.get_automation.return_value = {"id": "auto-1", "is_enabled": True}
             await manager._on_schedule_trigger("auto-1")
-        assert created == ["auto-schedule-auto-1"]
+        assert created == ["auto-fire-retention", "auto-schedule-auto-1"]
 
     @pytest.mark.asyncio
     async def test_missing_automation_never_fires(self, manager):
@@ -921,7 +921,7 @@ class TestScheduledElectionGate:
         with patch("app.core.automation_manager.database") as db:
             db.get_automation.side_effect = RuntimeError("db blip")
             await manager._on_schedule_trigger("auto-1")
-        assert created == ["auto-schedule-auto-1"]
+        assert created == ["auto-fire-retention", "auto-schedule-auto-1"]
 
 
 class TestScheduleReconcile:

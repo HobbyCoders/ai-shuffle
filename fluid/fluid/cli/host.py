@@ -648,6 +648,8 @@ class CliHost:
             )
         message = AgentMessage(
             text=str(input.get("message") or ""), sender=self.identity,
+            provenance="parent" if (target.worker is not None and any(
+                target.worker is w for w in self.workers.values())) else "peer",
             urgent=bool(input.get("urgent")),
         )
         if target.engine is None:

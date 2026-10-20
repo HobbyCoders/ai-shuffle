@@ -194,19 +194,18 @@ def cancel_interaction(interaction_id: str, *, _conn: Any = None) -> bool:
     return cancelled
 
 
-def expire_due_interactions_detailed() -> List[Dict[str, Any]]:
+def expire_due_interactions_detailed(*, stop=None) -> List[Dict[str, Any]]:
     """Expire every pending interaction past its TTL, returning the swept rows
     (id, session_id, kind, parsed payload) so the sweeper can NOTIFY each
     affected session and emit a durable ``interaction.expired`` (reason=ttl)
     carrying the row's ``request_id`` (nested in ``payload``)."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE pending_interactions SET state='expired' "
-            "WHERE state='pending' AND expires_at < NOW() "
-            "RETURNING id, session_id, kind, payload"
-        )
-        rows = rows_to_list(cursor.fetchall())
+    from app.db.retention import mutate_batches
+    rows = []
+    # One bounded pass keeps the shared sweep driver responsive. The next tick
+    # resumes remaining expired rows; RETURNING still owns exactly-once emission.
+    mutate_batches("pending_interactions", "state='pending' AND expires_at < NOW()",
+                   update="state='expired'", returning="id, session_id, kind, payload",
+                   consume=rows.extend, stop=stop, max_batches=1)
     for row in rows:
         row["payload"] = _parse_json(row.get("payload"))
     for session_id in {row.get("session_id") for row in rows}:

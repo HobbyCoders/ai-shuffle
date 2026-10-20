@@ -32,6 +32,9 @@ def isolated(monkeypatch):
             return self.inner.fetchone()
         def fetchall(self):
             return self.inner.fetchall()
+        @property
+        def rowcount(self):
+            return self.inner.rowcount
     class Connection:
         def cursor(self):
             return Cursor()
@@ -45,6 +48,7 @@ def isolated(monkeypatch):
                 conn.rollback()
                 raise
     monkeypatch.setattr(queue, 'get_db', db)
+    monkeypatch.setattr('app.db.retention.get_db', db)
     queue._reset_purge_throttle()
     conn.execute('CREATE TABLE mobile_devices(device_id TEXT PRIMARY KEY)')
     conn.executemany('INSERT INTO mobile_devices VALUES (?)', [('a',), ('b',)])
@@ -79,29 +83,41 @@ def test_accessibility_requires_android_snapshot_reference(name, args):
         service.validate_arguments(name, {**args, 'node_id': 'untrusted'})
 
 
-def test_purge_retries_after_sql_failure():
+def test_purge_retries_after_sql_failure(monkeypatch):
     queue._reset_purge_throttle()
-    class FailingCursor:
-        def execute(self, *args):
+    queue._purge_requested.set()
+    calls = []
+    def mutate(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
             raise RuntimeError("failed sweep")
+        return 0
+    monkeypatch.setattr('app.db.retention.mutate_batches', mutate)
     with pytest.raises(RuntimeError, match="failed sweep"):
-        queue._purge(FailingCursor(), queue.now())
-    assert queue._last_purge_monotonic is None
+        queue.purge_requested_commands()
+    assert queue._purge_requested.is_set()
+    queue.purge_requested_commands()
+    assert len(calls) == 3
+    assert not queue._purge_requested.is_set()
 
 
-def test_concurrent_purges_share_one_sweep():
+def test_concurrent_requests_share_one_deferred_sweep(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     queue._reset_purge_throttle()
     barrier = threading.Barrier(8)
     statements = []
-    class Cursor:
-        def execute(self, sql, args):
-            statements.append(sql)
-    def purge():
+    def mutate(*args, **kwargs):
+        statements.append(args)
+        return 0
+    monkeypatch.setattr('app.db.retention.mutate_batches', mutate)
+    def request():
         barrier.wait(timeout=5)
-        queue._purge(Cursor(), queue.now())
+        queue._purge_requested.set()
     with ThreadPoolExecutor(max_workers=8) as workers:
-        list(workers.map(lambda _: purge(), range(8)))
+        list(workers.map(lambda _: request(), range(8)))
+    assert statements == []
+    queue.purge_requested_commands()
+    queue.purge_requested_commands()
     assert len(statements) == 2
 
 
@@ -137,13 +153,12 @@ def test_unswept_expired_commands_are_never_live(isolated, monkeypatch):
     cmd = enqueue()
     future = queue.now() + timedelta(seconds=21)
     monkeypatch.setattr(queue, 'now', lambda: future)
-    queue._last_purge_monotonic = time.monotonic()  # sweep throttled off
     assert queue.claim('a') == []
     assert queue.outcome(cmd, 'sa') == {'status': 'expired', 'result': None}
     assert isolated[0].execute('SELECT status FROM mobile_tool_commands WHERE id=?',
                                (cmd,)).fetchone()['status'] == 'pending'
-    queue._reset_purge_throttle()
     queue.claim('a')
+    queue.purge_requested_commands()
     row = isolated[0].execute('SELECT * FROM mobile_tool_commands WHERE id=?', (cmd,)).fetchone()
     assert row['status'] == 'expired' and row['arguments'] == '{}'
 

@@ -76,8 +76,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     task_id, session_id, instance_id, kind, is_sdk_background,
                     tool_use_id, title, status, terminal_notified,
                     started_at, updated_at, summary, reason, report_path, report_chars,
-                    agent, roster_name, model, remote_device_id
-                ) VALUES ({", ".join([_ph] * 19)})
+                    agent, roster_name, model, remote_device_id, assignment_owner
+                ) VALUES ({", ".join([_ph] * 20)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -95,7 +95,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     agent = EXCLUDED.agent,
                     roster_name = EXCLUDED.roster_name,
                     model = EXCLUDED.model,
-                    remote_device_id = EXCLUDED.remote_device_id""",
+                    remote_device_id = EXCLUDED.remote_device_id,
+                    assignment_owner = background_tasks.assignment_owner AND EXCLUDED.assignment_owner""",
             [(
                 snapshot.get("task_id"),
                 snapshot.get("session_id"),
@@ -116,6 +117,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 (_task_text(snapshot.get("name")) or "")[:256] or None,
                 (_task_text(snapshot.get("model")) or "")[:256] or None,
                 snapshot.get("remote_device_id") or None,
+                bool(snapshot.get("assignment_owner", True)),
             ) for snapshot in snapshots],
         )
 
@@ -154,6 +156,7 @@ SERVER_RESTART_REASON = "server_restart"
 
 def mark_stale_background_tasks_killed(
     summary: Optional[str] = None,
+    *, stop=None,
 ) -> List[Dict[str, Any]]:
     """Boot reconcile: mark THIS install's non-terminal rows killed.
 
@@ -172,25 +175,20 @@ def mark_stale_background_tasks_killed(
     ``task.updated`` frame per row, settle the UI chip, rebuild the registry
     and tell each parent what was interrupted.
     """
-    _ph = ph()
     instance_id = settings.effective_instance_id
     # Safe literal join: TERMINAL_STATUSES is a module constant of trusted
     # string literals, never user input.
     terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""UPDATE background_tasks
-                   SET status = 'killed', updated_at = CURRENT_TIMESTAMP,
-                       reason = {_ph}, summary = COALESCE({_ph}, summary)
-                 WHERE instance_id = {_ph}
-                   AND status NOT IN ({terminal_list})
-                   AND remote_device_id IS NULL
-             RETURNING task_id, session_id, tool_use_id, title, kind, agent,
-                       roster_name, model, started_at, terminal_notified""",
-            (SERVER_RESTART_REASON, summary, instance_id),
-        )
-        return rows_to_list(cursor.fetchall())
+    from app.db.retention import mutate_batches
+    rows = []
+    mutate_batches("background_tasks",
+        f"instance_id = %s AND status NOT IN ({terminal_list}) AND remote_device_id IS NULL",
+        (instance_id,), keys=("task_id", "session_id"),
+        update="status = 'killed', updated_at = CURRENT_TIMESTAMP, reason = %s, summary = COALESCE(%s, summary)",
+        update_params=(SERVER_RESTART_REASON, summary),
+        returning="task_id, session_id, tool_use_id, title, kind, agent, roster_name, model, started_at, terminal_notified",
+        consume=rows.extend, stop=stop)
+    return rows
 
 
 def list_session_terminal_background_tasks(
@@ -213,7 +211,8 @@ def list_session_terminal_background_tasks(
         cursor.execute(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path,
-                       report_chars, agent, roster_name, model, remote_device_id
+                       report_chars, agent, roster_name, model, remote_device_id,
+                       assignment_owner, terminal_notified
                   FROM background_tasks
                  WHERE session_id = {_ph}
                    AND (status IN ({terminal_list}) OR remote_device_id IS NOT NULL)
@@ -305,7 +304,8 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
         cursor.execute(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path, report_chars,
-                       agent, roster_name, model, remote_device_id
+                       agent, roster_name, model, remote_device_id,
+                       assignment_owner, terminal_notified
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),

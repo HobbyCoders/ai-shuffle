@@ -127,6 +127,7 @@ class AutomationManager:
         self._waiting_approved: Set[asyncio.Task] = set()
         self._shutting_down = False
         self._requeue_task: Optional[asyncio.Task] = None
+        self._retention_task: Optional[asyncio.Task] = None
 
     def _create_tracked_task(self, coro, *, name: str) -> asyncio.Task:
         """Create a background task with error logging on failure."""
@@ -202,6 +203,10 @@ class AutomationManager:
         if self._requeue_task:
             self._requeue_task.cancel()
             self._requeue_task = None
+        if self._retention_task:
+            self._retention_task.cancel()
+            await asyncio.gather(self._retention_task, return_exceptions=True)
+            self._retention_task = None
 
         # Cancel running tasks, and the approved runs queued behind them: a
         # queued run would otherwise wake to a free latch and start now.
@@ -455,10 +460,7 @@ class AutomationManager:
         fire_bucket = self._fire_bucket(trigger_type, trigger_config, fired_at)
 
         def _claim_blocking() -> bool:
-            """The atomic cross-install fire claim and, only when we win it, the
-            fire-table prune — ONE hop for both. The prune ran immediately after
-            the claim's ``if not claimed: return`` before, so it still runs
-            exactly when the claim is won, with the same fail-open handling."""
+            """Only the atomic claim is on the fire's critical path."""
             try:
                 claimed = database.claim_automation_fire(automation_id, fire_bucket)
             except Exception as e:  # noqa: BLE001 — claim trouble must not drop the fire
@@ -466,11 +468,6 @@ class AutomationManager:
                 # unreachable here it is unreachable on the other installs too.
                 logger.warning(f"Automation {automation_id}: fire claim {fire_bucket} failed ({e}) — running locally")
                 claimed = True
-            if claimed:
-                try:
-                    database.prune_automation_fires()
-                except Exception:  # noqa: BLE001 — hygiene must never block a fire
-                    pass
             return claimed
 
         claimed = await run_sync(_claim_blocking)
@@ -483,6 +480,11 @@ class AutomationManager:
         # The claimed tick stays consumed even if _execute's budget check then
         # blocks the run: budget counters live in the shared database, so a
         # fire that is over budget here is over budget on every install.
+        from app.db.async_database import run_maintenance
+        if not self._shutdown_begun() and (self._retention_task is None or self._retention_task.done()):
+            self._retention_task = self._create_tracked_task(
+                run_maintenance(database.prune_automation_fires), name="auto-fire-retention"
+            )
         trigger_data = {"trigger": "schedule", "fired_at": fired_at.isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-schedule-{automation_id}")
 

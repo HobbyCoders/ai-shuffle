@@ -100,6 +100,20 @@ def compile_fixture(*, native=True):
         return compiled, full, specs
 
 
+def measure_worker_sections():
+    """Fixed Task role and checkout receipt, sent on either harness leg."""
+    from app.core import task_dispatch
+    from app.core.config import settings
+    from app.core.worker_checkout import WorkerCheckout
+    with patch.object(task_dispatch, "_is_worker_session", return_value=True), \
+         patch.object(task_dispatch, "caller_chain", return_value=("root", "root", 1)), \
+         patch.object(settings, "task_tool_max_depth", 5):
+        role = task_dispatch.subagent_system_prompt("fixture")
+    receipt = WorkerCheckout("/fixture/worker", "chore/fixture", "0" * 40,
+                             "fixture-project", "main").instructions()
+    return {"subagent_role": len(role), "checkout_receipt": len(receipt)}
+
+
 def measure(*, native=True):
     import re
     compiled, full, specs = compile_fixture(native=native)
@@ -115,7 +129,8 @@ def measure(*, native=True):
     full_text = system + "\n\n" + "\n\n".join(text for text, _ in full)
     totals = {"system": len(system), "full_catalog": sum(tools.values()) + 2 * (len(tools) - 1),
               "combined_full": len(full_text), "compiled_eager": len(compiled.text)}
-    result = {"sections": sections, "tools": tools, "totals": totals, "tool_count": len(specs)}
+    result = {"sections": sections, "tools": tools, "totals": totals, "tool_count": len(specs),
+              "worker_sections": measure_worker_sections()}
     if not native:
         # What the CLI loads from the bundled bridge on every request: each
         # always-loaded tool as name + description + JSON schema. The CLI's
@@ -144,7 +159,7 @@ def main():
     else:
         print("Fixture: owner code chat; bundled builtins/app-config/chat-access/ai-tools; no external MCPs")
         print("Characters / approximate tokens (chars/4; not provider billing):")
-        for group in ("sections", "tools", "delegated_loaded_tools", "totals"):
+        for group in ("sections", "tools", "delegated_loaded_tools", "worker_sections", "totals"):
             if group not in result:
                 continue
             print(f"\n{group}")

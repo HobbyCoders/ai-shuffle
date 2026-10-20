@@ -160,6 +160,8 @@ export interface EnvOptions {
 export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	const platform = opts.platform ?? process.platform;
 	const base = { ...(opts.baseEnv ?? process.env) };
+	// glibc reads this at process startup; preserve any explicit user setting.
+	if (platform === 'linux') base.MALLOC_ARENA_MAX ??= '2';
 	const sep = platform === 'win32' ? ';' : ':';
 	const pathKey = platform === 'win32' ? Object.keys(base).find((k) => k.toLowerCase() === 'path') ?? 'Path' : 'PATH';
 	const pathParts = [path.dirname(opts.runtime.python)];

@@ -93,8 +93,11 @@ class WorkerCheckout:
                           "integration_target": self.parent_branch,
                           "runtime": self.runtime})
             + "\nThe app created and bound this dedicated checkout before launch. "
-            "Use it instead of any checkout path in the assignment. Your default "
-            "working directory is this checkout. Do not create another worktree "
+            "Use it for this repository, over any path the brief names. For a "
+            "different repository the host does "
+            "not provision, use the parent's prepared isolated checkout named in "
+            "the brief under the same rules; never write in the parent's bound "
+            "checkout. Your default working directory is this checkout. Do not create another worktree "
             "or switch the parent's branch. Uncommitted parent changes and "
             "dependencies are not copied. When runtime information is supplied, "
             "use the recorded Python interpreter for "

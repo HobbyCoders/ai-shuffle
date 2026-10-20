@@ -221,7 +221,8 @@ async def handle_dismiss(body: dict, from_device: str) -> dict:
         raise ValueError("Invalid settled membership delivery")
     # Normal signed ordering decides whether this is current, obsolete or
     # waiting for a missing predecessor. Never mint a new owner revision.
-    result = await run_sync(engine.apply_batch, [envelope])
+    # Judge only this signed revision, never an unrelated buffered successor.
+    result = await run_sync(engine.apply_batch, [envelope], _pending_chunk_limit=0)
     if result.rejected:
         raise PermissionError("Invalid signed settled membership")
     from app.core.session_settlement import dismiss_owner_waits

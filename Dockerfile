@@ -215,6 +215,9 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-su
 # Ensure /app is owned by appuser
 RUN chown appuser:appuser /app
 
+# Limit glibc arena retention after threaded JSON decoding. Docker -e overrides it.
+ENV MALLOC_ARENA_MAX=2
+
 # ── Bake the git SHA into the image (deploy-restart detection) ──
 # scripts/unraid-lab/wake_detect.py compares this running-image SHA against a
 # pre-deploy marker to tell "new container landed" (matches target) apart from

@@ -146,6 +146,7 @@ from fluid.store.base import (
     flush_events,
     new_id,
     persist_event,
+    replay_source,
 )
 from fluid.tools.mcp.bundled_server import STREAM_LINE_LIMIT
 from fluid.tools.registry import ToolCtx, ToolRegistry
@@ -694,6 +695,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.store = store
         self.model = model
         self.bus = bus or EventBus()
+        if self.store is not None and self.bus.replay_source is None:
+            self.bus.set_replay_source(replay_source(self.store))
         self.claude_cmd = claude_cmd or [claude_path]
         self.system = system
         self.append_system_prompt = append_system_prompt
@@ -2398,7 +2401,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         peers, self._pending_peers = self._pending_peers, []
         context = "".join(
             format_steer(op.text) if isinstance(op, Steer)
-            else format_peer_message(op.sender, op.text)
+            else format_peer_message(op.sender, op.text, op.provenance)
             for op in peers
         ).strip()
         specific = output.get("hookSpecificOutput")
@@ -3311,7 +3314,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 steers=[
                     {"id": op.id, "text": op.text, "tool_use_id": tool_use_id}
                     if isinstance(op, Steer)
-                    else {"id": op.id, "text": op.text, "from": op.sender}
+                    else {"id": op.id, "text": op.text, "from": op.sender,
+                          **({"origin": op.provenance} if op.provenance != "peer" else {})}
                     for op in peers
                 ],
             ))

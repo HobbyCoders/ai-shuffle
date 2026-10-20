@@ -60,6 +60,7 @@ def prune_fluid_delta_events(
     older_than_days: int = 7,
     *,
     cursor: Optional[Any] = None,
+    stop=None,
 ) -> int:
     """Delete reconstructible streaming deltas for long-idle sessions.
 
@@ -108,7 +109,7 @@ def prune_fluid_delta_events(
         return session_id, session_id, seq, *filters
 
     deleted = delete_batches(sql, (None, None, None, *filters),
-                             cursor=cursor, advance=advance)
+                             cursor=cursor, advance=advance, stop=stop)
 
     if deleted:
         logger.info(

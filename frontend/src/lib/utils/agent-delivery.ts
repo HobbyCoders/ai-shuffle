@@ -6,7 +6,7 @@ export interface AgentDelivery { sender: string; content: string; senderLabel?: 
 
 // One complete envelope from fluid.context.peer.format_peer_message. The body is
 // defanged by the producer, so it never contains a marker of its own.
-const ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — a message from another (?:agent in this session|top-level session), delivered once at this position; not part of the tool output, and not a new message when re-read from history\]\r?\n([\s\S]*?)\r?\n\[\/agent\x20message\]`;
+const ENVELOPE = String.raw`\[agent\x20message from=(['"])(.*?)\1 — (?:host-verified (?:parent assignment update|same-owner session delegation); )?a message from another (?:agent(?: in this session)?|top-level session), delivered once at this position; not part of the tool output, and not a new message when re-read from history\]\r?\n([\s\S]*?)\r?\n\[\/agent\x20message\]`;
 const SINGLE_ENVELOPE = new RegExp(`^${ENVELOPE}$`);
 const ANY_ENVELOPE = new RegExp(ENVELOPE, 'g');
 // The reminder that carries messages held while the receiver was parked

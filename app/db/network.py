@@ -43,6 +43,35 @@ def _load(value: Any, default=None):
 # Schema
 # ---------------------------------------------------------------------------
 
+def drop_legacy_sync_ops_index(cursor) -> bool:
+    """Best-effort index retirement; busy shared databases retry on next boot."""
+    import psycopg2
+
+    if not isinstance(cursor, psycopg2.extensions.cursor):
+        cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+        return True
+    cursor.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
+    if cursor.fetchone()["name"] is None:
+        return True
+    cursor.execute("SAVEPOINT sp_sync_ops_record_index")
+    try:
+        cursor.execute("SHOW lock_timeout")
+        previous = cursor.fetchone()["lock_timeout"]
+        cursor.execute("SET LOCAL lock_timeout = '1s'")
+        cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
+    except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected):
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        logger.warning("Deferring legacy sync-op index removal until next boot: table busy")
+        return False
+    except Exception:
+        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        raise
+    finally:
+        cursor.execute("RELEASE SAVEPOINT sp_sync_ops_record_index")
+    return True
+
+
 def create_schema(cursor) -> None:
     # Owner-produced display state only: never runner leases or executable work.
     cursor.execute("""
@@ -125,8 +154,10 @@ def create_schema(cursor) -> None:
             UNIQUE (origin_device_id, incarnation, seq)
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record ON sync_ops(collection, record_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_ops_record_ingest ON sync_ops(collection, record_id, ingest_id)")
+    # The covering index also serves its leading (collection, record_id) prefix.
+    # This migration is transactional; do not wait indefinitely for its lock.
+    drop_legacy_sync_ops_index(cursor)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_records (
             collection TEXT NOT NULL,
@@ -962,6 +993,38 @@ def stash_pending(cursor, env: dict) -> None:
         (env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], _json(env), _now()))
 
 
+def pending_ready(cursor, origin: str, incarnation: int) -> bool:
+    """One lock-free primary-key probe before opening a drain's state lock."""
+    cursor.execute(
+        """SELECT 1 FROM sync_pending WHERE origin_device_id=%s AND incarnation=%s
+           AND seq=COALESCE((SELECT last_seq FROM sync_watermarks
+               WHERE origin_device_id=%s AND incarnation=%s), 0)+1""",
+        (origin, incarnation, origin, incarnation))
+    return cursor.fetchone() is not None
+
+
+def pending_prefix(cursor, origin: str, incarnation: int, seq: int, *, limit: int) -> List[dict]:
+    """Read a bounded contiguous prefix without consuming it before validation."""
+    cursor.execute(
+        """SELECT seq, envelope FROM sync_pending
+           WHERE origin_device_id=%s AND incarnation=%s AND seq>=%s AND seq<%s
+           ORDER BY seq""", (origin, incarnation, seq, seq + limit))
+    prefix = []
+    for row in cursor.fetchall():
+        if int(row["seq"]) != seq + len(prefix):
+            break
+        prefix.append(_load(row["envelope"], {}))
+    return prefix
+
+
+def delete_pending_prefix(cursor, origin: str, incarnation: int, seq: int, count: int) -> None:
+    """Consume only the prefix validated and applied in this transaction."""
+    cursor.execute(
+        """DELETE FROM sync_pending
+           WHERE origin_device_id=%s AND incarnation=%s AND seq>=%s AND seq<%s""",
+        (origin, incarnation, seq, seq + count))
+
+
 def pop_pending(cursor, origin: str, incarnation: int, seq: int) -> Optional[dict]:
     cursor.execute("SELECT envelope FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
                    (origin, incarnation, seq))
@@ -971,6 +1034,21 @@ def pop_pending(cursor, origin: str, incarnation: int, seq: int) -> Optional[dic
     cursor.execute("DELETE FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
                    (origin, incarnation, seq))
     return _load(row["envelope"], {})
+
+
+def ready_pending_streams(cursor, *, limit: int = 4) -> List[Tuple[str, int]]:
+    """Streams whose next op is already buffered, oldest frontier first.
+
+    Probe the pending primary key once per watermark instead of scanning or
+    aggregating every buffered payload. No row locks or writes at idle.
+    """
+    cursor.execute(
+        """SELECT w.origin_device_id, w.incarnation FROM sync_watermarks w
+           WHERE EXISTS (SELECT 1 FROM sync_pending p
+               WHERE p.origin_device_id=w.origin_device_id AND p.incarnation=w.incarnation
+                 AND p.seq=w.last_seq+1)
+           ORDER BY w.updated_at, w.origin_device_id, w.incarnation LIMIT %s""", (limit,))
+    return [(row["origin_device_id"], int(row["incarnation"])) for row in cursor.fetchall()]
 
 
 def pending_holes(_conn=None) -> List[dict]:
@@ -1062,11 +1140,9 @@ def delete_conflict(conflict_id: int) -> bool:
         return bool(cursor.rowcount)
 
 
-def expire_conflicts() -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sync_conflicts WHERE expires_at <= %s", (_now(),))
-        return cursor.rowcount or 0
+def expire_conflicts(*, stop=None) -> int:
+    from app.db.retention import mutate_batches
+    return mutate_batches("sync_conflicts", "expires_at <= %s", (_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------
@@ -1175,12 +1251,12 @@ def delete_join(join_id: str) -> bool:
         return bool(cursor.rowcount)
 
 
-def expire_joins() -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE network_joins SET status = 'expired', updated_at = %s WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < %s",
-                       (_now(), _now()))
-        return cursor.rowcount or 0
+def expire_joins(*, stop=None) -> int:
+    from app.db.retention import mutate_batches
+    return mutate_batches("network_joins",
+                          "status = 'pending' AND expires_at IS NOT NULL AND expires_at < %s",
+                          (_now(),), update="status = 'expired', updated_at = %s",
+                          update_params=(_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------

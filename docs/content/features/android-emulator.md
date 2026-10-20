@@ -18,8 +18,8 @@ The emulator runs a Pixel-sized phone (1080 × 2400) with Android 15 (API 35, Go
 
 ## What you need
 
-- **A Linux worker on an x86_64 (Intel or AMD) processor.** Windows and macOS workers are not supported yet.
-- **Hardware virtualization (KVM).** The emulator needs `/dev/kvm`.
+- **A Linux or Windows worker on an x86_64 (Intel or AMD) processor.** macOS and Windows ARM64 workers are not supported yet.
+- **Hardware virtualization.** Linux needs KVM (`/dev/kvm`); Windows needs a working Windows Hypervisor Platform (WHPX) or Android Emulator Hypervisor Driver (AEHD).
 - **About 9 GB of free disk space** in the data folder. The emulator, the phone system and the phone's own storage take about 6.5 GB.
 - **About 3 GB of free memory** while the phone runs.
 
@@ -47,6 +47,20 @@ Then recreate the container. When the container starts, it gives AI Shuffle acce
 1. Turn on virtualization (Intel VT-x or AMD-V) in your computer's firmware settings.
 2. Make sure the `kvm` module is loaded: `ls -l /dev/kvm` should list the device.
 3. If you cannot read and write the device, add your account to the `kvm` group: `sudo usermod -aG kvm $USER`. Then sign out and back in, and restart AI Shuffle.
+
+### Windows desktop
+
+1. Turn on Intel VT-x or AMD-V in BIOS/UEFI.
+2. Enable **Windows Hypervisor Platform** in Windows Features, then reboot. Alternatively, use Android Studio's SDK Manager to install **Android Emulator Hypervisor Driver (AEHD)** on a system with Hyper-V disabled. AI Shuffle does not install drivers or change Windows features for you.
+3. Set up the SDK from the Phone panel. Before starting a phone, AI Shuffle runs `emulator.exe -accel-check` with a deadline. If acceleration is unavailable, it reports how to fix it instead of attempting a slow software boot.
+
+The Windows desktop installer does not bundle the Android SDK. By default, setup installs and manages a private SDK under `android-sdk` in AI Shuffle's data folder. Windows SDK discovery checks `ANDROID_HOME`, `ANDROID_SDK_ROOT` and `%LOCALAPPDATA%\Android\Sdk` for guidance only: it never adopts, writes to or stops processes from an Android Studio SDK.
+
+`ANDROID_SDK_DIR` is an explicit opt-in to managing another SDK folder. Setup may replace that folder's emulator, platform-tools and selected system-image packages after license acceptance; choose a dedicated folder rather than your Android Studio SDK. Path-based startup cleanup is limited to the private data-folder SDK. In an explicit external SDK, only processes recorded and identity-verified by AI Shuffle's process ledger may be reaped. AI Shuffle uses adb server port **5038**, separate from Android Studio's default **5037**.
+
+Passing acceleration checks are cached until the emulator binary changes; status does not probe again while a phone is booting/running or SDK setup is in progress.
+
+Live Windows verification of this backend is still pending; its Windows paths and process lifecycle are covered by simulated tests.
 
 ## Install the emulator
 
@@ -93,6 +107,7 @@ Only the owner can open the Phone panel and its controls. API keys and other peo
 | --- | --- |
 | No /dev/kvm | Pass the device to the container or turn on virtualization. See [What you need](#what-you-need). |
 | Cannot open /dev/kvm | Give AI Shuffle's account access to the device. See [Docker](#docker). |
-| Not supported on this worker | Use a Linux x86_64 worker. |
+| Not supported on this worker | Use a Linux or Windows x86_64 worker. |
+| Hardware acceleration is unavailable | On Windows, enable virtualization and WHPX, reboot, and run `emulator.exe -accel-check` in the SDK's emulator folder. AEHD is an alternative when Hyper-V is disabled. |
 | Not enough free disk space | Free up the space the message names, then install again. |
 | The emulator exited unexpectedly | Start it again. The message names the emulator's own error, and the log is in `android-sdk/logs` in the data folder. |

@@ -871,8 +871,8 @@ def compact_session_deltas(
       compactable. ``copy_session_events`` (fork) copies the merged rows and
       renders identically.
 
-    Pass ``cursor`` to run inside a caller's transaction (the maintenance job
-    does); otherwise this opens its own. ``dry_run`` reports what would change
+    Pass ``cursor`` to run inside a caller's transaction; the maintenance job
+    commits each bounded session separately. ``dry_run`` reports what would change
     without writing.
     """
     if keep_tail_events < 0 or max_runs <= 0:
@@ -967,6 +967,7 @@ def compact_idle_session_deltas(
     max_sessions: int = DEFAULT_MAX_SESSIONS,
     max_runs_per_session: int = DEFAULT_MAX_RUNS_PER_SESSION,
     cursor: Optional[Any] = None,
+    stop=None,
 ) -> Dict[str, int]:
     """Compact delta runs for sessions idle longer than the given window.
 
@@ -998,8 +999,11 @@ def compact_idle_session_deltas(
         datetime.now(timezone.utc) - timedelta(hours=idle_hours)
     ).isoformat()
 
-    def _work(cur: Any) -> Dict[str, int]:
+    from app.db.retention import set_timeout
+
+    def _candidates(cur):
         global _compaction_cursor
+        set_timeout(cur)
         candidates = _idle_candidates(
             cur, cutoff, keep_tail_events, max_sessions, _compaction_cursor
         )
@@ -1009,13 +1013,25 @@ def compact_idle_session_deltas(
             candidates = _idle_candidates(
                 cur, cutoff, keep_tail_events, max_sessions, ""
             )
+        return candidates
+
+    def _work(candidates, cur=None):
+        global _compaction_cursor
         totals = {"sessions": 0, "runs": 0, "rows": 0}
         for session_id in candidates:
+            if stop is not None and stop.is_set():
+                break
             _compaction_cursor = session_id
             try:
-                runs, rows = _compact_session_deltas(
-                    cur, session_id, keep_tail_events, max_runs_per_session, False
-                )
+                if cursor is not None:
+                    runs, rows = _compact_session_deltas(
+                        cur, session_id, keep_tail_events, max_runs_per_session, False)
+                else:
+                    with get_db() as batch_conn:
+                        batch_cur = batch_conn.cursor()
+                        set_timeout(batch_cur)
+                        runs, rows = _compact_session_deltas(
+                            batch_cur, session_id, keep_tail_events, max_runs_per_session, False)
             except Exception:
                 logger.warning(
                     "session_events: delta compaction failed for %s",
@@ -1028,11 +1044,14 @@ def compact_idle_session_deltas(
                 totals["rows"] += rows
         return totals
 
+    if stop is not None and stop.is_set():
+        return {"sessions": 0, "runs": 0, "rows": 0}
     if cursor is not None:
-        totals = _work(cursor)
+        totals = _work(_candidates(cursor), cursor)
     else:
         with get_db() as conn:
-            totals = _work(conn.cursor())
+            candidates = _candidates(conn.cursor())
+        totals = _work(candidates)
 
     if totals["rows"]:
         logger.info(

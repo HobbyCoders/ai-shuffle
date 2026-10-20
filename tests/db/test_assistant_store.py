@@ -225,7 +225,8 @@ def test_retention_scrubs_then_deletes_only_settled_history(assistant_fixture):
     _backdate("assistant_events", "observed_at", pending["id"], days=200)
 
     counts = store.retention_sweep(aid)
-    assert counts == {"events_scrubbed": 1, "events_deleted": 1, "runs_deleted": 1}
+    assert counts == {"events_scrubbed": 1, "events_deleted": 1, "runs_deleted": 1,
+                      "remote_costs_deleted": 0, "limit_stops_deleted": 0}
     assert _event_by_id(ancient_event["id"]) is None and store.get_run(ancient["id"]) is None
     scrubbed = _event_by_id(old_event["id"])
     assert scrubbed["payload"] == {"retention_scrubbed": True}
@@ -238,7 +239,8 @@ def test_retention_scrubs_then_deletes_only_settled_history(assistant_fixture):
     # A redelivered item still deduplicates against the scrubbed fingerprint.
     assert events(message_id="old") == []
     # Scrubbed rows are not rewritten forever; activity still renders.
-    assert store.retention_sweep(aid) == {"events_scrubbed": 0, "events_deleted": 0, "runs_deleted": 0}
+    assert store.retention_sweep(aid) == {"events_scrubbed": 0, "events_deleted": 0, "runs_deleted": 0,
+                                          "remote_costs_deleted": 0, "limit_stops_deleted": 0}
     assert {row["id"] for row in store.get_activity(aid)} == {old["id"], in_flight["id"]}
 
 

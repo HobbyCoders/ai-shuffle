@@ -170,6 +170,10 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
             with get_db() as conn:
                 owned = _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False, session_ids=ids)
             if len(owned) != len(ids):
+                # Retract the requested deleted chats before widening the scan;
+                # the table-wide orphan sweep belongs to the expiry task.
+                from app.network.session_runtime import prune_owned
+                prune_owned(ctx=ctx, session_ids=ids)
                 ids = None
     published = 0
     # Held sessions have a foreign owner, so a narrow set (all owned) has none.

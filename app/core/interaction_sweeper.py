@@ -40,7 +40,8 @@ async def sweep_once() -> int:
     try:
         from app.db import interactions
 
-        rows = await asyncio.to_thread(interactions.expire_due_interactions_detailed)
+        from app.db.async_database import run_maintenance
+        rows = await run_maintenance(interactions.expire_due_interactions_detailed)
     except Exception:  # noqa: BLE001
         logger.warning("interaction_sweeper: expiry pass failed", exc_info=True)
         return 0

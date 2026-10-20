@@ -621,7 +621,7 @@ async def test_reconcile_at_boot_gates_shared_state_on_approval(monkeypatch, app
             ran.append(name)
             return 1
 
-        def _sync_stub():
+        def _sync_stub(*, stop=None):
             ran.append(name)
             return 1
 

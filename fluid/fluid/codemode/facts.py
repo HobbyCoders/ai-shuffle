@@ -401,10 +401,19 @@ class FactStore:
         text = validate_text(text)
         if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,96}", key)):
             raise ValueError("Invalid memory key")
-        key = key or (canonical_key(text) if scope in (None, "global") else None)
         fp = fingerprint(text)
         with file_transaction(self.lock):
             doc = self._prepare()
+            all_entries = doc["entries"] + doc["archived"]
+            local = doc["store_id"]
+            old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
+            if memory_id and (old is None or not visible_on(old, local)):
+                raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
+            if old is not None and scope is None:
+                scope = old.get("scope", "global")
+            # Scope-sensitive canonical keys and deletion barriers must use the
+            # resolved correction scope, not the new-fact global default.
+            key = key or (canonical_key(text) if scope in (None, "global") else None)
             suppressed = barrier_contains(doc.get("forgotten", ""), "text:" + fp)
             if key:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
@@ -414,11 +423,6 @@ class FactStore:
                 if fp in t.get("fingerprints", []) or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
-            all_entries = doc["entries"] + doc["archived"]
-            local = doc["store_id"]
-            old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
-            if memory_id and (old is None or not visible_on(old, local)):
-                raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
             if old is None:
                 # Another worker's environment fact is never this save's
                 # target. A per-worker save matches this worker's copy, or a

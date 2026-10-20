@@ -108,6 +108,18 @@ test('resolveRuntime uses the repository venv in development', async () => {
 	}
 });
 
+test('buildWorkerEnv defaults glibc arenas only on Linux and preserves user overrides', () => {
+	const runtime = { mode: 'repo', root: '/runtime', python: '/runtime/python', serverDir: '/repo', nodeBinDir: null };
+	for (const platform of ['linux', 'win32', 'darwin']) {
+		for (const value of [undefined, '7', '0', '']) {
+			const baseEnv = value === undefined ? {} : { MALLOC_ARENA_MAX: value };
+			const env = buildWorkerEnv({ runtime, port: 8000, platform, baseEnv });
+			assert.equal(env.MALLOC_ARENA_MAX, value ?? (platform === 'linux' ? '2' : undefined), platform);
+			assert.equal(baseEnv.MALLOC_ARENA_MAX, value, 'must not mutate the parent environment');
+		}
+	}
+});
+
 test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settings case-insensitively', async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));
 	try {

@@ -21,6 +21,7 @@ from app.db.base import get_db, row_to_dict
 logger = logging.getLogger(__name__)
 
 RETENTION_INTERVAL_SECONDS = 3600
+RETENTION_STARTUP_DELAY_SECONDS = 300
 # How stale the owner introduction may get before the loop detects it again.
 # Opening the Assistant page asks for a fresh pass (see detect_owner).
 DETECTION_INTERVAL_SECONDS = 6 * 3600
@@ -107,6 +108,7 @@ class AssistantManager:
         self._active_runs = {}
         # Monotonic time of the last retention attempt (None: not yet run).
         self._retention_at = None
+        self._retention_task = None
         # Owner detection: the in-flight pass and when the last one started.
         self._detect_task = None
         self._detected_at = None
@@ -131,7 +133,7 @@ class AssistantManager:
 
     async def shutdown(self):
         self._stopping = True
-        for task in (self._task, self._observer_task, self._detect_task):
+        for task in (self._task, self._observer_task, self._detect_task, self._retention_task):
             if task:
                 task.cancel()
                 try:
@@ -140,7 +142,7 @@ class AssistantManager:
                     pass
                 except Exception:
                     logger.exception("Assistant loop failed before shutdown")
-        self._task = self._observer_task = self._detect_task = None
+        self._task = self._observer_task = self._detect_task = self._retention_task = None
         # A failed/closed database must not prevent local inference teardown.
         # Settlement stays best-effort: do not invent a cancelled/$0 outcome
         # when the provider may already have completed and reported billing.
@@ -228,15 +230,25 @@ class AssistantManager:
         retries next interval instead of every backoff pass.
         """
         clock = time.monotonic()
+        if self._stopping or (self._retention_task and not self._retention_task.done()):
+            return
         if self._retention_at is not None and clock - self._retention_at < RETENTION_INTERVAL_SECONDS:
             return
+        first = self._retention_at is None
         self._retention_at = clock
-        try:
-            counts = await run_sync(store.retention_sweep, service.assistant_id())
-            if any(counts.values()):
-                logger.info("Assistant retention sweep: %s", counts)
-        except Exception:
-            logger.exception("Assistant retention sweep failed")
+
+        async def sweep():
+            if first:
+                await asyncio.sleep(RETENTION_STARTUP_DELAY_SECONDS)
+            try:
+                from app.db.async_database import run_maintenance
+                counts = await run_maintenance(store.retention_sweep, service.assistant_id())
+                if any(counts.values()):
+                    logger.info("Assistant retention sweep: %s", counts)
+            except Exception:
+                logger.exception("Assistant retention sweep failed")
+
+        self._retention_task = asyncio.create_task(sweep(), name="assistant-retention")
 
     def detect_owner(self, max_age=0):
         """Start an owner-detection pass unless one ran within ``max_age`` seconds.
