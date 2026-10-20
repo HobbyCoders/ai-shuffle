@@ -50,15 +50,14 @@ def feed(monkeypatch):
         seen["url"], seen["headers"] = str(request.url), dict(request.headers)
         return httpx.Response(answer["status"], content=answer["body"].encode())
     monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
-    monkeypatch.setattr("app.core.license.lease_header", lambda: "lease-value")
     return seen, answer
 
 
-def test_fetch_stable_sends_the_lease_to_the_hub_feed_only(feed):
+def test_fetch_stable_uses_public_hub_feed_without_a_lease(feed):
     seen, _ = feed
     text, stable = sr.fetch_stable()
     assert seen["url"] == "https://hobbycoders.com/v1/desktop/manifest"
-    assert seen["headers"]["x-shuffle-lease"] == "lease-value"
+    assert "x-shuffle-lease" not in seen["headers"]
     assert stable["revision"] == B and stable["sequence"] == 10 and json.loads(text)["payload"]
 
 

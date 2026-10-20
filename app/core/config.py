@@ -350,13 +350,6 @@ class Settings(BaseSettings):
     mobile_account_hub_verify_ttl_seconds: float = 90.0
     mobile_account_hub_grace_seconds: float = 1800.0
 
-    # Optional paid Cloud leases (app/core/license.py), never local run gates.
-    # With no server URL, LICENSE_BETA=true, or no verification keys, skip
-    # acquisition/renewal. Linked free accounts still have two remote workers.
-    # A release build sets LICENSE_SERVER_URL=https://hobbycoders.com.
-    license_server_url: str = ""
-    license_beta: bool = False
-
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
 

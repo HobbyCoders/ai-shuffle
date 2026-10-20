@@ -27,7 +27,6 @@ import re
 
 # docker/application_updates.py ORIGIN and desktop/src/main/source-auth.ts SOURCE_ORIGIN.
 STABLE_FEED = "https://hobbycoders.com/v1/desktop/manifest"
-LEASE_HEADER = "X-Shuffle-Lease"
 MAX_MANIFEST = 32768
 REVISION = re.compile(r"[a-f0-9]{40}")
 FINAL = re.compile(r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})")
@@ -66,13 +65,9 @@ def release_fields(text):
 def fetch_stable():
     """The stable feed's signed manifest text and its fields; raises Refused when unavailable."""
     import httpx
-    from app.core.license import lease_header
-
-    lease = lease_header()
     try:
-        # The lease goes only to the hub's own update endpoint; redirects are refused.
         with httpx.Client(trust_env=False, follow_redirects=False, timeout=15) as client:
-            response = client.get(STABLE_FEED, headers={LEASE_HEADER: lease} if lease else {})
+            response = client.get(STABLE_FEED)
     except httpx.HTTPError as exc:
         raise Refused("Could not reach the update feed to compare this worker with the current stable "
                       "release. Try again later.") from exc

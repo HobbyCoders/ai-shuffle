@@ -56,6 +56,7 @@ def test_env_example_lists_only_what_a_buyer_sets():
     assert env_example()["OWNER_PASSWORD"] == ""
     assert service()["environment"]["OWNER_PASSWORD"] == "${OWNER_PASSWORD:-}"
     # There is no license key: a Cloud plan follows the signed-in account.
+    assert "LICENSE_KEY" not in env_example()
     assert "LICENSE_KEY" not in service()["environment"]
     assert "LICENSE_KEY" not in (COMPOSE / "compose.yaml").read_text()
     assert env_example()["BIND_HOST"] == "127.0.0.1"

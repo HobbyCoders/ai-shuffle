@@ -229,24 +229,8 @@ class TunnelLimitError(HubResponseError):
         self.licensed = licensed
 
 
-# Calls that may make the hub build a managed tunnel. They carry the worker's
-# license lease (X-Shuffle-Lease) so a licensed account gets its larger cap.
-LEASE_SUFFIXES = ('activate', 'connector')
-
-
-def _lease_headers(suffix):
-    if suffix not in LEASE_SUFFIXES:
-        return {}
-    try:
-        from app.core import license as licensing
-        lease = licensing.lease_header()
-    except Exception:  # noqa: BLE001 - a license problem must never block the hub call
-        logger.warning('Could not read the license lease for the account hub', exc_info=True)
-        return {}
-    # A header value must be one printable line; the lease is base64url.
-    if not lease or len(lease) > 4096 or not re.fullmatch(r'[A-Za-z0-9_-]+', lease):
-        return {}
-    return {licensing.LEASE_HEADER: lease}
+# Calls that may make the hub build a managed tunnel; the hub uses the account plan.
+TUNNEL_SUFFIXES = ('activate', 'connector')
 
 
 def _tunnel_limit(response, retry):
@@ -305,13 +289,10 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         if timeout is None:
             timeout = 65 if suffix in ('activate', 'connector') else 4
         conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
-        # The lease goes only here: to the administrator-selected hub origin,
-        # on the two calls that can build a tunnel.
         conn.request(method, f'/v1/servers/{server}/{suffix}',
                      body=json.dumps(body) if body is not None else None,
                      headers={'Authorization': 'Bearer ' + (credential if credential is not None else secret_for(binding)),
-                              'Content-Type': 'application/json', 'Accept': 'application/json',
-                              **_lease_headers(suffix)})
+                              'Content-Type': 'application/json', 'Accept': 'application/json'})
         response = conn.getresponse()
         if response.status != 200:
             status = response.status
@@ -321,9 +302,11 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
                 _paused_until[origin] = time.monotonic() + wait
             if response.status in (401, 403):
                 _recent_authorization.pop(_authorization_key(binding), None)
-            if response.status == 409 and suffix in LEASE_SUFFIXES:
+            if response.status == 409 and suffix in TUNNEL_SUFFIXES:
                 refused = _tunnel_limit(response, wait)
                 if refused:
+                    from app.core.license import invalidate_plan_cache
+                    invalidate_plan_cache()
                     logger.warning('Account hub refused a remote connection: tunnel limit %s of %s (licensed: %s)',
                                    refused.used, refused.limit, refused.licensed)
                     raise refused
