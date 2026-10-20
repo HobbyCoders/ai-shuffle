@@ -1076,6 +1076,7 @@ def create_postgres_schema(cursor) -> None:
             roster_name TEXT,
             model TEXT,
             remote_device_id TEXT,
+            assignment_owner BOOLEAN NOT NULL DEFAULT TRUE,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
             PRIMARY KEY (task_id, session_id)

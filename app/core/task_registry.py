@@ -1250,9 +1250,7 @@ class TaskRegistry:
         """
         try:
             record = self._tasks.get(session_id, {}).get(task_id)
-            if record is None or record.get("assignment_owner") is False:
-                # A peer continuation is tracked for reports, not as a durable
-                # parent edge. Only dispatch owners are persisted as owners.
+            if record is None:
                 return
             from app.core.task_persistence import enqueue_task_snapshot
 
@@ -1263,6 +1261,7 @@ class TaskRegistry:
                     "task_id": task_id,
                     "session_id": session_id,
                     "kind": record.get("kind"),
+                    "assignment_owner": record.get("assignment_owner", True),
                     "is_sdk_background": task_id
                     in self._sdk_background_tasks.get(session_id, set()),
                     "tool_use_id": record.get("tool_use_id"),
@@ -1345,6 +1344,7 @@ class TaskRegistry:
             bucket[task_id] = {
                 "task_id": task_id,
                 "kind": row.get("kind"),
+                "assignment_owner": bool(row.get("assignment_owner", True)),
                 "title": row.get("title"),
                 "status": status,
                 "summary": row.get("summary"),
@@ -1359,6 +1359,8 @@ class TaskRegistry:
                 "updated_at": _iso(row.get("updated_at")),
                 "restored": True,
             }
+            if row.get("terminal_notified"):
+                self._terminal_notified.setdefault(session_id, set()).add(task_id)
             if remote:
                 bucket[task_id]["remote_device_id"] = remote
                 bucket[task_id]["worker_name"] = row.get("worker_name")
@@ -1685,8 +1687,8 @@ class TaskRegistry:
     def resume_task(self, session_id: str, task_id: str, *, assignment_owner: bool = True) -> None:
         """Resume reporting; a peer resumer is not a dispatch/assignment owner.
 
-        Non-owner continuations stay in memory for their report lifecycle but
-        never become durable parent edges or authoritative retained snapshots.
+        Non-owner continuations persist for their report lifecycle but never
+        become assignment-authority edges, including after hydration.
         """
         row = self.get_task(session_id, task_id, durable=True) or {}
         # start_task intentionally ignores error/killed replays. Only this
@@ -1769,6 +1771,7 @@ class TaskRegistry:
             "title": row.get("title"),
             "status": restored_status(row.get("status"), row.get("reason")),
             "kind": row.get("kind"),
+            "assignment_owner": bool(row.get("assignment_owner", True)),
             "tool_use_id": row.get("tool_use_id"),
             "started_at": _iso(row.get("started_at")),
             "updated_at": _iso(row.get("updated_at")),

@@ -21,7 +21,7 @@ def _persisted_parents(child: str) -> list[str]:
             cursor = conn.cursor()
             from app.core.config import settings
             cursor.execute("SELECT DISTINCT session_id FROM background_tasks "
-                           "WHERE task_id=%s AND kind='agent' AND instance_id=%s",
+                           "WHERE task_id=%s AND kind='agent' AND assignment_owner=TRUE AND instance_id=%s",
                            (child, settings.effective_instance_id))
             return [row["session_id"] for row in cursor.fetchall()]
     except Exception:  # noqa: BLE001 - missing/old store never establishes trust

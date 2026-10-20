@@ -82,11 +82,19 @@ async def test_sibling_resume_is_reportable_but_never_a_parent(peers, runtime, m
     swarm.workers.clear()
     assert await messaging.message_provenance_async("peer", "caller") == "peer"
     assert messaging.peer_rows("peer")[0]["worker_session_id"] == "root"
-    registry.complete_task("caller", "peer", "completed")
+    registry.complete_task("caller", "peer", "completed", summary="continuation report")
+    registry.mark_terminal_notified("caller", "peer")
+    registry._persist_task_state("caller", "peer")
     assert messaging.message_provenance("peer", "caller") == "peer"  # retained snapshot too
     await task_persistence.flush()
     assert await asyncio.to_thread(messaging._persisted_parents, "peer") == ["root"]
-    monkeypatch.setattr(registries, "task_registry", registries.TaskRegistry())
+    restored = registries.TaskRegistry()
+    monkeypatch.setattr(registries, "task_registry", restored)
+    assert await restored.ensure_hydrated("caller") == 1
+    row = restored.get_task("caller", "peer")
+    assert row["assignmentOwner"] is False
+    assert row["status"] == "completed" and row["summary"] == "continuation report"
+    assert not restored.mark_terminal_notified("caller", "peer")
     assert await messaging.message_provenance_async("peer", "caller") == "peer"
     [main] = await messaging.peer_rows_async("peer")
     assert main["worker_session_id"] == "root"

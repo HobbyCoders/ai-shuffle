@@ -14,6 +14,28 @@ from tests.shared_fixtures import clean_task_registry, foreign_keys_off, pin_run
 
 
 
+def test_checkout_prompt_scopes_isolation_to_its_repository(monkeypatch):
+    from app.core import task_dispatch
+    from scripts.measure_prompt_catalog import measure_worker_sections
+
+    monkeypatch.setattr(task_dispatch, "_is_worker_session", lambda _: True)
+    monkeypatch.setattr(task_dispatch, "caller_chain", lambda _: ("root", "root", 1))
+    receipt = worker_checkout.WorkerCheckout("/fixture/worker", "chore/fixture", "0" * 40,
+                                            "fixture-project", "main").instructions()
+    role = task_dispatch.subagent_system_prompt("fixture")
+    for text in (role, receipt):
+        assert text.count("repository the host does not provision") == 1
+        assert text.count("parent's prepared isolated checkout named in the brief under the same rules") == 1
+        assert "parent's bound checkout" in text
+        assert "Do not merge into the parent" in text
+        assert "copy credential files or dependencies" in text or "dependencies are not copied" in text
+    assert "Use that assigned checkout for its repository" in role
+    assert "Use it for this repository" in receipt
+    sizes = measure_worker_sections()
+    for section, baseline in {"subagent_role": 2681, "checkout_receipt": 1209}.items():
+        assert sizes[section] <= baseline * 101 // 100
+
+
 def test_explicit_review_base_is_materialized_not_parsed_from_prompt(repo, worker_runtime):
     row, parent, base, tip = repo
     review_sha = git(base, "rev-parse", "HEAD")

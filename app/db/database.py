@@ -576,6 +576,18 @@ def _migrate_provider_revisions(cursor):
                            (str(uuid4()), row[key]))
 
 
+def _migrate_task_assignment_owner(cursor, migrations_applied):
+    """Classify legacy resume edges once, before upserts replace their tool id."""
+    if not column_exists(cursor, "background_tasks", "assignment_owner"):
+        cursor.execute("ALTER TABLE background_tasks ADD COLUMN assignment_owner "
+                       "BOOLEAN NOT NULL DEFAULT TRUE")
+        # Pre-flag resume_task used the worker id as its synthetic tool_use_id.
+        # Persist the classification: later lifecycle snapshots replace that id.
+        cursor.execute("UPDATE background_tasks SET assignment_owner=FALSE "
+                       "WHERE kind='agent' AND tool_use_id=task_id")
+        migrations_applied.append("background_tasks_assignment_owner")
+
+
 def _run_column_migrations(cursor):
     """Run idempotent column migrations.
 
@@ -1626,6 +1638,8 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "background_tasks", name):
             cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {name} {sql_type}")
             migrations_applied.append(f"background_tasks_{name}")
+
+    _migrate_task_assignment_owner(cursor, migrations_applied)
 
     # Retire background_tasks.unparked. No SCHEMA_VERSION bump: editing this
     # file changes migrations_fingerprint(), which re-runs the column pass once
