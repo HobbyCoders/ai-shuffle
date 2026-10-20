@@ -1,0 +1,9 @@
+{
+  "facts": 20,
+  "foreign_per_phase": 12,
+  "phases": 2,
+  "max_delivered_chars": 5700,
+  "max_delta_chars": 900,
+  "max_full": 1,
+  "expected_changes": 2
+}
