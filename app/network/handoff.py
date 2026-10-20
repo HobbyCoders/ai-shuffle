@@ -503,7 +503,7 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
                 # released after the human messages, not cancelled with a timer.
                 if discard_all:
                     cur.execute("DELETE FROM pending_wakeups WHERE id=%s AND session_id=%s", (wake["id"], sid))
-                elif (not superseded or wake.get("source") == "handoff_resume"
+                elif (not superseded or (row["keep_peer"] and wake.get("source") == "handoff_resume")
                       or (row["keep_peer"] and wake.get("source") == HELD_PEER_SOURCE)):
                     cur.execute("INSERT INTO pending_wakeups "
                                 "(id,session_id,profile_id,project_id,prompt,reason,model,source,instance_id,fire_at) "
@@ -1300,7 +1300,8 @@ def _accept_owner(sid, device_id, branch=None, token=None):
     with get_db() as conn:
         cur = conn.cursor()
         # Same lock order as finalize-wakes, which may race the commit reply.
-        cur.execute("SELECT token,wakes FROM handoff_wakes WHERE session_id=%s AND token=%s AND finalized=FALSE FOR UPDATE", (sid, token))
+        cur.execute("SELECT token,wakes,superseded,keep_peer FROM handoff_wakes "
+                    "WHERE session_id=%s AND token=%s AND finalized=FALSE FOR UPDATE", (sid, token))
         staged_rows = cur.fetchall()
         # Admission and sync ownership updates share this lock. No target turn
         # may run between a mirrored source commit and context publication.
@@ -1313,6 +1314,8 @@ def _accept_owner(sid, device_id, branch=None, token=None):
             for wake in wakes:
                 if wake.get("source") != "handoff_resume":
                     continue
+                if staged["superseded"] and not staged["keep_peer"]:
+                    continue  # An explicit Stop/delete wins even before publication.
                 # Removing it from staging is the durable receipt: a source
                 # finalize/retry cannot recreate this wake after it has fired.
                 cur.execute("INSERT INTO pending_wakeups "

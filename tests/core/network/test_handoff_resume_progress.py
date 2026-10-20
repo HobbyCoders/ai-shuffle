@@ -44,8 +44,10 @@ async def test_target_commit_arms_resume_without_source_and_human_cannot_drop_it
     assert len(arm) == 1
     offline.assert_not_awaited()
     # This is the cancellation path a held human turn takes on admission.
-    assert wakeups.pop_session_wakeups("resume-chat") == []
-    assert wakeups.pop_session_wakeups("resume-chat", exclude_source="held_peer_promotion") == []
+    from app.core.turn_manager import _supersede_wakeups
+
+    _supersede_wakeups("resume-chat")
+    assert wakeups.get_session_wakeups("resume-chat")[0]["id"] == wake["id"]
     submit = AsyncMock(return_value="turn-resume")
     monkeypatch.setattr(wakeup_service, "_session_user_stopped", lambda _: False)
     monkeypatch.setattr(wakeup_service, "_resolve_profile_id", AsyncMock(return_value="default"))
@@ -145,6 +147,24 @@ async def test_commit_refusal_reason_is_logged_on_both_ends(monkeypatch, caplog)
     with pytest.raises(control.ControlRefused):
         await handoff._owner_commit("source", {"session_id": "s", "phase": "commit"})
     assert sum(reason in r.message for r in caplog.records) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("staged", [False, True])
+async def test_explicit_stop_still_cancels_receiver_resume(mock_db, monkeypatch, staged):
+    database.create_session("stopped-chat", "default")
+    wake = {"id": "handoff-resume-stopped", "source": "handoff_resume", "prompt": "note",
+            "fire_at": time.time(), "profile_id": "default"}
+    handoff._stage_wakes("stopped-chat", "source", {"token": "stop-lease", "wakes": [wake]}, None)
+    arm = []
+    monkeypatch.setattr(wakeup_service, "arm_persisted", arm.append)
+    if not staged:
+        await handoff._accept_and_arm("stopped-chat", "target", None, "stop-lease")
+        assert len(arm) == 1
+    wakeup_service.cancel_session_wakeups("stopped-chat")
+    await handoff._accept_and_arm("stopped-chat", "target", None, "stop-lease")
+    assert wakeups.get_session_wakeups("stopped-chat") == []
+    assert len(arm) == (0 if staged else 1)
 
 
 def test_resume_command_is_idempotent_at_durable_turn_admission(mock_db):

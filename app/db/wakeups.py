@@ -108,8 +108,8 @@ def pop_session_wakeups(
     :func:`claim_wakeup` finds no row and no-ops.
 
     ``exclude_source`` keeps that source's rows when ``source`` is None.
-    A human input supersedes timers, not the note-bearing handoff_resume.
-    Explicit source cancellation and the Stop latch still retire that wake.
+    A human input (which excludes held_peer_promotion) supersedes timers, not
+    the note-bearing handoff_resume. Stop/delete use no exclusion and retire it.
     """
     _ph = ph()
     with get_db() as conn:
@@ -123,7 +123,9 @@ def pop_session_wakeups(
         if source is None and exclude_source is not None:
             cursor.execute(
                 f"SELECT id FROM pending_wakeups WHERE session_id = {_ph} "
-                f"AND (source IS NULL OR (source <> {_ph} AND source <> 'handoff_resume'))",
+                f"AND (source IS NULL OR source <> {_ph}) "
+                + ("AND (source IS NULL OR source <> 'handoff_resume')"
+                   if exclude_source == "held_peer_promotion" else ""),
                 (session_id, exclude_source),
             )
             ids = [r["id"] for r in rows_to_list(list(cursor.fetchall() or []))]
@@ -134,8 +136,7 @@ def pop_session_wakeups(
             return ids
         if source is None:
             cursor.execute(
-                f"SELECT id FROM pending_wakeups WHERE session_id = {_ph} "
-                "AND (source IS NULL OR source <> 'handoff_resume')",
+                f"SELECT id FROM pending_wakeups WHERE session_id = {_ph}",
                 (session_id,),
             )
         else:
@@ -149,8 +150,7 @@ def pop_session_wakeups(
             return []
         if source is None:
             cursor.execute(
-                f"DELETE FROM pending_wakeups WHERE session_id = {_ph} "
-                "AND (source IS NULL OR source <> 'handoff_resume')",
+                f"DELETE FROM pending_wakeups WHERE session_id = {_ph}",
                 (session_id,),
             )
         else:

@@ -2626,8 +2626,10 @@ def _run_column_migrations(cursor):
     # tables whose rows execute somewhere, plus the local network tables.
     # The startup backfill (app.network.startup.backfill_owner_device_ids) stamps this worker's device
     # id onto rows that still only carry instance_id.
-    from app.db.network import create_schema as _create_network_schema
+    from app.db.network import create_schema as _create_network_schema, create_handoff_history_schema
     _create_network_schema(cursor)
+    if table_exists(cursor, "sessions"):
+        create_handoff_history_schema(cursor)
     for _table in ("sessions", "automations", "connectors", "artifacts"):
         if table_exists(cursor, _table) and not column_exists(cursor, _table, "owner_device_id"):
             cursor.execute(f"ALTER TABLE {_table} ADD COLUMN owner_device_id TEXT")

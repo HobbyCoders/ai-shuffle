@@ -635,6 +635,60 @@ def test_a_stranded_task_row_does_not_pin_the_session(pair):
             handoff._idle(conn.cursor(), "handoff-test")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projectless", [False, True])
+async def test_agent_note_is_exported_and_armed_without_source_after_commit(pair, monkeypatch, projectless):
+    import time
+    from app.core import wakeup_service
+    from app.db import session_moves, wakeups
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    if projectless:
+        for worker in (a, b):
+            with worker.active(), get_db() as conn:
+                conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
+    with a.active():
+        session_moves.save(sid, target_id=b.device_id, label="Receiver", note="Finish the release checklist",
+                           requested_by="agent", requested_at=time.time(), expires_at=time.time() + 1800)
+        move_id = session_moves.get(sid)["handoff_id"]
+    monkeypatch.setattr(handoff, "wake_carry", lambda _: True)
+    monkeypatch.setattr(handoff, "resume_carry", lambda _: True)
+    monkeypatch.setattr(handoff, "target_resume", lambda _: True)
+    armed = []
+    monkeypatch.setattr(wakeup_service, "arm_persisted", armed.append)
+    source_offline = False
+
+    async def call(device, action, body, **kwargs):
+        nonlocal source_offline
+        if source_offline:
+            raise ConnectionError("Source powered off immediately after commit")
+        with a.active():
+            result = await control.handle(action, body, from_device=b.device_id)
+            if body.get("phase") == "commit":
+                source_offline = True
+            return result
+
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        await handoff.receive(database.get_session(sid))
+        assert source_offline
+        assert database.get_session(sid)["owner_device_id"] == b.device_id
+        wake = wakeups.get_session_wakeups(sid)[0]
+        assert wake["id"] == "handoff-resume-" + move_id
+        assert "Finish the release checklist" in wake["prompt"]
+        assert [row["id"] for row in armed] == [wake["id"]]
+        # A lost reply/retry after the wake was consumed cannot recreate it.
+        assert wakeups.claim_wakeup(wake["id"])
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT token FROM handoff_wakes WHERE session_id=%s", (sid,))
+            token = cur.fetchone()["token"]
+        await handoff._accept_and_arm(sid, b.device_id, None, token)
+        assert wakeups.get_session_wakeups(sid) == []
+        assert len(armed) == 1
+
+
 def _owner_calls(a, b, monkeypatch):
     async def call(device, action, body, **kwargs):
         with a.active():
