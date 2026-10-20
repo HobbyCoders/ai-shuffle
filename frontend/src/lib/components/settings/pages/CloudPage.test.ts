@@ -122,6 +122,15 @@ describe('not linked', () => {
 	});
 });
 
+it('keeps the meter for 99 seats, just under unlimited', async () => {
+	status = { ...paid, seats: 99, seats_used: 2, remote_worker_limit: 99 };
+	render(CloudPage);
+	await waitFor(() => expect(state()).toContain('Paid'));
+	expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('2 of 99');
+	expect(tierNamed('Paid plan').textContent).toContain('99');
+	expect(tierNamed('Paid plan').textContent).not.toContain('Unlimited');
+});
+
 it.each([100, 1000])('shows unlimited remote workers for %i seats without a meter', async (seats) => {
 	status = { ...paid, seats, remote_worker_limit: seats };
 	render(CloudPage);

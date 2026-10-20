@@ -19,7 +19,7 @@ The paid plan includes **4 remote workers**, worker-to-worker sync across differ
 - **Founder:** $14/month or $140/year.
 - **Regular:** $20/month or $200/year.
 
-Prices are in US dollars. There is no trial: the free account lets you try remote access on one worker without a card.
+Prices are in US dollars. There is no trial: the free account lets you try remote access on two workers without a card.
 
 ## Link a paid plan
 
@@ -29,7 +29,7 @@ You can also supply the key at install time, in the desktop app's first-run wind
 
 Activation sends your key, an install ID, hashed machine identifiers, the machine name and the app version. It never sends prompts, files or AI provider credentials. The worker renews its signed Cloud lease about once a day; **Check now** requests a renewal immediately.
 
-### All 3 seats are taken
+### All 4 seats are taken
 
 Free a seat on the old worker or from your account on hobbycoders.com, then link the new worker. A worker that has not checked in for 21 days frees its seat by itself. Seats of other workers can be freed 3 times a day; deactivating a worker on itself is not counted.
 

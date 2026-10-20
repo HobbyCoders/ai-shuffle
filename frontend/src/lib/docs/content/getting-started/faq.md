@@ -53,7 +53,7 @@ The app and updates are free. AI Shuffle Cloud has a free account with 2 remote 
 
 ## Is there a free account?
 
-Yes. One remote worker, no card and no time limit. There is no trial, and local use needs no account.
+Yes. Two remote workers, no card and no time limit. There is no trial, and local use needs no account.
 
 ## Does it work offline?
 

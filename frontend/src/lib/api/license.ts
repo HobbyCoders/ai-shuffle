@@ -2,7 +2,7 @@
  * AI Shuffle Cloud status for this worker (backend: app/api/license.py).
  *
  * The app is free to run. A Cloud account only decides how many remote workers
- * the hub serves: none without an account, one on a free account, the plan's
+ * the hub serves: none without an account, two on a free account, the plan's
  * seats on a paid one. Nothing here can stop a local agent run, so `allowed`
  * is always true and `banner` always null; both stay for older callers.
  * The routes keep their `/license` names for compatibility.
