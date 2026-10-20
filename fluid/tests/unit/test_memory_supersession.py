@@ -161,3 +161,20 @@ def test_supersession_fixture_has_bounded_unique_paragraphs(tmp_path):
     assert len(section) <= 1100
     facts = [line for line in section.splitlines() if line.startswith("- [")]
     assert len(facts) == len(set(facts)) == 2
+
+
+@pytest.mark.parametrize("old_version,replaced,expected", [
+    ("v1.2", "v1.2", True), ("v1.2", "v1.3", False), ("v1.2.3", "v1.2", False),
+])
+def test_replacement_entities_keep_version_dots(tmp_path, old_version, replaced, expected):
+    store = SkillStore(tmp_path)
+    old = store.save_memory(f"Backend subagent code tasks use model {old_version}.", protected=True)
+    store.save_memory(f"Backend subagent code tasks use model v2.0, replacing {replaced}. Review stays separate.", protected=True)
+    assert bool(next(e for e in store.memories() if e.id == old.id).superseded_by) == expected
+
+
+def test_global_replacement_does_not_retire_an_older_task_exception(tmp_path):
+    store = SkillStore(tmp_path)
+    old = store.save_memory("For this task, " + OLD, scope="project:fixture", protected=True)
+    store.save_memory(NEW, protected=True)
+    assert not next(e for e in store.memories() if e.id == old.id).superseded_by

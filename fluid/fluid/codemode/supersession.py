@@ -3,13 +3,15 @@ from __future__ import annotations
 import re
 from fluid.codemode.relevance import query_terms
 
-_REPLACEMENT = re.compile(r"\b(?:replac(?:es|ing)|supersedes)\s+([^;,.()\n]+)", re.I)
+_REPLACEMENT = re.compile(r"\b(?:replac(?:es|ing)|supersedes)\s+([^;,()\n]+)", re.I)
 _EXCEPTION = re.compile(r"\b(?:for this (?:task|session)|one[- ]off|temporar\w*|today only)\b", re.I)
 _UNCERTAIN = re.compile(r"\b(?:might|may|could|possibly|proposed|proposal|hypothetical)\b|\b(?:not|never|without)\s+(?:\w+\s+){0,2}(?:replac|supersed)", re.I)
 
 
 def has_replacement_signal(text: str) -> bool:
     return bool(_REPLACEMENT.search(text)) and not (_EXCEPTION.search(text) or _UNCERTAIN.search(text))
+
+
 _GENERIC = frozenset("owner user rule latest prefers preference replacing replaces supersedes fact current new old use uses says model".split())
 
 
@@ -45,10 +47,11 @@ def replacement_evidence(old: dict, new: dict, *, proposed: bool = False) -> boo
         return len(shared) >= 3
     old_text = " ".join(old["text"].casefold().split())
     for match in _REPLACEMENT.finditer(new["text"]):
-        phrase = match.group(1).strip().casefold()
+        # Sentence punctuation ends an entity; decimal/version/domain dots do not.
+        phrase = re.split(r"\.(?:\s|$)", match.group(1), maxsplit=1)[0].strip().casefold()
         # Entity names may have punctuation (gpt-6-astra); whole-phrase
         # boundaries prevent alpha from superseding alphabet by accident.
         if (len(shared - subject_terms(phrase)) >= 2 and len(phrase) >= 3
-                and re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", old_text)):
+                and re.search(r"(?<![\w.-])" + re.escape(phrase) + r"(?![\w-]|\.\w)", old_text)):
             return True
     return False
