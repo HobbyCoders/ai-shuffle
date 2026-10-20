@@ -11,6 +11,17 @@ from fluid.codemode.skills import SkillStore
     ("test", "Run tests with a local interpreter."),
     ("テスト", "日本語のテスト設定を保持する。"),
     ("测试", "项目测试配置保存在本地。"),
+    ("store", "FactStore retains memory revisions."),
+    ("hub", "GitHub hosts this repository."),
+    ("lab", "HomeLab has a dedicated runner."),
+    ("PC", "GamingPC has a dedicated runner."),
+    ("pytest", "日本語でpytestを実行する。"),
+    ("ทดสอบ", "การทดสอบภายในระบบ"),
+    ("ທົດສອບ", "ການທົດສອບລະບົບ"),
+    ("စမ်းသပ်", "စနစ်စမ်းသပ်ခြင်း"),
+    ("សាកល្បង", "ការសាកល្បងប្រព័ន្ធ"),
+    ("C++", "The native helper is written in C++."),
+    ("C#", "The service is written in C#."),
 ])
 def test_keyword_forms_and_cjk_remain_findable(tmp_path, query, text):
     store = SkillStore(tmp_path)
@@ -45,3 +56,16 @@ def test_ipv4_is_one_exact_keyword_not_shared_components(tmp_path):
     store.save_memory("The other fixture endpoint is 10.0.0.1.")
     assert recall_terms("10.0.0.251") == frozenset({"10.0.0.251"})
     assert [e.id for e, _ in store.search_memories("10.0.0.251")] == [expected.id]
+
+
+@pytest.mark.parametrize("query,text", [
+    ("UI", "日本語でbuildを実行する。"),
+    ("don't", "Donation settings are separate."),
+    ("C++", "The C helper uses a compiler."),
+    ("C#", "The C helper uses a compiler."),
+])
+def test_short_and_contraction_literals_avoid_new_neighbors(tmp_path, query, text):
+    store = SkillStore(tmp_path)
+    store.save_memory(text)
+    assert not store.search_memories(query)
+    assert recall_terms("don't") == frozenset({"dont"})
