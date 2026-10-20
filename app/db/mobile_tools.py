@@ -64,10 +64,16 @@ def purge_requested_commands(*, stop=None):
     _purge_requested.clear()
     from app.db.retention import mutate_batches
     at = now()
-    expired = mutate_batches("mobile_tool_commands", "expires_at <= %s AND status != 'expired'",
-        (at,), update="status='expired', arguments='{}', result=NULL", stop=stop)
-    deleted = mutate_batches("mobile_tool_commands", "expires_at < %s",
-        (at - timedelta(days=1),), stop=stop)
+    try:
+        expired = mutate_batches("mobile_tool_commands", "expires_at <= %s AND status != 'expired'",
+            (at,), update="status='expired', arguments='{}', result=NULL", stop=stop)
+        deleted = mutate_batches("mobile_tool_commands", "expires_at < %s",
+            (at - timedelta(days=1),), stop=stop)
+    except Exception:
+        _purge_requested.set()
+        raise
+    if stop is not None and stop.is_set():
+        _purge_requested.set()
     return expired + deleted
 
 

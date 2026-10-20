@@ -341,6 +341,25 @@ def test_boot_and_runtime_cleanup_are_bounded_and_scoped(pg, monkeypatch, kind, 
     assert len(queries) == before
 
 
+def test_targeted_runtime_cleanup_keeps_other_orphans_and_live_rows(pg):
+    from types import SimpleNamespace
+    sql, queries, commits, stop, state, _ = pg
+    sql("CREATE TABLE sessions(id TEXT PRIMARY KEY)")
+    sql("CREATE TABLE network_session_runtime(session_id TEXT PRIMARY KEY, owner_device_id TEXT)")
+    sql("INSERT INTO sessions VALUES ('live')")
+    for sid, owner in [('a', 'us'), ('b', 'us'), ('c', 'us'), ('live', 'us'),
+                       ('other-orphan', 'us'), ('peer', 'them')]:
+        sql("INSERT INTO network_session_runtime VALUES (%s,%s)", (sid, owner))
+    assert session_runtime.prune_owned(ctx=SimpleNamespace(device_id='us'),
+        session_ids=['a', 'b', 'c', 'live', 'peer'], stop=stop) == 3
+    assert max(commits) == 2
+    assert {r['session_id'] for r in sql("SELECT session_id FROM network_session_runtime")} == {
+        'live', 'other-orphan', 'peer'}
+    before = len(queries)
+    assert session_runtime.prune_owned(ctx=SimpleNamespace(device_id='us'), session_ids=[]) == 0
+    assert len(queries) == before
+
+
 @pytest.mark.parametrize("stopping", [False, True])
 def test_compaction_uses_real_append_output_and_commits_per_session(pg, monkeypatch, stopping):
     from app.db.schema_postgres import create_postgres_schema

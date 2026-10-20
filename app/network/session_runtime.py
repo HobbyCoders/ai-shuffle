@@ -12,17 +12,22 @@ from app.network import engine
 STATES = frozenset({"working", "parked", "permission", "question", "idle"})
 
 
-def prune_owned(*, stop=None):
-    """Retract our orphan summaries off the catalog publisher's critical path."""
+def prune_owned(*, stop=None, ctx=None, session_ids=None):
+    """Retract orphan summaries in the expiry task or a targeted deletion pass."""
     from app.db.retention import mutate_batches
     if stop is not None and stop.is_set():
         return 0
-    ctx = engine.context()
-    if ctx is None:
+    ctx = ctx or engine.context()
+    if ctx is None or session_ids == []:
         return 0
-    return mutate_batches("network_session_runtime", """owner_device_id = %s AND NOT EXISTS
-        (SELECT 1 FROM sessions s WHERE s.id = network_session_runtime.session_id)""",
-        (ctx.device_id,), keys=("session_id",), stop=stop)
+    where = """owner_device_id = %s AND NOT EXISTS
+        (SELECT 1 FROM sessions s WHERE s.id = network_session_runtime.session_id)"""
+    params = (ctx.device_id,)
+    if session_ids is not None:
+        where += " AND session_id IN (" + ", ".join(["%s"] * len(session_ids)) + ")"
+        params += tuple(session_ids)
+    return mutate_batches("network_session_runtime", where, params,
+        keys=("session_id",), stop=stop)
 
 
 def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]] = None) -> int:
